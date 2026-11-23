@@ -1,0 +1,153 @@
+// OPR.0.5.3.6 — the productized chain-file trace (CE-v2).
+//
+// The topology tree carries derived context at four shipped altitudes,
+// instance at the TOP of the root (D2):
+//
+//   <topology.root>/<NAME>                          — instance
+//   <topology.root>/rigs/<rig>/<NAME>               — rig
+//   <topology.root>/rigs/<rig>/pods/<pod>/<NAME>    — pod
+//   <topology.root>/rigs/<rig>/seats/<seat>/<NAME>  — seat
+//
+// The root comes from the typed `topology.root` config key — never a literal
+// (D1). The pre-convention location (resolveLegacyTopologyRigsRoot) stays
+// readable as a per-level fallback that MUST surface the named advisory: the
+// read succeeds, and the caller is told the content came from the legacy tree
+// and how to migrate. Callers supply the configured canonical and legacy
+// roots; this shared resolver discovers no filesystem roots itself.
+import { lstatSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+export type TraceAltitude = "instance" | "rig" | "pod" | "seat";
+
+export interface TraceLevel {
+  altitude: TraceAltitude;
+  /** The canonical path under topology.root for this level. */
+  path: string;
+  /** Where content was actually found: canonical, the legacy tree, or nowhere. */
+  source: "topology.root" | "legacy" | "absent";
+  /** The path the content was read from (canonical or legacy); null when absent. */
+  resolvedPath: string | null;
+  content: string | null;
+  /** Present exactly when source === "legacy" — the named advisory. */
+  advisory?: string;
+}
+
+export interface TraceResult {
+  name: string;
+  topologyRoot: string;
+  /** Root-first: instance, rig, optional pod, optional seat — general to specific. */
+  levels: TraceLevel[];
+}
+
+export interface TraceFs {
+  exists(path: string): boolean;
+  read(path: string): string;
+}
+
+/** r2-B3: rig, seat, and name must each be ONE safe path segment. Unvalidated
+ *  values joined into filesystem paths let `--rig ../../outside` resolve every
+ *  level OUTSIDE topology.root (proven by the reviewer's discriminator).
+ *  Rejection happens BEFORE any filesystem contact. Dotted filenames
+ *  (a.b.c.md) and dashed/underscored ids stay valid; separators, dot-segments,
+ *  empties, and NULs do not. */
+function assertSafeSegment(value: string, field: "rig" | "pod" | "seat" | "name"): void {
+  if (
+    value.trim().length === 0
+    || value === "." || value === ".."
+    || value.includes("/") || value.includes("\\")
+    || value.includes("\0")
+  ) {
+    throw new Error(
+      `invalid ${field} "${value}": must be a non-blank single path segment (no separators or dot-segments)`,
+    );
+  }
+}
+
+const realFs: TraceFs = {
+  exists: (p) => {
+    // A dangling canonical link is present: its read must fail rather than fall back to legacy bytes.
+    try { lstatSync(p); return true; }
+    catch (error) {
+      if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+      throw error;
+    }
+  },
+  read: (p) => readFileSync(p, "utf-8"),
+};
+
+/**
+ * Walk the topology tree for one chain filename. `seat` is optional (a
+ * rig-level trace stops at the rig altitude). Pure given `fs` — tests inject.
+ */
+export interface TopologyTraceInput {
+  topologyRoot: string;
+  name: string;
+  rig: string;
+  pod?: string | null;
+  seat?: string | null;
+  legacyRigsRoot: string;
+  /** Optional selection before filesystem reads; omitted means the complete chain. */
+  altitudes?: readonly TraceAltitude[];
+  fs?: TraceFs;
+}
+
+export function traceTopologyChain(input: TopologyTraceInput): TraceResult {
+  assertSafeSegment(input.rig, "rig");
+  if (input.pod != null) assertSafeSegment(input.pod, "pod");
+  // r2 residual: an explicitly EMPTY seat is user error — only true omission
+  // (undefined/null) means a rig-level trace.
+  if (input.seat != null) assertSafeSegment(input.seat, "seat");
+  assertSafeSegment(input.name, "name");
+
+  const fs = input.fs ?? realFs;
+  const legacyRigsRoot = input.legacyRigsRoot;
+
+  const levels: Array<{ altitude: TraceAltitude; canonical: string; legacy: string | null }> = [
+    // The instance altitude IS the root of the tree — no legacy equivalent
+    // existed (the legacy layout began at rigs/).
+    { altitude: "instance", canonical: join(input.topologyRoot, input.name), legacy: null },
+    {
+      altitude: "rig",
+      canonical: join(input.topologyRoot, "rigs", input.rig, input.name),
+      legacy: join(legacyRigsRoot, input.rig, input.name),
+    },
+    ...(input.pod
+      ? [{
+          altitude: "pod" as const,
+          canonical: join(input.topologyRoot, "rigs", input.rig, "pods", input.pod, input.name),
+          legacy: null,
+        }]
+      : []),
+    ...(input.seat
+      ? [{
+          altitude: "seat" as const,
+          canonical: join(input.topologyRoot, "rigs", input.rig, "seats", input.seat, input.name),
+          legacy: join(legacyRigsRoot, input.rig, "seats", input.seat, input.name),
+        }]
+      : []),
+  ];
+
+  return {
+    name: input.name,
+    topologyRoot: input.topologyRoot,
+    levels: levels.filter(({ altitude }) => input.altitudes === undefined || input.altitudes.includes(altitude)).map(({ altitude, canonical, legacy }): TraceLevel => {
+      if (fs.exists(canonical)) {
+        return { altitude, path: canonical, source: "topology.root", resolvedPath: canonical, content: fs.read(canonical) };
+      }
+      if (legacy && fs.exists(legacy)) {
+        return {
+          altitude,
+          path: canonical,
+          source: "legacy",
+          resolvedPath: legacy,
+          content: fs.read(legacy),
+          advisory:
+            `legacy-topology-read: ${altitude}-level "${input.name}" was found at the pre-convention location ` +
+            `${legacy} — not under topology.root (${input.topologyRoot}). The read succeeded; migrate this file ` +
+            `to ${canonical} (see the chain-file convention doc; \`rig config get topology.root\` names the root).`,
+        };
+      }
+      return { altitude, path: canonical, source: "absent", resolvedPath: null, content: null };
+    }),
+  };
+}

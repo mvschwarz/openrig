@@ -1,4 +1,5 @@
 import { physicalSessionName } from "./session-registry.js";
+import { workflowRunSummary } from "./workflow-run-title.js";
 import { readWorkflowGuidance, type GuidanceInput } from "./workflow-guidance.js";
 // PL-004 Phase D: workflow projector — transactional-scribe contract.
 //
@@ -760,7 +761,7 @@ export class WorkflowProjector {
             ...(gateException ? workflowExceptionTags(gateException.identity).filter((t) => !t.startsWith("workflow:") && !t.startsWith("instance:")) : []),
             ...packetScopeTags(instance, nextStep.id),
           ],
-          summary: gateCompile?.summary ?? undefined,
+          summary: gateCompile ? gateCompile.summary ?? undefined : workflowRunSummary(instance.runTitle, nextStep),
           evidenceRef: gateCompile?.evidenceRef ?? undefined,
           chainOfRecord: [input.currentPacketId],
         });
@@ -1198,7 +1199,7 @@ export class WorkflowProjector {
         priority: "routine",
         tier: plan.gate?.tier ?? "mode2",
         tags: ["workflow", plan.gate ? "gate" : "handoff", `workflow:${spec.id}`, `instance:${instance.instanceId}`, `step:${plan.step.id}`, ...packetScopeTags(instance, plan.step.id)],
-        summary: plan.gate?.summary ?? undefined,
+        summary: plan.gate ? plan.gate.summary ?? undefined : workflowRunSummary(instance.runTitle, plan.step),
         evidenceRef: plan.gate?.evidenceRef ?? undefined,
         chainOfRecord: input.chainOfRecord,
       });

@@ -6,6 +6,7 @@ import { seatPoolSchema } from "./migrations/178_seat_pool.js";
 import { remoteControlObservationsSchema } from "./migrations/179_remote_control_observations.js";
 import { queueRelayedAnswersSchema } from "./migrations/186_queue_relayed_answers.js";
 import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_staging.js";
+import { workflowRunTitleSchema } from "./migrations/194_workflow_run_title.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
 import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";
@@ -382,4 +383,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueRelayedAnswersSchema,
   queueItemsScanIndexesSchema,
   rigSeatSliceSchema,
+  workflowRunTitleSchema,
 ];

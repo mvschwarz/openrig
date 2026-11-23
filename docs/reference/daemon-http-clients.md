@@ -560,3 +560,21 @@ This is delivery-only maintenance. Direct sends, control/END requests and ordina
 The automatic wake ladder also waits before attempt budgets, rung markers and escalation for work whose destination rig is drained, including a held escalation target. It resumes at the retained rung after END. Legacy workflow packets without outbox intents remain owed: their existing keepalive resumes after END, and the sweep reports them if they stay unclaimed. END's scoped recovery pass covers pending intents. Diagnosis re-presentations wait before spending their presentation receipt. An explicit resolve notification remains an explicit action and can pass through the delivery hold.
 
 All watchdog evaluation for the held rig waits, including the context-usage watchdog's managed-compaction action. This does not add a native-start hold. If a drain admission read fails, automatic delivery proceeds and reports the uncertainty. Control/status failures remain errors, and failed BEGIN/END writes never report success.
+
+
+## Read a seat's recorded knowledge
+
+`GET /api/context-packs/seat-knowledge?rig=<rig-name>&seat=<seat-name>` reads the fixed
+`LEARNED.md` and `RECAP.md` files for that seat without requiring a context-pack library.
+It uses the same configured topology root and per-file legacy fallback as `rig context trace`.
+The response includes `rig`, `seat`, `topologyRoot` and `files` in that order of filenames.
+
+Each file carries its canonical `path`, `source` (`topology.root`, `legacy` or `absent`),
+`resolvedPath`, verbatim `content` and `extent`. A present file has `extent: "whole-file"`,
+including an empty string for an empty file. An absent file has `extent: "absent"`, null
+content and null resolved path. Legacy reads retain the trace's named migration advisory.
+Only the seat level is read; ancestor knowledge is not included. A read failure returns
+HTTP 503 rather than claiming absence. A missing/invalid rig or seat path segment returns 400.
+
+This read does not prove that a seat is active, summarize or excerpt its notes, enumerate
+other files, or write a recap. Existing daemon read-access conventions apply.
