@@ -117,6 +117,10 @@ export const PRUNABLE_EVENT_TYPES = [
   "queue.unclaimed",
   "queue.handed_off",
   "queue.answer_recorded",
+  // #3728: refusals and unknown remote outcomes, kept as long as the other high-volume history.
+  "queue.create_refused",
+  "queue.create_remote_unknown",
+  "transport.send_refused",
   // One delivery-evidence record per send, and one prompt observation per prompt hook; kept only as long as the other
   // high-volume event types.
   "transport.delivery_evidence",

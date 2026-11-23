@@ -12,7 +12,8 @@ listed here can change.
 `OPENRIG_URL` has no `pid`. `reachable` is `true` when the daemon answered its health probe, `false` when it is
 positively down, and `null` when that isn't confirmed (see `rig status` in
 [the command reference](../as-built/cli-reference.md#status)). It reads the recorded state and probes; it never
-starts a daemon.
+starts a daemon. A supervisor that keeps the daemon running reads it as described in
+[Run the daemon under a supervisor](getting-started.md#run-the-daemon-under-a-supervisor).
 
 The CLI itself finds the daemon in these orders:
 
@@ -92,6 +93,15 @@ All of them are server-sent events (`text/event-stream`):
   same option again) has no event, and neither does a typed reply, which settles the ask through its own
   `queue.updated`. The event is recorded after the answer: if it can't be recorded, the answer still stands, so a
   client that re-reads the ask after a gap still sees it.
+  A queue create the daemon refuses leaves `queue.create_refused`: `{ sourceSession, destinationSession, reason, status,
+  hostId }`, where `reason` is the response's own error code or text. A send to a destination that doesn't resolve, when
+  nothing is kept in the sender's outbox, leaves `transport.send_refused`: `{ senderSession, session, reason, status }`.
+  A forwarded create whose result is unknown (it timed out, so the remote may still commit it) leaves
+  `queue.create_remote_unknown`: `{ qitemId, sourceSession, destinationSession, hostId, failureClass }`; reconcile by
+  `qitemId` before retrying. A send kept as a failed message in the sender's outbox is none of these: read it with
+  `GET /api/queue/outbox/list`. The events carry no message body and are never written for an accepted request; the
+  refused command's own response is unchanged. Read the reason and the parties from this stream or the `GET /api/events`
+  replay; `rig telemetry events` shows event metadata only, with no payload and no filter by type.
 - **`GET /api/activity/events`**: live only, no replay or ids. Each message is named after its event type:
   `seat.activity_changed`, `seat.rung_health`, `proof.judged` or `proof.sources_changed`. It tells a view to read
   again; it carries no derived state.
@@ -156,7 +166,8 @@ console.log(JSON.stringify({ participants: registry.participants, default: regis
   asks: rows.filter(row => row.humanIntent !== "update"), updates, receipts, rigHistory, messages }, null, 2));
 ```
 
-The queue and outbox lists are bounded snapshots, not subscriptions. A full queue list may need a larger `limit`.
+The queue and outbox lists are bounded snapshots, not subscriptions. A queue list cut at its `limit` says so in its
+`X-OpenRig-Truncated: 1` response header; read it again with a larger `limit`.
 An outbox entry's `deliveryState` reports the send attempt; only `delivered` confirms delivery. A queue transition,
 an open FYI, or a closed ask is not that receipt. The rig-wide reads and their limits are described below; the existing
 `outbox/list?senderSession=<session>` read remains available.
@@ -315,9 +326,18 @@ What reads these declarations:
 - **A rig's queue history:** `GET /api/queue/list?rig=<rig>&updatedSince=<ISO time>&sort=updated` returns the
   rig's queue items (any whose source or destination seat is in the rig) updated at or after that time: open items
   (`pending`, `in-progress`, `blocked`) first, then the rest by latest update. `limit` defaults to 100 and has no
-  upper cap. The list is cut after `limit` rows in that order, so when it comes back full, raise `limit` to read
-  them all. Each item's own history is `GET /api/queue/<qitemId>/transitions`. This read scans the queue table, so
-  read it occasionally rather than polling it. For live changes, treat `GET /api/queue/sse` events as hints to read
+  upper cap. The list is cut after `limit` rows in that order. The body stays a bare array; the response headers
+  carry `X-OpenRig-Limit` (the limit applied) and `X-OpenRig-Truncated`, `1` when more rows matched than were
+  returned and `0` when they all fit, so a full page that holds every match isn't mistaken for a cut one. When it
+  says `1`, raise `limit` to read them all. A negative `limit` doesn't bound the read, and the response has neither
+  header. With `attention=1`, when the read reaches its limit but the attention check leaves `limit` rows or fewer,
+  the response has neither header either; read again with a larger `limit` to know. `rig queue list` prints a line on
+  stderr when the page was cut, and the `rig_queue_list` MCP tool adds `limit` and `truncated` beside `items`. Both
+  rely on these headers: from an older daemon that doesn't send them, or when `X-OpenRig-Truncated` isn't an
+  explicit `0` or `1`, the CLI prints no line and the MCP result has no `limit` or `truncated`. Each item's own
+  history is
+  `GET /api/queue/<qitemId>/transitions`. This read scans the queue table, so read it occasionally rather than
+  polling it. For live changes, treat `GET /api/queue/sse` events as hints to read
   `queue/list?rig=` again. Not every event names both seats (`queue.claimed` and `queue.unclaimed` carry only the
   destination), and not every state change is on that stream, so the events alone don't track a rig's items.
 - **A rig's messages:** `GET /api/queue/outbox/list?rig=<rig>` returns the messages sent from or to the rig's
@@ -357,6 +377,7 @@ What reads these declarations:
   Success is 201 with `instance`, `spec`, `entryQitemId` and `entryOwnerSession`, any `advisories`, and
   `scopeIgnored` when a scope wasn't applied. The instance keeps `rootObjective`, which every instance read returns
   (`/api/workflow/list`, `/api/workflow/<id>` and its `trace`). An instance started before it was kept reads `null`.
+- **A workflow step's label.** A spec step can carry an optional `label`, a short name for a person ("QA pass"). `GET /api/workflow/<id>` returns it in `startedSpec.spec.steps[].label`, the spec the run started with. Match it by step id: the instance's `currentStepId`, each `frontierPackets[].stepId`, or a trace entry's `stepId`. A step without a label, or a step the started spec doesn't list (the run's file was edited or its graph revised since it started), shows its `id`. A label is display only: the step's `objective` stays its instruction. A daemon from before labels refuses a labelled spec with `spec_unknown_key`.
 - **`GET /api/workflow/list`** accepts exact `project`, `mission`, `slice`, `rig` (the bound rig), and `name` (the workflow name) filters, repeatable `tag` filters on the instance's free-form scope tags, and `limit` from 1 to 10,000. Filters combine with AND and apply before the limit; results keep their existing oldest-first order. Instances without the requested scope or binding do not match. Without these filters, existing list behavior is unchanged.
 - **`GET /api/provider/usage`** returns `{ hostUsage }`, this host's usage rows (`host: "local"`, a `provider`
   and a `state`). A Claude row's `windows` are the seats' status-line readings, one entry per reading, each with
@@ -395,6 +416,17 @@ What reads these declarations:
   subject to the existing project filter and the newest 500 rows per slice. Counts are recomputed on every list
   request. `?refresh=1|true` invalidates the separate listing cache, not a stored queue-count snapshot. This
   resolution does not change the returned slice list or filters.
+- **A terminal viewer's pane size:** add `?geometry=1` to the terminal websocket (`GET /api/terminal/<name>`) to
+  learn the pane's columns and rows, so a browser terminal wraps lines where the agent's pane does. The size arrives
+  as a binary frame holding UTF-8 JSON, `{"type":"geometry","cols":<n>,"rows":<n>}`: once when the viewer joins,
+  before any output, and again whenever the pane's size changes (checked about every two seconds). Terminal output
+  is always a text frame, so set `binaryType = "arraybuffer"` and read only binary frames as size frames. xterm.js's
+  `AttachAddon` writes every frame to the terminal, binary ones included, so a viewer using it should leave
+  `?geometry=1` off or read the socket's messages itself. With `terminal.fixed_geometry` on, the frame reports the
+  pinned 90 by 27, or the window's own size when OpenRig didn't pin it: someone fixed its size by hand, or its sizing
+  couldn't be read. When the size can't be read, no frame is sent
+  and the socket stays open. The viewer is told the size and never sets it: the socket still has no resize message.
+  Without the flag, the socket's frames are unchanged.
 
 
 ## Resume one banked original conversation
@@ -420,7 +452,12 @@ It resumes only while the seat's recorded session still names the banked convers
 or new conversation in that seat normally records a different one, and so does a changed resume type or
 restore policy. After that, the preview answers `selection_changed` with "This seat's record changed since it
 was saved", naming `rig snapshot <rig>` to save the current conversation, and a resume request returns a
-partial `selection_changed` result. A changed runtime is refused earlier: the preview answers
+partial `selection_changed` result. The preview compares the seat's current conversation, not only the saved
+history row: a current session that names another conversation, or a present agent (behind a prompt or not)
+whose proved native identity is another one, also answers `selection_changed`. Otherwise it answers as before
+and adds `currentConversation`: `{ "state": "same", "basis": "record" | "running_agent" }`, or, when the
+current conversation can't be established, `{ "state": "unknown", "reason": … }`, with `identityEvidence` for a
+present agent. An unknown one is reported, not refused, and its diagnostics carry no native IDs. A changed runtime is refused earlier: the preview answers
 `source_unavailable`, also naming `rig snapshot <rig>`, and a resume request returns a partial
 `original_changed` result.
 

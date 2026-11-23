@@ -237,9 +237,11 @@ A member with a `starter_ref` gets that agent starter's files in front of the ag
 | Rig | Rig spec author | Rig-wide context for all agents | Project documentation |
 | Pod | Rig spec author | Pod-specific coordination context | Pod SOP, intra-pod workflow |
 | Member | Rig spec author | Individual member overrides | Member-specific instructions, cwd-specific context |
-| Operator | OpenRig system | System-injected runtime content | `openrig-start.md` (optional delivery); `openrig-context-entry.md`, a pointer to the skills router, help and declared context, for every seat; on a fresh start, `openrig-onboarding-01.md` and `-02.md` unless `onboarding.default_pack.enabled` is false |
+| Operator | OpenRig system | System-injected runtime content | `openrig-start.md` (optional delivery); `openrig-context-entry.md`, a pointer to the skills router, help and declared context, for every seat; on a fresh start, `openrig-onboarding-01.md` and `-02.md` when the RigSpec's `default_onboarding_pack` is `true`, or when it is omitted and the daemon's `onboarding.default_pack.enabled` is `true` |
 
 After the files, OpenRig sends a session-identity message (rig, pod, member, logical ID) once the seat is ready.
+
+Restore uses the seat's saved guidance selection, including its onboarding pages if selected at launch. An exact resume preserves the conversation and can put back missing guidance without sending it into the conversation again.
 
 ### Practical Guidance
 

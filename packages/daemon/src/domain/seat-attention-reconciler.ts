@@ -7,22 +7,24 @@ import type { EventBus } from "./event-bus.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { AgentActivity, SeatIdentityVerdict } from "./types.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
+import { classifyPaneRuntimeMatch, tmuxUnavailableIdentity } from "./seat-identity-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
-import { explainNativeRejection, subtreeNamesClaudeExecutable, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow, type NativeProcessLister, type ClaudeResumeRotation, findExactNativeResumeProcess, listNativeProcesses } from "./native-process-lineage.js";
+import { explainNativeRejection, subtreeNamesClaudeExecutable, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow, type NativeProcessLister, type ClaudeResumeRotation, findExactNativeResumeProcess, listNativeProcesses, listNativeProcessesOrThrow } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
+import type { HarnessLaunchResult } from "./runtime-adapter.js";
 
 type PaneIdentityTmux = Pick<TmuxAdapter, "listPanes" | "getPanePid" | "getPaneCommand">;
 type ProcessRow = NativeProcessRow;
+type LaunchedExecutable = Extract<HarnessLaunchResult, { ok: true }>["launchedExecutable"];
 
 export type PaneIdentityReconcileResult =
   /** `nativeProcess`: the native runtime process the check matched, when it matched one (Codex, an exact-resume
    *  Claude). A caller that holds an earlier proof of a process compares against it (#1524). */
   | { ok: true; pane: string; pid: number; command: string | null; nativeProcess?: { pid: number; startedAt?: string } }
-  | { ok: false; detail: string };
+  | { ok: false; reason: "tmux_unavailable" | "identity_unverified"; detail: string };
 
 /** The rotation recorded with the node's current stored token, when the caller is checking that
  *  stored token (#1077). Exact-resume callers pass the rotation they mean to accept, if any. */
@@ -67,6 +69,7 @@ async function describeLineageFailure(input: {
   listProcesses?: NativeProcessLister;
   expectedToken: string | null;
   rotation: ClaudeResumeRotation | null;
+  launchedExecutable?: LaunchedExecutable;
   /** The check required a resume (`requireExactResumeLineage`), not just a runtime. */
   exact: boolean;
 }): Promise<string | null> {
@@ -77,9 +80,12 @@ async function describeLineageFailure(input: {
     // One read serves every observation below, so the explanation costs one process-table read. A failed read
     // looks like an empty table (and a missing pane pid like no process), so neither may be reported as an absence.
     const pid = await input.tmux.getPanePid(input.target);
-    const rows = pid ? await Promise.resolve((input.listProcesses ?? listNativeProcesses)()).catch((): NativeProcessRow[] => []) : [];
+    const executable = input.launchedExecutable;
+    const nativeOptions = { selectedExecutable: executable?.path, scriptLaunch: executable?.isScript };
+    const rows = pid ? await Promise.resolve((input.listProcesses ?? (() => listNativeProcesses({
+      frozenExecutable: executable?.path, claudeLaunchPaths: executable?.isScript === true })))()).catch((): NativeProcessRow[] => []) : [];
     if (!pid || !rows.some((row) => row.pid === pid)) return "The pane's process could not be found in the process listing (the listing may have failed), so the runtime could not be verified";
-    const observation = { target: input.target, tmux: input.tmux, listProcesses: () => rows };
+    const observation = { target: input.target, tmux: input.tmux, listProcesses: () => rows, ...nativeOptions };
     const passes = input.variant === "codex" ? !!await observeCodexPaneProcess({ ...observation, expectedToken: input.expectedToken, requireResume: input.exact, requireArgv: true })
       : input.variant === "claude_conversation" ? !!await observeClaudePaneProcess({ ...observation, expectedToken: input.expectedToken, rotation: input.rotation })
       : input.variant === "claude_runtime" ? !!await observeClaudePaneRuntime(observation)
@@ -100,7 +106,8 @@ async function describeLineageFailure(input: {
         : "No process in the pane's process tree names a Claude executable";
     }
     const rejection = input.variant === "claude_runtime" ? { kind: "no_single_process" as const }
-      : explainNativeRejection(rows, pid, input.runtime, input.expectedToken, input.exact, input.rotation);
+      : explainNativeRejection(rows, pid, input.runtime, input.expectedToken, input.exact, input.rotation,
+        executable?.path, executable?.isScript);
     switch (rejection.kind) {
       case "no_single_process": {
         if (input.runtime === "claude-code") {
@@ -144,6 +151,8 @@ export async function rebindAndVerifyPaneIdentity(input: {
    *  the same per-process check (`findExactNativeResumeProcess`). */
   resumeRotation?: ClaudeResumeRotation | null;
   listProcesses?: NativeProcessLister;
+  /** The executable frozen by this launch, including its script form; never rediscover the launch choice. */
+  launchedExecutable?: LaunchedExecutable;
   /** On a failed process check, read the process table again to say which part failed (default true).
    *  A caller that re-runs the check in a polling loop passes false until the attempt whose text it shows. */
   explainFailure?: boolean;
@@ -151,16 +160,30 @@ export async function rebindAndVerifyPaneIdentity(input: {
   /** Selected-history restore fences its exact launched binding after awaited observations. */
   assertCurrent?: () => boolean;
 }): Promise<PaneIdentityReconcileResult> {
-  const observedAt = (input.now ?? (() => new Date()))().toISOString();
+  const now = () => (input.now ?? (() => new Date()))().toISOString();
+  let observedAt: string;
   const identityStore = new SeatIdentityStore(input.db);
+  let sessionObserved = false;
+  const unavailable = (error: unknown): PaneIdentityReconcileResult => {
+    const sampledAt = now();
+    if (!input.assertCurrent || input.assertCurrent()) {
+      identityStore.upsert(tmuxUnavailableIdentity({ nodeId: input.nodeId, runtime: input.runtime,
+        sessionName: input.sessionName, observedAt: sampledAt,
+        registeredPane: input.sessionRegistry.getBindingForNode(input.nodeId)?.tmuxPane ?? null,
+        db: input.db, retainStopped: !sessionObserved }));
+    }
+    return { ok: false, reason: "tmux_unavailable", detail: `tmux pane identity lookup failed: ${error instanceof Error ? error.message : String(error)}` };
+  };
   let panes: Awaited<ReturnType<PaneIdentityTmux["listPanes"]>>;
   try {
     panes = await input.tmux.listPanes(input.sessionName);
+    observedAt = now();
+    sessionObserved = panes.length > 0;
   } catch (error) {
-    return { ok: false, detail: `tmux pane lookup failed: ${(error as Error).message}` };
+    return unavailable(error);
   }
   if (panes.length !== 1) {
-    if (input.assertCurrent && !input.assertCurrent()) return { ok: false, detail: "Selected seat changed during native proof" };
+    if (input.assertCurrent && !input.assertCurrent()) return { ok: false, reason: "identity_unverified", detail: "Selected seat changed during native proof" };
     const registeredPane = input.sessionRegistry.getBindingForNode(input.nodeId)?.tmuxPane ?? null;
     identityStore.upsert({
       nodeId: input.nodeId,
@@ -173,6 +196,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
     });
     return {
       ok: false,
+      reason: "identity_unverified",
       detail: panes.length === 0
         ? `tmux session '${input.sessionName}' has no attachable pane`
         : `tmux session '${input.sessionName}' has ${panes.length} panes; exact seat pane is ambiguous`,
@@ -180,13 +204,22 @@ export async function rebindAndVerifyPaneIdentity(input: {
   }
 
   const pane = panes[0]!;
+  const unreadablePid = `PID of tmux pane '${printable(pane.id)}' could not be read`;
   let pid: number | null;
   let command: string | null;
   try {
     pid = await input.tmux.getPanePid(pane.id);
+    // The adapter returns null after a read failure. Only the pane listing above proves absence.
+    if (pid === null) return unavailable(unreadablePid);
     command = await input.tmux.getPaneCommand(pane.id);
+    // Runner-backed seats use their own readiness evidence. For them the pane
+    // command can contradict the expected state, but its absence is no signal.
+    if (command === null && (input.runtime === "claude-code" || input.runtime === "codex" || input.runtime === "terminal")) {
+      return unavailable(`foreground command of tmux pane '${printable(pane.id)}' could not be read`);
+    }
+    observedAt = now();
   } catch (error) {
-    return { ok: false, detail: `tmux pane identity lookup failed: ${(error as Error).message}` };
+    return unavailable(error);
   }
   let runtimeMatch = classifyPaneRuntimeMatch(command, input.runtime);
   const normalizedCommand = command?.trim().toLowerCase() ?? "";
@@ -195,52 +228,86 @@ export async function rebindAndVerifyPaneIdentity(input: {
   const strictNativeLineage = input.requireExactResumeLineage === true
     && expectedResumeToken !== null
     && (input.runtime === "claude-code" || input.runtime === "codex");
-  const claudeWrapper = pid !== null && input.runtime === "claude-code"
+  const claudeWrapper = input.runtime === "claude-code"
     && runtimeMatch === "mismatch" && isShellForeground(normalizedCommand);
   // A native install may report its version as the pane label. This selects
   // exact process verification; the label itself is never identity evidence.
-  const claudeVersionLabel = pid !== null && input.runtime === "claude-code"
+  const claudeVersionLabel = input.runtime === "claude-code"
     && input.requireExactResumeLineage !== true
     && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(normalizedCommand);
   const claudeProcessProof = claudeWrapper || claudeVersionLabel;
+  let processReadFailure: string | undefined;
+  const listProcesses = async () => {
+    try {
+      return await (input.listProcesses ?? (() => listNativeProcessesOrThrow(claudeProcessProof ? {
+        claudeLaunchPaths: input.launchedExecutable?.isScript === true,
+        frozenExecutable: input.launchedExecutable?.path,
+      } : undefined)))();
+    } catch (error) {
+      // The native verifiers fold read failures into null for other callers.
+      processReadFailure = `native process listing failed: ${error instanceof Error ? error.message : String(error)}`;
+      throw error;
+    }
+  };
+  let nativePidUnreadable = false;
+  const observationTmux = {
+    getPanePid: async (target: string) => {
+      const observedPid = await input.tmux.getPanePid(target);
+      if (observedPid === null) nativePidUnreadable = true;
+      return observedPid;
+    },
+  };
+  const recheckPane = async () => {
+    try {
+      const currentPanes = await input.tmux.listPanes(input.sessionName);
+      if (currentPanes.length !== 1 || currentPanes[0]?.id !== pane.id) {
+        return { ok: true as const, sameProcess: false };
+      }
+      const currentPid = await input.tmux.getPanePid(pane.id);
+      if (currentPid === null || (currentPid === pid && nativePidUnreadable)) {
+        return { ok: false as const, error: unreadablePid };
+      }
+      return { ok: true as const, sameProcess: currentPid === pid };
+    } catch (error) { return { ok: false as const, error }; }
+  };
   if (input.runtime === "codex") {
     // A shell/Node label describes the wrapper, not the native occupant.
     runtimeMatch = "match";
-    const native = await verifyCodexPaneProcess({ target: pane.id, tmux: input.tmux,
-      listProcesses: input.listProcesses, expectedToken: expectedResumeToken,
+    const native = await verifyCodexPaneProcess({ target: pane.id, tmux: observationTmux,
+      listProcesses, expectedToken: expectedResumeToken,
       requireResume: input.requireExactResumeLineage === true, requireArgv: true });
-    const currentPanes = await input.tmux.listPanes(input.sessionName).catch(() => []);
-    const currentPid = await input.tmux.getPanePid(pane.id).catch(() => null);
-    if (native?.panePid === pid && currentPid === pid && currentPanes.length === 1 && currentPanes[0]?.id === pane.id) lineageMatch = native.process;
+    if (processReadFailure) return unavailable(processReadFailure);
+    const current = await recheckPane();
+    if (!current.ok) return unavailable(current.error);
+    if (native?.panePid === pid && current.sameProcess) lineageMatch = native.process;
   } else if (claudeProcessProof) {
     // A known token always requires exact proof. Only non-strict, tokenless
-    // shell wrappers may use runtime occupancy; this never proves resume continuity.
+    // wrappers and version labels may use runtime occupancy; this never proves resume continuity.
     runtimeMatch = "match";
-    const observation = { target: pane.id, tmux: input.tmux, listProcesses: input.listProcesses };
+    const observation = { target: pane.id, tmux: observationTmux, listProcesses,
+      selectedExecutable: input.launchedExecutable?.path, scriptLaunch: input.launchedExecutable?.isScript };
     const native = expectedResumeToken !== null
       ? await verifyClaudePaneProcess({ ...observation, expectedToken: expectedResumeToken,
         rotation: input.requireExactResumeLineage ? input.resumeRotation ?? null : storedRotation(input.db, input.nodeId, expectedResumeToken) })
-      : claudeWrapper && !input.requireExactResumeLineage ? await verifyClaudePaneRuntime(observation) : null;
-    const currentPanes = await input.tmux.listPanes(input.sessionName).catch(() => []);
-    const currentPid = await input.tmux.getPanePid(pane.id).catch(() => null);
-    if (native?.panePid === pid && currentPid === pid && currentPanes.length === 1 && currentPanes[0]?.id === pane.id) lineageMatch = native.process;
-  } else if (pid !== null && runtimeMatch === "match" && strictNativeLineage) {
+      : !input.requireExactResumeLineage ? await verifyClaudePaneRuntime(observation) : null;
+    if (processReadFailure) return unavailable(processReadFailure);
+    const current = await recheckPane();
+    if (!current.ok) return unavailable(current.error);
+    if (native?.panePid === pid && current.sameProcess) lineageMatch = native.process;
+  } else if (runtimeMatch === "match" && strictNativeLineage) {
+    let rows: NativeProcessRow[];
     try {
-      lineageMatch = findExactNativeResumeProcess(
-        // Full rows (process group, OS executable): the strict finder's launcher rules need them.
-        await (input.listProcesses ?? listNativeProcesses)(),
-        pid,
-        input.runtime,
-        expectedResumeToken!,
-        input.resumeRotation,
-      );
-      if (lineageMatch) {
-        const currentPanes = await input.tmux.listPanes(input.sessionName).catch(() => []);
-        const currentPid = await input.tmux.getPanePid(pane.id).catch(() => null);
-        if (currentPanes.length !== 1 || currentPanes[0]?.id !== pane.id || currentPid !== pid) lineageMatch = null;
-      }
-    } catch {
-      // Missing process evidence is ambiguity, never positive identity.
+      rows = await listProcesses();
+    } catch (error) {
+      return unavailable(processReadFailure ?? error);
+    }
+    // Full rows (process group, OS executable): the strict finder's launcher rules need them.
+    lineageMatch = findExactNativeResumeProcess(rows, pid, input.runtime, expectedResumeToken!, input.resumeRotation);
+    observedAt = now();
+    if (lineageMatch) {
+      const current = await recheckPane();
+      if (!current.ok) return unavailable(current.error);
+      if (!current.sameProcess) lineageMatch = null;
     }
   }
   const runtimeAmbiguous = input.runtime === "codex" || claudeProcessProof ? lineageMatch === null : runtimeMatch === "match" && (strictNativeLineage
@@ -250,65 +317,56 @@ export async function rebindAndVerifyPaneIdentity(input: {
   // counts: the selection recorded on the session being rebound.
   const selected = (input.db.prepare(`SELECT ${sessionCommunityHarnessSelect(input.db, "sessions")} AS community_harness FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1`)
     .get(input.nodeId, input.sessionName) as { community_harness: string | null } | undefined)?.community_harness;
-  const unconfirmed = pid !== null && runtimeMatch !== "mismatch" && !runtimeAmbiguous && !!communityHarnessOf(selected, input.runtime);
+  const unconfirmed = runtimeMatch !== "mismatch" && !runtimeAmbiguous && !!communityHarnessOf(selected, input.runtime);
   const verdict: SeatIdentityVerdict = {
     nodeId: input.nodeId,
-    verdict: pid === null
-      ? "pane_missing"
-      : runtimeMatch === "mismatch" || runtimeAmbiguous
-        ? "mismatch"
-        : unconfirmed ? "unconfirmed" : "verified",
+    verdict: runtimeMatch === "mismatch" || runtimeAmbiguous
+      ? "mismatch"
+      : unconfirmed ? "unconfirmed" : "verified",
     evidenceSource: "pane_process",
-    reason: pid === null
-      ? "pane_pid_gone"
-      : runtimeMatch === "mismatch"
-        ? "process_identity_mismatch"
-        : runtimeAmbiguous
-          ? "process_identity_ambiguous"
+    reason: runtimeMatch === "mismatch"
+      ? "process_identity_mismatch"
+      : runtimeAmbiguous
+        ? "process_identity_ambiguous"
         : unconfirmed ? "process_identity_unconfirmed" : null,
     evidence: {
       registeredPane: pane.id,
       observedPid: lineageMatch?.pid ?? pid,
       observedPanePid: pid,
       observedCommand: lineageMatch?.command ?? command,
-      matchedLayer: pid === null || runtimeAmbiguous || unconfirmed ? null : 1,
+      matchedLayer: runtimeAmbiguous || unconfirmed ? null : 1,
     },
     sessionName: input.sessionName,
     observedAt,
   };
 
-  // Persist the replacement pane before the verdict so both records describe
-  // the same current binding. A non-green verdict remains applicable and
-  // therefore keeps the public topology in attention_required.
-  if (input.assertCurrent && !input.assertCurrent()) return { ok: false, detail: "Selected seat changed during native proof" };
-  input.sessionRegistry.updateBinding(input.nodeId, {
-    tmuxSession: input.sessionName,
-    tmuxPane: pane.id,
-  });
-  identityStore.upsert(verdict);
+  if (input.assertCurrent && !input.assertCurrent()) return { ok: false, reason: "identity_unverified", detail: "Selected seat changed during native proof" };
+  // A rejected sample must leave the newer verdict and its binding together.
+  const published = input.db.transaction(() => {
+    if (!identityStore.upsert(verdict)) return false;
+    input.sessionRegistry.updateBinding(input.nodeId, { tmuxSession: input.sessionName, tmuxPane: pane.id });
+    return true;
+  })();
+  if (!published) return { ok: false, reason: "identity_unverified", detail: "A newer pane identity observation superseded this check" };
 
-  if (verdict.verdict === "pane_missing") {
-    return { ok: false, detail: `tmux pane '${printable(pane.id)}' has no live process` };
-  }
   if (verdict.verdict === "mismatch") {
     if (runtimeAmbiguous) {
       // A process check ran for Codex, a Claude launch wrapper or version label, and an exact-resume Claude: name the part that failed.
-      // A tokenless version-label Claude is unverifiable by design (nothing was compared), so it keeps the label text.
-      const unverifiableByDesign = claudeVersionLabel && !claudeWrapper && expectedResumeToken === null;
       const exact = input.requireExactResumeLineage === true;
       // The same variant, token and rotation the failed check used.
       const variant: LineageVariant | null = input.runtime === "codex" ? "codex"
-        : claudeProcessProof ? (expectedResumeToken === null && !exact ? (claudeWrapper ? "claude_runtime" : null) : "claude_conversation")
+        : claudeProcessProof ? (expectedResumeToken === null && !exact ? "claude_runtime" : "claude_conversation")
         : strictNativeLineage ? "claude_exact_resume" : null;
       const rotation = !expectedResumeToken ? null
         : claudeProcessProof && !exact ? storedRotation(input.db, input.nodeId, expectedResumeToken)
         : input.resumeRotation ?? null;
-      const failedCheck = input.explainFailure !== false && !unverifiableByDesign && variant !== null && (input.runtime === "codex" || input.runtime === "claude-code")
+      const failedCheck = input.explainFailure !== false && variant !== null && (input.runtime === "codex" || input.runtime === "claude-code")
         ? await describeLineageFailure({ variant, runtime: input.runtime, sessionName: input.sessionName, target: pane.id, tmux: input.tmux, listProcesses: input.listProcesses,
-          exact, expectedToken: expectedResumeToken, rotation })
+          exact, expectedToken: expectedResumeToken, rotation, launchedExecutable: input.launchedExecutable })
         : null;
       return {
         ok: false,
+        reason: "identity_unverified",
         detail: failedCheck
           ? `tmux pane '${printable(pane.id)}' (foreground command '${printable(command ?? "unknown")}') did not pass the process check for runtime '${input.runtime}': ${failedCheck}`
           : `tmux pane '${printable(pane.id)}' foreground command '${printable(command ?? "unknown")}' does not positively identify runtime '${input.runtime}'`,
@@ -316,10 +374,11 @@ export async function rebindAndVerifyPaneIdentity(input: {
     }
     return {
       ok: false,
+      reason: "identity_unverified",
       detail: `tmux pane '${printable(pane.id)}' foreground command '${printable(command ?? "unknown")}' contradicts runtime '${input.runtime ?? "unknown"}'`,
     };
   }
-  return { ok: true, pane: pane.id, pid: pid!, command,
+  return { ok: true, pane: pane.id, pid, command,
     ...(lineageMatch ? { nativeProcess: { pid: lineageMatch.pid, ...(lineageMatch.startedAt ? { startedAt: lineageMatch.startedAt } : {}) } } : {}) };
 }
 

@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { subsystemSlackDeliver, isHttpsImageRef, evidenceAttachment, defaultReadLocalImage, LOCAL_ATTACHMENT_MAX_BYTES } from "../src/domain/gateway/slack/slack-delivery.js";
+import { subsystemSlackDeliver, defaultReadLocalImage, LOCAL_ATTACHMENT_MAX_BYTES } from "../src/domain/gateway/slack/slack-delivery.js";
 import { SeenStore, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
 import type { OutboundDecision } from "../src/domain/gateway/protocol.js";
 import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
@@ -98,12 +98,13 @@ describe("S10 outbound images — external-upload flow (founder screenshot class
     expect(urls.some((u) => u.endsWith("/files.upload"))).toBe(false);
   });
 
-  it("an https evidenceRef does NOT trigger the upload flow (it rides as a Block Kit image)", async () => {
+  it("an HTTPS PNG evidence ref posts a link without an upload", async () => {
     const { fetchImpl, calls } = slackFetch();
-    await makeDeliver(fetchImpl)(decision("https://example.invalid/board.png"));
+    const evidenceRef = "https://example.invalid/board.png";
+    const out = await makeDeliver(fetchImpl)(decision(evidenceRef));
+    expect(out.ok).toBe(true);
     expect(calls.map((c) => c.url)).toEqual(["https://slack.com/api/chat.postMessage"]);
-    const blocks = (calls[0]!.body as { blocks: { type: string; image_url?: string }[] }).blocks;
-    expect(blocks.filter((b) => b.type === "image")[0]!.image_url).toBe("https://example.invalid/board.png");
+    expect(calls[0]!.body).toMatchObject({ text: expect.stringContaining(evidenceRef) });
   });
 
   it("a non-uploadable local ref (reader returns null) is a clean skip — text only", async () => {
@@ -199,46 +200,7 @@ describe("local attachments: images, video and PDF from disk, size-capped, misse
   });
 });
 
-describe("#47 — a non-image https evidenceRef never becomes a Block Kit image block", () => {
-  it("isHttpsImageRef: image extension (query/fragment stripped) → image; anything else → not", () => {
-    expect(isHttpsImageRef("https://example.invalid/shot.png")).toBe(true);
-    expect(isHttpsImageRef("https://example.invalid/shot.PNG?width=800#frag")).toBe(true);
-    expect(isHttpsImageRef("https://gitlab.com/acme/team/-/work_items/10")).toBe(false);
-    expect(isHttpsImageRef("https://example.invalid/PROOF.md")).toBe(false);
-    expect(isHttpsImageRef("http://example.invalid/shot.png")).toBe(false);
-    expect(isHttpsImageRef("/tmp/local-shot.png")).toBe(false);
-    expect(isHttpsImageRef(null)).toBe(false);
-    expect(isHttpsImageRef(42)).toBe(false);
-  });
-
-  it("evidenceAttachment: image https ref → media ref; non-image https ref → plain link; explicit media wins", () => {
-    const img = evidenceAttachment(undefined, "https://example.invalid/a.jpg", "s");
-    expect(img.mediaRefs).toEqual([{ imageUrl: "https://example.invalid/a.jpg", altText: "s" }]);
-    expect(img.evidenceLink).toBeUndefined();
-    const link = evidenceAttachment(undefined, "https://gitlab.com/acme/team/-/work_items/10", "s");
-    expect(link.mediaRefs).toBeUndefined();
-    expect(link.evidenceLink).toBe("https://gitlab.com/acme/team/-/work_items/10");
-    const explicit = evidenceAttachment([{ imageUrl: "https://example.invalid/x.png", altText: "a" }], "https://gitlab.com/y", "s");
-    expect(explicit.mediaRefs).toHaveLength(1); // explicit media stays caller-controlled
-    expect(explicit.evidenceLink).toBeUndefined();
-    const local = evidenceAttachment(undefined, "/tmp/shot.png", "s");
-    expect(local.mediaRefs).toBeUndefined();
-    expect(local.evidenceLink).toBeUndefined(); // local refs keep the upload-flow handling
-  });
-
-  it.each([
-    ["https://example.png", false],
-    ["https://example.invalid/PROOF.md?image=shot.png#preview.png", false],
-    ["https://example.invalid/shot%20one.PNG?caption=%3F%23#part%2F", true],
-    ["https://example.invalid/shot%2Epng", false],
-    ["https://example.invalid/shot.png%3Fdownload=1", false],
-    ["https://[invalid]/shot.png", false],
-    ["https://example.invalid:99999/shot.png", false],
-    ["https:///shot.png", false],
-  ])("classifies only the parsed URL pathname: %s", (url, expected) => {
-    expect(isHttpsImageRef(url)).toBe(expected);
-  });
-
+describe("Slack HTTPS evidence links", () => {
   it.each([
     "https://user:password@example.invalid/proof",
     "https://user:password@example.invalid/shot.png",
@@ -279,13 +241,17 @@ describe("#47 — a non-image https evidenceRef never becomes a Block Kit image 
     expect(body.text).toContain("Evidence: https://gitlab.com/acme/team/-/work_items/10");
   });
 
-  it("an https image URL with a query string still rides as a Block Kit image (no behavior change)", async () => {
+  it("renders explicit media as an image block", async () => {
     const { fetchImpl, calls } = slackFetch();
-    await makeDeliver(fetchImpl)(decision("https://example.invalid/board.png?width=800"));
+    const imageUrl = "https://example.invalid/board.png?width=800";
+    const outbound = decision("https://example.invalid/PROOF.md");
+    outbound.payload = { ...(outbound.payload as object), media: [{ imageUrl, altText: "Board" }] };
+    const out = await makeDeliver(fetchImpl)(outbound);
+    expect(out.ok).toBe(true);
     const blocks = (calls[0]!.body as { blocks: { type: string; image_url?: string }[] }).blocks;
     const images = blocks.filter((b) => b.type === "image");
     expect(images).toHaveLength(1);
-    expect(images[0]!.image_url).toBe("https://example.invalid/board.png?width=800");
+    expect(images[0]!.image_url).toBe(imageUrl);
     expect((calls[0]!.body as { text: string }).text).not.toContain("Evidence:");
   });
 });
