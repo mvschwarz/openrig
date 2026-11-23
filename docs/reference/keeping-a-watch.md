@@ -176,7 +176,7 @@ under some conditions, with no delay guarantee. So:
 - **Handing a watch to another session** (`rig queue handoff <task> --to <session>`) closes the old task and retires its
   timer (unless another task shares that timer through `--wake-watchdog`; a watch set up as above never does). The new
   task arrives pending, with its body and `watch` tag but no timer: the new owner sets it aside again with a fresh
-  timer, as in step 3.
+  timer using the **Re-arm** command (`rig queue block <task> --on external:<what> --wake-after <interval>`).
 
 ## A usage warning: "warn me when my allowance runs low"
 
