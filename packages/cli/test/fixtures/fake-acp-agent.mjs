@@ -91,6 +91,10 @@ function handle(packet) {
     case "session/load":
       if (process.env.FAKE_ACP_LOAD !== "1") return send({ id, error: { code: -32601, message: "Method not found" } });
       if (sessions.has(params?.sessionId)) return send({ id, result: null });
+      if (params?.sessionId && params.sessionId === process.env.FAKE_ACP_SAVED_SESSION) {
+        sessions.set(params.sessionId, { cancelled: false });
+        return send({ id, result: null });
+      }
       if (process.env.FAKE_ACP_MISSING === "claude") return send({ id, error: { code: -32002, message: "Resource not found", data: { sessionId: params?.sessionId } } });
       if (process.env.FAKE_ACP_MISSING === "codex") return send({ id, error: { code: -32603, message: "Internal error", data: { details: `no rollout found for thread id ${params?.sessionId}` } } });
       return send({ id, error: { code: -32002, message: `Unknown session ${params?.sessionId}` } });
