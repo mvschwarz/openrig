@@ -269,7 +269,9 @@ commands; if the two ever differ, this step is right.
     > clearly pick one choice (a condition the action doesn't plainly meet, say), ask me again before sending anything,
     > and never pick a "don't ask again" choice they didn't pick. Their answer covers only the prompt it answered: a
     > later prompt, even one like it, is a new question to me. Check the effect, and never send again while it's
-    > unknown. If you hand this item on or give this work to another seat, copy this paragraph into the new item. When
+    > unknown. To give this work to another seat, hand this item itself on (`rig queue handoff <this id> --to <seat>`), so
+    > my return address goes with it, and don't close it as a duplicate of a new item. If you hand this item on or give
+    > this work to another seat, copy this paragraph into the new item. When
     > you finish, put the outcome in this item's resolution, with what the latest review found, and any file in its
     > evidence ref.
 
@@ -282,6 +284,16 @@ commands; if the two ever differ, this step is right.
     this work again. If the outcome is unknown, repeat the same command with
     `--id` and the ID from its `Queue create request ID:` line, which it prints before it sends: the same task keeps the
     same address.
+  - **Get woken when a task arrives at your address:** right after the handover, start this wait with your shell tool's
+    background option (in Claude Code versions that wake you when a background command ends), with your address in place
+    of `<address>`:
+
+        until OPENRIG_SESSION_NAME='<address>' rig queue list --owned --state pending --json 2>/dev/null | grep -q '"qitemId"'; do sleep 20; done
+
+    It runs only `rig` and `sleep`, so it spends no model tokens while it waits, and it reads the same in bash and zsh.
+    When it ends, claim each pending task at once (claiming isn't answering: it stays open until the person answers),
+    handle what's waiting (below), then start the wait again, so it ends only on new work. A harness with no background
+    wake (Codex, for one) keeps the check whenever the person talks to you.
   - **When a question arrives at your address as a task,** list the pending work with
     `OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`. Read each in full
     (`rig queue show <id> --full`) and show the person the whole question in the team's words. Record only what they
@@ -305,8 +317,8 @@ commands; if the two ever differ, this step is right.
     rendered in the seat's pane) or `claimed` (picked up); `delivered-ack-pending` (sent, render unconfirmed: not
     proof it was woken); `retained` (the seat's typing guard held the wake, the task is still there to read, and it
     isn't retried automatically: wake the task's destination once its input is free with
-    `rig send <destination> "task <id> is yours"`); `failed` (the wake didn't land, and the task is still
-    owed: wake it the same way); `indeterminate` or `still-pending` (unknown, neither failed nor delivered: check
+    `rig send <destination> "task <id> is yours"`); `failed` (the wake wasn't delivered, and the task still needs
+    doing: wake it the same way); `indeterminate` or `still-pending` (unknown, neither failed nor delivered: check
     before you wake it again). A pending task with no wake isn't lost or done.
   - **Nothing wakes this chat** when the team asks or finishes: while its work is open, start each of your turns by
     listing your address's tasks (above), before anything else, including when the person talks to you and when they

@@ -201,6 +201,42 @@ describe("agent pane activity classifier", () => {
     }
   });
 
+  it("reads completed Working prose right above an empty prompt as idle (#3544)", () => {
+    const prose = "• Working tree is clean; ready for an assignment.";
+    for (const pane of [
+      [prose, "", ...CODEX_0158_FOOTER],
+      [prose, "", "› "],
+      ["• Working directory: /tmp/project", "", "› "],
+      ["• Working (as requested), I updated the tests.", "", "› "],
+      ["• Working... then I committed it.", "", "› "],
+      ["• Working… then I committed it.", "", "› "],
+      ["• Working tree is clean (2 files committed).", "", "› "],
+      ["• Working (2 files committed).", "", "› "],
+      ["• Working… (2 files committed).", "", "› "],
+      ["• Working on the tests (2s per test), I found the bottleneck.", "", "› "],
+      ["• Working (2s per test), I found the bottleneck.", "", "› "],
+      ["• Working on it (3s), then I committed.", "", "› "],
+    ]) {
+      const result = classifyPaneActivity(pane.join("\n"));
+
+      expect(result.state, pane[0]).toBe("agent_idle");
+      expect(result.reason, pane[0]).toBe("idle_prompt");
+    }
+  });
+
+  it("still reads a live Working row right above an empty prompt as active", () => {
+    for (const status of ["⠋ Working", "Working…", "• Working", "Working...", "◦ Working (3s • esc to interrupt)",
+      "✻ Working… (12s)", "• Working ( 3s", "• Working on the test fixtures (6m 12s",
+      "• Working on the test fixtures (3s", "• Working on the test fixtures (6m 12s • esc to interrupt)",
+      "• Working on the test fixtures (6m 1", "• Working (1h 2m 3s)", "• Working on the test fixtures (6",
+      "• Working (6"]) {
+      const result = classifyPaneActivity([status, "", "› "].join("\n"));
+
+      expect(result.state, status).toBe("agent_active");
+      expect(result.reason, status).toBe("mid_work_pattern");
+    }
+  });
+
   it("reads a far turn-status row with a reasoning-summary header as active", () => {
     const result = classifyPaneActivity([
       "• Exploring the test fixtures (2m 03s • esc to interrupt)",
@@ -4323,7 +4359,9 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
         checkReady: vi.fn(async () => readiness(panes[Math.min(reads++, panes.length - 1)]!)),
         launchHarness: vi.fn(async () => ({ ok: true })),
       };
-      const orchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: mockTmux(), sleep: async () => {} });
+      const tmux = mockTmux({ listPanes: async () => [{ id: "%1" }], getPaneCommand: async () => "claude" });
+      tmux.getPanePid = async () => 4242;
+      const orchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
       const result = await orchestrator.startNode({
         rigId: rig.id, nodeId: node.id, sessionId: session.id,
         binding: { id: "b1", nodeId: node.id, tmuxSession: "worker-1@test-rig", tmuxWindow: null, tmuxPane: null,

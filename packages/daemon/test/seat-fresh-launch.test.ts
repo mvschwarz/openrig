@@ -61,6 +61,9 @@ describe("SeatLifecycleService.launchFresh", () => {
   let invalidations: Array<Record<string, unknown>>;
   let activitySwaps: Array<{ nodeId: string; generation: string }>;
   let service: SeatLifecycleService;
+  let armed: Array<[string, string]> = [];
+  let armWarning: string | null = null;
+  let armFails = false;
   let listProcesses: NativeProcessLister;
   let readProcesses: () => Promise<ProcessTableRow[]>;
   let hiddenPids: number[];
@@ -130,9 +133,13 @@ describe("SeatLifecycleService.launchFresh", () => {
       eventBus,
       tmuxAdapter: tmux,
       sleep: async () => undefined,
+      listProcesses: () => listProcesses(),
     });
     invalidations = [];
     activitySwaps = [];
+    armed = [];
+    armWarning = null;
+    armFails = false;
     listProcesses = async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242,
       executableName: "codex", command: "/opt/native/codex -m model", argv: ["/opt/native/codex", "-m", "model"],
       startedAt: "Sat Jan  1 12:00:00 2000" }];
@@ -153,6 +160,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       runtimeAdapters,
       occupantInvalidator: { invalidateRetiringOccupant: (input) => invalidations.push(input) },
       activityOracle: { declareOccupantSwap: (nodeId, generation) => activitySwaps.push({ nodeId, generation }) },
+      armContinuity: async (rigId, nodeId) => { armed.push([rigId, nodeId]); if (armFails) throw new Error("arm fixture failure"); return armWarning; },
     });
   });
 
@@ -187,6 +195,35 @@ describe("SeatLifecycleService.launchFresh", () => {
     ]));
     expect(result.warnings?.join("\n")).toContain("rig terminal open 'rig:fresh-rig' --window");
     expect(result.warnings?.join("\n")).toContain("--provider cmux");
+  });
+
+  it("#3579: a fresh launch arms the new occupant's continuity notice once, by rig and node", async () => {
+    const seat = seedSeat({ clean: true });
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "first occupant" });
+    expect(result.ok).toBe(true);
+    expect(armed).toEqual([[seat.rig.id, seat.node.id]]);
+  });
+
+  it("#3579: a continuity notice that cannot be armed is a warning on the launch, never a failure of the occupant", async () => {
+    armWarning = "continuity policy was not re-armed: its spec could not be read";
+    const warned = await service.launchFresh({ seatRef: seedSeat({ clean: true }).sessionName, fresh: true, reason: "first occupant" });
+    expect(warned.ok).toBe(true);
+    expect(warned.warnings).toEqual(expect.arrayContaining([armWarning]));
+  });
+
+  it("#3579: a throwing arm step is reported the same way", async () => {
+    armFails = true;
+    const result = await service.launchFresh({ seatRef: seedSeat({ clean: true }).sessionName, fresh: true, reason: "first occupant" });
+    expect(result.ok).toBe(true);
+    expect(result.warnings?.join("\n")).toContain("continuity policy was not armed for dev.impl: arm fixture failure");
+  });
+
+  it("#3579: a launch whose startup fails and is rolled back arms nothing", async () => {
+    const seat = seedSeat({ clean: true });
+    adapter.launchHarness = async () => ({ ok: false, error: "fixture startup failure" });
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "first occupant" });
+    expect(result.ok).toBe(false);
+    expect(armed).toEqual([]);
   });
 
   it("#1939: a clean seat launch does not claim that it replaced an open tile", async () => {
@@ -270,7 +307,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(result.ok).toBe(verified);
     expect(result.warnings).toEqual(["Existing projection warning", expect.stringContaining("Startup submission unverified"), expect.stringContaining("open terminal clients")]);
     if (verified) expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe("verified");
-    else expect(result).toMatchObject({ code: "runtime_identity_unverified", status: "attention_required" });
+    else expect(result).toMatchObject({ code: "attention_required", status: "attention_required" });
   });
 
   it.each(["valid", "missing path", "wrong token", "no token"])("numeric Claude pane fresh launch: %s", async mode => {
@@ -287,13 +324,13 @@ describe("SeatLifecycleService.launchFresh", () => {
     const observe = vi.fn(async () => rows);
     listProcesses = observe;
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "fresh occupant" });
-    expect(result.ok).toBe(mode === "valid");
+    const valid = mode === "valid" || mode === "no token";
+    expect(result.ok).toBe(valid);
     const current = sessionRegistry.getSessionsForRig(seat.rig.id).find(s => s.status === "running")!;
     expect(current.id).not.toBe(seat.session!.id);
-    expect(current.startupStatus).toBe(mode === "valid" ? "ready" : "attention_required");
-    expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe(mode === "valid" ? "verified" : "mismatch");
+    expect(current.startupStatus).toBe(valid ? "ready" : "attention_required");
+    expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe(valid ? "verified" : "mismatch");
     expect(alive.has(seat.sessionName)).toBe(true);
-    if (mode === "valid") expect(observe).toHaveBeenCalledTimes(2);
   });
 
   it("default-path consent retains context and continues the same occupant once after late acceptance", async () => {
@@ -1004,7 +1041,14 @@ describe("SeatLifecycleService.launchFresh", () => {
   // Real tmux ends its server when the last session goes (exit-empty), and a
   // probe then fails "no server running": transport_unavailable, never absence.
   // new-session and startServer() each bring a server back.
-  function modelServerLifetime() {
+  // tmux (3.3a to 3.8, measured on 3.6a) says "no server running on <socket>" when the socket file is still there and
+  // nothing listens on it, as after exit-empty, `tmux kill-server` or a killed server. A socket file that's gone (a
+  // restart's /tmp cleanup) is "error connecting to <socket> (No such file or directory)" instead.
+  const SERVER_DOWN = {
+    stale: "no server running on /tmp/tmux-1000/default",
+    missing: "error connecting to /tmp/tmux-1000/default (No such file or directory)",
+  };
+  function modelServerLifetime(down: keyof typeof SERVER_DOWN = "stale") {
     const server = { up: true, starts: 0 };
     const createSession = vi.mocked(tmux.createSession).getMockImplementation()!;
     vi.mocked(tmux.createSession).mockImplementation(async (...args) => {
@@ -1019,7 +1063,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       return { ok: true };
     });
     vi.mocked(tmux.probeSession).mockImplementation(async (name: string) => {
-      if (!server.up) return { state: "transport_unavailable", cause: "no server running on /tmp/tmux-1000/default" };
+      if (!server.up) return { state: "transport_unavailable", cause: SERVER_DOWN[down] };
       return alive.has(name) ? { state: "present" } : { state: "absent" };
     });
     vi.mocked(tmux.hasSession).mockImplementation(async (name: string) => server.up && alive.has(name));
@@ -1109,7 +1153,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     });
 
     // Unclaim doesn't end the process, and tmux can lose its socket while its server keeps running: the probe then
-    // can't reach the server, and a server started at that path is a new, empty one. So the model keeps the two apart:
+    // finds no socket file, and a server started at that path is a new, empty one. So the model keeps the two apart:
     // `alive` and `server.up` are what the socket answers, and the process table is what still runs.
     const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -1120,7 +1164,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     const observed = new Date(Date.now() - 60_000);
     const releasedWithLostSocket = async () => {
       const seat = seedSeat({ adopted: true });
-      const server = modelServerLifetime();
+      const server = modelServerLifetime("missing");
       // Recorded while the adopted seat ran; then released, and the daemon's identity sweep (every 5 s) runs.
       new SeatIdentityStore(db).upsert({
         nodeId: seat.node.id, verdict: "verified", evidenceSource: null, reason: null,
@@ -1170,11 +1214,13 @@ describe("SeatLifecycleService.launchFresh", () => {
 
     // A host restart ends tmux with every seat in it. The daemon's boot reconcile then marks the managed sessions
     // detached (the server isn't there and nothing recorded is running) and keeps their bindings. Nothing was
-    // stopped on purpose, so the first fresh launch after boot meets "no server running" on a managed, detached row.
+    // stopped on purpose, so the first fresh launch after boot meets a missing socket (the restart's /tmp cleanup
+    // removed it) on a managed, detached row.
     // The identity sweep observes a session after it was created: evidence at or after the session's created_at.
-    const afterHostRestart = async (stillRunning: boolean, opts?: { noEvidence?: boolean; observedAt?: Date }) => {
+    const afterHostRestart = async (stillRunning: boolean,
+      opts?: { noEvidence?: boolean; observedAt?: Date; down?: keyof typeof SERVER_DOWN }) => {
       const seat = seedSeat();
-      const server = modelServerLifetime();
+      const server = modelServerLifetime(opts?.down ?? "missing");
       const seen = opts?.observedAt ?? new Date();
       if (!opts?.noEvidence) new SeatIdentityStore(db).upsert({
         nodeId: seat.node.id, verdict: "verified", evidenceSource: null, reason: null,
@@ -1299,6 +1345,94 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(tmux.createSession).not.toHaveBeenCalled();
     });
 
+    // #3435 follow-up: `tmux kill-server` or a killed server leaves its socket file, so the next probe says "no server
+    // running": nothing listens on that socket, so no seat runs on its server. The host stayed up, so the seat's row is
+    // still running and its binding kept.
+    const afterKillServer = async (opts: { stillRunning?: boolean; noEvidence?: boolean; down?: keyof typeof SERVER_DOWN } = {}) => {
+      const seat = seedSeat();
+      const server = modelServerLifetime(opts.down ?? "stale");
+      const seen = new Date();
+      if (!opts.noEvidence) new SeatIdentityStore(db).upsert({
+        nodeId: seat.node.id, verdict: "verified", evidenceSource: null, reason: null,
+        evidence: { registeredPane: "%old", observedPid: 8181, observedPanePid: 8180, observedCommand: "claude", matchedLayer: 1 },
+        sessionName: seat.sessionName, observedAt: seen.toISOString(),
+      });
+      alive.delete(seat.sessionName);
+      livePanes.delete(seat.sessionName);
+      server.up = false;
+      const before = new Date(seen.getTime() - 10 * 60_000);
+      readProcesses = async () => opts.stillRunning ? [processRow(8180, 1, before, "zsh")] : [];
+      return { seat, server };
+    };
+
+    it.each([
+      { name: "its recorded process ended with the server", noEvidence: false },
+      { name: "no process evidence was recorded for it", noEvidence: true },
+    ])("reopens the server for a running managed seat after tmux kill-server left its socket, when $name", async ({ noEvidence }) => {
+      const { seat, server } = await afterKillServer({ noEvidence });
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["running"]);
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after tmux kill-server" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready", sessionName: seat.sessionName });
+      if (!result.ok) return;
+      expect(server).toEqual({ up: true, starts: 1 });
+      expect(tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(killed).toEqual([]);
+      expect(result.supersededSessionIds).toContain(seat.session!.id);
+    });
+
+    it("reopens the server for a detached managed seat with no proof of its end when the socket is stale, not missing", async () => {
+      const { seat, server, boot } = await afterHostRestart(false, { noEvidence: true, down: "stale" });
+      expect(boot.detached).toBe(1);
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready", sessionName: seat.sessionName });
+      expect(server).toEqual({ up: true, starts: 1 });
+      expect(tmux.createSession).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps refusing after tmux kill-server while the seat's recorded process still runs", async () => {
+      const { seat } = await afterKillServer({ stillRunning: true });
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after tmux kill-server" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("last ran as process 8180, which is still running") });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["running"]);
+    });
+
+    it("doesn't reopen for the same running seat when its socket file is missing, and says why", async () => {
+      const { seat } = await afterKillServer({ down: "missing" });
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "socket file removed" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("wasn't tried") });
+      expect(result.ok === false && result.guidance).toContain("socket file is missing");
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["running"]);
+    });
+
+    it.each([
+      ["reports a failure", async (): Promise<TmuxResult> => ({ ok: false, code: "tmux_unavailable", message: "The terminal server did not become available." })],
+      ["throws", async (): Promise<TmuxResult> => { throw new Error("The terminal server did not become available."); }],
+    ])("keeps the refusal and names the reason when the reopen after tmux kill-server %s", async (_label, start) => {
+      const { seat } = await afterKillServer();
+      vi.mocked(tmux.startServer).mockImplementation(start);
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after tmux kill-server" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("The terminal server did not become available.") });
+      expect(tmux.startServer).toHaveBeenCalledTimes(1);
+      expect(tmux.createSession).not.toHaveBeenCalled();
+    });
+
     it("proves older non-terminal rows absent on the restored server before superseding them", async () => {
       const seat = seedSeat({ clean: true });
       const older = sessionRegistry.registerSession(seat.node.id, "r00-dev-impl@fresh-rig");
@@ -1371,9 +1505,9 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(server).toEqual({ up: true, starts: 0 });
     });
 
-    it("does not start a server it did not stop: a seat with no server stays a transport refusal", async () => {
+    it("does not start a server it did not stop when the socket file is missing: a seat with no server stays a transport refusal", async () => {
       seedSeat({ clean: true });
-      const server = modelServerLifetime();
+      const server = modelServerLifetime("missing");
       server.up = false;
 
       const result = await service.launchFresh({ seatRef: "dev.impl", fresh: true, reason: "server already down" });
@@ -1381,6 +1515,18 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed" });
       expect(tmux.startServer).not.toHaveBeenCalled();
       expect(tmux.createSession).not.toHaveBeenCalled();
+    });
+
+    it("starts the server for a seat with no session when its socket is there and nothing listens on it", async () => {
+      const seat = seedSeat({ clean: true });
+      const server = modelServerLifetime("stale");
+      server.up = false;
+
+      const result = await service.launchFresh({ seatRef: "dev.impl", fresh: true, reason: "server already down" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready", sessionName: seat.sessionName });
+      expect(server).toEqual({ up: true, starts: 1 });
+      expect(tmux.createSession).toHaveBeenCalledTimes(1);
     });
   });
 

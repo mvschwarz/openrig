@@ -18,11 +18,13 @@ import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "..
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
 import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "../queue-artifact.js";
 import { resolveSenderSession } from "../sender-identity.js";
+import { queueExportCommand } from "./queue-export.js";
+import { queueImportCommand, queueStagingCommand } from "./queue-import.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
  *
- * Backed by `/api/queue`. Operates only via the daemon HTTP API.
+ * Backed by `/api/queue`, except for the local read-only export.
  * Does NOT touch the POC `rigx-queue-proto` filesystem state.
  *
  * Hot-potato strict-rejection is enforced at the daemon; `update --state done`
@@ -168,7 +170,9 @@ function terminalDeliveryResult(
     "verified": "Terminal receipt confirmed: the wake rendered in the destination pane.",
     "delivered-ack-pending": "Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed.",
     "claimed": "Terminal receipt unconfirmed, but the seat has claimed the item (claimed).",
-    "retained": `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; inspect it with rig seat held-messages ${seat}.`,
+    "retained": wakeResult === "retained:draft_aware"
+      ? `The wake is held (${wakeResult}): nothing was typed into the pane. It's tried again when the seat next reports idle while it's still in draft-aware mode, within the wake retry cap; if it's still held past that cap or the unconfirmed window, its sender and the seat's owner are told once. Inspect it with rig seat held-messages ${seat}.`
+      : `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; if it's still held past the unconfirmed window, its sender and the seat's owner are told once. Inspect it with rig seat held-messages ${seat}.`,
     // A hosted member with no wake trigger: no wake exists to fail, and the work waits to be read.
     "failed": wakeResult?.startsWith("awaiting-pickup:")
       ? `No wake is sent (${wakeResult}): the work waits in the member's queue until it reads it.`
@@ -348,6 +352,15 @@ async function withClient<T>(
     }
     throw err;
   }
+}
+
+/** GET /api/queue/list's page marker (#3572): the limit the daemon applied, and whether more rows matched than it
+ *  returned. null from a daemon that doesn't send it, or without an explicit 0 or 1, which says nothing either way. */
+function queueListPage(headers: Headers | undefined): { limit: number; truncated: boolean } | null {
+  const limit = headers?.get("X-OpenRig-Limit");
+  const truncated = headers?.get("X-OpenRig-Truncated");
+  if (!limit || !/^\d+$/.test(limit) || (truncated !== "0" && truncated !== "1")) return null;
+  return { limit: Number(limit), truncated: truncated === "1" };
 }
 
 function printResult(json: boolean, body: unknown, status: number): void {
@@ -1298,6 +1311,9 @@ const QUEUE_HOST_ROW_OPTION_HELP =
 
 export function queueCommand(depsOverride?: QueueDeps): Command {
   const cmd = new Command("queue").description("Coordination L3 — owned-work queue + inbox/outbox");
+  cmd.addCommand(queueExportCommand());
+  cmd.addCommand(queueImportCommand());
+  cmd.addCommand(queueStagingCommand());
   const getDeps = (): QueueDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
@@ -1574,6 +1590,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               console.error(`Return route: ${route} is recorded with this work. It names a conversation on another host, and the work's ` +
                 `host sends prompts only to a route on its own host: this work's questions and its seats' prompts follow their usual path` +
                 (created.returnRouteBasis === "issued-actor" ? `. Put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
+            } else if (created.returnRouteBasis === "inherited") {
+              console.error(`Return route: ${route}, carried from the routed work you hold. This work's questions and its seats' prompts ` +
+                `(not choice dialogs) go to that conversation as tasks.`);
             } else {
               console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks; read them with ` +
                 `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
@@ -1680,7 +1699,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .description("Append a note and/or mutate qitem state. A note without --state never changes row state. state=done REQUIRES --closure-reason (one of: handed_off_to, denied, canceled, no-follow-on, escalation, superseded). To cancel a row: --state done --closure-reason canceled. To wait for another qitem, use rig queue block <id> --on <child>. Closure ≠ acceptance: handed_off_to records delivery to the next stage; acceptance is the next stage's verdict on its own qitem, not this closure.")
     .option("--actor <session>", "(deprecated, ignored) the actor is derived from the seat env (X-OpenRig-Session); P21 I3 made the update route derive it from the transport header")
     .option("--state <state>", "New state: pending | in-progress | done | blocked | failed | denied | canceled | handed-off")
-    .option("--expect-state <state>", "Apply the update only if the row is still in this state (the one you last read), checked in the same transaction as the write; otherwise nothing is written or triggered (no note, event or wake) and the command fails with qitem_state_changed and the current state. A closer that read pending: --expect-state pending --state done --closure-reason no-follow-on")
+    .option("--expect-state <state>", "Apply the update only if the row is still in this state (the one you last read), checked in the same transaction as the write; otherwise nothing is written or triggered (no note, event or wake) and the command fails with qitem_state_changed and the current state. An older daemon that doesn't know --expect-state ignores it and applies the update unchecked, so the check holds only against a daemon that has it. A closer that read pending: --expect-state pending --state done --closure-reason no-follow-on")
     .option("--reopen", "Explicitly acknowledge a deliberate terminal-to-active repair; requires --state and --note")
     .option("--closure-reason <reason>", "Required for state=done. --state canceled takes no reason, except 'superseded' (with --closure-target = the successor), which records a supersession, distinct from an abandoned cancel")
     .option("--closure-target <target>", "Required for handed_off_to, escalation, and superseded; blocked_on park records use state=blocked with --blocked-on")
@@ -1846,6 +1865,9 @@ Every deliberate HELD row should name its continuation and one live wake:
   --wake-after <duration>  arm a timer atomically with the park
 
 A live blocker qitem supplied with --on also wakes the row when resolved.
+
+--on external:<name> with no wake is an event-only hold: it stays visible, no
+reminder fires, and rig queue resolve <qitemId> --decision "..." ends it.
 
 HELD is only for a row that must stay on the queue while waiting. Work with a
 workspace home that is deferred/not-imminent belongs in its mission/slice.`)
@@ -2456,6 +2478,9 @@ Examples:
           }
         }
         printResult(useJson, res.data, res.status);
+        // The rows stay on stdout as they were; only a page the daemon says it cut adds a line on stderr.
+        const page = res.status < 400 ? queueListPage(res.headers) : null;
+        if (page?.truncated) console.error(`this page stops at --limit ${page.limit} and more rows match; pass a larger --limit to see the rest`);
       }, remote !== undefined, remote);
     });
 

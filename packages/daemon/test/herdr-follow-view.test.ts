@@ -12,6 +12,7 @@ import { inspectComposerInput } from "../src/domain/session-transport.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { codexTwoRowComposer } from "./fixtures/codex-two-row-composer.js";
 import { tileAttachArgv078, tileAttachArgv079, tileAttachArgv0710 } from "../src/domain/terminal/earlier-tile-attach.js";
+import { pinnedTileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 
 const roots: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -725,6 +726,28 @@ describe("follow views kept from an earlier release", () => {
       expect(JSON.parse(readFileSync(canvasFile, "utf8")).tiles.map((t: { target: { paneCommand: string } }) => t.target.paneCommand))
         .toEqual(current.map(t => t.paneCommand));
     });
+
+  it("with Herdr's pinned tiles, a kept 0.7.10 sizing follow view is kept and names the explicit reopen step", async () => {
+    const f = fixture();
+    f.setTransform(view => ({ ...view, opened: view.opened.map(p => {
+      const attachArgv = pinnedTileAttachArgv(p.attachArgv![5]!, p.attachArgv!.slice(6), p.attachArgv![4]!);
+      return { ...p, attachArgv, paneCommand: attachArgv.map(quote).join(" ") };
+    }) }));
+    expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
+    const earlier = (seat: string) => tileAttachArgv0710("/usr/bin/tmux", ["-S", "/tmp/follow-seats.sock"], seat, false);
+    const canvasFile = path.join(path.dirname(path.dirname(f.journal())), "canvas.json");
+    const canvas = JSON.parse(readFileSync(canvasFile, "utf8"));
+    for (const tile of canvas.tiles) { tile.target.attachArgv = earlier(tile.seat); tile.target.paneCommand = tile.target.attachArgv.map(quote).join(" "); }
+    writeFileSync(canvasFile, JSON.stringify(canvas));
+    const journal = JSON.parse(readFileSync(f.journal(), "utf8"));
+    for (const [id, entry] of Object.entries<{ argv: string[]; command: string }>(journal.entries)) {
+      entry.argv = earlier(JSON.parse(id)[1]); entry.command = entry.argv.map(quote).join(" ");
+    }
+    writeFileSync(f.journal(), JSON.stringify(journal));
+    const before = f.calls.length;
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, following: { state: "retained" }, error: expect.stringContaining("Close only the owned Herdr viewer pane") });
+    expect(f.calls.slice(before).some(c => ["create", "split", "run", "close"].includes(c[1]!))).toBe(false);
+  });
 
   it("holds a kept follow view whose tile script only shares a tile script's opening, and leaves its saved tiles", async () => {
     const f = fixture(); expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });

@@ -8,7 +8,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import { nodesRoutes } from "../src/routes/sessions.js";
 import { Command } from "commander";
-import { psCommand, compactNodeProjection } from "../../cli/src/commands/ps.js";
+import { psCommand, compactNodeProjection, attentionReason } from "../../cli/src/commands/ps.js";
 import { DaemonClient } from "../../tui/src/daemon-client.js";
 import { hydrateSnapshot } from "../../tui/src/hydrate.js";
 import type { SeatActivityService } from "../src/domain/seat-activity-service.js";
@@ -137,5 +137,79 @@ describe("served seat attention across the rig, CLI and TUI", () => {
     expect(seat).toMatchObject({ needsAttention: expected, arbitratedNeedsInput: signal, needsInputEvidence: evidence });
     if (!expected) expect(seat.status).not.toMatch(/attention|needs_input/);
     expect(tmux.capturePaneContent).not.toHaveBeenCalled();
+  });
+});
+
+// #3571: a Claude StopFailure for authentication or billing is attention on every served surface, over an idle pane;
+// a generic provider error is not. Neither is a question for a person.
+describe("a Claude provider failure across the rig and the CLI", () => {
+  it.each([
+    { error: "authentication_failed", reason: "provider_auth_error", expected: true },
+    { error: "billing_error", reason: "provider_billing_error", expected: true },
+    { error: "server_error", reason: "provider_error", expected: false },
+    // A draft typed after the failure isn't a native prompt: the failure keeps its attention on every route.
+    { error: "authentication_failed", reason: "provider_auth_error", expected: true, draft: true },
+  ])("$error (draft: $draft)", async ({ error, reason, expected, draft = false }) => {
+    const db = createFullTestDb(); closes.push(() => db.close());
+    db.exec(`INSERT INTO rigs(id,name) VALUES('rig','team');
+      INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES('node','rig','worker','claude-code');
+      INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES('binding','node','worker@team','%1');
+      INSERT INTO sessions(id,node_id,session_name,status,startup_status) VALUES('session','node','worker@team','running','ready');`);
+    const now = new Date().toISOString();
+    const later = new Date(Date.parse(now) + 1000).toISOString();
+    // The arbitrated state saw no question; the pane shows Claude idle at its prompt.
+    const seatActivity = { getSeatActivity: () => null, getSeatStateBySession: () => ({
+      activity: "idle-at-prompt", needsInput: { count: 0, reason: null },
+      needsInputEvidence: { rung: "needs-input-chrome", observedAt: now }, decidedBy: "window-sampling", seq: 1, lastSwap: null,
+    }) } as unknown as SeatActivityService;
+    const structuralActivity = { getStructuralActivity: () => draft
+      ? { state: "attention", reason: "prompt_draft", evidence: "❯ half a sentence", observedAt: later }
+      : { state: "agent_idle", reason: "idle_prompt", evidence: "❯", observedAt: now } };
+    const failure = { state: "unknown", reason, evidenceSource: "runtime_hook", sampledAt: now, eventAt: now, evidence: error,
+      rawEvent: "StopFailure", rawSubtype: error, runtime: "claude-code", fallback: false, stale: false };
+    // The newest hook is Claude's idle notification after the failure.
+    const activityStore = {
+      getLatestForNode: () => ({ state: "idle", reason: "idle_prompt", evidenceSource: "runtime_hook", sampledAt: now, eventAt: later,
+        evidence: "idle_prompt", rawEvent: "Notification", rawSubtype: "idle_prompt", runtime: "claude-code", fallback: false, stale: false }),
+      // A double that retains even a generic error: the routes themselves must refuse it.
+      latestUnsupersededProviderFailure: () => failure,
+    } as unknown as AgentActivityStore;
+    const ps = new PsProjectionService({ db, seatActivity, agentActivity: activityStore, structuralActivity });
+    const tmux = { getPaneCommand: vi.fn(async () => "node"), capturePaneContent: vi.fn(async () => null) };
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      for (const [key, value] of Object.entries({ rigRepo: new RigRepository(db), tmuxAdapter: tmux,
+        seatActivityService: seatActivity, agentActivityStore: activityStore, seatStructuralActivityService: structuralActivity })) c.set(key as never, value);
+      await next();
+    });
+    app.route("/api/rigs/:rigId/nodes", nodesRoutes);
+    app.get("/api/ps", c => c.json(ps.getEntries()));
+    const nodes = await (await app.request("/api/rigs/rig/nodes")).json();
+    expect(nodes[0]).toMatchObject({ needsAttention: expected, arbitratedNeedsInput: false });
+    // The seat's detail route, which reads no pane, agrees.
+    const detail = await (await app.request("/api/rigs/rig/nodes/worker")).json();
+    expect(detail).toMatchObject({ needsAttention: expected });
+    expect(ps.getEntries()[0]!.attentionCount).toBe(expected ? 1 : 0);
+    if (!expected) {
+      expect(nodes[0].agentActivity).toMatchObject({ state: "idle" });
+      return;
+    }
+    expect(nodes[0].agentActivity).toMatchObject({ state: "unknown", reason, rawEvent: "StopFailure", rawSubtype: error });
+    expect(compactNodeProjection(nodes)[0]).toMatchObject({ needsAttention: true, agentActivity: { state: "unknown", reason } });
+    expect(attentionReason(nodes[0])).toBe(`${reason} (${error})`);
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.stubEnv("ATTENTION_FIXTURE_TOKEN", "fixture-only");
+    const command = new Command().addCommand(psCommand({
+      lifecycleDeps: {} as never,
+      hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "fixture", transport: "http", url: "http://fixture", bearer_env: "ATTENTION_FIXTURE_TOKEN" }] } }) as never,
+      clientFactory: () => ({ get: async (path: string) => {
+        const result = await app.request(path); return { status: result.status, data: await result.json() };
+      } }) as never,
+    }));
+    await command.parseAsync(["node", "rig", "ps", "--host", "fixture", "--nodes", "--rig", "team"]);
+    const row = stdout.mock.calls.map(call => String(call[0])).find(line => line.includes("worker@team"));
+    expect(row).toMatch(/\byes\b/);
+    expect(row).toContain(reason);
+    stdout.mockRestore();
   });
 });

@@ -79,7 +79,7 @@ function readOpenBody(raw: unknown): { provider?: string; session?: string; view
   const view = typeof obj["view"] === "string" ? (obj["view"] as string) : undefined;
   const expectedPlan = typeof obj["expectedPlan"] === "string" ? obj["expectedPlan"] : undefined;
   const viewportColumns = typeof obj["viewportColumns"] === "number" ? obj["viewportColumns"] : undefined;
-  return { ...(provider !== undefined ? { provider } : {}), ...(obj["session"] !== undefined ? { session: obj["session"] as string } : {}), ...(view !== undefined ? { view } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}), ...(viewportColumns !== undefined ? { viewportColumns } : {}), ...(obj["reuseLive"] === true ? { reuseLive: true } : {}), ...target };
+  return { ...(provider !== undefined ? { provider } : {}), ...(obj["session"] !== undefined ? { session: obj["session"] as string } : {}), ...(view !== undefined ? { view } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}), ...(viewportColumns !== undefined ? { viewportColumns } : {}), ...(typeof obj["reuseLive"] === "boolean" ? { reuseLive: obj["reuseLive"] } : {}), ...target };
 }
 
 /** The same client from query parameters (preview, status). */
@@ -160,7 +160,8 @@ export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
       ...(parsed.provider !== undefined ? { provider: parsed.provider } : {}),
       ...(parsed.session !== undefined ? { session: parsed.session } : {}),
       ...(parsed.viewportColumns !== undefined ? { viewportColumns: parsed.viewportColumns } : {}),
-      ...(parsed.reuseLive ? { reuseLive: true } : {}),
+      // Reuse is open all's default (the service's); only an explicit false opens copies.
+      ...(parsed.reuseLive !== undefined ? { reuseLive: parsed.reuseLive } : {}),
       ...(parsed.herdrApp ? { herdrApp: parsed.herdrApp } : {}),
     });
     return c.json(result, statusForOpen(result.ok, result.code));

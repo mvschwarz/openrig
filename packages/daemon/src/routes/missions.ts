@@ -113,12 +113,12 @@ export function missionsRoutes(): Hono {
       return c.json({ error: "slices_indexer_unavailable" }, 503);
     }
     const missionId = c.req.param("missionId");
-    const allSlices = indexer.list();
-    const slices = allSlices.filter((s) => s.missionId === missionId);
-    if (slices.length === 0) {
+    // Only the folder is needed: a cold list() would rebuild queue membership for
+    // every slice before this write could run.
+    const missionPath = indexer.missionPath(missionId);
+    if (!missionPath) {
       return c.json({ error: "mission_not_found", missionId }, 404);
     }
-    const missionPath = computeMissionPath(slices[0]!);
     try {
       writeMissionStatusComplete(missionPath);
     } catch (err) {

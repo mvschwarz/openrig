@@ -28,6 +28,9 @@ export interface InstallPlanEntry {
   conflict?: ConflictInfo;
   deferred: boolean;
   deferReason?: string;
+  /** A skill or agent that lands outside its kind's usual folder, though inside the install target: where it lands and
+   *  the usual folder, both relative to the target. It installs as named; this only says so. */
+  outsideKindFolder?: { destination: string; kindFolder: string };
 }
 
 export interface InstallPlan {
@@ -39,6 +42,8 @@ export interface InstallPlan {
   actionable: InstallPlanEntry[];
   deferred: InstallPlanEntry[];
   conflicts: InstallPlanEntry[];
+  /** One line per skill or agent export that lands outside its kind's usual folder (see `outsideKindFolder`). */
+  warnings?: string[];
 }
 
 export interface PlanOptions {
@@ -59,6 +64,15 @@ function assertInsideTarget(targetRoot: string, targetPath: string, label: strin
   if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     throw new Error(`${label} would write outside the install target: '${targetPath}'`);
   }
+}
+
+/** Where a path lands relative to the target, and its kind's usual folder, when it's outside that folder: a name with
+ *  `..` that doesn't climb above the target still lands inside it, and installs as named. Undefined when it's inside. */
+function outsideKindFolder(targetRoot: string, kindRoot: string, targetPath: string): { destination: string; kindFolder: string } | undefined {
+  const relative = path.relative(kindRoot, targetPath);
+  if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) return undefined;
+  const slashed = (p: string) => p.split(path.sep).join("/");
+  return { destination: slashed(path.relative(targetRoot, targetPath)) || ".", kindFolder: slashed(path.relative(targetRoot, kindRoot)) };
 }
 
 // --- Planner ---
@@ -83,6 +97,7 @@ export class InstallPlanner {
 
     const exports = resolveExports(resolved.manifest, options?.roleName);
     const entries: InstallPlanEntry[] = [];
+    const warnings: string[] = [];
 
     // Plan skills
     for (const skill of exports.skills) {
@@ -104,10 +119,9 @@ export class InstallPlanner {
       const sourceDir = path.join(resolved.sourceRef, skill.source);
       const files = this.fs.listFiles ? this.fs.listFiles(sourceDir) : ["SKILL.md"];
 
+      const skillsRoot = runtime === "claude-code" ? path.join(targetRoot, ".claude", "skills") : path.join(targetRoot, ".agents", "skills");
       for (const file of files) {
-        const targetPath = runtime === "claude-code"
-          ? path.join(targetRoot, ".claude", "skills", skill.name, file)
-          : path.join(targetRoot, ".agents", "skills", skill.name, file);
+        const targetPath = path.join(skillsRoot, skill.name, file);
         assertInsideTarget(targetRoot, targetPath, `Skill '${skill.name}/${file}'`);
 
         const exists = this.fs.exists(targetPath);
@@ -132,9 +146,13 @@ export class InstallPlanner {
             reason: `Skill '${skill.name}/${file}' already exists at target`,
           };
         }
+        const outside = outsideKindFolder(targetRoot, skillsRoot, targetPath);
+        if (outside) entry.outsideKindFolder = outside;
 
         entries.push(entry);
       }
+      const skillOutside = outsideKindFolder(targetRoot, skillsRoot, path.join(skillsRoot, skill.name));
+      if (skillOutside) warnings.push(`Skill '${skill.name}' installs to ${skillOutside.destination}/, outside the usual ${skillOutside.kindFolder}/ folder`);
     }
 
     // Plan guidance
@@ -248,9 +266,8 @@ export class InstallPlanner {
         continue;
       }
 
-      const targetPath = runtime === "claude-code"
-        ? path.join(targetRoot, ".claude", "agents", `${agentName}.yaml`)
-        : path.join(targetRoot, ".agents", `${agentName}.yaml`);
+      const agentsRoot = runtime === "claude-code" ? path.join(targetRoot, ".claude", "agents") : path.join(targetRoot, ".agents");
+      const targetPath = path.join(agentsRoot, `${agentName}.yaml`);
       assertInsideTarget(targetRoot, targetPath, `Agent '${agentName}'`);
 
       const agentSourcePath = path.join(resolved.sourceRef, agent.source);
@@ -276,6 +293,11 @@ export class InstallPlanner {
           existingPath: targetPath,
           reason: `Agent '${agentName}' already exists at target`,
         };
+      }
+      const outside = outsideKindFolder(targetRoot, agentsRoot, targetPath);
+      if (outside) {
+        entry.outsideKindFolder = outside;
+        warnings.push(`Agent '${agentName}' installs to ${outside.destination}, outside the usual ${outside.kindFolder}/ folder`);
       }
 
       entries.push(entry);
@@ -336,6 +358,7 @@ export class InstallPlanner {
       actionable,
       deferred,
       conflicts,
+      warnings,
     };
   }
 }

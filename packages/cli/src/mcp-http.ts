@@ -19,11 +19,13 @@ import nodePath from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
+import { z } from "zod";
 import { DaemonClient } from "./client.js";
-import { createMcpServer, mintUnknownSender, type McpAccess, type UnfilledSeat } from "./mcp-server.js";
+import { createMcpServer, mintUnknownSender, type McpAccess, type UnfilledSeat, type McpInstructionExtension } from "./mcp-server.js";
 import { getOpenRigHome } from "./openrig-compat.js";
 import { MCP_PRESENCE_FILE, presenceRecorder } from "./mcp-presence.js";
 import { resolveRigHandle } from "./rig-handle.js";
+import { localCallerProfile, normalizeCallerResolution, type CallerResolver } from "./mcp-caller-resolver.js";
 
 /** One caller's grant. Only the token's sha256 is stored. */
 export type McpGrant = {
@@ -34,9 +36,18 @@ export type McpGrant = {
   roots: string[];
   workspace: boolean;
   owner: boolean;
+  /** #3512: the registered person this connection may answer the team's questions for (`--person <entity_id>`), their
+   *  address being <id>@external. Absent: no person tools, as before. */
+  person?: string;
+  /** Optional scoped work capabilities; omitted keeps this grant's existing rig/workspace/owner behavior. */
+  objects?: Record<string, string[]>;
+  peerSeats?: string[];
+  readOnly?: boolean;
+  newWorkRetryAfterSeconds?: number;
   createdAt: string;
 };
 
+type StoredMcpGrant = Omit<McpGrant, "person"> & { person?: unknown };
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 export function mcpTokenFilePath(home: string = getOpenRigHome()): string {
@@ -45,8 +56,9 @@ export function mcpTokenFilePath(home: string = getOpenRigHome()): string {
 
 /** An entry as token add writes it. A blank seat would act as the env's seat, and a string would become a set of its
  *  characters, so any other shape makes the file unreadable. */
-function isGrant(entry: unknown): entry is McpGrant {
-  const grant = (entry ?? {}) as Record<string, unknown>;
+function isGrant(entry: unknown): entry is StoredMcpGrant {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const grant: Partial<Record<keyof StoredMcpGrant, unknown>> = entry;
   const text = (value: unknown) => typeof value === "string" && value.trim() !== "";
   const list = (value: unknown) => Array.isArray(value) && value.every((item) => typeof item === "string");
   const flag = (value: unknown) => typeof value === "boolean";
@@ -55,8 +67,8 @@ function isGrant(entry: unknown): entry is McpGrant {
 }
 
 /** The configured grants, or null when there is no token file (auth not configured). A file that can't be read or parsed,
- *  or holds a malformed entry, throws: a broken configuration must never read as "no auth". */
-export function readGrants(file: string): McpGrant[] | null {
+ *  or holds a grant with malformed required fields, throws so it cannot be mistaken for "no auth". */
+function readStoredGrants(file: string): StoredMcpGrant[] | null {
   let text: string;
   try {
     text = fs.readFileSync(file, "utf8");
@@ -64,11 +76,25 @@ export function readGrants(file: string): McpGrant[] | null {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
   }
-  const parsed = JSON.parse(text) as { principals?: unknown } | null;
-  if (!Array.isArray(parsed?.principals)) throw new Error(`${file} must hold { "principals": [...] }`);
-  const bad = parsed.principals.findIndex((entry) => !isGrant(entry));
-  if (bad >= 0) throw new Error(`${file}: grant ${bad + 1} is malformed; each needs a name, a tokenSha256, a non-blank seat, and lists of rigs and roots`);
-  return parsed.principals as McpGrant[];
+  const parsed: unknown = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || !("principals" in parsed) || !Array.isArray(parsed.principals)) {
+    throw new Error(`${file} must hold { "principals": [...] }`);
+  }
+  return parsed.principals.map((entry: unknown, index: number) => {
+    if (!isGrant(entry)) {
+      throw new Error(`${file}: grant ${index + 1} is malformed; each needs a name, a tokenSha256, a non-blank seat, and lists of rigs and roots`);
+    }
+    return entry;
+  });
+}
+
+/** Only a valid optional person binding reaches consumers. Grant edits retain the stored fields. */
+export function readGrants(file: string, onUnusablePerson?: (grantName: string) => void): McpGrant[] | null {
+  return readStoredGrants(file)?.map(({ person, ...grant }) => {
+    if (typeof person === "string" && PERSON_ENTITY_ID.test(person)) return { ...grant, person };
+    if (person !== undefined) onUnusablePerson?.(grant.name);
+    return grant;
+  }) ?? null;
 }
 
 /** Holds the token file's lock for one read, modify and publish, so a concurrent add and revoke can't each publish a copy
@@ -94,7 +120,7 @@ export async function withGrantsLock<T>(file: string, update: () => T, waitMs = 
   }
 }
 
-function writeGrants(file: string, grants: McpGrant[]): void {
+function writeGrants(file: string, grants: StoredMcpGrant[]): void {
   fs.mkdirSync(nodePath.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temp, `${JSON.stringify({ principals: grants }, null, 2)}\n`, { mode: 0o600 });
@@ -109,13 +135,20 @@ export function addGrant(file: string, grant: Omit<McpGrant, "tokenSha256" | "cr
   if (!grant.name.trim() || !grant.seat.trim()) {
     return Promise.reject(new Error("A grant needs a name and a seat: --seat <session>, the seat this caller acts as."));
   }
+  if (grant.person !== undefined && !PERSON_ENTITY_ID.test(grant.person)) {
+    return Promise.reject(new Error(`--person needs a registered person's entity id (as rig gateway human list shows it), not '${grant.person}'.`));
+  }
+  const profile = localCallerProfile(grant, (field, repair) =>
+    console.error(`rig mcp token add: grant ${JSON.stringify(grant.name)}, field ${JSON.stringify(field)}: ${repair}`));
   return withGrantsLock(file, () => {
-    const grants = readGrants(file) ?? [];
+    const grants = readStoredGrants(file) ?? [];
     if (grants.some((existing) => existing.name === grant.name)) {
       throw new Error(`'${grant.name}' already has a grant; revoke it first to issue a new token`);
     }
     const token = `orm_${randomBytes(32).toString("base64url")}`;
-    grants.push({ ...grant, seat: grant.seat.trim(), tokenSha256: sha256(token), createdAt: new Date().toISOString() });
+    const { person, ...scope } = { ...grant, ...profile };
+    grants.push({ ...scope, seat: grant.seat.trim(), ...(person !== undefined ? { person } : {}), tokenSha256: sha256(token),
+      createdAt: new Date().toISOString() });
     writeGrants(file, grants);
     return token;
   });
@@ -124,7 +157,7 @@ export function addGrant(file: string, grant: Omit<McpGrant, "tokenSha256" | "cr
 /** Removes a grant; its next request is refused. The file stays, so auth stays configured. */
 export function revokeGrant(file: string, name: string): Promise<boolean> {
   return withGrantsLock(file, () => {
-    const grants = readGrants(file);
+    const grants = readStoredGrants(file);
     if (!grants?.some((grant) => grant.name === name)) return false;
     writeGrants(file, grants.filter((grant) => grant.name !== name));
     return true;
@@ -135,7 +168,7 @@ export function revokeGrant(file: string, name: string): Promise<boolean> {
  *  matching the moment this publishes. The token is shown once and never stored. */
 export function rotateGrant(file: string, name: string): Promise<string> {
   return withGrantsLock(file, () => {
-    const grants = readGrants(file);
+    const grants = readStoredGrants(file);
     const existing = grants?.find((grant) => grant.name === name);
     if (!grants || !existing) throw new Error(`No grant named ${name}.`);
     const token = `orm_${randomBytes(32).toString("base64url")}`;
@@ -162,16 +195,21 @@ export function isLoopbackHost(host: string): boolean {
 export class McpHttpConfigError extends Error {}
 
 /** The caller whose grant this server checked, as the daemon records it beside the rows it writes (principal:v1). */
-export type McpPrincipal = { source: "file" | "grant-service"; id: string; grant?: string; version?: number | string };
+export type McpPrincipal = { source: string; id: string; grant?: string; version?: number | string; label?: string };
 /** One request's caller as this server decided it: no seat, access or principal for the loopback local owner. */
-type RequestCaller = { seat?: string; access?: McpAccess; principal?: McpPrincipal };
+type RequestCaller = { seat?: string; access?: McpAccess; principal?: McpPrincipal; signal: AbortSignal };
+
+const queueWaitCall = z.object({ method: z.literal("tools/call"), id: z.union([z.string(), z.number()]),
+  params: z.object({ name: z.literal("rig_queue_show"), arguments: z.object({ waitSeconds: z.number().positive() }) }) });
+const cancelCall = z.object({ method: z.literal("notifications/cancelled"),
+  params: z.object({ requestId: z.union([z.string(), z.number()]) }) });
 
 /** An external grant service's contract. Core asks on every request with the caller's raw key and its own instance id;
  *  nothing is cached, and every answer but `active` is refused. */
 export const GRANT_SCHEMA = "openrig.grant/v1";
-/** A grant key as the grant service issues it, `<connection id>.cus_<principal id>.<secret>`. Anything else is refused
- *  before any call. */
-const GRANT_KEY = /^[a-f0-9]{24}\.cus_[A-Za-z0-9]{8,64}\.[a-f0-9]{48}$/;
+/** A grant key as the issuing service formats it, `<connection id>.<principal>.<secret>`.
+ *  The principal is an opaque, prefixed id; connection and secret formats stay the same. */
+const GRANT_KEY = /^[a-f0-9]{24}\.[a-z]{2,8}_[A-Za-z0-9]{8,64}\.[a-f0-9]{48}$/;
 /** An instance id as the grant service takes it. */
 const INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 /** A person's gateway entity id, as the daemon's registry takes it (ENTITY_ID_PATTERN): their address is <id>@external. */
@@ -351,6 +389,12 @@ export type McpHttpOptions = {
   clientFactory?: (daemonUrl: string, sessionName?: string, principal?: McpPrincipal) => DaemonClient;
   /** Grants come from an external grant service instead of the token file, which is then never read. */
   grantService?: GrantServiceOptions;
+  /** Resolve opaque credentials per request, instead of a grant service or token file. No fallback on failure. */
+  resolver?: CallerResolver;
+  /** One budget for body reading, instance lookup, resolver and seat check (default 5000 ms). */
+  resolverTimeoutMs?: number;
+  /** Endpoint-owned introduction and static resources, beside Core's caller-scoped guidance. */
+  instructions?: McpInstructionExtension;
   /** Operator-configured receiver for external callers omitting a task destination; never an authority grant. */
   taskDestination?: string;
   /** rig mcp serve --front-door: a caller that isn't external gets the front-door instructions, not the member workflow. */
@@ -368,34 +412,59 @@ function reply(res: http.ServerResponse, status: number, body: Record<string, un
   res.writeHead(status, { "Content-Type": "application/json", ...headers }).end(JSON.stringify(body));
 }
 
-function readBody(req: http.IncomingMessage): Promise<string> {
+function readBody(req: http.IncomingMessage, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let done = false;
     const chunks: Buffer[] = [];
+    const finish = (error?: Error) => {
+      if (done) return;
+      done = true;
+      signal?.removeEventListener("abort", aborted);
+      if (error) { chunks.length = 0; reject(error); }
+      else resolve(Buffer.concat(chunks).toString("utf8"));
+    };
+    const aborted = () => finish(new Error("request_cancelled"));
     req.on("data", (chunk: Buffer) => {
+      if (done) return;
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) { reject(new Error("body_too_large")); req.destroy(); return; }
+      if (size > MAX_BODY_BYTES) { finish(new Error("body_too_large")); return; }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    req.once("end", () => finish());
+    req.once("error", finish);
+    signal?.addEventListener("abort", aborted, { once: true });
+    if (signal?.aborted) aborted();
   });
 }
 
 export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: string; authenticated: boolean; close(): Promise<void> }> {
   const loopback = isLoopbackHost(opts.host);
   const service = opts.grantService;
+  const resolver = opts.resolver;
+  if (resolver && service) throw new McpHttpConfigError("Choose one caller resolver or grant service.");
+  const resolverTimeout = opts.resolverTimeoutMs ?? 5_000;
+  if (!Number.isFinite(resolverTimeout) || resolverTimeout <= 0 || resolverTimeout > 2_147_483_647) {
+    throw new McpHttpConfigError("resolverTimeoutMs needs a positive timer duration in milliseconds.");
+  }
   if (opts.taskDestination !== undefined) {
-    if (!service) throw new McpHttpConfigError("--task-destination needs --grant-service");
+    if (!service && !resolver) throw new McpHttpConfigError("--task-destination needs --grant-service or a caller resolver");
     if (!/^[^\s@]+@[^\s@]+$/.test(opts.taskDestination) || opts.taskDestination.endsWith("@external")) {
       throw new McpHttpConfigError("--task-destination takes one local team seat, member@rig");
     }
   }
   const serviceUrl = service ? grantServiceUrl(service.url) : undefined;
   // The metadata describes the keys a grant service checks, so it's served only with one.
-  if (opts.oauth && !service) throw new McpHttpConfigError("--oauth-resource and --oauth-issuer need --grant-service");
+  if (opts.oauth && !service && !resolver) throw new McpHttpConfigError("--oauth-resource and --oauth-issuer need --grant-service or a caller resolver");
   const discovery = opts.oauth ? oauthDiscovery(opts.oauth) : undefined;
-  const configured = service !== undefined || readGrants(opts.tokenFile) !== null;
+  const warnedBindings = new Set<string>();
+  const warnedProfiles = new Set<string>();
+  const loadGrants = () => readGrants(opts.tokenFile, grantName => {
+    if (warnedBindings.has(grantName)) return;
+    warnedBindings.add(grantName);
+    console.error(`rig mcp serve --http: token-file grant ${JSON.stringify(grantName)} names an unusable person, so it has no person tools (rig_question_*)`);
+  });
+  const configured = resolver !== undefined || service !== undefined || loadGrants() !== null;
   if (!loopback && !configured) {
     throw new McpHttpConfigError(`Serving on ${opts.host} needs authentication: add a grant with rig mcp token add, then start again. With no grants, the server stays on loopback.`);
   }
@@ -411,10 +480,12 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   // The instance a grant key must be bound to: the self id of the daemon whose seats this server acts on, read from that
   // daemon, never from a caller. Kept once known.
   let instance: string | undefined;
-  const instanceId = async (): Promise<string | undefined> => {
+  const instanceId = async (signal?: AbortSignal): Promise<string | undefined> => {
     if (instance) return instance;
     try {
-      const res = await fetch(`${opts.daemonUrl.replace(/\/+$/, "")}/healthz`, { signal: AbortSignal.timeout(2_000) });
+      const res = await fetch(`${opts.daemonUrl.replace(/\/+$/, "")}/healthz`, {
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(2_000)]) : AbortSignal.timeout(2_000),
+      });
       const self = res.ok ? ((await res.json()) as { selfHostId?: unknown }).selfHostId : undefined;
       if (typeof self === "string" && INSTANCE_ID.test(self)) instance = self;
     } catch { /* Unknown: refused below, and asked again on the next request. */ }
@@ -433,13 +504,17 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   // the caller decided below, handed over as the request's authInfo. A caller with no seat writes as this process's one
   // unknown sender, so its later requests carry the label rig_whoami named and a same-id create retry matches.
   const unknownSender = mintUnknownSender();
+  // Legacy HTTP is stateless: cancellation arrives on a separate request/server instance.
+  // Bind only active queue waits to the authenticated credential and RPC id, never another caller's wait.
+  const queueWaits = new Map<string, Set<AbortController>>();
   const mcpHandler = createMcpHandler(({ authInfo }) => {
     const caller = (authInfo?.extra as { caller?: RequestCaller } | undefined)?.caller;
     // Never a default seat: a request reaches the handler only with its caller decided.
     if (!caller) throw new Error("a request reached the MCP handler without its caller");
     // A grant that names its person gets a client acting as them, which records only their answers to the team.
-    const person = caller.access?.external?.person;
-    return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access,
+    const person = caller.access?.external ? caller.access.external.person : caller.access?.person;
+    return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access, principalSource: caller.principal?.source,
+      requestSignal: caller.signal, instructions: opts.instructions,
       taskDestination: opts.taskDestination, presenceFile: () => presenceFile, frontDoor: opts.frontDoor === true,
       unknownSender, ...(opts.unfilledSeat ? { unfilledSeat: opts.unfilledSeat } : {}),
       ...(person ? { personClient: makeClient(opts.daemonUrl, `${person}@external`, caller.principal) } : {}) });
@@ -448,31 +523,34 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   const bearer = (req: http.IncomingMessage): string | undefined => /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? "")?.[1];
   const NO_BEARER = "This server needs a bearer credential: Authorization: Bearer <token>.";
 
-  /** The caller of one request on a server with a grant service: its key's grant, checked there, for a seat on this
-   *  instance. */
-  const serviceRequestCaller = async (req: http.IncomingMessage): Promise<{ seat: string; access: McpAccess; principal: McpPrincipal } | Refusal> => {
-    const key = bearer(req);
-    if (!key) return unauthenticated(NO_BEARER);
-    if (!GRANT_KEY.test(key)) return unauthenticated(NOT_VALID_HERE);
-    const self = await instanceId();
-    if (!self) return unavailable("this daemon reports no self id, so a grant key can't be checked against this instance");
-    const caller = await grantServiceCaller(service!, serviceUrl!, key, self);
-    if (!("seat" in caller)) return caller;
-    // The grant service names the seat; it must already exist here. It's checked, never created.
+  type AuthenticatedCaller = { seat: string; access: McpAccess; principal: McpPrincipal };
+  /** An authority names an existing seat, including a materialized node with no session. Never create or launch it. */
+  const checkedSeat = async (caller: AuthenticatedCaller, signal?: AbortSignal): Promise<AuthenticatedCaller | Refusal> => {
     try {
       const res = await fetch(`${opts.daemonUrl.replace(/\/+$/, "")}/api/whoami?${new URLSearchParams({ sessionName: caller.seat, compact: "1" }).toString()}`,
-        { signal: AbortSignal.timeout(5_000) });
+        { signal: signal ?? AbortSignal.timeout(5_000) });
+      if (signal?.aborted) return unavailable("the caller seat check was cancelled");
       if (res.status === 404) {
         // whoami knows a seat by its sessions, and a seat created without a launch has none yet: it's then this daemon's
         // node of exactly that name, or it isn't here.
         const node = await nodeSeat(makeClient(opts.daemonUrl), caller.seat);
-        if (node === "absent") return { status: 503, error: "seat_unavailable", message: "This connection's seat isn't on this instance yet.", log: `The grant service named seat ${caller.seat}, which this daemon doesn't have` };
+        if (node === "absent") return { status: 503, error: "seat_unavailable", message: "This connection's seat isn't on this instance yet.", log: `The caller authority named seat ${caller.seat}, which this daemon doesn't have` };
         if (node !== "found") return node;
       } else if (!res.ok) return unavailable(`the seat check for ${caller.seat} answered HTTP ${res.status}`);
     } catch (err) {
       return unavailable(`the seat check for ${caller.seat} failed: ${(err as Error).message}`);
     }
     return caller;
+  };
+
+  const serviceRequestCaller = async (req: http.IncomingMessage): Promise<AuthenticatedCaller | Refusal> => {
+    const key = bearer(req);
+    if (!key) return unauthenticated(NO_BEARER);
+    if (!GRANT_KEY.test(key)) return unauthenticated(NOT_VALID_HERE);
+    const self = await instanceId();
+    if (!self) return unavailable("this daemon reports no self id, so a grant key can't be checked against this instance");
+    const caller = await grantServiceCaller(service!, serviceUrl!, key, self);
+    return "seat" in caller ? checkedSeat(caller) : caller;
   };
 
   const handle = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
@@ -490,7 +568,57 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     let seat: string | undefined;
     let principal: McpPrincipal | undefined;
     let authenticated = false;
-    if (service) {
+    let body: unknown;
+    let bodyError: "body_too_large" | "parse_error" | undefined;
+    const readRequestBody = async (signal?: AbortSignal) => {
+      if (req.method !== "POST") return;
+      try { body = JSON.parse(await readBody(req, signal)); }
+      catch (err) { bodyError = (err as Error).message === "body_too_large" ? "body_too_large" : "parse_error"; }
+    };
+    if (resolver) {
+      const key = bearer(req);
+      if (!key) { refuse(res, unauthenticated(NO_BEARER)); return; }
+      const resolution = new AbortController();
+      const disconnect = () => { if (!res.writableFinished) resolution.abort(); };
+      res.once("close", disconnect);
+      const timer = setTimeout(() => resolution.abort(), resolverTimeout);
+      timer.unref();
+      const cancelled = () => unavailable("the caller resolver failed or exceeded its request budget");
+      let abort!: () => void;
+      const interrupted = new Promise<Refusal>(resolve => {
+        abort = () => resolve(cancelled());
+        resolution.signal.addEventListener("abort", abort, { once: true });
+      });
+      let caller: AuthenticatedCaller | Refusal;
+      try {
+        // The race also bounds a resolver or injected client that ignores its AbortSignal. Late answers are unused.
+        caller = await Promise.race([interrupted, (async (): Promise<AuthenticatedCaller | Refusal> => {
+          await readRequestBody(resolution.signal);
+          if (resolution.signal.aborted) return cancelled();
+          const self = await instanceId(resolution.signal);
+          if (!self) return unavailable("this daemon reports no instance id for caller resolution");
+          if (resolution.signal.aborted) return cancelled();
+          const messages = Array.isArray(body) ? body : [body];
+          const methods = messages.flatMap(message => message && typeof message === "object" && typeof message.method === "string" ? [message.method] : []);
+          const value = await resolver({ bearer: key, instance: self, methods, signal: resolution.signal });
+          if (resolution.signal.aborted) return cancelled();
+          const answer = normalizeCallerResolution(value);
+          if (!answer) return unavailable("the caller resolver returned an unusable answer");
+          if (!answer.ok) return ["unknown", "revoked", "expired", "wrong_instance"].includes(answer.refusal)
+            ? unauthenticated(answer.message ?? NOT_VALID_HERE)
+            : unavailable("the caller resolver cannot answer this request");
+          return checkedSeat(answer, resolution.signal);
+        })().catch(cancelled)]);
+      } finally {
+        clearTimeout(timer);
+        resolution.signal.removeEventListener("abort", abort);
+        res.off("close", disconnect);
+      }
+      if (res.destroyed) return;
+      if (!("seat" in caller)) { refuse(res, caller, true); return; }
+      ({ access, seat, principal } = caller);
+      authenticated = true;
+    } else if (service) {
       const caller = await serviceRequestCaller(req);
       if (!("seat" in caller)) { refuse(res, caller, bearer(req) !== undefined); return; }
       ({ access, seat, principal } = caller);
@@ -498,7 +626,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     } else {
       let grants: McpGrant[] | null;
       try {
-        grants = readGrants(opts.tokenFile);
+        grants = loadGrants();
         if (grants === null && authSeen) throw new Error(`${opts.tokenFile} is gone after auth was configured; restore it, or restart with no token file to serve loopback unauthenticated`);
       } catch (err) {
         // The detail stays in this server's log: the reply goes to a caller not yet authenticated.
@@ -514,7 +642,19 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
           refuse(res, unauthenticated(token ? NOT_VALID_HERE : NO_BEARER));
           return;
         }
-        access = { principal: grant.name, owner: grant.owner === true, rigs: grant.rigs ?? [], roots: grant.roots ?? [], workspace: grant.workspace === true };
+        access = { principal: grant.name, owner: grant.owner === true, rigs: grant.rigs ?? [], roots: grant.roots ?? [], workspace: grant.workspace === true,
+          ...(grant.person !== undefined ? { person: grant.person } : {}) };
+        const profile = localCallerProfile(grant, (field, repair) => {
+          const key = `${grant.name}\u0000${field}\u0000${repair}`;
+          if (warnedProfiles.has(key)) return;
+          warnedProfiles.add(key);
+          console.error(`rig mcp serve --http: token-file grant ${JSON.stringify(grant.name)}, field ${JSON.stringify(field)}: ${repair}`);
+        });
+        if (profile.objects !== undefined) access = { ...access, owner: false, workspace: false,
+          external: { objects: profile.objects, ...(profile.peerSeats !== undefined ? { peerSeats: profile.peerSeats } : {}),
+            ...(grant.person !== undefined ? { person: grant.person } : {}) } };
+        if (profile.readOnly) access.readOnly = true;
+        if (profile.newWorkRetryAfterSeconds !== undefined) access.newWorkRetryAfterMs = profile.newWorkRetryAfterSeconds * 1000;
         seat = grant.seat;
         // A token-file grant has a name and nothing more: no grant id or version is invented for it.
         principal = { source: "file", id: grant.name };
@@ -522,15 +662,11 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
         recordCall(grant.seat, grant.name);
       }
     }
-    let body: unknown;
-    if (req.method === "POST") {
-      try {
-        body = JSON.parse(await readBody(req));
-      } catch (err) {
-        const tooLarge = (err as Error).message === "body_too_large";
-        reply(res, tooLarge ? 413 : 400, { jsonrpc: "2.0", error: { code: -32700, message: tooLarge ? "Request body too large" : "Parse error" }, id: null });
-        return;
-      }
+    if (!resolver) await readRequestBody();
+    if (bodyError) {
+      const tooLarge = bodyError === "body_too_large";
+      reply(res, tooLarge ? 413 : 400, { jsonrpc: "2.0", error: { code: -32700, message: tooLarge ? "Request body too large" : "Parse error" }, id: null });
+      return;
     }
     // With no auth (loopback only), refuse a Host that isn't loopback, as a page reaching localhost through DNS rebinding
     // or a forward from elsewhere would send. With auth, the credential is the check, so a tunnel's Host is fine. The SDK's
@@ -539,9 +675,31 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
       reply(res, 403, { jsonrpc: "2.0", error: { code: -32000, message: `Invalid Host header: ${req.headers.host}` }, id: null });
       return;
     }
-    const caller: RequestCaller = { seat, access, principal };
+    const controller = new AbortController();
+    const disconnect = () => { if (!res.writableFinished) controller.abort(); };
+    res.once("close", disconnect);
+    const credential = createHash("sha256").update(bearer(req) ?? "local-owner").digest("hex");
+    const keyFor = (id: string | number) => JSON.stringify([credential, id]);
+    const cancel = cancelCall.safeParse(body);
+    if (cancel.success) for (const wait of queueWaits.get(keyFor(cancel.data.params.requestId)) ?? []) wait.abort();
+    const call = queueWaitCall.safeParse(body);
+    const key = call.success ? keyFor(call.data.id) : undefined;
+    if (key !== undefined) {
+      const active = queueWaits.get(key) ?? new Set<AbortController>();
+      active.add(controller);
+      queueWaits.set(key, active);
+    }
+    const caller: RequestCaller = { seat, access, principal, signal: controller.signal };
     (req as http.IncomingMessage & { auth?: AuthInfo }).auth = { token: "", clientId: principal?.id ?? "local-owner", scopes: [], extra: { caller } };
-    await serveMcp(req, res, body);
+    try { await serveMcp(req, res, body); }
+    finally {
+      res.off("close", disconnect);
+      if (key !== undefined) {
+        const active = queueWaits.get(key);
+        active?.delete(controller);
+        if (active?.size === 0) queueWaits.delete(key);
+      }
+    }
   };
 
   const server = http.createServer((req, res) => {
