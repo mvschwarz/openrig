@@ -41,15 +41,23 @@ export function makeTopologyDestinationCheck(deps: {
 
 /** A bare name (e.g. an adopted tmux selector such as `local-captain`, which rig detail reports as the
  *  representative) that is still its owner's current session: the shared resolver's node, in an active rig,
- *  whose latest session or current binding has this exact spelling. */
+ *  whose latest session or current binding has this exact spelling. Refused when another seat in an active rig
+ *  still claims the name (its binding, or its live latest session), since bindings are not unique. */
 export function isCurrentLocalSeatSession(db: Database.Database, sessionRef: string): boolean {
   const nodeId = resolveSessionNodeId(db, sessionRef);
   if (!nodeId) return false;
-  return db.prepare(`SELECT 1 FROM nodes n JOIN rigs r ON r.id = n.rig_id
+  const owns = db.prepare(`SELECT 1 FROM nodes n JOIN rigs r ON r.id = n.rig_id
     WHERE n.id = ? AND r.archived_at IS NULL AND (
       EXISTS (SELECT 1 FROM bindings b WHERE b.node_id = n.id AND b.tmux_session = ?)
       OR (SELECT session_name FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1) = ?)`)
     .get(nodeId, sessionRef, sessionRef) !== undefined;
+  if (!owns) return false;
+  return db.prepare(`SELECT 1 FROM nodes n JOIN rigs r ON r.id = n.rig_id
+    WHERE n.id <> ? AND r.archived_at IS NULL AND (
+      EXISTS (SELECT 1 FROM bindings b WHERE b.node_id = n.id AND b.tmux_session = ?)
+      OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = (SELECT id FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1)
+        AND s.session_name = ? AND COALESCE(s.status, '') NOT IN ('stopped', 'superseded', 'detached', 'exited')))`)
+    .get(nodeId, sessionRef, sessionRef) === undefined;
 }
 
 /** Keep canonical work even before its topology exists; retain the other admission rules. */
