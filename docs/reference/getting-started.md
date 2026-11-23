@@ -43,7 +43,10 @@ Setup and launch are separate: declining `rig setup` avoids its `~/.tmux.conf` c
 still write workspace trust and selected MCP/config fragments. `runtime.codex.hooks_enabled=false` controls hooks;
 it isn't a no-global-config option. Setup has no project-only mode. Trusted project `.codex/config.toml` settings
 don't redirect OpenRig's home-config writes. A separate selected `CODEX_HOME` keeps Codex config, login and sessions
-together in that home; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
+together in that home; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`. A new home, such as one
+made inside a project to avoid these writes, has no login, so a team can't start on it until it's signed in. To keep
+your existing login, keep your home (`~/.codex`, or `~/.claude` for Claude Code) and accept these few writes there.
+Don't copy credentials into a project to get around them.
 
 > **What OpenRig changes on your machine**
 > - **Install:** `@openrig/cli` goes in globally with npm.
@@ -408,6 +411,13 @@ once, by rig id when names are shared; it records the stop, and `--last` then
 leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
 (`OPENRIG_NO_KERNEL=1`) the daemon skips the kernel's automatic restore too;
 bring it back with `rig up kernel --existing`.
+
+A rig the daemon has nothing to restore from is left out and named with the
+daemon's reason and, when it sends them, the blockers that kept its saved state
+from standing in. With `--json` these rigs are listed under `leftOut`, each with
+its `code`, `message` and `blockers`; `neverLaunched` marks a rig none of whose
+seats has ever run. A preview that failed outright stays under `previewErrors`.
+Left-out rigs don't change the exit code.
 
 Restore requests run one at a time by default. To keep up to two requests
 outstanding, for example, use `rig start --last --concurrency 2`. A request that

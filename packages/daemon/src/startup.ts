@@ -183,6 +183,7 @@ import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
 import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
 import { makeSeatPoolExecutor, seatPoolQueueEffects } from "./domain/seat-pool-executor.js";
+import { convergeOp } from "./domain/topology-converge.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
@@ -2675,7 +2676,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // not run it and nothing registers a seat-pool job: the job stays unarmed until the activation change adds the
     // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start. The policy hands each
     // evaluation to the executor, composed with the queue, the outbox's held messages, the delivery guard's custody,
-    // the seats' activity and the rig's events; it runs only through the policy.
+    // the seats' activity and the rig's events, and with the add: the model member as the export writes it, and the
+    // member add of `rig add` (convergeOp over this daemon's instantiator); it runs only through the policy.
     const seatPoolSlots = new SeatPoolSlotsRepository(db);
     const seatPoolExecutor = makeSeatPoolExecutor({
       db,
@@ -2688,6 +2690,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       seatState: (nodeId) => seatActivityService.getSeatState(nodeId),
       custody: (nodeIds, fn) => deliveryGuard.custody(nodeIds, fn),
       now: () => new Date(),
+      add: {
+        exportMember: (rigId, modelNodeId) => rigSpecExporter.exportedRawMemberFromNode(rigId, modelNodeId),
+        converge: (rigId, op, rigRoot, opts) => convergeOp({ instantiator: podInstantiator }, rigId, op, rigRoot, opts),
+        makeFolder: (folder) => { fs.mkdirSync(folder, { recursive: true }); },
+      },
     });
     const seatPoolPolicy = makeSeatPoolPolicy({ cycle: (job) => seatPoolExecutor.cycle(job) });
     void seatPoolPolicy;

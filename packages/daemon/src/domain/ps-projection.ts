@@ -74,6 +74,8 @@ export interface PsEntry {
    * pass as `lifecycleState` — no extra probes.
    */
   attentionCount: number;
+  /** With `seats: true` only: the rig's seat session names, from the same inventory pass (no extra reads). */
+  seats?: string[];
 }
 
 export { seatNeedsAttention, arbitratedNeedsInputSignal } from "./node-inventory.js";
@@ -183,7 +185,7 @@ export class PsProjectionService {
     this.periodicSnapshotIntervalSeconds = intervalSeconds;
   }
 
-  getEntries(filter?: RigArchiveFilter): PsEntry[] {
+  getEntries(filter?: RigArchiveFilter, opts?: { seats?: boolean }): PsEntry[] {
     // OPR.0.3.3.19 - default excludes archived rigs at the projection layer
     // (NOT client-side). Explicit includeArchived/archivedOnly opt in.
     const cond = archiveWhereClause("r.archived_at", filter);
@@ -338,6 +340,7 @@ export class PsProjectionService {
         periodicSnapshotIntervalSeconds: this.periodicSnapshotIntervalSeconds,
         autoPeriodicSnapshotCount: r.auto_periodic_count,
         attentionCount,
+        ...(opts?.seats ? { seats: inventory.flatMap((node) => node.canonicalSessionName ? [node.canonicalSessionName] : []) } : {}),
       };
     });
   }

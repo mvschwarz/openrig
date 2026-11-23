@@ -164,6 +164,19 @@ Open FYIs are ordered by priority, then newest first. `view=all` (also the defau
 `view=default` selects the effective default person, or all when no default is available. A named view that cannot
 resolve a person has `perspective.basis: "unknown"` and no items when a registry is available. With no registered
 people there is no perspective filter: inspect `perspective` rather than assuming the requested view was applied.
+
+For open FYIs on one selected machine, add `host=<registered-id>` to
+`GET /api/queue/open-human-updates`. The home daemon resolves that target before reading and forwards `view` and
+`limit` using the target's configured bearer, or no bearer for a tokenless entry. It does not forward the app's
+incoming credential. An unknown or unavailable target returns a structured read failure, never a complete empty
+list or an all-host fallback. The request and response body share the existing five-second read deadline.
+
+Keep the selected request host as the origin key alongside the returned envelope; do not infer it from a queue
+item id. Successful JSON is the origin's envelope verbatim and does not add a host stamp. The target resolves its
+own `view`: an unknown named person gives an unknown perspective and no items when people are registered, while
+an absent or unavailable people registry can return unfiltered items without `perspective`. Do not label that
+unfiltered result as a confirmed personal view. This read leaves action-required attention, delivered-update
+history and notification behavior unchanged.
 A person's view also includes instance or unassigned items when that person is the default. These are views on a
 trusted daemon, not per-person authentication or access control; existing daemon and browser access rules still apply.
 
@@ -354,6 +367,9 @@ What reads these declarations:
 
 ## Route details
 
+- **Every seat's name in one read:** `GET /api/ps?seats=true` adds `seats`, the rig's seat session names, to each
+  entry of the usual `/api/ps` body, from the same read. Use it instead of reading each rig's nodes when only the
+  names are needed. The default body has no `seats`, and neither does a daemon from before this option.
 - **A rig's queue history:** `GET /api/queue/list?rig=<rig>&updatedSince=<ISO time>&sort=updated` returns the
   rig's queue items (any whose source or destination seat is in the rig) updated at or after that time: open items
   (`pending`, `in-progress`, `blocked`) first, then the rest by latest update. `limit` defaults to 100 and has no
@@ -544,3 +560,21 @@ This is delivery-only maintenance. Direct sends, control/END requests and ordina
 The automatic wake ladder also waits before attempt budgets, rung markers and escalation for work whose destination rig is drained, including a held escalation target. It resumes at the retained rung after END. Legacy workflow packets without outbox intents remain owed: their existing keepalive resumes after END, and the sweep reports them if they stay unclaimed. END's scoped recovery pass covers pending intents. Diagnosis re-presentations wait before spending their presentation receipt. An explicit resolve notification remains an explicit action and can pass through the delivery hold.
 
 All watchdog evaluation for the held rig waits, including the context-usage watchdog's managed-compaction action. This does not add a native-start hold. If a drain admission read fails, automatic delivery proceeds and reports the uncertainty. Control/status failures remain errors, and failed BEGIN/END writes never report success.
+
+
+## Read a seat's recorded knowledge
+
+`GET /api/context-packs/seat-knowledge?rig=<rig-name>&seat=<seat-name>` reads the fixed
+`LEARNED.md` and `RECAP.md` files for that seat without requiring a context-pack library.
+It uses the same configured topology root and per-file legacy fallback as `rig context trace`.
+The response includes `rig`, `seat`, `topologyRoot` and `files` in that order of filenames.
+
+Each file carries its canonical `path`, `source` (`topology.root`, `legacy` or `absent`),
+`resolvedPath`, verbatim `content` and `extent`. A present file has `extent: "whole-file"`,
+including an empty string for an empty file. An absent file has `extent: "absent"`, null
+content and null resolved path. Legacy reads retain the trace's named migration advisory.
+Only the seat level is read; ancestor knowledge is not included. A read failure returns
+HTTP 503 rather than claiming absence. A missing/invalid rig or seat path segment returns 400.
+
+This read does not prove that a seat is active, summarize or excerpt its notes, enumerate
+other files, or write a recap. Existing daemon read-access conventions apply.
