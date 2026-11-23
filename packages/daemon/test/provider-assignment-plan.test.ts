@@ -294,6 +294,59 @@ describe("the daemon's assignment plan", () => {
     expect(successor.mock.calls.map(([s]) => s)).toEqual(["a1@fleet", "a3@fleet"]);
   });
 
+  it("a Codex seat whose session name an archived rig's newer Claude seat has is refused by name: the precheck and switch would reach that seat first", async () => {
+    const refs = new ProviderAccountRefsRepository(db);
+    expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
+    for (const [rigId, node, runtime, session] of [["rig-a", "k1", "codex", "sess-1"], ["rig-old", "c2", "claude-code", "sess-2"]] as const) {
+      db.prepare("INSERT INTO rigs (id, name) VALUES (?, 'fleet')").run(rigId);
+      db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, 'dev', 'Dev')").run(`pod-${rigId}`, rigId);
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd, pod_id) VALUES (?, ?, 'dev.a', ?, '/w', ?)").run(node, rigId, runtime, `pod-${rigId}`);
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES (?, ?, 'a@fleet', 'running', 'ready')").run(session, node);
+    }
+    new RigRepository(db).archiveRig("rig-old");
+    // The Claude relaunch's lookup, as the route has it: the newest session row with the name, any rig, a Claude seat only.
+    const claudeSeat = { seat: (s: string) => {
+      const row = db.prepare(`SELECT n.id, n.rig_id, n.runtime, r.name FROM sessions s JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id
+        WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`).get(s) as { id: string; rig_id: string; runtime: string; name: string } | undefined;
+      return row?.runtime === "claude-code" ? { nodeId: row.id, rigId: row.rig_id, rigName: row.name, logicalId: "dev.a", running: true, pane: null } : null;
+    } } as never;
+    const svc = new ProviderServiceImpl({ db, listRigs: () => new RigRepository(db).listRigs(), env: { HOME: dir, CODEX_HOME: codexHome }, platform: "linux",
+      claudePrecedence: async () => ({ conflicts: [], checked: ["the pane environment"], notChecked: [] }) });
+    const restartPlan = vi.fn<SeatRestart["plan"]>(async () => ({ ok: true, codexHome, activity: { state: "idle" }, peers: [] }) as never);
+    const planned = await svc.assignmentPlan({ rig: "fleet", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" }, { plan: restartPlan, run: vi.fn() }, claudeSeat);
+    if (!planned.ok) throw new Error(planned.message);
+    expect(planned.plan.rows.map((r) => [r.seat, r.precheck?.reasons])).toEqual([["a@fleet", ["seat_name_shared"]]]);
+    expect(planned.plan.rows[0]!.precheck!.message).toContain("a@fleet reaches the seat in rig rig-old (archived), not this one");
+    expect(restartPlan).not.toHaveBeenCalled();
+  });
+
+  it("an outside peer whose session name a seat in a third rig has, on another home, gets no restart command", async () => {
+    const refs = new ProviderAccountRefsRepository(db);
+    expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);
+    const otherHome = path.join(dir, "other-home");
+    fs.mkdirSync(otherHome);
+    // rig-a is the one assigned. Two other rigs are both named other, each with a member p: one on this Codex home, one on
+    // another home. `rig seat restart p@other` reaches neither alone.
+    for (const [rigId, name, node, session] of [["rig-a", "fleet", "c1", "c1@fleet"], ["rig-o1", "other", "p1", "p@other"], ["rig-o2", "other", "p2", "p@other"]] as const) {
+      db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run(rigId, name);
+      db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, 'dev', 'Dev')").run(`pod-${rigId}`, rigId);
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd, pod_id) VALUES (?, ?, ?, 'codex', '/w', ?)").run(node, rigId, `dev.${session.split("@")[0]}`, `pod-${rigId}`);
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES (?, ?, ?, 'running', 'ready')").run(`sess-${node}`, node, session);
+    }
+    db.prepare("UPDATE nodes SET account_home = ? WHERE id = 'p2'").run(otherHome);
+    const restartPlan = vi.fn<SeatRestart["plan"]>(async () => ({ ok: true, codexHome, activity: { state: "idle" }, peers: [] }) as never);
+    const planned = await service().assignmentPlan({ rig: "rig-a", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" }, { plan: restartPlan, run: vi.fn() });
+    if (!planned.ok) throw new Error(planned.message);
+    expect(planned.plan.codexHomes).toEqual([{ home: codexHome, seats: [
+      { seat: "c1@fleet", rig: "fleet", rigId: "rig-a", effect: "would restart" },
+      { seat: "p@other", rig: "other", rigId: "rig-o1", sharedName: true, effect: "not restarted; another seat has its session name, so a restart by that name could reach that one instead" },
+    ] }]);
+    const report = await applyAssignment(planned.plan, refs.get("codex", "team")!, { switchSeat: vi.fn(async () => ({ outcome: "succeeded" as const, message: "switched" })),
+      restartPeer: vi.fn(), activityOf: () => "idle", save: () => {}, now: () => "t" });
+    expect(report.otherRigPeers).toEqual([{ seat: "p@other", rig: "other", home: codexHome,
+      why: "It has no restart command: a restart reaches a seat by its session name, and another seat has this one" }]);
+  });
+
   it("reads each seat's own token, account home and Codex home, and lists a shared home's peer in another rig", async () => {
     const refs = new ProviderAccountRefsRepository(db);
     expect(refs.add({ provider: "codex", label: "team", codexHome, login: "team" }).ok).toBe(true);

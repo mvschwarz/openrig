@@ -315,12 +315,14 @@ export class ProviderServiceImpl implements ProviderService {
    *  lookup (every session row, archived rigs' and older ones included, the newest first). A Codex seat's restart, and the
    *  successor and its dry run, use the seat-ref resolver: active rigs only, refusing a name more than one seat has. */
   private seatReachedBy(session: string, runtime: string, claudeSeat?: ClaudeSeatRelaunch): SeatReached {
-    if (runtime === "claude-code" && claudeSeat) {
-      const seat = claudeSeat.seat(session);
-      if (!seat) return { none: true };
-      const archived = this.deps.db.prepare("SELECT archived_at FROM rigs WHERE id = ?").get(seat.rigId) as { archived_at: string | null } | undefined;
-      return { nodeId: seat.nodeId, rigId: seat.rigId, archived: !!archived?.archived_at };
+    // The precheck and the switch ask the Claude relaunch's lookup first, for a seat of any runtime: a seat it finds is the
+    // one they act on, so it must be this one.
+    const claude = claudeSeat?.seat(session);
+    if (claude) {
+      const archived = this.deps.db.prepare("SELECT archived_at FROM rigs WHERE id = ?").get(claude.rigId) as { archived_at: string | null } | undefined;
+      return { nodeId: claude.nodeId, rigId: claude.rigId, archived: !!archived?.archived_at };
     }
+    if (runtime === "claude-code" && claudeSeat) return { none: true };
     const status = new SeatStatusService({ rigRepo: new RigRepository(this.deps.db) }).getStatus(session);
     if (!status.ok) return status.code === "seat_ambiguous" ? { ambiguous: true } : { none: true };
     const node = this.deps.db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(status.status.rig_id, status.status.logical_id) as { id: string } | undefined;
@@ -539,7 +541,9 @@ export class ProviderServiceImpl implements ProviderService {
     const plan = await planAssignment({ daemon: input.daemon, rig: rig.name, rigId, account, seats, includeOverrides: input.includeOverrides,
       ...(input.accountHome ? { accountHome: input.accountHome } : {}), platform: this.deps.platform ?? process.platform,
       resolveHome: resolvedHome,
-      intent: assignments.intent(rigId, input.provider) },
+      intent: assignments.intent(rigId, input.provider),
+      // The restart command's own resolver decides whether a printed `rig seat restart <name>` reaches a seat.
+      restartReaches: (session, seatRig) => { const r = this.seatReachedBy(session, "codex"); return "rigId" in r && r.rigId === seatRig; } },
     async (seat) => notReached(nodeOf.get(seat.session)!.nodeId, seat.session) ?? (input.accountHome && account.provider === "codex"
       // A move to a prepared home isn't an in-place switch: it's checked by the account-home dry run, not the switch's precheck.
       ? successorCheck ? successorCheck(seat.session, input.accountHome)

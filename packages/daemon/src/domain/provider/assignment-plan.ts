@@ -55,6 +55,9 @@ export interface AssignmentPlanInput {
   resolveHome?: (home: string) => string;
   /** The rig's stored assignment for this provider, if an apply has started one. */
   intent?: AssignmentIntent | null;
+  /** Whether `rig seat restart <session>` reaches that rig's seat: the seat-ref resolver's own answer, over every active rig.
+   *  Without it, a session name another seat in `seats` has is taken as not reaching it. */
+  restartReaches?: (session: string, rigId: string) => boolean;
 }
 
 /** A seat's check before it changes: the existing per-seat precheck, or, for a fresh successor, the account-home dry run. */
@@ -86,6 +89,8 @@ export interface PlanHomePeer {
   rig: string;
   rigId: string;
   effect: string;
+  /** Another active seat has this session name, so a restart by that name could reach it instead: no command is given. */
+  sharedName?: true;
 }
 
 export interface AssignmentPlan {
@@ -303,9 +308,11 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
   for (const home of switching) { const key = input.resolveHome?.(home) ?? home; if (!keys.has(key)) keys.set(key, home); }
   for (const [key, home] of [...keys].sort(([a], [b]) => a.localeCompare(b))) {
     const onHome = input.seats.filter((s) => s.runtime === "codex" && s.codexHome !== null && (input.resolveHome?.(s.codexHome) ?? s.codexHome) === key);
-    // A restart reaches a seat by its session name: one that another seat on the home has gets no command.
-    const shared = (s: PlanSeatFacts) => onHome.some((o) => o !== s && o.session === s.session);
+    // A restart reaches a seat by its session name: one the name doesn't reach alone gets no command.
+    const shared = (s: PlanSeatFacts) => (input.restartReaches ? !input.restartReaches(s.session, s.rigId)
+      : input.seats.some((o) => o !== s && o.session === s.session));
     codexHomes.push({ home, seats: onHome.map((s) => ({ seat: s.session, rig: s.rigName, rigId: s.rigId,
+      ...(shared(s) ? { sharedName: true as const } : {}),
       effect: s.rigId === input.rigId ? "would restart"
         : shared(s) ? "not restarted; another seat has its session name, so a restart by that name could reach that one instead"
         : `not restarted; needs rig seat restart ${shellArg(s.session)}` })) });

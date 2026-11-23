@@ -151,6 +151,14 @@ describe("applying an assignment", () => {
 
   const homeA = (...seats: string[]) => ({ codexHomes: [{ home: "/homes/a", seats: seats.map((seat) => ({ seat, rig: "fleet", rigId: "id-fleet", effect: "would restart" })) }] });
 
+  it("a seat whose switch is refused by name when it runs gets no restart command once another seat switches its home", async () => {
+    const { d } = deps({ "c1@fleet": { outcome: "failed_safely", reasons: ["seat_name_shared"], message: "the name reaches another seat" } as ProviderSwitchResult });
+    const report = await applyAssignment(plan(CODEX, [change("c1@fleet", { runtime: "codex" }), change("c2@fleet", { runtime: "codex" })],
+      homeA("c1@fleet", "c2@fleet")), CODEX, d);
+    expect(report.results.map((r) => [r.seat, r.kind, r.recovery])).toEqual([["c2@fleet", "switched", undefined], ["c1@fleet", "unknown", undefined]]);
+    expect(report.results[1]!.detail).toContain("It has no restart command");
+  });
+
   it.each([
     ["before", ["bad@fleet", "c1@fleet"]],
     ["after", ["c1@fleet", "bad@fleet"]],

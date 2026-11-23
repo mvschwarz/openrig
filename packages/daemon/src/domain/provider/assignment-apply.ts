@@ -73,8 +73,12 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     ? { file: null, fileKind: null, codexHome: plan.accountHome, codexLogin: null } : own;
   // A seat refused because its session name doesn't reach it alone, or one sharing its name with another seat on a home:
   // a restart by that name could reach the other seat, so no command is given for it.
+  // A switch or move refused for it when it runs adds it too.
   const unnamed = new Set([...plan.rows.filter((r) => r.precheck?.reasons.includes("seat_name_shared")).map((r) => r.seat),
-    ...plan.codexHomes.flatMap((g) => g.seats.map((s) => s.seat).filter((seat, i, all) => all.indexOf(seat) !== i))]);
+    ...plan.codexHomes.flatMap((g) => g.seats.filter((s) => s.sharedName).map((s) => s.seat))]);
+  const refusedByName = (row: PlanRow, r: ProviderSwitchResult | SuccessorResult) => {
+    if ("outcome" in r ? r.outcome === "failed_safely" && r.reasons.includes("seat_name_shared") : !r.ok && r.code === "seat_name_shared") unnamed.add(row.seat);
+  };
   const recoveryOf = (seat: string) => (unnamed.has(seat) ? undefined : restartCommand(seat));
   const record = (row: PlanRow, kind: AssignmentResultKind, detail: string, recovery?: string, activity = row.activity as string) => {
     if (kind === "unknown" && unnamed.has(row.seat)) detail = `${detail}. ${NO_NAME}.`;
@@ -122,6 +126,7 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     if (plan.provider === "codex" && plan.accountHome) {
       if (!deps.successor) { record(row, "failed_before_effect", "not attempted: the move to a prepared home isn't available here", undefined, activity); continue; }
       const moved = await deps.successor(row.seat, plan.accountHome);
+      refusedByName(row, moved);
       const [kind, detail, recovery] = successorKind(row.seat, moved);
       // The successor uses whatever login is active in the prepared home: the result names the account the person chose, not
       // a login it checked.
@@ -130,6 +135,7 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
       continue;
     }
     const switched = await deps.switchSeat(row.seat);
+    refusedByName(row, switched);
     const [kind, detail, recovery] = switchKind(row.seat, switched);
     record(row, kind, detail, recovery, activity);
   }
@@ -165,6 +171,7 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
       if (row.effect !== "change" || unsafe(row)) { waiting.push(row); continue; }
       const activity = deps.activityOf(row.seat);
       const result = await deps.switchSeat(row.seat);
+      refusedByName(row, result);
       const [kind, detail, recovery] = switchKind(row.seat, result);
       record(row, kind, detail, recovery, activity);
       if (kind === "switched") {
