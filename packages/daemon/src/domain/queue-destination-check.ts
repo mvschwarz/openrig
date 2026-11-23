@@ -1,5 +1,6 @@
 // The existing topology-backed destination preflight, used when choosing a receiver.
 // Recording canonical work is separate: absence must not prevent keeping the row.
+import type Database from "better-sqlite3";
 import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { LoadResult } from "./gateway/human-registry.js";
@@ -35,7 +36,26 @@ export function makeTopologyDestinationCheck(deps: {
   };
 }
 
-/** Keep canonical work even before its topology exists; retain the other admission rules. */
-export function makeQueueRecordingCheck(topologyCheck: (sessionRef: string) => boolean): (sessionRef: string) => boolean {
-  return sessionRef => parseSessionName(sessionRef).kind === "canonical" || topologyCheck(sessionRef);
+/** A seat's exact reported session name: one node of an active rig whose latest session or
+ *  current binding has this spelling, e.g. an adopted bare tmux selector such as `local-captain`. */
+export function isCurrentLocalSeatSession(db: Database.Database, sessionRef: string): boolean {
+  const rows = db.prepare(`SELECT DISTINCT node_id FROM (
+    SELECT s.node_id FROM sessions s JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id
+      WHERE s.session_name = ? AND r.archived_at IS NULL
+        AND s.id = (SELECT id FROM sessions WHERE node_id = s.node_id ORDER BY id DESC LIMIT 1)
+    UNION ALL
+    SELECT b.node_id FROM bindings b JOIN nodes n ON n.id = b.node_id JOIN rigs r ON r.id = n.rig_id
+      WHERE b.tmux_session = ? AND r.archived_at IS NULL
+  ) LIMIT 2`).all(sessionRef, sessionRef);
+  return rows.length === 1;
+}
+
+/** Keep canonical work even before its topology exists, and work for a seat's exact current
+ *  session name (the address rig detail reports as a representative); retain the other admission rules. */
+export function makeQueueRecordingCheck(
+  topologyCheck: (sessionRef: string) => boolean,
+  db?: Database.Database,
+): (sessionRef: string) => boolean {
+  return sessionRef => parseSessionName(sessionRef).kind === "canonical" || topologyCheck(sessionRef)
+    || (db !== undefined && isCurrentLocalSeatSession(db, sessionRef));
 }

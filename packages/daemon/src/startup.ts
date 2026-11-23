@@ -564,7 +564,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   };
   const queueRepoInstance = new QueueRepository(db, eventBus, {
     validateRig: topologyValidateRig,
-    canRecordDestination: makeQueueRecordingCheck(topologyValidateRig),
+    canRecordDestination: makeQueueRecordingCheck(topologyValidateRig, db),
     destinationAdvisory: topologyDestinationAdvisory,
     // OPR.0.4.6.WF3 FR-6 — the frontier close-path guard's predicate,
     // INJECTED here (arch layering pin: the queue never imports the
