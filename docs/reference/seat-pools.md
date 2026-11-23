@@ -78,10 +78,12 @@ Under `drain: true`, nothing is moved.
     only while its latest session is still the one the evaluation read. Right before each of its effects, after its
     liveness probe, the stop runs the drain's recheck, which reads again the job, the rig and model holds, the pool
     block, and the agent's rows, held messages and activity; stopping again after an earlier attempt also needs the
-    pool to still have surplus. What keeps the agent stops nothing. In a fresh drain, an agent that got work or woke
-    goes back to `live`, and any other refusal leaves the slot `draining` for that evaluation and gives it back to
-    `live` in the next. A retry refused this way leaves the slot `draining` with the earlier attempt on record, and
-    the stop is tried again later.
+    pool to still have surplus. What keeps the agent stops nothing. Refused before the detach, a fresh drain whose
+    agent got work or woke goes back to `live`, and any other refusal leaves the slot `draining` for that evaluation
+    and gives it back to `live` in the next; a retry refused this way leaves the slot `draining` with the earlier
+    attempt on record, and the stop is tried again later. Refused between the detach and the kill, the agent is left
+    detached and running, the stop is `unconfirmed`, and the slot stays `draining` with the attempt on record; a
+    later evaluation stops that session once the agent is free and the pool still has surplus.
 
   What the stop returned goes in the notes as `stop.result`, never two at once:
 
