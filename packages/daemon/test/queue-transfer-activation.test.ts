@@ -12,6 +12,7 @@ import { AUTHORIZATION_KIND, RECEIPT_KIND, authorizationDigest, parseAuthorizati
 import { QueueTransferStaging } from "../src/domain/queue-transfer-staging.js";
 import { QueueTransitionLog } from "../src/domain/queue-transition-log.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
+import { replayTransfer } from "../src/domain/queue-transfer-recovery.js";
 
 let source: Database.Database;
 let db: Database.Database;
@@ -91,4 +92,13 @@ it("shows imported actions and transitions as history but not as local receipts 
   const actions = new MissionControlActionLog(db);
   expect(actions.listForQitem("qitem-a")).toMatchObject([{ importedFrom: "origin/minted" }]);
   expect(actions.findOperation("qitem-a", "source-op")).toBeNull();
+});
+
+it("reports a missing restored row without reconstructing work", () => {
+  const result = service.activate(stage("blocked"));
+  if (result?.status !== "activated") throw new Error("expected activation");
+  expect(replayTransfer(db, result)).toMatchObject({ restore: "complete" });
+  db.exec("DELETE FROM queue_items WHERE qitem_id = 'qitem-a'");
+  expect(replayTransfer(db, result)).toMatchObject({ restore: "incomplete", missingRows: ["qitem-a"] });
+  expect(db.prepare("SELECT 1 FROM queue_items").get()).toBeUndefined();
 });

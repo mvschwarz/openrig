@@ -9,6 +9,7 @@ import { parseQueueTransfer } from "../src/domain/queue-transfer-parse.js";
 import { ACTIVATION_KIND, AUTHORIZATION_KIND, authorizationDigest, parseAuthorization, type TransferActivation } from "../src/domain/queue-transfer-records.js";
 import { QueueTransferSource } from "../src/domain/queue-transfer-relinquish.js";
 import { mappingDigest } from "../src/domain/queue-transfer-mapping.js";
+import { replayTransfer, transferStatus } from "../src/domain/queue-transfer-recovery.js";
 
 let db: Database.Database;
 let repo: QueueRepository;
@@ -84,4 +85,22 @@ it.each([false, true])("reconciles a confirmed row without overwriting late repo
   expect(repo.getById("qitem-a")).toMatchObject(late ? { state: "done" } : { state: "canceled", closureReason: "superseded", closureTarget: "qitem-a@target" });
   expect(source.reconcile({ ...input, result })).toEqual({ ...report, replayed: true });
   expect(() => repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "pending", reopen: true, transitionNote: "retry" })).toThrow(/fenced/);
+});
+
+it("restores only the receipt's fence and reports incomplete status without a destination result", () => {
+  const restored = new Database(":memory:");
+  try {
+    migrate(restored, ALL_MIGRATIONS);
+    restored.exec("INSERT INTO self_host_identity VALUES (1, 'origin', 'minted', 'reconciled')");
+    const { receipt } = source.relinquish(snapshot());
+    if (!receipt) throw new Error("expected receipt");
+    expect(replayTransfer(restored, receipt)).toMatchObject({ fenced: ["qitem-a"] });
+    expect(replayTransfer(restored, receipt)).toMatchObject({ fenced: [] });
+    expect(restored.prepare("SELECT qitem_id FROM queue_transfer_relinquished").pluck().all()).toEqual(["qitem-a"]);
+    expect(restored.prepare("SELECT 1 FROM outbox_entries").get()).toBeUndefined();
+    expect(transferStatus(restored, receipt.archiveDigest)).toMatchObject({ evacuation: "incomplete", transfers: [{ restriction: "scoped", destinationResult: "absent" }] });
+    expect(transferStatus(restored, "0".repeat(64))).toMatchObject({ evacuation: "incomplete", transfers: [] });
+  } finally {
+    restored.close();
+  }
 });
