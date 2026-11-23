@@ -1223,6 +1223,7 @@ export class QueueRepository {
    *     best-effort {@link maybeNudge} when no store is attached (P34 made that
    *     fallback real code rather than a promise in a comment). */
   private outbox: OutboxHandler | undefined;
+  private readonly hasTransferFence: boolean;
   /** #2829 slice 1 — cold-start notifier, late-wired by startup after the restore orchestrator exists. */
   private wakeWithoutReceiverNotifier: ((destinationSession: string, drainPass?: object) => void) | undefined;
   // A first clear may recover durable refusals observed before startup. Later clears need
@@ -1330,6 +1331,7 @@ export class QueueRepository {
     }
   ) {
     this.db = db;
+    this.hasTransferFence = detectTable(db, "queue_transfer_relinquished");
     this.deliveryDrains = new RigDeliveryDrainStore(db);
     this.eventBus = eventBus;
     this.transitionLog = new QueueTransitionLog(db);
@@ -1793,6 +1795,22 @@ export class QueueRepository {
     return this.outbox !== undefined;
   }
 
+  transferFence(qitemId: string) {
+    if (!this.hasTransferFence) return undefined;
+    const fence = this.db.prepare<[string], { destinationHostId: string; archiveDigest: string }>(`SELECT destination_host_id AS destinationHostId,
+      archive_digest AS archiveDigest FROM queue_transfer_relinquished WHERE qitem_id = ?`).get(qitemId);
+    return fence && { fenced: true as const, ...fence };
+  }
+
+  assertNotFenced(qitemId: string): void {
+    const fence = this.transferFence(qitemId);
+    if (fence) throw new QueueRepositoryError("qitem_fenced", `fenced: awaiting reconciliation (transfer ${fence.archiveDigest.slice(0, 12)})`, fence);
+  }
+
+  private dispatchableTransferRow(): string {
+    return this.hasTransferFence ? "queue_items.qitem_id NOT IN (SELECT qitem_id FROM queue_transfer_relinquished)" : "1";
+  }
+
   deliverWakeIntentsAfterCommit(ids: readonly string[]): void {
     for (const id of ids) this.deliverWakeIntentAfterCommit(id);
   }
@@ -1885,12 +1903,14 @@ export class QueueRepository {
     if (!this.transport) return "skipped"; // no transport → stays pending for a later drain
     if (attempted.has(outboxId)) return "skipped";
     const alreadyHeld = this.outbox.getById(outboxId);
+    if (alreadyHeld?.auditPointer && this.transferFence(alreadyHeld.auditPointer)) return "skipped";
     if (alreadyHeld?.deliveryState === "retained" || alreadyHeld?.deliveryState === "retired") {
       if (this.deliveryDrains.holds(alreadyHeld.destinationSession)) return "retained";
       if (alreadyHeld.auditPointer && !this.wakeOutcomeStale(alreadyHeld)) this.recordNudgeAttempt(alreadyHeld.auditPointer, "retained:typing_guard");
       return "retained";
     }
     const claim = (entry: OutboxEntry): boolean => {
+      if (entry.auditPointer && this.transferFence(entry.auditPointer)) return false;
       if (this.deliveryDrains.holds(entry.destinationSession) || !eligible(entry) || attempted.has(entry.outboxId)) return false;
       let rebound: NonNullable<OutboxEntry["guardBinding"]> | undefined;
       const frozen = entry.guardBinding;
@@ -3289,6 +3309,7 @@ export class QueueRepository {
   }
 
   private handoffWithin(input: QueueHandoffInput): { closed: QueueItem; created: QueueItem } {
+    this.assertNotFenced(input.qitemId);
     const source = this.getById(input.qitemId);
     if (!source) {
       throw new QueueRepositoryError(
@@ -3477,6 +3498,7 @@ export class QueueRepository {
    * tracking needed against the source qitem.
    */
   async handoffAndComplete(input: QueueHandoffAndCompleteInput): Promise<{ closed: QueueItem; created: QueueItem }> {
+    this.assertNotFenced(input.qitemId);
     const source = this.getById(input.qitemId);
     if (!source) {
       throw new QueueRepositoryError(
@@ -3875,6 +3897,7 @@ export class QueueRepository {
    * Mark a qitem `in-progress` (claim). Computes closure_required_at from tier.
    */
   claim(input: QueueClaimInput): QueueItem {
+    this.assertNotFenced(input.qitemId);
     const qitem = this.getById(input.qitemId);
     if (!qitem) {
       throw new QueueRepositoryError(
@@ -3963,6 +3986,7 @@ export class QueueRepository {
   }
 
   unclaim(qitemId: string, destinationSession: string, reason: string, identityProvenance?: string | null, identityPrincipal?: string | null): QueueItem {
+    this.assertNotFenced(qitemId);
     const qitem = this.getById(qitemId);
     if (!qitem) {
       throw new QueueRepositoryError("qitem_not_found", `qitem ${qitemId} not found`);
@@ -4069,6 +4093,7 @@ export class QueueRepository {
    * removed or rewritten here.
    */
   addTags(input: QueueTagAddInput): { item: QueueItem; added: string[] } {
+    this.assertNotFenced(input.qitemId);
     const txn = this.db.transaction(() => {
       const qitem = this.getById(input.qitemId);
       if (!qitem) throw new QueueRepositoryError("qitem_not_found", `qitem ${input.qitemId} not found`);
@@ -4129,6 +4154,7 @@ export class QueueRepository {
     persistedEvent: PersistedEvent;
     persistedEvents: PersistedEvent[];
   } {
+    if (!completingRelay && !["done", "failed", "denied", "canceled"].some(state => state === input.state)) this.assertNotFenced(input.qitemId);
     if (input.closureReason === "relayed-answer" && !completingRelay) {
       throw new QueueRepositoryError("invalid_closure_reason", "Use the relay-answer operation to record a relayed answer.");
     }
@@ -5769,6 +5795,7 @@ export class QueueRepository {
     const rows = this.db.prepare(
       `SELECT qitem_id, state, blocked_on, ts_updated${this.hasSummaryColumn ? ", summary" : ""} FROM queue_items
         WHERE destination_session IN (${slots}) AND state IN ('pending', 'in-progress', 'blocked')
+          AND ${this.dispatchableTransferRow()}
           AND NOT CASE WHEN state != 'blocked' AND json_valid(tags) THEN CASE WHEN json_type(tags) = 'array' THEN
             EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)
             AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value IN (${ownPrompt.map(() => "?").join(",")}))
@@ -6121,6 +6148,7 @@ export class QueueRepository {
       : "0";
     const conditions = [
       "state IN ('pending', 'in-progress', 'blocked')",
+      this.dispatchableTransferRow(),
       `((state = 'pending' AND (last_nudge_result LIKE 'failed:%'
                              OR last_nudge_result LIKE 'unroutable:%'
                              OR last_nudge_result LIKE 'awaiting-pickup:%'
@@ -6718,6 +6746,7 @@ export class QueueRepository {
     reason: string,
     opts: { expectState?: string; expectDestination?: string; wake?: boolean } = {},
   ): QueueItem {
+    this.assertNotFenced(qitemId);
     if (opts.expectState !== undefined && !isQueueState(opts.expectState)) {
       throw new QueueRepositoryError(
         "invalid_state",

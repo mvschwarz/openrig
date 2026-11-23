@@ -48,3 +48,14 @@ it("refuses a stale archive when only its history drifted", () => {
   expect(() => source.relinquish(input)).toThrow(expect.objectContaining({ code: "archive_stale", detail: { changed: ["qitem-a"], missing: [] } }));
   expect(db.prepare("SELECT record_id FROM queue_transfer_ledger").get()).toBeUndefined();
 });
+
+it("refuses claims and reopen on the fenced row but records a late terminal report", async () => {
+  source.relinquish(snapshot());
+  expect(() => repo.claim({ qitemId: "qitem-a", destinationSession: "b@old" })).toThrow(expect.objectContaining({ code: "qitem_fenced" }));
+  expect(() => repo.unclaim("qitem-a", "b@old", "late")).toThrow(expect.objectContaining({ code: "qitem_fenced" }));
+  expect(repo.listOpenObligations("b@old", 10).map(row => row.qitemId)).toEqual(["qitem-b"]);
+  repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "done", closureReason: "no-follow-on" });
+  expect(() => repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "pending", reopen: true, transitionNote: "retry" }))
+    .toThrow(expect.objectContaining({ code: "qitem_fenced" }));
+  expect(repo.claim({ qitemId: "qitem-b", destinationSession: "b@old" }).state).toBe("in-progress");
+});
