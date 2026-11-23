@@ -1185,6 +1185,30 @@ with `rig workflow instantiate-lifecycle`. Compilation alone does not start work
 [OpenRig Software Factory](../../packages/daemon/specs/agents/shared/skills/core/openrig-software-factory/SKILL.md)
 shows a small reviewed example and how to retain custody through a genuine wait.
 
+### Check a workflow start after a lost response
+
+If the connection drops after you request a workflow start, the daemon may have
+already created the instance and its entry packet. Repeating an ordinary
+`rig workflow instantiate` can create another run.
+
+For ordinary starts, choose and save a unique tag for each intended run before
+calling `instantiate`. For example, add `--tags request:review-20261123-01` and
+look for that tag on the same daemon before deciding whether to retry.
+
+```bash
+rig workflow list --name review-flow --tag request:review-20261123-01 --json
+rig queue list --all --all-rigs --tag instance:INSTANCE_ID --tag entry --json
+```
+
+Use the `instanceId` from the matching run in the second command. The entry
+row's queue and pickup state tell you what happened after creation. A tag helps
+you find the request's effects. It can match multiple runs if reused, and an
+empty result can still mean a request is in flight, so recheck before retrying.
+
+For `rig workflow instantiate-lifecycle`, keep the original `--operation-key`.
+Run `rig workflow operation <key>` on the same daemon to look up the committed
+instance and entry packet. If you retry the original command, reuse that key.
+
 ## Have your agent configure permissions
 
 For a team with no permission policy, your agent recommends keeping the
