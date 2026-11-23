@@ -659,9 +659,9 @@ export function formatCommunityHarnessLine(seat: string, app: NonNullable<NodeEn
 }
 
 function missingSessionGuidance(node: NodeEntry): string | null {
-  return node.identityVerdict?.reason === "session_missing"
-    ? "tmux session missing; restore or relaunch the seat"
-    : null;
+  return node.identityVerdict?.reason === "session_missing_tmux_unavailable"
+    ? "tmux session last observed missing; latest tmux reading unavailable; restore or relaunch the seat"
+    : node.identityVerdict?.reason === "session_missing" ? "tmux session missing; restore or relaunch the seat" : null;
 }
 
 /** A recorded-running seat whose applicable identity check could not reach tmux: its liveness is

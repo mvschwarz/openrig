@@ -2388,20 +2388,51 @@ export class PodRigInstantiator {
    * Every skill its profile selects, and those whose resource follows its source, with the source's full path. When it
    * can't be resolved, says why; the restore then keeps the saved selection.
    */
-  async seatSkillSelection(rigId: string, nodeId: string): Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }> {
+  /** A seat's launch config as its spec says today: resolved from its launch recipe the way a fresh launch of it would be, with
+   *  the agent spec read from disk now. Shared by every restore-time read of the spec (skills, the continuity notice). */
+  private async resolveSeatConfigToday(rigId: string, nodeId: string) {
     const node = this.deps.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
-    if (!node) return { ok: false, reason: `node ${nodeId} not found` };
+    if (!node) return { ok: false as const, reason: `node ${nodeId} not found` };
     const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
-    if (!recipe) return { ok: false, reason: `${node.logicalId} has no launch recipe` };
+    if (!recipe) return { ok: false as const, reason: `${node.logicalId} has no launch recipe` };
     const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
-    if (!context) return { ok: false, reason: `${node.logicalId}'s launch recipe does not contain its member definition` };
+    if (!context) return { ok: false as const, reason: `${node.logicalId}'s launch recipe does not contain its member definition` };
     const member = this.persistedMember(node, context.member);
     const resolved = resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
-    if (!resolved.ok) return { ok: false, reason: resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error };
+    if (!resolved.ok) return { ok: false as const, reason: resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error };
     const config = await resolveNodeConfigAsync({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
       profileName: member.profile, specRoot: recipe.rigRoot, cwdOverride: node.cwd ?? undefined, member, pod: context.pod, rig: recipe.rigSpec,
       skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
-    if (!config.ok) return { ok: false, reason: config.errors.join("; ") };
+    if (!config.ok) return { ok: false as const, reason: config.errors.join("; ") };
+    return { ok: true as const, node, config };
+  }
+
+  /**
+   * A seat's continuity strategy as its spec says today (its `compaction_strategy` and `mechanic`), for a start that is not
+   * the first one: a restore (`rig up --existing`) or a fresh launch. A first start arms it from the spec directly; the others
+   * come here, so a seat that selects `managed-compaction` or `apprentice-handover` keeps its notice across them.
+   */
+  async seatContinuityPolicy(rigId: string, nodeId: string): Promise<{ ok: true; compactionStrategy: CompactionStrategy; mechanic: string | undefined; runtime: string }
+    | { ok: false; reason: string; silent?: true }> {
+    const node = this.deps.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
+    // A seat with no launch recipe (an adopted or attached one) or no runtime never selected a strategy: nothing to arm, nothing to say.
+    if (!node?.runtime || !this.deps.rigRepo.getNodeLaunchRecipe(nodeId)) return { ok: false, reason: "no launch recipe or runtime", silent: true };
+    // A terminal-only seat is launched from `builtin:terminal`, which is not an agent spec: it selects no strategy, so there is nothing
+    // to resolve and nothing to warn about, even though its materialized recipe is kept like any other seat's.
+    if (node.runtime === "terminal") return { ok: false, reason: "a terminal seat selects no continuity strategy", silent: true };
+    // Only a Claude agent is planned a notice (continuity-policy-materializer): for any other runtime the plan is empty whatever the spec says,
+    // so its spec is not resolved (a Codex agent whose spec no longer resolves gets no warning about a notice it never had) and arming with the
+    // default strategy still retires a job a Claude start left behind (#3579 R2).
+    if (node.runtime !== "claude-code") return { ok: true, compactionStrategy: "default-compaction", mechanic: undefined, runtime: node.runtime };
+    const seat = await this.resolveSeatConfigToday(rigId, nodeId);
+    if (!seat.ok) return seat;
+    return { ok: true, compactionStrategy: seat.config.config.compactionStrategy as CompactionStrategy, mechanic: seat.config.config.mechanic, runtime: node.runtime };
+  }
+
+  async seatSkillSelection(rigId: string, nodeId: string): Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }> {
+    const seat = await this.resolveSeatConfigToday(rigId, nodeId);
+    if (!seat.ok) return seat;
+    const config = seat.config;
     const skills = config.config.selectedResources.skills;
     const selected = new Set(skills.map((skill) => skill.effectiveId));
     return { ok: true, selection: {
@@ -2443,7 +2474,7 @@ export class PodRigInstantiator {
     });
   }
 
-  /** Store the rig culture file and rig startup block the spec declares, with the absolute root they resolve against. */
+  /** Store the rig's authored startup layers, with the absolute root their paths resolve against. */
   private persistRigStartupLayers(rigId: string, rigSpec: PodRigSpec, rigRoot: string): void {
     const podStartupFiles: Record<string, StartupFile[]> = Object.create(null);
     const podStartupActions: Record<string, import("./types.js").StartupBlock["actions"]> = Object.create(null);
@@ -2454,11 +2485,13 @@ export class PodRigInstantiator {
     const hasPodFiles = Object.keys(podStartupFiles).length > 0;
     const hasMemberStartupFiles = rigSpec.pods.some(pod => pod.members.some(member => (member.startup?.files.length ?? 0) > 0));
     const hasPodActions = Object.keys(podStartupActions).length > 0;
-    if (!rigSpec.cultureFile && !rigSpec.startup && !hasPodFiles && !hasPodActions && !hasMemberStartupFiles) return;
+    if (rigSpec.defaultOnboardingPack === undefined && !rigSpec.cultureFile && !rigSpec.startup
+      && !hasPodFiles && !hasPodActions && !hasMemberStartupFiles) return;
     this.deps.rigRepo.setRigStartupLayers(rigId, {
       root: nodePath.resolve(rigRoot),
       cultureFile: rigSpec.cultureFile,
       startup: rigSpec.startup,
+      defaultOnboardingPack: rigSpec.defaultOnboardingPack,
       ...(hasPodFiles ? { podStartupFiles } : {}),
       ...(hasPodActions ? { podStartupActions } : {}),
     });
@@ -2516,10 +2549,16 @@ export class PodRigInstantiator {
    *  decided as a pair: a spec that declares either one supplies both (an undeclared one is absent), resolved against
    *  the spec's root; a spec that declares neither gets both as stored when the rig was created, against that root.
    *  Expand, add-member and first-start retry launch from a synthetic spec that declares neither, so an added seat gets
-   *  the rig's layers as an original seat did. */
+   *  the rig's layers as an original seat did. The onboarding override always belongs to the target rig. */
   private rigStartupLayers(rigSpec: PodRigSpec, rigRoot: string, rigId: string): RigStartupLayers {
-    if (rigSpec.cultureFile || rigSpec.startup) return { root: rigRoot, cultureFile: rigSpec.cultureFile, startup: rigSpec.startup };
-    return this.deps.rigRepo.getRigStartupLayers(rigId) ?? { root: rigRoot };
+    const saved = this.deps.rigRepo.getRigStartupLayers(rigId);
+    if (rigSpec.cultureFile || rigSpec.startup) {
+      return {
+        root: rigRoot, cultureFile: rigSpec.cultureFile, startup: rigSpec.startup,
+        defaultOnboardingPack: saved?.defaultOnboardingPack,
+      };
+    }
+    return saved ?? { root: rigRoot };
   }
 
   /** The spec as the startup layering sees it: carrying the rig layers the seat launches with, and only those there
@@ -3367,7 +3406,7 @@ export class PodRigInstantiator {
       appliesOn: ["fresh_start", "restore"],
     });
 
-    if (this.deps.onboardingEnabledResolver?.() ?? true) {
+    if (rigLayers.defaultOnboardingPack ?? this.deps.onboardingEnabledResolver?.() ?? true) {
       const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
       files.push(
         {

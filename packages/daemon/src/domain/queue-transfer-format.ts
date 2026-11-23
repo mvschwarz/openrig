@@ -23,12 +23,8 @@ export function canonicalQueueJson(value: QueueTransferJson): string {
     .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalQueueJson(entry)}`).join(",")}}`;
 }
 
-export function queueTransferDigest({ digest: _digest, ...body }: QueueTransferObject): string {
-  return createHash("sha256").update(canonicalQueueJson(body)).digest("hex");
-}
-
-export function sealQueueTransfer(body: QueueTransferObject, maxBytes: number): string {
-  const value = queueTransferDigest(body);
+export function sealQueueTransfer({ digest: _digest, ...body }: QueueTransferObject, maxBytes: number): string {
+  const value = createHash("sha256").update(canonicalQueueJson(body)).digest("hex");
   const archive = canonicalQueueJson({ ...body, digest: { algorithm: "sha256", value, coverage: QUEUE_TRANSFER_FORMAT } });
   checkQueueTransferSize(Buffer.byteLength(archive), maxBytes);
   return archive;

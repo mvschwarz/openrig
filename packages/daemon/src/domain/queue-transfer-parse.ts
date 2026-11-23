@@ -1,6 +1,13 @@
+import { createHash } from "node:crypto";
 import { QUEUE_TRANSFER_COLUMNS } from "./queue-transfer-export.js";
-import { checkQueueTransferSize, queueTransferDigest, QUEUE_TRANSFER_FORMAT, QUEUE_TRANSFER_MAX_BYTES,
+import { checkQueueTransferSize, canonicalQueueJson, QUEUE_TRANSFER_FORMAT, QUEUE_TRANSFER_MAX_BYTES,
   type QueueTransferJson, type QueueTransferObject } from "./queue-transfer-format.js";
+
+// Mirrors sealQueueTransfer's binding: sha256 over the canonical body without the digest field.
+const queueTransferDigest = (archive: QueueTransferObject): string => {
+  const { digest: _digest, ...body } = archive;
+  return createHash("sha256").update(canonicalQueueJson(body)).digest("hex");
+};
 
 type ParseCode = "format_unsupported" | "digest_mismatch" | "origin_identity_missing" | "selection_not_shown" | "archive_invalid";
 

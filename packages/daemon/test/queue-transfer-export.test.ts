@@ -60,15 +60,60 @@ it("preserves source history and verbatim routes without copying outside work or
   expect(result.origin).not.toHaveProperty("generation");
 });
 
-it("resolves each scope exactly and includes only explicitly selected erasure receipts", () => {
+it("includes all erasure receipts when exporting the whole host", () => {
   seed();
-  expect(readQueueTransfer(db, { kind: "host" }).scope.qitemIds).toEqual(["qitem-a", "qitem-b"]);
+  const host = readQueueTransfer(db, { kind: "host" });
+  expect(host.scope.qitemIds).toEqual(["qitem-a", "qitem-b", "qitem-erased", "qitem-unrelated"]);
+  expect(host.erasedIds.map(row => row.qitemId)).toEqual(["qitem-erased", "qitem-unrelated"]);
+  expect(host.erasedRigs.map(row => row.rigId)).toEqual(["rig-demo", "rig-other"]);
+});
+
+it("selects only local endpoints and includes receipts for named rigs or IDs", () => {
+  seed();
   const rig = readQueueTransfer(db, { kind: "rig", names: ["demo"] });
   expect(rig.scope.qitemIds).toEqual(["qitem-a"]);
   expect(rig.erasedRigs.map(row => row.rigId)).toEqual(["rig-demo"]);
-  expect(readQueueTransfer(db, { kind: "mission", names: ["demo"] }).scope.qitemIds).toEqual(["qitem-a"]);
-  expect(readQueueTransfer(db, { kind: "slice", names: ["one"] }).scope.qitemIds).toEqual(["qitem-a"]);
   expect(readQueueTransfer(db, { kind: "qitems", names: ["qitem-erased"] }).erasedIds.map(row => row.qitemId)).toEqual(["qitem-erased"]);
+});
+
+it.each([{ kind: "mission", name: "demo" }, { kind: "slice", name: "one" }] as const)(
+  "includes only traceable erasure receipts when exporting a $kind", ({ kind, name }) => {
+    seed();
+    db.exec("INSERT INTO queue_erased_ids VALUES ('qitem-a', '0', 'delete')");
+    const result = readQueueTransfer(db, { kind, names: [name] });
+    expect(result.scope.qitemIds).toEqual(["qitem-a"]);
+    expect(result.erasedIds.map(row => row.qitemId)).toEqual(["qitem-a"]);
+    expect(result.erasedRigs.map(row => row.rigId)).toEqual(["rig-demo"]);
+  },
+);
+
+it("warns and skips host-qualified rig selectors, keeping the valid part", () => {
+  seed();
+  db.exec("UPDATE queue_items SET source_session = 'a@demo@elsewhere' WHERE qitem_id = 'qitem-b'");
+  // A mixed list keeps its valid part and names the skipped selector; the selection is
+  // shown as given.
+  // The sealed envelope keeps the fixed shape; the summary carries skippedSelectors.
+  const plain = buildQueueTransfer(db, { kind: "rig", names: ["demo"] });
+  const mixed = buildQueueTransfer(db, { kind: "rig", names: ["demo", "demo@elsewhere"] });
+  expect(mixed.skippedSelectors).toEqual(["demo@elsewhere"]);
+  expect(mixed.scope.rigs).toEqual(["demo", "demo@elsewhere"]);
+  // The same rows a plain --rig demo export selects — and the plain export provably
+  // leaves the foreign endpoint's work out.
+  expect(plain.rows.map(row => row.qitemId)).toEqual(["qitem-a"]);
+  expect(mixed.rows).toEqual(plain.rows);
+  // A host-qualified selector must not pick up an erased-rig receipt by that name:
+  // the mixed export's receipts equal the plain one's, and the all-skipped export has none.
+  db.exec("INSERT INTO queue_erased_rigs (rig_id, rig_name, members_digest, verified_at) VALUES ('rig-elsewhere', 'demo@elsewhere', 'digest', '2026-02-03T04:05:06.000Z')");
+  const plainReceipts = buildQueueTransfer(db, { kind: "rig", names: ["demo"] });
+  const mixedReceipts = buildQueueTransfer(db, { kind: "rig", names: ["demo", "demo@elsewhere"] });
+  expect(mixedReceipts.erasedRigs).toEqual(plainReceipts.erasedRigs);
+  const emptyReceipts = buildQueueTransfer(db, { kind: "rig", names: ["demo@elsewhere", "other@x"] });
+  expect(emptyReceipts.erasedRigs).toEqual([]);
+  // All-@ input: the empty archive stays valid, with both selectors named as skipped.
+  const empty = buildQueueTransfer(db, { kind: "rig", names: ["demo@elsewhere", "other@x"] });
+  expect(empty.rows).toEqual([]);
+  expect(empty.skippedSelectors).toEqual(["demo@elsewhere", "other@x"]);
+  expect(empty.scope.rigs).toEqual(["demo@elsewhere", "other@x"]);
 });
 
 it("leaves claims, unrelated work and late reports untouched across disjoint exports", () => {
