@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, PLAIN_WORDING, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
+import { CALLER_SHAPED, createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, PLAIN_WORDING, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, senderIdentityHeaders, type DaemonResponse } from "../src/client.js";
 import type { HostRegistryLoadResult } from "../src/host-registry.js";
 import type { HostBindingsFile } from "../src/host-bindings.js";
@@ -32,6 +32,27 @@ const ASK_SENT_ANYWAY = "If you sent it anyway, tell your person it waits until 
 const ASK_UNLISTED = "If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory. If your person names one clearly, go ahead.";
 const ASK_GO_AHEAD = "If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again.";
 const ASK_REMOVED_FACT = "If your person still asks to send to one whose person is no longer on the team, tell them it can't be delivered: requests to an assistant whose person is no longer on the team are closed unanswered.";
+
+describe("caller address shape", () => {
+  it("keeps the caller shape with nonempty parts, including hyphens in either part", () => {
+    for (const address of [
+      "cus-a-caller@team", "cus-a-b-c@team", "cus---b@team", "cus-a--@team",
+      "cus-?-?-@team", "cus-名-接続@組", "cus-a\n-b@team", "cus-a-b@team\n",
+    ]) expect(CALLER_SHAPED.test(address), address).toBe(true);
+    for (const address of [
+      "lead@team", "Cus-a-b@team", "xcus-a-b@team", "cus-a@team", "cus--b@team",
+      "cus-a-@team", "cus-a-b@", "cus-a-b@team@other", "cus-a@b-c@team",
+    ]) expect(CALLER_SHAPED.test(address), address).toBe(false);
+  });
+
+  it("rejects a long repeated-hyphen input without retrying all possible splits", () => {
+    const address = `cus-${"?-".repeat(100_000)}@team@other`;
+    const start = performance.now();
+    expect(CALLER_SHAPED.test(address)).toBe(false);
+    // The linear scan takes milliseconds; allow a full second for a slow test host.
+    expect(performance.now() - start).toBeLessThan(1_000);
+  });
+});
 
 describe("MCP Server", () => {
   let mcpClient: Client;

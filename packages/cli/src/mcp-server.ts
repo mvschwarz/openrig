@@ -525,7 +525,8 @@ function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
  *  cus-<id>-caller@<rig>). v1 marks no seat as a caller, so for a grant without team/list an item from a seat of this
  *  shape is never the team's question to it, and it can't hand a task to one. The shape only refuses; it never grants
  *  anything, and a grant with team/list doesn't read it. */
-const CALLER_SHAPED = /^cus-[^@]+-[^@]+@[^@]+$/;
+// Choose the first eligible hyphen; keeping it out of the prefix repetition prevents repeated splits.
+export const CALLER_SHAPED = /^cus-[^@][^@-]*-[^@]+@[^@]+$/;
 
 /** OpenRig's own tags that decide what a person asked about a row sees of its body: what Slack ingestion records about where
  *  the row came from and which parts of its body OpenRig wrote (the sender's channel, the attachments block, the body's
