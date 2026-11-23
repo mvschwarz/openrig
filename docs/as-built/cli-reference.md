@@ -140,7 +140,7 @@ Root: `rig`; declared option: `-V, --version`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig start` | — | `--last`<br>`--all`<br>`--rigs <names...>`<br>`--fresh <seats...>`<br>`--json` |
+| `rig start` | — | `--last`<br>`--all`<br>`--rigs <names...>`<br>`--concurrency <n>`<br>`--fresh <seats...>`<br>`--json` |
 
 ### daemon
 
@@ -327,7 +327,7 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig up <source>` | — | `--non-interruptive`<br>`--no-non-interruptive`<br>`--plan`<br>`--yes`<br>`--cwd <path>`<br>`--env <KEY=VALUE>` (repeatable)<br>`--name <rig>`<br>`--target <root>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--existing`<br>`--fresh <seats...>`<br>`--json`<br>`--host <id>` |
+| `rig up <source>` | — | `--non-interruptive`<br>`--no-non-interruptive`<br>`--plan`<br>`--yes`<br>`--timeout <seconds>`<br>`--cwd <path>`<br>`--env <KEY=VALUE>` (repeatable)<br>`--name <rig>`<br>`--target <root>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--existing`<br>`--fresh <seats...>`<br>`--json`<br>`--host <id>` |
 
 ### down
 
@@ -461,7 +461,7 @@ do not establish connectivity to a live peer.
 | `rig mcp` | — | — |
 | `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>`<br>`--front-door`<br>`--task-destination <seat>` |
 | `rig mcp token` | — | — |
-| `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
+| `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner`<br>`--person <entity_id>` |
 | `rig mcp token list` | — | `--json` |
 | `rig mcp token revoke <name>` | — | — |
 
@@ -544,7 +544,7 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | `rig queue create` | — | `--source <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--body-context <ref>`<br>`--mission <id>`<br>`--slice <id>`<br>`--gate <role>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--expires-at <iso>`<br>`--blocked-on <blocker>`<br>`--wake-after <duration>`<br>`--id <qitemId>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--human-intent <intent>`<br>`--alert`<br>`--human-detail-file <path>`<br>`--reply-to <qitemId>`<br>`--human-questions-file <path>`<br>`--evidence-ref <path>`<br>`--host <id>`<br>`--return-route <route>`<br>`--no-nudge`<br>`--verify`<br>`--full`<br>`--json` |
 | `rig queue claim <qitemId>` | — | `--destination <session>`<br>`--full`<br>`--json` |
 | `rig queue unclaim <qitemId>` | — | `--destination <session>`<br>`--reason <text>`<br>`--full`<br>`--json` |
-| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--closure-required-at <iso>`<br>`--resolution <text>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--source <name@external>`<br>`--host <id>`<br>`--full`<br>`--json` |
+| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--expect-state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--closure-required-at <iso>`<br>`--resolution <text>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--source <name@external>`<br>`--host <id>`<br>`--full`<br>`--json` |
 | `rig queue block <qitemId>` | — | `--on <blocker>` **required**<br>`--actor <session>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--continuation <text>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--host <id>`<br>`--full`<br>`--json` |
 | `rig queue resolve <qitemId>` | — | `--decision <text>` **required**<br>`--actor <session>`<br>`--bearer <token>`<br>`--no-notify`<br>`--json` |
 | `rig queue handoff <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--alert`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
@@ -1171,8 +1171,11 @@ for producer/consumer wiring and launch-scoped state lifetime.
 | `rig seat clean <seat>` | — | `--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-resume-token <session>` | — | `--token-stdin`<br>`--reason <text>` **required**<br>`--json` |
 
-A `rig seat stop` that successfully kills the current session records that it
-was intentionally stopped. With other healthy members running, the rig's `lifecycleState` in
+A `rig seat stop` records its stop request before it stops anything, and a
+successful kill confirms that the seat was intentionally stopped. A stop that
+times out or only partly takes effect keeps the request pending (`stopRequested`
+in `--full` node JSON) instead of reporting the seat as exited; see
+[checked seat stop](../reference/checked-seat-stop.md#the-stop-request). With other healthy members running, the rig's `lifecycleState` in
 `rig ps` and the TUI stays `running`; the stopped member no longer makes it
 `degraded`. Stopping every member
 leaves the rig `stopped`. Node JSON exposes `intentionallyStopped` in compact,
@@ -1183,9 +1186,11 @@ Process counts still reflect reality: stopping one of two members leaves
 resume information, and attention diagnostics remain available. A crash or
 attention condition on another member still affects the rig lifecycle.
 
-Stop intent survives daemon restarts and audit retention. It applies only to the
-latest exited session while the seat has no binding; a subsequent session status
-change clears it, and a new session starts without it. Existing exits are not
+Stop intent survives daemon restarts and audit retention. `intentionallyStopped`
+applies only to the latest exited session while the seat has no binding. A later
+status write or observation doesn't clear the intent; a new session, from an
+explicit start, starts without it. A seat that declares `keep_alive` is never
+relaunched while its latest session carries the intent. Existing exits are not
 backfilled as intentional stops. If the session disappears between the live
 probe and the stop, its unexplained exit still affects rig health. The internal
 stop in `rig seat launch --fresh --stop` does not record final stop intent, so a

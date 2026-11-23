@@ -139,9 +139,14 @@ export interface ActivityEvidence {
   /** The turn is over but a background shell lives (Claude Code's self-report status `shell`). Orthogonal to
    *  `activity`, never an ActivityValue: the seat still reads idle-at-prompt. */
   backgroundWork?: boolean;
+  /** A typed provider usage limit ended the turn (Claude's StopFailure/rate_limit), with the reset it stated, or null. */
+  usageLimit?: { resetsAt: string | null };
   needsInput?: NeedsInput;
   permissionRequest?: { id: string; hookAgentId?: string | null };
   permissionResolved?: boolean;
+  /** The file a self-report was read from. A report from another file starts the source again: its timestamps don't
+   *  continue the earlier file's, so that file's reports stop deciding the seat. */
+  sourceFile?: string;
   /** Which relay route posted hook evidence, when it said. One event can arrive by more than one route (a Codex seat's
    *  plugin hook and its managed hook), so promotion counts agreements per route. Absent for an untagged post. */
   route?: EvidenceRoute;
@@ -174,6 +179,9 @@ export interface ArbitratedSeatState {
   /** A background shell outlives the turn (self-report `shell`) while `activity` is idle-at-prompt: the rung and
    *  when the shell was first seen (the anchor of any grace a consumer gives it). Null or absent otherwise. */
   backgroundWork?: { rung: EvidenceRungId; observedAt: string } | null;
+  /** A typed usage limit ended the seat's last turn and no newer turn has started, so `activity` is unknown, never
+   *  working or idle: the rung, when the limit was seen, and the reset it stated (null when it stated none). */
+  usageLimit?: { rung: EvidenceRungId; observedAt: string; resetsAt: string | null } | null;
   /** Which rung decided `activity` — confidence made visible. */
   decidedBy: EvidenceRungId | null;
   /** Monotonic arbitrated-state sequence (wait-after-seq consumes it). */

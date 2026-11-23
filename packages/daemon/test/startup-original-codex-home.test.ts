@@ -90,21 +90,24 @@ function fixture(selection: "member" | "account-switch" | "process-home", wrong 
   setup.sessionRegistry.updateResumeToken(source.id, "codex_id", original);
   const snapshot = setup.snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
   setup.sessionRegistry.updateStatus(source.id, "exited"); setup.sessionRegistry.clearBinding(node.id);
-  setup.tmuxAdapter.probeSession = vi.fn(async () => ({ state: wrong ? "present" : "absent" } as never));
-  if (wrong) {
+  let present = false;
+  setup.tmuxAdapter.probeSession = vi.fn(async () => ({ state: present ? "present" : "absent" } as never));
+  // With `wrong`, another verified conversation then runs in the seat: a newer session row, its binding and pane identity.
+  const runAnother = () => {
+    present = true;
     const current = setup.sessionRegistry.registerSession(node.id, name);
     setup.sessionRegistry.updateStatus(current.id, "running");
     setup.sessionRegistry.updateResumeToken(current.id, "codex_id", replacement);
     setup.sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
     new SeatIdentityStore(db).upsert({ nodeId: node.id, sessionName: name, verdict: "verified", evidenceSource: "pane_process", reason: null,
       observedAt: new Date().toISOString(), evidence: { registeredPane: "%1", observedPanePid: 1234, observedPid: 1235, observedCommand: "codex", matchedLayer: 1 } });
-  }
+  };
   const request = (body?: unknown) => setup.app.request(`/api/startup/${rig.id}/nodes/${node.id}/original` +
     (body ? "" : `?snapshotId=${snapshot.id}&historySessionId=${source.id}`), {
     method: body ? "POST" : "GET", headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  return { db, setup, store, node, seatHome, selectedTranscript, oldTranscript, request, snapshot, source,
+  return { db, setup, store, node, seatHome, selectedTranscript, oldTranscript, request, snapshot, source, runAnother,
     args: (revision: string) => ({ action: "resume", snapshotId: snapshot.id, historySessionId: source.id, revision, operationId: randomUUID(),
       expectedOriginal: { nodeId: node.id, sessionName: name, runtime: "codex", nativeId: original } }) };
 }
@@ -133,6 +136,11 @@ it.each(["member", "account-switch", "process-home"] as const)("uses the selecte
 it("leaves a verified different current Codex identity in the selected home untouched", async () => {
   const f = fixture("account-switch", true);
   const review = await f.request(); expect(review.status).toBe(200);
+  f.runAnother();
+  // The seat's record now names another conversation, so the preview no longer offers the saved one.
+  const again = await f.request(), refused = await again.json();
+  expect(again.status).toBe(409); expect(refused).toMatchObject({ ok: false, code: "selection_changed" });
+  expect(JSON.stringify(refused)).not.toContain(original); expect(JSON.stringify(refused)).not.toContain(replacement);
   const launch = vi.spyOn(f.setup.restoreOrchestrator, "launchSingleNode"), kill = vi.spyOn(f.setup.tmuxAdapter, "killSession");
   const before = f.db.prepare("SELECT * FROM sessions").all();
   const response = await f.request(f.args((await review.json()).revision));

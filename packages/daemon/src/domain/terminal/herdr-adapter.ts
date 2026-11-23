@@ -217,7 +217,7 @@ export interface HerdrSplitNode {
 export type HerdrLayoutNode = HerdrPaneNode | HerdrSplitNode;
 
 /** Herdr's own agent label for a seat's runtime, or null when Herdr doesn't recognise it. */
-function herdrAgent(pane: ComposedPane): "claude" | "codex" | "pi" | null {
+export function herdrAgent(pane: ComposedPane): "claude" | "codex" | "pi" | null {
   return pane.runtime === "claude-code" ? "claude" : pane.runtime === "codex" ? "codex" : pane.runtime === "pi" ? "pi" : null;
 }
 
@@ -242,8 +242,8 @@ function herdrResumeArgv(pane: ComposedPane, tile: string): string[] | null {
 }
 
 /** Rounds of the restart-command report, half a second apart: about 3 s for Herdr to detect each tile's agent. */
-const RESUME_REPORT_ROUNDS = 7;
-const RESUME_REPORT_INTERVAL_MS = 500;
+export const RESUME_REPORT_ROUNDS = 7;
+export const RESUME_REPORT_INTERVAL_MS = 500;
 
 /** Herdr's spelling of the shared grid: `right`/`down` splits, and blanks running the person's login shell (cmux's blank-surface precedent). */
 const HERDR_TILE_NODES: TileNodes<HerdrLayoutNode> = {

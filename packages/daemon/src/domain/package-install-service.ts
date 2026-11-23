@@ -8,7 +8,7 @@ import { detectConflicts } from "./conflict-detector.js";
 import { applyPolicy } from "./install-policy.js";
 
 export type PackageInstallOutcome =
-  | { ok: true; installId: string; packageId: string; applied: number; deferred: number; notes?: string[] }
+  | { ok: true; installId: string; packageId: string; applied: number; deferred: number; notes?: string[]; warnings?: string[] }
   | { ok: false; code: "conflict_blocked"; message: string }
   | { ok: false; code: "policy_rejected"; message: string }
   | { ok: false; code: "manifest_hash_mismatch"; message: string }
@@ -113,6 +113,7 @@ export class PackageInstallService {
       applied: result.applied.length,
       deferred: result.deferred.length,
       ...(result.notes?.length ? { notes: result.notes } : {}),
+      ...(refined.warnings?.length ? { warnings: refined.warnings } : {}),
     };
   }
 }

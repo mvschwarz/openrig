@@ -6,6 +6,7 @@ import { ConfigStore } from "./config-store.js";
 import { getOpenRigHome, normalizeOpenRigUrl, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
 import { fetchWithTimeout, FetchTimeoutError } from "./fetch-with-timeout.js";
 import { FETCH_HEADERS_TIMEOUT_MS, nodeHttpFetch } from "./long-request-fetch.js";
+import { daemonFetch } from "./daemon-transport.js";
 import { resolveSenderSession, type BindingCheck, type TmuxIdentityReader } from "./sender-identity.js";
 
 export function terminalAuthHeaders(): Record<string, string> {
@@ -320,8 +321,8 @@ export class DaemonClient {
       }
     }
 
-    this.fetchImpl = options?.fetchImpl ?? fetch;
-    this.longFetchImpl = options?.longFetchImpl ?? options?.fetchImpl ?? nodeHttpFetch;
+    this.fetchImpl = options?.fetchImpl ?? daemonFetch(this.baseUrl);
+    this.longFetchImpl = options?.longFetchImpl ?? options?.fetchImpl ?? daemonFetch(this.baseUrl, nodeHttpFetch);
     this.ownerProbe = options?.ownerProbe ?? ((url, timeoutMs) => assessLocalDaemonOwner(url, { fetchImpl: this.fetchImpl, timeoutMs }));
     this.timeoutMs = options?.timeoutMs ?? 5_000;
     this.sessionName = options?.sessionName;

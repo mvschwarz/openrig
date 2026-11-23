@@ -1,5 +1,10 @@
 import { seatSkillPaths, recordSeatSkillWrite, recordSeatSkillFollowing, cleanSeatSkills } from "../src/domain/seat-skill-storage.js";
 import type { RestoreOrchestratorDeps } from "../src/domain/restore-orchestrator.js";
+import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
+import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
+import { startPiRecoveryServer, type RunnerRecoveryReply } from "../src/adapters/pi-recovery-rpc.js";
+import type { PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
+import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { isEffectivelyRunning } from "../src/domain/ps-projection.js";
 import { TerminalAdapter } from "../src/adapters/terminal-adapter.js";
@@ -29,6 +34,7 @@ import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { PeriodicSnapshotScheduler } from "../src/domain/periodic-snapshot-scheduler.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator, rollupRestoreRigResult, snapshotLaunchOutcome } from "../src/domain/restore-orchestrator.js";
+import { SeatPoolSlotsRepository } from "../src/domain/seat-pool-slots.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { noticeLine, TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
@@ -139,6 +145,7 @@ describe("RestoreOrchestrator", () => {
     listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
     freshLaunch?: RestoreOrchestratorDeps["freshLaunch"];
     harnessNotStartedNotice?: RestoreOrchestratorDeps["harnessNotStartedNotice"];
+    armContinuity?: RestoreOrchestratorDeps["armContinuity"];
   }) {
     const tmux = opts?.tmux ?? mockTmux();
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
@@ -153,6 +160,7 @@ describe("RestoreOrchestrator", () => {
       freshLaunch: opts?.freshLaunch,
       seatSkillSelection: opts?.seatSkillSelection,
       harnessNotStartedNotice: opts?.harnessNotStartedNotice,
+      armContinuity: opts?.armContinuity,
     });
   }
 
@@ -619,6 +627,31 @@ describe("RestoreOrchestrator", () => {
     expect(rigRepo.getRig(snap.rigId)!.nodes[0]!.id).toBe(replacement.id);
     expect(tmux.createSession).not.toHaveBeenCalled();
     expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
+  it("#3579 a resumed seat gets its continuity notice armed once, by rig and node", async () => {
+    const original = seedRigAndSnapshot({ nodes: [{ logicalId: "lead", role: "lead", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "carried-conversation" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited'").run();
+    const armed: Array<[string, string]> = [];
+    const orch = createOrchestrator({ claude: mockClaudeResume(), listProcesses: nativeLineage("claude-code", "carried-conversation"),
+      armContinuity: async (rigId, nodeId) => { armed.push([rigId, nodeId]); return null; } });
+    const first = await orch.launchSingleNode(original.rigId, "lead");
+    expect(first.launched?.[0]?.status).toBe("resumed");
+    expect(armed).toEqual([[original.rigId, first.launched![0]!.nodeId]]);
+  });
+
+  it("#3579 a continuity notice that cannot be armed warns on the restore and leaves the resumed seat resumed", async () => {
+    const original = seedRigAndSnapshot({ nodes: [{ logicalId: "lead", role: "lead", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "carried-conversation" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited'").run();
+    const orch = createOrchestrator({ claude: mockClaudeResume(), listProcesses: nativeLineage("claude-code", "carried-conversation"),
+      armContinuity: async () => "continuity policy was not re-armed for node x: its spec could not be read" });
+    const result = await orch.launchSingleNode(original.rigId, "lead");
+    expect(result.launched?.[0]?.status).toBe("resumed");
+    expect(JSON.stringify(result)).toContain("continuity policy was not re-armed for node x");
   });
 
   it.each(["intact ledger", "pruned predecessor"])("#1822 resumes the second named agent after a periodic capture between separate launches (%s)", async (mode) => {
@@ -2103,7 +2136,8 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.result.nodes[0]?.status).toBe("attention_required");
-    expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "mismatch" });
+    expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(result.result.nodes[0]!.nodeId))
+      .toEqual({ verdict: failure === "process-error" ? "tmux_unavailable" : "mismatch" });
     expect(tmux.sendKeys).not.toHaveBeenCalled();
   });
 
@@ -2293,7 +2327,7 @@ describe("RestoreOrchestrator", () => {
   });
 
   it.each([null, "node"])(
-    "keeps a native resume partial when the joined pane command is ambiguous (%s)",
+    "keeps a native resume partial when the joined pane does not prove identity (%s)",
     async (command) => {
       const snap = seedRigAndSnapshot({
         nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
@@ -2309,10 +2343,18 @@ describe("RestoreOrchestrator", () => {
       if (!result.ok) return;
       expect(result.result.rigResult).toBe("partially_restored");
       expect(result.result.nodes[0]!.status).toBe("attention_required");
-      expect(result.result.nodes[0]!.error).toContain("did not pass the process check for runtime 'claude-code'");
-      expect(result.result.nodes[0]!.error).toContain("could not be found in the process listing");
-      expect(db.prepare("SELECT verdict, reason FROM seat_identity_verdicts WHERE node_id = ?")
-        .get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "mismatch", reason: "process_identity_ambiguous" });
+      expect(result.result.nodes[0]!.error).toContain("no replacement was started");
+      const verdict = db.prepare("SELECT verdict, reason FROM seat_identity_verdicts WHERE node_id = ?")
+        .get(result.result.nodes[0]!.nodeId);
+      if (command === null) {
+        expect(result.result.nodes[0]!.error).toContain("foreground command of tmux pane");
+        expect(result.result.nodes[0]!.error).toContain("could not be read");
+        expect(verdict).toEqual({ verdict: "tmux_unavailable", reason: "tmux_unavailable" });
+      } else {
+        expect(result.result.nodes[0]!.error).toContain("did not pass the process check for runtime 'claude-code'");
+        expect(result.result.nodes[0]!.error).toContain("could not be found in the process listing");
+        expect(verdict).toEqual({ verdict: "mismatch", reason: "process_identity_ambiguous" });
+      }
     },
   );
 
@@ -2669,12 +2711,19 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("restore.started: exact payload in DB", async () => {
+  it("`rig up` persists `restore.started` before it launches any node (the existing exact-payload assertion, extended).", async () => {
     const snap = seedRigAndSnapshot({
-      nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }, { logicalId: "helper", role: "worker", runtime: "claude-code" }],
       edges: [],
     });
-    const orch = createOrchestrator();
+    const tmux = mockTmux();
+    // At each launch, how many restore.started rows are already in the database.
+    const startedAtLaunch: number[] = [];
+    tmux.createSession = vi.fn(async () => {
+      startedAtLaunch.push((db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'restore.started'").get() as { n: number }).n);
+      return { ok: true as const };
+    }) as unknown as TmuxAdapter["createSession"];
+    const orch = createOrchestrator({ tmux });
     await orch.restore(snap.id);
 
     const events = db.prepare("SELECT payload FROM events WHERE type = 'restore.started'").all() as { payload: string }[];
@@ -2682,6 +2731,202 @@ describe("RestoreOrchestrator", () => {
     const payload = JSON.parse(events[0]!.payload);
     expect(payload.rigId).toBe(snap.data.rig.id);
     expect(payload.snapshotId).toBe(snap.id);
+    expect(startedAtLaunch).toEqual([1, 1]);
+  });
+
+  describe("a seat pool agent the pool drained (#3395 Piece 1)", () => {
+    const AT = "2026-11-18T10:00:00.000Z";
+    const KEPT = "drained pool agent, not started";
+
+    // A model and one pool agent, both stopped by rig down after the snapshot; the agent's slot is in `phase`.
+    function seedPool(phase: "drained" | "live", opts: { resumeTenure?: boolean; agentCheckpoint?: boolean } = {}) {
+      const snap = seedRigAndSnapshot({
+        nodes: [{ logicalId: "dev.impl", role: "worker", runtime: "claude-code" }, { logicalId: "dev.impl-s1", role: "worker", runtime: "claude-code" }],
+        edges: [], resumeType: "claude_name", resumeToken: "conv-x", restorePolicy: "resume_if_possible",
+        ...(opts.agentCheckpoint ? { withCheckpoint: "dev.impl-s1" } : {}),
+      });
+      const nodes = rigRepo.getRig(snap.rigId)!.nodes;
+      const model = nodes.find((node) => node.logicalId === "dev.impl")!;
+      const agent = nodes.find((node) => node.logicalId === "dev.impl-s1")!;
+      let snapshot = snap;
+      if (opts.resumeTenure) {
+        // The agent's last tenure is a resume: a second session of the same generation took over the conversation.
+        const first = sessionRegistry.getSessionsForRig(snap.rigId).find((sess) => sess.nodeId === agent.id)!;
+        sessionRegistry.markIntentionallyStopped(first.id);
+        const generation = sessionRegistry.currentOccupantTenure(agent.id)!.generationUuid;
+        const resumed = sessionRegistry.registerSession(agent.id, "r99-dev.impl-s1-r", "initial", generation);
+        sessionRegistry.updateStatus(resumed.id, "running");
+        db.prepare("UPDATE sessions SET resume_type = 'claude_name', resume_token = 'conv-x', restore_policy = 'resume_if_possible' WHERE id = ?")
+          .run(resumed.id);
+        snapshot = snapshotCapture.captureSnapshot(snap.rigId, "manual");
+      }
+      for (const sess of sessionRegistry.getSessionsForRig(snap.rigId)) {
+        if (sess.status === "running") sessionRegistry.markIntentionallyStopped(sess.id);
+      }
+      new SeatPoolSlotsRepository(db).insert({ modelNodeId: model.id, slotNumber: 1, nodeId: agent.id, phase, at: AT });
+      return { snapshot, model, agent };
+    }
+    const sessionsOf = (nodeId: string) => db.prepare("SELECT * FROM sessions WHERE node_id = ? ORDER BY created_at, id").all(nodeId);
+    // The model resumes its own conversation, so the rest of the rig comes back whole.
+    const orchestrator = (tmux?: TmuxAdapter) => createOrchestrator({ tmux, listProcesses: nativeLineage("claude-code", "conv-x") });
+
+    it("An idle agent the pool drained stays down after `rig up` with a \"drained pool agent, not started\" result, keeps its node and sessions, and the rig is not `partially_restored`.", async () => {
+      const { snapshot, model, agent } = seedPool("drained");
+      const before = sessionsOf(agent.id);
+      const tmux = mockTmux();
+      const result = await orchestrator(tmux).restore(snapshot.id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.nodes.map((node) => node.nodeId)).toEqual([model.id]);
+      expect(result.result.nodes[0]!.status).not.toBe("failed");
+      expect(result.result.rigResult).toBe("fully_restored");
+      expect(rigRepo.getRig(snapshot.rigId)!.nodes.map((node) => node.id)).toContain(agent.id);
+      expect(sessionsOf(agent.id)).toEqual(before);
+      // Only the model is launched: one session, and none for the agent under any spelling of its name.
+      const launched = vi.mocked(tmux.createSession).mock.calls.map((call) => String(call[0]));
+      expect(launched).toHaveLength(1);
+      expect(launched.filter((name) => /impl[-_.]s1/.test(name))).toEqual([]);
+      // The model and the agent share a conversation: the kept-down agent is not named as a seat this restore resumes.
+      expect(result.result.warnings.filter((line) => line.includes("have the same recorded"))).toEqual([]);
+      // The completed attempt records the same result, the kept-down agent with it.
+      const completed = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get() as { payload: string };
+      expect(JSON.parse(completed.payload).result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+    });
+
+    it("The attempt receipt leaves a kept-down agent out of its current nodes, so its verdict is the rest of the rig's.", async () => {
+      const { snapshot, model, agent } = seedPool("drained");
+      const result = await orchestrator().restore(snapshot.id);
+      expect(result.ok).toBe(true);
+      const attempt = db.prepare("SELECT seq FROM events WHERE type = 'restore.started'").get() as { seq: number };
+      const receipt = deriveRestoreAttemptReceipt(db, snapshot.rigId, attempt.seq);
+      if (!receipt.ok) throw new Error(receipt.message);
+      expect(receipt.intendedRoster.map((node) => node.nodeId)).toContain(agent.id);
+      expect(receipt.currentNodes.map((node) => node.nodeId)).toEqual([model.id]);
+      expect(receipt.unresolvedIntendedSeats).toEqual([]);
+      expect(receipt.currentIntendedSetVerdict).toBe("fully_restored");
+      expect(receipt.originalResult.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+    });
+
+    it("A drained agent whose last tenure is a resume also stays down after `rig up`.", async () => {
+      const { snapshot, model, agent } = seedPool("drained", { resumeTenure: true });
+      expect(db.prepare("SELECT COUNT(*) AS n FROM occupant_tenures WHERE node_id = ?").get(agent.id)).toEqual({ n: 1 });
+      const before = sessionsOf(agent.id);
+      expect(before).toHaveLength(2);
+      const result = await orchestrator().restore(snapshot.id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.nodes.map((node) => node.nodeId)).toEqual([model.id]);
+      expect(result.result.rigResult).toBe("fully_restored");
+      expect(sessionsOf(agent.id)).toEqual(before);
+    });
+
+    it("A pool agent whose slot is `live` is restored as a plain member, with nothing kept down.", async () => {
+      const { snapshot, agent } = seedPool("live");
+      const result = await orchestrator().restore(snapshot.id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.keptDown).toBeUndefined();
+      expect(result.result.nodes.map((node) => node.nodeId)).toContain(agent.id);
+    });
+
+    it("A blocker found only on a drained agent doesn't hold the rest of the rig's restore; it is named as a warning.", async () => {
+      // A checkpoint with no working directory to write it to blocks the whole restore when it is a seat restore launches.
+      const { snapshot, model, agent } = seedPool("drained", { agentCheckpoint: true });
+      const result = await orchestrator().restore(snapshot.id);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.nodes.map((node) => node.nodeId)).toEqual([model.id]);
+      expect(result.result.rigResult).toBe("fully_restored");
+      expect(result.result.warnings.join("\n")).toContain("restore keeps dev.impl-s1 down, so this doesn't block a restore");
+    });
+
+    it("A drained agent the snapshot saved under an earlier node id is still kept down: restore launches a seat by its name.", async () => {
+      const { snapshot, model, agent } = seedPool("drained");
+      const earlier = updateSnapshotData(snapshot, (data) => {
+        for (const node of data.nodes) if (node.id === agent.id) node.id = "earlier-node";
+        for (const session of data.sessions) if (session.nodeId === agent.id) session.nodeId = "earlier-node";
+        if (data.activeSessionIdByNode?.[agent.id] !== undefined) {
+          data.activeSessionIdByNode["earlier-node"] = data.activeSessionIdByNode[agent.id];
+          delete data.activeSessionIdByNode[agent.id];
+        }
+        if (data.activeOccupantsByNode?.[agent.id] !== undefined) {
+          data.activeOccupantsByNode["earlier-node"] = data.activeOccupantsByNode[agent.id];
+          delete data.activeOccupantsByNode[agent.id];
+        }
+        if (data.topologyRoster) data.topologyRoster.intendedNodeIds = data.topologyRoster.intendedNodeIds.map((id: string) => id === agent.id ? "earlier-node" : id);
+      });
+      const before = sessionsOf(agent.id);
+      const result = await orchestrator().restore(earlier.id);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.nodes.map((node) => node.nodeId)).toEqual([model.id]);
+      expect(sessionsOf(agent.id)).toEqual(before);
+    });
+
+    it("A drained agent this snapshot's roster doesn't list is kept down, not named as a skipped seat.", async () => {
+      const { snapshot, model, agent } = seedPool("drained");
+      const narrowed = updateSnapshotData(snapshot, (data) => {
+        data.topologyRoster = { version: 1, source: "materialized_topology", intendedNodeIds: [model.id] };
+      });
+      const result = await orchestrator().restore(narrowed.id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.excludedNodes).toEqual([]);
+      expect(result.result.warnings.join("\n")).not.toContain("was skipped");
+      expect(result.result.rigResult).toBe("fully_restored");
+    });
+
+    it("A pool-slot read that throws doesn't fail the restore: every seat restores on the ordinary path, and a warning names the failed read.", async () => {
+      const { snapshot, model, agent } = seedPool("drained");
+      const read = vi.spyOn(SeatPoolSlotsRepository.prototype, "isDrainedPoolNode").mockImplementation(() => {
+        throw new Error("pool read down");
+      });
+      try {
+        const result = await orchestrator().restore(snapshot.id);
+        expect(read).toHaveBeenCalled();
+        expect(result.ok, JSON.stringify(result)).toBe(true);
+        if (!result.ok) return;
+        // Its pool state unknown, the drained agent is an ordinary seat: restore starts it, and keeps nothing down.
+        expect(result.result.keptDown).toBeUndefined();
+        expect(result.result.nodes.map((node) => node.nodeId)).toEqual(expect.arrayContaining([model.id, agent.id]));
+        const warning = result.result.warnings.find((line) => line.includes("seat pool read failed"));
+        expect(warning).toContain("dev.impl-s1");
+        expect(warning).toContain("pool read down");
+        expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'restore.completed'").get()).toEqual({ n: 1 });
+      } finally { read.mockRestore(); }
+    });
+
+    it("A selection of a single drained agent launches nothing and keeps it down: a fully restored result and receipt, not a validation failure with no blocker.", async () => {
+      const { snapshot, agent } = seedPool("drained");
+      // What the snapshot route records from `intendedSeats` naming only the agent.
+      const selected = updateSnapshotData(snapshot, (data) => {
+        data.topologyRoster = { version: 1, source: "operator_explicit", intendedNodeIds: [agent.id] };
+      });
+      const before = sessionsOf(agent.id);
+      const tmux = mockTmux();
+      const result = await orchestrator(tmux).restore(selected.id);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.rigResult).toBe("fully_restored");
+      expect(result.result.nodes).toEqual([]);
+      expect(result.result.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: KEPT }]);
+      expect(result.result.blockers).toBeUndefined();
+      expect(result.result.warnings.join("\n")).toContain("nothing to launch: dev.impl-s1 is a drained seat pool agent");
+      expect(vi.mocked(tmux.createSession)).not.toHaveBeenCalled();
+      expect(sessionsOf(agent.id)).toEqual(before);
+      // The attempt's receipt has no seat to roll up and keeps the attempt's verdict, not the empty rollup's `failed`.
+      const attempt = db.prepare("SELECT seq FROM events WHERE type = 'restore.started'").get() as { seq: number };
+      const receipt = deriveRestoreAttemptReceipt(db, selected.rigId, attempt.seq);
+      if (!receipt.ok) throw new Error(receipt.message);
+      expect(receipt.currentNodes).toEqual([]);
+      expect(receipt.unresolvedIntendedSeats).toEqual([]);
+      expect(receipt.currentIntendedSetVerdict).toBe("fully_restored");
+    });
   });
 
   it("restore.completed: exact payload with RestoreResult in DB + subscriber", async () => {
@@ -3115,7 +3360,9 @@ describe("RestoreOrchestrator", () => {
       } else {
         expect(outcome.status).not.toBe("resumed");
         if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
-        else if (mode === "chooser") expect(latest.resumeToken).toBe(token); // attempted lineage, not readiness
+        // Attempted lineage, not readiness: a gate Claude draws after starting (the resume chooser, workspace trust, project
+        // MCP approval) keeps the launch for a person, with its resume token.
+        else if (mode === "chooser" || mode === "trust" || mode === "mcp") expect(latest.resumeToken).toBe(token);
         else expect(latest.resumeToken).toBeNull();
       }
       if (mode === "error") {
@@ -3437,6 +3684,55 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.harnessNotStarted).toEqual(report);
   });
 
+  // A resume that finds no conversation rolls its blank session back: no agent runs in the seat, so it goes to the same
+  // notice, marked rolled back, and the rig isn't fully restored.
+  it("hands a seat whose resume was rolled back for a missing conversation to the notice, marked rolled back", async () => {
+    const token = "00000000-0000-4000-8000-0000000ba5e2";
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", token);
+    adapter.launchHarness.mockResolvedValueOnce({ ok: false as const, error: "Claude resume failed: no conversation found for the requested session",
+      recovery: "retry_fresh", missingConversation: true as const } as never);
+    const report = { notices: [{ owner: "lead@r", qitemId: "qitem-harness-not-started-y", seats: ["dev-moved@r"] }], unrouted: [], warnings: [] };
+    const notice = vi.fn(async () => report);
+    const result = await createOrchestrator({ harnessNotStartedNotice: notice, listProcesses: nativeLineage("claude-code", token) })
+      .restore(snap.id, { adapters: { "claude-code": adapter } });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const node0 = result.result.nodes[0]!;
+    expect(node0).toMatchObject({ status: "awaiting-decision", stage: "resume_rolled_back" });
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice).toHaveBeenCalledWith(expect.objectContaining({
+      attempt: expect.stringMatching(/^restore attempt \d+$/),
+      seats: [{ nodeId: node0.nodeId, logicalId: "dev.moved", cause: node0.error, rolledBack: true }],
+    }));
+    expect(result.result.harnessNotStarted).toEqual(report);
+    expect(result.result.rigResult).toBe("partially_restored");
+  });
+
+  // The pod-aware twin of the legacy failed-resume rollback: the runtime reported fresh continuity for a resume, so its
+  // blank session is rolled back too, and that seat goes to the same notice.
+  it("hands a seat whose resume was rolled back for a fresh continuity outcome to the notice, marked rolled back", async () => {
+    const token = "00000000-0000-4000-8000-0000000f2e54";
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", token);
+    const { StartupOrchestrator } = await import("../src/domain/startup-orchestrator.js");
+    const start = vi.spyOn(StartupOrchestrator.prototype, "startNode").mockResolvedValue({ ok: true, startupStatus: "ready", continuityOutcome: "fresh", warnings: [] });
+    const notice = vi.fn(async () => ({ notices: [], unrouted: [], warnings: [] }));
+    try {
+      const result = await createOrchestrator({ harnessNotStartedNotice: notice, listProcesses: nativeLineage("claude-code", token) })
+        .restore(snap.id, { adapters: { "claude-code": adapter } });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node0 = result.result.nodes[0]!;
+      expect(node0).toMatchObject({ status: "awaiting-decision", stage: "resume_rolled_back" });
+      expect(node0.error).toContain("the runtime reported fresh continuity");
+      expect(notice).toHaveBeenCalledWith(expect.objectContaining({
+        seats: [{ nodeId: node0.nodeId, logicalId: "dev.moved", cause: node0.error, rolledBack: true }],
+      }));
+      expect(result.result.rigResult).toBe("partially_restored");
+    } finally { start.mockRestore(); }
+  });
+
   it("a full restore reports a recreated seat's current session to its owner", async () => {
     const { node: savedNode, snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
     db.prepare("DELETE FROM nodes WHERE id = ?").run(savedNode.id);
@@ -3521,7 +3817,7 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
-    expect(result.result.warnings).toContain("Restore: the notice for the seats left as a bare shell wasn't recorded (database is locked).");
+    expect(result.result.warnings).toContain("Restore: the notice for the seats left with no agent running wasn't recorded (database is locked).");
     expect(notice).not.toHaveBeenCalled();
     expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'restore.completed'").get()).toEqual({ n: 1 });
   });
@@ -3570,7 +3866,7 @@ describe("RestoreOrchestrator", () => {
     if (!result.ok) return;
     expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
     expect(result.result.harnessNotStarted).toBeUndefined();
-    expect(result.result.warnings).toContain("Restore: the notice for the seats left as a bare shell wasn't recorded (queue unavailable).");
+    expect(result.result.warnings).toContain("Restore: the notice for the seats left with no agent running wasn't recorded (queue unavailable).");
   });
 
   it("pod-aware chooser attention preserves the attempted native token for no-input reconciliation", async () => {
@@ -5608,7 +5904,7 @@ describe("RestoreOrchestrator", () => {
     function seedFailedAttempt(opts: {
       rigName?: string;
       logicalId?: string;
-      runtime?: "claude-code" | "codex";
+      runtime?: "claude-code" | "codex" | "pi" | "omp";
       restoreOutcome: "failed" | "attention_required";
       withResumeToken?: boolean;
       withBinding?: boolean;
@@ -5653,6 +5949,134 @@ describe("RestoreOrchestrator", () => {
 
       return { rig, nodeId: node.id, sessionName };
     }
+
+    describe.each(["pi", "omp"] as const)("%s runner recovery", (runtime) => {
+      async function runnerFixture(status: "failed" | "attention_required" = "attention_required", stateRoot = "/scratch") {
+        const tmux = mockTmuxForReconciler();
+        vi.mocked(tmux.hasSession).mockResolvedValue(true);
+        vi.mocked(tmux.getPaneCommand).mockResolvedValue("node");
+        const seeded = seedFailedAttempt({ runtime, restoreOutcome: status, withResumeToken: true });
+        const token = `/scratch/${seeded.sessionName}/sessions/history.jsonl`;
+        db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ? WHERE node_id = ?").run(`${runtime}_session_file`, token, seeded.nodeId);
+        const verify = vi.fn(async (): Promise<RunnerRecoveryReply> => ({ ok: true, sessionFile: token, sessionId: "session" }));
+        const server = await startPiRecoveryServer("launch", verify);
+        let state: PiRunnerState | null = { ready: true, launchId: "launch", sessionFile: token, updatedAt: new Date().toISOString(),
+          recovery: { port: server.port, pid: 1235, childPid: 1236 } };
+        const argv = ["node", "/dist/pi-runner.js", "--session-name", seeded.sessionName, "--state-root", stateRoot, "--cwd", "/work", "--launch-id", "launch",
+          ...(runtime === "omp" ? ["--runtime", "omp"] : ["--no-approve"])];
+        const rows: NativeProcessRow[] = [
+          { pid: 1234, ppid: 1, command: "bash" },
+          { pid: 1235, ppid: 1234, command: argv.join(" "), argv, pgid: 1235, tpgid: 1235, startedAt: "Sat Jan  1 12:00:00 2000" },
+          { pid: 1236, ppid: 1235, command: `${runtime} --mode rpc`, startedAt: "Sat Jan  1 12:00:01 2000" },
+        ];
+        const Adapter = runtime === "pi" ? PiRuntimeAdapter : OmpRuntimeAdapter;
+        const adapter = new Adapter({ tmux, stateRoot: "/scratch", stateRootForSession: () => stateRoot, runnerEntryPath: "/dist/pi-runner.js",
+          fsOps: { exists: () => state !== null, readFile: () => JSON.stringify(state), writeFile: vi.fn(), mkdirp: vi.fn() } });
+        const orch = createOrchestrator({ tmux, listProcesses: async () => rows });
+        return { ...seeded, tmux, token, rows, argv, verify, server,
+          setState: (next: PiRunnerState | null) => { state = next; },
+          reconcile: () => orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId, { [runtime]: adapter }) };
+      }
+
+      it.each(["failed", "attention_required"] as const)("reconciles %s with live runner evidence and keeps the failed attempt", async (status) => {
+        const f = await runnerFixture(status);
+        try {
+          const original = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").all();
+          const result = await f.reconcile();
+          expect(result).toMatchObject({ ok: true, from: status, to: "operator_recovered", evidence: {
+            fgProcess: runtime, runner: { pid: 1235, childPid: 1236, launchId: "launch", rpcConfirmed: true, identityConfirmed: true },
+          } });
+          expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").all()).toEqual(original);
+          expect(getNodeInventory(db, f.rig.id)[0]).toMatchObject({ restoreOutcome: "operator_recovered" });
+          expect(sessionRegistry.getBindingForNode(f.nodeId)?.tmuxPane).toBe("%1");
+          expect(f.tmux.sendText).not.toHaveBeenCalled();
+          expect(f.tmux.sendKeys).not.toHaveBeenCalled();
+          expect(f.tmux.capturePaneContent).not.toHaveBeenCalled();
+        } finally { f.server.close(); }
+      });
+
+      it("clears full-restore attention through the seat reconciler", async () => {
+        const f = await runnerFixture();
+        try {
+          const session = db.prepare("SELECT id FROM sessions WHERE node_id = ?").get(f.nodeId) as { id: string };
+          sessionRegistry.updateStartupStatus(session.id, "attention_required");
+          const clear = new SeatAttentionReconciler({ db, sessionRegistry, eventBus,
+            agentActivityStore: new AgentActivityStore({ db, eventBus }), reconcileRestoreOutcome: () => f.reconcile() });
+          expect(await clear.clearAttention(f.sessionName)).toMatchObject({ ok: true, clearedBy: "evidence",
+            clearedClasses: expect.arrayContaining(["restore_outcome", "startup_status"]) });
+          expect(getNodeInventory(db, f.rig.id)[0]).toMatchObject({ startupStatus: "ready", restoreOutcome: "operator_recovered" });
+        } finally { f.server.close(); }
+      });
+
+      it("uses the state root selected for this session", async () => {
+        const f = await runnerFixture("attention_required", "/scratch/account-switch");
+        try {
+          expect(await f.reconcile()).toMatchObject({ ok: true, to: "operator_recovered" });
+        } finally { f.server.close(); }
+      });
+
+      it("accepts a new session row id for the same canonical session and token", async () => {
+        const f = await runnerFixture();
+        try {
+          f.verify.mockImplementation(async () => {
+            db.prepare("UPDATE sessions SET id = ? WHERE node_id = ?").run("replacement-row-id", f.nodeId);
+            return { ok: true, sessionFile: f.token, sessionId: "session" };
+          });
+          expect(await f.reconcile()).toMatchObject({ ok: true, to: "operator_recovered" });
+        } finally { f.server.close(); }
+      });
+
+      it("records one receipt when two live recovery checks overlap", async () => {
+        const f = await runnerFixture();
+        try {
+          const results = await Promise.all([f.reconcile(), f.reconcile()]);
+          expect(results.every((result) => result.ok)).toBe(true);
+          expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
+        } finally { f.server.close(); }
+      });
+
+      it.each([
+        ["wrong runner", "runner_identity_mismatch"], ["wrong launch", "runner_identity_mismatch"],
+        ["wrong runtime", "runner_identity_mismatch"], ["background runner", "runner_identity_mismatch"],
+        ["missing child", "runner_missing"], ["missing runner", "runner_missing"],
+        ["different session", "runner_session_mismatch"], ["missing sidecar", "runner_state_unavailable"],
+        ["dead RPC", "runner_rpc_unavailable"], ["unconfirmed identity", "runner_identity_unconfirmed"],
+        ["replaced child", "runner_identity_mismatch"], ["changed token", "proof_superseded"],
+        ["new restore attempt", "proof_superseded"], ["changed binding", "proof_superseded"],
+        ["changed session name", "proof_superseded"], ["superseded failed proof", "proof_superseded"],
+      ])("keeps the failed outcome for %s", async (failure, code) => {
+        const f = await runnerFixture();
+        try {
+          if (failure === "wrong runner") f.argv[1] = "/other/pi-runner.js";
+          if (failure === "wrong launch") f.argv[f.argv.indexOf("--launch-id") + 1] = "other";
+          if (failure === "wrong runtime") {
+            if (runtime === "pi") f.argv.push("--runtime", "omp");
+            else f.argv[f.argv.indexOf("--runtime") + 1] = "pi";
+          }
+          if (failure === "background runner") f.rows[1]!.pgid = 9999;
+          if (failure === "missing child") f.rows.pop();
+          if (failure === "missing runner") f.rows.splice(1, 1);
+          if (failure === "different session") db.prepare("UPDATE sessions SET resume_token = ? WHERE node_id = ?").run("/other/history.jsonl", f.nodeId);
+          if (failure === "missing sidecar") f.setState(null);
+          if (failure === "dead RPC") f.verify.mockResolvedValue({ ok: false, code: "runner_rpc_unavailable", detail: "RPC unavailable" });
+          if (failure === "unconfirmed identity") f.verify.mockResolvedValue({ ok: false, code: "runner_identity_unconfirmed", detail: "Identity unconfirmed" });
+          if (["replaced child", "changed token", "new restore attempt", "changed binding", "changed session name", "superseded failed proof"].includes(failure)) f.verify.mockImplementation(async () => {
+            if (failure === "replaced child") f.rows[2]!.startedAt = "Sat Jan  1 12:00:02 2000";
+            else if (failure === "new restore attempt") eventBus.emit({ type: "restore.started", rigId: f.rig.id, snapshotId: "new-attempt" });
+            else if (failure === "changed binding") sessionRegistry.updateBinding(f.nodeId, { tmuxSession: "replacement@demo" });
+            else if (failure === "changed session name") db.prepare("UPDATE sessions SET session_name = ? WHERE node_id = ?").run("replacement@demo", f.nodeId);
+            else db.prepare("UPDATE sessions SET resume_token = ? WHERE node_id = ?").run("/other/history.jsonl", f.nodeId);
+            if (failure === "superseded failed proof") return { ok: false, code: "runner_identity_unconfirmed", detail: "The old identity was not confirmed." };
+            return { ok: true, sessionFile: f.token, sessionId: "session" };
+          });
+          expect(await f.reconcile()).toMatchObject({ ok: false, code });
+          if (failure === "changed binding") expect(sessionRegistry.getBindingForNode(f.nodeId)?.tmuxSession).toBe("replacement@demo");
+          expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toEqual([]);
+          expect(f.tmux.sendText).not.toHaveBeenCalled();
+          expect(f.tmux.sendKeys).not.toHaveBeenCalled();
+        } finally { f.server.close(); }
+      });
+    });
 
     it.each([
       ["OpenAI Codex (v0.155.1)\n› continue", true],
