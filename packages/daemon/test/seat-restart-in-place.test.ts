@@ -2074,7 +2074,10 @@ describe("rig provider assign's plan over a Codex seat", () => {
     expect(w.calls).toEqual([]);
   });
 
-  it("the switch's restart carries the seat it was selected as: a name another rig takes while the switch awaits its check restarts nothing", async () => {
+  it.each([
+    ["another rig takes", false],
+    ["another rig shares (both rigs active)", true],
+  ] as const)("the switch's restart carries the seat it was selected as: a name %s while the switch awaits its check restarts nothing", async (_case, shared) => {
     const { w, home } = setup();
     const rigs = new RigRepository(w.db);
     const rigId = (w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(w.node.id) as { rig_id: string }).rig_id;
@@ -2092,6 +2095,8 @@ describe("rig provider assign's plan over a Codex seat", () => {
       const registry = new SessionRegistry(w.db);
       registry.updateStatus(registry.registerSession(node.id, SEAT).id, "running");
       otherNode = node.id;
+      // Both rigs active: the name reaches two seats.
+      if (shared) rigs.unarchiveRig(rigId);
     };
     let checks = 0;
     // The route's in-place restart, passing the node it's given.
@@ -2116,7 +2121,8 @@ describe("rig provider assign's plan over a Codex seat", () => {
     expect(w.events().filter((e) => e.type !== "seat.restart_in_place.planned")).toEqual([]);
     const [result] = applied.report.results;
     expect(result).toMatchObject({ seat: SEAT, kind: "unknown" });
-    expect(result!.detail).toContain(`now names the seat in rig r (${(w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(otherNode) as { rig_id: string }).rig_id}), not the one this restart was for; nothing was restarted`);
+    expect(result!.detail).toContain(shared ? "now names more than one seat, not only the one this restart was for; nothing was restarted"
+      : `now names the seat in rig r (${(w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(otherNode) as { rig_id: string }).rig_id}), not the one this restart was for; nothing was restarted`);
     expect(result!.recovery).toBeUndefined();
     expect(result!.detail).not.toContain("rig seat restart");
     expect(result!.detail).toContain("It has no restart command");

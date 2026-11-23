@@ -2179,9 +2179,13 @@ export class SeatLifecycleService {
       if (required) return required;
     }
     const resolved = this.resolveSeat(input.seatRef);
-    if ("code" in resolved) return resolved;
     // #3625: a caller that selected the seat by its node (an assignment) passes it, so a name that now resolves to another
-    // seat (another rig took it meanwhile) restarts nothing rather than that seat.
+    // seat, or to more than one (another rig took it meanwhile), restarts nothing, and is refused as a name that no longer
+    // reaches that seat alone.
+    if (input.nodeId !== undefined && "code" in resolved && resolved.code === "seat_ambiguous") {
+      return { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" now names more than one seat, not only the one this restart was for; nothing was restarted.` };
+    }
+    if ("code" in resolved) return resolved;
     if (input.nodeId !== undefined && resolved.nodeId !== input.nodeId) {
       return { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" now names the seat in rig ${resolved.entry.rigName} (${resolved.entry.rigId}), not the one this restart was for; nothing was restarted.` };
     }
