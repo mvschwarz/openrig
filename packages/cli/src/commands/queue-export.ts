@@ -1,6 +1,7 @@
 import { link, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { Command, InvalidArgumentError } from "commander";
+import { resolveLocalDbOverride } from "../local-db.js";
 import { getOpenRigHome } from "../openrig-compat.js";
 
 type ExportOptions = {
@@ -41,7 +42,7 @@ export function queueExportCommand(): Command {
         : opts.qitems ? { kind: "qitems", names: opts.qitems } as const : { kind: "host" } as const;
       try {
         const { exportLocalQueue } = await import("@openrig/daemon/queue-transfer-export");
-        const { archive, ...summary } = exportLocalQueue({ home: getOpenRigHome(), dbPath: process.env.OPENRIG_DB ?? process.env.RIGGED_DB }, selection, opts.maxBytes);
+        const { archive, ...summary } = exportLocalQueue({ home: getOpenRigHome(), dbPath: resolveLocalDbOverride() }, selection, opts.maxBytes);
         for (const skipped of summary.skippedSelectors ?? []) process.stderr.write(`Warning: --rig ${JSON.stringify(skipped)} is host-qualified and was not resolved or exported; use --qitems for exact rows or --whole-host for the broader export\n`);
         if (!summary.rows.length && !summary.erasedIds.length && !summary.erasedRigs.length) {
           const scope = selection.kind === "host" ? "--whole-host" : `--${selection.kind} ${selection.names.map(name => JSON.stringify(name)).join(" ")}`;
