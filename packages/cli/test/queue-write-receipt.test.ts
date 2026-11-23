@@ -647,18 +647,45 @@ describe("queue write receipt (output.compact)", () => {
       expect(json).toMatchObject({ lastNudgeResult: "verified", lastNudgeAttempt: "2026-10-10T18:00:01.000Z" });
     });
 
-    const createVia = async (extra: string[], data: Row) =>
+    const createVia = async (extra: string[], data: Row, health?: RouteEntry) =>
       run(["create", "--destination", "worker@r", "--body", BODY, "--summary", "s", "--id", DEFAULT_ROW_ID, ...extra],
-        { "POST /api/queue/create": { status: 201, data } });
+        { "POST /api/queue/create": { status: 201, data }, ...(health ? { "GET /healthz": health } : {}) });
 
     const writeHosts = (content: string) => fs.writeFileSync(path.join(home, "hosts.yaml"), content);
 
-    it("a --host create names a registered remote from registry evidence", async () => {
+    it("a --host create to another daemon names the host and the remote read after checking selfHostId", async () => {
       writeHosts("hosts:\n  - id: far\n    transport: http\n    url: https://far.example:7433\n");
-      const out = await createVia(["--host", "far"], row());
+      const out = await createVia(["--host", "far"], row(), { status: 200, data: { selfHostId: "here" } });
       expect(out).toContain("host: far (the row lives on that daemon)");
       expect(out).toContain("rig queue show 'qitem-20261010180000-aaaa' --host 'far' --full --json");
-      expect(requestPaths).not.toContain("/healthz");
+      expect(requestPaths).toContain("/healthz");
+    });
+
+    it("a --host matching this daemon's own host id is local even when hosts.yaml maps it to another URL", async () => {
+      writeHosts("hosts:\n  - id: here\n    transport: http\n    url: https://here.example:7433\n");
+      const out = await createVia(["--host", "here"], row(), { status: 200, data: { selfHostId: "here" } });
+      expect(out).not.toContain("host:");
+      expect(out).not.toContain("lives on that daemon");
+      expect(out).toContain("full row: rig queue show 'qitem-20261010180000-aaaa' --full --json");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "here", "--json"], row(), { status: 200, data: { selfHostId: "here" } })) as Row;
+      expect(json).not.toHaveProperty("host");
+      expect(json).not.toHaveProperty("hostUnconfirmed");
+      expect((json.receipt as Row).fullCommand).toBe("rig queue show 'qitem-20261010180000-aaaa' --full --json");
+    });
+
+    it("a --host mapped to another URL stays unconfirmed when this daemon's own host id cannot be read", async () => {
+      writeHosts("hosts:\n  - id: here\n    transport: http\n    url: https://here.example:7433\n");
+      const out = await createVia(["--host", "here"], row(), { status: 503, data: {} });
+      expect(out).toContain("host: here (this daemon's own host id could not be read; if it is not here, the row lives on that daemon)");
+      expect(out).not.toContain("host: here (the row lives on that daemon)");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "here", "--json"], row(), { status: 503, data: {} })) as Row;
+      expect(json).toMatchObject({ host: "here", hostUnconfirmed: true });
+      expect(json.receipt).toMatchObject({
+        fullCommand: "rig queue show 'qitem-20261010180000-aaaa' --full --json",
+        fullCommandOnHost: "rig queue show 'qitem-20261010180000-aaaa' --host 'here' --full --json",
+      });
     });
 
     it("a --host naming a registry entry at the selected URL is local", async () => {

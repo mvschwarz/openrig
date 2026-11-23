@@ -576,7 +576,9 @@ function sameQueueEndpoint(left: string, right: string): boolean {
   return left.replace(/\/+$/, "") === right.replace(/\/+$/, "");
 }
 
-/** Resolve create receipt labels from the selected endpoint and local registry. No daemon identity request is needed. */
+/** Resolve initial create receipt host context from the selected endpoint and local registry.
+ *  A candidate remote host is settled against `/healthz` `selfHostId` in {@link settleReceiptHost}
+ *  so a `--host` naming this daemon is never labeled a confirmed remote write when `hosts.yaml` maps it elsewhere. */
 function createReceiptHostContext(client: DaemonClient, receipt: ReceiptContext | null, hostId: string | undefined): ReceiptContext | null {
   if (!receipt) return null;
   const remote = remoteHostOf(hostId);
@@ -612,15 +614,15 @@ function handoffScopeDiagnosticOptions(hostId: string | undefined) {
   };
 }
 
-/** For non-create receipts, resolve whether the selected daemon used its own host id. */
+/** Resolve whether the selected daemon used its own host id before labeling a receipt remote. */
 async function settleReceiptHost(client: DaemonClient, receipt: ReceiptContext): Promise<ReceiptContext> {
-  if (!receipt.remoteHost) return receipt;
+  if (!receipt.remoteHost || receipt.remoteHostUnconfirmed) return receipt;
   let selfHostId: string | undefined;
   try {
     const health = await client.get<{ selfHostId?: unknown }>("/healthz", { timeoutMs: 1_000 });
     if (health.status === 200 && typeof health.data?.selfHostId === "string" && health.data.selfHostId.trim()) selfHostId = health.data.selfHostId;
   } catch { /* An unreadable id must not change or fail the write's output. */ }
-  if (selfHostId === receipt.remoteHost) return { ...receipt, remoteHost: undefined };
+  if (selfHostId === receipt.remoteHost) return { ...receipt, remoteHost: undefined, remoteHostUnconfirmed: undefined };
   return selfHostId === undefined ? { ...receipt, remoteHostUnconfirmed: true } : receipt;
 }
 
@@ -796,10 +798,8 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
 }
 
 async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null, hostUsed = false): Promise<void> {
-  // Create receipts use their selected endpoint and registry; they do not need a healthz request before output.
-  // Other forwarded writes keep their receipt-only host settlement.
   const settled = receipt && status < 400
-    ? (hostUsed || receipt.verb === "create" ? receipt : await settleReceiptHost(client, receipt))
+    ? (hostUsed ? receipt : await settleReceiptHost(client, receipt))
     : null;
   const projected = settled ? buildWriteReceipt(body, settled) : null;
   if (!projected) {
@@ -1704,10 +1704,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             if (opts.verify) {
               const delivery = await waitForDeliveryOutcome(createReceiptReader(deps, client, hostResolved.hostId, qitemId, sent), qitemId, deps.deliveryVerify,
                 { destinationSession: hostResolved.destination, nudge: requestNudge, parked: true });
-              await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId, persisted: true, delivery }, status, resultReceipt);
+              await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId, persisted: true, delivery }, status, resultReceipt, recovered !== undefined);
               return;
             }
-            await printWriteResult(client, opts.json ?? false, outputCreated, status, resultReceipt);
+            await printWriteResult(client, opts.json ?? false, outputCreated, status, resultReceipt, recovered !== undefined);
             return;
           }
           if (status < 400) {
@@ -1731,10 +1731,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               ? await waitForDeliveryOutcome(createReceiptReader(deps, client, hostResolved.hostId, qitemId, sent), createdId, deps.deliveryVerify,
                 { destinationSession: hostResolved.destination, nudge: requestNudge, parked: parkRequested })
               : unreadableDeliveryResult(null, hostResolved.destination, {}, "create response did not include a qitem id; delivery cannot be correlated");
-            await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId: createdId, persisted: true, delivery }, status, resultReceipt);
+            await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId: createdId, persisted: true, delivery }, status, resultReceipt, recovered !== undefined);
             return;
           }
-          await printWriteResult(client, opts.json ?? false, outputCreated, status, resultReceipt);
+          await printWriteResult(client, opts.json ?? false, outputCreated, status, resultReceipt, recovered !== undefined);
         };
         const usableCreateRow = (value: unknown): value is QueueRow =>
           isQueueRow(value) && value.qitemId === qitemId && isQueueState(value.state);
