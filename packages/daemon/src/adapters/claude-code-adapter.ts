@@ -756,6 +756,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    *  nothing under it; Claude, or a launch script about to start it, is a slow resume. */
   private async paneReturnedToShell(binding: NodeBinding, paneCommand: string | null): Promise<boolean> {
     if (!paneCommand || !SHELL_COMMANDS.has(paneCommand)) return false;
+    // A shell that hasn't read the launch yet (a new pane's shell still running its startup files) holds the terminal
+    // with nothing under it exactly as one Claude returned to does. The launch's own script, still there, tells them apart.
+    if (binding.tmuxSession && this.tmux.stagedLaunchUnread?.(binding.tmuxSession)) return false;
     if (!binding.tmuxPane) return true;
     const observed = await observeClaudeDelivery({ target: binding.tmuxPane, tmux: this.tmux, listProcesses: this.listProcesses },
       { unknownKeepsIdle: false });

@@ -59,6 +59,51 @@ async function shown(db: Database.Database, hook: object, arbitrated: ReturnType
   return formatSeatActivity(row as never);
 }
 
+// Reported on 0.7.18: a seat whose session was gone kept a binding to pane %22, which by then belonged to another seat.
+// rig ps showed it running/verified while its activity read unknown/session_missing, and its reminder failed for hours.
+describe("rig ps when the seat's session is gone and its old pane id belongs to another seat", () => {
+  /** tmux is up with another seat's session, whose live Claude pane has the id worker's binding still names. */
+  function recycledPane(listing: "readable" | "unreadable" = "readable") {
+    return {
+      listSessions: listing === "readable" ? async () => [{ name: "other@rig" }] as never
+        : async () => { throw new Error("error connecting to /tmp/tmux-501/default (Permission denied)"); },
+      readAllPaneProcesses: async () => new Map([["%1", { pid: 5000, command: "claude" }]]),
+      getPanePid: vi.fn(async () => 5000), getPaneCommand: vi.fn(async () => "claude"),
+      listPanes: vi.fn(async (session: string) => { throw new Error(`can't find session: ${session}`); }),
+      probeSession: vi.fn(async () => unreadable),
+    };
+  }
+
+  it("reads the seat stopped with session_missing in its identity, status and activity", async () => {
+    const db = fixture();
+    await new SeatIdentityReconciler({ db, tmux: recycledPane() }).reconcileAll();
+    expect(new SeatIdentityStore(db).getForNode("worker")).toMatchObject({ verdict: "pane_missing", reason: "session_missing" });
+    const { entry, activity: read } = await activity(db, lastIdle);
+    expect(entry).toMatchObject({ sessionStatus: "detached", storedSessionStatus: "running" });
+    expect(entry.lifecycleState).not.toBe("running");
+    expect(read).toMatchObject({ state: "unknown", reason: "session_missing" });
+    expect(await shown(db, lastIdle, oracle("idle-at-prompt"))).toBe("unknown");
+  });
+
+  it("keeps the missing session a failed reminder send recorded, sweep after sweep", async () => {
+    const db = fixture();
+    new SeatIdentityStore(db).upsert({ nodeId: "worker", verdict: "pane_missing", evidenceSource: "tmux_session", reason: "session_missing",
+      sessionName: "worker@rig", observedAt: "2026-01-01T00:00:01.000Z",
+      evidence: { registeredPane: "%1", observedPid: null, observedCommand: null, matchedLayer: null } });
+    for (let tick = 0; tick < 3; tick++) {
+      await new SeatIdentityReconciler({ db, tmux: recycledPane() }).reconcileAll();
+      expect((await activity(db, lastIdle)).entry.sessionStatus).toBe("detached");
+    }
+  });
+
+  it("an unreadable listing in the same state reads unknown, not stopped (unchanged)", async () => {
+    const db = fixture();
+    await new SeatIdentityReconciler({ db, tmux: recycledPane("unreadable") }).reconcileAll();
+    expect(new SeatIdentityStore(db).getForNode("worker")).toMatchObject({ verdict: "tmux_unavailable", reason: "tmux_unavailable" });
+    expect((await activity(db, lastIdle)).entry.sessionStatus).toBe("running");
+  });
+});
+
 describe("rig ps after the seat's tmux server is gone", () => {
   it("a server that's gone reads the seat stopped, not idle", async () => {
     const db = fixture();

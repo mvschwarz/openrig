@@ -2385,6 +2385,21 @@ export class TmuxAdapter {
     return this.guardedInput(target, () => this.sendShellCommandUnchecked(target, command, beforeInput, options));
   }
 
+  /** The script sendShellCommand last staged a launch in, per target, until its shell is seen to have read it. */
+  private readonly stagedLaunches = new Map<string, string>();
+
+  /** Whether the shell in `target` has yet to read the launch sendShellCommand last staged there. The script removes
+   *  itself as its first step, so while it is still there the shell hasn't started the launch: a new pane's shell can
+   *  still be running its startup files, and its pane reads as an idle shell meanwhile. False when nothing was staged
+   *  for the target, or the script is gone or can't be read. */
+  stagedLaunchUnread(target: string): boolean {
+    const path = this.stagedLaunches.get(target);
+    if (!path) return false;
+    try { if (statSync(path).isFile()) return true; } catch { /* gone (the shell read it), or unreadable: no evidence */ }
+    this.stagedLaunches.delete(target);
+    return false;
+  }
+
   /** Stage or send a launch while leaving a consumed script's cleanup to the receiving shell. */
   private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
     const commandBytes = Buffer.byteLength(command, "utf8");
@@ -2434,6 +2449,7 @@ export class TmuxAdapter {
       }
       // The receiver now owns removal. Unlinking here races shell startup.
       created = false;
+      if (path) this.stagedLaunches.set(target, path); else this.stagedLaunches.delete(target);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);

@@ -330,7 +330,10 @@ export class ClaudeResumeAdapter {
     if (finalProbe.code === "returned_to_shell") {
       // A shell label alone isn't a return to the shell: a launch script still starting Claude holds the pane the
       // same way. Only a proven, stable idle shell ends the resume; anything else keeps the launch for attention.
-      if (await verifyPaneIdleShell({ target: tmuxSessionName, tmux: this.tmux,
+      // A shell that hasn't read the launch yet (a new pane's shell still running its startup files) is idle the same
+      // way; the launch's own script, still there, tells them apart.
+      const unread = this.tmux.stagedLaunchUnread?.(tmuxSessionName) === true;
+      if (!unread && await verifyPaneIdleShell({ target: tmuxSessionName, tmux: this.tmux,
         ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}) })) {
         return {
           ok: false,
@@ -350,7 +353,9 @@ export class ClaudeResumeAdapter {
       return {
         ok: false,
         code: "attention_required",
-        message: "Claude resume could not be verified; launch retained: the pane shows a shell that isn't a proven idle shell, so a launch script may still be starting Claude.",
+        message: unread
+          ? "Claude resume could not be verified; launch retained: the pane's shell hasn't read the launch yet (it may still be running its startup files), so Claude may still be starting."
+          : "Claude resume could not be verified; launch retained: the pane shows a shell that isn't a proven idle shell, so a launch script may still be starting Claude.",
         evidence: finalContent.split("\n").slice(-12).join("\n"),
       };
     }

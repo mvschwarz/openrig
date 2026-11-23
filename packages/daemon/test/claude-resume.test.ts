@@ -465,6 +465,28 @@ describe("ClaudeResumeAdapter", () => {
         .toMatchObject({ ok: false, code: "retry_fresh" });
     });
 
+    // A new pane's shell still running its startup files is the same idle shell in both samples; it hasn't read the
+    // launch, whose staged script (it removes itself first) is still there. Reported on 0.7.18 as "pane returned to shell"
+    // with the original conversation running a moment later.
+    it.each([
+      ["hasn't read the staged launch yet: the launch is kept", true, "attention_required"],
+      ["read the staged launch and is back at its prompt: the return stands", false, "retry_fresh"],
+    ] as const)("a pane whose shell %s", async (_label, unread, code) => {
+      const tmux = mockTmux({ getPaneCommand: async () => "zsh", capturePaneContent: async () => "$ ", getPanePid: async () => 4321 });
+      tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+      tmux.stagedLaunchUnread = vi.fn(() => unread);
+      const adapter = new ClaudeResumeAdapter(tmux, { pollMs: 0, maxWaitMs: 0,
+        seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never,
+        listProcesses: async () => [
+          { pid: 4321, ppid: 1, pgid: 4321, tpgid: 4321, command: "-zsh", executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+        ] });
+      const result = await adapter.resume("worker", "claude_id", "retained-history", "/repo");
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, code });
+      expect(tmux.sendShellCommand).toHaveBeenCalled();
+      expect(tmux.stagedLaunchUnread).toHaveBeenCalledWith("worker");
+      if (unread) expect((result as { message: string }).message).toContain("hasn't read the launch yet");
+    });
+
     it("waits for Claude to become the foreground command, and accepts a foreground Claude with nothing drawn only at its final read", async () => {
       const getPaneCommand = vi
         .fn<(_: string) => Promise<string | null>>()

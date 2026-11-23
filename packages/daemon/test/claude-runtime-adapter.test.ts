@@ -1219,14 +1219,22 @@ describe("Claude Code runtime adapter", () => {
 
     // `screen(read)` is the pane text on the nth capture; `rows(read)` the process list at that point.
     // `command(read)`, when given, is the pane's foreground command before the nth capture.
-    const run = async (opts: { screen?: (read: number) => string; rows?: (read: number) => typeof occupied; paneCommand?: string; command?: (read: number) => string; readinessTimeoutMs?: number; autoDrive?: boolean } = {}) => {
+    // `launchScript.readAt`, when given: the launch goes as a staged script (sendShellCommand, as in production), which the
+    // pane's shell reads before the nth capture (never, when undefined); the tmux adapter says whether it's still unread.
+    const run = async (opts: { screen?: (read: number) => string; rows?: (read: number) => typeof occupied; paneCommand?: string; command?: (read: number) => string; readinessTimeoutMs?: number; autoDrive?: boolean; launchScript?: { readAt?: number } } = {}) => {
       let reads = 0;
       const tmux = mockTmux();
+      const staged = opts.launchScript;
+      if (staged) {
+        tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+        tmux.stagedLaunchUnread = vi.fn((target: string) => target === "r01-impl" && (staged.readAt === undefined || reads < staged.readAt));
+      }
       (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => opts.command?.(reads) ?? opts.paneCommand ?? "sh");
       (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async () => (opts.screen ?? (() => ""))(reads++));
       (tmux as unknown as { getPanePid: unknown }).getPanePid = vi.fn(async () => 10);
       const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, autoDriveProviderPrompts: opts.autoDrive, readinessTimeoutMs: "readinessTimeoutMs" in opts ? opts.readinessTimeoutMs : WAIT_MS,
-        listProcesses: () => (opts.rows ?? (() => occupied))(reads) });
+        listProcesses: () => (opts.rows ?? (() => occupied))(reads),
+        ...(staged ? { seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never } : {}) });
       const result = await adapter.launchHarness({ ...makeBinding(), tmuxPane: "%1" }, { name: "dev-impl@test-rig", resumeToken: "abc-123" });
       return { result, reads, tmux };
     };
@@ -1370,6 +1378,44 @@ describe("Claude Code runtime adapter", () => {
       expect((result as { error: string }).error).toContain("resume-selection prompt");
       // Ended at the prompt, not at the bound.
       expect(reads).toBeLessThan(25);
+    });
+
+    // Reported on 0.7.18: a single-seat launch returned "pane returned to shell" while, a moment later, the original
+    // conversation was running in the new pane. A new pane's shell still running its startup files holds the terminal
+    // alone, as an idle shell does, so both of the idle-shell samples agree; it reads the launch only when it's done.
+    describe("a shell that hasn't read the launch yet", () => {
+      const shellOnly = () => [pane];
+
+      it("isn't reported back at its shell: the resume it then starts is marked resumed", async () => {
+        const { result, reads } = await run({ launchScript: { readAt: 24 }, command: (read) => (read < 24 ? "zsh" : "claude"),
+          rows: (read) => (read < 24 ? shellOnly() : occupied), screen: (read) => (read < 24 ? "" : tui) });
+        expect(result, JSON.stringify({ error: (result as { error?: string }).error, recovery: (result as { recovery?: string }).recovery }))
+          .toMatchObject({ ok: true, resumeToken: "abc-123" });
+        expect(reads).toBeGreaterThan(24);
+      });
+
+      it("keeps the launch and its token when the shell still hasn't read it at the end of the wait", async () => {
+        const { result } = await run({ launchScript: {}, paneCommand: "zsh", rows: shellOnly });
+        expect(result, JSON.stringify({ error: (result as { error?: string }).error, recovery: (result as { recovery?: string }).recovery }))
+          .toMatchObject({ ok: false, recovery: "attention_required",
+          error: "Claude resume did not finish within 6s; Claude may still be starting, so the launch was kept" });
+      });
+
+      // Controls: once the shell has read the launch, its verdicts are as before.
+      it("a shell that read the launch and is back at its prompt still reports the return", async () => {
+        const { result } = await run({ launchScript: { readAt: 0 }, paneCommand: "zsh", rows: shellOnly });
+        expect(result).toEqual({
+          ok: false,
+          probe: probeEvidence,
+          error: "Claude resume failed: pane returned to shell instead of entering Claude",
+          recovery: "retry_fresh",
+        });
+      });
+
+      it("an ordinary resume the shell reads at once is marked resumed", async () => {
+        const { result } = await run({ launchScript: { readAt: 0 }, paneCommand: "claude", screen: () => tui });
+        expect(result).toMatchObject({ ok: true, resumeToken: "abc-123" });
+      });
     });
 
     it("reports a return to the shell when the pane is back at its shell by the end of the wait", async () => {

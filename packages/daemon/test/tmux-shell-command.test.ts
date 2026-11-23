@@ -192,6 +192,23 @@ describe("shell launch transport", () => {
     expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
   });
 
+  it("says a staged launch is unread until the pane's shell runs its script", async () => {
+    const root = mkdtempSync(join(tmpdir(), "launch-unread-"));
+    try {
+      const f = fixture(undefined, join(root, "launch.sh"));
+      expect(f.adapter.stagedLaunchUnread("pane")).toBe(false);
+      expect(await f.adapter.sendShellCommand("pane", "true", undefined, { sourceInPane: true })).toEqual({ ok: true });
+      writeFileSync(f.scriptPath, f.files.get(f.scriptPath)!, { mode: 0o600 }); // the staged script, as on disk
+      // A new pane's shell still running its startup files hasn't read the launch typed into it.
+      expect(f.adapter.stagedLaunchUnread("pane")).toBe(true);
+      expect(f.adapter.stagedLaunchUnread("other")).toBe(false);
+      // The shell reads the launch: the script's first step removes it.
+      execFileSync("/bin/sh", ["-c", vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]]);
+      expect(existsSync(f.scriptPath)).toBe(false);
+      expect(f.adapter.stagedLaunchUnread("pane")).toBe(false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("sources a long classic command in a pane-shell subshell using the same short-input bound", async () => {
     const f = fixture();
     const command = `OPENRIG_HOME='/instance' claude --model '${"m".repeat(4096)}'`;

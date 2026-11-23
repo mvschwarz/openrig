@@ -525,6 +525,18 @@ export class SeatIdentityReconciler {
         evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
       };
     }
+    if (!liveSessions.has(seat.session_name)) {
+      // A live pane under the bound id, while this sweep's readable listing has no such session. tmux numbers panes per
+      // server, so after a server restart the id can be another seat's pane: as for a dead pane above, only membership in
+      // the exact session makes it this seat's. A fresh read that doesn't list the session (tmux's "can't find session"
+      // throws) leaves the listing's absence standing, as when the pane is gone too; one that lists the session without
+      // this pane means it changed since the listing, which is unknown.
+      const currentPanes = await this.tmux.listPanes?.(seat.session_name, true).catch(() => null);
+      const at = this.now().toISOString();
+      if (!currentPanes?.some(pane => pane.id === seat.tmux_pane)) {
+        return currentPanes?.length ? this.tmuxUnavailableVerdict(seat, at, false) : this.sessionMissingVerdict(seat, at);
+      }
+    }
 
     const command = batched ? batched.command : await this.tmux.getPaneCommand(seat.tmux_pane);
     if (!batched) base.observedAt = this.now().toISOString();
