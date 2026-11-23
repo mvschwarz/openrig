@@ -2816,6 +2816,11 @@ describe("GET /api/slices observed queue counts", () => {
         path.join(newRoot, "shipping", "slices", "02-new", "SPEC.md"),
         `${nodeBytes("OPR.NEW", "closed", "New Slice")}\n## Proof contract\n- [ ] New outcome.\n`,
       );
+      // Give 01-old an older directory mtime than 02-new so GET /api/slices
+      // (sorted by lastActivityAt DESC) deterministically puts 02-new before
+      // 01-old on every filesystem, reproducing high-resolution APFS mtime order.
+      const olderMtime = new Date(fs.statSync(path.join(newRoot, "shipping", "slices", "02-new")).mtimeMs - 5_000);
+      fs.utimesSync(path.join(newRoot, "shipping", "slices", "01-old"), olderMtime, olderMtime);
       write(
         path.join(newRoot, "child-new", "SPEC.md"),
         "---\nid: M.CHILD.NEW\nstatus: active\nparent: OPR.NEW.SHARED\n---\n# Child New\n",
@@ -2871,7 +2876,7 @@ describe("GET /api/slices observed queue counts", () => {
         const second = await app.request("/api/slices");
         expect(second.status).toBe(200);
         const secondBody = await second.json() as DetailedBody;
-        expect(secondBody.slices.map((s) => s.name)).toEqual(["01-old", "02-new"]);
+        expect(secondBody.slices.map((s) => s.name).sort()).toEqual(["01-old", "02-new"]);
         expect(secondBody.slices.find((s) => s.name === "01-old")).toMatchObject({
           slicePath: path.join(alias, "shipping", "slices", "01-old"),
           rawStatus: "closed",
@@ -2899,7 +2904,7 @@ describe("GET /api/slices observed queue counts", () => {
           slicePath: path.join(alias, "shipping", "slices", "01-old"),
           derivedState: "blocked",
         });
-        expect((await list(app, "?derived=pending")).map((s) => s.name)).toEqual(["01-old", "02-new"]);
+        expect((await list(app, "?derived=pending")).map((s) => s.name).sort()).toEqual(["01-old", "02-new"]);
       } finally {
         readySpy.mockRestore();
       }
