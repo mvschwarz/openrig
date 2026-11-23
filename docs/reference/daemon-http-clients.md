@@ -112,6 +112,33 @@ All of them are server-sent events (`text/event-stream`):
   `queue.handed_off`, `queue.claimed`, `queue.unclaimed`, `qitem.fallback_routed`, `qitem.closure_overdue`,
   `inbox.absorbed` and `inbox.denied`.
 
+## Read many stream items' reader actions
+
+`GET /api/stream/actions/list` pages the same records as `GET /api/stream/:id/actions` without a request per
+item. Each `items` entry has `actionId`, `streamItemId`, `readerSession`, `action` (`act`, `decline`, `duplicate`),
+`workQitemId`, `duplicateOf`, `reason` and `actedAt`. It records a reader's declaration, not proof that the reader
+used a decision. Clients choose which kinds and work links count as citations; repeated historical acts remain
+separate records.
+
+- `mode=history` (default) reads all matching retained actions. `mode=current` reads the newest **actionId** per
+  item and reader, selected across the whole history before kind, time and page filters. A later decline cannot
+  cause an older act to reappear just because `action=act` was requested.
+- Repeat `streamItemId` to select particular items. `hintTag` and `sourceSession` filter item metadata;
+  `readerSession` filters the action's actor. `action` selects one of the three kinds. `since` and `until` are
+  inclusive **action-time** bounds, valid ISO timestamps with at most millisecond precision, normalized to UTC.
+- `limit` defaults to 200 and is clamped to 1–500 after the usual integer query parsing. Results sort by
+  ascending `actionId`, a unique tie-breaker even when action timestamps are equal. Follow `nextAfterActionId`
+  as `afterActionId`, keeping the other filters/mode unchanged, until `hasMore` is false. A page is not a total count.
+- Archived items' actions are included. `missingStreamItemIds` lists explicitly requested IDs absent from the
+  item table; a present item with no matching actions is different from a missing item. Manually orphaned action
+  rows remain readable without item-metadata filters, as on the per-item route; absent metadata cannot match a tag
+  or source filter. `historyScope: "retained"` does not promise history removed manually or unavailable elsewhere.
+
+Paging has no gaps or repeats on stable data. It is not a snapshot: new action IDs ahead of the cursor can appear
+on later pages, IDs inserted behind it are not revisited, and concurrent corrections can change which records
+are current. A client needing one consistent current view should restart/reconcile by newest actionId. The old
+per-item read, writes and host access behavior are unchanged; this adds no remote forwarding.
+
 ## People, asks and updates without Slack
 
 `GET /api/gateway/participants` returns the same JSON projection as `rig gateway participants --json`:
