@@ -28,7 +28,7 @@ export const CLOSURE_REASONS = [
   "superseded",
 ] as const;
 
-export type ClosureReason = (typeof CLOSURE_REASONS)[number];
+export type ClosureReason = (typeof CLOSURE_REASONS)[number] | "relayed-answer";
 
 export const DONE_CLOSURE_REASONS = CLOSURE_REASONS.filter((reason) => reason !== "blocked_on");
 
@@ -59,7 +59,7 @@ export type ClosureValidation = ClosureValidationOk | ClosureValidationErr;
  * - If state === "done": closure_reason REQUIRED, must be in DONE_CLOSURE_REASONS.
  *   handed_off_to / escalation also require closure_target.
  */
-export function validateClosure(req: ClosureRequest): ClosureValidation {
+export function validateClosure(req: ClosureRequest, completingRelay = false): ClosureValidation {
   if (req.state !== "done") {
     return {
       ok: true,
@@ -77,7 +77,7 @@ export function validateClosure(req: ClosureRequest): ClosureValidation {
     };
   }
 
-  if (!isClosureReason(req.closureReason)) {
+  if (!isClosureReason(req.closureReason) && !(completingRelay && req.closureReason === "relayed-answer")) {
     return {
       ok: false,
       code: "invalid_closure_reason",
@@ -113,7 +113,7 @@ export function validateClosure(req: ClosureRequest): ClosureValidation {
   };
 }
 
-export function isClosureReason(value: unknown): value is ClosureReason {
+export function isClosureReason(value: unknown): value is (typeof CLOSURE_REASONS)[number] {
   return typeof value === "string" && (CLOSURE_REASONS as readonly string[]).includes(value);
 }
 

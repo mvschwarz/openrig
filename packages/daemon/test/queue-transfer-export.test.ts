@@ -36,7 +36,7 @@ it("matches the migrated queue and source history column inventories", () => {
     queue_transitions_archive: [...QUEUE_TRANSFER_COLUMNS.queue_transitions, "archived_at"] })) {
     expect(db.prepare<[], { name: string }>(`PRAGMA table_info(${table})`).all().map(row => row.name).sort()).toEqual([...columns].sort());
   }
-  expect(QUEUE_TRANSFER_COLUMNS.queue_items).toHaveLength(38);
+  expect(QUEUE_TRANSFER_COLUMNS.queue_items).toHaveLength(39);
 });
 
 it("refuses an unreconciled source and an incomplete explicit ID selection", () => {

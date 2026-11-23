@@ -459,6 +459,7 @@ export function queueRoutes(): Hono {
         : err.code === "qitem_not_claimable" ? 409
         : err.code === "qitem_not_in_progress" ? 409
         : err.code === "qitem_already_terminal" ? 409
+        : err.code === "relayed_answer_refused" ? 409
         // An update's expected state (--expect-state) no longer matches the row; nothing was written.
         : err.code === "qitem_state_changed" ? 409
         // OPR.0.4.6.MH3 Q-a: same minted id, different destination/source =
@@ -1539,6 +1540,28 @@ export function queueRoutes(): Hono {
       const advisories = [destination, scope].filter(Boolean);
       return c.json({ ...result, ...(advisories.length > 0 ? { advisories } : {}),
         ...(scopeCheckRequested ? { [HANDOFF_SCOPE_CHECK_ACKNOWLEDGED]: true } : {}) }, 201);
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  app.post("/:qitemId/relayed-answer", async (c) => {
+    const body = await c.req.json<Record<string, unknown> | null>().catch(() => null);
+    const { attributedTo, text, channel, questionId, optionId, answeredAt, actor } = body ?? {};
+    if (typeof attributedTo !== "string" || !attributedTo.trim() || typeof text !== "string" || !text.trim()
+      || typeof channel !== "string" || !channel.trim() || (questionId !== undefined && typeof questionId !== "string")
+      || (optionId !== undefined && typeof optionId !== "string")
+      || (answeredAt !== undefined && (typeof answeredAt !== "string"
+        || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(answeredAt) || !Number.isFinite(Date.parse(answeredAt))))) {
+      return c.json({ error: "invalid_relayed_answer", message: "Pass attributedTo, verbatim text and channel; name questionId/optionId as applicable, and supply answeredAt as an ISO timestamp only if known." }, 400);
+    }
+    const identity = requireSenderIdentity(c, { verb: "relay an answer", bodyClaim: typeof actor === "string" ? actor : null });
+    if (!identity.ok) return identity.response;
+    { const held = switchCustody(c, identity.session); if (held) return held; }
+    try {
+      return c.json(getRepo(c).writeRelayedAnswer({ qitemId: c.req.param("qitemId"), actorSession: identity.session,
+        identityProvenance: resolveRecordedProvenance(c, identity),
+        relay: { attributedTo, text, channel, questionId, optionId, answeredAt } }));
     } catch (err) {
       return errorResponse(c, err);
     }
