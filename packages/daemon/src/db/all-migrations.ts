@@ -7,6 +7,7 @@ import { remoteControlObservationsSchema } from "./migrations/179_remote_control
 import { queueRelayedAnswersSchema } from "./migrations/186_queue_relayed_answers.js";
 
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
+import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
 
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
@@ -374,5 +375,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   sessionStopAttemptSchema,
   nodeKeepAliveSchema,
   queueItemsBlockedOnIndexSchema,
-  queueRelayedAnswersSchema,
+queueRelayedAnswersSchema,
+queueItemsScanIndexesSchema,
 ];

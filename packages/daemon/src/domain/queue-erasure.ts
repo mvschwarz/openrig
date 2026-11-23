@@ -50,7 +50,7 @@ const QITEM_SHAPE = /^qitem-[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?$/;
 
 /** A scrub keeps a closure target only when it names a successor: closure writes don't constrain the target, so text
  *  under a successor reason is cleared like any other note. */
-function keepsClosureTarget(reason: unknown, target: unknown): boolean {
+export function keepsClosureTarget(reason: unknown, target: unknown): boolean {
   return ID_CLOSURE_REASONS.includes(reason as (typeof ID_CLOSURE_REASONS)[number]) && typeof target === "string"
     && target.length <= 256 && (ADDRESS_SHAPE.test(target) || QITEM_SHAPE.test(target));
 }

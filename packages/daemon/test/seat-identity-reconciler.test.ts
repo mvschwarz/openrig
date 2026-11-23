@@ -464,6 +464,32 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     db.close();
   });
 
+  it("a nonempty fresh pane list disables retained session absence despite the earlier session snapshot", async () => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1" });
+      db.prepare("UPDATE sessions SET created_at = '2026-01-01 00:00:00'").run();
+      let paneSeen = false;
+      const tmux = {
+        ...makeTmux({ sessions: ["other@rig"] }),
+        readAllPaneProcesses: vi.fn(async () => paneSeen
+          ? new Map([["%1", { pid: null, command: "claude", dead: true }]]) : new Map()),
+        listPanes: vi.fn(async () => [{ id: "%other", index: 0, cwd: "/", width: 80, height: 24, active: true }]),
+      };
+      const rec = new SeatIdentityReconciler({ db, tmux, now: NOW });
+      await rec.reconcileAll();
+      expect(nodeSessionConfirmedMissing(db, "n1")).toBe(true);
+
+      paneSeen = true;
+      await rec.reconcileAll();
+      expect(tmux.listPanes).toHaveBeenCalledWith("s1@rig", true);
+      expect(new SeatIdentityStore(db).getForNode("n1")).toMatchObject({
+        verdict: "tmux_unavailable", reason: "tmux_unavailable",
+      });
+      expect(nodeSessionConfirmedMissing(db, "n1")).toBe(false);
+    } finally { db.close(); }
+  });
+
   it("clears retained stopped evidence when a live listing has an unreadable pid", async () => {
     const db = createFullTestDb();
     try {

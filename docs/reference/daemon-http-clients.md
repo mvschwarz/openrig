@@ -93,6 +93,15 @@ All of them are server-sent events (`text/event-stream`):
   same option again) has no event, and neither does a typed reply, which settles the ask through its own
   `queue.updated`. The event is recorded after the answer: if it can't be recorded, the answer still stands, so a
   client that re-reads the ask after a gap still sees it.
+  A queue create the daemon refuses leaves `queue.create_refused`: `{ sourceSession, destinationSession, reason, status,
+  hostId }`, where `reason` is the response's own error code or text. A send to a destination that doesn't resolve, when
+  nothing is kept in the sender's outbox, leaves `transport.send_refused`: `{ senderSession, session, reason, status }`.
+  A forwarded create whose result is unknown (it timed out, so the remote may still commit it) leaves
+  `queue.create_remote_unknown`: `{ qitemId, sourceSession, destinationSession, hostId, failureClass }`; reconcile by
+  `qitemId` before retrying. A send kept as a failed message in the sender's outbox is none of these: read it with
+  `GET /api/queue/outbox/list`. The events carry no message body and are never written for an accepted request; the
+  refused command's own response is unchanged. Read the reason and the parties from this stream or the `GET /api/events`
+  replay; `rig telemetry events` shows event metadata only, with no payload and no filter by type.
 - **`GET /api/activity/events`**: live only, no replay or ids. Each message is named after its event type:
   `seat.activity_changed`, `seat.rung_health`, `proof.judged` or `proof.sources_changed`. It tells a view to read
   again; it carries no derived state.
@@ -406,6 +415,17 @@ What reads these declarations:
   subject to the existing project filter and the newest 500 rows per slice. Counts are recomputed on every list
   request. `?refresh=1|true` invalidates the separate listing cache, not a stored queue-count snapshot. This
   resolution does not change the returned slice list or filters.
+- **A terminal viewer's pane size:** add `?geometry=1` to the terminal websocket (`GET /api/terminal/<name>`) to
+  learn the pane's columns and rows, so a browser terminal wraps lines where the agent's pane does. The size arrives
+  as a binary frame holding UTF-8 JSON, `{"type":"geometry","cols":<n>,"rows":<n>}`: once when the viewer joins,
+  before any output, and again whenever the pane's size changes (checked about every two seconds). Terminal output
+  is always a text frame, so set `binaryType = "arraybuffer"` and read only binary frames as size frames. xterm.js's
+  `AttachAddon` writes every frame to the terminal, binary ones included, so a viewer using it should leave
+  `?geometry=1` off or read the socket's messages itself. With `terminal.fixed_geometry` on, the frame reports the
+  pinned 90 by 27, or the window's own size when OpenRig didn't pin it: someone fixed its size by hand, or its sizing
+  couldn't be read. When the size can't be read, no frame is sent
+  and the socket stays open. The viewer is told the size and never sets it: the socket still has no resize message.
+  Without the flag, the socket's frames are unchanged.
 
 
 ## Resume one banked original conversation
@@ -431,7 +451,12 @@ It resumes only while the seat's recorded session still names the banked convers
 or new conversation in that seat normally records a different one, and so does a changed resume type or
 restore policy. After that, the preview answers `selection_changed` with "This seat's record changed since it
 was saved", naming `rig snapshot <rig>` to save the current conversation, and a resume request returns a
-partial `selection_changed` result. A changed runtime is refused earlier: the preview answers
+partial `selection_changed` result. The preview compares the seat's current conversation, not only the saved
+history row: a current session that names another conversation, or a present agent (behind a prompt or not)
+whose proved native identity is another one, also answers `selection_changed`. Otherwise it answers as before
+and adds `currentConversation`: `{ "state": "same", "basis": "record" | "running_agent" }`, or, when the
+current conversation can't be established, `{ "state": "unknown", "reason": … }`, with `identityEvidence` for a
+present agent. An unknown one is reported, not refused, and its diagnostics carry no native IDs. A changed runtime is refused earlier: the preview answers
 `source_unavailable`, also naming `rig snapshot <rig>`, and a resume request returns a partial
 `original_changed` result.
 

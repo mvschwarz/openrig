@@ -394,6 +394,12 @@ export type RigEvent =
   // (null for legacy/omitted — always present, never absent, so consumers
   // can title feed cards without a second fetch).
   | { type: "queue.created"; qitemId: string; sourceSession: string; destinationSession: string; priority: string; tier: string | null; summary: string | null }
+  // #3728: a queue write or send the daemon refused or could not settle, so it stays diagnosable when the caller loses
+  // stderr. Three outcomes stay apart: these refusals (nothing stored), a send kept as a failed message in the sender's
+  // outbox (queue outbox list, not an event), and a forwarded write whose result is unknown. Never carries the body.
+  | { type: "queue.create_refused"; sourceSession: string | null; destinationSession: string | null; reason: string; status: number; hostId: string | null }
+  | { type: "queue.create_remote_unknown"; qitemId: string | null; sourceSession: string | null; destinationSession: string | null; hostId: string; failureClass: string }
+  | { type: "transport.send_refused"; senderSession: string | null; session: string | null; reason: string; status: number }
   | { type: "queue.handed_off"; qitemId: string; fromSession: string; toSession: string; closureReason: "handed_off_to"; summary: string | null }
   | { type: "queue.claimed"; qitemId: string; destinationSession: string; claimedAt: string; closureRequiredAt: string | null; summary: string | null }
   | { type: "queue.unclaimed"; qitemId: string; destinationSession: string; reason: string; summary: string | null }
@@ -643,8 +649,9 @@ export interface RestoreValidationBlocker {
 export interface RestoreNodeResult {
   /** Saved intended seat when this attempt launched a recreated node; nodeId names the registered current node. */
   intendedNodeId?: string;
-  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so. */
-  stage?: "harness_not_started";
+  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so.
+   *  `resume_rolled_back`: its resume failed and the blank session it launched was rolled back, so no agent runs in it. */
+  stage?: "harness_not_started" | "resume_rolled_back";
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
   launchStarted?: true;
   /** An in-place restore failed before its takeover stopped anything. It says nothing about whether the seat's process runs. */
@@ -1564,6 +1571,8 @@ export interface RigSpec {
   env?: Record<string, string>;
   /** #25: per-runtime managed-block destination. Absent = CLAUDE.md. */
   managedBlocks?: { "claude-code"?: import("./managed-blocks.js").ClaudeManagedBlockFile };
+  /** Override the daemon's default onboarding pack setting for this rig. */
+  defaultOnboardingPack?: boolean;
   docs?: RigSpecDoc[];
   startup?: StartupBlock;
   services?: RigServicesSpec;

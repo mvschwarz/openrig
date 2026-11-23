@@ -18,11 +18,12 @@ import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "..
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
 import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "../queue-artifact.js";
 import { resolveSenderSession } from "../sender-identity.js";
+import { queueExportCommand } from "./queue-export.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
  *
- * Backed by `/api/queue`. Operates only via the daemon HTTP API.
+ * Backed by `/api/queue`, except for the local read-only export.
  * Does NOT touch the POC `rigx-queue-proto` filesystem state.
  *
  * Hot-potato strict-rejection is enforced at the daemon; `update --state done`
@@ -1309,6 +1310,7 @@ const QUEUE_HOST_ROW_OPTION_HELP =
 
 export function queueCommand(depsOverride?: QueueDeps): Command {
   const cmd = new Command("queue").description("Coordination L3 — owned-work queue + inbox/outbox");
+  cmd.addCommand(queueExportCommand());
   const getDeps = (): QueueDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
@@ -1882,6 +1884,9 @@ Every deliberate HELD row should name its continuation and one live wake:
   --wake-after <duration>  arm a timer atomically with the park
 
 A live blocker qitem supplied with --on also wakes the row when resolved.
+
+--on external:<name> with no wake is an event-only hold: it stays visible, no
+reminder fires, and rig queue resolve <qitemId> --decision "..." ends it.
 
 HELD is only for a row that must stay on the queue while waiting. Work with a
 workspace home that is deferred/not-imminent belongs in its mission/slice.`)
