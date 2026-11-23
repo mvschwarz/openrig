@@ -385,7 +385,13 @@ export class ProviderServiceImpl implements ProviderService {
         const r = this.seatReachedBy(seat, node.runtime, inPlace ? tools.claudeSeat : undefined);
         return "nodeId" in r && r.nodeId === node.nodeId ? null : unreachedSeat(seat, r);
       };
+      const exists = (table: "nodes" | "rigs", id: string) => !!this.deps.db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id);
       const report = await applyAssignment(plan, account, {
+        seatGone: (seat, seatRigId) => {
+          const nodeId = seatRigId === rigId ? nodeOf.get(seat)?.nodeId : undefined;
+          return nodeId !== undefined ? !exists("nodes", nodeId)
+            : !this.deps.db.prepare("SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE s.session_name = ? AND n.rig_id = ?").get(seat, seatRigId);
+        },
         switchSeat: async (seat) => {
           const why = elsewhere(seat, true);
           if (why) return { outcome: "failed_safely", reasons: ["seat_name_shared"], message: why };
@@ -416,7 +422,6 @@ export class ProviderServiceImpl implements ProviderService {
           // A seat removed while the apply ran (its removal held the seat's lease first) is still in the report, but saves
           // no result: its row would go with the node. Its rig removed with it saves no intent either.
           const nodeId = nodeOf.get(result.seat)!.nodeId;
-          const exists = (table: "nodes" | "rigs", id: string) => !!this.deps.db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id);
           if (!exists("rigs", rigId)) return;
           if (!stored && tookEffect(result.kind, result.seat)) {
             assignments.setIntent({ rigId, provider: input.provider, label: input.label, reference: plan.account.reference, requestedBy: input.requestedBy, at: now() });

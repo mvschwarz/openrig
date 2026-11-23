@@ -51,6 +51,8 @@ export interface ApplyDeps {
   /** The switches this daemon has made of a Codex home: how many, and the seat that made the last. A peer restarted on a
    *  home some other switch changed after this apply's isn't recorded as on the account. Without it, nothing is checked. */
   homeSwitches?(home: string): { count: number; seat: string } | null;
+  /** Whether the seat (of the given rig) no longer exists: removed, or its rig removed, while the apply ran. */
+  seatGone?(seat: string, rigId: string): boolean;
   /** Saves each result as it lands, with the reference a switched or pending-successor seat was given. */
   save(result: ApplySeatResult, applied: AppliedReference | undefined): void;
   now(): string;
@@ -60,6 +62,8 @@ const restartCommand = (seat: string) => `rig seat restart ${shellArg(seat)} --k
 
 /** Why no restart command is given for a seat its session name no longer reaches alone (another seat has it, or none does). */
 const NO_NAME = "It has no restart command: a restart reaches a seat by its session name, and that name doesn't reach this seat alone";
+/** Why no restart command is given for a seat removed while the apply ran. */
+const REMOVED = "It has no restart command: it was removed while this apply ran, and a restart by its session name could reach another seat later";
 
 export async function applyAssignment(plan: AssignmentPlan, account: AccountRef, deps: ApplyDeps): Promise<AssignmentApplyReport> {
   const results: ApplySeatResult[] = [];
@@ -224,10 +228,18 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     }
   }
 
+  // A seat removed while the apply ran, or whose rig was, gets no command, whatever its row: its name reaches no seat now,
+  // and could reach another one later.
+  const gone = (seat: string, rigId: string) => deps.seatGone?.(seat, rigId) ?? false;
+  results.forEach((r, i) => {
+    if (!gone(r.seat, plan.rigId) || (!r.recovery && r.kind !== "unknown")) return;
+    const { recovery: _dropped, ...rest } = r;
+    results[i] = { ...rest, detail: `${r.detail.replace(` ${NO_NAME}.`, "").replace(/\.$/, "")}. ${REMOVED}.` };
+  });
   const otherRigPeers = plan.codexHomes.flatMap((group) => {
     const switched = results.some((r) => onHome.get(r.seat) === group.home && (r.kind === "switched" || r.kind === "unknown"));
     return switched ? group.seats.filter((s) => s.rigId !== plan.rigId).map((s) => ({ seat: s.seat, rig: s.rig, home: group.home,
-      ...(unnamed.has(s.seat) ? { why: NO_NAME } : { command: restartCommand(s.seat) }) })) : [];
+      ...(gone(s.seat, s.rigId) ? { why: REMOVED } : unnamed.has(s.seat) ? { why: NO_NAME } : { command: restartCommand(s.seat) }) })) : [];
   });
   return { daemon: plan.daemon, rig: plan.rig, provider: plan.provider, account: { label: plan.account.label, reference: plan.account.reference },
     digest: plan.digest, results, otherRigPeers };

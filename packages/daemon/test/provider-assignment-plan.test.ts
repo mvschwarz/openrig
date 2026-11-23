@@ -411,15 +411,21 @@ describe("the daemon's assignment plan", () => {
     if (!planned.ok) throw new Error(planned.message);
     const applied = await svc.applyAssignment({ ...request, digest: planned.plan.digest, requestedBy: null }, { seatRestart });
     if (!applied.ok) throw new Error(applied.message);
-    // a@fleet left the home unknown, so b@fleet is skipped with its own restart step (its name still reaches it alone).
+    // a@fleet left the home unknown, so b@fleet is skipped, not restarted.
     expect(run.mock.calls.map(([s]) => s)).toEqual(["a@fleet"]);
     const [a, b] = applied.report.results;
     expect(a).toMatchObject({ seat: "a@fleet", kind: "unknown" });
     expect(a!.recovery).toBeUndefined();
     expect(a!.detail).toContain('"a@fleet" no longer names the seat this restart was for, or any seat; nothing was restarted.');
-    expect(a!.detail).toContain("It has no restart command: a restart reaches a seat by its session name, and that name doesn't reach this seat alone.");
+    const REMOVED = "It has no restart command: it was removed while this apply ran, and a restart by its session name could reach another seat later.";
+    expect(a!.detail).toContain(REMOVED);
     expect(a!.detail).not.toContain("rig seat restart");
-    expect(b).toMatchObject({ seat: "b@fleet", kind: "unknown", recovery: "rig seat restart b@fleet --keep-conversation" });
+    // b@fleet is skipped as before; with its rig removed too, it gets no command either.
+    expect(b).toMatchObject({ seat: "b@fleet", kind: "unknown" });
+    if (wholeRig) {
+      expect(b!.recovery).toBeUndefined();
+      expect(b!.detail).toContain(REMOVED);
+    } else expect(b!.recovery).toBe("rig seat restart b@fleet --keep-conversation");
     // A removed rig saves no intent and no results (they'd go with it); otherwise only the removed seat's result is missing.
     const assignments = new ProviderAccountAssignmentsRepository(db);
     expect(assignments.results(rigId, "codex").map((r) => [r.seat, r.kind])).toEqual(wholeRig ? [] : [["b@fleet", b!.kind]]);
@@ -450,6 +456,11 @@ describe("the daemon's assignment plan", () => {
       restartPeer: vi.fn(), activityOf: () => "idle", save: () => {}, now: () => "t" });
     expect(report.otherRigPeers).toEqual([{ seat: "p@other", rig: "other", home: codexHome,
       why: "It has no restart command: a restart reaches a seat by its session name, and that name doesn't reach this seat alone" }]);
+    // A peer removed while the apply ran gets no command either.
+    const removed = await applyAssignment(planned.plan, refs.get("codex", "team")!, { switchSeat: vi.fn(async () => ({ outcome: "succeeded" as const, message: "switched" })),
+      restartPeer: vi.fn(), activityOf: () => "idle", save: () => {}, now: () => "t", seatGone: (s, rigId) => s === "p@other" && rigId === "rig-o1" });
+    expect(removed.otherRigPeers).toEqual([{ seat: "p@other", rig: "other", home: codexHome,
+      why: "It has no restart command: it was removed while this apply ran, and a restart by its session name could reach another seat later" }]);
   });
 
   it("reads each seat's own token, account home and Codex home, and lists a shared home's peer in another rig", async () => {
