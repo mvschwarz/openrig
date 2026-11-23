@@ -37,7 +37,79 @@ describe("Rig lifecycle routes", () => {
     db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = ?").run(work.qitemId);
     const removed = await setup.app.request(`/api/rigs/${rig.id}/${target}`, { method: "DELETE" });
     expect(removed.status).toBe(200);
+    expect(queue.getById(rosterReadyNoticeId(rig.id, session))).toMatchObject({ state: "done", resolution: "seat removed" });
+  });
+
+  it.each(["nodes/infra.server", "pods/infra"])("%s removal closes notices from an archived generation of the same seat", async target => {
+    migrate(db, ALL_MIGRATIONS);
+    const prior = setup.rigRepo.createRig("notice-replacement");
+    setup.rigRepo.archiveRig(prior.id);
+    const rig = setup.rigRepo.createRig("notice-replacement");
+    const expanded = await setup.rigExpansionService.expand({ rigId: rig.id, pod: { id: "infra", label: "infra",
+      members: [{ id: "server", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" }], edges: [] } });
+    if (!expanded.ok) throw new Error(JSON.stringify(expanded));
+    const session = expanded.nodes[0]!.sessionName;
+    const queue = new QueueRepository(db, setup.eventBus);
+    await noticeRosterReady(queue, prior.id, [session]);
+    await noticeRosterReady(queue, rig.id, [session]);
+    const other = await queue.create({ sourceSession: "other@notice-replacement", destinationSession: session,
+      qitemId: rosterReadyNoticeId("ordinary-work", session), body: "ordinary work with a notice-shaped id", nudge: false });
+    const blocked = await setup.app.request(`/api/rigs/${rig.id}/${target}`, { method: "DELETE" });
+    expect(blocked.status).toBe(409);
+    expect((await blocked.json()).activeQitemIds).toEqual([other.qitemId]);
+    expect(queue.getById(rosterReadyNoticeId(prior.id, session))?.state).toBe("pending");
+    db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = ?").run(other.qitemId);
+    const events: number[] = [];
+    setup.eventBus.subscribe(event => { events.push(event.seq); });
+    const removed = await setup.app.request(`/api/rigs/${rig.id}/${target}`, { method: "DELETE" });
+    expect(removed.status).toBe(200);
+    expect(events).toEqual([...events].sort((a, b) => a - b));
+    for (const id of [prior.id, rig.id]) {
+      expect(queue.getById(rosterReadyNoticeId(id, session))).toMatchObject({ state: "done", resolution: "seat removed" });
+    }
+  });
+
+  it("removal closes only the archived seat notice when a live replacement owns its name", async () => {
+    migrate(db, ALL_MIGRATIONS);
+    const prior = setup.rigRepo.createRig("notice-live-owner");
+    const expand = (rigId: string) => setup.rigExpansionService.expand({ rigId, pod: { id: "infra", label: "infra",
+      members: [{ id: "server", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" }], edges: [] } });
+    const oldSeat = await expand(prior.id);
+    if (!oldSeat.ok) throw new Error(JSON.stringify(oldSeat));
+    setup.rigRepo.archiveRig(prior.id);
+    const current = setup.rigRepo.createRig("notice-live-owner");
+    const replacement = await expand(current.id);
+    if (!replacement.ok) throw new Error(JSON.stringify(replacement));
+    const session = replacement.nodes[0]!.sessionName;
+    expect(oldSeat.nodes[0]!.sessionName).toBe(session);
+    const queue = new QueueRepository(db, setup.eventBus);
+    await noticeRosterReady(queue, prior.id, [session]);
+    await noticeRosterReady(queue, current.id, [session]);
+    const work = await queue.create({ sourceSession: "other@notice-live-owner", destinationSession: session, body: "live work", nudge: false });
+    vi.mocked(setup.tmuxAdapter.killSession).mockClear();
+    const response = await setup.app.request(`/api/rigs/${prior.id}/nodes/infra.server`, { method: "DELETE" });
+    expect(response.status).toBe(200);
+    expect(queue.getById(rosterReadyNoticeId(prior.id, session))).toMatchObject({ state: "done", resolution: "seat removed" });
+    expect(queue.getById(rosterReadyNoticeId(current.id, session))?.state).toBe("pending");
+    expect(queue.getById(work.qitemId)).toMatchObject({ state: "pending", destinationSession: session });
+    expect(setup.rigRepo.getRig(current.id)?.nodes).toHaveLength(1);
+    expect(setup.tmuxAdapter.killSession).not.toHaveBeenCalled();
+  });
+
+  it("rolls back roster notice closure when seat removal cannot commit", async () => {
+    migrate(db, ALL_MIGRATIONS);
+    const rig = setup.rigRepo.createRig("notice-rollback");
+    const expanded = await setup.rigExpansionService.expand({ rigId: rig.id, pod: { id: "infra", label: "infra",
+      members: [{ id: "server", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" }], edges: [] } });
+    if (!expanded.ok) throw new Error(JSON.stringify(expanded));
+    const session = expanded.nodes[0]!.sessionName;
+    const queue = new QueueRepository(db, setup.eventBus);
+    await noticeRosterReady(queue, rig.id, [session]);
+    vi.spyOn(setup.rigRepo, "deleteNode").mockImplementationOnce(() => { throw new Error("test removal rollback"); });
+    const response = await setup.app.request(`/api/rigs/${rig.id}/nodes/infra.server`, { method: "DELETE" });
+    expect(response.status).toBe(500);
     expect(queue.getById(rosterReadyNoticeId(rig.id, session))?.state).toBe("pending");
+    expect(setup.rigRepo.getRig(rig.id)?.nodes).toHaveLength(1);
   });
 
   it.each([

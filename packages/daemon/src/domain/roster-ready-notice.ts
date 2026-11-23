@@ -7,6 +7,11 @@ export function rosterReadyNoticeId(rigId: string, session: string): string {
   return `qitem-roster-ready-${key}`;
 }
 
+/** Notice IDs retain their rig generation; session names can be reused by a replacement. */
+export function isRosterReadyNotice(row: { qitem_id: string; source_session: string }): boolean {
+  return row.source_session === OPENRIG_SENDER && /^qitem-roster-ready-[a-f0-9]{20}$/.test(row.qitem_id);
+}
+
 /** One durable notice per seat in this newly built rig. A failed notice does not change launch status. */
 export async function noticeRosterReady(queue: Pick<QueueRepository, "create">, rigId: string, sessions: string[]): Promise<string[]> {
   const warnings: string[] = [];

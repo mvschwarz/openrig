@@ -8,7 +8,7 @@ import type { QueueRepository } from "./queue-repository.js";
 import { findOtherSessionOwner } from "./session-owner.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
-import { rosterReadyNoticeId } from "./roster-ready-notice.js";
+import { isRosterReadyNotice, rosterReadyNoticeId } from "./roster-ready-notice.js";
 import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
 
 type ClaimedSessionRow = {
@@ -516,7 +516,7 @@ export class RigLifecycleService {
       ? findOtherSessionOwner(this.db, node.latest_session_name, node.node_id, { ignoreArchived: true })
       : null;
     const addressedSessions = node.latest_session_name && !sessionOwner ? [node.latest_session_name] : [];
-    const activeQitemIds = this.activeQitemIdsForSessionNames(rigId, addressedSessions);
+    const activeQitemIds = this.activeQitemIdsForSessionNames(addressedSessions);
     if (activeQitemIds.length > 0 && fallbackDestination === undefined) {
       return {
         ok: false,
@@ -564,7 +564,7 @@ export class RigLifecycleService {
     // seat's lifecycle lease. Late work goes to the same fallback once it is confirmed still running;
     // the topology transaction then checks again and keeps the node if any work remains.
     let lateFallbackFailure: FallbackValidationFailure | null = null;
-    const lateQitemIds = this.activeQitemIdsForSessionNames(rigId, addressedSessions);
+    const lateQitemIds = this.activeQitemIdsForSessionNames(addressedSessions);
     if (fallbackDestination !== undefined && lateQitemIds.length > 0) {
       lateFallbackFailure = await this.validateFallbackDestination(fallbackDestination, targetNodeIds);
       if (!lateFallbackFailure) {
@@ -575,10 +575,11 @@ export class RigLifecycleService {
       }
     }
 
+    const queueEvents: ReturnType<QueueRepository["updateWithinTransaction"]>["persistedEvents"] = [];
     const persisted: Array<{ type: "session.detached" | "node.removed"; seq: number; createdAt: string }> = [];
     let rosterEvent: ReturnType<EventBus["persistWithinTransaction"]> | null = null;
     const tx = this.db.transaction(() => {
-      const remaining = this.activeQitemIdsForSessionNames(rigId, addressedSessions);
+      const remaining = this.activeQitemIdsForSessionNames(addressedSessions);
       if (sessionStopped && node.latest_session_id && node.latest_session_name) {
         this.sessionRegistry.markIntentionallyStopped(node.latest_session_id);
         this.eventBus.persistWithinTransaction({ type: "session.stopped", rigId, nodeId: node.node_id,
@@ -602,6 +603,16 @@ export class RigLifecycleService {
         nodeId: node.node_id,
       });
       persisted.push({ type: "node.removed", seq: removed.seq, createdAt: removed.createdAt });
+      const noticeSessions = node.latest_session_name ? [node.latest_session_name] : [];
+      for (const notice of this.activeQitemsForSessionNames(noticeSessions).filter(isRosterReadyNotice)) {
+        // A live replacement owns this shared name; close only the removed generation's notice.
+        if (sessionOwner && notice.qitem_id !== rosterReadyNoticeId(rigId, node.latest_session_name!)) continue;
+        const updated = this.queueRepo.updateWithinTransaction({
+          qitemId: notice.qitem_id, actorSession: OPENRIG_SENDER, state: "done",
+          closureReason: "no-follow-on", resolution: "seat removed", transitionNote: "seat removed",
+        });
+        queueEvents.push(...updated.persistedEvents);
+      }
       this.rigRepo.deleteNode(node.node_id);
       rosterEvent = this.eventBus.persistWithinTransaction({
         type: "topology.roster_recorded",
@@ -634,6 +645,7 @@ export class RigLifecycleService {
         });
       }
     }
+    for (const event of queueEvents) this.eventBus.notifySubscribers(event);
     if (rosterEvent) this.eventBus.notifySubscribers(rosterEvent);
 
     if (remaining.length > 0) {
@@ -709,7 +721,7 @@ export class RigLifecycleService {
     // that an unarchived node OUTSIDE the target owns (for example the live replacement of an archived
     // generation) addresses that node's work, which this shrink neither counts nor reroutes. Another member of
     // the target sharing the name doesn't take the name's work out of this check.
-    const activeQitemIds = this.activeQitemIdsForSessionNames(rigId,
+    const activeQitemIds = this.activeQitemIdsForSessionNames(
       nodes.flatMap((node) => node.latest_session_name
         && !findOtherSessionOwner(this.db, node.latest_session_name, node.id, { ignoreArchived: true, excludeNodeIds: ids })
         ? [node.latest_session_name] : []),
@@ -851,19 +863,23 @@ export class RigLifecycleService {
 Shrinking pod '${namespace}' already ${applied.join("; ")}; those changes were not undone.`;
   }
 
-  private activeQitemIdsForSessionNames(rigId: string, sessionNames: string[]): string[] {
+  private activeQitemIdsForSessionNames(sessionNames: string[]): string[] {
+    return this.activeQitemsForSessionNames(sessionNames)
+      .filter(row => !isRosterReadyNotice(row))
+      .map(row => row.qitem_id);
+  }
+
+  private activeQitemsForSessionNames(sessionNames: string[]): Array<{ qitem_id: string; source_session: string }> {
     const uniqueSessionNames = [...new Set(sessionNames)];
     if (uniqueSessionNames.length === 0) return [];
     const placeholders = uniqueSessionNames.map(() => "?").join(", ");
-    return (this.db.prepare(`
-      SELECT qitem_id, source_session, destination_session
+    return this.db.prepare(`
+      SELECT qitem_id, source_session
       FROM queue_items
       WHERE destination_session IN (${placeholders})
         AND state IN ('pending', 'in-progress', 'blocked')
       ORDER BY qitem_id
-    `).all(...uniqueSessionNames) as Array<{ qitem_id: string; source_session: string; destination_session: string }>)
-      .filter(row => row.source_session !== OPENRIG_SENDER || row.qitem_id !== rosterReadyNoticeId(rigId, row.destination_session))
-      .map(row => row.qitem_id);
+    `).all(...uniqueSessionNames) as Array<{ qitem_id: string; source_session: string }>;
   }
 
   private activeQitemsError(subject: string, activeQitemIds: string[], before = "removal"): string {
