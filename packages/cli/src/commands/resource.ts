@@ -7,6 +7,8 @@ import { sessionRigOf } from "../session-name.js";
 
 type Resource = { kind: string; url: string };
 type ResourceLink = Resource & { ref: string; linkedBy: string };
+export type NativeResourceEntry = { id: string; summary: string; details: object };
+export type ResourceSource = { kind: string; list: (rig: string) => NativeResourceEntry[] };
 
 const digest = (parts: string[]) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 const kindPattern = /^[a-z][a-z0-9-]*$/;
@@ -32,11 +34,11 @@ function resourceOf(input: string, requestedKind?: string): Resource {
   return { kind, url: url.href };
 }
 
-function scope(): { dir: string; seat: string } {
+function scope(): { dir: string; seat: string; rig: string } {
   const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
   const rig = seat && sessionRigOf(seat);
   if (!seat || !rig) throw new Error("Run rig resource from a managed seat.");
-  return { dir: join(getOpenRigHome(), "resource-links", digest([rig])), seat };
+  return { dir: join(getOpenRigHome(), "resource-links", digest([rig])), seat, rig };
 }
 
 function update(operation: "link" | "unlink", input: string, opts: { kind?: string; ref?: string }): void {
@@ -62,8 +64,7 @@ function update(operation: "link" | "unlink", input: string, opts: { kind?: stri
   }
 }
 
-function list(kind?: string) {
-  const { dir } = scope();
+function listLinks(dir: string, kind?: string) {
   let names: string[];
   try { names = readdirSync(dir); }
   catch (error) {
@@ -87,23 +88,32 @@ function list(kind?: string) {
   return [...grouped.values()].sort((a, b) => a.kind.localeCompare(b.kind) || a.url.localeCompare(b.url));
 }
 
-export function resourceCommand(): Command {
+export function resourceCommand(sources: readonly ResourceSource[] = []): Command {
   const command = new Command("resource").description("Manage this rig's shared resource links on this host");
   for (const operation of ["link", "unlink"] as const) {
     command.command(`${operation} <url>`)
       .description(operation === "link" ? "Add a resource association" : "Remove a resource association")
       .option("--kind <kind>", "Resource kind (pr, mr, or any custom kind)")
       .option("--ref <ref>", "Work reference (defaults to the current seat)")
-      .action((url: string, opts: { kind?: string; ref?: string }) => update(operation, url, opts));
+      .action((url: string, opts: { kind?: string; ref?: string }) => {
+        if (sources.some(({ kind }) => kind === opts.kind)) throw new Error(`Resource kind ${opts.kind} is read-only.`);
+        update(operation, url, opts);
+      });
   }
   command.command("list").description("List the current rig's resource links")
     .option("--kind <kind>", "Filter by resource kind")
     .option("--json", "JSON output")
     .action((opts: { kind?: string; json?: boolean }) => {
-      const entries = list(opts.kind);
-      console.log(opts.json ? JSON.stringify(entries, null, 2) : entries.length
-        ? entries.map(({ kind, url, links }) => `${kind}\t${url}\t${links.map(({ ref }) => ref).join(", ")}`).join("\n")
-        : "No matching resource links for this rig.");
+      const { dir, rig } = scope();
+      const links = listLinks(dir, opts.kind);
+      const native = sources.filter(({ kind }) => !opts.kind || kind === opts.kind)
+        .flatMap(({ kind, list }) => list(rig).map((entry) => ({ ...entry, kind })));
+      const rows = [
+        ...links.map(({ kind, url, links }) => `${kind}\t${url}\t${links.map(({ ref }) => ref).join(", ")}`),
+        ...native.map(({ kind, id, summary }) => `${kind}\t${id}\t${summary}`),
+      ];
+      console.log(opts.json ? JSON.stringify([...links, ...native], null, 2)
+        : rows.join("\n") || "No matching resources for this rig.");
     });
   return command;
 }

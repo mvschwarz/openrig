@@ -14,7 +14,9 @@ it("shares durable links within one rig and preserves other associations when un
   try {
     vi.stubEnv("OPENRIG_HOME", home);
     vi.stubEnv("OPENRIG_SESSION_NAME", "builder@studio");
-    const run = (...args: string[]) => resourceCommand().parse(args, { from: "user" });
+    const source = { kind: "native", list: (rig: string) => rig === "studio"
+      ? [{ id: "native-1", summary: "Managed entry", details: { state: "ready" } }] : [] };
+    const run = (...args: string[]) => resourceCommand([source]).parse(args, { from: "user" });
     const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
     const list = (...args: string[]) => {
       run("list", "--json", ...args);
@@ -34,6 +36,8 @@ it("shares durable links within one rig and preserves other associations when un
     expect(prs[0].links.map((link: { ref: string }) => link.ref).sort()).toEqual(["qitem-1", "workflow-2"]);
     expect(list("--kind", "mr")).toMatchObject([{ url: mr }]);
     expect(list("--kind", "report")).toMatchObject([{ url: "https://docs.example/report" }]);
+    expect(list("--kind", "native")).toEqual([{ kind: "native", id: "native-1", summary: "Managed entry", details: { state: "ready" } }]);
+    expect(() => run("link", "https://docs.example/report", "--kind", "native")).toThrow("read-only");
     run("unlink", pr, "--ref", "qitem-1");
     expect(list("--kind", "pr")).toMatchObject([{ links: [{ ref: "workflow-2" }] }]);
     vi.stubEnv("OPENRIG_SESSION_NAME", "reviewer@other");
