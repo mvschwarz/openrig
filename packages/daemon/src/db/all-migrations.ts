@@ -7,6 +7,7 @@ import { remoteControlObservationsSchema } from "./migrations/179_remote_control
 import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_staging.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
+import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";
 import { networkRequestsSchema } from "./migrations/184_network_requests.js";
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
@@ -35,6 +36,7 @@ import { contextUsageOccupantGenerationSchema } from "./migrations/168_context_u
 import { seatRuntimeHomeRecordsSchema } from "./migrations/169_seat_runtime_home_records.js";
 import { claudeAutoModeSchema } from "./migrations/171_claude_auto_mode.js";
 import { seatHookBridgeSchema } from "./migrations/171_seat_hook_bridge.js";
+import { seatColdStartsSchema } from "./migrations/185_seat_cold_starts.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
@@ -372,9 +374,11 @@ export const ALL_MIGRATIONS: Migration[] = [
   seatPoolSchema,
   queueTransferStagingSchema,
   remoteControlObservationsSchema,
+  seatColdStartsSchema,
   sessionStopAttemptSchema,
   nodeKeepAliveSchema,
   queueItemsBlockedOnIndexSchema,
   queueItemsScanIndexesSchema,
+  rigSeatSliceSchema,
   networkRequestsSchema,
 ];
