@@ -4,7 +4,7 @@ An [exported queue archive](queue-transfer-export.md) can be checked and stored 
 
 ## Review, then stage
 
-Run the proposed commands on the destination. Use the same `OPENRIG_HOME` and, if set, `OPENRIG_DB` as its daemon. The database must already have the staging migration; the commands don't start a daemon or migrate its database.
+Run the proposed commands on the destination with the daemon's `OPENRIG_HOME`. They use `db.path` (including environment overrides) when configured, then the last launch's `--db` path if recorded, then the home default. The database must already have migration 190; the commands don't start a daemon or migrate its database.
 
 ```sh
 rig queue import workshop.queue.json --dry-run
@@ -26,9 +26,11 @@ No authorization is needed. A valid review reports `not_ready_for_activation` an
 | `qitem_id_collision`, `workspace_has_unrelated_conflict` | An ID belongs to destination work already, or a mission-control action ID collides. Nothing is replaced. |
 | `qitem_erased_at_destination` | The destination already recorded an erasure for this ID. |
 | `unresolved_rig`, `unresolved_seat` | A named rig or seat could not be shown locally without mapping. The report leaves the address as written. |
-| `missing_evidence`, `dangling_reference` | A referenced file could not be shown under local shared roots, or the work it refers to isn't in the archive or known locally. Nothing is fetched or copied. |
+| `missing_evidence` | The path was checked under a local shared root but did not name an existing regular file. |
+| `evidence_not_checked` | The reference could not be checked, for example because it is a link, is relative, or is outside local shared roots. |
+| `dangling_reference` | A referenced item is not in the archive or known locally. |
 
-Refusals exit nonzero and do not keep an envelope. Warnings do not prevent staging. Evidence checks use the local shell's `OPENRIG_FILES_ALLOWLIST`; links and relative paths without a root are not verified. Review does not compare to the current source, discover later reports, validate a receipt or check a proposed seat mapping. Those require the later transfer steps.
+Refusals exit nonzero and do not keep an envelope. Warnings do not prevent staging. Evidence checks use the resolved `files.allowlist` configuration; nothing is fetched or copied. Review does not compare to the current source, discover later reports, validate a receipt or check a proposed seat mapping. Those require the later transfer steps.
 
 ## Keep only what you need
 
