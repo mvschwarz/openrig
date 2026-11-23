@@ -13,9 +13,10 @@ it("retains an interrupted runtime switch when upgrading to Pi-capable switches"
       (id, node_id, canonical_session, staging_session, predecessor_pane, predecessor_generation, successor_generation, from_runtime, to_runtime, reason, plan_json, deadline_at)
       VALUES (?, 'seat', 'build@upgrade', ?, '%0', 'before', ?, 'codex', ?, 'allowance', '{}', '2026-11-03T03:00:00Z')`);
     insert.run("old", "staging-old", "after-old", "claude-code");
-    const before = db.prepare("SELECT * FROM seat_runtime_switches WHERE id = 'old'").get();
+    const before = db.prepare("SELECT * FROM seat_runtime_switches WHERE id = 'old'").get() as Record<string, unknown>;
     migrate(db, ALL_MIGRATIONS);
-    expect(db.prepare("SELECT * FROM seat_runtime_switches WHERE id = 'old'").get()).toEqual(before);
+    // Every pre-upgrade column must survive, including when a later migration adds a column.
+    expect(db.prepare("SELECT * FROM seat_runtime_switches WHERE id = 'old'").get()).toMatchObject(before);
     expect(() => insert.run("duplicate", "staging-new", "after-new", "pi")).toThrow();
     db.exec("UPDATE seat_runtime_switches SET phase = 'abandoned' WHERE id = 'old'");
     insert.run("pi", "staging-new", "after-new", "pi");

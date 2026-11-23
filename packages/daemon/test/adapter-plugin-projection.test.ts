@@ -41,7 +41,10 @@ function mockTmux() {
 function mockClaudeFs(files?: Record<string, string>): ClaudeAdapterFsOps & { _store: Record<string, string> } {
   const store: Record<string, string> = { ...files };
   return {
-    readFile: (p: string) => { if (p in store) return store[p]!; throw new Error(`Not found: ${p}`); },
+    readFile: (p: string) => {
+      if (p in store) return store[p]!;
+      throw Object.assign(new Error(`Not found: ${p}`), { code: "ENOENT" });
+    },
     writeFile: (p: string, c: string) => { store[p] = c; },
     exists: (p: string) => p in store,
     mkdirp: () => {},
