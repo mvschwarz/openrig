@@ -73,3 +73,25 @@ The new format contains no payloads, auth or raw identity headers, URL parameter
 SQL text, bind values, native identifiers or raw exception messages. Legacy
 slow-operation records keep their existing format: their `outcome: ok` indicates
 completion of the observed operation and is not an HTTP-success assertion.
+
+## Trace of state-changing requests (opt-in)
+
+Start the daemon with `OPENRIG_MUTATION_TRACE=1` in its environment to record a line
+for `POST`, `PUT`, `PATCH` and `DELETE` requests on its main port. The line is offered
+once the request's handling has finished and its response is prepared: a request still
+being handled has no line yet, and a daemon stopped before then writes none. The
+variable is read once at startup; any other value, or none, leaves the trace off. There
+is no `rig config` key for it. The optional guest activity port isn't traced.
+
+Records use `schema: openrig.mutation-trace/v1` in the same `logs/slow-operations.jsonl`
+under the OpenRig home. Each carries `at`, `method`, `path` (without the query string),
+the response `status`, `sender` and the writer `coverage` counters described above.
+Unlike the request-phase format, `sender` records a header value: the
+`X-OpenRig-Session` the caller sent, or null.
+
+`status` is the status the daemon prepared for the response, not proof the client
+received it. A record is a request and that status, not a committed change, and
+`sender` is what the request carried, not a verified identity. The trace uses the same writer and
+limits as the diagnostics above: nothing is written on the request path, a record that
+doesn't fit is dropped and counted while the request goes on, and a failure to record
+never changes the response.
