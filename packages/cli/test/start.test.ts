@@ -1190,6 +1190,142 @@ describe("rig start (OPR.0.3.4.1)", () => {
     expect(exitCode).toBe(1);
   });
 
+  // ---- LEFT-OUT RIGS: a 404 preview is named, never dropped ----
+
+  // What the daemon answers when a rig's selected snapshot names older occupants and current state can't stand in.
+  const STALE_404 = {
+    _httpStatus: 404,
+    error: "Rig \"rebooted\" exists but its restore snapshots name an older occupant and current DB state is insufficient for rehydrate. Start fresh with: rig up <spec-path>",
+    code: "no_snapshot",
+    blockers: ["node dev.c is pod-aware but has no persisted startup context or resume token"],
+  };
+  const detachedSeats = () => ["dev.a", "dev.b", "dev.c"].map((logicalId) => ({
+    logicalId, sessionStatus: "detached", intentionallyStopped: false,
+  })) as unknown as Record<string, unknown>;
+
+  it("--last names a rig whose preview answers 404, with the daemon's code, message and blockers", async () => {
+    routes["/api/rigs/summary"] = () => [{ id: "rig-h", name: "rebooted", nodeCount: 3, lifecycleState: "recoverable" }];
+    routes["/api/rigs/:id/nodes"] = detachedSeats;
+    routes["/api/rigs/:id/up"] = () => STALE_404;
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "start", "--last"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain(`rebooted: left out, not restored -- ${STALE_404.error} (no_snapshot)`);
+    expect(output).toContain(`    ${STALE_404.blockers[0]}`);
+    expect(output).toContain("Daemon and kernel are up. No rig restored: 1 rig(s) left out (see above).");
+    expect(output).not.toContain("No rigs to restore");
+    // Which rigs restore and the exit code are unchanged: nothing was applied, and a left-out rig is not an error.
+    expect(upBodies.filter((b) => b.plan !== true)).toHaveLength(0);
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("--last --json lists a 404 preview under leftOut, apart from previewErrors", async () => {
+    routes["/api/rigs/summary"] = () => [{ id: "rig-h", name: "rebooted", nodeCount: 3, lifecycleState: "recoverable" }];
+    routes["/api/rigs/:id/nodes"] = detachedSeats;
+    routes["/api/rigs/:id/up"] = () => STALE_404;
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "start", "--last", "--json"]);
+    });
+    expect(logs.filter((line) => !line.startsWith("{"))).toEqual([]);
+    const parsed = JSON.parse(logs.find((l) => l.startsWith("{"))!);
+    expect(parsed).toMatchObject({ status: "started", candidates: [], keptDown: [], restoredRigs: [] });
+    expect(parsed.leftOut).toEqual([{
+      rigId: "rig-h", rigName: "rebooted", code: "no_snapshot", message: STALE_404.error, blockers: STALE_404.blockers,
+    }]);
+    expect(parsed.previewErrors).toBeUndefined();
+    expect(exitCode).toBeUndefined();
+  });
+
+  it.each([
+    ["never launched", () => [{ logicalId: "dev.a", sessionStatus: null }, { logicalId: "dev.b", sessionStatus: null }], true],
+    ["seats unreadable", () => ({ _httpStatus: 503 }), false],
+  ] as const)("a 404 rig whose seats are %s: neverLaunched only when every seat was read and none has run", async (_label, nodes, never) => {
+    routes["/api/rigs/summary"] = () => [{ id: "rig-n", name: "scratch", nodeCount: 2, lifecycleState: "stopped" }];
+    routes["/api/rigs/:id/nodes"] = nodes as never;
+    routes["/api/rigs/:id/up"] = () => ({
+      _httpStatus: 404, code: "no_snapshot",
+      error: "Rig \"scratch\" exists but has no restore-usable snapshot and current DB state is insufficient for rehydrate. Start fresh with: rig up <spec-path>",
+      blockers: ["rig has no persisted sessions to rehydrate"],
+    });
+
+    const human = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--last"]); });
+    const json = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--last", "--json"]); });
+    const output = human.logs.join("\n");
+    const entry = JSON.parse(json.logs.find((l) => l.startsWith("{"))!).leftOut[0];
+    expect(entry).toMatchObject({ rigId: "rig-n", rigName: "scratch", code: "no_snapshot", blockers: ["rig has no persisted sessions to rehydrate"] });
+    if (never) {
+      expect(entry.neverLaunched).toBe(true);
+      expect(output).toContain("scratch: nothing to restore (none of its seats has ever run), left out.");
+      expect(output).toContain("Daemon and kernel are up. No rigs to restore.");
+    } else {
+      // Unknown never reads as nothing: an unreadable seat list keeps the daemon's reason in full.
+      expect(entry.neverLaunched).toBeUndefined();
+      expect(output).toContain("scratch: left out, not restored -- ");
+      expect(output).toContain("No rig restored: 1 rig(s) left out");
+    }
+    expect(human.exitCode).toBeUndefined();
+    expect(json.exitCode).toBeUndefined();
+  });
+
+  it("a 5xx and a transport failure stay in previewErrors (exit 1), and a 404 beside them goes to leftOut", async () => {
+    routes["/api/rigs/summary"] = () => [
+      { id: "rig-5xx", name: "broken", nodeCount: 1, lifecycleState: "recoverable" },
+      { id: "rig-net", name: "unreachable", nodeCount: 1, lifecycleState: "recoverable" },
+      { id: "rig-h", name: "rebooted", nodeCount: 3, lifecycleState: "recoverable" },
+    ];
+    routes["/api/rigs/:id/nodes"] = detachedSeats;
+    routes["/api/rigs/:id/up"] = (_req, body) => body._rigId === "rig-5xx"
+      ? { _httpStatus: 503, code: "preview_broken", error: "database unavailable" }
+      : STALE_404;
+    const prog = new Command();
+    prog.addCommand(startCommand({ ...deps(), clientFactory: (url) => {
+      const client = new DaemonClient(url), post = client.post.bind(client);
+      client.post = (async (path: string, body: unknown, config?: unknown) => {
+        if (path === "/api/rigs/rig-net/up") throw new (await import("../src/client.js")).DaemonConnectionError("connection reset");
+        return post(path, body, config as never);
+      }) as typeof client.post;
+      return client;
+    } }));
+
+    const { logs, exitCode } = await captureLogs(async () => { await prog.parseAsync(["node", "rig", "start", "--last", "--json"]); });
+    const parsed = JSON.parse(logs.find((l) => l.startsWith("{"))!);
+    expect(parsed.status).toBe("started_with_errors");
+    expect(parsed.previewErrors).toEqual([
+      { rigId: "rig-5xx", rigName: "broken", code: "preview_broken", message: "database unavailable" },
+      { rigId: "rig-net", rigName: "unreachable", code: "transport_error", message: "connection reset" },
+    ]);
+    expect(parsed.leftOut.map((entry: { rigId: string }) => entry.rigId)).toEqual(["rig-h"]);
+    expect(exitCode).toBe(1);
+  });
+
+  it("a normal candidate restores as before while a 404 rig beside it is named", async () => {
+    setupCandidateRig("good-rig");
+    routes["/api/rigs/summary"] = () => [
+      { id: "rig-1", name: "good-rig", nodeCount: 2, lifecycleState: "recoverable" },
+      { id: "rig-h", name: "rebooted", nodeCount: 3, lifecycleState: "recoverable" },
+    ];
+    const candidateUp = routes["/api/rigs/:id/up"]!;
+    routes["/api/rigs/:id/up"] = (req, body) => body._rigId === "rig-h" ? STALE_404 : candidateUp(req, body);
+
+    const human = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--last"]); });
+    const output = human.logs.join("\n");
+    expect(output).toContain("rebooted: left out, not restored -- ");
+    expect(output).toContain("good-rig: fully_restored");
+    const json = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--last", "--json"]); });
+    const parsed = JSON.parse(json.logs.find((l) => l.startsWith("{"))!);
+    expect(parsed.status).toBe("started");
+    expect(parsed.candidates).toEqual([{ rigName: "good-rig", lifecycleState: "recoverable" }]);
+    expect(parsed.restoredRigs).toMatchObject([{ rigId: "rig-1", rigName: "good-rig", status: "fully_restored" }]);
+    expect(parsed.leftOut).toMatchObject([{ rigId: "rig-h", rigName: "rebooted", code: "no_snapshot" }]);
+    // Only good-rig was applied, once per run.
+    expect(upBodies.filter((b) => b.plan === false).map((b) => b._rigIdRoute)).toEqual(["rig-1", "rig-1"]);
+    expect(human.exitCode).toBeUndefined();
+    expect(json.exitCode).toBeUndefined();
+  });
+
   // ---- NON-2XX ERROR HANDLING (guard BLOCKING 25661f72) ----
 
   it("non-2xx /api/up (rig_not_stopped) -> honest error output, nonzero exit, not undefined success", async () => {
