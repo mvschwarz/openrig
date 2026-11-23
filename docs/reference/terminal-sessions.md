@@ -116,6 +116,10 @@ native Herdr tiles. A temporary readable capture uses
 when the capture finishes. It does not unset a manually fixed window it did not
 pin.
 
+A browser terminal that connects with `?geometry=1` learns the pane's columns
+and rows, and the pinned 90 by 27 when `terminal.fixed_geometry` is on; see
+[Writing a daemon client](daemon-http-clients.md#route-details).
+
 Kept writable 0.7.8/0.7.9 viewers can retain an old `ignore-size` attach, and
 pre-reflow 0.7.11 viewers can retain the old mirrored display. Changing saved
 argv cannot change that running client. Close only the owned Herdr viewer pane

@@ -406,6 +406,17 @@ What reads these declarations:
   subject to the existing project filter and the newest 500 rows per slice. Counts are recomputed on every list
   request. `?refresh=1|true` invalidates the separate listing cache, not a stored queue-count snapshot. This
   resolution does not change the returned slice list or filters.
+- **A terminal viewer's pane size:** add `?geometry=1` to the terminal websocket (`GET /api/terminal/<name>`) to
+  learn the pane's columns and rows, so a browser terminal wraps lines where the agent's pane does. The size arrives
+  as a binary frame holding UTF-8 JSON, `{"type":"geometry","cols":<n>,"rows":<n>}`: once when the viewer joins,
+  before any output, and again whenever the pane's size changes (checked about every two seconds). Terminal output
+  is always a text frame, so set `binaryType = "arraybuffer"` and read only binary frames as size frames. xterm.js's
+  `AttachAddon` writes every frame to the terminal, binary ones included, so a viewer using it should leave
+  `?geometry=1` off or read the socket's messages itself. With `terminal.fixed_geometry` on, the frame reports the
+  pinned 90 by 27, or the window's own size when OpenRig didn't pin it: someone fixed its size by hand, or its sizing
+  couldn't be read. When the size can't be read, no frame is sent
+  and the socket stays open. The viewer is told the size and never sets it: the socket still has no resize message.
+  Without the flag, the socket's frames are unchanged.
 
 
 ## Resume one banked original conversation
