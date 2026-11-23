@@ -79,6 +79,7 @@ import {
   STUCK_SWEEP_FINDING_TAG,
   resolveOperatorSeat,
   resolveSessionNodeId,
+  resolveStuckSweepIntervalSeconds,
 } from "./queue-stuck-sweep.js";
 import {
   RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
@@ -492,7 +493,18 @@ function findWakeRecovery(db: Database.Database, qitemId: string) {
  * Diagnosis remains visible; only duplicate delivery is suppressed. */
 export function queueRecoveryOwnsWake(db: Database.Database, row: QueueItem | null): boolean {
   if (!row || !["pending", "in-progress", "blocked"].includes(row.state)) return false;
-  if (findWakeRecovery(db, row.qitemId)) return true;
+  const recovery = findWakeRecovery(db, row.qitemId);
+  if (recovery) {
+    if (["pending", "in-progress", "blocked"].includes(recovery.state)) return true;
+    // The ladder keeps a lead's closed disposition. Only the consumer's duplicate-wake
+    // suppression expires, so an idle owner can receive its ordinary reminder again.
+    const closed = db.prepare(`SELECT ts FROM queue_transitions WHERE qitem_id = ?
+      AND state NOT IN ('pending', 'in-progress', 'blocked') AND closure_reason IS NOT NULL
+      ORDER BY transition_id DESC LIMIT 1`).get(recovery.qitemId) as { ts: string } | undefined;
+    const ageMs = Date.now() - Date.parse(closed?.ts ?? "");
+    // Missing, invalid or future closure times cannot justify suppressing a wake.
+    return ageMs >= 0 && ageMs < resolveStuckSweepIntervalSeconds() * 1000;
+  }
   const mode = unclaimedWakeMode(row);
   if (!mode) return false;
   if (row.state === "pending" && !row.claimedAt && row.handedOffFrom) {

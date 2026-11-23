@@ -19,6 +19,7 @@ import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, tr
 import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "../queue-artifact.js";
 import { resolveSenderSession } from "../sender-identity.js";
 import { queueExportCommand } from "./queue-export.js";
+import { queueImportCommand, queueStagingCommand } from "./queue-import.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -1396,6 +1397,8 @@ const QUEUE_HOST_ROW_OPTION_HELP =
 export function queueCommand(depsOverride?: QueueDeps): Command {
   const cmd = new Command("queue").description("Coordination L3 — owned-work queue + inbox/outbox");
   cmd.addCommand(queueExportCommand());
+  cmd.addCommand(queueImportCommand());
+  cmd.addCommand(queueStagingCommand());
   const getDeps = (): QueueDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
