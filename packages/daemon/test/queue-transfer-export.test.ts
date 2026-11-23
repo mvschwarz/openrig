@@ -33,6 +33,7 @@ function seed() {
 
 it("matches the migrated queue and source history column inventories", () => {
   for (const [table, columns] of Object.entries({ ...QUEUE_TRANSFER_COLUMNS,
+    mission_control_actions: [...QUEUE_TRANSFER_COLUMNS.mission_control_actions, "imported_from"],
     queue_transitions_archive: [...QUEUE_TRANSFER_COLUMNS.queue_transitions, "archived_at"] })) {
     expect(db.prepare<[], { name: string }>(`PRAGMA table_info(${table})`).all().map(row => row.name).sort()).toEqual([...columns].sort());
   }
