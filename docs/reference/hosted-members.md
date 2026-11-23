@@ -209,6 +209,104 @@ is the documented entry.
 This entry exposes the current endpoint options. It does not add a resolver-module loader or promise
 additional adapter callbacks that those options do not implement.
 
+### Add an introduction and static references
+
+Pass `instructions` to `startMcpHttpServer` to add endpoint-owned guidance. Its exported type is
+`McpInstructionExtension`:
+
+```js
+const instructions = {
+  introduction: "The team guide is available at team://reference/guide.",
+  resources: [{
+    uri: "team://reference/guide",
+    name: "team-guide",
+    mimeType: "text/markdown",
+    text: "# Team guide\nUse this team's documented workflow.",
+  }],
+};
+```
+
+Core keeps its existing caller-scoped instructions and appends the introduction. Static resources
+use the SDK's `resources/list` and `resources/read` protocol. The built-in
+`openrig://reference/coordination` resource always serves Core's generic guidance for the current
+caller, including read-only and offered-tool filtering. It is available without an extension and
+with local token-file grants as well as a resolver or grant service. Its URI is reserved for Core.
+
+Configured introduction and resource text belong to the endpoint and are delivered to callers admitted by that
+endpoint; use separate endpoint configurations when the content differs. They do not grant Core tools
+or object access. Resources contain the supplied text, not a file path or a loader callback. Duplicate
+resource URIs follow the SDK's existing registration error behavior. Without an introduction, the
+existing initialization instructions remain unchanged.
+
+### Supply a caller resolver
+
+An embedding can pass `resolver` and `resolverTimeoutMs` to `startMcpHttpServer`. The supported
+`@openrig/cli/mcp.js` entry exports the `CallerResolver` and `CallerResolution` types. There is no module loader:
+your application supplies the function and owns its credential authority.
+
+The resolver receives `{ bearer, instance, methods, signal }` on each request. `instance` is this daemon's
+reported instance id, not a client parameter. `methods` lists the JSON-RPC methods in message order; it is empty
+for non-POST requests or an unreadable body. It is operation metadata, not permission to run those methods.
+The POST body is read within the shared bounded budget before the resolver decides; authentication refusals
+take precedence over parse errors, not over reading the body.
+A successful result has this shape:
+
+```ts
+{
+  ok: true,
+  principal: { source: "example-authority", id: "guest-42" },
+  seat: "guest@team",
+  access: {
+    principal: "guest-42", owner: false, workspace: false, rigs: [], roots: [],
+    external: {
+      objects: { queue: ["create", "show", "list"], team: ["list"] },
+      peerSeats: ["lead@team", "helper@team"]
+    }
+  }
+}
+```
+
+The exact seat must already exist in this daemon, including a materialized seat that has not launched.
+Core does not create or start it during resolution. The principal's opaque `source` and `id`, with optional
+`grant`, `version` and `label`, are attribution, never credentials. `access.principal` is normalized to that id.
+`external.objects` uses the existing object/action capability evaluator. With `external.peerSeats`, only those
+exact peers are in scope for destinations, rows and team members; rig selection follows the named seat addresses.
+The `rigs` list is ignored when `peerSeats` is supplied.
+Without `peerSeats`, the existing rig-scoped rule remains. Without peers or rigs, only the caller's own rows are
+in scope. An external work profile has `owner: false` and `workspace: false`.
+A non-external result can instead be an owner or workspace caller, carrying the embedding's full authority;
+the embedding owns that choice.
+
+A result may also reduce the profile with `readOnly: true`, or set `newWorkRetryAfterMs`. Read-only connections
+are offered only read operations and cannot invoke hidden writes. Backoff holds only new creates, returns a
+retryable result with the same request id, and leaves reads, claims, updates and already-landed same-id retries
+available. The existing backoff range is 1–600 seconds for a positive delay; zero means no backoff.
+
+A refusal is `{ ok: false, refusal }`. `unknown`, `revoked`, `expired` and `wrong_instance` return HTTP 401 with a
+Bearer challenge; `malformed` and `unavailable` return 503. A thrown error, unusable result, missing instance or
+unavailable seat is also unavailable. Resolver exceptions are not echoed or logged. No result falls back to the
+token file or the process's seat. A resolver and a grant service cannot both be selected.
+
+The default 5000 ms budget covers reading the body, looking up the instance, calling the resolver and checking
+the seat. The signal aborts on that deadline or a disconnected client. Core bounds its wait even when the returned
+promise ignores the signal, and ignores late completion. Authentication refusals take precedence over JSON
+parse errors; an authenticated malformed body still gets 400, and a body over 4 MiB gets 413. OAuth resource
+metadata and the configured task destination can also be used with a resolver.
+
+### Use the same profile in a local token file
+
+A token-file entry can optionally carry `objects`, `peerSeats`, `readOnly` and `newWorkRetryAfterSeconds`.
+`objects` selects the scoped work profile above; `peerSeats` requires `objects`. An entry without these fields
+keeps its existing rig, workspace and owner behavior. The read-only reduction and new-work delay also work on
+ordinary local grants. Rotation preserves the optional fields. A malformed field gets a warning naming the
+field and its repair, and a conservative reading: `readOnly` becomes true, invalid peers become an empty list,
+and invalid object actions are disabled while valid object limits remain. A peer list without `objects` allows
+no object actions. These cases never restore owner, workspace or unrestricted legacy access.
+
+An unusable `newWorkRetryAfterSeconds` uses the bounded 600-second new-work delay with a warning. Reads,
+existing-work settlement and landed same-ID retries remain usable; the authenticated token does not become
+unavailable. Other grants are unaffected. No service or service-shaped principal id is needed.
+
 ## Assistants connected through a grant service
 
 With `rig mcp serve --http --grant-service <url>`, an outside service answers each connection's key with its grant

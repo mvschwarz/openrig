@@ -231,12 +231,14 @@ export function parseIdentityPrincipal(raw: string | undefined): string | null {
   let value: unknown;
   try { value = JSON.parse(raw); } catch { return null; }
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const { source, id, grant, version, ...rest } = value as Record<string, unknown>;
+  const { source, id, grant, version, label, ...rest } = value as Record<string, unknown>;
   const text = (v: unknown, max: number): v is string => typeof v === "string" && v.trim() !== "" && v.length <= max;
-  if (Object.keys(rest).length > 0 || (source !== "file" && source !== "grant-service") || !text(id, 200)) return null;
+  if (Object.keys(rest).length > 0 || !text(source, 200) || !text(id, 200)) return null;
   if (grant !== undefined && !text(grant, 200)) return null;
   if (version !== undefined && !(typeof version === "number" && Number.isFinite(version)) && !text(version, 64)) return null;
-  return JSON.stringify({ source, id, ...(grant !== undefined ? { grant } : {}), ...(version !== undefined ? { version } : {}) });
+  if (label !== undefined && !text(label, 200)) return null;
+  return JSON.stringify({ source, id, ...(grant !== undefined ? { grant } : {}), ...(version !== undefined ? { version } : {}),
+    ...(label !== undefined ? { label } : {}) });
 }
 
 /** Whether the request's TCP peer is this machine. A request without a socket (an in-process call) isn't. */

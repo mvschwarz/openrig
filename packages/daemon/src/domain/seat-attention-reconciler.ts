@@ -163,12 +163,14 @@ export async function rebindAndVerifyPaneIdentity(input: {
   const now = () => (input.now ?? (() => new Date()))().toISOString();
   let observedAt: string;
   const identityStore = new SeatIdentityStore(input.db);
+  let sessionObserved = false;
   const unavailable = (error: unknown): PaneIdentityReconcileResult => {
     const sampledAt = now();
     if (!input.assertCurrent || input.assertCurrent()) {
       identityStore.upsert(tmuxUnavailableIdentity({ nodeId: input.nodeId, runtime: input.runtime,
         sessionName: input.sessionName, observedAt: sampledAt,
-        registeredPane: input.sessionRegistry.getBindingForNode(input.nodeId)?.tmuxPane ?? null }));
+        registeredPane: input.sessionRegistry.getBindingForNode(input.nodeId)?.tmuxPane ?? null,
+        db: input.db, retainStopped: !sessionObserved }));
     }
     return { ok: false, reason: "tmux_unavailable", detail: `tmux pane identity lookup failed: ${error instanceof Error ? error.message : String(error)}` };
   };
@@ -176,6 +178,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
   try {
     panes = await input.tmux.listPanes(input.sessionName);
     observedAt = now();
+    sessionObserved = panes.length > 0;
   } catch (error) {
     return unavailable(error);
   }
