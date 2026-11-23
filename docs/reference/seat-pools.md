@@ -76,10 +76,11 @@ Under `drain: true`, nothing is moved.
     fails stops nothing: the slot stays `draining` for that evaluation and goes back to `live` in the next;
   - stops the agent with the checked seat stop (the seat stop given an expected node and session), which stops it
     only while its latest session is still the one the evaluation read. Right before each of its effects, after its
-    liveness probe, the stop reads again the job, the rig and model holds, the pool block, and the agent's rows, held
-    messages and activity; stopping again after an earlier attempt also needs the pool to still have surplus. What
-    keeps the agent stops nothing: an agent that got work or woke goes back to `live`; otherwise the slot stays
-    `draining` for that evaluation and goes back to `live` in the next, while an earlier attempt stays on record and
+    liveness probe, the stop runs the drain's recheck, which reads again the job, the rig and model holds, the pool
+    block, and the agent's rows, held messages and activity; stopping again after an earlier attempt also needs the
+    pool to still have surplus. What keeps the agent stops nothing. In a fresh drain, an agent that got work or woke
+    goes back to `live`, and any other refusal leaves the slot `draining` for that evaluation and gives it back to
+    `live` in the next. A retry refused this way leaves the slot `draining` with the earlier attempt on record, and
     the stop is tried again later.
 
   What the stop returned goes in the notes as `stop.result`, never two at once:
@@ -89,7 +90,7 @@ Under `drain: true`, nothing is moved.
   | `stopped` | The stop succeeded. | `drained` |
   | `absent` | The stop found the session absent in tmux (`session_not_live`, or a `keep_alive` seat already down): a confirmed absence, not a stop. | `drained` |
   | `changed_owner` | The seat or its latest session changed before anything was stopped (`selection_changed`). | `live` |
-  | `unconfirmed` | Anything else, with the real code and message (for example `stop_uncertain`). | `draining`. When the stop attempted a kill, the next evaluation stops the same session again, with no new capture, once the agent is free (an agent that still runs and got work or a wake is not stopped); a session relaunched since is `changed_owner`. When the stop had no effect, the next evaluation gives the slot back to `live`, and a later drain starts again with a new capture. |
+  | `unconfirmed` | Anything else, with the real code and message (for example `stop_uncertain`). | `draining`. When the stop attempted a kill, the next evaluation stops the same session again, with no new capture, once the agent is free and the pool still has surplus (an agent that still runs and got work or a wake is not stopped); a session relaunched since is `changed_owner`. When the stop had no effect, the next evaluation gives the slot back to `live`, and a later drain starts again with a new capture. |
 
   A drained agent keeps its node, its sessions and its history: nothing is removed. `rig up` leaves it stopped.
   Bringing a drained agent back is done by a later change.

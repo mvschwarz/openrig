@@ -177,6 +177,40 @@ function drainWorld() {
   };
 }
 
+/** The seat lifecycle service's real checked stop, composed as the daemon composes it (startup.ts), over a tmux whose
+ *  liveness probe (`has-session`) waits until the test releases it. `commands` is every tmux command it ran. */
+function realCheckedStop(w: ReturnType<typeof drainWorld>, a: Agent) {
+  w.sessions.updateBinding(a.nodeId, { attachmentType: "tmux", tmuxSession: a.session, tmuxPane: "%1" });
+  const commands: string[] = [];
+  let named: string | undefined;
+  let probing!: () => void;
+  const probed = new Promise<void>((resolve) => { probing = resolve; });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const adapter = new TmuxAdapter(async (command) => {
+    commands.push(command);
+    if (command.includes("has-session")) { probing(); await released; return ""; }
+    if (command.includes("list-panes")) { named = /=([^:']+):/.exec(command)?.[1] ?? named; return "%1|0|/tmp|120|40|1"; }
+    if (command.startsWith("tmux show-environment")) {
+      const bound = w.db.prepare("SELECT node_id FROM bindings WHERE tmux_session = ?").get(named) as { node_id: string } | undefined;
+      return `OPENRIG_NODE_ID=${bound?.node_id ?? ""}`;
+    }
+    if (command.startsWith("tmux display-message")) return "$7|4242|1700000000";
+    if (command.includes("detach-client") || command.includes("kill-session")) return "";
+    throw new Error(`unexpected tmux command: ${command}`);
+  });
+  adapter.deliveryGuard = w.guard;
+  const service = new SeatLifecycleService({ db: w.db, rigRepo: w.rigRepo, sessionRegistry: w.sessions, eventBus: w.bus, tmuxAdapter: adapter });
+  w.stopSeat.mockImplementation(async ({ seatRef, reason, expected, recheck }) => {
+    const stopped = await service.stopSeat({ seatRef, reason, operator: null, expected, ...(recheck ? { recheck } : {}) });
+    if (stopped.ok) return { ok: true };
+    return { ok: false, code: stopped.code, message: stopped.message, ...(stopped.partialEffect ? { partialEffect: true } : {}) };
+  });
+  /** The stop's effects that reached tmux. */
+  const effectsSent = () => commands.filter((c) => c.includes("detach-client") || c.includes("kill-session"));
+  return { commands, probed, release, effectsSent };
+}
+
 describe("seat-pool drain: re-read under the lifecycle lease (#3395 Piece 1)", () => {
   it("A row that reaches an agent during its drain is seen by the re-read under the lifecycle lease, the slot goes back to `live`, and nothing is stopped.", async () => {
     const w = drainWorld();
@@ -236,34 +270,7 @@ describe("seat-pool drain: re-read under the lifecycle lease (#3395 Piece 1)", (
       const m = w.model();
       const s1 = w.agent(m, 1);
       const job = w.jobFor(m);
-      w.sessions.updateBinding(s1.nodeId, { attachmentType: "tmux", tmuxSession: s1.session, tmuxPane: "%1" });
-      // The real checked stop, over a tmux whose liveness probe waits for the test.
-      const commands: string[] = [];
-      let named: string | undefined;
-      let probing!: () => void;
-      const probed = new Promise<void>((resolve) => { probing = resolve; });
-      let release!: () => void;
-      const released = new Promise<void>((resolve) => { release = resolve; });
-      const adapter = new TmuxAdapter(async (command) => {
-        commands.push(command);
-        if (command.includes("has-session")) { probing(); await released; return ""; }
-        if (command.includes("list-panes")) { named = /=([^:']+):/.exec(command)?.[1] ?? named; return "%1|0|/tmp|120|40|1"; }
-        if (command.startsWith("tmux show-environment")) {
-          const bound = w.db.prepare("SELECT node_id FROM bindings WHERE tmux_session = ?").get(named) as { node_id: string } | undefined;
-          return `OPENRIG_NODE_ID=${bound?.node_id ?? ""}`;
-        }
-        if (command.startsWith("tmux display-message")) return "$7|4242|1700000000";
-        if (command.includes("detach-client") || command.includes("kill-session")) return "";
-        throw new Error(`unexpected tmux command: ${command}`);
-      });
-      adapter.deliveryGuard = w.guard;
-      const service = new SeatLifecycleService({ db: w.db, rigRepo: w.rigRepo, sessionRegistry: w.sessions, eventBus: w.bus, tmuxAdapter: adapter });
-      // As the daemon composes it (startup.ts).
-      w.stopSeat.mockImplementation(async ({ seatRef, reason, expected, recheck }) => {
-        const stopped = await service.stopSeat({ seatRef, reason, operator: null, expected, ...(recheck ? { recheck } : {}) });
-        if (stopped.ok) return { ok: true };
-        return { ok: false, code: stopped.code, message: stopped.message, ...(stopped.partialEffect ? { partialEffect: true } : {}) };
-      });
+      const { commands, probed, release, effectsSent } = realCheckedStop(w, s1);
 
       const run = w.cycle(job.jobId);
       await probed;
@@ -273,13 +280,74 @@ describe("seat-pool drain: re-read under the lifecycle lease (#3395 Piece 1)", (
       const notes = await run;
 
       expect(commands.some((c) => c.includes("has-session"))).toBe(true);
-      expect(commands.filter((c) => c.includes("detach-client") || c.includes("kill-session"))).toEqual([]);
+      expect(effectsSent()).toEqual([]);
       expect(w.latestOf(s1.nodeId)?.status).toBe("running");
       expect(w.queue.getById(q)).toMatchObject({ state: "pending", destinationSession: s1.session });
       expect(notes.drains).toEqual([{
         slotNumber: 1, session: s1.session, phase: "live", outcome: "returned", code: "work_arrived", snapshotId: w.captures[0]!.snapshotId,
       }]);
       expect(w.phases(m)).toEqual(["live"]);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A pool block changed while the checked stop's liveness probe is paused, now keeping the agent, is seen at the stop's final step: nothing is detached or killed, and the slot stays `draining`.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model();
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      const { probed, release, effectsSent } = realCheckedStop(w, s1);
+
+      const run = w.cycle(job.jobId);
+      await probed;
+      // after the read under the lease: a readable block whose `min` now keeps the one agent
+      const stored = w.db.prepare("SELECT pool FROM nodes WHERE id = ?").get(m.nodeId) as { pool: string };
+      w.db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(JSON.stringify({ ...JSON.parse(stored.pool), min: 1 }), m.nodeId);
+      release();
+      const notes = await run;
+
+      expect(effectsSent()).toEqual([]);
+      expect(w.latestOf(s1.nodeId)?.status).toBe("running");
+      expect(notes.drains).toEqual([{
+        slotNumber: 1, session: s1.session, phase: "draining", outcome: "draining", code: "pool_block_changed", snapshotId: w.captures[0]!.snapshotId,
+      }]);
+      expect(w.phases(m)).toEqual(["draining"]);
+      // nothing was stopped, so the attempt record goes, and the next evaluation gives the slot back to `live`
+      expect(w.slots.stopOutcome(w.slots.forModel(m.nodeId)[0]!.slotId)).toBeNull();
+      await w.cycle(job.jobId);
+      expect(w.phases(m)).toEqual(["live"]);
+      expect(effectsSent()).toEqual([]);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A row admitted while a retried stop's liveness probe is paused is seen at the stop's final step: nothing more is detached or killed, the agent keeps the row, and the slot stays `draining` with the earlier attempt on record.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model();
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      w.stopResults.push({ ok: false, code: "stop_uncertain", message: "The kill was sent but the session could not be confirmed gone.", partialEffect: true });
+      await w.cycle(job.jobId);
+      expect(w.phases(m)).toEqual(["draining"]);
+      const { probed, release, effectsSent } = realCheckedStop(w, s1);
+
+      const run = w.cycle(job.jobId);
+      await probed;
+      // the row arrives while the retry's probe is paused, after the retry's own read under the lease
+      const q = await w.row(s1.session);
+      release();
+      const notes = await run;
+
+      expect(effectsSent()).toEqual([]);
+      expect(w.latestOf(s1.nodeId)?.status).toBe("running");
+      expect(w.queue.getById(q)).toMatchObject({ state: "pending", destinationSession: s1.session });
+      expect(notes.drains).toEqual([{ slotNumber: 1, session: s1.session, phase: "draining", outcome: "draining", code: "work_arrived" }]);
+      expect(w.phases(m)).toEqual(["draining"]);
+      expect(w.slots.stopOutcome(w.slots.forModel(m.nodeId)[0]!.slotId)).toMatchObject({ result: "unconfirmed", partialEffect: true });
     } finally {
       w.db.close();
     }
