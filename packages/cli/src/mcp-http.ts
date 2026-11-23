@@ -199,9 +199,9 @@ const cancelCall = z.object({ method: z.literal("notifications/cancelled"),
 /** An external grant service's contract. Core asks on every request with the caller's raw key and its own instance id;
  *  nothing is cached, and every answer but `active` is refused. */
 export const GRANT_SCHEMA = "openrig.grant/v1";
-/** A grant key as the grant service issues it, `<connection id>.cus_<principal id>.<secret>`. Anything else is refused
- *  before any call. */
-const GRANT_KEY = /^[a-f0-9]{24}\.cus_[A-Za-z0-9]{8,64}\.[a-f0-9]{48}$/;
+/** A grant key as the issuing service formats it, `<connection id>.<principal>.<secret>`.
+ *  The principal is an opaque, prefixed id; connection and secret formats stay the same. */
+const GRANT_KEY = /^[a-f0-9]{24}\.[a-z]{2,8}_[A-Za-z0-9]{8,64}\.[a-f0-9]{48}$/;
 /** An instance id as the grant service takes it. */
 const INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 /** A person's gateway entity id, as the daemon's registry takes it (ENTITY_ID_PATTERN): their address is <id>@external. */
@@ -478,7 +478,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     if (!caller) throw new Error("a request reached the MCP handler without its caller");
     // A grant that names its person gets a client acting as them, which records only their answers to the team.
     const person = caller.access?.external ? caller.access.external.person : caller.access?.person;
-    return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access,
+    return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access, principalSource: caller.principal?.source,
       requestSignal: caller.signal,
       taskDestination: opts.taskDestination, presenceFile: () => presenceFile, frontDoor: opts.frontDoor === true,
       unknownSender, ...(opts.unfilledSeat ? { unfilledSeat: opts.unfilledSeat } : {}),

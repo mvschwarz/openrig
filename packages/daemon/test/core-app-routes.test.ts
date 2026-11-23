@@ -339,6 +339,21 @@ describe("follow actual results and erase retained submissions", () => {
       ? { status: "returned", replyQitemId: reply.qitemId, body: "Original Slack words", replyTo: f.ask.qitemId }
       : { status: "not-returned", replyQitemId: null });
   });
+  it.each(["handoff", "handoff-and-complete"] as const)("follows A -> W -> S when W, parked on A, is handed off (%s) with no saved answer", async (verb) => {
+    const f = await jobFixture();
+    const builder = ["builder", "test"].join("@"), next = ["next", "test"].join("@");
+    const work = await f.repo.create({ sourceSession: builder, destinationSession: builder, body: "Prepare report", nudge: false });
+    f.repo.claim({ qitemId: work.qitemId, destinationSession: builder });
+    f.repo.update({ qitemId: work.qitemId, actorSession: builder, state: "blocked", blockedOn: f.ask.qitemId });
+    const input = { qitemId: work.qitemId, fromSession: builder, toSession: next, nudge: false };
+    const { created } = verb === "handoff" ? await f.repo.handoff(input) : await f.repo.handoffAndComplete(input);
+    // The handoff leaves W naming its blocker, and no answer was submitted, so no checkpoint captures W.
+    expect(f.repo.getById(work.qitemId)!.blockedOn).toBe(f.ask.qitemId);
+    const body = await (await f.send(`/v1/requests/${f.ask.qitemId}/result?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
+    expect(body.work.edges).toContainEqual(expect.objectContaining({ from: f.ask.qitemId, to: work.qitemId, relation: "blocked-on" }));
+    expect(body.work.edges).toContainEqual(expect.objectContaining({ from: work.qitemId, to: created.qitemId, relation: "handed-off-from" }));
+    expect((await f.send(`/v1/work/${created.qitemId}?requestId=${f.ask.qitemId}&actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).status).toBe(200);
+  });
   it("follows A -> R and captured A -> W -> Z after attention disappears, without exposing unrelated work", async () => {
     const f = await jobFixture();
     const work = await f.repo.create({ sourceSession: "builder@test", destinationSession: "builder@test", body: "Prepare report", nudge: false });

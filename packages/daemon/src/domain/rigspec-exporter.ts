@@ -119,21 +119,29 @@ export class RigSpecExporter {
     }).sort((a, b) => a.logicalId.localeCompare(b.logicalId));
   }
 
-  private memberStartupSource(rigId: string, node: import("./types.js").NodeWithBinding): {
-    startup?: import("./types.js").StartupBlock; reason?: "source unavailable" | "different source root";
-  } {
+  /** The seat's member as its rig spec authored it: from its launch recipe, or, before a first launch creates one, from
+   *  its one materialized source. */
+  private authoredMember(rigId: string, node: import("./types.js").NodeWithBinding):
+    { root: string; member: RigSpecPodMember } | null {
     const recipe = this.rigRepo.getNodeLaunchRecipe(node.id);
     // A materialized seat can be exported before its first launch creates a recipe.
     const materialized = this.rigRepo.getRigStartupLayers(rigId)?.materializedSources?.filter(source => source.nodeIds.includes(node.id)) ?? [];
-    if (!recipe && materialized.length !== 1) return { reason: "source unavailable" };
+    if (!recipe && materialized.length !== 1) return null;
     const source = recipe ? { root: recipe.rigRoot, spec: recipe.rigSpec } : materialized[0]!;
     // A malformed retained materialization cannot authorize exporting its contents.
-    if (!source.spec || !Array.isArray(source.spec.pods) || typeof source.root !== "string") return { reason: "source unavailable" };
+    if (!source.spec || !Array.isArray(source.spec.pods) || typeof source.root !== "string") return null;
     const [podId, memberId] = node.logicalId.split(".");
     const pods = source.spec.pods.filter(pod => pod && pod.id === podId);
     const members = pods.length === 1 && Array.isArray(pods[0]!.members) ? pods[0]!.members.filter(member => member && member.id === memberId) : [];
-    if (members.length !== 1) return { reason: "source unavailable" };
-    const startup = members[0]!.startup;
+    return members.length === 1 ? { root: source.root, member: members[0]! } : null;
+  }
+
+  private memberStartupSource(rigId: string, node: import("./types.js").NodeWithBinding): {
+    startup?: import("./types.js").StartupBlock; reason?: "source unavailable" | "different source root";
+  } {
+    const authored = this.authoredMember(rigId, node);
+    if (!authored) return { reason: "source unavailable" };
+    const startup = authored.member.startup;
     if (!startup) return {};
     if (!Array.isArray(startup.files) || !Array.isArray(startup.actions)
       || startup.files.some(file => !file || validateSafePath(file.path, "member startup"))) return { reason: "source unavailable" };
@@ -142,8 +150,8 @@ export class RigSpecExporter {
     // Do not silently resolve a second source's files against the first source.
     // Without a stored original root, a non-portable legacy declaration cannot
     // honestly be exported as if its files resolved from the output folder.
-    if (startup.files.length && (!exportRoot || !isAbsolute(source.root) || !isAbsolute(exportRoot)
-      || normalize(source.root) !== normalize(exportRoot))) return { reason: "different source root" };
+    if (startup.files.length && (!exportRoot || !isAbsolute(authored.root) || !isAbsolute(exportRoot)
+      || normalize(authored.root) !== normalize(exportRoot))) return { reason: "different source root" };
     return { startup };
   }
 
@@ -324,6 +332,11 @@ export class RigSpecExporter {
     const pool = this.rigRepo.getNodePool(node.id);
     if (pool !== undefined && "spec" in pool) member.pool = pool.spec;
     if (restorePolicy) member.restorePolicy = restorePolicy;
+    // #2940: the seat's resolved keep_alive, written when on, so an export of a rig without it is unchanged. Off is
+    // written only when the member itself said so, in the spec last applied to it (kept in its recipe): re-imported
+    // without it, its agent spec could turn it back on.
+    if (node.keepAlive) member.keepAlive = true;
+    else if (this.authoredMember(rigId, node)?.member.keepAlive === false) member.keepAlive = false;
     return member;
   }
 
@@ -423,6 +436,7 @@ export class RigSpecExporter {
       ...(this.rigRepo.getRigNonInterruptive(rigId) ? { nonInterruptive: true } : {}),
       ...(rigEnv ? { env: rigEnv } : {}),
       ...(claudeManagedBlockFile ? { managedBlocks: { "claude-code": claudeManagedBlockFile } } : {}),
+      ...(startupLayers?.defaultOnboardingPack !== undefined ? { defaultOnboardingPack: startupLayers.defaultOnboardingPack } : {}),
       ...(workspace ? { workspace } : {}),
       ...(startup ? { startup } : {}),
       pods: podSpecs,

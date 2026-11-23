@@ -116,6 +116,10 @@ native Herdr tiles. A temporary readable capture uses
 when the capture finishes. It does not unset a manually fixed window it did not
 pin.
 
+A browser terminal that connects with `?geometry=1` learns the pane's columns
+and rows, and the pinned 90 by 27 when `terminal.fixed_geometry` is on; see
+[Writing a daemon client](daemon-http-clients.md#route-details).
+
 Kept writable 0.7.8/0.7.9 viewers can retain an old `ignore-size` attach, and
 pre-reflow 0.7.11 viewers can retain the old mirrored display. Changing saved
 argv cannot change that running client. Close only the owned Herdr viewer pane
@@ -589,7 +593,11 @@ with a coalesced scope invalidation event. There is no repeating membership
 poll. Structural edits under additional legacy roots, or a filesystem where
 watching is unavailable, require `rig`'s existing slice refresh endpoint
 `POST /api/slices/refresh` or reopening the view. Missing or unreadable sources
-keep prior viewers; they never certify that the work disappeared.
+keep prior viewers; they never certify that the work disappeared. That includes
+the project catalog: a catalogued project whose own read fails (an unreadable root,
+a `project.yaml` or root work source that doesn't parse), or a catalog that can't
+be read, is named in a `scope_unavailable` for a scope that isn't found elsewhere.
+A project whose root is missing, or whose missions root escapes it, holds no scopes.
 
 
 Scope identity reads are bounded to 4,096 directory entries, 16 KiB per selected
@@ -600,8 +608,8 @@ or a qitem view. This is separate from unreadable or malformed sources.
 Queue membership reads are bounded to 50,000 active rows plus one lookahead,
 16 KiB of encoded tags per row and 8 MiB of aggregate encoded tags. They remain
 fresh on each render. Identities are reused within a scope-source generation
-only while the primary-root watcher is live and existing additional roots are
-covered by that root. A source event or explicit refresh invalidates them;
+only while the primary-root watcher is live, existing additional roots are
+covered by that root and no catalogued project is unreadable. A source event or explicit refresh invalidates them;
 errors discard the cache. Unavailable watching or an existing unwatched legacy
 root uses fresh bounded identity reads instead. Missing legacy roots are checked
 on each call so an appearing root cannot reuse an older cached identity set.

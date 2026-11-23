@@ -285,12 +285,17 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
       // The context monitor read it before the commit, while the successor ran unadopted.
       contextUsage.persist(nodeId, contextUsage.readAndNormalize(SEAT));
 
+      // The retiring occupant's generation, read before the recovery mints the successor's tenure.
+      const retiringGeneration = sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid;
+      expect(retiringGeneration).toBeTruthy();
+      expect(retiringGeneration).not.toBe(generation);
+
       const result = await service({ occupantInvalidator: new DefaultOccupantInvalidator({ enforcer, contextUsage }) })
         .recover({ seatRef: SEAT, reason: "adopt the running successor" });
 
       expect(result).toMatchObject({ ok: true });
       expect(contextUsage.readSidecar(SEAT).ok).toBe(kept);
-      expect(enforcer.invalidateOccupant).toHaveBeenCalledWith(SEAT);
+      expect(enforcer.invalidateOccupant).toHaveBeenCalledWith(SEAT, retiringGeneration);
       // The sample predates the tenure the commit minted. The successor's own still reads current; the retiree's doesn't.
       expect(contextUsage.getForNode(nodeId, SEAT)).toMatchObject(kept
         ? { availability: "known", usedPercentage: 41 } : { availability: "unknown", reason: "stale_generation" });

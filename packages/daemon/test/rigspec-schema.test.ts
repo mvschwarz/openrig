@@ -38,6 +38,20 @@ const VALID_RIG = {
 };
 
 describe("RigSpec schema (pod-aware)", () => {
+  it.each([true, false, undefined])("round-trips default_onboarding_pack = %s", value => {
+    const raw = { ...VALID_RIG, ...(value === undefined ? {} : { default_onboarding_pack: value }) };
+    expect(RigSpecSchema.validate(raw).valid).toBe(true);
+    const yaml = RigSpecCodec.serialize(RigSpecSchema.normalize(raw));
+    if (value === undefined) expect(yaml).not.toContain("default_onboarding_pack");
+    else expect(RigSpecCodec.parse(yaml)).toHaveProperty("default_onboarding_pack", value);
+  });
+
+  it.each(["false", null, 0])("rejects non-boolean default_onboarding_pack = %s", value => {
+    const result = RigSpecSchema.validate({ ...VALID_RIG, default_onboarding_pack: value });
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain("default_onboarding_pack: must be a boolean");
+  });
+
   it.each(["model", "label"])("rejects non-string member %s values in canonical validation", field => {
     for (const value of [null, 7, {}, [], true]) {
       const rig = structuredClone(VALID_RIG);
@@ -1075,6 +1089,53 @@ describe("member process_limits (#3253)", () => {
     expect(LegacyRigSpecSchema.normalize(legacy({ memory_max: "1G" })).nodes[0]!.processLimits).toEqual({ memoryMax: 1073741824 });
     const refused = LegacyRigSpecSchema.validate(legacy({ cpu_quota: "50%" }));
     expect(refused.errors.some((e) => e.includes("process_limits.cpu_quota: not supported"))).toBe(true);
+  });
+});
+
+describe("member keep_alive (#2940)", () => {
+  const withMember = (fields: Record<string, unknown>, runtime = "codex") => ({
+    version: "0.2",
+    name: "keep-rig",
+    pods: [{
+      id: "dev",
+      label: "Dev",
+      members: [{ id: "worker", runtime, cwd: ".",
+        ...(runtime === "terminal" ? { agent_ref: "builtin:terminal", profile: "none" }
+          : { agent_ref: "local:agents/worker", profile: "default" }),
+        ...fields }],
+      edges: [],
+    }],
+    edges: [],
+  });
+
+  it.each(["codex", "claude-code", "pi", "terminal"])("accepts keep_alive true and false on %s and normalizes it", (runtime) => {
+    for (const value of [true, false]) {
+      const spec = withMember({ keep_alive: value }, runtime);
+      expect(RigSpecSchema.validate(spec).errors).toEqual([]);
+      expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.keepAlive).toBe(value);
+    }
+  });
+
+  it("keeps an absent key undefined, so the agent spec's lifecycle can decide", () => {
+    const member = RigSpecSchema.normalize(withMember({})).pods[0]!.members[0]!;
+    expect(member.keepAlive).toBeUndefined();
+    expect("keepAlive" in member).toBe(false);
+  });
+
+  it.each([["yes"], [1], [0], [null], [{ enabled: true }]])("refuses %j by name", (value) => {
+    const result = RigSpecSchema.validate(withMember({ keep_alive: value }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("keep_alive: must be true or false")), result.errors.join("; ")).toBe(true);
+  });
+
+  it("round-trips through the codec: true and false as written, absent stays absent", () => {
+    for (const value of [true, false]) {
+      const spec = RigSpecSchema.normalize(withMember({ keep_alive: value }));
+      const yaml = RigSpecCodec.serialize(spec);
+      expect(yaml).toContain(`keep_alive: ${value}`);
+      expect(RigSpecSchema.normalize(RigSpecCodec.parse(yaml) as Record<string, unknown>).pods[0]!.members[0]!.keepAlive).toBe(value);
+    }
+    expect(RigSpecCodec.serialize(RigSpecSchema.normalize(withMember({})))).not.toContain("keep_alive");
   });
 });
 
