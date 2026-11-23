@@ -8,6 +8,7 @@ import { remoteControlObservationsSchema } from "./migrations/179_remote_control
 import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_staging.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
+import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
@@ -376,5 +377,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeKeepAliveSchema,
   queueItemsBlockedOnIndexSchema,
   queueItemsScanIndexesSchema,
+  rigSeatSliceSchema,
   networkBindingProvidersSchema,
 ];
