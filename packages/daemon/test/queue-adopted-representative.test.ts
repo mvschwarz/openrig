@@ -81,14 +81,15 @@ describe("queue recording admits an adopted representative's reported name", () 
     await expect(create("local-captain")).rejects.toMatchObject({ code: "unknown_destination_rig" });
   });
 
-  it("refuses a bare name that another active seat's binding also claims", async () => {
-    const { leadNode } = adopt("bare-lead", "local-captain", "dev-worker@bare-lead");
-    const other = adopt("other-rig", "other-lead", "dev-worker@other-rig");
-    sessions.updateBinding(other.leadNode.id, { tmuxSession: "local-captain", tmuxPane: "%2" });
-    expect(resolveSessionNodeId(db, "local-captain")).toBe(leadNode.id);
-    expect(queue.acceptsDestination("local-captain")).toBe(false);
-    await expect(create("local-captain")).rejects.toMatchObject({ code: "unknown_destination_rig" });
-    expect(db.prepare("SELECT COUNT(*) AS n FROM queue_items").get()).toEqual({ n: 0 });
+  it.each(["exited", "detached", "superseded"])("lands on the successor when a %s predecessor keeps its binding", async state => {
+    const before = adopt("bare-lead", "local-captain", "worker-before");
+    db.prepare("UPDATE sessions SET status = ? WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = ?)").run(state, before.rig.id);
+    const after = adopt("bare-lead", "local-captain", "worker-after");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM bindings WHERE node_id = ? AND tmux_session = 'local-captain'").get(before.leadNode.id)).toEqual({ n: 1 });
+    expect(after.leadNode.logicalId).toBe(before.leadNode.logicalId);
+    expect(resolveSessionNodeId(db, "local-captain")).toBe(after.leadNode.id);
+    expect(queue.acceptsDestination("local-captain")).toBe(true);
+    expect(queue.getById((await create("local-captain")).qitemId)?.destinationSession).toBe("local-captain");
   });
 
   it("keeps refusing an unregistered external name even when a seat's session has that spelling", async () => {
