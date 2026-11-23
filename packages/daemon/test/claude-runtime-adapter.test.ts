@@ -405,6 +405,34 @@ describe("launchHarness — the resume token is one shell argument", () => {
   });
 });
 
+// The seat name is parsed by the pane shell as well: a name that needs quoting is quoted, and one that doesn't stays bare.
+describe("launchHarness — the seat name is one shell argument", () => {
+  const adapterWith = (tmux: TmuxAdapter) => new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+  const lastCmd = (tmux: TmuxAdapter): string => {
+    const calls = (tmux.sendText as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    return (calls[calls.length - 1]?.[1] as string) ?? "";
+  };
+  const argvOf = (cmd: string): string[] =>
+    execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${cmd}`], { encoding: "utf8" }).split("\n").slice(0, -1);
+  const launch = (kind: string) => kind === "resume" ? { resumeToken: "tok-1" }
+    : kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-1" } } : {};
+  const kinds = ["fresh", "resume", "fork"];
+
+  it.each(kinds.flatMap((kind) => ["my seat", "it's", "a;b", "$(echo hi)"].map((name) => [kind, name])))(
+    "%s launch keeps the name %j after --name as one argument", async (kind, name) => {
+      const tmux = mockTmux();
+      await adapterWith(tmux).launchHarness(makeBinding(), { name: name!, ...launch(kind!) });
+      const argv = argvOf(lastCmd(tmux));
+      expect(argv.slice(argv.indexOf("--name"))).toEqual(["--name", name]);
+    });
+
+  it.each(kinds)("%s launch prints a name that needs no quoting as it is", async (kind) => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(makeBinding(), { name: "release-0.7", ...launch(kind) });
+    expect(lastCmd(tmux).endsWith(" --name release-0.7")).toBe(true);
+  });
+});
+
 // OPR.0.7.0.9: a seat's own launch additions (from its seat storage) reach every Claude launch builder: fresh, resume
 // and fork, managed and not. Without them the command is byte-identical (the tests above).
 describe("launchHarness — a seat's launch additions", () => {
