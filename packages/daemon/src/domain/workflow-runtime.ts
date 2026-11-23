@@ -272,7 +272,7 @@ export class WorkflowRuntime {
   }): Promise<InstantiateResult & { compilation: LifecycleCompilation }> {
     const prior = this.recoverOperation(input.operationKey);
     if (prior && prior.kind !== "instantiate") {
-      throw new WorkflowProjectorError("lifecycle_operation_conflict", "This key already records a graph revision; inspect workflow operation before choosing a new creation key.");
+      throw new WorkflowProjectorError("lifecycle_operation_conflict", "A different operation already used this key; inspect workflow operation before choosing a new creation key.");
     }
     const compilation = this.compileLifecycle(input.missionPath, input.operationKey);
     if (!compilation.eligible || !compilation.workflowSpec) {
@@ -392,8 +392,8 @@ export class WorkflowRuntime {
    */
   async instantiate(input: InstantiateInput): Promise<InstantiateResult> {
     const operationKey = input.operationKey;
-    if (operationKey !== undefined && (!operationKey.trim() || operationKey.length > 200)) {
-      throw new WorkflowProjectorError("workflow_start_key_invalid", "operation key must be nonempty and at most 200 characters");
+    if (operationKey !== undefined && !operationKey.trim()) {
+      throw new WorkflowProjectorError("workflow_start_key_invalid", "operation key must be nonempty");
     }
     const requestDigest = operationKey === undefined ? null : createHash("sha256").update(JSON.stringify({
       specPath: input.specPath, rootObjective: input.rootObjective, createdBySession: input.createdBySession,

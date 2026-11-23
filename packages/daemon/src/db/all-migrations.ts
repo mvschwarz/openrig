@@ -5,7 +5,7 @@ import { nodeStatuslineThrottleSchema } from "./migrations/176_node_statusline_t
 import { seatPoolSchema } from "./migrations/178_seat_pool.js";
 import { remoteControlObservationsSchema } from "./migrations/179_remote_control_observations.js";
 import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_staging.js";
-import { workflowStartOperationsSchema } from "./migrations/192_workflow_start_operations.js";
+import { workflowStartOperationsSchema } from "./migrations/195_workflow_start_operations.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
 import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";

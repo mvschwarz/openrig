@@ -225,8 +225,7 @@ export function workflowRoutes(): Hono {
     if (!body.specPath) return c.json({ error: "specPath is required" }, 400);
     if (!body.rootObjective) return c.json({ error: "rootObjective is required" }, 400);
     if (!body.createdBySession) return c.json({ error: "createdBySession is required" }, 400);
-    if (keyed && (typeof body.operationKey !== "string" || !body.operationKey.trim() || body.operationKey.length > 200)) return c.json({ error: "operationKey must be nonempty and at most 200 characters" }, 400);
-    if (!keyed && body.operationKey !== undefined) return c.json({ error: "Use /api/workflow/instantiate-keyed for operationKey" }, 400);
+    if (keyed && (typeof body.operationKey !== "string" || !body.operationKey.trim())) return c.json({ error: "operationKey must be a nonempty string" }, 400);
     if (body.targetPod !== undefined && typeof body.targetPod !== "string") return c.json({ error: "targetPod must be a string" }, 400);
     try {
       // A request can carry scope the route cannot apply: main accepted every such request, ignoring the key and
@@ -242,7 +241,7 @@ export function workflowRoutes(): Hono {
           }
           scope = normalizeWorkflowScope({ project: body.scope.project, mission: body.scope.mission, slice: body.scope.slice, tags: body.scope.tags });
           // The packets must show up under a project the workspace catalog declares (same lookup as the project reads).
-          if (scope?.project) declaredProject(c, scope.project);
+          if (scope?.project && !(keyed && getRuntime(c).recoverOperation(body.operationKey as string))) declaredProject(c, scope.project);
         } catch (err) {
           if (err instanceof WorkflowScopeError || err instanceof ProjectReadError) {
             scope = null;

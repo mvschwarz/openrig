@@ -112,7 +112,7 @@ describe("WorkflowRuntime facade + FR-1 KEEP-fence pins (OPR.0.4.6.WF1)", () => 
   // ── (d) facade coverage ────────────────────────────────────────────
 
   it("recovers one committed ordinary start after concurrent retry, restart and source removal", async () => {
-    const input = { specPath, rootObjective: "release", createdBySession: "ops@rig", operationKey: "release-42" };
+    const input = { specPath, rootObjective: "release", createdBySession: "ops@rig", operationKey: `  ${"key".repeat(100)}  ` };
     const wake = vi.spyOn(queueRepo, "maybeNudge");
     const [first, retry] = await Promise.all([runtime.instantiate(input), runtime.instantiate(input)]);
     expect([first.replayed, retry.replayed].sort()).toEqual([false, true]);
@@ -124,7 +124,7 @@ describe("WorkflowRuntime facade + FR-1 KEEP-fence pins (OPR.0.4.6.WF1)", () => 
     for (const changed of [{ rootObjective: "different" }, { specPath: `${specPath}.other` }, { entryOwnerSession: "other@rig" }, { targetRig: "other" }, { scope: { tags: ["different"] } }]) {
       await expect(runtime.instantiate({ ...input, ...changed })).rejects.toMatchObject({ code: "workflow_start_conflict" });
     }
-    await expect(runtime.instantiateLifecycle({ missionPath: "/missing", operationKey: input.operationKey, rootObjective: "other", createdBySession: "ops@rig" })).rejects.toMatchObject({ code: "lifecycle_operation_conflict" });
+    await expect(runtime.instantiateLifecycle({ missionPath: "/missing", operationKey: input.operationKey, rootObjective: "other", createdBySession: "ops@rig" })).rejects.toMatchObject({ code: "lifecycle_operation_conflict", message: expect.stringContaining("different operation already used this key") });
     const path = join(tmp, "restart.sqlite");
     await db.backup(path);
     db.close();
@@ -161,9 +161,11 @@ describe("WorkflowRuntime facade + FR-1 KEEP-fence pins (OPR.0.4.6.WF1)", () => 
     const recovery = await app.request("/api/workflow/operations/lost-response");
     expect(await recovery.json()).toMatchObject({ kind: "ordinary-instantiate", receipt: { instanceId: result.instance.instanceId, entryQitemId: result.entryQitemId } });
     expect((await start({ ...body, rootObjective: "other" })).status).toBe(409);
-    expect((await app.request("/api/workflow/instantiate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).status).toBe(400);
     expect((db.prepare("SELECT count(*) AS n FROM workflow_instances").get() as { n: number }).n).toBe(1);
     expect((db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number }).n).toBe(1);
+    const legacy = await app.request("/api/workflow/instantiate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    expect(legacy.status).toBe(201);
+    expect((await legacy.json()).instance.instanceId).not.toBe(result.instance.instanceId);
   });
 
   it("facade: validate returns ok for a well-formed spec and reports issues for a broken one", () => {
