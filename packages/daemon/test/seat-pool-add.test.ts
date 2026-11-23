@@ -565,4 +565,28 @@ describe("seat-pool add: the model's member startup (#3395 Piece 1)", () => {
     expect(w.slots.forModel(m.nodeId)).toEqual([]);
     expect(w.correlations()).toEqual([]);
   });
+
+  it("A model whose declared member startup can't be read (a file path that leaves the root) makes the pool add no agent and record why, while the rig export still leaves the startup out and names it.", async () => {
+    const w = addWorld();
+    fs.mkdirSync(path.join(w.root, "guidance"));
+    fs.writeFileSync(path.join(w.root, "guidance", "member.md"), "member guidance");
+    const m = await w.model({ member: { startup: STARTUP } });
+    // the launch recipe keeps a declared startup whose file path escapes the root: the add can't read it
+    const recipe = w.rigRepo.getNodeLaunchRecipe(m.nodeId)!;
+    const rigSpec = structuredClone(recipe.rigSpec);
+    const member = rigSpec.pods.find((pod) => pod.id === "dev")!.members.find((entry) => entry.id === "impl")!;
+    member.startup = { ...member.startup!, files: member.startup!.files.map((file) => ({ ...file, path: "../outside.md" })) };
+    w.db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify({ ...recipe, rigSpec }), m.nodeId);
+    expect(w.rigRepo.getNodeLaunchRecipe(m.nodeId)).not.toBeNull();
+    expect(w.exporter.memberStartupNotCarried(m.rigId)).toContainEqual({ logicalId: "dev.impl", reason: "source unavailable" });
+
+    const notes = await w.notesOf(m.jobId);
+    await w.executor.idle();
+    expect((notes.add as { refused: string }).refused).toMatch(/^add refused: the model member can't be exported \(.*startup can't be read/);
+    expect(w.converge).not.toHaveBeenCalled();
+    expect(w.slots.forModel(m.nodeId)).toEqual([]);
+    expect(w.correlations()).toEqual([]);
+    const exported = w.exporter.exportRig(m.rigId) as { pods: Array<{ members: Array<{ id: string; startup?: unknown }> }> };
+    expect(exported.pods[0]!.members.find((entry) => entry.id === "impl")!.startup).toBeUndefined();
+  });
 });

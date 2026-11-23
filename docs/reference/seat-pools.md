@@ -73,7 +73,8 @@ It then moves waiting rows to free agents and adds agents, in that order.
     and `{slot}` (the agent's member id, such as `impl-s1`) filled in; the daemon only creates that folder;
   - no agent is added, and the notes say why (`add refused: …`), while the model's stored `process_limits` or
     `claude_auto_mode` can't be read, or while the model has an `accountHome` or an `api-key` token reference, which
-    a pool agent does not carry, or while the model's member `startup` files can't be resolved from its launch root;
+    a pool agent does not carry, or while the model's declared member `startup` can't be read or its files can't be
+    resolved from its launch root;
   - `n` is one more than the highest slot number on record, skipping a logical id the rig already has. An add that
     ends with no node removes its slot row, which frees its number;
   - the add is reserved and issued under the model's custody lease, with an operation id, and runs after the lease is
