@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
+import { createServer } from "node:http";
 import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -74,7 +75,7 @@ describe("provider-managed network bindings", () => {
 
   it("direct bindings remain provider-free and legacy enrollment metadata is projected without reconnecting", () => {
     const b = store.create({ session: "a@lab", hubUrl: "https://hub.example/mcp", hubSeat: "alex@team", token: "old-work", installation: { id: "local-account", name: "alex", account: "original-account-install" } });
-    expect(store.get(b.id)!.provider).toEqual({ id: "openrig-cloud", installation: "local-account", participant: "alex", remoteInstallation: "original-account-install" });
+    expect(store.get(b.id)!.provider).toEqual({ id: "account", installation: "local-account", participant: "alex", remoteInstallation: "original-account-install" });
     expect(readNetworkCredential(home, b.id)).toBe("old-work");
     store.disconnect(b.id); store.markAccountRemoved(b.id);
     expect(store.get(b.id)!.providerRemoval).toBe("confirmed");
@@ -107,6 +108,104 @@ describe("provider-managed network bindings", () => {
 
   const workerDeps = (removalFetch: typeof fetch) => ({ bindings: store, home, removalFetch } as NetworkConnectorDeps);
   const reply = (request: RequestInit, outcome: Record<string, unknown>) => new Response(JSON.stringify({ ...JSON.parse(String(request.body)), ...outcome }), { status: 200 });
+
+  it("R1 removal redirects stay pending without forwarding the capability", async () => {
+    const b = create(); store.disconnect(b.id);
+    let initialRequests = 0, redirectedRequests = 0;
+    const server = createServer((request, response) => {
+      let body = "";
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        if (request.url !== "/redirected") {
+          initialRequests++;
+          response.writeHead(307, { Location: "/redirected" }); response.end(); return;
+        }
+        redirectedRequests++;
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ ...JSON.parse(body), alreadyRemoved: true }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Expected a TCP fixture");
+      const endpoint = "http://127.0.0.1:" + address.port;
+      await runNetworkProviderRemovalPass(workerDeps((input, init) =>
+        fetch(new URL(new URL(String(input)).pathname, endpoint), init)), store.pendingProviderRemovals()[0]!);
+      expect(initialRequests).toBe(1);
+      expect(redirectedRequests).toBe(0);
+      expect(store.get(b.id)).toMatchObject({ providerRemoval: "pending", providerRemovalReason: "removal-effect-unknown" });
+      expect(store.readRemovalToken(store.pendingProviderRemovals()[0]!)).toBe("removal-one");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it.each([408, 429])("R1 HTTP %i stays pending with capability and backoff, then succeeds", async (status) => {
+    let now = Date.parse("2026-11-23T00:00:00Z");
+    store = new NetworkBindingStore(db, home, () => new Date(now));
+    const b = create(); store.disconnect(b.id); let calls = 0;
+    const removalFetch: typeof fetch = async (_url, init) => {
+      calls++;
+      return calls === 1 ? new Response("temporary", { status }) : reply(init!, { alreadyRemoved: true });
+    };
+    await runNetworkProviderRemovalPass(workerDeps(removalFetch), store.pendingProviderRemovals()[0]!, { retryDelayMs: 5_000 });
+    expect(store.get(b.id)).toMatchObject({ providerRemoval: "pending", providerRemovalReason: "provider-temporary:http-" + status });
+    expect(store.pendingProviderRemovals()[0]).toMatchObject({ attempts: 1, nextAttemptAt: new Date(now + 5_000).toISOString(), hasCapability: true });
+    expect(store.readRemovalToken(store.pendingProviderRemovals()[0]!)).toBe("removal-one");
+    now += 5_000;
+    await runNetworkProviderRemovalPass(workerDeps(removalFetch), store.pendingProviderRemovals()[0]!);
+    expect(calls).toBe(2);
+    expect(store.get(b.id)!.providerRemoval).toBe("confirmed");
+    expect(store.pendingProviderRemovals()).toEqual([]);
+  });
+
+  it("R1 local read errors keep removal pending across store reconstruction", async () => {
+    let now = Date.parse("2026-11-23T00:00:00Z");
+    store = new NetworkBindingStore(db, home, () => new Date(now));
+    const b = create(); store.disconnect(b.id);
+    const folder = dirname(networkCredentialFile(home, b.id)); let calls = 0;
+    const removalFetch: typeof fetch = async (_url, init) => { calls++; return reply(init!, { alreadyRemoved: true }); };
+    chmodSync(folder, 0o000);
+    try {
+      await runNetworkProviderRemovalPass(workerDeps(removalFetch), store.pendingProviderRemovals()[0]!, { retryDelayMs: 5_000 });
+      expect(store.get(b.id)!.providerRemoval).toBe("pending");
+      expect(store.get(b.id)!.providerRemovalReason).toMatch(/^local-/);
+      expect(store.pendingProviderRemovals()[0]).toMatchObject({ hasCapability: true, attempts: 1, nextAttemptAt: new Date(now + 5_000).toISOString() });
+      store = new NetworkBindingStore(db, home, () => new Date(now)); now += 5_000;
+      await runNetworkProviderRemovalPass(workerDeps(removalFetch), store.pendingProviderRemovals()[0]!, { retryDelayMs: 5_000 });
+      expect(calls).toBe(0);
+      expect(store.pendingProviderRemovals()[0]).toMatchObject({ hasCapability: true, attempts: 2 });
+    } finally { chmodSync(folder, 0o700); }
+    now += 5_000; store.sweepCredentials();
+    expect(store.readRemovalToken(store.pendingProviderRemovals()[0]!)).toBe("removal-one");
+    await runNetworkProviderRemovalPass(workerDeps(removalFetch), store.pendingProviderRemovals()[0]!);
+    expect(calls).toBe(1);
+    expect(store.get(b.id)!.providerRemoval).toBe("confirmed");
+  });
+
+  it("R1 capability metadata survives an unreadable path and reconciles an old false flag", async () => {
+    const b = create(); const folder = dirname(networkCredentialFile(home, b.id));
+    chmodSync(folder, 0o000);
+    try {
+      expect(() => store.disconnect(b.id)).toThrow(expect.objectContaining({ code: "credential_cleanup_failed" }));
+      expect(store.pendingProviderRemovals()[0]!.hasCapability).toBe(true);
+    } finally { chmodSync(folder, 0o700); }
+    db.prepare("UPDATE network_binding_removals SET has_capability = 0 WHERE binding_id = ?").run(b.id);
+    store = new NetworkBindingStore(db, home); store.sweepCredentials();
+    expect(store.pendingProviderRemovals()[0]!.hasCapability).toBe(true);
+    expect(store.readRemovalToken(store.pendingProviderRemovals()[0]!)).toBe("removal-one");
+    await runNetworkProviderRemovalPass(workerDeps(async (_url, init) => reply(init!, { alreadyRemoved: true })), store.pendingProviderRemovals()[0]!);
+    expect(store.get(b.id)!.providerRemoval).toBe("confirmed");
+  });
+
+  it("R1 startup does not invent removal work for historical ended bindings", () => {
+    const b = create(); store.disconnect(b.id);
+    db.prepare("DELETE FROM network_binding_removals WHERE binding_id = ?").run(b.id);
+    store = new NetworkBindingStore(db, home); store.sweepCredentials();
+    expect(store.pendingProviderRemovals()).toEqual([]);
+  });
 
   it("a lost reply remains pending across restart and retries with only the removal capability", async () => {
     const b = create(); store.disconnect(b.id);

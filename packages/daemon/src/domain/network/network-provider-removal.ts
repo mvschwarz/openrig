@@ -10,11 +10,9 @@ export async function runNetworkProviderRemovalPass(deps: NetworkConnectorDeps, 
   let token: string;
   try { token = deps.bindings.readRemovalToken(removal); }
   catch (error) {
-    if (error instanceof NetworkBindingError) {
-      deps.bindings.reportProviderRemoval(removal.bindingId, { provider: removal.provider, removalRevision: removal.removalRevision, status: "unconfirmed", reason: error.code });
-      return;
-    }
-    throw error;
+    defer(error instanceof NetworkBindingError ? "local-" + error.code : "local-credential-unavailable");
+    deps.log?.("network leave: local credential unavailable");
+    return;
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), deps.passTimeoutMs ?? 60_000); timer.unref?.();
@@ -23,9 +21,12 @@ export async function runNetworkProviderRemovalPass(deps: NetworkConnectorDeps, 
   opts.signal?.addEventListener("abort", stop, { once: true });
   try {
     const url = new URL(removal.hubUrl); url.pathname = url.pathname.replace(/\/+$/, "") + "/bindings/leave";
-    const response = await (deps.removalFetch ?? fetch)(url, { method: "POST", signal: controller.signal,
+    const response = await (deps.removalFetch ?? fetch)(url, { method: "POST", signal: controller.signal, redirect: "error",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ bindingId: removal.bindingId, provider: removal.provider, hubSeat: removal.hubSeat, removalRevision: removal.removalRevision }) });
+    if (response.status === 408 || response.status === 429) {
+      defer("provider-temporary:http-" + response.status); return;
+    }
     if (response.status >= 400 && response.status < 500) {
       let code = `http-${response.status}`;
       try { const refusal = await response.json() as { code?: unknown }; if (typeof refusal.code === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(refusal.code)) code = refusal.code; } catch { /* Status alone still cannot confirm removal. */ }

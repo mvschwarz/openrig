@@ -86,7 +86,7 @@ const project = (row: Row): NetworkBinding => ({
   installationId: row.installation_id, participantName: row.participant_name, accountRemovedAt: row.account_removed_at,
   accountInstallationId: row.account_installation_id,
   provider: row.provider_json ? JSON.parse(row.provider_json) as NetworkBindingProvider : row.installation_id && row.participant_name
-    ? { id: "openrig-cloud", installation: row.installation_id, participant: row.participant_name, ...(row.account_installation_id ? { remoteInstallation: row.account_installation_id } : {}) } : null,
+    ? { id: "account", installation: row.installation_id, participant: row.participant_name, ...(row.account_installation_id ? { remoteInstallation: row.account_installation_id } : {}) } : null,
   credentialRevision: row.credential_revision,
   credentialCleanup: row.credential_cleanup_pending === 1 ? "pending" : "complete",
   providerRemoval: row.account_removed_at ? "confirmed" : row.installation_id && row.state !== "active" ? "unconfirmed" : null,
@@ -362,11 +362,14 @@ export class NetworkBindingStore {
   private recordRemovalIntent(binding: NetworkBinding): void {
     if (!binding.provider) return;
     const at = this.now().toISOString();
-    this.db.prepare(`INSERT OR IGNORE INTO network_binding_removals
+    this.db.prepare(`INSERT INTO network_binding_removals
       (binding_id,credential_revision,removal_revision,provider_json,hub_url,hub_seat,has_capability,status,next_attempt_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,'pending',?,?)`).run(binding.id, binding.credentialRevision,
+      VALUES (?,?,?,?,?,?,?,'pending',?,?)
+      ON CONFLICT(binding_id,credential_revision) DO UPDATE SET
+        has_capability = MAX(network_binding_removals.has_capability, excluded.has_capability)
+      WHERE network_binding_removals.status = 'pending'`).run(binding.id, binding.credentialRevision,
         binding.providerRemovalRevision ?? `local-${binding.credentialRevision}`, JSON.stringify(binding.provider), binding.hubUrl, binding.hubSeat,
-        existsSync(removalFile(this.home, binding.id, binding.credentialRevision)) ? 1 : 0, at, at);
+        binding.providerRemovalRevision ? 1 : 0, at, at);
   }
 
   pendingProviderRemovals(): NetworkProviderRemoval[] {
@@ -451,6 +454,10 @@ export class NetworkBindingStore {
    *  row, or one whose removal failed when its binding ended. Other names under the folder are left alone. */
   sweepCredentials(): { removed: string[]; failed: string[] } {
     const swept = { removed: [] as string[], failed: [] as string[] };
+    for (const removal of this.pendingProviderRemovals()) {
+      const binding = this.get(removal.bindingId);
+      if (binding && binding.credentialRevision === removal.credentialRevision) this.recordRemovalIntent(binding);
+    }
     let names: string[];
     try { names = readdirSync(join(this.home, "network-secrets")); } catch { return swept; }
     for (const name of names.sort()) {
