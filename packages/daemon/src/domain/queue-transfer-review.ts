@@ -8,6 +8,18 @@ export type TransferRefusal = Finding<"format_unsupported" | "digest_mismatch" |
   "archive_invalid" | "archive_too_large" | "already_activated" | "qitem_id_collision" | "qitem_erased_at_destination" | "workspace_has_unrelated_conflict">;
 export type TransferWarning = Finding<"destination_unbound" | "unresolved_rig" | "unresolved_seat" | "missing_evidence" | "evidence_not_checked" | "dangling_reference">;
 
+export function transferRouteWarning(db: Database.Database, address: string): "unresolved_rig" | "unresolved_seat" | null {
+  if (address === "daemon@kernel" || address.startsWith("system:")) return null;
+  const host = db.prepare<[], { hostId: string }>("SELECT host_id AS hostId FROM self_host_identity WHERE singleton = 1").get()?.hostId;
+  const parts = address.split("@");
+  const localAddress = parts.length === 3 && parts[2] === host ? parts.slice(0, 2).join("@") : address;
+  const parsed = parseSessionName(localAddress);
+  if (parsed.kind !== "canonical" || isHumanSeatSessionRef(localAddress) ||
+      (parts.length > 2 && localAddress === address)) return "unresolved_seat";
+  if (!db.prepare<[string]>("SELECT 1 FROM rigs WHERE name = ? AND archived_at IS NULL LIMIT 1").get(parsed.rig)) return "unresolved_rig";
+  return resolveCurrentSessionAddress(db, localAddress)?.rigName === parsed.rig ? null : "unresolved_seat";
+}
+
 export function reviewQueueTransfer(db: Database.Database, archive: ParsedQueueTransfer, evidence: ReadonlyMap<string, boolean | undefined>) {
   const host = db.prepare<[], { hostId: string }>("SELECT host_id AS hostId FROM self_host_identity WHERE singleton = 1").get()?.hostId;
   const erased = db.prepare<[string]>("SELECT 1 FROM queue_erased_ids WHERE qitem_id = ?");
@@ -20,16 +32,7 @@ export function reviewQueueTransfer(db: Database.Database, archive: ParsedQueueT
   const seenActions = new Set<string>();
   const selected = new Set(archive.rows.map(row => row.qitemId));
   const counts = { open: 0, terminal: 0, erased: archive.erasedIds.length };
-  const checkSeat = (address: string): TransferWarning["code"] | null => {
-    if (address === "daemon@kernel" || address.startsWith("system:")) return null;
-    const parts = address.split("@");
-    const localAddress = parts.length === 3 && parts[2] === host ? parts.slice(0, 2).join("@") : address;
-    const parsed = parseSessionName(localAddress);
-    if (parsed.kind !== "canonical" || isHumanSeatSessionRef(localAddress) ||
-        (parts.length > 2 && localAddress === address)) return "unresolved_seat";
-    if (!rig.get(parsed.rig)) return "unresolved_rig";
-    return resolveCurrentSessionAddress(db, localAddress)?.rigName === parsed.rig ? null : "unresolved_seat";
-  };
+  const checkSeat = (address: string) => transferRouteWarning(db, address);
   for (const reference of archive.selection.rigs) {
     if (!rig.get(reference)) warnings.push({ code: "unresolved_rig", reference });
   }
