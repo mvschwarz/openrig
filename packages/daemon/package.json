@@ -110,7 +110,7 @@
     }
   },
   "scripts": {
-    "build": "tsc && node scripts/copy-workflow-specs.mjs",
+    "build": "node -e \"require('node:fs').rmSync('dist/db/migrations', { recursive: true, force: true })\" && tsc && node scripts/copy-workflow-specs.mjs",
     "gen:control-plane-json": "node scripts/gen-control-plane-json.mjs",
     "test": "vitest run",
     "eval": "node --import tsx scripts/run-evals.mjs",

@@ -21,8 +21,9 @@ function isMigration(value: unknown): value is Migration {
 /** The migrations in `dir`, in file-name order: the built daemon's `.js` files, or the `.ts` sources the test
  *  runner loads, matching this module's own extension. A migration file that exports no migration fails
  *  loudly, since skipping it would leave the schema short. */
-export async function loadMigrations(dir: URL = MIGRATIONS_DIR, extension = import.meta.url.endsWith(".ts") ? ".ts" : ".js"): Promise<Migration[]> {
+export async function loadMigrations(dir: URL = MIGRATIONS_DIR, extension = new URL(import.meta.url).pathname.endsWith(".ts") ? ".ts" : ".js"): Promise<Migration[]> {
   const files = readdirSync(dir).filter((file) => MIGRATION_FILE.test(file) && file.endsWith(extension)).sort();
+  if (files.length === 0) throw new Error(`No migration files ending in ${extension} found in ${dir.href}.`);
   return Promise.all(files.map(async (file) => {
     const found = Object.values(await import(new URL(file, dir).href) as Record<string, unknown>).filter(isMigration);
     if (found.length !== 1) throw new Error(`Migration file ${file} must export exactly one migration; it exports ${found.length}.`);
