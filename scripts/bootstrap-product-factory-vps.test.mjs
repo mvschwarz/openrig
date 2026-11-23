@@ -213,7 +213,7 @@ test("the downloader runs an unpinned installer and says it is unverified", { sk
 test("a failed download leaves no temporary installer behind", { skip: SKIP_NO_BASH }, () => {
   const result = runCase({ mode: "match", curlFails: true });
   try {
-    assert.notEqual(result.status, 0, "a failed download is a failure");
+    assert.equal(result.status, 6, "the downloader hands curl's own status to the caller");
     assert.equal(result.ran, false, "nothing ran");
     assert.deepEqual(result.leftovers, [], "the partial download was removed");
   } finally {
@@ -248,7 +248,7 @@ for (const installerExit of [0, 37]) {
 test("a failing hash computation removes the downloaded installer", { skip: SKIP_NO_BASH }, () => {
   const result = runCase({ mode: "match", shaFails: true });
   try {
-    assert.notEqual(result.status, 0, "a hash that cannot be computed is a failure");
+    assert.equal(result.status, 5, "the downloader hands the hash pipeline's own status to the caller");
     assert.equal(result.ran, false, "the installer did not run");
     assert.match(result.output, /could not compute the SHA-256/, "the failure names the cause");
     assert.deepEqual(result.leftovers, [], "the downloaded installer was removed");

@@ -54,16 +54,18 @@ download_and_run_installer() {
   local file status=0
   file="$(mktemp "${TMPDIR:-/tmp}/openrig-installer.XXXXXX")"
   echo "   fetching $url"
-  if ! curl -fsSL "$url" -o "$file"; then
+  curl -fsSL "$url" -o "$file" || status=$?
+  if [[ "$status" != 0 ]]; then
     rm -f "$file" || echo "WARNING: could not remove temporary installer $file" >&2 || true
-    return 1
+    return "$status"
   fi
   if [[ -n "$expected" ]]; then
     local actual
-    if ! actual="$(sha256sum "$file" | awk '{print $1}')"; then
+    actual="$(sha256sum "$file" | awk '{print $1}')" || status=$?
+    if [[ "$status" != 0 ]]; then
       echo "could not compute the SHA-256 of $url — sha256sum failed" >&2
       rm -f "$file" || echo "WARNING: could not remove temporary installer $file" >&2 || true
-      return 1
+      return "$status"
     fi
     if [[ "$actual" != "$expected" ]]; then
       echo "refusing to run $url: SHA-256 is ${actual}, not the pinned ${expected}" >&2
