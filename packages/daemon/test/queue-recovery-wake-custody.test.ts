@@ -4,7 +4,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "../src/domain/policies/parked-owner-consumer.js";
+import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, FAILED_PREFIX, NUDGE_FAIL_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
 import type { PolicyJob } from "../src/domain/policies/types.js";
 import { queueRecoveryOwnsWake, readWakeLadderBackstop, PROMPT_ALERT_TAG } from "../src/domain/queue-wake-ladder.js";
 import { findQueueRecovery, recoveryTag } from "../src/domain/queue-recovery.js";
@@ -27,9 +27,15 @@ describe("closed recovery wake custody", () => {
   });
   afterEach(() => { db.close(); vi.useRealTimers(); vi.unstubAllEnvs(); });
 
-  async function fixture({ closed = true, prompt = false } = {}) {
+  async function fixture({ closed = true, prompt = false, failedReminder = false } = {}) {
     const task = await repo.create({ sourceSession: "lead@fixture", destinationSession: seat, body: "build it", nudge: false });
     repo.claim({ qitemId: task.qitemId, destinationSession: seat });
+    if (failedReminder) {
+      vi.setSystemTime(at(300));
+      await repo.update({ qitemId: task.qitemId, actorSession: "watchdog@system",
+        transitionNote: `${FAILED_PREFIX} fixture-reminder; transport unavailable` });
+      repo.recordNudgeAttempt(task.qitemId, `${NUDGE_FAIL_PREFIX} — transport unavailable`);
+    }
     vi.setSystemTime(at(360));
     const recovery = await repo.create({ sourceSession: "lead@fixture", destinationSession: "lead@fixture", body: "stalled after claim",
       tags: [prompt ? PROMPT_ALERT_TAG : "stuck-sweep-finding", `stuck-sweep:stalled-after-claim:${task.qitemId}`, recoveryTag(task.qitemId)], nudge: false });
@@ -66,6 +72,18 @@ describe("closed recovery wake custody", () => {
     expect(repo.list({ tag: recoveryTag(f.task.qitemId) })).toHaveLength(1);
   });
 
+  it("releases a closed recovery despite an owner reminder failing before closure", async () => {
+    const f = await fixture({ failedReminder: true });
+    expect(repo.getById(f.task.qitemId)?.lastNudgeResult).toContain(NUDGE_FAIL_PREFIX);
+    vi.setSystemTime(at(659));
+    expect((await f.evaluate()).action).toBe("skip");
+    vi.setSystemTime(at(660));
+    expect(queueRecoveryOwnsWake(db, repo.getById(f.task.qitemId))).toBe(false);
+    expect((await f.evaluate()).action).toBe("send");
+    expect(readWakeLadderBackstop(db, f.task.qitemId)?.mechanism).toBe("queue-recovery:resolved");
+    expect(findQueueRecovery(db, f.task.qitemId)).toMatchObject({ qitemId: f.recovery.qitemId, state: "done" });
+  });
+
   it("keeps an open finding's custody beyond the interval", async () => {
     const f = await fixture({ closed: false });
     vi.setSystemTime(at(3600));
@@ -97,7 +115,7 @@ describe("closed recovery wake custody", () => {
   });
 
   it.each([null, "invalid", at(1000).toISOString()])("wakes when the closure time is unusable: %s", async ts => {
-    const f = await fixture();
+    const f = await fixture({ failedReminder: true });
     if (ts === null) db.prepare("DELETE FROM queue_transitions WHERE qitem_id = ? AND closure_reason IS NOT NULL").run(f.recovery.qitemId);
     else db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND closure_reason IS NOT NULL").run(ts, f.recovery.qitemId);
     expect((await f.evaluate()).action).toBe("send");
