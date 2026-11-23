@@ -153,15 +153,24 @@ function workPacketEnabled() {
   return enabled(process.env.OPENRIG_REFOCUS_WORK_PACKET, WORK_PACKET_DEFAULT[runtime()] === true);
 }
 
+// With nothing in progress, the trace shows the seat's held and pending rows as context. The daemon adds them to its
+// answer only on request, so ask only where the trace takes them: the packet off (its candidates carry held and next
+// work already), no explicit work node, and a work tree.
+function heldWorkWanted() {
+  return !workPacketEnabled() && !process.env.OPENRIG_REFOCUS_WORK_NODE
+    && (process.env.OPENRIG_REFOCUS_TREES || "both") !== "topology";
+}
+
 function readQueueWhoami(timeout = lookupTimeout()) {
   if (timeout <= MIN_LOOKUP_MS) return { unknown: "no time left in the refocus budget" };
-  const args = ["queue", "whoami", "--json", ...(workPacketEnabled() ? ["--work-candidates"] : [])];
+  const request = workPacketEnabled() ? ["--work-candidates"] : heldWorkWanted() ? ["--held-work"] : [];
+  const args = ["queue", "whoami", "--json", ...request];
   let result = spawnSync("rig", args, {
     encoding: "utf8", env: childEnv, timeout, maxBuffer: 16 * 1024 * 1024,
   });
   // A rig CLI older than this hook rejects the flag. Ask again without it, inside what is left of
-  // the budget, so the role and the strict answer still arrive (just without candidates).
-  if (args.includes("--work-candidates") && !result.error && result.status !== 0
+  // the budget, so the role and the strict answer still arrive (just without candidates or held work).
+  if (request.length > 0 && !result.error && result.status !== 0
     && /unknown option/i.test(`${result.stderr || ""}${result.stdout || ""}`)) {
     const remaining = remainingLookupBudget();
     if (remaining > 250) {
@@ -296,7 +305,8 @@ function renderTrace() {
   else if (evidence) args.push("--work-candidates", "-");
   else if (work.basis) {
     args.push("--work-basis", work.basis);
-    // With nothing in progress, the same answer carries the seat's held and pending rows; the trace shows them as context.
+    // With nothing in progress, the same answer carries the seat's held and pending rows (asked for with --held-work); the
+    // trace shows them as context.
     const held = whoami?.answer?.heldAndPendingWork;
     if (trees !== "topology" && held && typeof held === "object") {
       heldWork = JSON.stringify(held);

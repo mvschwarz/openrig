@@ -3365,8 +3365,8 @@ describe("queue routes", () => {
       expect(workCandidates.heldTruncated).toBe(false);
       expect(workCandidates.nextTruncated).toBe(true);
       expect(workCandidates.heldAndNextTruncated).toBe(true);
-      // The plain answer carries the same bounded lists when nothing is in progress, and says which was cut.
-      const plain = (await (await app.request("/api/queue/whoami?session=bob@r")).json()) as {
+      // Asked with held=1, the answer carries the same bounded lists when nothing is in progress, and says which was cut.
+      const plain = (await (await app.request("/api/queue/whoami?session=bob@r&held=1")).json()) as {
         heldAndPendingWork: { held: unknown[]; next: unknown[]; heldTruncated: boolean; nextTruncated: boolean } };
       expect(plain.heldAndPendingWork.held).toHaveLength(1);
       expect(plain.heldAndPendingWork.next).toHaveLength(50);
@@ -3374,9 +3374,10 @@ describe("queue routes", () => {
       expect(plain.heldAndPendingWork.nextTruncated).toBe(true);
     });
 
-    // With nothing in progress, plain whoami carries the seat's held and pending rows with their own resolved scope, so
-    // refocus can show them as context from its one lookup. Never completed rows, and never as current work.
-    describe("held and pending work in the plain answer", () => {
+    // With nothing in progress and held=1 (refocus's one lookup asks for it), whoami carries the seat's held and pending
+    // rows with their own resolved scope, so refocus can show them as context. Never completed rows, never as current
+    // work, and never in an answer that didn't ask.
+    describe("held and pending work on request", () => {
       let top: string;
       beforeEach(() => {
         top = fs.realpathSync(mkdtempSync(join(tmpdir(), "whoami-held-")));
@@ -3394,7 +3395,22 @@ describe("queue routes", () => {
       };
       type Answer = { currentWork: unknown; currentWorkBasis: string; heldAndPendingWork?: { missionsRoot: string;
         held: Array<Record<string, unknown>>; next: Array<Record<string, unknown>>; heldTruncated: boolean; nextTruncated: boolean } };
-      const whoami = async () => (await (await app.request("/api/queue/whoami?session=bob@r")).json()) as Answer;
+      const whoami = async (query = "&held=1") => (await (await app.request(`/api/queue/whoami?session=bob@r${query}`)).json()) as Answer;
+
+      it("carries it only when asked, as candidates=1 does, so the default answer is unchanged", async () => {
+        const parked = await row("blocked", ["mission:release"], { summary: "parked" });
+        await row("pending", ["mission:release", "slice:01-work"], { summary: "pick up the work" });
+        const plain = await whoami("");
+        expect(plain.currentWork).toBeNull();
+        expect(plain).not.toHaveProperty("heldAndPendingWork");
+        expect(await whoami("&held=0")).not.toHaveProperty("heldAndPendingWork");
+        const asked = await whoami();
+        expect(asked.heldAndPendingWork?.held.map((held) => held.qitemId)).toEqual([parked]);
+        expect(asked.heldAndPendingWork?.next).toHaveLength(1);
+        // Apart from the field, the asked answer is the plain one.
+        const { heldAndPendingWork: _held, ...rest } = asked;
+        expect(rest).toEqual(plain);
+      });
 
       it("names each row's resolved mission and slice, and a summary-less row's first body line", async () => {
         const parked = await row("blocked", ["mission:release"], { body: "\n# Wait for the eval keys\ndetails" });

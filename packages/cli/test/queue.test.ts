@@ -1438,6 +1438,20 @@ describe("rig queue CLI", () => {
     expect(call!.path).toContain("recentLimit=10");
   });
 
+  // The refocus hook passes --held-work on its one lookup; every other whoami asks for nothing more.
+  it("whoami asks for held and pending work (held=1) only with --held-work", async () => {
+    const pathFor = async (extra: string[]) => {
+      const { deps, calls } = makeDeps();
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "whoami", "--session", "bob@rig", "--json", ...extra]);
+      return calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/whoami"))!.path;
+    };
+    expect(await pathFor([])).toBe("/api/queue/whoami?session=bob%40rig&recentLimit=25");
+    expect(await pathFor(["--held-work"])).toBe("/api/queue/whoami?session=bob%40rig&recentLimit=25&held=1");
+    expect(await pathFor(["--work-candidates", "--held-work"])).toBe("/api/queue/whoami?session=bob%40rig&recentLimit=25&candidates=1&held=1");
+  });
+
   it("plain whoami ends with one line per candidate to choose from; --json adds nothing", async () => {
     const data = {
       session: "bob@rig",

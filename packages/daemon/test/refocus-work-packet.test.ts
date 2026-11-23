@@ -51,6 +51,7 @@ function world() {
 printf '%s\\n' "$*" >> "$RIG_CALL_LOG"
 if [ "$1 $2" = "queue whoami" ]; then
   case " $* " in *" --work-candidates "*) if [ -n "$RIG_REJECT_CANDIDATES" ]; then echo "error: unknown option '--work-candidates'" >&2; exit 1; fi;; esac
+  case " $* " in *" --held-work "*) if [ -n "$RIG_REJECT_HELD_WORK" ]; then echo "error: unknown option '--held-work'" >&2; exit 1; fi;; esac
   printf '%s' "$RIG_QUEUE_WHOAMI_STDOUT"; exit 0
 fi
 if [ "$1 $2" = "whoami --json" ]; then printf '{"identity":{"rigName":"demo","sessionName":"builder@demo"}}\\n'; exit 0; fi
@@ -699,6 +700,70 @@ describe("trace-to-root with nothing in progress — held and pending work as co
     expect(result.stdout).toContain(`\n  python3 '${copy}' --trees work --packet --work-start ${w.slice}\n`);
   });
 
+  /** Runs a printed command as the agent's own call: a fresh shell with none of this run's roots. */
+  const follow = (w: ReturnType<typeof world>, command: string) => spawnSync("/bin/sh", ["-c", command], { encoding: "utf8",
+    env: { PATH: process.env.PATH, HOME: w.root, OPENRIG_WORKSPACE_ROOT: w.workspace } });
+
+  it("quotes a missions root with a space once in the generic route, so the command reads the mission the agent names", () => {
+    const w = world();
+    const spaced = join(w.workspace, "my missions");
+    mkdirSync(join(spaced, "m1"), { recursive: true });
+    writeFileSync(join(spaced, "m1/SPEC.md"), "---\nintent: a mission under a root with a space\n---\n", "utf8");
+    const generic = `--work-start '${spaced}'/<mission>`;
+    const followed = (stdout: string) => {
+      const command = stdout.split("\n").find((line) => line.includes("<mission>"))!.trim();
+      expect(command.endsWith(generic), command).toBe(true);
+      return follow(w, command.replace("<mission>", "m1"));
+    };
+    // Packet off: a row's mission doesn't resolve, so the generic route names the configured missions root.
+    const held = { ...heldWork(w, [parked(["mission:release-a"]), pending(["mission:release"], "q-gone")]), missionsRoot: spaced };
+    const result = plain(w, held);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("- release — UNRESOLVED ON THIS HOST: mission release resolves to 0 directories on this host\n"
+      + "Then read that mission's current intent as text:\n");
+    const off = followed(result.stdout);
+    expect(off.status, off.stdout + off.stderr).toBe(0);
+    expect(off.stdout).toContain("intent: a mission under a root with a space");
+    // The work-packet path's same route, which names the daemon's missions root, quotes it the same way.
+    const packed = w.trace(["--trees", "work", "--check", "--packet", "--work-candidates", "-"],
+      { candidates: [], unknown: [], held: [], next: [], missionsOnHost: ["m1"], missionsRoot: spaced });
+    expect(packed.status, packed.stdout + packed.stderr).toBe(0);
+    const on = followed(packed.stdout);
+    expect(on.status, on.stdout + on.stderr).toBe(0);
+    expect(on.stdout).toContain("intent: a mission under a root with a space");
+  });
+
+  it("bounds a long or multiline scope to one line per tag and reason, with the row's pointer, and keeps the folder's path exact", () => {
+    const w = world();
+    const longName = `m-${"y".repeat(200)}`;
+    mkdirSync(join(w.missions, longName), { recursive: true });
+    writeFileSync(join(w.missions, longName, "SPEC.md"), "---\nintent: the long-named mission\n---\n", "utf8");
+    const multiline = "release-a\nINJECTED LINE FROM A TAG";
+    const result = plain(w, heldWork(w, [parked([`mission:${longName}`], "q-long"), pending([`mission:${multiline}`], "q-multi")]));
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    const lines = result.stdout.split("\n");
+    // A tag's second line never becomes a line of its own, in the rows or in the choices.
+    expect(lines.filter((line) => line.startsWith("INJECTED"))).toEqual([]);
+    const cutName = `m-${"y".repeat(157)}…`;
+    expect(lines).toContain(`- q-long — parked — blocked on q-gate — continuation: none recorded [mission: ${cutName}] — full row: rig queue show q-long`);
+    expect(lines).toContain("- q-multi — later [mission: release-a INJECTED LINE FROM A TAG] — UNRESOLVED ON THIS HOST: "
+      + "mission release-a INJECTED LINE FROM A TAG resolves to 0 directories on this host — full row: rig queue show q-multi");
+    // The choice is bounded the same way; its folder and the command that reads it keep the whole path.
+    const folder = join(w.missions, longName);
+    expect(result.stdout).toContain(`\n- ${cutName} — ${folder} — full row: rig queue show q-long\n  ${route(folder)}\n`);
+    expect(lines).toContain("- release-a INJECTED LINE FROM A TAG — UNRESOLVED ON THIS HOST: "
+      + "mission release-a INJECTED LINE FROM A TAG resolves to 0 directories on this host — full row: rig queue show q-multi");
+    const read = follow(w, route(folder));
+    expect(read.status, read.stdout + read.stderr).toBe(0);
+    expect(read.stdout).toContain("intent: the long-named mission");
+    // A reason past the bound is cut too.
+    const reason = `project:ghost could not be used ${"z".repeat(300)}`;
+    const fallback = plain(w, heldWork(w, [parked(["project:ghost", "mission:release-a"], "q-ghost")], {},
+      () => ({ root: w.missions, reason, ambiguous: true })));
+    expect(fallback.stdout).toContain(`[mission: release-a] — RESOLVED ONLY THROUGH A FALLBACK MISSIONS ROOT: ${reason.slice(0, 159)}… — full row: rig queue show q-ghost`);
+    expect(fallback.stdout).not.toContain("z".repeat(300));
+  });
+
   it("gives one mission name in two project roots no shared chain", () => {
     const w = world();
     const other = join(w.root, "other/missions");
@@ -909,7 +974,8 @@ describe("refocus hook — OPENRIG_REFOCUS_WORK_PACKET switch", () => {
       expect(argv).toContain("--packet");
       expect(argv).toContain("--work-candidates -");
     } else {
-      expect(w.calls()).toContain("queue whoami --json\n");
+      // With the packet off the one lookup asks for held and pending work too; the daemon adds it only with nothing in progress.
+      expect(w.calls()).toContain("queue whoami --json --held-work\n");
       expect(w.calls()).not.toContain("--work-candidates");
       expect(argv).toContain(`--work-start ${w.slice}`);
       expect(argv).not.toContain("--packet");
@@ -969,35 +1035,46 @@ describe("refocus hook — OPENRIG_REFOCUS_WORK_PACKET switch", () => {
     return { heldAndPendingWork, answer: { currentWork: null, currentWorkBasis: NO_BATON, role: { state: "not-declared", files: [] }, heldAndPendingWork } };
   };
 
-  it.each(["claude", "codex"] as const)("with the packet off (%s), passes held and pending work from the one plain lookup", (runtime) => {
+  it.each(["claude", "codex"] as const)("with the packet off (%s), asks for held and pending work on its one lookup and passes it", (runtime) => {
     const w = world();
     const { heldAndPendingWork, answer } = noBaton(w);
     const { argv, stdin } = fire(w, { OPENRIG_REFOCUS_WORK_PACKET: undefined, RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify(answer) }, runtime);
-    expect(w.calls().split("\n").filter((call) => call.startsWith("queue "))).toEqual(["queue whoami --json"]);
+    expect(w.calls().split("\n").filter((call) => call.startsWith("queue "))).toEqual(["queue whoami --json --held-work"]);
     expect(argv).toBe(`${TRACE} --trees work --depth light --check --unresolved-work-advisory --work-basis ${NO_BATON} --held-work -\n`);
     expect(JSON.parse(stdin)).toEqual(heldAndPendingWork);
   });
 
-  it("with the packet on and an older rig CLI, the plain fallback still carries held and pending work", () => {
+  // That CLI predates both flags, so the plain retry asks for nothing more, and its answer carries no held work.
+  it.each([
+    ["on", "--work-candidates", "1", "RIG_REJECT_CANDIDATES"],
+    ["off", "--held-work", "0", "RIG_REJECT_HELD_WORK"],
+  ] as const)("with the packet %s and an older rig CLI that rejects %s, asks again plainly and passes the basis alone", (_label, flag, packet, reject) => {
     const w = world();
-    const { heldAndPendingWork, answer } = noBaton(w);
-    const { argv, stdin } = fire(w, { OPENRIG_REFOCUS_WORK_PACKET: "1", RIG_REJECT_CANDIDATES: "1", RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify(answer) });
-    expect(w.calls()).toContain("queue whoami --json --work-candidates\nqueue whoami --json\n");
-    expect(argv).toContain(`--packet --work-basis ${NO_BATON} --held-work -\n`);
-    expect(JSON.parse(stdin)).toEqual(heldAndPendingWork);
+    const older = JSON.stringify({ currentWork: null, currentWorkBasis: NO_BATON, role: { state: "not-declared", files: [] } });
+    const { argv, stdin } = fire(w, { OPENRIG_REFOCUS_WORK_PACKET: packet, [reject]: "1", RIG_QUEUE_WHOAMI_STDOUT: older });
+    expect(w.calls().split("\n").filter((call) => call.startsWith("queue "))).toEqual([`queue whoami --json ${flag}`, "queue whoami --json"]);
+    expect(argv.endsWith(`--work-basis ${NO_BATON}\n`), argv).toBe(true);
+    expect(stdin).toBe("");
   });
 
-  it("never passes held work beside a current work node, an explicit start, or a topology-only trace", () => {
+  it("never passes held work beside a current work node, an explicit start, or a topology-only trace, and asks for it only where it could", () => {
     const passes = (w: ReturnType<typeof world>, extra: NodeJS.ProcessEnv, ending: string) => {
       const { argv, stdin } = fire(w, { OPENRIG_REFOCUS_WORK_PACKET: "0", RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify(noBaton(w).answer), ...extra });
       expect(argv.endsWith(`--unresolved-work-advisory ${ending}\n`), argv).toBe(true);
       expect(stdin).toBe("");
+      return w.calls().split("\n").filter((call) => call.startsWith("queue "));
     };
     const settled = world();
     const current = { mission: "release-a", slice: "12-refocus", workNodePath: settled.slice, basis: "one typed" };
-    passes(settled, { RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify({ ...noBaton(settled).answer, currentWork: current }) }, `--work-start ${settled.slice}`);
+    // Before the answer, the hook can't know work is in progress, so it asks; the daemon then adds nothing.
+    expect(passes(settled, { RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify({ ...noBaton(settled).answer, currentWork: current }) },
+      `--work-start ${settled.slice}`)).toEqual(["queue whoami --json --held-work"]);
+    // An explicit work node needs no lookup for the work, and a topology-only trace takes no held work: neither asks.
     const explicit = world();
-    passes(explicit, { OPENRIG_REFOCUS_WORK_NODE: explicit.slice }, `--work-start ${explicit.slice}`);
-    passes(world(), { OPENRIG_REFOCUS_TREES: "topology" }, `--work-basis ${NO_BATON}`);
+    expect(passes(explicit, { OPENRIG_REFOCUS_WORK_NODE: explicit.slice }, `--work-start ${explicit.slice}`)).toEqual([]);
+    const withRole = world();
+    expect(passes(withRole, { OPENRIG_REFOCUS_WORK_NODE: withRole.slice, OPENRIG_REFOCUS_TREES: "both" }, `--work-start ${withRole.slice}`))
+      .toEqual(["queue whoami --json"]);
+    expect(passes(world(), { OPENRIG_REFOCUS_TREES: "topology" }, `--work-basis ${NO_BATON}`)).toEqual(["queue whoami --json"]);
   });
 });

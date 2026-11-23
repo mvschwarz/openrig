@@ -1621,10 +1621,11 @@ export function queueRoutes(): Hono {
         workCandidates: { ...workCandidates, ...(projectMissions ? { projectMissions } : {}),
           heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
-    // Nothing in progress: the seat's held and pending rows, each with its own resolved scope, ride the plain answer so
-    // refocus can show them as context (never as current work) from its one lookup. Absent when there are none.
+    // Nothing in progress: the seat's held and pending rows, each with its own resolved scope, so refocus can show them
+    // as context (never as current work) from its one lookup. Only on request (held=1), as candidates=1 is, so the
+    // default answer is unchanged. Absent when there are none.
     let heldField = {};
-    if (inProgress.length === 0) {
+    if (c.req.query("held") === "1" && inProgress.length === 0) {
       const { held, next, heldTruncated, nextTruncated } = readHeldAndNext();
       if (held.length > 0 || next.length > 0) {
         // No default missions root: the host's mission listing is the work packet's, not needed here.
