@@ -58,6 +58,7 @@ import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessOptio
 import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, isRecoverableStartupFailure } from "./startup-orchestrator.js";
 import { resolveSeatKind, seatInboundTransport } from "./seat-kinds.js";
 import type { HookBridge } from "./hook-bridge.js";
+import type { WatchdogUsageLimitState } from "./watchdog-usage-limit.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -219,6 +220,12 @@ export function writtenFact(result: SendResult): WrittenFact {
   if (result.inputPhase === "written") return enterWithheld(result.reason) ? "text_only" : "text_submit_unknown";
   if (result.inputPhase === "not_reached" || result.sent === false) return "none";
   return "unknown";
+}
+
+/** The text reached the seat's input, or may have: the sends a usage-limit record describes. */
+function reachedInput(result: SendResult): boolean {
+  const fact = writtenFact(result);
+  return fact === "submitted" || fact === "text_only" || fact === "text_submit_unknown" || fact === "uncertain";
 }
 
 function trimPaneLines(paneContent: string): string[] {
@@ -2235,6 +2242,11 @@ export interface SendResult {
   /** Context, not a status: the seat was in a managed compaction or restore OpenRig had recorded when this send ran. The
    *  send's own result (ok, outcome, error) is unchanged by it, and it never says the restore finished. */
   managedCompaction?: { stage: string; observed: "before_send" | "after_send"; notice: string };
+  /** Context, not a status: when this send started, OpenRig held a current usage-limit reading for the seat with its
+   *  stated reset (#3508's reader), and the send's text reached the seat's input or may have (submitted, written without
+   *  Enter, or uncertain). The agent isn't expected to read it before the reset. The send's own result, uncertain
+   *  delivery included, is unchanged by it, and a send that wrote nothing gets none. */
+  usageLimit?: { asOf: string; resetsAt: string; notice: string };
   /** Context, not a status: when this send started, the seat's main session had a permission or elicitation request,
    *  made after its latest activity report, that OpenRig hadn't seen settled. It never says a dialog is open (a hook or
    *  host can decide one with nothing shown), and the send's own result is unchanged by it. */
@@ -2760,6 +2772,21 @@ export class SessionTransport {
   setCompactionObserver(observer: (sessionName: string) => { stage: string; detail: string } | null): void {
     this.compactionObserver = observer;
   }
+  /** #3508's usage-limit reader, for the sender's record. It reads recorded evidence only and never captures a pane. */
+  private usageLimitObserver?: (sessionName: string) => WatchdogUsageLimitState | null;
+  setUsageLimitObserver(observer: (sessionName: string) => WatchdogUsageLimitState | null): void {
+    this.usageLimitObserver = observer;
+  }
+  /** A limit is current when it has a future stated reset and no positive activity after it was recorded, as #3508's wake reads it. */
+  private currentUsageLimit(sessionName: string): { asOf: string; resetsAt: string } | null {
+    try {
+      const state = this.usageLimitObserver?.(sessionName) ?? null;
+      if (!state?.limit || Date.parse(state.limit.resetsAt) <= this.now().getTime()) return null;
+      return Date.parse(state.clearedAt ?? "") > Date.parse(state.limit.asOf) ? null : state.limit;
+    } catch {
+      return null; // An unreadable reading never changes a send.
+    }
+  }
 
   /** The time of a permission or elicitation request the seat's main session made after its latest activity report and
    *  that nothing has settled, else null. An unreadable record reads as none: it never changes a send. */
@@ -2777,8 +2804,9 @@ export class SessionTransport {
 
   /**
    * Deliver as always; when the seat was in a managed compaction or restore OpenRig had recorded, before or after the
-   * send, or had an unsettled permission or elicitation request newer than its latest activity report, add a notice
-   * saying so. Each notice is context beside the send's own result, which it never changes.
+   * send, had an unsettled permission or elicitation request newer than its latest activity report, or was at its
+   * recorded usage limit while the text reached its input, add a notice saying so. Each notice is context beside the
+   * send's own result, which it never changes.
    */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     // A terminal seat's shell would run the envelope lines as commands. Swap before the guard,
@@ -2792,11 +2820,15 @@ export class SessionTransport {
     }
     const observe = () => { try { return this.compactionObserver?.(sessionName) ?? null; } catch { return null; } };
     const before = observe();
-    // A prompt answer or a bare Enter is aimed at the prompt itself.
-    const requestAt = opts?.dangerouslyInteract || opts?.submitOnly ? null : this.unsettledInputRequestAt(sessionName);
-    const sent = await this.sendWithoutCompactionNotice(sessionName, text, opts);
-    const result = requestAt ? { ...sent, inputRequest: { observedAt: requestAt,
-      notice: `${sessionName}'s main session made a permission or elicitation request at ${requestAt}, after its latest activity report, and OpenRig hasn't seen it settled. That doesn't establish that a dialog is open; if this message matters, check the seat.` } } : sent;
+    // A prompt answer or a bare Enter is aimed at the prompt itself, not a message for the agent to read.
+    const interacting = opts?.dangerouslyInteract || opts?.submitOnly;
+    const limit = interacting ? null : this.currentUsageLimit(sessionName);
+    const requestAt = interacting ? null : this.unsettledInputRequestAt(sessionName);
+    const sent = await this.sendWithoutCompactionNotice(sessionName, text, opts, limit);
+    const limited = limit && reachedInput(sent) ? { ...sent, usageLimit: { ...limit,
+      notice: `${sessionName} was at its usage limit when this send started (OpenRig recorded it at ${limit.asOf}; it resets at ${limit.resetsAt}). The message reached its input, or may have; the agent isn't expected to read it before then.` } } : sent;
+    const result = requestAt ? { ...limited, inputRequest: { observedAt: requestAt,
+      notice: `${sessionName}'s main session made a permission or elicitation request at ${requestAt}, after its latest activity report, and OpenRig hasn't seen it settled. That doesn't establish that a dialog is open; if this message matters, check the seat.` } } : limited;
     const seen = before ? { observed: "before_send" as const, ...before } : (() => { const after = observe(); return after ? { observed: "after_send" as const, ...after } : null; })();
     if (!seen) return result;
     const when = seen.observed === "before_send" ? "when this send started" : "when this send finished";
@@ -2804,7 +2836,7 @@ export class SessionTransport {
       notice: `${sessionName} was ${seen.detail} (${when}, as OpenRig's managed compaction recorded it). This doesn't mean the restore has finished; if this message matters, check the reply and follow up.` } };
   }
 
-  private async sendWithoutCompactionNotice(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+  private async sendWithoutCompactionNotice(sessionName: string, text: string, opts?: SendOpts, limit: { asOf: string; resetsAt: string } | null = null): Promise<SendResult> {
     // The seat and occupant this send is for, frozen before it runs: a later handover doesn't relabel its evidence.
     const seat = this.evidenceSeat(sessionName);
     // The text the paste actually wrote (a terminal seat's exact text, a combined wake), not the text asked for.
@@ -2818,7 +2850,7 @@ export class SessionTransport {
     let bridgeUnavailable: string | null = null;
     const observed: SendOpts | undefined = seat ? { ...opts, onInputEffect: observer, onHookBridgeUnavailable: (reason) => { bridgeUnavailable = reason; } } : opts;
     const result = await this.sendMarkingUrgent(sessionName, text, observed);
-    this.recordDeliveryEvidence(sessionName, seat, opts, result, wire, bridgeUnavailable);
+    this.recordDeliveryEvidence(sessionName, seat, opts, result, wire, bridgeUnavailable, limit && reachedInput(result) ? limit : null);
     return result;
   }
 
@@ -2839,7 +2871,7 @@ export class SessionTransport {
    *  can't be written never changes the result, holds the send or resends anything. A fact the result doesn't give is
    *  unknown. Only an outbox row that exists counts as admitted. */
   private recordDeliveryEvidence(sessionName: string, seat: ReturnType<SessionTransport["evidenceSeat"]>, opts: SendOpts | undefined, result: SendResult,
-    wire: { text: string; at: string } | null, bridgeUnavailable: string | null): void {
+    wire: { text: string; at: string } | null, bridgeUnavailable: string | null, usageLimit: { asOf: string; resetsAt: string } | null = null): void {
     if (!this.eventBus || !seat) return;
     try {
       const outboxIds = opts?.committedOutboxIds ?? result.outboxIds ?? [];
@@ -2855,6 +2887,7 @@ export class SessionTransport {
         terminalObserved: { outcome: result.outcome ?? null, verified: result.verified ?? null }, inputBoundary: "unknown", source: "send_result",
         ...wireFingerprint(wire), outcome: readSendOutcome(result, writtenFact(result)),
         ...(bridgeUnavailable ? { hookBridgeUnavailable: bridgeUnavailable } : {}),
+        ...(usageLimit ? { usageLimit } : {}),
       });
     } catch (err) {
       if (!this.evidenceFailureLogged) {

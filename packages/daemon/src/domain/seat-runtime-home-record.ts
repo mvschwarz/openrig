@@ -65,7 +65,7 @@ export function runtimeHomeRecordsByNode(db: Database.Database, nodeIds: readonl
  *  paths read it (the occupant ladder over rows that aren't superseded or exited), so a newer row a failed launch left
  *  beside the live occupant isn't taken for it. A stopped seat, with none of those, falls back to its newest row that
  *  wasn't superseded. Several candidates with none uniquely running give no single original, and say which. */
-function currentOriginal(db: Database.Database, nodeId: string): { original: string | null; candidates?: string[] } {
+export function currentOriginal(db: Database.Database, nodeId: string): { original: string | null; candidates?: string[] } {
   const rows = db.prepare("SELECT id, node_id AS nodeId, status, resume_token AS resumeToken FROM sessions WHERE node_id = ? ORDER BY id")
     .all(nodeId) as Array<{ id: string; nodeId: string; status: string | null; resumeToken: string | null }>;
   const live = rows.filter((row) => row.status !== "superseded" && row.status !== "exited");

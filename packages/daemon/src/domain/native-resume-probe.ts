@@ -38,6 +38,13 @@ export interface NativeResumeProbeResult {
   foregroundOnly?: true;
 }
 
+/** The note a resume's result carries when its wait ended on a `foregroundOnly` verdict. */
+export const CLAUDE_PROCESS_ONLY_RESUME = "Claude was running when the resume's wait ended, but nothing on its screen was recognized "
+  + "yet (no prompt, reply or dialog), so this resume rests on the process alone.";
+
+// Claude's auto-mode footer row, which Claude draws under its composer.
+const CLAUDE_AUTO_MODE_FOOTER = /^[ \t]*⏵⏵ auto mode on \(shift\+tab to cycle\)(?:[ \t]+·[^\r\n]*)?[ \t]*$/m;
+
 export interface ProbeShellReadyInput {
   paneCommand: string | null;
   paneContent: string | null;
@@ -441,16 +448,17 @@ export function assessNativeResumeProbe(
         detail: "Claude is at its interactive prompt and the exact managed resume process was verified.",
       };
     }
+    const autoModeScreen = /(^|\n)\s*❯/.test(paneContent) && CLAUDE_AUTO_MODE_FOOTER.test(paneContent);
     if (paneCommand === "claude" && input.claudeResumeIdentityVerified !== false) {
       return {
         status: "resumed",
         code: "active_runtime",
         detail: "Claude is the active foreground process in the probe pane.",
-        foregroundOnly: true,
+        // An auto-mode composer whose header scrolled out is Claude's drawn screen, not the process alone.
+        ...(autoModeScreen ? {} : { foregroundOnly: true as const }),
       };
     }
-    if (/(^|\n)\s*❯/.test(paneContent)
-      && /^[ \t]*⏵⏵ auto mode on \(shift\+tab to cycle\)(?:[ \t]+·[^\r\n]*)?[ \t]*$/m.test(paneContent)) {
+    if (autoModeScreen) {
       return input.claudeAutoIdentityVerified
         ? { status: "resumed", code: "active_runtime", detail: "Claude auto-mode TUI and the exact managed native identity were verified." }
         : { status: "inconclusive", code: "claude_auto_identity_required", detail: "Auto-mode screen text requires proof of the launched Claude identity." };
@@ -655,10 +663,16 @@ function hasClaudeGatedGrantsMark(rows: string[]): boolean {
  *  Text above a session that started (a scrollback, a reply quoting a prompt's words) never decides what is current,
  *  and neither does a draft in the input box: an input frame ends at its closing rule. */
 function claudeCurrentRows(paneContent: string): string[] {
+  return claudeCurrentScreen(paneContent).rows;
+}
+
+/** claudeCurrentRows, and whether they start right under a reply's ● row rather than under a header or an input frame. */
+function claudeCurrentScreen(paneContent: string): { rows: string[]; afterReply: boolean } {
   const rows = claudeWithoutDrafts(paneContent.trimEnd().split(/\r?\n/));
   // A header-like row inside a trust dialog's content is the dialog's text, not Claude's header: it never ends the dialog.
   const scan = rows.map((row, at) => isClaudeVersionHeader(row) && insideClaudeTrustDialog(rows, at) ? "" : row);
   let current = rows;
+  let afterReply = false;
   // Walking up, the first row whose suffix has Claude's own UI (claudeDrawnAfter(scan.slice(at))) is the row where that
   // UI starts: a header, a reply, or the opening rule of an input frame whose closing rule is below. Testing only that
   // row keeps the walk linear on a tall screen.
@@ -671,11 +685,23 @@ function claudeCurrentRows(paneContent: string): string[] {
     const framed = CLAUDE_INPUT_RULE.test(rows[at]!) && /^\s*❯/.test(rows[at + 1] ?? "");
     const closing = framed ? rows.findIndex((row, index) => index > at + 1 && CLAUDE_INPUT_RULE.test(row)) : -1;
     current = rows.slice((closing >= 0 ? closing : at) + 1);
+    afterReply = !framed && /^[●⏺]/.test(scan[at]!);
     break;
   }
   // An input frame still being drawn (its opening rule and the ❯ row, no closing rule yet) holds a draft, not a dialog.
   const opening = current.findIndex((row, index) => CLAUDE_INPUT_RULE.test(row) && /^\s*❯/.test(current[index + 1] ?? ""));
-  return opening >= 0 ? current.slice(0, opening) : current;
+  return { rows: opening >= 0 ? current.slice(0, opening) : current, afterReply };
+}
+
+/** The current rows Claude's trust dialog can be on. Rows that start right under a reply begin with that reply's own
+ *  continuation (blank rows and rows indented two columns or more), which is its text even when it quotes the dialog;
+ *  the dialog starts under its own full-width rule, one column in. A dialog drawn straight under a reply, with no rule
+ *  between and a reply's indentation, can't be told apart from a quote by this shape. */
+function claudeTrustRows(paneContent: string): string[] {
+  const { rows, afterReply } = claudeCurrentScreen(paneContent);
+  if (!afterReply) return rows;
+  const own = rows.findIndex(row => row.trim() !== "" && !/^ {2,}\S/.test(row));
+  return own < 0 ? [] : rows.slice(own);
 }
 
 /** These rows with the text of every draft in Claude's input frames blanked (the ❯ kept), so a rule, a reply or a
@@ -708,13 +734,17 @@ function claudeFocusedOption(paneContent: string): string | null {
   return focused.at(-1)?.[2] ?? null;
 }
 
-/** The focus of Claude's plain workspace trust prompt (#2820 item 2), read from its last 12 drawn rows. An allowlist:
+/** The focus of Claude's plain workspace trust prompt (#2820 item 2), read from the rows after the current screen's last
+ *  trust heading, so options an earlier prompt left above it never count. An allowlist:
  *  "yes" or "no" only when the prompt's options are exactly "No, exit" and "Yes, I trust this folder" (in either
  *  order, numbered or not) and one of them carries the cursor (❯ or ›): "yes" on "Yes, I trust this folder", "no" on
- *  "No, exit" (Claude Code 2.1.322 opens the plain prompt there). Anything else is "unknown": another option set (the
- *  gated-grants backstop's "No, continue without these permissions" included), no cursor, or more than one. */
+ *  "No, exit" (Claude Code 2.1.322 opens the plain prompt there). Anything else is "unknown": no current heading, another
+ *  option set (the gated-grants backstop's "No, continue without these permissions" included), no cursor, or more than one. */
 export function claudeTrustPromptFocus(paneContent: string): "yes" | "no" | "unknown" {
-  const rows = paneContent.trimEnd().split(/\r?\n/).filter(row => row.trim()).slice(-12);
+  const current = claudeTrustRows(paneContent);
+  const heading = current.map(isClaudeTrustHeading).lastIndexOf(true);
+  if (heading < 0) return "unknown";
+  const rows = current.slice(heading + 1).filter(row => row.trim());
   const options = rows.map(row => CLAUDE_TRUST_OPTION_ROW.exec(row)).filter(match => match !== null);
   const labels = options.map(match => match[2]);
   if (labels.length !== 2 || !labels.includes(CLAUDE_TRUST_YES) || !labels.includes(CLAUDE_TRUST_EXIT)) return "unknown";
@@ -725,12 +755,20 @@ export function claudeTrustPromptFocus(paneContent: string): "yes" | "no" | "unk
 
 function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
   // #2820 item 2: read on Claude's current screen only, and a screen with the backstop's marks is never the plain
-  // trust prompt, even still drawn: pressing Enter on it would decline the folder's grants or exit.
-  const current = claudeCurrentRows(paneContent);
-  const text = current.join("\n");
-  return text.includes("Accessing workspace:")
-    && text.includes("Yes, I trust this folder")
-    && !hasClaudeGatedGrantsMark(current);
+  // trust prompt, even still drawn: pressing Enter on it would decline the folder's grants or exit. The heading alone
+  // counts: Claude draws it before the options. A reply quoting it isn't it.
+  const current = claudeTrustRows(paneContent);
+  return current.some(isClaudeTrustHeading) && !hasClaudeGatedGrantsMark(current);
+}
+
+const isClaudeTrustHeading = (row: string) => row.trim().startsWith("Accessing workspace:");
+
+/** Whether Claude is still drawing its plain workspace trust prompt: the heading is on its current screen and fewer than
+ *  its two options are drawn below it, so claudeTrustPromptFocus can't read the focus yet. */
+export function claudeTrustPromptDrawing(paneContent: string): boolean {
+  const current = claudeTrustRows(paneContent);
+  const heading = current.map(isClaudeTrustHeading).lastIndexOf(true);
+  return heading >= 0 && current.slice(heading + 1).filter(row => CLAUDE_TRUST_OPTION_ROW.test(row)).length < 2;
 }
 
 // Claude's resume-selection prompt appears when `claude --resume` finds multiple
@@ -981,8 +1019,10 @@ function looksLikeCodexTui(paneContent: string, codexProcessVerified: boolean): 
 // revoked. Please log out and sign in again."), all starting the same way.
 //
 // The message starts its own row: printed by the CLI, perhaps after `Error:`, or drawn as a TUI error cell (`■`). A row
-// that starts any other way (a reply, a prompt, an indented quote) or sits in a fenced block isn't Codex's message. Its
-// opening words must fit on that first row; the sign-in instruction may wrap onto any number of rows after it.
+// that starts any other way (a reply, a prompt, an indented quote) isn't Codex's message. Inside a fenced block the pane
+// leaves open, an unmarked row stays a quote and is excluded; a row carrying Codex's mark (CODEX_MARKED_REFUSAL_ROW) is
+// eligible, subject to the instruction and tail checks, and may still be quoted text. The message's opening words must
+// fit on its first row; the sign-in instruction may wrap onto any number of rows after it.
 const CODEX_AUTH_REFUSAL_ROW = /^(?:■ |Error: |ERROR: )?Your access token could not be refreshed\b/;
 const CODEX_AUTH_INSTRUCTIONS = ["Please sign in again", "Please log out and sign in again"];
 const CODEX_INPUT_ROW = /^\s*[›»](?:\s|$)/;

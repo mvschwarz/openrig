@@ -602,17 +602,20 @@ describe("rig seat status", () => {
     expect(lines[summaryAt + 1]).toBe(`  ${advisory}`);
   });
 
-  it("explains a confirmed missing tmux session", async () => {
+  it.each([
+    ["session_missing", "tmux session missing; restore or relaunch the seat"],
+    ["session_missing_tmux_unavailable", "tmux session last observed missing; latest tmux reading unavailable; restore or relaunch the seat"],
+  ])("explains a confirmed missing tmux session: %s", async (reason, explanation) => {
     const deps = makeDeps({
       status: 200,
-      data: { ...STATUS, session_status: "detached", session_reason: "session_missing" },
+      data: { ...STATUS, session_status: "detached", session_reason: reason },
     }, []);
 
     const { logs } = await captureLogs(async () => {
       await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
     });
 
-    expect(logs.join("\n")).toContain("Reason: tmux session missing; restore or relaunch the seat");
+    expect(logs.join("\n")).toContain(`Reason: ${explanation}`);
   });
 
   // #3185 (C14 native): a bare shell's session record stayed running, so seat status said running while rig ps said att.
