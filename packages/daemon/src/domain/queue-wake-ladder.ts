@@ -79,6 +79,7 @@ import {
   STUCK_SWEEP_FINDING_TAG,
   resolveOperatorSeat,
   resolveSessionNodeId,
+  resolveStuckSweepIntervalSeconds,
 } from "./queue-stuck-sweep.js";
 import {
   RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
@@ -473,9 +474,10 @@ function heldCreatedRow(row: HeldRowFacts): boolean {
     && !(row.tags ?? []).some(tag => tag === WAKE_ESCALATION_TAG || tag === PROMPT_ALERT_TAG || tag === STUCK_SWEEP_FINDING_TAG);
 }
 
-/** A producer-retired prompt alert no longer owns wake continuation. Keep this
- * exception identical for the consumer, executing ladder and waiting readback;
- * other terminal dispositions (including manual closure) retain ownership. */
+/** Share wake custody across the consumer, executing ladder and waiting readback.
+ * A closed finding quiets duplicates for one stuck-sweep interval; the diagnostic
+ * episode remains settled after wake custody expires. Producer-retired prompts
+ * release immediately, as before. */
 function findWakeRecovery(db: Database.Database, qitemId: string) {
   const recovery = findQueueRecovery(db, qitemId);
   if (!recovery || ["pending", "in-progress", "blocked"].includes(recovery.state)) return recovery;
@@ -484,7 +486,13 @@ function findWakeRecovery(db: Database.Database, qitemId: string) {
         AND EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = q.qitem_id
           AND t.actor_session = q.source_session AND t.transition_note IN (?, ?))`)
         .get(recovery.qitemId, PROMPT_ALERT_TAG, PROMPT_RETIRED_NOTE, LEGACY_PROMPT_RETIRED_NOTE));
-  return endedPrompt ? null : recovery;
+  if (endedPrompt) return null;
+  const closed = db.prepare(`SELECT ts FROM queue_transitions WHERE qitem_id = ?
+    AND state NOT IN ('pending', 'in-progress', 'blocked') AND closure_reason IS NOT NULL
+    ORDER BY transition_id DESC LIMIT 1`).get(recovery.qitemId) as { ts: string } | undefined;
+  const ageMs = Date.now() - Date.parse(closed?.ts ?? "");
+  // Missing, invalid or future closure times cannot justify suppressing a wake.
+  return ageMs >= 0 && ageMs < resolveStuckSweepIntervalSeconds() * 1000 ? recovery : null;
 }
 
 /** Another consumer may diagnose the same parked seat, but the existing
