@@ -68,7 +68,7 @@ const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string
 
 const RIG_KEYS = new Set([
   "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "docs",
-  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "seat_slice", "env",
+  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "seat_slice", "env", "default_onboarding_pack",
 ]);
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
@@ -208,6 +208,10 @@ export class RigSpecSchema {
       errors.push('seat_slice: must be "rig" (omit it to keep seats ungrouped)');
     }
 
+    if (obj["default_onboarding_pack"] !== undefined && typeof obj["default_onboarding_pack"] !== "boolean") {
+      errors.push("default_onboarding_pack: must be a boolean");
+    }
+
     // Launch environment for every seat in the rig; a member's own env overrides it.
     if (obj["env"] !== undefined) errors.push(...validateSeatEnv(obj["env"], "env"));
 
@@ -281,6 +285,7 @@ export class RigSpecSchema {
     const docs = Array.isArray(raw["docs"])
       ? (raw["docs"] as Record<string, unknown>[]).map((d) => ({ path: d["path"] as string }))
       : undefined;
+    const defaultOnboardingPack = raw["default_onboarding_pack"];
 
     return {
       version: raw["version"] as string,
@@ -292,6 +297,7 @@ export class RigSpecSchema {
       ...(raw["seat_slice"] === "rig" ? { seatSlice: "rig" as const } : {}),
       env: normalizeSeatEnv(raw["env"]),
       managedBlocks: raw["managed_blocks"] as RigSpec["managedBlocks"],
+      ...(typeof defaultOnboardingPack === "boolean" ? { defaultOnboardingPack } : {}),
       docs,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
       services: raw["services"] ? normalizeServicesBlock(raw["services"], raw["name"] as string) : undefined,

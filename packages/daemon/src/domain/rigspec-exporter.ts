@@ -437,6 +437,7 @@ export class RigSpecExporter {
       ...(this.rigRepo.getRigSeatSlice(rigId) ? { seatSlice: "rig" as const } : {}),
       ...(rigEnv ? { env: rigEnv } : {}),
       ...(claudeManagedBlockFile ? { managedBlocks: { "claude-code": claudeManagedBlockFile } } : {}),
+      ...(startupLayers?.defaultOnboardingPack !== undefined ? { defaultOnboardingPack: startupLayers.defaultOnboardingPack } : {}),
       ...(workspace ? { workspace } : {}),
       ...(startup ? { startup } : {}),
       pods: podSpecs,
