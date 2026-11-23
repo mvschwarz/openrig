@@ -17,7 +17,7 @@ const CLAUDE_FLOOR_EFFECT = {
   claudeAutoMode: null,
 } as const;
 
-// A staged launch's script name, and the line the pane's shell shows once it reads the launch (after its prompt).
+// A staged launch's script name, and the exact line typed to run it, which the pane shows once its shell reads it.
 const launchName = "openrig-tmux-send-4242-0f0e0d0c-1111-4222-8333-444455556666.txt";
 const typedLaunch = `( . '/tmp/${launchName}' )`;
 
@@ -502,7 +502,7 @@ describe("ClaudeResumeAdapter", () => {
         capturePaneContent: async () => `No conversation found with session ID: old\n$ ${unread ? "" : `${typedLaunch}\nNo conversation found with session ID: retained-history\n$ `}` });
       tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
       tmux.stagedLaunchUnread = vi.fn(() => unread);
-      tmux.stagedLaunchFileName = vi.fn(() => launchName);
+      tmux.stagedLaunchTypedLine = vi.fn(() => typedLaunch);
       const adapter = new ClaudeResumeAdapter(tmux, { pollMs: 0, maxWaitMs: 0,
         seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never });
       const result = await adapter.resume("worker", "claude_id", "retained-history", "/repo");
@@ -523,7 +523,7 @@ describe("ClaudeResumeAdapter", () => {
         } });
         tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
         tmux.stagedLaunchUnread = vi.fn(() => unread);
-        tmux.stagedLaunchFileName = vi.fn(() => launchName);
+        tmux.stagedLaunchTypedLine = vi.fn(() => typedLaunch);
         const adapter = new ClaudeResumeAdapter(tmux, { pollMs: 1, maxWaitMs: 3, sleep: async () => {},
           seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never });
         return { adapter, reads: () => read };
@@ -540,13 +540,13 @@ describe("ClaudeResumeAdapter", () => {
 
       it("two launches in one pane: each is judged by its own typed line", async () => {
         let launch = 0;
-        const names = ["aaaaaaaa", "bbbbbbbb"].map(id => `openrig-tmux-send-4242-${id}-1111-4222-8333-444455556666.txt`);
+        const lines = ["aaaaaaaa", "bbbbbbbb"].map(id => `( . '/tmp/openrig-tmux-send-4242-${id}-1111-4222-8333-444455556666.txt' )`);
         const tmux = mockTmux({ getPaneCommand: async () => "zsh", capturePaneContent: async () => launch === 1
           ? "No conversation found with session ID: old\nNo conversation found with session ID: older\n$ "
-          : `No conversation found with session ID: old\nNo conversation found with session ID: older\n$ ( . '/tmp/${names[1]}' )\nNo conversation found with session ID: second\n$ ` });
+          : `No conversation found with session ID: old\nNo conversation found with session ID: older\n$ ${lines[1]}\nNo conversation found with session ID: second\n$ ` });
         tmux.sendShellCommand = vi.fn(async () => { launch++; return { ok: true as const }; });
         tmux.stagedLaunchUnread = vi.fn(() => launch === 1);
-        tmux.stagedLaunchFileName = vi.fn(() => names[launch - 1]);
+        tmux.stagedLaunchTypedLine = vi.fn(() => lines[launch - 1]);
         const adapter = new ClaudeResumeAdapter(tmux, { pollMs: 1, maxWaitMs: 3, sleep: async () => {},
           seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never });
         expect(await adapter.resume("worker", "claude_id", "first", "/repo")).toMatchObject({ code: "attention_required" });
@@ -573,6 +573,25 @@ describe("ClaudeResumeAdapter", () => {
         expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo")).toMatchObject({ ok: false, code: "retry_fresh" });
       });
 
+      // review50-r2 (reviewer-tests.patch): the script's name in output isn't the typed line, so it moves nothing.
+      it("reviewer anchor: a later message naming the script doesn't hide this launch's missing report", async () => {
+        const { adapter, reads } = staged(() => `${typedLaunch}\nNo conversation found with session ID: retained-history\ndiagnostic: ${launchName} finished\n$ `, { command: "claude" });
+        const result = await adapter.resume("worker", "claude_id", "retained-history", "/repo");
+        expect(result, JSON.stringify({ result, read: reads() })).toMatchObject({ ok: false, code: "retry_fresh" });
+      });
+
+      it("reviewer anchor: the script's name in output alone leaves whose report it is unknown", async () => {
+        const { adapter, reads } = staged(() => `diagnostic: ${launchName}\nNo conversation found with session ID: old`, { command: "claude" });
+        const result = await adapter.resume("worker", "claude_id", "retained-history", "/repo");
+        expect(result, JSON.stringify({ result, read: reads() })).toMatchObject({ ok: false, code: "attention_required" });
+      });
+
+      it("reviewer anchor: a typed line split inside the script's name still places this launch's report", async () => {
+        const wrap = typedLaunch.replace(launchName, launchName.slice(0, 23) + "\n" + launchName.slice(23));
+        const { adapter } = staged(() => `${wrap}\nNo conversation found with session ID: retained-history`, { command: "claude" });
+        expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo")).toMatchObject({ ok: false, code: "retry_fresh" });
+      });
+
       it("a report with the typed line out of view keeps polling, and ends saying whose it is can't be told", async () => {
         const { adapter, reads } = staged(() => "No conversation found with session ID: retained-history\n$ ");
         const result = await adapter.resume("worker", "claude_id", "retained-history", "/repo");
@@ -586,7 +605,7 @@ describe("ClaudeResumeAdapter", () => {
         const tmux = mockTmux({ getPaneCommand: async () => "zsh", capturePaneContent: async () => `${old}${typedLaunch}\n`, getPanePid: async () => 4321 });
         tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
         tmux.stagedLaunchUnread = vi.fn(() => false);
-        tmux.stagedLaunchFileName = vi.fn(() => launchName);
+        tmux.stagedLaunchTypedLine = vi.fn(() => typedLaunch);
         const adapter = new ClaudeResumeAdapter(tmux, { pollMs: 0, maxWaitMs: 0,
           seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never,
           listProcesses: async () => [

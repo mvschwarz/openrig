@@ -1224,7 +1224,7 @@ describe("Claude Code runtime adapter", () => {
     // `command(read)`, when given, is the pane's foreground command before the nth capture.
     // `launchScript.readAt`, when given: the launch goes as a staged script (sendShellCommand, as in production), which the
     // pane's shell reads before the nth capture (never, when undefined); the tmux adapter says whether it's still unread,
-    // and names the script (`launchName`), whose name shows in the line the shell read (`typed`).
+    // and gives the exact line it typed to run the script (`typed`), which the pane shows once the shell reads it.
     const run = async (opts: { screen?: (read: number) => string; rows?: (read: number) => typeof occupied; paneCommand?: string; command?: (read: number) => string; readinessTimeoutMs?: number; autoDrive?: boolean; launchScript?: { readAt?: number } } = {}) => {
       let reads = 0;
       const tmux = mockTmux();
@@ -1232,7 +1232,7 @@ describe("Claude Code runtime adapter", () => {
       if (staged) {
         tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
         tmux.stagedLaunchUnread = vi.fn((target: string) => target === "r01-impl" && (staged.readAt === undefined || reads < staged.readAt));
-        tmux.stagedLaunchFileName = vi.fn((target: string) => (target === "r01-impl" ? launchName : undefined));
+        tmux.stagedLaunchTypedLine = vi.fn((target: string) => (target === "r01-impl" ? typed : undefined));
       }
       (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => opts.command?.(reads) ?? opts.paneCommand ?? "sh");
       (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async () => (opts.screen ?? (() => ""))(reads++));
@@ -1476,16 +1476,16 @@ describe("Claude Code runtime adapter", () => {
         });
 
         it("two launches in one pane: the second doesn't take the first one's report for its own", async () => {
-          const names = ["aaaaaaaa", "bbbbbbbb"].map(id => `openrig-tmux-send-4242-${id}-1111-4222-8333-444455556666.txt`);
-          const first = `zsh$ ( . '/tmp/${names[0]}' )\nNo conversation found with session ID: old-1\nzsh$ `;
+          const lines = ["aaaaaaaa", "bbbbbbbb"].map(id => `( . '/tmp/openrig-tmux-send-4242-${id}-1111-4222-8333-444455556666.txt' )`);
+          const first = `zsh$ ${lines[0]}\nNo conversation found with session ID: old-1\nzsh$ `;
           let launches = 0;
           const tmux = mockTmux();
           tmux.sendShellCommand = vi.fn(async () => { launches++; return { ok: true as const }; });
           tmux.stagedLaunchUnread = vi.fn(() => false);
-          tmux.stagedLaunchFileName = vi.fn(() => names[launches - 1]);
+          tmux.stagedLaunchTypedLine = vi.fn(() => lines[launches - 1]);
           (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => (launches === 1 ? "zsh" : "claude"));
           (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async () =>
-            (launches === 1 ? first : `${first}( . '/tmp/${names[1]}' )\n${tui}`));
+            (launches === 1 ? first : `${first}${lines[1]}\n${tui}`));
           (tmux as unknown as { getPanePid: unknown }).getPanePid = vi.fn(async () => 10);
           const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, readinessTimeoutMs: WAIT_MS,
             listProcesses: () => (launches === 1 ? shellOnly() : occupied),
@@ -1496,6 +1496,26 @@ describe("Claude Code runtime adapter", () => {
           expect(await adapter.launchHarness(binding, { name: "dev-impl@test-rig", resumeToken: "abc-123" }))
             .toMatchObject({ ok: true, resumeToken: "abc-123" });
           expect(launches).toBe(2);
+        });
+
+        // review50-r2 (reviewer-tests.patch): the script's name in output isn't the typed line, so it moves nothing.
+        it("reviewer anchor: a later message naming the script doesn't hide this launch's missing report", async () => {
+          const { result, reads } = await run({ launchScript: { readAt: 0 }, paneCommand: "claude",
+            screen: () => `${typed}\nNo conversation found with session ID: abc-123\ndiagnostic: ${launchName} finished\nzsh$ ` });
+          expect(result, JSON.stringify({ result, reads })).toMatchObject({ ok: false, recovery: "retry_fresh", missingConversation: true });
+        });
+
+        it("reviewer anchor: the script's name in output alone leaves whose report it is unknown", async () => {
+          const { result, reads } = await run({ launchScript: { readAt: 0 }, paneCommand: "claude",
+            screen: () => `diagnostic: ${launchName}\nNo conversation found with session ID: old-1` });
+          expect(result, JSON.stringify({ result, reads })).toMatchObject({ ok: false, recovery: "attention_required" });
+        });
+
+        it("reviewer anchor: a typed line split inside the script's name still places this launch's report", async () => {
+          const wrap = typed.replace(launchName, launchName.slice(0, 23) + "\n" + launchName.slice(23));
+          const { result } = await run({ launchScript: { readAt: 0 }, paneCommand: "claude",
+            screen: () => `${wrap}\nNo conversation found with session ID: abc-123` });
+          expect(result).toMatchObject({ ok: false, recovery: "retry_fresh", missingConversation: true });
         });
 
         // Whose report it is can't be told without the typed line: never a missing conversation, never an earlier one.

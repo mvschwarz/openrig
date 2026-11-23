@@ -558,9 +558,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.autoLaunches.set(binding.nodeId, launch);
     if (opts.resumeToken) {
       // A launch sent through sendShellCommand (managed, or classic with the seat's launch environment) went as a staged
-      // script, whose file name marks this launch's typed line in the pane; one typed inline has none.
-      const launchFileName = managed || this.seatLaunchEnvironment ? this.tmux.stagedLaunchFileName?.(binding.tmuxSession) : undefined;
-      const verification = await this.verifyResumeLaunch(binding, launchFileName);
+      // script, run by the line it typed; that line marks this launch in the pane. One typed inline has none.
+      const launchLine = managed || this.seatLaunchEnvironment ? this.tmux.stagedLaunchTypedLine?.(binding.tmuxSession) : undefined;
+      const verification = await this.verifyResumeLaunch(binding, launchLine);
       // The process readiness pinned first, if it observed one: the caller records it, not a later read.
       const launchedProcess = launch.process ? { launchedProcess: { ...launch.process } } : {};
       if (!verification.ok) return { ...verification, ...launchedProcess };
@@ -802,7 +802,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       ? "absent" : "unknown";
   }
 
-  private async verifyResumeLaunch(binding: NodeBinding, launchFileName?: string): Promise<HarnessLaunchResult> {
+  private async verifyResumeLaunch(binding: NodeBinding, launchLine?: string): Promise<HarnessLaunchResult> {
     const tmuxSession = binding.tmuxSession!;
     // A quick window, then a longer one only while the boot is still in progress, as the Codex adapter does it.
     // The longer one is the readiness setting less the quick window, as a number of polls counted from here; it is per
@@ -822,7 +822,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // placed (any, while the launch is unread; one whose typed line isn't in view) keeps the wait going like a start in
     // progress, bounded as before.
     const notFoundOwner = (content: string) => noConversationFoundOwner(content,
-      { fileName: launchFileName, unread: this.tmux.stagedLaunchUnread?.(tmuxSession) === true });
+      { typedLine: launchLine, unread: this.tmux.stagedLaunchUnread?.(tmuxSession) === true });
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSession);

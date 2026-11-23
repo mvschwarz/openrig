@@ -365,26 +365,29 @@ export function buildCodexResumeCore(
 }
 
 /** Whose "No conversation found" a resume's pane shows. A launch sent as a staged script (TmuxAdapter.sendShellCommand)
- *  is typed as a line naming its script, and that file name is unique to the launch:
+ *  is run by one typed line naming its script (TmuxAdapter.stagedLaunchTypedLine), and that script is unique to the launch:
  *  - while the pane's shell hasn't read the launch, Claude hasn't run, so no report is this launch's: "earlier";
- *  - once it has, only a report below the last line showing the name is this launch's: "this". One above it is an
- *    earlier launch's: "earlier", with `since`, the pane text below that line, which is what this launch has drawn;
- *  - a name that doesn't show (scrolled out of the capture) can't place the report: "unknown".
- *  A launch typed inline (no file name) keeps any report as this launch's. A long typed line wraps in a narrow pane and
- *  the capture splits it into rows, which a joined capture (-J) doesn't rejoin when the shell's line editor did the
- *  wrapping, so the name is matched with the row breaks ignored. */
-export function noConversationFoundOwner(paneContent: string, launch: { fileName?: string; unread: boolean }):
+ *  - once it has, only a report below the last place that whole typed line shows is this launch's: "this". One above it
+ *    is an earlier launch's: "earlier", with `since`, the pane text below that line, which is what this launch has drawn.
+ *    The script's name alone (in a later message, say) is output, not the typed line, and places nothing;
+ *  - a typed line that doesn't show (scrolled out of the capture) can't place the report: "unknown".
+ *  A launch typed inline (no typed line recorded) keeps any report as this launch's. A long typed line wraps in a narrow
+ *  pane and the capture splits it into rows, which a joined capture (-J) doesn't rejoin when the shell's line editor did
+ *  the wrapping, and a row that ends at a space loses it. So the line is matched with row breaks ignored and its spaces
+ *  optional; every other character must match in order. */
+export function noConversationFoundOwner(paneContent: string, launch: { typedLine?: string; unread: boolean }):
   { owner: "this" } | { owner: "earlier"; since?: string } | { owner: "unknown" } {
   if (launch.unread) return { owner: "earlier" };
-  if (!launch.fileName) return { owner: "this" };
+  if (!launch.typedLine?.trim()) return { owner: "this" };
   const rows = paneContent.split("\n");
   const rowEnds: number[] = [];
   let joined = "";
   for (const row of rows) rowEnds.push((joined += row).length);
-  const at = joined.lastIndexOf(launch.fileName);
-  if (at < 0) return { owner: "unknown" };
-  const nameEnd = at + launch.fileName.length;
-  const since = rows.slice(rowEnds.findIndex((end) => end >= nameEnd) + 1).join("\n");
+  const line = new RegExp(launch.typedLine.trim().split(/\s+/).map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s*"), "g");
+  let lineEnd = -1;
+  for (const match of joined.matchAll(line)) lineEnd = match.index + match[0].length;
+  if (lineEnd < 0) return { owner: "unknown" };
+  const since = rows.slice(rowEnds.findIndex((end) => end >= lineEnd) + 1).join("\n");
   return since.includes("No conversation found") ? { owner: "this" } : { owner: "earlier", since };
 }
 

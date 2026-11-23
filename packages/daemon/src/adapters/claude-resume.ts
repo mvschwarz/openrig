@@ -224,9 +224,9 @@ export class ClaudeResumeAdapter {
     }
 
     // A launch sent through sendShellCommand (managed, or classic with the seat's launch environment) went as a staged
-    // script, whose file name marks this launch's typed line in the pane; one typed inline has none.
-    const launchFileName = managed || this.options.seatLaunchEnvironment ? this.tmux.stagedLaunchFileName?.(tmuxSessionName) : undefined;
-    const result = await this.verifyResume(tmuxSessionName, resumeToken!, launchFileName).catch((error): ResumeResult => ({
+    // script, run by the line it typed; that line marks this launch in the pane. One typed inline has none.
+    const launchLine = managed || this.options.seatLaunchEnvironment ? this.tmux.stagedLaunchTypedLine?.(tmuxSessionName) : undefined;
+    const result = await this.verifyResume(tmuxSessionName, resumeToken!, launchLine).catch((error): ResumeResult => ({
       ok: false,
       code: "attention_required",
       message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
@@ -235,7 +235,7 @@ export class ClaudeResumeAdapter {
     return result.ok ? { ...result, appliedLaunch, ...(warnings.length ? { warnings } : {}) } : result;
   }
 
-  private async verifyResume(tmuxSessionName: string, resumeToken: string, launchFileName?: string): Promise<ResumeResult> {
+  private async verifyResume(tmuxSessionName: string, resumeToken: string, launchLine?: string): Promise<ResumeResult> {
     const pollMs = this.options.pollMs ?? 200;
     const maxWaitMs = this.options.maxWaitMs ?? 5_000;
     const sleepFn = this.options.sleep ?? sleep;
@@ -244,7 +244,7 @@ export class ClaudeResumeAdapter {
     // launch's is set aside, and the screen this launch has drawn below that line is judged instead. One that can't be
     // placed (any, while the launch is unread; one whose typed line isn't in view) keeps polling.
     const notFoundOwner = (content: string) => noConversationFoundOwner(content,
-      { fileName: launchFileName, unread: this.tmux.stagedLaunchUnread?.(tmuxSessionName) === true });
+      { typedLine: launchLine, unread: this.tmux.stagedLaunchUnread?.(tmuxSessionName) === true });
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSessionName);
