@@ -6891,7 +6891,12 @@ describe("RestoreOrchestrator", () => {
       if (!result.ok) return;
       const node = result.result.nodes[0]!;
       expect(node.status).toBe("awaiting-decision");
-      expect(node.error).toMatch(/rig seat launch 'worker@[^']+' --fresh --reason "<why>"/);
+      // This seat has no saved startup context, so the fresh launch would refuse: the reason offers none and names how to
+      // record the token instead.
+      expect(node.error).toContain("The seat has no saved startup context either, so it can't be started fresh.");
+      expect(node.error).toMatch(/rig seat set-resume-token \S+ --token-stdin/);
+      expect(node.error).not.toContain("rig seat launch");
+      expect(node.noStartupContext).toBe(true);
       // ZERO session started: launchNode never called, session count unchanged.
       expect(launchSpy).not.toHaveBeenCalled();
       expect(after.c).toBe(before.c);

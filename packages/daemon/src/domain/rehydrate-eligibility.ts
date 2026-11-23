@@ -7,9 +7,10 @@ import type { RigWithRelations, Session, Snapshot, SnapshotData } from "./types.
 export interface CurrentStateRehydrateEligibility {
   ok: boolean;
   blockers: string[];
-  /** Seats a current-state restore leaves unstarted, waiting for a decision, instead of blocking the rig on them
-   *  (present only when there are any). */
+  /** Seats a current-state restore leaves unstarted, waiting for a decision (present only when there are any). */
   awaitingDecision?: string[];
+  /** Every seat would wait, so restoring the rig starts none (present only then). */
+  noSeatStarts?: true;
 }
 
 /**
@@ -147,14 +148,14 @@ export function assessCurrentStateRehydrateEligibility(
   }
 
   // A seat with neither saved startup context nor a resume token would start blank, so it blocks, with one exception.
-  // When its current occupant resolves unambiguously, as the auto-rehydrate capture resolves it, under
-  // resume_if_possible, restore starts nothing for it: the capture keeps that row and its null token, and restore stops
-  // the seat as awaiting-decision before any launch while the other seats resume from their own current rows. No token
-  // comes from an older row, and the occupant match is unchanged. With no other eligible seat the blocker stays:
-  // restoring that rig would start nothing.
-  const seatBlockers: Array<{ logicalId: string; blocker: string; awaitsDecision: boolean }> = [];
-  let eligibleSeats = 0;
-  let awaitsDecision: ((node: RigWithRelations["nodes"][number]) => boolean) | undefined;
+  // Under the default restore policy (resume_if_possible), when its current occupant resolves unambiguously, as the
+  // auto-rehydrate capture resolves it, restore starts nothing for it: the capture keeps that row and its null token, and
+  // restore stops the seat as awaiting-decision before any launch while the other seats resume from their own current
+  // rows. No token comes from an older row, and the occupant match is unchanged. The exception needs another seat that
+  // doesn't block. That seat isn't promised to start: an agent seat whose current occupant has no token stops the same
+  // way even with startup context. So when the exception applies, every agent seat that will wait is named, and the
+  // result says when none starts.
+  const seats: Array<{ node: RigWithRelations["nodes"][number]; blocker: string | null; isAgentRuntime: boolean }> = [];
   for (const node of rig.nodes) {
     const runtime = node.runtime ?? "";
     const isAgentRuntime = runtime.length > 0 && runtime !== "terminal";
@@ -171,21 +172,27 @@ export function assessCurrentStateRehydrateEligibility(
       : isAgentRuntime && !hasStartupContext && !hasResumeToken
         ? `node ${node.logicalId} has runtime ${runtime} but no startup context or resume token`
         : null;
-    if (!blocker) {
-      eligibleSeats++;
-      continue;
-    }
-    awaitsDecision ??= tokenlessResumeOccupants(db, rig);
-    seatBlockers.push({ logicalId: node.logicalId, blocker, awaitsDecision: awaitsDecision(node) });
+    seats.push({ node, blocker, isAgentRuntime });
   }
-  const waiting = eligibleSeats > 0 ? seatBlockers.filter((seat) => seat.awaitsDecision) : [];
-  blockers.push(...seatBlockers.filter((seat) => !waiting.includes(seat)).map((seat) => seat.blocker));
+  // Read once, and only for a rig with a seat that would otherwise block: a rig with none is assessed as before.
+  const awaitsDecision = seats.some((seat) => seat.blocker) ? tokenlessResumeOccupants(db, rig) : undefined;
+  const eligibleSeats = seats.filter((seat) => !seat.blocker).length;
+  const waiting = awaitsDecision && eligibleSeats > 0 ? seats.filter((seat) => seat.blocker && awaitsDecision(seat.node)) : [];
+  blockers.push(...seats.filter((seat) => seat.blocker && !waiting.includes(seat)).map((seat) => seat.blocker!));
+  const waitingWithContext = awaitsDecision && waiting.length > 0
+    ? seats.filter((seat) => !seat.blocker && seat.isAgentRuntime && awaitsDecision(seat.node))
+    : [];
+  const awaitingDecision = [
+    ...waiting.map((seat) => `node ${seat.node.logicalId} has no persisted startup context or resume token: restore keeps its current session and leaves it unstarted, waiting for a decision; without startup context it can't be started fresh`),
+    ...waitingWithContext.map((seat) => `node ${seat.node.logicalId} has saved startup context but no resume token: restore leaves it unstarted, waiting for a decision`),
+  ];
+  const ok = blockers.length === 0;
 
   return {
-    ok: blockers.length === 0,
+    ok,
     blockers,
-    ...(waiting.length > 0 ? { awaitingDecision: waiting.map((seat) =>
-      `node ${seat.logicalId} has no persisted startup context or resume token: restore keeps its current session and leaves it unstarted, waiting for a decision`) } : {}),
+    ...(awaitingDecision.length > 0 ? { awaitingDecision } : {}),
+    ...(ok && awaitingDecision.length === rig.nodes.length && rig.nodes.length > 0 ? { noSeatStarts: true as const } : {}),
   };
 }
 

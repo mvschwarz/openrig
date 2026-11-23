@@ -263,15 +263,19 @@ describe("restore-check current-state eligibility correction", () => {
   // seat's current occupant is still known, so current state stands in: restore keeps its row and null token and stops
   // it for a decision, and the siblings resume from their own rows. Both selection paths and restore-check decide
   // through the one eligibility rule.
-  const WAITING = "node dev.moved has no persisted startup context or resume token: restore keeps its current session and leaves it unstarted, waiting for a decision";
+  const WAITING = "node dev.moved has no persisted startup context or resume token: restore keeps its current session and leaves it unstarted, waiting for a decision; without startup context it can't be started fresh";
   const BLOCKED = "node dev.moved is pod-aware but has no persisted startup context or resume token";
-  function seedPartial(name: string, shape: "known" | "ambiguous" | "relaunch-fresh" | "no-eligible-seat" = "known") {
+  function seedPartial(name: string, shape: "known" | "ambiguous" | "relaunch-fresh" | "no-eligible-seat" | "lead-context-no-token" = "known") {
     const rig = seedMoved(name, false);
     const moved = setup.rigRepo.getRig(rig.id)!.nodes.find((node) => node.logicalId === "dev.moved")!;
     const lead = setup.rigRepo.addNode(rig.id, "dev.lead", { runtime: "codex", cwd: home, podId: `pod-${name}` });
     const leadRow = setup.sessionRegistry.registerSession(lead.id, `dev-lead@${name}`);
     setup.sessionRegistry.updateStatus(leadRow.id, "stopped");
-    if (shape !== "no-eligible-seat") setup.db.prepare("UPDATE sessions SET resume_type='codex_id',resume_token='fixture-lead-token' WHERE id=?").run(leadRow.id);
+    if (shape === "lead-context-no-token") {
+      setup.db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', '[]', 'codex')").run(lead.id);
+    } else if (shape !== "no-eligible-seat") {
+      setup.db.prepare("UPDATE sessions SET resume_type='codex_id',resume_token='fixture-lead-token' WHERE id=?").run(leadRow.id);
+    }
     if (shape === "ambiguous") {
       // A second current row that never recorded a token: which one is the seat's occupant can't be told.
       setup.sessionRegistry.updateStatus(setup.sessionRegistry.registerSession(moved.id, `dev-moved@${name}`).id, "stopped");
@@ -304,6 +308,21 @@ describe("restore-check current-state eligibility correction", () => {
     const input = (await check(rig.name)).checks.find((c: { check: string }) => c.check.endsWith(".restore-preconditions"));
     expect(input).toMatchObject({ status: "yellow", evidence: expect.stringContaining(`It would not start every seat: ${WAITING}.`) });
     expect(changes()).toEqual(before);
+  });
+
+  it("a sibling with saved startup context but no resume token waits too, and is named; when no seat would start, the report says so", async () => {
+    const { rig } = seedPartial("partial-lead-waits", "lead-context-no-token");
+    const LEAD_WAITING = "node dev.lead has saved startup context but no resume token: restore leaves it unstarted, waiting for a decision";
+    // No new gate: the rig stays eligible, as a rig whose seats all wait already restores that way.
+    expect(eligibility.assessCurrentStateRehydrateEligibility(setup.db, setup.rigRepo.getRig(rig.id)!))
+      .toEqual({ ok: true, blockers: [], awaitingDecision: [WAITING, LEAD_WAITING], noSeatStarts: true });
+    for (const response of await plans(rig.id, rig.name)) {
+      expect(response.status).toBe(200);
+      const forecast = await response.json() as { nodes: Array<{ logicalId: string; intendedAction: string }> };
+      expect(Object.fromEntries(forecast.nodes.map((node) => [node.logicalId, node.intendedAction]))).toEqual({ "dev.lead": "awaiting-decision", "dev.moved": "awaiting-decision" });
+    }
+    const input = (await check(rig.name)).checks.find((c: { check: string }) => c.check.endsWith(".restore-preconditions"));
+    expect(input).toMatchObject({ status: "yellow", evidence: expect.stringContaining(`It would start no seat; every seat would wait for a decision: ${WAITING}; ${LEAD_WAITING}.`) });
   });
 
   it.each([

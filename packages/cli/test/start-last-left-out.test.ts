@@ -159,7 +159,7 @@ async function serveDaemon(app: ReturnType<typeof createTestApp>["app"]): Promis
   return port;
 }
 
-function startCmd(port: number): Command {
+function startCmd(port: number, extra: { promptYesNo?: (question: string) => Promise<boolean> } = {}): Command {
   const lifecycleDeps: LifecycleDeps = {
     acquireStartLock: () => ({ recordChild: vi.fn(), release: vi.fn() }),
     spawn: vi.fn(() => ({ pid: 1, unref: vi.fn() }) as never),
@@ -176,7 +176,7 @@ function startCmd(port: number): Command {
   };
   const prog = new Command();
   prog.exitOverride();
-  prog.addCommand(startCommand({ lifecycleDeps, clientFactory: (url: string) => new DaemonClient(url) }));
+  prog.addCommand(startCommand({ lifecycleDeps, clientFactory: (url: string) => new DaemonClient(url), ...extra }));
   return prog;
 }
 
@@ -234,7 +234,13 @@ it("rig start --last after the reboot brings the other seats back on their own c
   const restoredRig = parsed.restoredRigs[0] as { status: string; nodes: Array<{ logicalId: string; status: string; error?: string }>; warnings?: string[] };
   expect(restoredRig.status).toBe("partially_restored");
   expect(restoredRig.nodes.map((node) => [node.logicalId, node.status])).toEqual([["dev.a", "resumed"], ["dev.b", "resumed"], ["dev.c", "awaiting-decision"]]);
-  expect(restoredRig.nodes.find((node) => node.logicalId === "dev.c")?.error).toContain("Original session unresumable: no resume token was captured for this seat. No session was started.");
+  // dev.c has no saved startup context, so its reason offers no fresh start (the launch would refuse) and names how to
+  // record its token instead.
+  const devC = restoredRig.nodes.find((node) => node.logicalId === "dev.c") as { error?: string; noStartupContext?: true };
+  expect(devC.noStartupContext).toBe(true);
+  expect(devC.error).toContain("Original session unresumable: no resume token was captured for this seat. The seat has no saved startup context either, so it can't be started fresh. No session was started.");
+  expect(devC.error).toContain("rig seat set-resume-token dev-c@rebooted --token-stdin");
+  expect(devC.error).not.toContain("rig seat launch");
   expect(restoredRig.warnings).toContain("Existing restore snapshots named an older occupant; captured current DB state as auto-rehydrate snapshot for reboot recovery.");
   // A seat waiting for a decision is not a clean restore: the existing exit-code contract.
   expect(json.exitCode).toBe(1);
@@ -266,9 +272,41 @@ it("rig start --last prints the restored seats and the decision the token-less s
   expect(output).toContain("rebooted: partially_restored");
   expect(output).toContain("    dev.a: resumed");
   expect(output).toContain("    dev.b: resumed");
-  expect(output).toContain("    dev.c: awaiting-decision -- Original session unresumable: no resume token was captured for this seat.");
-  expect(output).toContain("    dev.c: awaiting-decision -- to fresh-prime: rig seat launch dev.c@rebooted --fresh");
+  expect(output).toContain("    dev.c: awaiting-decision -- Original session unresumable: no resume token was captured for this seat. The seat has no saved startup context either, so it can't be started fresh.");
+  // No fresh start is offered for it: that launch reads the saved startup context, and this seat has none.
+  expect(output).not.toContain("to fresh-prime");
+  expect(output).not.toContain("--fresh");
   expect(output).not.toContain("left out");
+  expect(human.exitCode).toBe(1);
+  const freshLaunch = await fixture.app.request(`/api/seat/launch/${encodeURIComponent("dev.c@rebooted")}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fresh: true, reason: "the fresh start no longer offered" }),
+  });
+  expect(((await freshLaunch.json()) as { code?: string }).code).toBe("startup_context_missing");
+});
+
+it("interactively, rig start --last doesn't ask to fresh-prime a waiting seat that has no startup context", async () => {
+  const { fixture, launches } = await rebootedAfterRestore();
+  const asked: string[] = [];
+  const promptYesNo = vi.fn(async (question: string) => { asked.push(question); return true; });
+  const human = await run(startCmd(await serveDaemon(fixture.app), { promptYesNo }), ["--last"]);
+  const output = human.logs.join("\n");
+  expect(output).toContain("    dev.c: awaiting-decision -- Original session unresumable: no resume token was captured for this seat. The seat has no saved startup context either, so it can't be started fresh.");
+  expect(asked.filter((question) => question.includes("dev.c"))).toEqual([]);
+  expect(output).not.toContain("fresh-primed");
+  expect(launches.map((launch) => launch.name)).toEqual(["dev-a@rebooted", "dev-b@rebooted"]);
+  expect(human.exitCode).toBe(1);
+});
+
+it("with saved startup context, the token-less seat waits the same way and its fresh start is still offered", async () => {
+  const { fixture, db, nodeIds } = await rebootedAfterRestore();
+  db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', '[]', 'codex')")
+    .run(nodeIds["dev.c"]!);
+  const human = await run(startCmd(await serveDaemon(fixture.app)), ["--last"]);
+  const output = human.logs.join("\n");
+  expect(output).toContain("    dev.a: resumed");
+  expect(output).toContain("    dev.b: resumed");
+  expect(output).toContain("    dev.c: awaiting-decision -- Original session unresumable: no resume token was captured for this seat. No session was started. Restore the original session manually, or deliberately start only this seat fresh:");
+  expect(output).toContain("    dev.c: awaiting-decision -- to fresh-prime: rig seat launch dev.c@rebooted --fresh");
   expect(human.exitCode).toBe(1);
 });
 

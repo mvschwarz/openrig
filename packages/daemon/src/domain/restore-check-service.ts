@@ -485,9 +485,11 @@ export class RestoreCheckService {
       const input = this.deps.getRestoreInputs(rig.rigId);
       if ("unavailable" in input) throw new Error(input.unavailable);
       if ("currentStateRehydrate" in input) {
-        const { ok, blockers, awaitingDecision } = input.currentStateRehydrate;
+        const { ok, blockers, awaitingDecision, noSeatStarts } = input.currentStateRehydrate;
         const recorded = this.deps.getMaterializedRoster?.(rig.rigId) ?? null;
-        const waiting = awaitingDecision?.length ? ` It would not start every seat: ${awaitingDecision.join("; ")}.` : "";
+        const waiting = !awaitingDecision?.length ? ""
+          : noSeatStarts ? ` It would start no seat; every seat would wait for a decision: ${awaitingDecision.join("; ")}.`
+          : ` It would not start every seat: ${awaitingDecision.join("; ")}.`;
         return {
           snapshot: null,
           ...(input.notRestoredNodeIds ? { notRestored: new Set(input.notRestoredNodeIds) } : {}),

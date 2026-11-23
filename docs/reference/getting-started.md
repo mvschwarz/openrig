@@ -419,12 +419,17 @@ its `code`, `message` and `blockers`; `neverLaunched` marks a rig none of whose
 seats has ever run. A preview that failed outright stays under `previewErrors`.
 Left-out rigs don't change the exit code.
 
-A seat with neither saved startup context nor a resume token doesn't hold back
-the rest of its rig when OpenRig can still tell which session is that seat's
-current one. The other seats resume their own conversations, and that seat isn't
-started: it reads `awaiting-decision`, with the command that starts it fresh, and
-the run exits 1 as for any seat awaiting a decision. When every seat is in that
-state, or which session is current is unclear, the rig is left out as above.
+Under the default restore policy (`resume_if_possible`), a seat with neither
+saved startup context nor a resume token doesn't hold back the rest of its rig
+when OpenRig can still tell which session is that seat's current one. The other
+seats resume their own conversations, and that seat isn't started: it reads
+`awaiting-decision`, and the run exits 1 as for any seat awaiting a decision.
+Without saved startup context it can't be started fresh, so no fresh start is
+offered. Restore its original session by hand, or record that session's resume
+token with `rig seat set-resume-token <session> --token-stdin`. A seat whose
+current session has no resume token waits the same way even with saved startup
+context. A seat set to start fresh still leaves the rig out, as does a rig
+where every seat lacks both, or where which session is current is unclear.
 
 Restore requests run one at a time by default. To keep up to two requests
 outstanding, for example, use `rig start --last --concurrency 2`. A request that
