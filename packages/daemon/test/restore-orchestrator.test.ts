@@ -3360,7 +3360,9 @@ describe("RestoreOrchestrator", () => {
       } else {
         expect(outcome.status).not.toBe("resumed");
         if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
-        else if (mode === "chooser") expect(latest.resumeToken).toBe(token); // attempted lineage, not readiness
+        // Attempted lineage, not readiness: a gate Claude draws after starting (the resume chooser, workspace trust, project
+        // MCP approval) keeps the launch for a person, with its resume token.
+        else if (mode === "chooser" || mode === "trust" || mode === "mcp") expect(latest.resumeToken).toBe(token);
         else expect(latest.resumeToken).toBeNull();
       }
       if (mode === "error") {

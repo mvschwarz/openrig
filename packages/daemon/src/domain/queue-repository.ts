@@ -1193,6 +1193,8 @@ export interface QueueDestinationAdvisory {
   message: string;
 }
 
+export { buildQueueTransfer } from "./queue-transfer-export.js";
+
 export class QueueRepository {
   readonly db: Database.Database;
   readonly deliveryDrains: RigDeliveryDrainStore;

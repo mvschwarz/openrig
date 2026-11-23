@@ -475,6 +475,20 @@ describe("native resume probe", () => {
     });
   });
 
+  it("reads an auto-mode composer whose header scrolled out as Claude's drawn screen, not the process alone", () => {
+    const probe = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
+      paneContent: `● Done.\n${"─".repeat(60)}\n❯ \n${"─".repeat(60)}\n  ⏵⏵ auto mode on (shift+tab to cycle)` });
+    expect(probe).toMatchObject({ status: "resumed", code: "active_runtime" });
+    expect(probe.foregroundOnly).toBeUndefined();
+  });
+
+  it("reads the trust dialog's heading, drawn before its options, as the trust gate, not the foreground process", () => {
+    const heading = "user@host:~$ ( . '/home/user/tmp/openrig-tmux-send-launch.txt' )\n\n" + "─".repeat(80)
+      + "\n Accessing workspace:\n\n /home/user";
+    expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent: heading }))
+      .toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
   it("classifies a Claude workspace trust prompt as blocked, not resumed", () => {
     expect(
       assessNativeResumeProbe({

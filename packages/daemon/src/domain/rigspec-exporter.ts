@@ -436,6 +436,7 @@ export class RigSpecExporter {
       ...(this.rigRepo.getRigNonInterruptive(rigId) ? { nonInterruptive: true } : {}),
       ...(rigEnv ? { env: rigEnv } : {}),
       ...(claudeManagedBlockFile ? { managedBlocks: { "claude-code": claudeManagedBlockFile } } : {}),
+      ...(startupLayers?.defaultOnboardingPack !== undefined ? { defaultOnboardingPack: startupLayers.defaultOnboardingPack } : {}),
       ...(workspace ? { workspace } : {}),
       ...(startup ? { startup } : {}),
       pods: podSpecs,
