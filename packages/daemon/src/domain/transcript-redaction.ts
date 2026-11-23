@@ -9,7 +9,8 @@
 
 /** Explicit credential shapes, each a known token or key format rather than a length rule. A pattern's first
  *  capture group, when it has one, is the visible context kept in front of `[REDACTED]`. Every pattern runs in
- *  linear time on transcript-sized text: bounded repeats where classes overlap, and no lazy scan or lookbehind. */
+ *  linear time on transcript-sized text: classes that meet at a repeat don't overlap, there's no lazy scan, and the
+ *  one lookbehind checks a single character. */
 export const TRANSCRIPT_SECRET_PATTERNS: readonly RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{16,}\b/g, // OpenAI and Anthropic API keys
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, // GitHub tokens
@@ -22,13 +23,19 @@ export const TRANSCRIPT_SECRET_PATTERNS: readonly RegExp[] = [
   /\bxapp-[A-Za-z0-9-]{10,}/g, // Slack app-level tokens
   /\bhttps:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/g, // Slack incoming webhook URLs
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, // AWS access key ids
-  /(\baws_secret_access_key["']?\s*[=:]\s*["']?)[A-Za-z0-9/+=]{40}/gi, // AWS secret keys, where named
+  /(\b(?:aws_secret_access_key|SecretAccessKey)["']?\s*[=:]\s*["']?)[A-Za-z0-9/+=]{40}/gi, // AWS secret keys, where named (config, env, CLI JSON)
+  /(\b(?:aws_session_token|SessionToken)["']?\s*[=:]\s*["']?)[A-Za-z0-9/+=]{16,}/gi, // AWS session tokens, where named
+  /(\b(?:AccountKey|SharedAccessKey)\s*=\s*)[A-Za-z0-9+/=]{20,}/gi, // Azure connection-string keys
+  /(\bAuthorization["']?\s*[=:]\s*["']?Basic\s+)[A-Za-z0-9+/=]{8,}/gi, // HTTP Basic credentials
   /\bAIza[0-9A-Za-z_-]{35}/g, // Google API keys
-  /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, // JSON Web Tokens
-  // Private keys: the BEGIN line, its base64 body and the END line when it's there (a body cut off before its END
-  // line still goes). The body class has no "-", so a match can't run on into another key or the END line.
-  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[A-Za-z0-9+/=\s]*(?:-----END [A-Z ]{0,40}PRIVATE KEY-----)?/g,
-  /(\bhttps?:\/\/)[^\s/@:]+:[^\s/@]+(?=@)/g, // a user and password in a URL
+  // JSON Web Tokens, starting only where a run of token characters starts. Starting after any "-" inside a run
+  // would rescan the rest of the run from each one, which is quadratic on a long run with no dot.
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  // Private keys: the BEGIN line, an encrypted key's Proc-Type and DEK-Info lines, the base64 body and the END line
+  // when it's there (a body cut off before its END line still goes). Escaped line breaks count as body, so a key
+  // inside a JSON string goes too. The body class has no "-", so a match can't run on into another key or the END line.
+  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----(?:(?:\s|\\[rn])*(?:Proc-Type|DEK-Info):[^\n\\]*)*[A-Za-z0-9+/=\s\\]*(?:-----END [A-Z ]{0,40}PRIVATE KEY-----)?/g,
+  /(\bhttps?:\/\/)[^\s/?#@:]*:[^\s/?#@]+(?=@)/g, // a password in a URL, with or without a user
 ];
 
 /**

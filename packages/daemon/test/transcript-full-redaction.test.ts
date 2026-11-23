@@ -21,6 +21,10 @@ const shortSha = "e3b3d90c5";
 const apiKey = "sk-" + "Fake".repeat(5);
 const bearer = "Bearer " + "Fake".repeat(8);
 const privateKey = "-----BEGIN " + "PRIVATE KEY-----\n" + "MIIEv".repeat(13) + "\n-----END " + "PRIVATE KEY-----";
+const encryptedKey = "-----BEGIN RSA " + "PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC," + "0A1B".repeat(8)
+  + "\n\n" + "QUJDRA".repeat(13) + "\n-----END RSA " + "PRIVATE KEY-----";
+const awsCliSecret = "wJalr" + "Z".repeat(35);
+const urlPassword = "s3cr3t".repeat(8);
 
 describe("transcript redaction keeps identifiers", () => {
   it("leaves commits, hashes, paths and ids unchanged", () => {
@@ -57,6 +61,40 @@ describe("transcript redaction keeps identifiers", () => {
       const context = `aws_secret_access_key${" ".repeat(width)}=${" ".repeat(width)}`;
       expect(redactTranscriptContent(context + value)).toBe(context + "[REDACTED]");
       expect(hasTranscriptSecret(context + value)).toBe(true);
+    }
+  });
+
+  it("masks private keys inside JSON strings and encrypted keys, END line or not", () => {
+    expect(redactTranscriptContent(JSON.stringify({ private_key: privateKey }))).toBe('{"private_key":"[REDACTED]"}');
+    expect(redactTranscriptContent(JSON.stringify({ private_key: encryptedKey }))).toBe('{"private_key":"[REDACTED]"}');
+    expect(redactTranscriptContent(`a ${encryptedKey} b`)).toBe("a [REDACTED] b");
+    expect(redactTranscriptContent(encryptedKey.slice(0, encryptedKey.indexOf("\n-----END")))).toBe("[REDACTED]");
+  });
+
+  it("masks named credentials in AWS CLI output, Azure connection strings, Basic auth and password-only URLs", () => {
+    const cases: Array<[string, string]> = [
+      [`"SecretAccessKey": "${awsCliSecret}"`, '"SecretAccessKey": "[REDACTED]"'],
+      [`"SessionToken": "${"FwoG" + "ZXIvYXdz".repeat(20)}"`, '"SessionToken": "[REDACTED]"'],
+      [`aws_session_token = ${"IQoJ" + "b3JpZ2lu".repeat(10)}`, "aws_session_token = [REDACTED]"],
+      [`AccountName=acct;AccountKey=${"Zm9vYmFy".repeat(11)}==;EndpointSuffix=core.windows.net`, "AccountName=acct;AccountKey=[REDACTED];EndpointSuffix=core.windows.net"],
+      ["Authorization: Basic " + "ZGVwbG95" + "Omh1bnRlcjI=", "Authorization: Basic [REDACTED]"],
+      [`https://:${urlPassword}@git.example.com/r.git`, "https://[REDACTED]@git.example.com/r.git"],
+    ];
+    for (const [text, masked] of cases) {
+      expect(redactTranscriptContent(text), text).toBe(masked);
+      expect(hasTranscriptSecret(text), text).toBe(true);
+    }
+    // A colon and "@" after the host aren't a password.
+    expect(redactTranscriptContent("https://example.com?x=a:b@other#f")).toBe("https://example.com?x=a:b@other#f");
+  });
+
+  it("runs in linear time on JWT-shaped runs that never finish", () => {
+    // Starting a JWT after every "-" of a run is quadratic: about 5 s on the first text.
+    for (const text of ["eyJ-".repeat(25_000), "eyJ" + "a".repeat(100_000)]) {
+      const started = performance.now();
+      expect(redactTranscriptContent(text)).toBe(text);
+      expect(hasTranscriptSecret(text)).toBe(false);
+      expect(performance.now() - started).toBeLessThan(100);
     }
   });
 
@@ -97,6 +135,10 @@ describe("GET /api/transcripts/:session/full through createApp", () => {
       `pasted ${apiKey} and ${bearer}`,
       privateKey,
       awsContext + awsSecret,
+      `service account ${JSON.stringify({ private_key: privateKey })}`,
+      encryptedKey,
+      `{"Credentials": {"SecretAccessKey": "${awsCliSecret}"}}`,
+      `cloned https://:${urlPassword}@git.example.com/r.git`,
       "trailing line",
     ].join("\n"));
 
@@ -112,6 +154,11 @@ describe("GET /api/transcripts/:session/full through createApp", () => {
     expect(body.content).not.toContain(apiKey);
     expect(body.content).not.toContain(bearer);
     expect(body.content).not.toContain("MIIEvMIIEv");
+    expect(body.content).not.toContain("QUJDRAQUJDRA");
+    expect(body.content).not.toContain(awsCliSecret);
+    expect(body.content).toContain('"SecretAccessKey": "[REDACTED]"');
+    expect(body.content).not.toContain(urlPassword);
+    expect(body.content).toContain("https://[REDACTED]@git.example.com/r.git");
     expect(body.content).toContain("[REDACTED]");
     expect(body.content).toContain("trailing line");
   });

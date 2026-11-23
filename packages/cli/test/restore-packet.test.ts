@@ -361,7 +361,14 @@ describe("M2b redaction (openrig-v0 / velocity-v1 patterns)", () => {
       google: "AIza" + "Sy" + "A".repeat(33),
       jwt: "eyJ" + "hbGciOiJIUzI1NiJ9" + ".eyJ" + "zdWIiOiIxMjM0In0" + "." + "s".repeat(20),
       privateKey: "-----BEGIN " + "PRIVATE KEY-----\n" + "MIIEv".repeat(13) + "\n-----END " + "PRIVATE KEY-----",
+      encryptedKey: "-----BEGIN RSA " + "PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC," + "0A1B".repeat(8) + "\n\n" + "QUJDRA".repeat(13) + "\n-----END RSA " + "PRIVATE KEY-----",
+      jsonKey: JSON.stringify({ private_key: "-----BEGIN " + "PRIVATE KEY-----\n" + "MIIEv".repeat(13) + "\n-----END " + "PRIVATE KEY-----" }),
+      awsCliSecret: '"SecretAccessKey": "' + "wJalr" + "Z".repeat(35) + '"',
+      awsSessionToken: '"SessionToken": "' + "FwoG" + "ZXIvYXdz".repeat(20) + '"',
+      azureKey: "AccountName=acct;AccountKey=" + "Zm9vYmFy".repeat(11) + "==;EndpointSuffix=core.windows.net",
+      basicAuth: "Authorization: Basic " + "ZGVwbG95" + "Omh1bnRlcjI=",
       urlPassword: "https://deploy:" + "hunter2hunter2" + "@git.example.com/repo.git",
+      urlPasswordOnly: "https://:" + "s3cr3t".repeat(8) + "@git.example.com/repo.git",
     };
     for (const [name, secret] of Object.entries(cases)) {
       const out = redact(`before ${secret} after`);
@@ -374,6 +381,10 @@ describe("M2b redaction (openrig-v0 / velocity-v1 patterns)", () => {
     expect(redact(cases.awsSecret!)).toBe("aws_secret_access_key = [REDACTED]");
     expect(redact(cases.urlPassword!)).toBe("https://[REDACTED]@git.example.com/repo.git");
     expect(redact(cases.privateKey!)).toBe("[REDACTED]");
+    expect(redact(cases.encryptedKey!)).toBe("[REDACTED]");
+    expect(redact(cases.jsonKey!)).toBe('{"private_key":"[REDACTED]"}');
+    expect(redact(cases.awsCliSecret!)).toBe('"SecretAccessKey": "[REDACTED]"');
+    expect(redact(cases.urlPasswordOnly!)).toBe("https://[REDACTED]@git.example.com/repo.git");
     // A private key whose END line was cut off still loses its body.
     expect(redact("-----BEGIN " + "RSA PRIVATE KEY-----\n" + "MIIEv".repeat(13))).toBe("[REDACTED]");
   });
@@ -1783,6 +1794,9 @@ describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-
     const privateKey = "-----BEGIN " + "PRIVATE KEY-----\n" + "MIIEv".repeat(13) + "\n-----END " + "PRIVATE KEY-----";
     const awsSecret = "wJalr" + "Y".repeat(35);
     const awsContext = "aws_secret_access_key" + " ".repeat(12) + "=" + " ".repeat(12);
+    const encryptedKey = "-----BEGIN RSA " + "PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC," + "0A1B".repeat(8) + "\n\n" + "QUJDRA".repeat(13) + "\n-----END RSA " + "PRIVATE KEY-----";
+    const awsCliSecret = "wJalr" + "Z".repeat(35);
+    const urlPassword = "s3cr3t".repeat(8);
     const src = path.join(tmpRoot, "with-identifiers.jsonl");
     fs.writeFileSync(src, [
       JSON.stringify({ type: "session_meta", payload: { cwd: "/x", id: "ids-driver@ids-rig" } }),
@@ -1791,7 +1805,7 @@ describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-
         payload: {
           type: "message",
           role: "assistant",
-          content: [{ type: "text", text: `Built ${commit} for ${row}; tarball sha256 ${hash}; notes in ${longPath}; ignore ${key} and\n${privateKey}\n${awsContext}${awsSecret}` }],
+          content: [{ type: "text", text: `Built ${commit} for ${row}; tarball sha256 ${hash}; notes in ${longPath}; ignore ${key} and\n${privateKey}\n${awsContext}${awsSecret}\nservice account ${JSON.stringify({ private_key: privateKey })}\n${encryptedKey}\n{"Credentials": {"SecretAccessKey": "${awsCliSecret}"}}\ncloned https://:${urlPassword}@git.example.com/r.git` }],
         },
       }),
     ].join("\n"), "utf8");
@@ -1816,6 +1830,11 @@ describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-
       for (const identifier of [commit, hash, longPath, row]) expect(text, `${name}: ${identifier}`).toContain(identifier);
       expect(text, name).not.toContain(awsSecret);
       expect(text, name).toContain(awsContext + "[REDACTED]");
+      expect(text, name).not.toContain("QUJDRAQUJDRA");
+      expect(text, name).not.toContain(awsCliSecret);
+      expect(text, name).toContain('"SecretAccessKey": "[REDACTED]"');
+      expect(text, name).not.toContain(urlPassword);
+      expect(text, name).toContain("https://[REDACTED]@git.example.com/r.git");
       expect(text, name).not.toContain(key);
       expect(text, name).not.toContain("MIIEvMIIEv");
       expect(text, name).toContain("[REDACTED]");
