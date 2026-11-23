@@ -24,6 +24,8 @@ export const QUEUE_TRANSFER_COLUMNS = {
     "target_repo", "summary", "evidence_ref", "minting_generation_uuid", "claimed_by_generation_uuid", "human_intent",
     "human_detail", "reply_to", "human_questions", "human_answers", "last_nudge_input_box", "delegated_decision",
     "content_erased_at", "return_route", "return_route_basis",
+    // 186: relay journal for the asking-seat's answer history
+    "relayed_answers",
   ],
   // 025:17–24, 067:15, 140:15, 076:11–12. Archive base and archived_at 054:38–46; additions 082:7, 140:16, 076:13–14.
   queue_transitions: ["transition_id", "qitem_id", "ts", "state", "transition_note", "actor_session", "closure_reason",

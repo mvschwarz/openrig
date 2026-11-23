@@ -275,6 +275,15 @@ the sections that were not read are `null`.
 | `rig package rollback <installId>` | — | — |
 | `rig package list` | — | — |
 
+`rig package plan` and `rig package install` end with an "Outside the usual folder (installed as named):" list when a
+skill or agent export lands outside its kind's usual folder but still inside the target, such as a name containing `..`
+that doesn't climb above it. The usual folders are `.claude/skills/` and `.claude/agents/` for `claude-code`, and
+`.agents/skills/` and `.agents/` for other runtimes. The export still installs as named; the list only says where it went.
+A name that would climb above the target is still refused. The daemon's `/api/packages/plan` and `/api/packages/install`
+responses carry the same lines as `warnings`, each affected plan entry carries `outsideKindFolder` (`destination` and `kindFolder`,
+relative to the target), and a bootstrap's package step adds the lines to its warnings, prefixed with the package and
+runtime.
+
 ### bootstrap
 
 | Invocation | Aliases | Declared options |
@@ -535,6 +544,17 @@ Stream intake: the `stream.intake` setting (default `queue.worker`, or a canonic
 It opens an intake row for that seat, which wakes it, or adds a note to that seat's intake row still pending; a `critical`
 or interrupting item makes the row urgent. `rig config set stream.intake off` keeps emits passive. A runner's
 default-permit record (tag `runner-permission-permit`) opens no row.
+
+When neither the automatic path nor intake has recorded a routing decision for an item, `rig stream show` asks the daemon
+where intake recorded it (`GET /api/stream/<streamItemId>/intake`) and reports one of three stages:
+- `in_intake`: the item opened an intake row, or was added as a note to a pending one. The line names the row and its
+  state. If that row is `done`, `failed`, `denied` or `canceled`, it says the row closed without a recorded decision for
+  this item; a handed-off row isn't counted as closed, since its successor may still decide.
+- `awaiting_intake`: intake has no record of the item.
+- `intake_unknown`: it couldn't be checked, because the daemon doesn't serve that read (an older daemon), the read failed,
+  or only a truncated intake note matches the item's long id, so it cannot identify the item exactly.
+
+As with the other stages that have no automatic work, work a reader linked with `rig stream act --work` decides the stage.
 
 ### queue
 
@@ -1263,7 +1283,7 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | `rig scope slice` | — | — |
 | `rig scope slice ls` | — | `--mission <name>`<br>`--state <state>`<br>`--json` |
 | `rig scope slice show <slice-path>` | — | `--mission <name>`<br>`--json` |
-| `rig scope slice create <mission> <slug>` | — | `--template <kind>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--readme-only`<br>`--json` |
+| `rig scope slice create <mission> <slug>` | — | `--template <kind>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--execution-depends-on <dot-id...>`<br>`--readme-only`<br>`--json` |
 | `rig scope slice ship <slice-path> <release-mission>` | — | `--mission <name>`<br>`--json` |
 | `rig scope slice close <slice-path>` | — | `--reason <reason>` **required**<br>`--in-place`<br>`--note <text>`<br>`--mission <name>`<br>`--json` |
 | `rig scope slice move <slice-path> <dest-mission>` | — | `--mission <name>`<br>`--json` |
