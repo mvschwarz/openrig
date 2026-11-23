@@ -456,7 +456,11 @@ behavior (`workflowBinding`, `specGraph`, `phaseDefinitions` and
 handlers (`grep -c -E 'app\.(get|post)\(' packages/daemon/src/routes/slices.ts`):
 
 - `GET /` — filter `all|active|done|blocked` (default `all`; anything else is
-  400 `filter_invalid`); `?refresh=1` (or `true`) invalidates first; optional
+  400 `filter_invalid`); optional
+  `?derived=blocked|in-progress|pending|idle|none|unknown` narrows by
+  queue-derived state after `filter` (case-insensitive; unknown values return
+  400 `derived_invalid` after the 503 `slices_root_not_configured` check);
+  `?refresh=1` (or `true`) invalidates first; optional
   `?boundToWorkflow=<name>:<version>` lens narrows to slices bound to a
   workflow instance (400 `boundToWorkflow_invalid` without the colon). Each
   slice row carries `readiness`, and a `missions` sidecar carries authored
@@ -469,7 +473,11 @@ handlers (`grep -c -E 'app\.(get|post)\(' packages/daemon/src/routes/slices.ts`)
   exactly one such candidate; ambiguous candidates count nowhere, even if
   first-wins discovery or the status filter exposes only one
   listed row. Explicit mismatched qualifiers never count. Counting does not
-  change list or filter behavior. Rows sort by last activity, newest first.
+  change list or `filter` behavior. Each row also carries `derivedState`
+  (`blocked|in-progress|pending|idle|none|unknown`), projected at read time
+  from `queueCounts` beside the unchanged authored `status` (`unknown` when
+  `queueCounts` is `null`), which `?derived=` filters on with no extra query.
+  Rows sort by last activity, newest first.
 - `POST /refresh` — drops the indexer caches, no daemon restart.
 - `GET /:name/proof-asset/*` — serves a proof asset from the slice's matched
   dogfood-evidence directory; rejects `..` (400); `Cache-Control: public,
