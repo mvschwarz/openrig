@@ -280,7 +280,7 @@ skill or agent export lands outside its kind's usual folder but still inside the
 that doesn't climb above it. The usual folders are `.claude/skills/` and `.claude/agents/` for `claude-code`, and
 `.agents/skills/` and `.agents/` for other runtimes. The export still installs as named; the list only says where it went.
 A name that would climb above the target is still refused. The daemon's `/api/packages/plan` and `/api/packages/install`
-responses carry the same lines as `warnings`, each plan entry carries `outsideKindFolder` (`destination` and `kindFolder`,
+responses carry the same lines as `warnings`, each affected plan entry carries `outsideKindFolder` (`destination` and `kindFolder`,
 relative to the target), and a bootstrap's package step adds the lines to its warnings, prefixed with the package and
 runtime.
 
@@ -552,7 +552,7 @@ where intake recorded it (`GET /api/stream/<streamItemId>/intake`) and reports o
   this item; a handed-off row isn't counted as closed, since its successor may still decide.
 - `awaiting_intake`: intake has no record of the item.
 - `intake_unknown`: it couldn't be checked, because the daemon doesn't serve that read (an older daemon), the read failed,
-  or the item's id is longer than the 120 characters intake's note keeps, so it can't be told apart from another long id.
+  or only a truncated intake note matches the item's long id, so it cannot identify the item exactly.
 
 As with the other stages that have no automatic work, work a reader linked with `rig stream act --work` decides the stage.
 
