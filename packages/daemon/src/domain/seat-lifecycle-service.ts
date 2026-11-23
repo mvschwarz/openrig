@@ -2185,24 +2185,26 @@ export class SeatLifecycleService {
     if (input.nodeId !== undefined && "code" in resolved && resolved.code === "seat_ambiguous") {
       return { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" now names more than one seat, not only the one this restart was for; nothing was restarted.` };
     }
-    if (input.nodeId !== undefined && "code" in resolved && resolved.code === "seat_not_found") {
-      return { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" no longer names the seat this restart was for, or any seat; nothing was restarted.` };
-    }
-    if ("code" in resolved) return resolved;
+    // The same when the node is gone by the time its target is read (a removal held the seat's lease first).
+    const gone = <T,>(r: T | SeatRefusal): T | SeatRefusal => input.nodeId !== undefined && typeof r === "object" && r !== null
+      && "code" in r && r.code === "seat_not_found"
+      ? { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" no longer names the seat this restart was for, or any seat; nothing was restarted.` }
+      : r;
+    if ("code" in resolved) return gone(resolved);
     if (input.nodeId !== undefined && resolved.nodeId !== input.nodeId) {
       return { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" now names the seat in rig ${resolved.entry.rigName} (${resolved.entry.rigId}), not the one this restart was for; nothing was restarted.` };
     }
     const prepared = this.inPlaceRestarter();
     if ("code" in prepared) return prepared;
     if (input.plan) {
-      const target = await this.inPlaceTarget(resolved, input.seatRef);
+      const target = gone(await this.inPlaceTarget(resolved, input.seatRef));
       return "code" in target ? target : prepared.plan(target);
     }
     // Recorded before waiting for the lease: a restart that ran meanwhile refuses this one (no repeat
     // on a slow reply).
     const seenStartedSeq = prepared.latestStartedSeq(resolved.nodeId);
     const run = async (): Promise<RestartInPlaceResult> => {
-      const target = await this.inPlaceTarget(resolved, input.seatRef);
+      const target = gone(await this.inPlaceTarget(resolved, input.seatRef));
       if ("code" in target) return target;
       return prepared.execute(target, { reason: input.reason ?? "", operator: input.operator ?? null, seenStartedSeq });
     };

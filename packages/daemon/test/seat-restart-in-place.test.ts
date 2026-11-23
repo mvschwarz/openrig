@@ -2135,6 +2135,18 @@ describe("rig provider assign's plan over a Codex seat", () => {
     expect(saved.map((r) => [r.nodeId, r.kind])).toEqual([[w.node.id, "unknown"]]);
   });
 
+  it.each([true, false])("a restart queued behind the seat's removal (its lease held first) finds no seat: by the node it was for, refused by name (pinned: %s)", async (pinned) => {
+    const w = world();
+    // The removal holds the seat's lifecycle lease; the restart reads its target only after the node is gone.
+    Object.defineProperty(w.tmux, "deliveryGuard", { value: { preference: () => undefined, ownsLifecycle: () => false,
+      lifecycle: async (_ids: string[], fn: () => Promise<unknown>) => { new RigRepository(w.db).deleteNode(w.node.id); return fn(); } } });
+    const r = await w.service.restartInPlace({ seatRef: SEAT, reason: "moved", ...(pinned ? { nodeId: w.node.id } : {}) });
+    expect(r).toMatchObject(pinned
+      ? { ok: false, code: "seat_name_shared", message: `"${SEAT}" no longer names the seat this restart was for, or any seat; nothing was restarted.` }
+      : { ok: false, code: "seat_not_found" });
+    expect(w.calls).toEqual([]);
+  });
+
   it("the switch's check again after waiting for the home carries the seat too: a name another rig took meanwhile is refused before any effect", async () => {
     const { w, home } = setup();
     const rigs = new RigRepository(w.db);
