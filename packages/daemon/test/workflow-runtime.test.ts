@@ -168,6 +168,62 @@ describe("WorkflowRuntime facade + FR-1 KEEP-fence pins (OPR.0.4.6.WF1)", () => 
     expect((await legacy.json()).instance.instanceId).not.toBe(result.instance.instanceId);
   });
 
+  it("keeps a titled keyed replay at HTTP 200 when title normalization adds an advisory", async () => {
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("workflowRuntime" as never, runtime); c.set("eventBus" as never, bus); await next(); });
+    app.route("/api/workflow", workflowRoutes());
+    const body = { specPath, rootObjective: "release", createdBySession: "ops@rig", operationKey: "titled-retry", runTitle: "Release\nreadiness" };
+    const start = () => app.request("/api/workflow/instantiate-keyed", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const first = await start();
+    expect(first.status).toBe(201);
+    const created = await first.json();
+    expect(created.instance.runTitle).toBe("Release readiness");
+    const replay = await start();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ replayed: true, instance: { instanceId: created.instance.instanceId, runTitle: "Release readiness" }, entryQitemId: created.entryQitemId,
+      advisories: expect.arrayContaining([expect.stringContaining("title normalized")]) });
+    expect(queueRepo.getById(created.entryQitemId)?.summary).toBe("Release readiness — produce");
+    expect((db.prepare("SELECT count(*) AS n FROM workflow_instances").get() as { n: number }).n).toBe(1);
+    expect((db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number }).n).toBe(1);
+  });
+
+  it("persists each run title for ordinary packets across runtime reconstruction", async () => {
+    writeFileSync(specPath, SPEC.replace("    - id: review\n      actor_role: reviewer", "    - id: review\n      label: Review results\n      actor_role: reviewer"));
+    const first = await runtime.instantiate({ specPath, rootObjective: "first objective", runTitle: "Release readiness", createdBySession: "ops@rig" });
+    const second = await runtime.instantiate({ specPath, rootObjective: "second objective", runTitle: "Docs feedback", createdBySession: "ops@rig" });
+    const untitled = await runtime.instantiate({ specPath, rootObjective: "legacy", createdBySession: "ops@rig" });
+    expect(queueRepo.getById(first.entryQitemId)?.summary).toBe("Release readiness — produce");
+    expect(queueRepo.getById(second.entryQitemId)?.summary).toBe("Docs feedback — produce");
+    expect(queueRepo.getById(untitled.entryQitemId)?.summary).toBeNull();
+    const compact = queueRepo.list({ compact: true, limit: 100 });
+    expect(compact.find(row => row.qitemId === first.entryQitemId)?.summary).toBe("Release readiness — produce");
+    queueRepo.update({ qitemId: first.entryQitemId, actorSession: "producer@rig", summary: "A corrected summary" });
+    expect(queueRepo.getById(first.entryQitemId)?.summary).toBe("A corrected summary");
+
+    const persistedPath = join(tmp, "restart.sqlite");
+    await db.backup(persistedPath);
+    db.close();
+    db = createDb(persistedPath);
+    bus = new EventBus(db);
+    queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    queueRepo.attachOutbox(new OutboxHandler(db));
+    const restarted = new WorkflowRuntime({ exceptionDial: { hostDefault: () => null, humanFallbackSeat: "human@host" }, db, eventBus: bus, queueRepo });
+    for (const [created, title] of [[first, "Release readiness"], [second, "Docs feedback"]] as const) {
+      expect(restarted.instanceStore.getByIdOrThrow(created.instance.instanceId).runTitle).toBe(title);
+      const handoff = await restarted.project({ instanceId: created.instance.instanceId, currentPacketId: created.entryQitemId, exit: "handoff", actorSession: "producer@rig" });
+      expect(queueRepo.getById(handoff.nextQitemId!)?.summary).toBe(`${title} — Review results`);
+    }
+    const legacy = await restarted.project({ instanceId: untitled.instance.instanceId, currentPacketId: untitled.entryQitemId, exit: "handoff", actorSession: "producer@rig" });
+    expect(queueRepo.getById(legacy.nextQitemId!)?.summary).toBeNull();
+  });
+
+  it("keeps a gate's explicit summary when a titled run reaches it", async () => {
+    writeFileSync(specPath, SPEC.replace("    - id: review\n      actor_role: reviewer", "    - id: review\n      actor_role: reviewer\n      gate:\n        target: reviewer\n        summary: Approve this review"));
+    const started = await runtime.instantiate({ specPath, rootObjective: "gated", runTitle: "Release", createdBySession: "ops@rig" });
+    const handoff = await runtime.project({ instanceId: started.instance.instanceId, currentPacketId: started.entryQitemId, exit: "handoff", actorSession: "producer@rig" });
+    expect(queueRepo.getById(handoff.nextQitemId!)?.summary).toBe("Approve this review");
+  });
+
   it("facade: validate returns ok for a well-formed spec and reports issues for a broken one", () => {
     const good = runtime.validate(specPath);
     expect(good.ok).toBe(true);

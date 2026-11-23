@@ -33,6 +33,21 @@ export function checkAbi({ nodeVersion, loadNativeAddon, openNativeDatabase }) {
   const match = nodeVersion.match(/^v?(\d+)/);
   const major = match ? parseInt(match[1], 10) : 0;
 
+  const minorMatch = nodeVersion.match(/^v?22\.(\d+)/);
+  if (major === 22 && minorMatch && Number(minorMatch[1]) < 14) {
+    return {
+      ok: false,
+      message: box([
+        "Node 22.14.0 or newer is required in the Node 22 line.",
+        `Current: ${nodeVersion}`,
+        "",
+        "The SQLite binding requires Node-API 10.",
+        "",
+        FIX_INSTALL,
+      ]),
+    };
+  }
+
   if (major < SUPPORTED_MAJORS[0]) {
     return {
       ok: false,

@@ -134,6 +134,14 @@ describe("FAC-1 C2: --rig on both instantiate verbs + bound-rig rendering", () =
     }
   });
 
+  it.each(["instantiate", "run"])("%s sends the optional run title", async verb => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", verb, "/abs/spec.yaml", "--root-objective", "obj", "--created-by", "ops@rig", "--title", "Release readiness", "--json"]);
+    expect((calls.find(c => c.path === "/api/workflow/instantiate")!.body as Record<string, unknown>).runTitle).toBe("Release readiness");
+  });
+
   it("instantiate WITHOUT --rig omits targetRig (unbound default preserved)", async () => {
     const { deps, calls } = makeDeps({
       routes: { "POST /api/workflow/instantiate": { status: 201, data: { instance: {}, entryQitemId: "q-1" } } },

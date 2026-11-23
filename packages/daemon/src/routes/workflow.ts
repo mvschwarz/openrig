@@ -212,6 +212,7 @@ export function workflowRoutes(): Hono {
         specPath?: string;
         rootObjective?: string;
         operationKey?: unknown;
+        runTitle?: unknown;
         createdBySession?: string;
         entryOwnerSession?: string;
         /** OPR.0.4.6.FAC1: overrides the spec's target.rig default. */
@@ -228,6 +229,11 @@ export function workflowRoutes(): Hono {
     if (keyed && (typeof body.operationKey !== "string" || !body.operationKey.trim())) return c.json({ error: "operationKey must be a nonempty string" }, 400);
     if (body.targetPod !== undefined && typeof body.targetPod !== "string") return c.json({ error: "targetPod must be a string" }, 400);
     try {
+      const title = typeof body.runTitle === "string"
+        ? Array.from(body.runTitle.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()).slice(0, 120).join("") || undefined
+        : undefined;
+      const titleNote = body.runTitle !== undefined && body.runTitle !== title
+        ? `Workflow run title normalized to ${title === undefined ? "untitled" : JSON.stringify(title)}.` : null;
       // A request can carry scope the route cannot apply: main accepted every such request, ignoring the key and
       // creating one unscoped instance, so this route does too. The instance is created unscoped, nothing the scope
       // named is recorded, and the response advisories say plainly that it was not applied. A scope that can be
@@ -257,6 +263,7 @@ export function workflowRoutes(): Hono {
         specPath: body.specPath,
         rootObjective: body.rootObjective,
         ...(keyed ? { operationKey: body.operationKey as string } : {}),
+        runTitle: title,
         createdBySession: body.createdBySession,
         entryOwnerSession: body.entryOwnerSession,
         targetRig: body.targetRig,
@@ -272,12 +279,12 @@ export function workflowRoutes(): Hono {
         notes.push(`Scope not applied (${scopeFailure}). Instance ${result.instance.instanceId} was created unscoped: its packets carry no project, mission, slice or tag scope. `
           + "Correct the scope and instantiate again for a scoped instance; that creates a second instance.");
       }
-      if (notes.length === 0) return c.json(result, result.replayed ? 200 : 201);
+      if (notes.length === 0 && !titleNote) return c.json(result, result.replayed ? 200 : 201);
       return c.json({
         ...result,
-        advisories: [...(result.advisories ?? []), ...notes],
-        scopeIgnored: { fields: [...ignoredFields, ...(scopeFailure ? ["scope"] : [])], message: notes.join(" ") },
-      }, 201);
+        advisories: [...(result.advisories ?? []), ...notes, ...(titleNote ? [titleNote] : [])],
+        ...(notes.length ? { scopeIgnored: { fields: [...ignoredFields, ...(scopeFailure ? ["scope"] : [])], message: notes.join(" ") } } : {}),
+      }, result.replayed ? 200 : 201);
     } catch (err) {
       return errorResponse(c, err);
     }

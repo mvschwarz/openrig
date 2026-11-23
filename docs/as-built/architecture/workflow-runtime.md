@@ -181,6 +181,15 @@ fallback. API clients must use that endpoint when requesting keyed behavior.
 For a local file, pass a path such as `./workflow.yaml` rather than an ambiguous
 bare filename; a registered workflow name remains valid.
 
+Both commands also accept an optional `--title <text>`. Empty titles are
+untitled; control characters become spaces and titles longer than 120
+characters are shortened. The response reports normalization and the stored
+title. The instance retains it across restarts; ordinary
+entry and handoff packets receive a summary combining the title and step label
+(or step ID). Gate summaries keep their own behavior. A packet's summary can
+still be corrected with `rig queue update`; without a title the existing
+summary behavior is unchanged. The root objective remains the full instruction.
+
 A `preferred_targets` entry may end in `@{rig}`, for example `watcher@{rig}`.
 When the instance is bound to a rig (`--rig`, or the spec's `target.rig`
 default), the trailing `{rig}` becomes that rig, so one reusable spec addresses

@@ -1,5 +1,6 @@
 import { physicalSessionName } from "./session-registry.js";
 import { createHash } from "node:crypto";
+import { workflowRunSummary } from "./workflow-run-title.js";
 import { readWorkflowGuidance, type GuidanceInput } from "./workflow-guidance.js";
 import { exceptionConfigurationSource, inspectExceptionReadiness, type ExceptionReadiness } from "./workflow-exception-readiness.js";
 import { inspectGraph, recoverGraphOperation, reviseGraph } from "./workflow-reconciliation.js";
@@ -107,6 +108,7 @@ export interface InstantiateInput {
   rootObjective: string;
   /** Stable identity for an ordinary start; omitted starts remain independent. */
   operationKey?: string;
+  runTitle?: string;
   createdBySession: string;
   /**
    * Override default entry-step owner. v1 falls back to spec
@@ -811,6 +813,7 @@ export class WorkflowRuntime {
         // #2607: the run keeps the spec it starts with and its file; another file with this id and version can't move it.
         startedSpec: { sourcePath: specSource, spec: specRow.spec },
         rootObjective: input.rootObjective,
+        runTitle: input.runTitle,
         createdBySession: input.createdBySession,
         initialFrontier: [],
         // R2 fix: set durable current_step_id at instantiate so the
@@ -878,7 +881,7 @@ export class WorkflowRuntime {
           ...(entryGateException ? workflowExceptionTags(entryGateException.identity).filter((t) => !t.startsWith("workflow:") && !t.startsWith("instance:")) : []),
           ...packetScopeTags(instance, entryStep.id),
         ],
-        summary: entryGate?.summary ?? undefined,
+        summary: entryGate ? entryGate.summary ?? undefined : workflowRunSummary(instance.runTitle, entryStep),
         evidenceRef: entryGate?.evidenceRef ?? undefined,
       });
       entryQitemId = created.qitemId;

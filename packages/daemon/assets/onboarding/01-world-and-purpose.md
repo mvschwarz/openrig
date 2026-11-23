@@ -31,7 +31,8 @@ facts again before using them.
 Contact with the human operator is open by default. Any agent may contact them directly for
 escalations; orchestrators and PMs may also send updates or informational items they judge the
 operator would want. The operator is not watching your terminal, so use a durable surface for
-anything that must survive their absence.
+anything that must survive their absence. Your harness's own question prompt shows only in this
+terminal too, so ask them through the queue instead (the `messaging-the-human` skill).
 
 ## Purpose before machinery
 
