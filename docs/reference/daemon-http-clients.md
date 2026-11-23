@@ -486,7 +486,7 @@ What reads these declarations:
   symlink alias; this pins the configured root target for the request, not a filesystem snapshot of mutations inside
   that target or of separate catalog roots. Duplicate roots are removed after this normalization. A missing or
   unreadable root behaves as before.
-  If the primary root's capture fails, the list request fails even when another configured root is ready (as before when that root stays missing or unreadable); project readiness is never read from that root's configured spelling.
+  If the primary root's capture fails while another configured root is ready, the list request still returns 200 with the slices read from the other ready roots and `primaryReadiness: { state: "unknown" }` without re-reading the primary root through its configured spelling; when the primary root's capture succeeds, `primaryReadiness` is omitted (and a later failure reading project readiness from that captured primary root still returns 500).
   `rig scope slice ls --with-queue` and `--derived <state>` read this list once and
   join by physical slice path, only when it can confirm the daemon is this home's own (its `/healthz` instance id
   matches this home's); a daemon it cannot confirm gives `unknown` for every slice, because the same absolute

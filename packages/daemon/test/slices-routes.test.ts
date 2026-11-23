@@ -3066,16 +3066,23 @@ describe("GET /api/slices observed queue counts", () => {
       }
     });
 
-    it("does not walk or re-resolve a failed primary root for project readiness when it appears after capture", async () => {
+    it("keeps slices from other ready roots and reports primaryReadiness unknown when primary root capture fails", async () => {
       const alphaExtra = path.join(root, "alpha-readiness-fallback-extra");
       const alphaSlicePath = path.join(alphaExtra, "shipping", "slices", "01-extra");
       write(path.join(alphaExtra, "shipping", "SPEC.md"), nodeBytes("M.EXTRA", "active", "Extra Mission"));
       write(path.join(alphaSlicePath, "SPEC.md"), nodeBytes("OPR.EXTRA", "active", "Extra Slice"));
 
+      type PrimaryReadinessBody = {
+        slices: Entry[];
+        missions: Record<string, { authoredStatus?: string | null; readiness?: { historicalStatus?: string | null } }>;
+        primaryReadiness?: { state: string };
+      };
+
       // Case 1: primary root is missing at capture (ready additional root makes isReady() true),
-      // then appears before the walk inside isReady(). Request 1 must fail from the captured
-      // missing state without calling fs.readdirSync on the uncaptured primary root; Request 2
-      // captures the newly created primary root coherently across list and project readiness.
+      // then appears before the walk inside isReady(). Request 1 must return 200 with the other
+      // root's slices and primaryReadiness unknown without calling fs.readdirSync on the
+      // uncaptured primary root; Request 2 captures the newly created primary root coherently
+      // with primaryReadiness omitted.
       const latePrimary = path.join(root, "late-primary-missions");
       expect(fs.existsSync(latePrimary)).toBe(false);
       const { app: missingApp, indexer: missingIndexer } = route("alpha", false, latePrimary, [alphaExtra]);
@@ -3094,7 +3101,12 @@ describe("GET /api/slices observed queue counts", () => {
       vi.mocked(fs.readdirSync).mockClear();
       try {
         const first = await missingApp.request("/api/slices");
-        expect(first.status).toBe(500);
+        expect(first.status).toBe(200);
+        const firstBody = await first.json() as PrimaryReadinessBody;
+        expect(firstBody.slices.map((s) => s.name)).toEqual(["01-extra"]);
+        expect(firstBody.primaryReadiness).toEqual({ state: "unknown" });
+        expect(firstBody.missions["shipping"]?.authoredStatus).toBe("active");
+        expect(firstBody.missions["late-mission"]).toBeUndefined();
         const readdirOnLatePrimary = vi.mocked(fs.readdirSync).mock.calls.filter(([p]) => String(p) === latePrimary);
         expect(readdirOnLatePrimary).toHaveLength(0);
       } finally {
@@ -3103,17 +3115,16 @@ describe("GET /api/slices observed queue counts", () => {
 
       const second = await missingApp.request("/api/slices");
       expect(second.status).toBe(200);
-      const secondBody = await second.json() as {
-        slices: Entry[];
-        missions: Record<string, { authoredStatus?: string | null; readiness?: { historicalStatus?: string | null } }>;
-      };
+      const secondBody = await second.json() as PrimaryReadinessBody;
       expect(secondBody.slices.map((s) => s.name)).toContain("02-late");
       expect(secondBody.missions["late-mission"]?.readiness?.historicalStatus).toBe("active");
+      expect(Object.prototype.hasOwnProperty.call(secondBody, "primaryReadiness")).toBe(false);
 
       // Case 2: primary `..` root is missing at capture and its symlink appears AFTER list()
       // (inside missionAuthoredStatuses, right before readinessRoot selection). Request 1 must
-      // still fail from the captured missing state with zero fs.readdirSync calls on the failed
-      // spelling, and Request 2 captures the new target cleanly.
+      // return 200 with the other root's slices and primaryReadiness unknown with zero
+      // fs.readdirSync calls on the failed spelling, and Request 2 captures the new target cleanly
+      // with primaryReadiness omitted.
       const lateDotDotTarget = path.join(root, "late-dotdot-readiness-target");
       fs.mkdirSync(path.join(lateDotDotTarget, "sub"), { recursive: true });
       write(path.join(lateDotDotTarget, "missions", "dotdot-mission", "SPEC.md"), nodeBytes("M.DOTDOT", "active", "DotDot Mission"));
@@ -3140,7 +3151,11 @@ describe("GET /api/slices observed queue counts", () => {
       vi.mocked(fs.readdirSync).mockClear();
       try {
         const firstDotDot = await dotDotApp.request("/api/slices");
-        expect(firstDotDot.status).toBe(500);
+        expect(firstDotDot.status).toBe(200);
+        const firstDotDotBody = await firstDotDot.json() as PrimaryReadinessBody;
+        expect(firstDotDotBody.slices.map((s) => s.name)).toEqual(["01-extra"]);
+        expect(firstDotDotBody.primaryReadiness).toEqual({ state: "unknown" });
+        expect(firstDotDotBody.missions["dotdot-mission"]).toBeUndefined();
         const readdirOnUnresolved = vi.mocked(fs.readdirSync).mock.calls.filter(([p]) => String(p) === unresolvedDotDotPrimary);
         expect(readdirOnUnresolved).toHaveLength(0);
       } finally {
@@ -3149,16 +3164,14 @@ describe("GET /api/slices observed queue counts", () => {
 
       const secondDotDot = await dotDotApp.request("/api/slices");
       expect(secondDotDot.status).toBe(200);
-      const secondDotDotBody = await secondDotDot.json() as {
-        slices: Entry[];
-        missions: Record<string, { readiness?: { historicalStatus?: string | null } }>;
-      };
+      const secondDotDotBody = await secondDotDot.json() as PrimaryReadinessBody;
       expect(secondDotDotBody.slices.map((s) => s.name)).toContain("03-dotdot");
       expect(secondDotDotBody.missions["dotdot-mission"]?.readiness?.historicalStatus).toBe("active");
+      expect(Object.prototype.hasOwnProperty.call(secondDotDotBody, "primaryReadiness")).toBe(false);
 
       // Case 3: primary root capture fails with EACCES while ready additional root exists, and the
-      // EACCES clears before readiness runs. Request 1 must preserve the captured failure (500)
-      // without walking the primary root via fs.readdirSync.
+      // EACCES clears before readiness runs. Request 1 must return 200 with the other root's slices
+      // and primaryReadiness unknown without walking the primary root via fs.readdirSync.
       const unreadablePrimary = path.join(root, "unreadable-primary-missions");
       write(path.join(unreadablePrimary, "perm-mission", "SPEC.md"), nodeBytes("M.PERM", "active", "Perm Mission"));
       write(path.join(unreadablePrimary, "perm-mission", "mission.yaml"), "metadata:\n  id: M.PERM\n  status: active\n");
@@ -3177,23 +3190,51 @@ describe("GET /api/slices observed queue counts", () => {
       vi.mocked(fs.readdirSync).mockClear();
       try {
         const unreadableRes = await unreadableApp.request("/api/slices");
-        expect(unreadableRes.status).toBe(500);
+        expect(unreadableRes.status).toBe(200);
+        const unreadableBody = await unreadableRes.json() as PrimaryReadinessBody;
+        expect(unreadableBody.slices.map((s) => s.name)).toEqual(["01-extra"]);
+        expect(unreadableBody.primaryReadiness).toEqual({ state: "unknown" });
+        expect(unreadableBody.missions["perm-mission"]).toBeUndefined();
         const readdirOnUnreadable = vi.mocked(fs.readdirSync).mock.calls.filter(([p]) => String(p) === unreadablePrimary);
         expect(readdirOnUnreadable).toHaveLength(0);
       } finally {
         realpathSpy.mockRestore();
       }
 
-      // Case 4 (control): primary root missing at capture and still missing at readiness time keeps
-      // the pre-existing 500 outcome without invoking fs.readdirSync on the failed primary spelling.
+      // Case 4: primary root missing at capture and still missing at readiness time follows the
+      // same capture-failure rule (200 with other ready roots' slices and primaryReadiness unknown)
+      // without invoking fs.readdirSync on the failed primary spelling.
       const stillMissingPrimary = path.join(root, "still-missing-primary-missions");
       expect(fs.existsSync(stillMissingPrimary)).toBe(false);
       const { app: stillMissingApp } = route("alpha", false, stillMissingPrimary, [alphaExtra]);
       vi.mocked(fs.readdirSync).mockClear();
       const stillMissingRes = await stillMissingApp.request("/api/slices");
-      expect(stillMissingRes.status).toBe(500);
+      expect(stillMissingRes.status).toBe(200);
+      const stillMissingBody = await stillMissingRes.json() as PrimaryReadinessBody;
+      expect(stillMissingBody.slices.map((s) => s.name)).toEqual(["01-extra"]);
+      expect(stillMissingBody.primaryReadiness).toEqual({ state: "unknown" });
       const readdirOnStillMissing = vi.mocked(fs.readdirSync).mock.calls.filter(([p]) => String(p) === stillMissingPrimary);
       expect(readdirOnStillMissing).toHaveLength(0);
+
+      // Case 5 (control): a primary root whose capture SUCCEEDS, then fails when project readiness
+      // reads that captured primary root, keeps today's 500 outcome.
+      const capturedThenGonePrimary = path.join(root, "captured-then-gone-primary-missions");
+      fs.mkdirSync(path.join(capturedThenGonePrimary, "gone-mission", "slices", "05-gone"), { recursive: true });
+      fs.writeFileSync(path.join(capturedThenGonePrimary, "gone-mission", "SPEC.md"), nodeBytes("M.GONE", "active", "Gone Mission"));
+      fs.writeFileSync(path.join(capturedThenGonePrimary, "gone-mission", "slices", "05-gone", "SPEC.md"), nodeBytes("OPR.GONE", "active", "Gone Slice"));
+      const { app: goneApp, indexer: goneIndexer } = route("alpha", false, capturedThenGonePrimary, [alphaExtra]);
+      const origGoneAuthored = goneIndexer.missionAuthoredStatuses.bind(goneIndexer);
+      const goneSpy = vi.spyOn(goneIndexer, "missionAuthoredStatuses").mockImplementation(() => {
+        const result = origGoneAuthored();
+        fs.rmSync(capturedThenGonePrimary, { recursive: true, force: true });
+        return result;
+      });
+      try {
+        const goneRes = await goneApp.request("/api/slices");
+        expect(goneRes.status).toBe(500);
+      } finally {
+        goneSpy.mockRestore();
+      }
     });
 
     it("keeps captured snapshot roots unchanged in sliceRoots during withResolvedRoots", () => {

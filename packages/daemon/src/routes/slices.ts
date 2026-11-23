@@ -177,20 +177,15 @@ export function slicesRoutes(): Hono {
         ? deps.indexer.configuredRootResolutions()[0]
         : undefined;
       if (primaryRoot && (primaryRoot.status !== "ok" || primaryRoot.physicalPath === null)) {
-        const fallbackCode = primaryRoot.status === "missing" ? "ENOENT" : "EACCES";
-        const captureError = primaryRoot.captureError ?? Object.assign(
-          new Error(`${fallbackCode}: cannot read primary slices root '${primaryRoot.identity}'`),
-          { code: fallbackCode },
-        );
         return {
           filtered, boundDiagnostic, queueCountsByPath, authored, readPathsBySlicePath,
-          slicesRoot: null as string | null, primaryCaptureError: captureError,
+          slicesRoot: null as string | null,
         };
       }
       const readinessRoot = primaryRoot?.physicalPath ?? deps.indexer.slicesRoot;
       return {
         filtered, boundDiagnostic, queueCountsByPath, authored, readPathsBySlicePath,
-        slicesRoot: readinessRoot, primaryCaptureError: undefined as unknown,
+        slicesRoot: readinessRoot,
       };
     });
     if (batch instanceof Response) return batch;
@@ -201,11 +196,7 @@ export function slicesRoutes(): Hono {
       authored,
       readPathsBySlicePath,
       slicesRoot,
-      primaryCaptureError,
     } = batch;
-    if (primaryCaptureError !== undefined || slicesRoot === null) {
-      throw primaryCaptureError ?? new Error("Primary slices root capture failed");
-    }
     if (queueCountRows && deferredCount.countRow) {
       try {
         await deps.indexer.countQueueRowsCooperatively(queueCountRows, deferredCount.countRow);
@@ -254,6 +245,9 @@ export function slicesRoutes(): Hono {
       missions: authored,
     };
     // The membership batch is synchronous and request-local; finish it before yielding to other requests.
+    if (slicesRoot === null) {
+      return c.json({ ...listing, primaryReadiness: { state: "unknown" as const } });
+    }
     const readiness = await readProjectReadinessAsync(slicesRoot, readPolicy);
     return c.json({ ...listing, missions: { ...listing.missions, ...Object.fromEntries(readiness.missions.map(m => [m.name, {
       ...listing.missions[m.name],
