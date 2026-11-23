@@ -444,7 +444,7 @@ ever run). Left-out rigs don't change the exit code.
             leftOut.push(entry);
             if (!opts.json) {
               const label = rigLabelOf(rig.id, rig.name);
-              if (entry.neverLaunched) console.log(`  ${label}: nothing to restore (none of its seats has ever run), left out.`);
+              if (entry.neverLaunched) console.error(`  ${label}: nothing to restore (none of its seats has ever run), left out.`);
               else {
                 console.error(`  ${label}: left out, not restored -- ${entry.message} (${entry.code})`);
                 for (const blocker of entry.blockers ?? []) console.error(`    ${blocker}`);

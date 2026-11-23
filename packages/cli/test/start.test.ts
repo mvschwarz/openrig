@@ -1260,6 +1260,13 @@ describe("rig start (OPR.0.3.4.1)", () => {
       expect(entry.neverLaunched).toBe(true);
       expect(output).toContain("scratch: nothing to restore (none of its seats has ever run), left out.");
       expect(output).toContain("Daemon and kernel are up. No rigs to restore.");
+      // Every left-out line goes to stderr, so automation that redirects stdout keeps all of them.
+      const errors: string[] = [];
+      const origLog = console.log, origErr = console.error;
+      console.log = () => {};
+      console.error = (...args: unknown[]) => errors.push(args.join(" "));
+      try { await makeCmd().parseAsync(["node", "rig", "start", "--last"]); } finally { console.log = origLog; console.error = origErr; }
+      expect(errors.join("\n")).toContain("scratch: nothing to restore (none of its seats has ever run), left out.");
     } else {
       // Unknown never reads as nothing: an unreadable seat list keeps the daemon's reason in full.
       expect(entry.neverLaunched).toBeUndefined();
