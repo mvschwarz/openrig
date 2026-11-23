@@ -564,9 +564,9 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         throw err;
       }
 
-      // Context beside the send's own result: the seat was in a managed compaction or restore when it ran, or had an
-      // unsettled permission or elicitation request.
-      const notices = [res.data["managedCompaction"], res.data["inputRequest"]]
+      // Context beside the send's own result: the seat was in a managed compaction or restore when it ran, at its usage
+      // limit, or had an unsettled permission or elicitation request.
+      const notices = [res.data["managedCompaction"], res.data["usageLimit"], res.data["inputRequest"]]
         .map(context => (context as { notice?: unknown } | undefined)?.notice).filter((notice): notice is string => typeof notice === "string");
       const printContextNotices = (write: (line: string) => void) => { for (const notice of notices) write(`Notice: ${notice}`); };
       if (!opts.json) printDestinationStatus(res.data, console.error);
@@ -945,6 +945,13 @@ async function runCrossHostSend(
  * DIFFERENT terminal bearer surfaces as the structured permission-gate step
  * (never a hang, never silent). Remedy documented in cli-reference.md.
  */
+/** The remote seat's usage-limit notice, as a local send prints it: its agent isn't expected to read the text before
+ *  the stated reset. */
+function printRemoteUsageLimit(data: Record<string, unknown>, write: (line: string) => void): void {
+  const notice = (data["usageLimit"] as { notice?: unknown } | undefined)?.notice;
+  if (typeof notice === "string") write(`Notice: ${notice}`);
+}
+
 async function runHttpHostSend(
   host: HttpHostEntry,
   session: string,
@@ -1014,6 +1021,8 @@ async function runHttpHostSend(
       console.error(`  ${unconfirmedGuidance.consequence}`);
       console.error(`  ${unconfirmedGuidance.action}`);
     }
+    // A failed or uncertain send whose text may have reached the input carries the record too, as a local failure prints it.
+    printRemoteUsageLimit(remoteData, console.error);
     return;
   }
 
@@ -1026,6 +1035,7 @@ async function runHttpHostSend(
   }
   console.log(`Sent to ${session}`);
   if (data["envelopeOmitted"]) console.log(exactTextNote(session));
+  printRemoteUsageLimit(data, console.log);
   const advisory = data["warning"] as string | undefined;
   if (advisory) {
     console.log(`Advisory: ${advisory}`);
@@ -1209,12 +1219,13 @@ async function runFanOutSend(params: {
   }
 
   const data = res.data;
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string; runnerReceipt?: NativeSendReceipt; envelopeOmitted?: boolean; managedCompaction?: { notice?: unknown }; inputRequest?: { notice?: unknown }; existingInput?: unknown; warning?: string }>) ?? [];
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string; runnerReceipt?: NativeSendReceipt; envelopeOmitted?: boolean; managedCompaction?: { notice?: unknown }; usageLimit?: { notice?: unknown }; inputRequest?: { notice?: unknown }; existingInput?: unknown; warning?: string }>) ?? [];
   // Context beside a recipient's own result: its own advisory (such as unreadable input), and whether
   // it was in a managed compaction or restore when the send ran.
   const printNotice = (r: (typeof results)[number]) => {
     if (r.warning) console.log(`${r.sessionName}: Advisory: ${r.warning}`);
     if (typeof r.managedCompaction?.notice === "string") console.log(`Notice: ${r.managedCompaction.notice}`);
+    if (typeof r.usageLimit?.notice === "string") console.log(`Notice: ${r.usageLimit.notice}`);
     if (typeof r.inputRequest?.notice === "string") console.log(`Notice: ${r.inputRequest.notice}`);
   };
   // Round-2 F1 (desk-binding): ONE verdict line per recipient. A

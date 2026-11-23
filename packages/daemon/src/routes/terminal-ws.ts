@@ -65,6 +65,10 @@ export function registerTerminalWs(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (upgradeWebSocket as any)((c: any) => {
       const sessionName = c.req.param("sessionName")!;
+      // `?geometry=1` opts this viewer in to the pane's size, sent as a BINARY frame holding UTF-8 JSON
+      // `{"type":"geometry","cols":N,"rows":M}`. Terminal output is always a text frame, so the two can't be confused.
+      // Without the flag, the frames on this socket are unchanged.
+      const wantsGeometry = c.req.query("geometry") === "1";
       let broker: TerminalSessionBroker | null = null;
       let subscriber: TerminalSubscriber | null = null;
       // The WebSocket can close DURING the async attach (before the broker
@@ -108,7 +112,7 @@ export function registerTerminalWs(
       };
 
       return {
-        async onOpen(_evt: unknown, ws: { send(data: string): void; close(code: number, reason: string): void }) {
+        async onOpen(_evt: unknown, ws: { send(data: string | Uint8Array): void; close(code: number, reason: string): void }) {
           const tmux = c.get("tmuxAdapter") as TmuxAdapter | undefined;
           if (!tmux) { ws.close(1011, "tmux adapter unavailable"); return; }
           // Adapt the WebSocket to a broker subscriber. The broker owns the pipe,
@@ -117,6 +121,11 @@ export function registerTerminalWs(
             send: (data: string) => { try { ws.send(data); } catch { /* closed socket */ } },
             close: (code: number, reason: string) => { try { ws.close(code, reason); } catch { /* already closed */ } },
           };
+          if (wantsGeometry) {
+            sub.geometry = (cols: number, rows: number) => {
+              try { ws.send(new TextEncoder().encode(JSON.stringify({ type: "geometry", cols, rows }))); } catch { /* closed socket */ }
+            };
+          }
           subscriber = sub;
           let b: TerminalSessionBroker;
           try {

@@ -1270,7 +1270,7 @@ activityRoutes.get("/parked", (c) => {
     | undefined;
   const queueRepo = c.get("queueRepo" as never) as
     | {
-        listOpenObligations: (destinationSession: string, limit: number) => Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null }>;
+        listOpenObligations: (destinationSession: string, limit: number) => Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null; blockedOn?: string | null; updatedAt?: string | null }>;
         getParkWakeStatus: (qitemId: string) => import("../domain/queue-wake-repository.js").ParkWakeStatus | null;
         parkWakeServedByOwnReminder?: (qitemId: string) => boolean;
       }

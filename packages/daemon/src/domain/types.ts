@@ -139,6 +139,8 @@ export interface Session {
 export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unknown";
 /** A send's own screen check as it reported it, or nulls when none ran. */
 export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
+/** A seat's current usage-limit reading: when OpenRig recorded it, and the reset it states. */
+export type UsageLimitReading = { asOf: string; resetsAt: string };
 
 /** Facts a runner reports about its own process; launch authentication is not independent native verification. */
 export interface RunnerObservations {
@@ -250,7 +252,10 @@ export type RigEvent =
       /** Slice 13: the seat routes through its hook bridge, which couldn't take this send (its waiter expired, say), so it
        *  went to typed delivery: why, as the sender's warning said it. A message queued for the bridge and typed later is
        *  named by `transport.hook_bridge_fallback` instead. */
-      hookBridgeUnavailable?: string }
+      hookBridgeUnavailable?: string;
+      /** The seat's current usage-limit reading when the send started, for a send whose text reached the input: its
+       *  agent isn't expected to read the text before the stated reset. */
+      usageLimit?: UsageLimitReading }
   /** Slice 13: a Claude seat's hook bridge. A waiter armed at a turn boundary; a batch was delivered into the seat's
    *  context (one model turn on the seat's login; delivered, not acted on); a waiter expired before its hook's timeout; or
    *  queued messages were handed back to typed delivery because the bridge had no live arm. */
@@ -389,6 +394,12 @@ export type RigEvent =
   // (null for legacy/omitted — always present, never absent, so consumers
   // can title feed cards without a second fetch).
   | { type: "queue.created"; qitemId: string; sourceSession: string; destinationSession: string; priority: string; tier: string | null; summary: string | null }
+  // #3728: a queue write or send the daemon refused or could not settle, so it stays diagnosable when the caller loses
+  // stderr. Three outcomes stay apart: these refusals (nothing stored), a send kept as a failed message in the sender's
+  // outbox (queue outbox list, not an event), and a forwarded write whose result is unknown. Never carries the body.
+  | { type: "queue.create_refused"; sourceSession: string | null; destinationSession: string | null; reason: string; status: number; hostId: string | null }
+  | { type: "queue.create_remote_unknown"; qitemId: string | null; sourceSession: string | null; destinationSession: string | null; hostId: string; failureClass: string }
+  | { type: "transport.send_refused"; senderSession: string | null; session: string | null; reason: string; status: number }
   | { type: "queue.handed_off"; qitemId: string; fromSession: string; toSession: string; closureReason: "handed_off_to"; summary: string | null }
   | { type: "queue.claimed"; qitemId: string; destinationSession: string; claimedAt: string; closureRequiredAt: string | null; summary: string | null }
   | { type: "queue.unclaimed"; qitemId: string; destinationSession: string; reason: string; summary: string | null }
@@ -611,6 +622,15 @@ export interface RestoreResult {
   excludedNodes?: RestoreExcludedNode[];
   /** The notice for seats this attempt left as bare shells: who was told, and the seats with no single destination. */
   harnessNotStarted?: import("./harness-not-started-notice.js").HarnessNotStartedReport;
+  /** Seats this restore left stopped on purpose, outside `nodes` so they don't count in `rigResult`: a seat pool agent
+   *  the pool drained (#3395) stays down until the pool brings it back. Present only when there is one. */
+  keptDown?: RestoreKeptDownNode[];
+}
+
+export interface RestoreKeptDownNode {
+  nodeId: string;
+  logicalId: string;
+  reason: "drained pool agent, not started";
 }
 
 export type RestoreRigResult = "fully_restored" | "partially_restored" | "failed" | "not_attempted";
@@ -629,8 +649,9 @@ export interface RestoreValidationBlocker {
 export interface RestoreNodeResult {
   /** Saved intended seat when this attempt launched a recreated node; nodeId names the registered current node. */
   intendedNodeId?: string;
-  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so. */
-  stage?: "harness_not_started";
+  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so.
+   *  `resume_rolled_back`: its resume failed and the blank session it launched was rolled back, so no agent runs in it. */
+  stage?: "harness_not_started" | "resume_rolled_back";
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
   launchStarted?: true;
   /** An in-place restore failed before its takeover stopped anything. It says nothing about whether the seat's process runs. */
@@ -818,6 +839,7 @@ export interface SeatIdentityVerdict {
     | "pane_pid_gone"
     | "binding_pane_missing"
     | "session_missing"
+    | "session_missing_tmux_unavailable"
     | "pane_exited"
     | "tmux_unavailable"
     | null;
@@ -834,10 +856,11 @@ export interface SeatIdentityVerdict {
   observedAt: string;
 }
 
-/** Only a confirmed missing session proves the seat is no longer running.
+/** Only a confirmed missing session proves the seat is no longer running. A later unreadable sample
+ * retains that evidence and notes its uncertainty; it is not a new absence observation.
  * Callers must first gate the verdict to the current session and binding. */
 export function identityVerdictConfirmsSessionMissing(verdict: SeatIdentityVerdict | null | undefined): boolean {
-  return verdict?.reason === "session_missing";
+  return verdict?.reason === "session_missing" || verdict?.reason === "session_missing_tmux_unavailable";
 }
 
 /** Positive executor absence only. Unknown identity or an unreadable pane never proves an exit.
@@ -1548,6 +1571,8 @@ export interface RigSpec {
   env?: Record<string, string>;
   /** #25: per-runtime managed-block destination. Absent = CLAUDE.md. */
   managedBlocks?: { "claude-code"?: import("./managed-blocks.js").ClaudeManagedBlockFile };
+  /** Override the daemon's default onboarding pack setting for this rig. */
+  defaultOnboardingPack?: boolean;
   docs?: RigSpecDoc[];
   startup?: StartupBlock;
   services?: RigServicesSpec;

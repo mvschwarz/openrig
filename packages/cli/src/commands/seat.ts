@@ -229,7 +229,9 @@ function display(value: string | null | undefined, empty = "none"): string {
 }
 
 function sessionReason(reason: string | null | undefined): string | null {
-  return reason === "session_missing" ? "tmux session missing; restore or relaunch the seat" : null;
+  return reason === "session_missing_tmux_unavailable"
+    ? "tmux session last observed missing; latest tmux reading unavailable; restore or relaunch the seat"
+    : reason === "session_missing" ? "tmux session missing; restore or relaunch the seat" : null;
 }
 
 const LEVEL_WORDS: Record<string, string> = {

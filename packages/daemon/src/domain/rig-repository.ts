@@ -156,6 +156,7 @@ function isStoredRigSpec(value: unknown): value is NodeLaunchRecipe["rigSpec"] {
   if (typeof spec.version !== "string" || typeof spec.name !== "string" || !Array.isArray(spec.pods)) return false;
   if (spec.cultureFile !== undefined && typeof spec.cultureFile !== "string") return false;
   if (spec.nonInterruptive !== undefined && typeof spec.nonInterruptive !== "boolean") return false;
+  if (spec.defaultOnboardingPack !== undefined && typeof spec.defaultOnboardingPack !== "boolean") return false;
   if (spec.permissionPolicy !== undefined && typeof spec.permissionPolicy !== "string") return false;
   if (spec.env !== undefined && !isStringRecord(spec.env)) return false;
   if (spec.managedBlocks !== undefined) {
@@ -218,6 +219,7 @@ export interface RigStartupLayers {
   root: string;
   cultureFile?: string;
   startup?: StartupBlock;
+  defaultOnboardingPack?: boolean;
   podStartupFiles?: Record<string, StartupFile[]>;
   /** Export-only authored actions, never inherited by seats added later. */
   podStartupActions?: Record<string, StartupBlock["actions"]>;
@@ -519,8 +521,8 @@ export class RigRepository {
       .run(file ?? null, new Date().toISOString(), rigId);
   }
 
-  /** The rig's `culture_file` and rig `startup` block as its spec declared them, and the absolute root their paths
-   *  resolve against (migration 121). A seat added to the rig later reads them back. Null when neither was declared. */
+  /** The rig's authored startup layers and the absolute root their paths resolve against (migration 121).
+   *  A seat added to the rig later reads them back. */
   setRigStartupLayers(rigId: string, layers: RigStartupLayers | null): void {
     if (!this.hasRigColumn("startup_layers_json")) return;
     this.db.prepare("UPDATE rigs SET startup_layers_json = ?, updated_at = ? WHERE id = ?")

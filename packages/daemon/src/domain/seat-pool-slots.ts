@@ -95,6 +95,11 @@ export class SeatPoolSlotsRepository {
       .map(fromRow);
   }
 
+  /** Whether the node is a pool agent the pool drained: restore keeps it down until the pool brings it back. */
+  isDrainedPoolNode(nodeId: string): boolean {
+    return this.db.prepare("SELECT 1 FROM seat_pool_slots WHERE node_id = ? AND phase = 'drained'").get(nodeId) !== undefined;
+  }
+
   /** The nodes of every pool agent in a rig, in every phase (`drained` included). */
   poolAgentNodeIds(rigId: string): string[] {
     return (this.db.prepare(
