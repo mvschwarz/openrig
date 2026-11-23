@@ -412,6 +412,13 @@ leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
 (`OPENRIG_NO_KERNEL=1`) the daemon skips the kernel's automatic restore too;
 bring it back with `rig up kernel --existing`.
 
+A rig the daemon has nothing to restore from is left out and named with the
+daemon's reason and, when it sends them, the blockers that kept its saved state
+from standing in. With `--json` these rigs are listed under `leftOut`, each with
+its `code`, `message` and `blockers`; `neverLaunched` marks a rig none of whose
+seats has ever run. A preview that failed outright stays under `previewErrors`.
+Left-out rigs don't change the exit code.
+
 Restore requests run one at a time by default. To keep up to two requests
 outstanding, for example, use `rig start --last --concurrency 2`. A request that
 times out can keep running in the daemon, so more than two restores can still be
