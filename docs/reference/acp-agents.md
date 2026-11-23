@@ -260,11 +260,18 @@ Each URL appears once per kind, with all its associations.
 rig resource link https://github.com/owner/repo/pull/42 --ref qitem-123
 rig resource link https://gitlab.example/team/repo/-/merge_requests/17 --ref workflow-456
 rig resource link https://docs.example/design --kind design
+rig resource link ./notes/design.md --kind file --id design-path
+rig resource link --kind note --id decision --content "Use the existing queue."
 rig resource list --kind pr --json
 rig resource unlink https://github.com/owner/repo/pull/42 --ref qitem-123
 ```
 
-GitHub pull requests and GitLab merge request paths are recognized
-automatically. Use `--kind pr` for an enterprise GitHub host and custom kinds
-for other HTTPS links. The list persists in OpenRig home. It does not grant
-access to linked resources or fetch their status.
+Resources have a kind and an ID, with an optional URI or string value. A path
+is stored as written. Use `--content-file` to explicitly store local UTF-8
+text instead, or `--content` for inline text. Content belongs to the
+association and is visible in JSON output to members of the rig.
+
+GitHub pull requests and GitLab merge requests are examples that derive
+canonical IDs from their URLs. Use `--kind pr` for an enterprise GitHub host.
+The list persists in OpenRig home. It does not grant access to remote
+resources or fetch their status.
