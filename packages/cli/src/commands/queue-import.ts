@@ -1,7 +1,9 @@
 import { Command } from "commander";
+import { ConfigStore } from "../config-store.js";
+import { resolveLocalDbOverride } from "../local-db.js";
 import { getOpenRigHome } from "../openrig-compat.js";
 
-const destination = () => ({ home: getOpenRigHome(), dbPath: process.env.OPENRIG_DB ?? process.env.RIGGED_DB });
+const destination = () => ({ home: getOpenRigHome(), dbPath: resolveLocalDbOverride() });
 const print = (report: unknown) => process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 
 export function queueImportCommand(): Command {
@@ -13,7 +15,8 @@ export function queueImportCommand(): Command {
     .action(async (file: string, opts: { readonly dryRun?: boolean; readonly maxBytes?: string }, cmd: Command) => {
       try {
         const { importLocalQueue } = await import("@openrig/daemon/queue-transfer-staging");
-        const report = importLocalQueue(destination(), file, { dryRun: opts.dryRun === true,
+        const allowlist = new ConfigStore().resolveWithSource("files.allowlist").value;
+        const report = importLocalQueue({ ...destination(), allowlist: typeof allowlist === "string" ? allowlist : undefined }, file, { dryRun: opts.dryRun === true,
           ...(opts.maxBytes === undefined ? {} : { maxBytes: /^\d+$/.test(opts.maxBytes) ? Number(opts.maxBytes) : NaN }) });
         print(report);
         if (report.status === "rejected") process.exitCode = 2;

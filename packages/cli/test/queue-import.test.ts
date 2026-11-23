@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,7 @@ beforeEach(() => {
     source.exec(`INSERT INTO self_host_identity VALUES (1, 'origin', 'minted', 'reconciled');
       INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body)
       VALUES ('qitem-a', '1', '1', 'a@demo', 'b@demo', 'pending', 'archive body');`);
+    source.prepare("UPDATE queue_items SET evidence_ref = ?").run(join(home, "evidence", "receipt.txt"));
     writeFileSync(file, buildQueueTransfer(source, { kind: "host" }).archive);
   } finally {
     source.close();
@@ -37,10 +38,44 @@ function run(...args: string[]): unknown {
 }
 
 function invoke(...args: string[]) {
+  const { OPENRIG_DB: _db, RIGGED_DB: _legacy, OPENRIG_FILES_ALLOWLIST: _files,
+    RIGGED_FILES_ALLOWLIST: _legacyFiles, ...env } = process.env;
   return spawnSync(process.execPath, [fileURLToPath(new URL("../dist/bin-wrapper.js", import.meta.url)), "queue", ...args], {
-    encoding: "utf8", timeout: 10_000, env: { ...process.env, OPENRIG_HOME: home, OPENRIG_DB: join(home, "openrig.sqlite") },
+    encoding: "utf8", timeout: 10_000, env: { ...env, OPENRIG_HOME: home },
   });
 }
+
+it.each(["config", "last launch"])("stages into the database from %s rather than the default", selector => {
+  const db = join(home, "selected.sqlite");
+  renameSync(join(home, "openrig.sqlite"), db);
+  if (selector === "config") {
+    writeFileSync(join(home, "config.json"), JSON.stringify({ db: { path: db } }));
+    writeFileSync(join(home, "daemon.json"), JSON.stringify({ db: join(home, "stale.sqlite") }));
+  } else {
+    writeFileSync(join(home, "daemon.json"), JSON.stringify({ db }));
+  }
+
+  expect(run("import", file)).toMatchObject({ stage: { status: "staged" } });
+  expect(run("staging", "list")).toMatchObject([{ status: "staged" }]);
+});
+
+it.each(["present", "missing", "not checked"])("reports evidence as %s using files.allowlist", outcome => {
+  const evidence = join(home, "evidence");
+  const reference = join(evidence, "receipt.txt");
+  mkdirSync(evidence);
+  if (outcome !== "missing") writeFileSync(reference, "receipt");
+  const allowlist = `shared:${outcome === "not checked" ? join(home, "outside") : evidence}`;
+  writeFileSync(join(home, "config.json"), JSON.stringify({ files: { allowlist } }));
+
+  const result = invoke("import", file, "--dry-run");
+  expect(result.status, result.stderr).toBe(0);
+  const { warnings } = JSON.parse(result.stdout);
+  expect(warnings.filter((warning: { reference?: string }) => warning.reference === reference)).toEqual(
+    outcome === "present" ? [] : [{
+      code: outcome === "missing" ? "missing_evidence" : "evidence_not_checked", qitemId: "qitem-a", reference,
+    }],
+  );
+});
 
 it("dry-runs without a manifest, stages across CLI invocations, and discards by import ID", () => {
   expect(run("import", file, "--dry-run")).toMatchObject({ status: "not_ready_for_activation", dryRun: true, stage: null });
