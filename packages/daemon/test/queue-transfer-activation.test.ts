@@ -10,6 +10,8 @@ import { mappingDigest } from "../src/domain/queue-transfer-mapping.js";
 import { parseQueueTransfer } from "../src/domain/queue-transfer-parse.js";
 import { AUTHORIZATION_KIND, RECEIPT_KIND, authorizationDigest, parseAuthorization, parseReceipt, rowsDigest } from "../src/domain/queue-transfer-records.js";
 import { QueueTransferStaging } from "../src/domain/queue-transfer-staging.js";
+import { QueueTransitionLog } from "../src/domain/queue-transition-log.js";
+import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 
 let source: Database.Database;
 let db: Database.Database;
@@ -24,9 +26,10 @@ beforeEach(() => {
 });
 afterEach(() => { source.close(); db.close(); });
 
-function stage(state: string, scrubbed = false) {
+function stage(state: string, scrubbed = false, history = "") {
   source.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body, content_erased_at)
     VALUES ('qitem-a', '1', '1', 'a@old', 'b@old', ?, 'secret', ?)`).run(state, scrubbed ? "2" : null);
+  source.exec(history);
   const { archive } = buildQueueTransfer(source, { kind: "host" });
   const manifest = new QueueTransferStaging(db).import(archive).stage;
   if (!manifest) throw new Error("expected staged import");
@@ -72,4 +75,20 @@ it("fails closed before recording activation when runnable work has no wake stor
   const input = stage("in-progress");
   expect(() => service.activate(input)).toThrow(expect.objectContaining({ code: "wake_intent_store_unavailable" }));
   expect(db.prepare("SELECT record_id FROM queue_transfer_ledger").get()).toBeUndefined();
+});
+
+it("shows imported actions and transitions as history but not as local receipts or activity", () => {
+  const input = stage("blocked", false, `INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, actor_session, transition_note, owner_notification_level)
+    VALUES (50, 'qitem-a', '1', 'in-progress', 'a@old', 'relay-owner-notification-accepted notification_key=source-key', 'NOTICE');
+    INSERT INTO mission_control_actions (action_id, action_verb, qitem_id, actor_session, acted_at, audit_notes_json)
+    VALUES ('action-a', 'approve', 'qitem-a', 'a@old', '1', '{"operation":"source-op"}');`);
+  service.activate(input);
+  const log = new QueueTransitionLog(db);
+  expect(log.listForQitem("qitem-a")[0]).toMatchObject({ importedFrom: { hostId: "origin", mintedAt: "minted", transitionId: 50 } });
+  expect(log.listRecentForRig("old").some(row => row.actorSession === "a@old")).toBe(false);
+  expect(log.hasRelayOwnerNotificationReceipt("qitem-a", "source-key")).toBe(false);
+  expect(log.activeOwnerNotificationEpisodes()).toEqual([]);
+  const actions = new MissionControlActionLog(db);
+  expect(actions.listForQitem("qitem-a")).toMatchObject([{ importedFrom: "origin/minted" }]);
+  expect(actions.findOperation("qitem-a", "source-op")).toBeNull();
 });

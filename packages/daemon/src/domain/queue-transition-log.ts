@@ -207,6 +207,7 @@ export function ownerNotificationLevelAtLeast(
 }
 
 export interface QueueTransition {
+  importedFrom?: { hostId: string; mintedAt: string; transitionId: number };
   transitionId: number;
   qitemId: string;
   ts: string;
@@ -379,11 +380,14 @@ export class QueueTransitionLog {
   private readonly hasOwnerNotificationColumns: boolean;
   private readonly hasIdentityPrincipalColumn: boolean;
   private readonly historySource: string;
+  private readonly localHistorySource: string;
+  private readonly hasTransferOrigins: boolean;
   /** The history tables this schema has: the live table, and the archive where it exists. */
   private readonly historyTables: string[];
 
   constructor(db: Database.Database) {
     this.db = db;
+    this.hasTransferOrigins = !!db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transfer_transition_origins' AND type = 'table'").get();
     this.hasIdentityProvenanceColumn = (
       this.db.prepare("PRAGMA table_info(queue_transitions)").all() as Array<{ name: string }>
     ).some((c) => c.name === "identity_provenance");
@@ -404,7 +408,13 @@ export class QueueTransitionLog {
       return [`SELECT ${fields.map((field) => available.has(field) ? field : `NULL AS ${field}`).join(", ")} FROM ${table}`];
     });
     this.historySource = `(${sources.join(" UNION ALL ")})`;
+    this.localHistorySource = this.hasTransferOrigins
+      ? `(SELECT * FROM ${this.historySource} WHERE ${this.localTransition("transition_id")})` : this.historySource;
 
+  }
+
+  private localTransition(id: string): string {
+    return this.hasTransferOrigins ? `${id} NOT IN (SELECT transition_id FROM queue_transfer_transition_origins)` : "1";
   }
 
   /**
@@ -456,7 +466,12 @@ export class QueueTransitionLog {
         `SELECT * FROM ${this.historySource} WHERE qitem_id = ? ORDER BY transition_id ASC`
       )
       .all(qitemId) as QueueTransitionRow[];
-    return rows.map((r) => this.rowToTransition(r));
+    const origins = this.hasTransferOrigins ? this.db.prepare<[number], NonNullable<QueueTransition["importedFrom"]>>(`SELECT origin_host_id AS hostId, origin_minted_at AS mintedAt,
+      origin_transition_id AS transitionId FROM queue_transfer_transition_origins WHERE transition_id = ?`) : null;
+    return rows.map((r) => {
+      const importedFrom = origins?.get(r.transition_id);
+      return { ...this.rowToTransition(r), ...(importedFrom ? { importedFrom } : {}) };
+    });
   }
 
   /**
@@ -472,7 +487,7 @@ export class QueueTransitionLog {
    */
   currentParkContinuation(qitemId: string): string | null {
     const newestFirst = this.db.prepare(
-      "SELECT state, transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id DESC",
+      `SELECT state, transition_note FROM queue_transitions WHERE qitem_id = ? AND ${this.localTransition("transition_id")} ORDER BY transition_id DESC`,
     );
     // Leaving the loop early releases the statement (better-sqlite3 closes the iterator).
     for (const row of newestFirst.iterate(qitemId) as Iterable<{ state: string; transition_note: string | null }>) {
@@ -521,7 +536,7 @@ export class QueueTransitionLog {
   listForActor(actorSession: string, limit = 100): QueueTransition[] {
     const rows = this.db
       .prepare(
-        `SELECT * FROM ${this.historySource} WHERE actor_session = ? ORDER BY transition_id DESC LIMIT ?`
+        `SELECT * FROM ${this.localHistorySource} WHERE actor_session = ? ORDER BY transition_id DESC LIMIT ?`
       )
       .all(actorSession, limit) as QueueTransitionRow[];
     return rows.map((r) => this.rowToTransition(r));
@@ -587,11 +602,11 @@ export class QueueTransitionLog {
       ${this.historyTables.map((table) => `
       SELECT t.transition_id, t.qitem_id, t.ts, t.state, t.actor_session, t.closure_reason, t.closure_target
       FROM ${table} t
-      WHERE +t.qitem_id IN (SELECT qitem_id FROM scope_items)`).join(" UNION ALL ")}
+      WHERE +t.qitem_id IN (SELECT qitem_id FROM scope_items) AND ${this.localTransition("t.transition_id")}`).join(" UNION ALL ")}
       ORDER BY ts DESC, transition_id DESC`);
     // max() with a bare column reads the state from the row holding the max, one per table.
     const predecessors = this.historyTables.map((table) => this.db.prepare(
-      `SELECT MAX(transition_id) AS transition_id, state FROM ${table} WHERE qitem_id = ? AND transition_id < ?`,
+      `SELECT MAX(transition_id) AS transition_id, state FROM ${table} WHERE qitem_id = ? AND transition_id < ? AND ${this.localTransition("transition_id")}`,
     ));
     const metadata = this.db.prepare(
       "SELECT tags, summary, destination_session, source_session, CASE WHEN summary IS NULL OR ltrim(summary, ?) = '' THEN substr(body, 1, ?) END AS body_head FROM queue_items WHERE qitem_id = ?",
@@ -626,7 +641,7 @@ export class QueueTransitionLog {
     if (!this.hasOwnerNotificationColumns) return null;
     const row = this.db
       .prepare(
-        `SELECT * FROM ${this.historySource}
+        `SELECT * FROM ${this.localHistorySource}
           WHERE qitem_id = ? AND owner_notification_level IS NOT NULL
           ORDER BY transition_id DESC LIMIT 1`,
       )
@@ -647,7 +662,7 @@ export class QueueTransitionLog {
          SELECT history.*, ROW_NUMBER() OVER (
            PARTITION BY qitem_id, (owner_notification_kind IS NOT NULL AND owner_notification_kind != 'human-decision-resolved')
            ORDER BY transition_id DESC) AS newest
-           FROM ${this.historySource} history
+           FROM ${this.localHistorySource} history
           WHERE qitem_id IN (SELECT value FROM json_each(?)) AND owner_notification_level IS NOT NULL)
         WHERE newest = 1
         ORDER BY transition_id DESC`,
@@ -663,7 +678,7 @@ export class QueueTransitionLog {
   /** Startup catch-up includes retained terminal rows, unlike active-episode selection. */
   postedHumanAskIds(): string[] {
     if (!this.hasOwnerNotificationColumns) return [];
-    return (this.db.prepare(`SELECT DISTINCT qitem_id FROM ${this.historySource}
+    return (this.db.prepare(`SELECT DISTINCT qitem_id FROM ${this.localHistorySource}
       WHERE (transition_note LIKE 'slack-owner-notification-posted %' OR transition_note LIKE 'slack-owner-notification-marked %')
         AND qitem_id IN (SELECT qitem_id FROM queue_items)
         AND instr(' ' || transition_note || ' ', ' kind=human-required ') > 0`).all() as Array<{ qitem_id: string }>).map((r) => r.qitem_id);
@@ -696,7 +711,7 @@ export class QueueTransitionLog {
     // contain characters LIKE would treat as wildcards).
     const receipt = (qitemIdExpr: string, transitionIdExpr: string) =>
       `EXISTS (
-         SELECT 1 FROM ${this.historySource} r
+         SELECT 1 FROM ${this.localHistorySource} r
          WHERE r.qitem_id = ${qitemIdExpr}
            AND (r.transition_note LIKE 'slack-owner-notification-posted %' OR r.transition_note LIKE 'slack-owner-notification-marked %' OR r.transition_note LIKE 'relay-owner-notification-accepted %')
            AND instr(' ' || r.transition_note || ' ', ' notification_key=' || ${qitemIdExpr} || ':' || ${transitionIdExpr} || ' ') > 0
@@ -711,7 +726,7 @@ export class QueueTransitionLog {
            SELECT qitem_id, ts_created FROM queue_items WHERE state IN ('pending', 'in-progress', 'blocked')
          ),
          history_active AS (
-           SELECT h.* FROM ${this.historySource} h
+           SELECT h.* FROM ${this.localHistorySource} h
            WHERE h.qitem_id IN (SELECT qitem_id FROM active_ids)
              AND h.owner_notification_level IS NOT NULL
          ),
@@ -739,7 +754,7 @@ export class QueueTransitionLog {
   getOwnerNotificationReceipt(qitemId: string, notificationKey: string): { messageTs: string | null; threadTs: string | null; digest: string | null } | null {
     const rows = this.db
       .prepare(
-        `SELECT transition_note FROM ${this.historySource}
+        `SELECT transition_note FROM ${this.localHistorySource}
           WHERE qitem_id = ? AND (transition_note LIKE 'slack-owner-notification-posted %' OR transition_note LIKE 'slack-owner-notification-marked %')
           ORDER BY transition_id DESC`,
       )
@@ -756,7 +771,7 @@ export class QueueTransitionLog {
   listRelayOwnerNotificationReceipts(qitemId: string): RelayOwnerNotificationReceipt[] {
     const rows = this.db
       .prepare(
-        `SELECT transition_id, transition_note FROM ${this.historySource}
+        `SELECT transition_id, transition_note FROM ${this.localHistorySource}
           WHERE qitem_id = ? AND transition_note LIKE 'relay-owner-notification-accepted %'
           ORDER BY transition_id DESC`,
       )
@@ -794,7 +809,7 @@ export class QueueTransitionLog {
     const fullHash = createHash("sha256").update(trimmed, "utf8").digest("hex");
     const rows = this.db
       .prepare(
-        `SELECT qitem_id, transition_note FROM ${this.historySource}
+        `SELECT qitem_id, transition_note FROM ${this.localHistorySource}
           WHERE transition_note LIKE 'relay-owner-notification-accepted %'
             AND (
               instr(' ' || transition_note || ' ', ' reply_ref_hash=' || ? || ' ') > 0
@@ -828,7 +843,7 @@ export class QueueTransitionLog {
     if (!encoded) return null;
     const rows = this.db
       .prepare(
-        `SELECT qitem_id, transition_note FROM ${this.historySource}
+        `SELECT qitem_id, transition_note FROM ${this.localHistorySource}
           WHERE transition_note LIKE 'relay-owner-notification-accepted %'
             AND instr(' ' || transition_note || ' ', ' delivery_id=' || ? || ' ') > 0
           ORDER BY transition_id DESC`,

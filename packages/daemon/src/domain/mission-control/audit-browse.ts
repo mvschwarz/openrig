@@ -56,6 +56,7 @@ interface ActionRow {
   notify_result: string | null;
   audit_notes_json: string | null;
   identity_provenance?: string | null;
+  imported_from?: string | null;
 }
 
 const DEFAULT_LIMIT = 50;
@@ -161,6 +162,7 @@ function clampLimit(input: number | undefined): number {
 
 function rowToEntry(row: ActionRow): MissionControlActionEntry {
   return {
+    ...(row.imported_from ? { importedFrom: row.imported_from } : {}),
     actionId: row.action_id,
     actionVerb: row.action_verb as MissionControlVerb,
     qitemId: row.qitem_id,
