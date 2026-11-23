@@ -37,8 +37,9 @@ export interface AssignmentApplyReport {
   account: { label: string; reference: string };
   digest: string;
   results: ApplySeatResult[];
-  /** Codex seats in other rigs on a home this apply switched: reported, not restarted. */
-  otherRigPeers: Array<{ seat: string; rig: string; home: string; command: string }>;
+  /** Codex seats in other rigs on a home this apply switched: reported, not restarted. `command` restarts one by name; it's
+   *  left out, with `why`, when that name reaches more than one seat. */
+  otherRigPeers: Array<{ seat: string; rig: string; home: string; command?: string; why?: string }>;
 }
 
 export interface ApplyDeps {
@@ -57,6 +58,9 @@ export interface ApplyDeps {
 
 const restartCommand = (seat: string) => `rig seat restart ${shellArg(seat)} --keep-conversation`;
 
+/** Why no restart command is given for a seat whose session name another seat has. */
+const NO_NAME = "It has no restart command: a restart reaches a seat by its session name, and another seat has this one";
+
 export async function applyAssignment(plan: AssignmentPlan, account: AccountRef, deps: ApplyDeps): Promise<AssignmentApplyReport> {
   const results: ApplySeatResult[] = [];
   const reason = `rig provider assign ${plan.rig} --provider ${plan.provider} --account ${plan.account.label}`;
@@ -67,7 +71,13 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
   // What a switch or a move gives a seat: the account's reference, or the prepared home it moves to, on that home's login.
   const applied: AppliedReference = account.provider === "codex" && plan.accountHome
     ? { file: null, fileKind: null, codexHome: plan.accountHome, codexLogin: null } : own;
+  // A seat refused because its session name doesn't reach it alone, or one sharing its name with another seat on a home:
+  // a restart by that name could reach the other seat, so no command is given for it.
+  const unnamed = new Set([...plan.rows.filter((r) => r.precheck?.reasons.includes("seat_name_shared")).map((r) => r.seat),
+    ...plan.codexHomes.flatMap((g) => g.seats.map((s) => s.seat).filter((seat, i, all) => all.indexOf(seat) !== i))]);
+  const recoveryOf = (seat: string) => (unnamed.has(seat) ? undefined : restartCommand(seat));
   const record = (row: PlanRow, kind: AssignmentResultKind, detail: string, recovery?: string, activity = row.activity as string) => {
+    if (kind === "unknown" && unnamed.has(row.seat)) detail = `${detail}. ${NO_NAME}.`;
     const result: ApplySeatResult = { seat: row.seat, kind, detail, ...(recovery ? { recovery } : {}), activity, at: deps.now() };
     // A seat whose own switch failed before effect is recorded again, as unknown, once another seat changes its home:
     // the later result, which names the earlier failure, replaces it in the report.
@@ -141,9 +151,9 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     /** Seats whose own switch failed before effect, with why: kept as they are, whatever the home does next. */
     const refused = new Map<string, string>();
     const waiting: PlanRow[] = [];
-    const skipped = (row: PlanRow) => record(row, "unknown", `skipped: home outcome unknown (${switcher} left ${home} in an unknown state)`, restartCommand(row.seat));
+    const skipped = (row: PlanRow) => record(row, "unknown", `skipped: home outcome unknown (${switcher} left ${home} in an unknown state)`, recoveryOf(row.seat));
     const notRestarted = (row: PlanRow, why: string) => record(row, "unknown",
-      `${home} now uses "${plan.account.label}" (switched by ${switcher}), and this seat wasn't restarted: ${why}`, restartCommand(row.seat));
+      `${home} now uses "${plan.account.label}" (switched by ${switcher}), and this seat wasn't restarted: ${why}`, recoveryOf(row.seat));
     const onSwitchedHome = async (row: PlanRow) => {
       if (unsafe(row)) notRestarted(row, notAttempted(row).replace(/^not attempted: /, ""));
       else await restartOnHome(row, home, switcher, switchedSince);
@@ -178,7 +188,7 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     for (const [seat, why] of refused) {
       const row = rows.find((r) => r.seat === seat)!;
       if (state === "switched") notRestarted(row, `its own switch failed before effect (${why})`);
-      else if (state === "unknown") record(row, "unknown", `its own switch failed before effect (${why}), then ${switcher} left ${home} in an unknown state`, restartCommand(seat));
+      else if (state === "unknown") record(row, "unknown", `its own switch failed before effect (${why}), then ${switcher} left ${home} in an unknown state`, recoveryOf(seat));
     }
   }
 
@@ -188,27 +198,29 @@ export async function applyAssignment(plan: AssignmentPlan, account: AccountRef,
     const before = switchedSince();
     if (before) {
       record(row, "unknown", `${home} was switched again by ${before} after ${switcher} switched it to "${plan.account.label}", so this seat wasn't restarted`,
-        restartCommand(row.seat), activity);
+        recoveryOf(row.seat), activity);
       return;
     }
     const restarted = await deps.restartPeer(row.seat, reason);
     const during = switchedSince();
     if (restarted.ok && during) {
       record(row, "unknown", `restarted in place on ${home}, but ${during} switched it again meanwhile: it may be on that login, not "${plan.account.label}"`,
-        restartCommand(row.seat), activity);
+        recoveryOf(row.seat), activity);
     } else if (restarted.ok && restarted.outcome === "restarted_account_unverified") {
       record(row, "switched", `restarted in place on ${home}, which ${switcher} switched to "${plan.account.label}"; the account isn't verified until a tool turn`, undefined, activity);
     } else if (restarted.ok) {
       record(row, "unknown", `${home} now uses "${plan.account.label}"; the restart didn't confirm (${restarted.outcome ?? "no outcome"}: ${restarted.message}). Not retried.`,
-        restarted.recoveryCommand ?? restarted.remainingStep ?? restartCommand(row.seat), activity);
+        restarted.recoveryCommand ?? restarted.remainingStep ?? recoveryOf(row.seat), activity);
     } else {
-      record(row, "unknown", `${home} now uses "${plan.account.label}", but this seat wasn't restarted (${restarted.code}: ${restarted.message})`, restartCommand(row.seat), activity);
+      record(row, "unknown", `${home} now uses "${plan.account.label}", but this seat wasn't restarted (${restarted.code}: ${restarted.message})`,
+        restarted.code === "seat_name_shared" ? undefined : recoveryOf(row.seat), activity);
     }
   }
 
   const otherRigPeers = plan.codexHomes.flatMap((group) => {
     const switched = results.some((r) => onHome.get(r.seat) === group.home && (r.kind === "switched" || r.kind === "unknown"));
-    return switched ? group.seats.filter((s) => s.rigId !== plan.rigId).map((s) => ({ seat: s.seat, rig: s.rig, home: group.home, command: restartCommand(s.seat) })) : [];
+    return switched ? group.seats.filter((s) => s.rigId !== plan.rigId).map((s) => ({ seat: s.seat, rig: s.rig, home: group.home,
+      ...(unnamed.has(s.seat) ? { why: NO_NAME } : { command: restartCommand(s.seat) }) })) : [];
   });
   return { daemon: plan.daemon, rig: plan.rig, provider: plan.provider, account: { label: plan.account.label, reference: plan.account.reference },
     digest: plan.digest, results, otherRigPeers };

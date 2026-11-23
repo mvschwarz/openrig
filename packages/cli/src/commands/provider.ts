@@ -1072,7 +1072,7 @@ that machine. Only the command and its output cross the connection.`);
     intent?: { label: string; reference: string; requestedBy: string | null; at: string }; digest: string; note: string };
   type ApplyReport = { daemon: string; rig: string; provider: string; account: { label: string; reference: string }; digest: string;
     results: Array<{ seat: string; kind: string; detail: string; recovery?: string; activity: string; at: string }>;
-    otherRigPeers: Array<{ seat: string; rig: string; home: string; command: string }> };
+    otherRigPeers: Array<{ seat: string; rig: string; home: string; command?: string; why?: string }> };
   const kindWords = (kind: string) => kind.replace(/_/g, "-");
   const printPlan = (plan: Plan, again: string) => {
     console.log(`Plan ${plan.digest} on ${plan.daemon}: rig ${plan.rig}'s ${plan.provider} seats to ${plan.account.label} (${plan.account.reference})`
@@ -1124,7 +1124,9 @@ that machine. Only the command and its output cross the connection.`);
       }
       if (r.recovery) console.log(`  recovery: ${r.recovery}`);
     }
-    for (const p of report.otherRigPeers) console.log(`${p.seat} (rig ${p.rig}): not restarted; it shares ${p.home}, so restart it yourself: ${p.command}`);
+    for (const p of report.otherRigPeers) {
+      console.log(`${p.seat} (rig ${p.rig}): not restarted; it shares ${p.home}, so ${p.command ? `restart it yourself: ${p.command}` : `restart it yourself. ${p.why ?? ""}`.trim()}`);
+    }
     console.log("Each result is reported on its own: nothing was rolled back or retried.");
   };
 

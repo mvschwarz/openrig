@@ -274,6 +274,12 @@ describe("the daemon's assignment plan", () => {
     const report = await applyAssignment(planned.plan, refs.get("codex", "team")!, { switchSeat, restartPeer, activityOf: () => "idle", save: () => {}, now: () => "t" });
     expect(report.results.map((r) => [r.seat, r.kind])).toEqual([["a1@fleet", "switched"], ["a2@fleet", "unknown"], ["a3@fleet", "switched"]]);
     expect([switchSeat.mock.calls.map(([s]) => s), restartPeer.mock.calls.map(([s]) => s)]).toEqual([["a1@fleet"], ["a3@fleet"]]);
+    // No restart command is given by that name, for this rig's seat or the other rig's: it could reach the other seat.
+    const a2 = report.results.find((r) => r.seat === "a2@fleet")!;
+    expect([a2.recovery, a2.detail]).toEqual([undefined, expect.stringContaining("It has no restart command: a restart reaches a seat by its session name, and another seat has this one.")]);
+    expect(planned.plan.codexHomes[0]!.seats.find((s) => s.rigId === "rig-b")!.effect).toBe("not restarted; another seat has its session name, so a restart by that name could reach that one instead");
+    expect(report.otherRigPeers).toEqual([{ seat: "a2@fleet", rig: "fleet", home: codexHome,
+      why: "It has no restart command: a restart reaches a seat by its session name, and another seat has this one" }]);
 
     // With --account-home, the successor's dry run isn't asked about it either, and its move is never attempted.
     const prepared = path.join(dir, "prepared");

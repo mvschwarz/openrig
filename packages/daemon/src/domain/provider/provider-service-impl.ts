@@ -37,6 +37,8 @@ import type {
 } from "./provider-service.js";
 import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
 import { shellArg } from "../../adapters/shell-quote.js";
+import { RigRepository } from "../rig-repository.js";
+import { SeatStatusService } from "../seat-status-service.js";
 import { assignmentStanding, planAssignment, type AssignmentPlan, type PlanSeatFacts, type PlanCheck } from "./assignment-plan.js";
 import { applyAssignment } from "./assignment-apply.js";
 import { ProviderAccountAssignmentsRepository, type AssignmentResult } from "./provider-account-assignments.js";
@@ -146,6 +148,17 @@ export interface ProviderServiceImplDeps {
   claudePrecedence?: ClaudeCredentialPrecedence;
   /** Where a Codex seat can switch in place (Linux); tests pin it. */
   platform?: NodeJS.Platform;
+}
+
+/** The seat a session name reaches through a seat tool's lookup (`seatReachedBy`). */
+type SeatReached = { nodeId: string; rigId: string; archived: boolean } | { ambiguous: true } | { none: true };
+
+/** Why a seat whose session name doesn't reach it alone isn't moved. */
+function unreachedSeat(session: string, r: SeatReached): string {
+  const why = "ambiguous" in r ? `${session} is the session name of more than one active seat, and a switch or restart reaches a seat by that name`
+    : "none" in r ? `${session} doesn't reach this seat by name: the switch's lookup finds no such seat`
+    : `a switch finds a seat by its session name, and ${session} reaches the seat in rig ${r.rigId}${r.archived ? " (archived)" : ""}, not this one`;
+  return `${why}. Nothing changes for this seat here${"ambiguous" in r ? "; archiving the other rig (rig archive) leaves it the only seat with that name" : ""}.`;
 }
 
 export class ProviderServiceImpl implements ProviderService {
@@ -298,6 +311,22 @@ export class ProviderServiceImpl implements ProviderService {
     return { ok: false, code: "unknown_rig", message: `There's no rig named ${handle} with seats on this daemon (rig ps lists them).` };
   }
 
+  /** #3625: the seat a seat tool reaches by this session name. A Claude seat's switch finds it with the Claude relaunch's own
+   *  lookup (every session row, archived rigs' and older ones included, the newest first). A Codex seat's restart, and the
+   *  successor and its dry run, use the seat-ref resolver: active rigs only, refusing a name more than one seat has. */
+  private seatReachedBy(session: string, runtime: string, claudeSeat?: ClaudeSeatRelaunch): SeatReached {
+    if (runtime === "claude-code" && claudeSeat) {
+      const seat = claudeSeat.seat(session);
+      if (!seat) return { none: true };
+      const archived = this.deps.db.prepare("SELECT archived_at FROM rigs WHERE id = ?").get(seat.rigId) as { archived_at: string | null } | undefined;
+      return { nodeId: seat.nodeId, rigId: seat.rigId, archived: !!archived?.archived_at };
+    }
+    const status = new SeatStatusService({ rigRepo: new RigRepository(this.deps.db) }).getStatus(session);
+    if (!status.ok) return status.code === "seat_ambiguous" ? { ambiguous: true } : { none: true };
+    const node = this.deps.db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(status.status.rig_id, status.status.logical_id) as { id: string } | undefined;
+    return node ? { nodeId: node.id, rigId: status.status.rig_id, archived: false } : { none: true };
+  }
+
   /** The plan command again, as the person copies it into a shell. */
   private reviewCommand(input: AssignmentPlanRequest): string {
     return `rig provider assign ${shellArg(input.rig)} --provider ${input.provider} --account ${shellArg(input.label)}`
@@ -345,17 +374,33 @@ export class ProviderServiceImpl implements ProviderService {
       const keptOverride = new Set(plan.rows.filter((r) => r.effect === "kept_override").map((r) => r.seat));
       const tookEffect = (kind: string, seat: string) => kind === "switched" || kind === "pending_successor" || kind === "unknown"
         || (kind === "unchanged" && !keptOverride.has(seat));
+      // Checked again just before each effect, with the lookup that effect uses: the plan's check was awaited, and a session
+      // registered since could give the name another seat.
+      const elsewhere = (seat: string): string | null => {
+        const node = nodeOf.get(seat)!;
+        const r = this.seatReachedBy(seat, node.runtime, tools.claudeSeat);
+        return "nodeId" in r && r.nodeId === node.nodeId ? null : unreachedSeat(seat, r);
+      };
       const report = await applyAssignment(plan, account, {
-        switchSeat: (seat) => this.switchAccount({ ...precheckFor(seat, account), forceUnsafe: false }, tools.seatRestart, tools.claudeSeat),
+        switchSeat: async (seat) => {
+          const why = elsewhere(seat);
+          if (why) return { outcome: "failed_safely", reasons: ["seat_name_shared"], message: why };
+          return this.switchAccount({ ...precheckFor(seat, account), forceUnsafe: false }, tools.seatRestart, tools.claudeSeat);
+        },
         restartPeer: async (seat, reason) => {
           if (!tools.seatRestart) return { ok: false, code: "restart_unavailable", message: "The seat's restart isn't available here." };
+          const why = elsewhere(seat);
+          if (why) return { ok: false, code: "seat_name_shared", message: why };
           const r = await tools.seatRestart.run(seat, reason);
           return r.ok ? { ok: true, ...("outcome" in r && r.outcome ? { outcome: r.outcome } : {}), message: r.message,
             ...("recoveryCommand" in r && typeof r.recoveryCommand === "string" ? { recoveryCommand: r.recoveryCommand } : {}),
             ...("remainingStep" in r && typeof r.remainingStep === "string" ? { remainingStep: r.remainingStep } : {}) }
             : { ok: false, code: r.code, message: r.message };
         },
-        ...(tools.successor ? { successor: tools.successor } : {}),
+        ...(tools.successor ? { successor: async (seat: string, home: string) => {
+          const why = elsewhere(seat);
+          return why ? { ok: false as const, code: "seat_name_shared", message: why } : tools.successor!(seat, home);
+        } } : {}),
         homeSwitches: homeSwitchesOf,
         activityOf: (seat) => this.activityOf(seat),
         save: (result, applied) => {
@@ -476,28 +521,26 @@ export class ProviderServiceImpl implements ProviderService {
     const nodeOf = new Map<string, { nodeId: string; runtime: string }>();
     for (const { nodeId, rigId: seatRig, seat } of entries) if (seatRig === rigId) nodeOf.set(seat.seatSession, { nodeId, runtime: seat.runtime });
     const facts = this.assignmentFacts(entries, configured, (nodeId) => results.get(nodeId));
-    // Two rigs with the same name and member give two seats one session name. Every tool that reads or changes a seat finds
-    // it by that name (its running state and activity, the Claude switch, the Codex restart, the successor and its dry run,
-    // a peer's restart), which could be the other rig's seat. Such a seat's state isn't read, and its check refuses it, so
-    // the apply never reaches any of them for it.
-    const others = (session: string) => entries.filter((e) => e.seat.seatSession === session && e.rigId !== rigId).map((e) => e.rigId);
-    const seats = entries.map(({ seat }, index): PlanSeatFacts => {
-      const unreadable = entries.filter((e) => e.seat.seatSession === seat.seatSession).length > 1;
-      return { ...facts[index]!,
-        running: seat.runtime === "claude-code" && !unreadable ? claudeSeat?.seat(seat.seatSession)?.running ?? null : null,
-        activity: unreadable ? "unknown" : this.activityOf(seat.seatSession) };
-    });
-    const sharedName = (session: string): PlanCheck | null => {
-      const ids = others(session);
-      return ids.length === 0 ? null : { safe: false, reasons: ["seat_name_shared"],
-        message: `${session} is also a seat in rig ${ids.join(", ")}, and a switch or restart reaches a seat by that name, so it could change that one. `
-          + "Nothing changes for this seat here; rename one of the rigs to move it." };
+    // Every tool that reads or changes a seat finds it by its session name: two rigs with the same name and member, or an
+    // archived or older generation of one, can give that name another seat. So each seat is checked against the lookup its
+    // switch or restart uses, and one that doesn't reach it alone isn't read and is refused before any effect.
+    const reached = new Map(entries.filter((e) => e.rigId === rigId).map((e) => [e.nodeId, this.seatReachedBy(e.seat.seatSession, e.seat.runtime, claudeSeat)]));
+    const notReached = (nodeId: string, session: string): PlanCheck | null => {
+      const r = reached.get(nodeId);
+      return !r || ("nodeId" in r && r.nodeId === nodeId) ? null : { safe: false, reasons: ["seat_name_shared"], message: unreachedSeat(session, r) };
     };
+    const seats = entries.map(({ nodeId, rigId: seatRig, seat }, index): PlanSeatFacts => {
+      // Only this rig's seats are read, and only those their session name reaches.
+      const readable = seatRig === rigId && notReached(nodeId, seat.seatSession) === null;
+      return { ...facts[index]!,
+        running: seat.runtime === "claude-code" && readable ? claudeSeat?.seat(seat.seatSession)?.running ?? null : null,
+        activity: readable ? this.activityOf(seat.seatSession) : "unknown" };
+    });
     const plan = await planAssignment({ daemon: input.daemon, rig: rig.name, rigId, account, seats, includeOverrides: input.includeOverrides,
       ...(input.accountHome ? { accountHome: input.accountHome } : {}), platform: this.deps.platform ?? process.platform,
       resolveHome: resolvedHome,
       intent: assignments.intent(rigId, input.provider) },
-    async (seat) => sharedName(seat.session) ?? (input.accountHome && account.provider === "codex"
+    async (seat) => notReached(nodeOf.get(seat.session)!.nodeId, seat.session) ?? (input.accountHome && account.provider === "codex"
       // A move to a prepared home isn't an in-place switch: it's checked by the account-home dry run, not the switch's precheck.
       ? successorCheck ? successorCheck(seat.session, input.accountHome)
         : Promise.resolve({ safe: false, reasons: ["successor_not_checked"], message: "The account-home dry run isn't available here, so the move wasn't checked." })

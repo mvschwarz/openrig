@@ -193,7 +193,7 @@ describe("applying an assignment on the daemon", () => {
     if (!planned.ok) throw new Error(planned.message);
     expect(planned.plan.rows.map((r) => [r.seat, r.effect, r.precheck?.safe, r.precheck?.reasons])).toEqual([
       ["a@fleet", "change", false, ["seat_name_shared"]], ["b@fleet", "change", true, []]]);
-    expect(planned.plan.rows[0]!.precheck!.message).toContain("a@fleet is also a seat in rig rig-b");
+    expect(planned.plan.rows[0]!.precheck!.message).toContain("a@fleet reaches the seat in rig rig-b, not this one");
     const applied = await svc.applyAssignment(request("max-2", planned.plan.digest, { rig: "rig-a" }), { claudeSeat: claude });
     expect(applied.ok && applied.report.results.map((r) => [r.seat, r.kind])).toEqual([["a@fleet", "failed_before_effect"], ["b@fleet", "switched"]]);
     // Neither a@fleet changed, and each result is stored for the node it's about.
@@ -202,6 +202,57 @@ describe("applying an assignment on the daemon", () => {
     expect(new ProviderAccountAssignmentsRepository(db).results("rig-a", "claude").map((r) => [r.nodeId, r.kind]).sort())
       .toEqual([["a1", "failed_before_effect"], ["b1", "switched"]]);
     expect(new ProviderAccountAssignmentsRepository(db).results("rig-b", "claude")).toEqual([]);
+  });
+
+  it("an archived generation with the same name and member: the seat is moved only while its session name reaches it, not the archived one", async () => {
+    // rig-a is live; rig-old, also named fleet, was archived. Both have member a, and rig-old's a@fleet session is the newer
+    // one, which is what the Claude switch's lookup reaches. The daemon's real rig list leaves the archived rig out.
+    const repo = new RigRepository(db);
+    const add = (rigId: string, node: string, session: string) => {
+      db.prepare("INSERT OR IGNORE INTO rigs (id, name) VALUES (?, 'fleet')").run(rigId);
+      db.prepare("INSERT OR IGNORE INTO pods (id, rig_id, namespace, label) VALUES (?, ?, 'dev', 'Dev')").run(`pod-${rigId}`, rigId);
+      db.prepare("INSERT OR IGNORE INTO nodes (id, rig_id, logical_id, runtime, cwd, pod_id) VALUES (?, ?, 'dev.a', 'claude-code', '/w', ?)").run(node, rigId, `pod-${rigId}`);
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES (?, ?, 'a@fleet', 'stopped', 'ready')").run(session, node);
+    };
+    add("rig-a", "a1", "sess-1"); add("rig-old", "a2", "sess-2");
+    repo.archiveRig("rig-old");
+    svc = new ProviderServiceImpl({ db, listRigs: () => repo.listRigs(), env: { HOME: dir }, platform: "linux", now: () => "2026-11-21T07:00:00.000Z",
+      claudePrecedence: async () => ({ conflicts: [], checked: ["the pane environment"], notChecked: [] }) });
+    const claude = stoppedClaude();
+    const plan = async () => {
+      const p = await svc.assignmentPlan({ rig: "fleet", provider: "claude", label: "max-2", includeOverrides: false, daemon: "host-a" }, undefined, claude);
+      if (!p.ok) throw new Error(p.message);
+      return p.plan;
+    };
+    const refused = await plan();
+    expect(refused.rows.map((r) => [r.seat, r.precheck?.reasons])).toEqual([["a@fleet", ["seat_name_shared"]]]);
+    expect(refused.rows[0]!.precheck!.message).toContain("a@fleet reaches the seat in rig rig-old (archived), not this one");
+    const kept = await svc.applyAssignment(request("max-2", refused.digest), { claudeSeat: claude });
+    expect(kept.ok && kept.report.results.map((r) => [r.seat, r.kind])).toEqual([["a@fleet", "failed_before_effect"]]);
+    expect([readClaudeSeatTokenRef(db, "a1"), readClaudeSeatTokenRef(db, "a2")]).toEqual([null, null]);
+
+    // Once the live seat has the newer session (it was launched again), the name reaches it, and it moves; the archived
+    // generation is untouched.
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES ('sess-3', 'a1', 'a@fleet', 'stopped', 'ready')").run();
+    const moving = await plan();
+    expect(moving.rows.map((r) => [r.seat, r.precheck?.safe])).toEqual([["a@fleet", true]]);
+    const moved = await svc.applyAssignment(request("max-2", moving.digest), { claudeSeat: claude });
+    expect(moved.ok && moved.report.results.map((r) => [r.seat, r.kind])).toEqual([["a@fleet", "switched"]]);
+    expect([readClaudeSeatTokenRef(db, "a1")?.label, readClaudeSeatTokenRef(db, "a2")]).toEqual(["max-2", null]);
+
+    // A session registered while the apply runs, after the plan's checks, gives the name the archived seat again: the switch
+    // checks it once more, just before it acts, and refuses.
+    let redirected = false;
+    const svcLate = new ProviderServiceImpl({ db, listRigs: () => repo.listRigs(), env: { HOME: dir }, platform: "linux", now: () => "2026-11-21T07:00:00.000Z",
+      claudePrecedence: async () => { redirected = true; return { conflicts: [], checked: ["the pane environment"], notChecked: [] }; } });
+    const late = { ...claude, seat: (s: string) => { const seat = claude.seat(s); return seat && redirected ? { ...seat, nodeId: "a2", rigId: "rig-old" } : seat; } };
+    const again = await svcLate.assignmentPlan({ rig: "fleet", provider: "claude", label: "max-3", includeOverrides: false, daemon: "host-a" }, undefined, claude);
+    if (!again.ok) throw new Error(again.message);
+    redirected = false;
+    const lateApply = await svcLate.applyAssignment(request("max-3", again.plan.digest), { claudeSeat: late });
+    expect(lateApply.ok && lateApply.report.results.map((r) => [r.seat, r.kind, r.detail])).toEqual([["a@fleet", "failed_before_effect",
+      "seat_name_shared: a switch finds a seat by its session name, and a@fleet reaches the seat in rig rig-old (archived), not this one. Nothing changes for this seat here."]]);
+    expect([readClaudeSeatTokenRef(db, "a1")?.label, readClaudeSeatTokenRef(db, "a2")]).toEqual(["max-2", null]);
   });
 
   it("a seat brought in with --include-overrides that's already on the account follows the assignment from then on", async () => {

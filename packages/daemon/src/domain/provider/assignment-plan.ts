@@ -302,9 +302,13 @@ export async function planAssignment(input: AssignmentPlanInput, check: (seat: P
   const keys = new Map<string, string>();
   for (const home of switching) { const key = input.resolveHome?.(home) ?? home; if (!keys.has(key)) keys.set(key, home); }
   for (const [key, home] of [...keys].sort(([a], [b]) => a.localeCompare(b))) {
-    codexHomes.push({ home, seats: input.seats.filter((s) => s.runtime === "codex" && s.codexHome !== null && (input.resolveHome?.(s.codexHome) ?? s.codexHome) === key)
-      .map((s) => ({ seat: s.session, rig: s.rigName, rigId: s.rigId,
-        effect: s.rigId === input.rigId ? "would restart" : `not restarted; needs rig seat restart ${shellArg(s.session)}` })) });
+    const onHome = input.seats.filter((s) => s.runtime === "codex" && s.codexHome !== null && (input.resolveHome?.(s.codexHome) ?? s.codexHome) === key);
+    // A restart reaches a seat by its session name: one that another seat on the home has gets no command.
+    const shared = (s: PlanSeatFacts) => onHome.some((o) => o !== s && o.session === s.session);
+    codexHomes.push({ home, seats: onHome.map((s) => ({ seat: s.session, rig: s.rigName, rigId: s.rigId,
+      effect: s.rigId === input.rigId ? "would restart"
+        : shared(s) ? "not restarted; another seat has its session name, so a restart by that name could reach that one instead"
+        : `not restarted; needs rig seat restart ${shellArg(s.session)}` })) });
   }
 
   const plan: Omit<AssignmentPlan, "digest"> = {

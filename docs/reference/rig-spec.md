@@ -907,8 +907,9 @@ rig provider account remove budget --provider claude
 
 **The plan.** `rig provider assign my-rig --provider claude --account work` prints one row per seat of that provider,
 and changes nothing. The rig is named by its id, or by a name only one rig has: a name two rigs share is refused with
-both ids (`rig_ambiguous`), and nothing is done. A seat whose session name a seat in another rig also has (the same
-rig name and member) is refused with `seat_name_shared`, since a switch reaches a seat by that name. In this run, team-dev and team-qa are running on the default login, and team-review has its own
+both ids (`rig_ambiguous`), and nothing is done. A switch or restart reaches a seat by its session name, so a seat
+that name doesn't reach alone (another rig with the same name and member has it, or an archived one does) is refused
+with `seat_name_shared`, and no restart command is printed for it. In this run, team-dev and team-qa are running on the default login, and team-review has its own
 token file. The paths and the host id are shortened; a digest belongs to its own plan, so yours will differ:
 
 ```text
