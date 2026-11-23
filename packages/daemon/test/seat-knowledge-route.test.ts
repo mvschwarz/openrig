@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contextPacksRoutes } from "../src/routes/context-packs.js";
@@ -62,5 +62,26 @@ describe("seat knowledge read independent of a context pack", () => {
     mkdirSync(join(seat, "LEARNED.md"));
     const res = await app.request(url); expect(res.status).toBe(503);
     expect(await res.json()).toMatchObject({ error: "seat_knowledge_unavailable" });
+  });
+
+  it.each(["unreadable directory", "dangling link"])("does not serve legacy bytes after a canonical %s", async (failure) => {
+    const oldSeat = join(legacy, "rigs", "team", "seats", "worker"); mkdirSync(oldSeat, { recursive: true });
+    writeFileSync(join(oldSeat, "LEARNED.md"), "legacy bytes must not replace a failed canonical lookup");
+    if (failure === "unreadable directory") chmodSync(seat, 0o000);
+    else symlinkSync(join(tmp, "missing-target"), join(seat, "LEARNED.md"));
+    try {
+      const res = await app.request(url); expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "seat_knowledge_unavailable", message: "The requested seat files could not be read." });
+    } finally { chmodSync(seat, 0o700); }
+  });
+
+  it("keeps ENOTDIR as absence with the existing legacy fallback", async () => {
+    rmSync(seat, { recursive: true }); writeFileSync(seat, "not a directory");
+    const oldSeat = join(legacy, "rigs", "team", "seats", "worker"); mkdirSync(oldSeat, { recursive: true });
+    writeFileSync(join(oldSeat, "LEARNED.md"), "legacy learned");
+    const res = await app.request(url); expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.files[0]).toMatchObject({ source: "legacy", content: "legacy learned", extent: "whole-file" });
+    expect(body.files[1]).toMatchObject({ source: "absent", content: null, extent: "absent" });
   });
 });

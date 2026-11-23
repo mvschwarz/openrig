@@ -14,7 +14,7 @@
 // read succeeds, and the caller is told the content came from the legacy tree
 // and how to migrate. Callers supply the configured canonical and legacy
 // roots; this shared resolver discovers no filesystem roots itself.
-import { existsSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export type TraceAltitude = "instance" | "rig" | "pod" | "seat";
@@ -64,7 +64,14 @@ function assertSafeSegment(value: string, field: "rig" | "pod" | "seat" | "name"
 }
 
 const realFs: TraceFs = {
-  exists: (p) => existsSync(p),
+  exists: (p) => {
+    // A dangling canonical link is present: its read must fail rather than fall back to legacy bytes.
+    try { lstatSync(p); return true; }
+    catch (error) {
+      if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+      throw error;
+    }
+  },
   read: (p) => readFileSync(p, "utf-8"),
 };
 
