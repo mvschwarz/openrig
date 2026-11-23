@@ -1571,11 +1571,13 @@ export class RestoreOrchestrator {
       return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: absentSeatResumeHistoryError(node.logicalId, priorWithToken.resumeType, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name) };
     }
 
-    // Consult live continuity state BEFORE clearing stale state
-    if (node.podId) {
+    // Consult live continuity state BEFORE clearing stale state, keyed on the live seat and its pod: a pod recreated
+    // after the snapshot runs under a new id too.
+    const seatPodId = liveNode?.podId ?? node.podId;
+    if (seatPodId) {
       const continuityRow = this.db.prepare(
         "SELECT status FROM continuity_state WHERE pod_id = ? AND node_id = ?"
-      ).get(node.podId, seatNodeId) as { status: string } | undefined;
+      ).get(seatPodId, seatNodeId) as { status: string } | undefined;
       if (continuityRow) {
         if (continuityRow.status === "restoring") {
           if (selectedHistory) return { nodeId, logicalId: node.logicalId, status: "failed", error: "Continuity recovery already owns this seat.", notStarted: true };
@@ -1829,7 +1831,8 @@ export class RestoreOrchestrator {
       ...(selectedHistory ? { expectedNodeId: nodeId, beforeEffect: selectedHistory.beforeNative,
         beforeRegistration: selectedHistory.beforeRegistration } : {}),
       ...(savedStartup ? { pluginPaths: pluginPathsOf(savedStartup.projectionEntries) } : {}),
-      ...(onSessionLaunched ? { onSessionRegistered: (sessionId: string) => onSessionLaunched(nodeId, sessionId) } : {}),
+      // Reported on the node the session registers on: a recreated seat's keep_alive budget is its live node's.
+      ...(onSessionLaunched ? { onSessionRegistered: (sessionId: string) => onSessionLaunched(seatNodeId, sessionId) } : {}),
     });
     if (!launchResult.ok) {
       // Launch failed — restore prior state (compensating action)
@@ -2717,7 +2720,7 @@ export class RestoreOrchestrator {
           const fresh = await this.freshLaunch(rigId, launchResult.session.nodeId,
             { processLimitsMode: "recovery", ...(opts?.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}),
               ...(replacementNativeAllowed ? { beforeNativeDispatch: replacementNativeAllowed } : {}),
-              ...(onSessionLaunched ? { onSessionRegistered: (sessionId: string) => onSessionLaunched(node.id, sessionId) } : {}) });
+              ...(onSessionLaunched ? { onSessionRegistered: (sessionId: string) => onSessionLaunched(launchResult.session.nodeId, sessionId) } : {}) });
           if (fresh.warnings?.length) warnings?.push(...fresh.warnings);
           // The replacement's own outcome, also when it applied the limit (no notice): the retired provisional shell's
           // notice no longer describes the seat (the key is set either way, so the caller doesn't fall back to it).

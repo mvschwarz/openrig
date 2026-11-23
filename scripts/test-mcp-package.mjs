@@ -69,7 +69,7 @@ try {
   `);
   run(process.execPath, [path.join(consumer, "import.mjs")]);
   fs.writeFileSync(path.join(consumer, "consumer.ts"), `
-    import { startMcpHttpServer, McpHttpConfigError, type McpHttpOptions, type McpAccess, type CallerResolver, type CallerResolution } from "@openrig/cli/mcp.js";
+    import { startMcpHttpServer, McpHttpConfigError, type McpHttpOptions, type McpAccess, type CallerResolver, type CallerResolution, type McpInstructionExtension } from "@openrig/cli/mcp.js";
     const options: McpHttpOptions = { daemonUrl: "http://127.0.0.1:1", host: "127.0.0.1", port: 0, tokenFile: "local.json" };
     // @ts-expect-error a typed endpoint port must not degrade to any through the package declarations
     const invalidPort: McpHttpOptions = { ...options, port: "not-a-port" };
@@ -84,7 +84,13 @@ try {
     };
     // @ts-expect-error an incomplete resolved caller must not degrade to any
     const invalidResolver: CallerResolver = async () => ({ ok: true, seat: "guest@team" });
-    const endpoint: Promise<{ url: string; authenticated: boolean; close(): Promise<void> }> = startMcpHttpServer({ ...options, resolver, resolverTimeoutMs: 5000 });
+    const instructions: McpInstructionExtension = { introduction: "Read the team guide.", resources: [
+      { uri: "team://reference/guide", name: "team-guide", mimeType: "text/plain", text: "Team guidance" },
+    ] };
+    // @ts-expect-error resource text must stay typed through the public package
+    const invalidInstructions: McpInstructionExtension = { resources: [{ uri: "team://reference/guide", name: "guide", mimeType: "text/plain", text: 3 }] };
+    const endpoint: Promise<{ url: string; authenticated: boolean; close(): Promise<void> }> = startMcpHttpServer({ ...options, resolver, resolverTimeoutMs: 5000, instructions });
+    void invalidInstructions;
     void invalidResolver;
     const error: Error = new McpHttpConfigError("configuration");
     void endpoint; void error; void invalidPort; void invalidAccess;
