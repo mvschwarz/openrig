@@ -2382,6 +2382,7 @@ export class SeatLifecycleService {
         type: "session.stopped",
         rigId: seat.rigId,
         nodeId: seat.nodeId,
+        sessionId: session.id,
         sessionName: session.session_name,
         reason: reason.trim(),
         operator: operator ?? null,

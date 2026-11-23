@@ -25,7 +25,7 @@ import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProc
 import { isPerSeatRoleGuidance, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
-import { shellQuote } from "./shell-quote.js";
+import { shellQuote, shellWord } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, managedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
 import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
 import { throttledStatusLineForLaunch } from "../domain/claude-statusline-throttle.js";
@@ -501,7 +501,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         // The non-managed command text is parsed by the pane shell, so the
         // parent id needs the same quoting as --model/--effort above (and as
         // the codex fork path) — a hostile id must not leave --resume.
-        : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${opts.name}`;
+        : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${shellWord(opts.name)}`;
       const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
         : await sendClassic(cmd);
       if (!textResult.ok) {
@@ -525,8 +525,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     else launchArgs = transportClaudeSettings(launchArgs, settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
     const permissionMode = permissionArg(launchArgs);
     const cmd = managed ? managed.command(nativeArgs, opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
-      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
-      : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${opts.name}`;
+      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${shellWord(opts.name)}`
+      : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${shellWord(opts.name)}`;
 
     const configPrefix = binding.claudeLaunch?.configDir != null && this.seatLaunchEnvironment ? `CLAUDE_CONFIG_DIR=${shellQuote(binding.claudeLaunch.configDir)} ` : "";
     const classicCommand = configPrefix + (opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable

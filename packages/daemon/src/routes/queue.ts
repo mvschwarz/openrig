@@ -1,3 +1,4 @@
+import { recordedQueueGraph } from "../domain/queue-recorded-graph.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import { Hono, type Context } from "hono";
 import { classifierOccupant } from "../domain/classification-sources.js";
@@ -416,6 +417,7 @@ export function queueRoutes(): Hono {
         : err.code === "qitem_not_claimable" ? 409
         : err.code === "qitem_not_in_progress" ? 409
         : err.code === "qitem_already_terminal" ? 409
+        : err.code === "relayed_answer_refused" ? 409
         // An update's expected state (--expect-state) no longer matches the row; nothing was written.
         : err.code === "qitem_state_changed" ? 409
         // OPR.0.4.6.MH3 Q-a: same minted id, different destination/source =
@@ -1418,6 +1420,28 @@ export function queueRoutes(): Hono {
     }
   });
 
+  app.post("/:qitemId/relayed-answer", async (c) => {
+    const body = await c.req.json<Record<string, unknown> | null>().catch(() => null);
+    const { attributedTo, text, channel, questionId, optionId, answeredAt, actor } = body ?? {};
+    if (typeof attributedTo !== "string" || !attributedTo.trim() || typeof text !== "string" || !text.trim()
+      || typeof channel !== "string" || !channel.trim() || (questionId !== undefined && typeof questionId !== "string")
+      || (optionId !== undefined && typeof optionId !== "string")
+      || (answeredAt !== undefined && (typeof answeredAt !== "string"
+        || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(answeredAt) || !Number.isFinite(Date.parse(answeredAt))))) {
+      return c.json({ error: "invalid_relayed_answer", message: "Pass attributedTo, verbatim text and channel; name questionId/optionId as applicable, and supply answeredAt as an ISO timestamp only if known." }, 400);
+    }
+    const identity = requireSenderIdentity(c, { verb: "relay an answer", bodyClaim: typeof actor === "string" ? actor : null });
+    if (!identity.ok) return identity.response;
+    { const held = switchCustody(c, identity.session); if (held) return held; }
+    try {
+      return c.json(getRepo(c).writeRelayedAnswer({ qitemId: c.req.param("qitemId"), actorSession: identity.session,
+        identityProvenance: resolveRecordedProvenance(c, identity),
+        relay: { attributedTo, text, channel, questionId, optionId, answeredAt } }));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
   // A decision made on the person's behalf, inside the decision room of the mode they have on. Recorded by the agent that
   // asked, on the ask's own row, beside the person's answers and never as one; refused when there's no room to decide in.
   app.post("/:qitemId/delegated-decision", async (c) => {
@@ -1894,6 +1918,23 @@ export function queueRoutes(): Hono {
 
   app.get("/watch", sseHandler);
   app.get("/sse", sseHandler);
+
+  // Ordinary queue read authority; no app request, mutation or cross-host lookup.
+  app.get("/:qitemId/lineage", (c) => {
+    const rootId = c.req.param("qitemId");
+    const graph = recordedQueueGraph(getRepo(c), rootId, { includeAncestors: true });
+    const rootAvailable = graph.nodes.has(rootId);
+    const nodes = [...graph.nodes.values()].map(item => ({
+      qitemId: item.qitemId, state: item.state, body: item.body, summary: item.summary,
+      sourceSession: item.sourceSession, destinationSession: item.destinationSession,
+      replyTo: item.replyTo ?? null, handedOffFrom: item.handedOffFrom, handedOffTo: item.handedOffTo,
+      blockedOn: item.blockedOn, closureReason: item.closureReason, evidenceRef: item.evidenceRef,
+      completion: { status: ["done", "canceled", "denied", "failed", "handed-off"].includes(item.state) ? "closed-as-recorded" : "open" },
+    }));
+    return c.json({ rootId, scope: "this-daemon", status: !rootAvailable ? "unknown" : graph.partial ? "partial" : "available",
+      nodes, edges: graph.edges, partial: graph.partial, partialReasons: graph.partialReasons, unresolved: graph.unresolved,
+      limits: graph.limits, completion: { status: "unknown" }, ...(!rootAvailable ? { error: "qitem_not_found" } : {}) }, rootAvailable ? 200 : 404);
+  });
 
   // GET /:qitemId/transitions — registered before /:qitemId so the literal
   // suffix wins over the bare param route.

@@ -752,10 +752,15 @@ seatRoutes.get("/stop-precondition/:seatRef", c => {
 
 seatRoutes.post("/stop/:seatRef", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  // Record the transport sender, else the body's --operator (the CLI's documented contract).
+  // Neither source may name an internal daemon actor, so a caller cannot forge reaper attribution.
+  const sender = transportSenderSession(c);
+  const claimed = sender ?? (typeof body["operator"] === "string" ? body["operator"] : null);
+  const operator = claimed?.startsWith("daemon:") ? null : claimed;
   const result = await seatLifecycleService(c).stopSeat({
     seatRef: c.req.param("seatRef")!,
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
-    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+    operator,
     ...(Object.prototype.hasOwnProperty.call(body, "expected") ? { expected: body["expected"] } : {}),
   });
   if (result.ok) return c.json(result);

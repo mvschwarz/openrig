@@ -120,6 +120,38 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
       reason: "isolate planning", operator: "operator@project" });
   });
 
+  // R3 (#2829 review): the stop route records sender ELSE body --operator, dropping daemon: from either.
+  it("stop records the body --operator when there is no transport sender", async () => {
+    const stopSeat = vi.spyOn(SeatLifecycleService.prototype, "stopSeat").mockResolvedValue({ ok: true } as never);
+    const res = await post("stop", "dev.impl@seat-rig", { reason: "wave boundary", operator: "op@rig" });
+    expect(res.status).toBe(200);
+    expect(stopSeat).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ seatRef: "dev.impl@seat-rig", reason: "wave boundary", operator: "op@rig" }));
+  });
+
+  it("stop prefers the transport sender over a body operator", async () => {
+    const stopSeat = vi.spyOn(SeatLifecycleService.prototype, "stopSeat").mockResolvedValue({ ok: true } as never);
+    await setup.app.request("/api/seat/stop/dev.impl%40seat-rig", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "sender@rig" },
+      body: JSON.stringify({ reason: "x", operator: "body@rig" }),
+    });
+    expect(stopSeat).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ operator: "sender@rig" }));
+  });
+
+  it.each(["daemon:seat-reaper", "daemon:anything"])("stop drops a %s body operator (a caller cannot forge daemon attribution)", async actor => {
+    const stopSeat = vi.spyOn(SeatLifecycleService.prototype, "stopSeat").mockResolvedValue({ ok: true } as never);
+    await post("stop", "dev.impl@seat-rig", { reason: "x", operator: actor });
+    expect(stopSeat).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ operator: null }));
+  });
+
+  it("stop drops a daemon: transport sender", async () => {
+    const stopSeat = vi.spyOn(SeatLifecycleService.prototype, "stopSeat").mockResolvedValue({ ok: true } as never);
+    await setup.app.request("/api/seat/stop/dev.impl%40seat-rig", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "daemon:seat-reaper" },
+      body: JSON.stringify({ reason: "x" }),
+    });
+    expect(stopSeat).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ operator: null }));
+  });
+
   it.each(["null", "[]", "{broken", '{"cwd": 42, "reason": "isolate"}'])("set-cwd rejects malformed input %s without an internal error", async body => {
     const res = await setup.app.request("/api/seat/set-cwd/planner%40project", {
       method: "POST", headers: { "Content-Type": "application/json" }, body,
