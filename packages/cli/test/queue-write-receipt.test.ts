@@ -688,40 +688,98 @@ describe("queue write receipt (output.compact)", () => {
       });
     });
 
-    it("a --host naming a registry entry at the selected URL is local", async () => {
+    it("a --host mapped to the selected URL is remote when this daemon reports a different selfHostId", async () => {
+      writeHosts("hosts:\n  - id: vps-b\n    transport: http\n    url: http://localhost:7433\n");
+      const out = await createVia(["--host", "vps-b"], row(), { status: 200, data: { selfHostId: "host-a" } });
+      expect(out).toContain("host: vps-b (the row lives on that daemon)");
+      expect(out).toContain("rig queue show 'qitem-20261010180000-aaaa' --host 'vps-b' --full --json");
+      expect(requestPaths).toContain("/healthz");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "vps-b", "--json"], row(), { status: 200, data: { selfHostId: "host-a" } })) as Row;
+      expect(json).toMatchObject({ host: "vps-b" });
+      expect(json).not.toHaveProperty("hostUnconfirmed");
+      expect((json.receipt as Row).fullCommand).toBe("rig queue show 'qitem-20261010180000-aaaa' --host 'vps-b' --full --json");
+      expect(requestPaths).toContain("/healthz");
+    });
+
+    it("a --host mapped to the selected URL is local only after /healthz confirms matching selfHostId", async () => {
       writeHosts("hosts:\n  - id: here\n    transport: http\n    url: http://localhost:7433\n");
-      const out = await createVia(["--host", "here"], row());
+      const out = await createVia(["--host", "here"], row(), { status: 200, data: { selfHostId: "here" } });
       expect(out).not.toContain("host:");
       expect(out).not.toContain("OPENRIG_URL");
       expect(out).toContain("full row: rig queue show 'qitem-20261010180000-aaaa' --full --json");
-      expect(requestPaths).not.toContain("/healthz");
+      expect(requestPaths).toContain("/healthz");
       logs = [];
-      const json = JSON.parse(await createVia(["--host", "here", "--json"], row())) as Row;
+      const json = JSON.parse(await createVia(["--host", "here", "--json"], row(), { status: 200, data: { selfHostId: "here" } })) as Row;
       expect(json).not.toHaveProperty("host");
+      expect(json).not.toHaveProperty("hostUnconfirmed");
       expect((json.receipt as Row).fullCommand).toBe("rig queue show 'qitem-20261010180000-aaaa' --full --json");
-      expect(requestPaths).not.toContain("/healthz");
+      expect(requestPaths).toContain("/healthz");
     });
 
-    it("an unknown --host stays unconfirmed without a host registry entry", async () => {
-      const out = await createVia(["--host", "far"], row());
-      expect(out).toContain("host: far (this daemon's own host id could not be read; if it is not far, the row lives on that daemon)");
-      expect(requestPaths).not.toContain("/healthz");
+    it("a --host mapped to the selected URL stays unconfirmed when /healthz cannot be read", async () => {
+      writeHosts("hosts:\n  - id: here\n    transport: http\n    url: http://localhost:7433\n");
+      const out = await createVia(["--host", "here"], row(), { status: 503, data: {} });
+      expect(out).toContain("host: here (this daemon's own host id could not be read; if it is not here, the row lives on that daemon)");
+      expect(requestPaths).toContain("/healthz");
       logs = [];
-      const json = JSON.parse(await createVia(["--host", "far", "--json"], row())) as Row;
+      const json = JSON.parse(await createVia(["--host", "here", "--json"], row(), { status: 503, data: {} })) as Row;
+      expect(json).toMatchObject({ host: "here", hostUnconfirmed: true });
+      expect(json.receipt).toMatchObject({
+        fullCommand: "rig queue show 'qitem-20261010180000-aaaa' --full --json",
+        fullCommandOnHost: "rig queue show 'qitem-20261010180000-aaaa' --host 'here' --full --json",
+      });
+      expect(requestPaths).toContain("/healthz");
+    });
+
+    it("an unregistered --host matching this daemon's own host id settles as local via /healthz", async () => {
+      const out = await createVia(["--host", "here"], row(), { status: 200, data: { selfHostId: "here" } });
+      expect(out).not.toContain("host:");
+      expect(out).not.toContain("could not be read");
+      expect(out).toContain("full row: rig queue show 'qitem-20261010180000-aaaa' --full --json");
+      expect(requestPaths).toContain("/healthz");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "here", "--json"], row(), { status: 200, data: { selfHostId: "here" } })) as Row;
+      expect(json).not.toHaveProperty("host");
+      expect(json).not.toHaveProperty("hostUnconfirmed");
+      expect((json.receipt as Row).fullCommand).toBe("rig queue show 'qitem-20261010180000-aaaa' --full --json");
+      expect(requestPaths).toContain("/healthz");
+    });
+
+    it("an unregistered --host differing from this daemon's own host id settles as remote via /healthz", async () => {
+      const out = await createVia(["--host", "far"], row(), { status: 200, data: { selfHostId: "here" } });
+      expect(out).toContain("host: far (the row lives on that daemon)");
+      expect(out).not.toContain("could not be read");
+      expect(out).toContain("rig queue show 'qitem-20261010180000-aaaa' --host 'far' --full --json");
+      expect(requestPaths).toContain("/healthz");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "far", "--json"], row(), { status: 200, data: { selfHostId: "here" } })) as Row;
+      expect(json).toMatchObject({ host: "far" });
+      expect(json).not.toHaveProperty("hostUnconfirmed");
+      expect((json.receipt as Row).fullCommand).toBe("rig queue show 'qitem-20261010180000-aaaa' --host 'far' --full --json");
+      expect(requestPaths).toContain("/healthz");
+    });
+
+    it("an unregistered --host stays unconfirmed only after /healthz cannot be read", async () => {
+      const out = await createVia(["--host", "far"], row(), { status: 503, data: {} });
+      expect(out).toContain("host: far (this daemon's own host id could not be read; if it is not far, the row lives on that daemon)");
+      expect(requestPaths).toContain("/healthz");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "far", "--json"], row(), { status: 503, data: {} })) as Row;
       expect(json).toMatchObject({ host: "far", hostUnconfirmed: true });
-      expect(requestPaths).not.toContain("/healthz");
+      expect(requestPaths).toContain("/healthz");
     });
 
     it("an unconfirmed --host offers both reads as alternatives, in the footer and in --json, for a create and a handoff's new row", async () => {
       const local = "rig queue show 'qitem-20261010180000-aaaa' --full --json";
       const remote = "rig queue show 'qitem-20261010180000-aaaa' --host 'far' --full --json";
-      const out = await createVia(["--host", "far"], row());
+      const out = await createVia(["--host", "far"], row(), { status: 503, data: {} });
       expect(out).toContain(`full row: ${local} if this daemon is host far, otherwise ${remote}, or add --full to the create`);
-      expect(requestPaths).not.toContain("/healthz");
+      expect(requestPaths).toContain("/healthz");
       logs = [];
-      const json = JSON.parse(await createVia(["--host", "far", "--json"], row())) as Row;
+      const json = JSON.parse(await createVia(["--host", "far", "--json"], row(), { status: 503, data: {} })) as Row;
       expect(json.receipt).toMatchObject({ fullCommand: local, fullCommandOnHost: remote });
-      expect(requestPaths).not.toContain("/healthz");
+      expect(requestPaths).toContain("/healthz");
 
       const v = VERBS.find((x) => x.verb === "handoff")!;
       const newId = ((v.data as Row).created as Row).qitemId as string;

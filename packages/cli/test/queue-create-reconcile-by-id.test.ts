@@ -430,14 +430,43 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ host: "host-b", hostUnconfirmed: true });
   });
 
-  it("prints a compact local create receipt without a healthz read for a registered self host", async () => {
+  it("settles a compact create receipt via /healthz even when hosts.yaml maps --host to the selected URL", async () => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: host-a\n    transport: http\n    url: ${LOCAL}\n`);
     vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "true");
-    const { calls, error } = await run("dev@rig-b", [{ status: 201, data: ROW }], {}, ["--host", "host-a"]);
+    const localRun = await run("dev@rig-b", [{ status: 201, data: ROW }], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
+    }, ["--host", "host-a"]);
+    expect(localRun.error).toBeNull();
+    expect(posts(localRun.calls)).toHaveLength(1);
+    expect(localRun.calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(1);
+    expect(JSON.parse(stdout.join("\n"))).not.toHaveProperty("host");
+
+    stdout = [];
+    const remoteRun = await run("dev@rig-b", [{ status: 201, data: ROW }], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "other-host" } },
+    }, ["--host", "host-a"]);
+    expect(remoteRun.error).toBeNull();
+    expect(posts(remoteRun.calls)).toHaveLength(1);
+    expect(remoteRun.calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(1);
+    const remoteJson = JSON.parse(stdout.join("\n")) as Record<string, unknown>;
+    expect(remoteJson).toMatchObject({ host: "host-a" });
+    expect(remoteJson).not.toHaveProperty("hostUnconfirmed");
+  });
+
+  it("recovered compact forwarded create keeps its recovered host without a second /healthz read", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
+    vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "true");
+    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
+      [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: REMOTE_ROW },
+    });
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
-    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
-    expect(JSON.parse(stdout.join("\n"))).not.toHaveProperty("host");
+    expect(calls.filter((call) => call.base === LOCAL && call.method === "get" && call.path === "/healthz")).toHaveLength(1);
+    expect(calls.filter((call) => call.base === REMOTE && call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    const json = JSON.parse(stdout.join("\n")) as Record<string, unknown>;
+    expect(json).toMatchObject({ qitemId: ID, host: "vps-b" });
+    expect(json).not.toHaveProperty("hostUnconfirmed");
   });
 
   it("reads a forwarded create once from the remote without requesting remote healthz identity", async () => {

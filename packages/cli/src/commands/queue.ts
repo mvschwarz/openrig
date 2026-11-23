@@ -611,29 +611,6 @@ function sameQueueEndpoint(left: string, right: string): boolean {
   return left.replace(/\/+$/, "") === right.replace(/\/+$/, "");
 }
 
-/** Resolve initial create receipt host context from the selected endpoint and local registry.
- *  A candidate remote host is settled against `/healthz` `selfHostId` in {@link settleReceiptHost}
- *  so a `--host` naming this daemon is never labeled a confirmed remote write when `hosts.yaml` maps it elsewhere. */
-function createReceiptHostContext(client: DaemonClient, receipt: ReceiptContext | null, hostId: string | undefined): ReceiptContext | null {
-  if (!receipt) return null;
-  const remote = remoteHostOf(hostId);
-  if (!remote) return receipt;
-  const registry = loadHostRegistry();
-  const learned = loadHostBindings();
-  const eligible = registry.ok ? eligibleQueueBindings(registry.registry, learned) : {};
-  const match = registry.ok ? resolveHost(registry.registry, remote, eligible) : undefined;
-  if (match?.ok && match.host.transport === "http") {
-    if (sameQueueEndpoint(match.host.url, client.baseUrl)) {
-      const local = { ...receipt };
-      delete local.remoteHost;
-      delete local.remoteHostUnconfirmed;
-      return local;
-    }
-    return { ...receipt, remoteHost: remote };
-  }
-  return { ...receipt, remoteHost: remote, remoteHostUnconfirmed: true };
-}
-
 const CROSS_HOST_QUEUE_WRITE_TIMEOUT_MS = 15_000;
 const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
 
@@ -649,9 +626,11 @@ function handoffScopeDiagnosticOptions(hostId: string | undefined) {
   };
 }
 
-/** Resolve whether the selected daemon used its own host id before labeling a receipt remote. */
+/** The daemon's own rule (`resolvesToLocalHost`): a `--host` naming the selected
+ *  daemon's selfHostId took the local path, so its receipt must not call the row
+ *  remote. Read only for a receipt; an unreadable id leaves the host unconfirmed. */
 async function settleReceiptHost(client: DaemonClient, receipt: ReceiptContext): Promise<ReceiptContext> {
-  if (!receipt.remoteHost || receipt.remoteHostUnconfirmed) return receipt;
+  if (!receipt.remoteHost) return receipt;
   let selfHostId: string | undefined;
   try {
     const health = await client.get<{ selfHostId?: unknown }>("/healthz", { timeoutMs: 1_000 });
@@ -1630,9 +1609,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         console.error(`Queue create request ID: ${qitemId} (not proof of persistence). ${recovery}`);
         const parkRequested = opts.blockedOn !== undefined || opts.wakeAfter !== undefined;
         const requestNudge = parkRequested ? false : opts.nudge;
-        const receipt = createReceiptHostContext(client, writeReceipt(opts.full, {
+        const receipt = writeReceipt(opts.full, {
           verb: "create", nudgeSuppressed: opts.nudge === false, parked: parkRequested, idGiven: opts.id !== undefined, remoteHost: remoteHostOf(hostResolved.hostId),
-        }), hostResolved.hostId);
+        });
         const sent: SentCreate = {
           destinationSession: hostResolved.destination,
           body: resolvedBody,
