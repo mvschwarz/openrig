@@ -1394,24 +1394,52 @@ describe("queue create scope advisories preserve admission and output", () => {
   );
 
   function healthAfterMatchedRecovery(later: "different" | "null" | "unreadable") {
-    return (observation: number): string | null => {
+    return (): string | null => {
       if (later === "unreadable") throw new Error("fixture health became unreadable after matching recovery");
       return later === "null" ? null : "replacement-fixture";
     };
   }
 
   it.each((["--host", "qualified destination"] as const).flatMap(form =>
-    (["different", "null", "unreadable"] as const).map(later => ({ form, later }))))(
-    "keeps registered own-host $form recovery independent of a post-write health value of $later", async ({ form, later }) => {
+    (["null", "unreadable"] as const).map(later => ({ form, later }))))(
+    "keeps registered own-host $form recovery local when post-write health is $later", async ({ form, later }) => {
       const calls = await recoverOwnHost(form, healthAfterMatchedRecovery(later));
       expect(calls.healthReads).toBe(1);
-      expect(calls.healthResults).toEqual([later === "different" ? "replacement-fixture" : later === "null" ? null : "unreadable"]);
+      expect(calls.healthResults).toEqual([later === "null" ? null : "unreadable"]);
       expect(calls.readbacks[0]?.base).toBe("http://own-host-recovery.invalid:39001");
       expect.soft(scopeLines()).toContain("mission:missing-mission");
       expect.soft(scopeLines()).toMatch(/\bunavailable\b/i);
       expect.soft(scopeLines()).toMatch(/\boutcome\b|\bresult\b/i);
       expect.soft(scopeLines()).toMatch(/response recovery/i);
       expect.soft(scopeLines()).not.toMatch(/\bskipped\b|cross-host|\bforwarded\b/i);
+    },
+  );
+
+  it.each(["--host", "qualified destination"] as const)(
+    "refuses registered own-host %s recovery when post-write health reports a different host ID", async form => {
+      expect(source.hostId).toEqual(expect.any(String));
+      expect(getSelfHostId()).toBe(source.hostId);
+      const registryUrl = "http://own-host-recovery.invalid:39001";
+      const home = path.join(scratch, "cli-home-own-host-different-health");
+      fs.mkdirSync(home);
+      fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: ${source.hostId}\n    transport: http\n    url: ${registryUrl}\n`);
+      vi.stubEnv("OPENRIG_HOME", home);
+      vi.stubEnv("OPENRIG_URL", registryUrl);
+      const unchanged = preserveAuthored(source);
+      const { factory, calls } = recoveredClient(source.app, source, true, healthAfterMatchedRecovery("different"));
+      const args = ["--mission", "missing-mission", "--tags", "project:alpha"];
+      if (form === "--host") args.push("--host", source.hostId!);
+      const destination = form === "qualified destination" ? "worker@scope@" + source.hostId : "worker@scope";
+      await expect(create(source.app, args, true, "qitem-create-contract", factory, destination))
+        .rejects.toMatchObject({ name: "DaemonResponseError", status: 201 });
+      expect(calls.healthReads).toBe(1);
+      expect(calls.healthResults).toEqual(["replacement-fixture"]);
+      expect(calls.readbacks).toEqual([]);
+      expect(stdout).toEqual([]);
+      expect(stderr.join("\n")).toContain(`The CLI could not establish the queue for requested host '${source.hostId}'. The write outcome is still unknown. Keep this ID for recovery.`);
+      expect(stderr.join("\n")).not.toContain("committed after all");
+      expect(scopeLines()).toBe("");
+      unchanged();
     },
   );
 
