@@ -294,6 +294,8 @@ export interface SliceIndexerOpts {
 
 interface CachedListing {
   entries: SliceListEntry[];
+  physicalPathsBySlicePath: ReadonlyMap<string, string>;
+  rootsKey: string | null;
   expiresAt: number;
 }
 
@@ -614,8 +616,22 @@ export class SliceIndexer {
    *  under that root's captured physical target so reads never re-traverse a symlink alias. */
   physicalPathFor(publishedPath: string): string {
     const normalized = path.resolve(publishedPath);
+    const rootsKey = this.capturedRootsKey();
+    if (
+      this.listingCache
+      && this.listingCache.expiresAt > Date.now()
+      && this.listingCache.rootsKey === rootsKey
+    ) {
+      const cached = this.listingCache.physicalPathsBySlicePath.get(normalized);
+      if (cached !== undefined) return cached;
+    }
+    const roots = this.sliceRootResolutions();
+    if (roots.length > 1) {
+      const location = this.readSliceLocations().find((candidate) => path.resolve(candidate.slicePath) === normalized);
+      if (location) return location.physicalSlicePath;
+    }
     let bestMatch: { identity: string; physicalPath: string } | null = null;
-    for (const root of this.sliceRootResolutions()) {
+    for (const root of roots) {
       if (normalized !== root.identity) {
         const prefix = root.identity.endsWith(path.sep) ? root.identity : `${root.identity}${path.sep}`;
         if (!normalized.startsWith(prefix)) continue;
@@ -759,10 +775,15 @@ export class SliceIndexer {
     if (!this.isReady()) return [];
     if (this.batchDepth === 0) this.reconcileComposition();
     const now = Date.now();
-    if (this.listingCache && this.listingCache.expiresAt > now) {
+    const rootsKey = this.capturedRootsKey();
+    if (this.listingCache && this.listingCache.expiresAt > now && this.listingCache.rootsKey === rootsKey) {
       return this.listingCache.entries;
     }
     const locations = this.readSliceLocations();
+    const physicalPathsBySlicePath = new Map<string, string>();
+    for (const location of locations) {
+      physicalPathsBySlicePath.set(path.resolve(location.slicePath), location.physicalSlicePath);
+    }
     // ONE batch membership index serves this whole rebuild (the <=4 LIKE-
     // execution load contract), then drops so later uncached operations
     // read current queue state (operation scoping) — unless
@@ -774,7 +795,7 @@ export class SliceIndexer {
     } finally {
       if (this.batchDepth === 0) this.membershipIndex = null;
     }
-    this.listingCache = { entries, expiresAt: now + this.cacheTtlMs };
+    this.listingCache = { entries, physicalPathsBySlicePath, rootsKey, expiresAt: now + this.cacheTtlMs };
     return entries;
   }
 
@@ -842,7 +863,11 @@ export class SliceIndexer {
     const plan = withRoots(() => {
       if (this.batchDepth > 0 || !this.isReady()) return { immediate: true as const, value: this.withMembershipBatch(fn) };
       this.reconcileComposition();
-      const file = this.listingCache && this.listingCache.expiresAt > Date.now() ? null : cooperativeReadFile(this.db);
+      const file = this.listingCache
+        && this.listingCache.expiresAt > Date.now()
+        && this.listingCache.rootsKey === this.capturedRootsKey()
+        ? null
+        : cooperativeReadFile(this.db);
       if (!file) return { immediate: true as const, value: this.withMembershipBatch(fn) };
       return { immediate: false as const, file };
     });

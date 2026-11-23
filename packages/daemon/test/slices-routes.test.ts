@@ -3895,6 +3895,66 @@ describe("GET /api/slices observed queue counts", () => {
       const followUp = await list(app);
       expect(followUp.find((s) => s.name === "01-shared")?.qitemCount).toBe(0);
     });
+
+    it("maps listed slices through the winning outer root when nested configured roots contain an inner symlink", async () => {
+      const outerPhysical = path.join(root, "a");
+      const archiveShared = path.join(root, "archive", "shared");
+      const otherRoot = path.join(root, "other");
+      const currentAlias = path.join(root, "current");
+
+      write(path.join(outerPhysical, "project.yaml"), "id: outer\n");
+      write(path.join(outerPhysical, "m", "SPEC.md"), nodeBytes("M.OUTER", "active", "Outer Mission"));
+      write(
+        path.join(outerPhysical, "m", "mission.yaml"),
+        "metadata:\n  id: M.OUTER\n  status: active\nproofPolicy:\n  judges:\n    - judge@outer\n",
+      );
+      write(
+        path.join(archiveShared, "s", "SPEC.md"),
+        `${nodeBytes("SLICE.S", "active", "Nested Slice")}\n## Proof contract\n- [ ] Nested slice outcome.\n`,
+      );
+      fs.symlinkSync(archiveShared, path.join(outerPhysical, "m", "slices"), "dir");
+      write(
+        path.join(outerPhysical, "child-m", "SPEC.md"),
+        "---\nid: M.CHILD\nstatus: active\nparent: SLICE.S\n---\n# Child Mission\n",
+      );
+      fs.mkdirSync(path.join(outerPhysical, "child-m", "slices"), { recursive: true });
+
+      // A second mission named "m" in another root prevents idByName fallback from masking physicalPathFor remapping.
+      write(path.join(otherRoot, "m", "SPEC.md"), nodeBytes("M.OTHER", "active", "Other Mission"));
+      write(path.join(otherRoot, "m", "slices", "other-slice", "SPEC.md"), nodeBytes("SLICE.OTHER", "active", "Other Slice"));
+
+      fs.symlinkSync(outerPhysical, currentAlias, "dir");
+      const innerNestedRoot = path.join(currentAlias, "m", "slices");
+      const { app, indexer } = route("alpha", false, currentAlias, [innerNestedRoot, otherRoot]);
+
+      const res = await app.request("/api/slices");
+      expect(res.status).toBe(200);
+      const body = await res.json() as {
+        slices: Array<Entry & {
+          childMissions?: Array<{ id: string | null }>;
+          readiness?: {
+            policy?: { judges?: string[] } | null;
+            attention?: { scope?: string };
+          };
+        }>;
+      };
+
+      const nestedSlice = body.slices.find((s) => s.name === "s");
+      expect(nestedSlice).toBeDefined();
+      const expectedSlicePath = path.join(currentAlias, "m", "slices", "s");
+      const expectedPhysicalPath = path.join(outerPhysical, "m", "slices", "s");
+      expect(nestedSlice?.slicePath).toBe(expectedSlicePath);
+      expect(Object.prototype.hasOwnProperty.call(nestedSlice, "physicalSlicePath")).toBe(false);
+      expect(nestedSlice?.childMissions).toMatchObject([{ id: "M.CHILD" }]);
+      expect(nestedSlice?.readiness?.policy).toMatchObject({ judges: ["judge@outer"] });
+      expect(nestedSlice?.readiness?.attention?.scope).toBe(expectedPhysicalPath);
+      expect(indexer.missionTagKeys("m", expectedSlicePath)).toEqual(["m", "M.OUTER"]);
+
+      // Uncached multi-root missionTagKeys after invalidation must also resolve through the winning root.
+      indexer.invalidate();
+      expect(indexer.missionTagKeys("m", expectedSlicePath)).toEqual(["m", "M.OUTER"]);
+      expect(indexer.missionTagKeys("m", path.join(otherRoot, "m", "slices", "other-slice"))).toEqual(["m", "M.OTHER"]);
+    });
   });
 
   describe("PR2902 JOIN001 hidden authored node metadata", () => {
