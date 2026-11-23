@@ -576,6 +576,9 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           try {
             drains.push(await effects.lifecycle([r.nodeId], async (): Promise<DrainReport> => {
               if (!active()) { held = JOB_STOPPED; return { ...step, phase: "draining", outcome: "draining", code: "job_stopped" }; }
+              // The block again, under the lease: one changed or unreadable while the lease was awaited ends this cycle's
+              // effects. A kill was attempted, so the slot stays `draining` and a later cycle stops it again.
+              if (blockChangedNow()) return { ...step, phase: "draining", outcome: "draining", code: "pool_block_changed" };
               // The agent again, under its lifecycle lease: one that still runs and got work or is not idle is never
               // stopped. A kill was attempted, so it is not given back to `live` either: the slot stays `draining`, and a
               // later cycle stops it once it is free.
@@ -621,12 +624,23 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
               if (agent.openRows > 0 || agent.heldCount > 0) return back("returned", "work_arrived");
               if (!agent.idleAtPrompt || woken(t.nodeId, t.idleSince)) return back("returned", "woken");
               if (!active()) { held = JOB_STOPPED; return { ...step, phase: "draining", outcome: "draining", code: "job_stopped" }; }
+              // The block again, under the lease: one changed or unreadable while the lease was awaited ends this cycle's
+              // effects before any capture. Nothing was stopped, so the slot goes back to `live` in a later cycle.
+              if (blockChangedNow()) return { ...step, phase: "draining", outcome: "draining", code: "pool_block_changed" };
               // The capture, while the agent still runs, right before the stop. A capture that fails stops nothing.
               let snapshotId: string;
               try {
                 snapshotId = effects.capture(rigId).snapshotId;
               } catch (error) {
                 return { ...step, phase: "draining", outcome: "draining", code: "capture_failed", message: errorMessage(error) };
+              }
+              // The attempt goes on record before the stop: a daemon exit after the stop took effect and before its result
+              // is written leaves the slot `draining` with it, and the next cycle stops the recorded session again instead
+              // of giving back to `live` an agent that no longer runs. The result below replaces it.
+              const inFlight = { cause: "drain", result: "unconfirmed", code: "stop_in_flight", partialEffect: true, sessionId: t.sessionId, at: at() };
+              if (!deps.slots.setPhase({ slotId: t.slot.slotId, from: "draining", to: "draining", at: at(), stop: inFlight })) {
+                const phase = deps.slots.forModel(modelNodeId).find((s) => s.slotId === t.slot.slotId)?.phase ?? "draining";
+                return { ...step, phase, outcome: "skipped", code: "slot_moved_on" };
               }
               const stop = await effects.stopSeat({
                 seatRef: t.session, reason: stopReason(`idle since ${t.idleSince}; drained`),

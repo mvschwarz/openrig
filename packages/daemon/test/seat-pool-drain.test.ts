@@ -434,6 +434,79 @@ describe("seat-pool drain: the capture and the confirmed stop (#3395 Piece 1)", 
       w.db.close();
     }
   });
+  it("A daemon exit after the drain's stop took effect and before its result was written leaves the slot `draining` with the attempt on record, and the next cycle stops the recorded session again, never giving back to `live` an agent that no longer runs.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model();
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      const session = w.latestOf(s1.nodeId)!;
+      // the stop takes effect, then the daemon exits before the drain writes its result
+      w.stopSeat.mockImplementationOnce(async () => {
+        w.sessions.updateStatus(session.id, "stopped");
+        throw new Error("daemon exited");
+      });
+      await w.cycle(job.jobId).catch(() => undefined);
+      expect(w.latestOf(s1.nodeId)?.status).toBe("stopped");
+      expect(w.phases(m)).toEqual(["draining"]);
+
+      const next = await w.cycle(job.jobId);
+      expect(next.drains).toEqual([expect.objectContaining({ slotNumber: 1, session: s1.session, phase: "drained", outcome: "drained" })]);
+      expect(w.phases(m)).toEqual(["drained"]);
+      expect(w.stopSeat).toHaveBeenCalledTimes(2);
+      expect(w.stopSeat.mock.calls[1]![0]).toMatchObject({ seatRef: s1.session, expected: { nodeId: s1.nodeId, sessionId: session.id } });
+      // stopped again, never captured again
+      expect(w.captures).toHaveLength(1);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A pool block that becomes unreadable while a drain waits for the agent's lifecycle lease captures nothing and stops nothing, and the slot stays `draining` in the hold.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model();
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      w.hooks.beforeLifecycle = () => {
+        w.db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(JSON.stringify({ max: 2, min: 5 }), m.nodeId);
+      };
+
+      const notes = await w.cycle(job.jobId);
+      expect(w.captures).toEqual([]);
+      expect(w.stopSeat).not.toHaveBeenCalled();
+      expect(w.latestOf(s1.nodeId)?.status).toBe("running");
+      expect(notes.held).toEqual({ cause: "pool block unreadable", message: "held: pool block unreadable" });
+      expect(notes.drains).toEqual([{ slotNumber: 1, session: s1.session, phase: "draining", outcome: "draining", code: "pool_block_changed" }]);
+      expect(w.phases(m)).toEqual(["draining"]);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("An unconfirmed stop after an attempted kill is not tried again in a cycle whose pool block became unreadable while it waited for the lease: no second stop, and the slot stays `draining`.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model();
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      w.stopResults.push({ ok: false, code: "stop_uncertain", message: "The kill was sent but the session could not be confirmed gone.", partialEffect: true });
+      await w.cycle(job.jobId);
+      expect(w.phases(m)).toEqual(["draining"]);
+      w.hooks.beforeLifecycle = () => {
+        w.db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(JSON.stringify({ max: 2, min: 5 }), m.nodeId);
+      };
+
+      const second = await w.cycle(job.jobId);
+      expect(w.stopSeat).toHaveBeenCalledTimes(1);
+      expect(second.held).toEqual({ cause: "pool block unreadable", message: "held: pool block unreadable" });
+      expect(second.drains).toEqual([{ slotNumber: 1, session: s1.session, phase: "draining", outcome: "draining", code: "pool_block_changed" }]);
+      expect(w.phases(m)).toEqual(["draining"]);
+      expect(w.latestOf(s1.nodeId)?.status).toBe("running");
+    } finally {
+      w.db.close();
+    }
+  });
 });
 
 describe("seat-pool drain: after `pool: {}` (#3395 Piece 1)", () => {
