@@ -378,7 +378,8 @@ describe("queue write receipt (output.compact)", () => {
 
       logs = [];
       const json = JSON.parse(await create(["--id", id, "--wake-after", "15m", "--json"], data)) as Row;
-      expect(json).toMatchObject({ qitemId: id, persisted: true });
+      expect(json).toMatchObject({ qitemId: id });
+      expect(json).not.toHaveProperty("persisted");
       expect(json).not.toHaveProperty("parkReceipt");
       expect((json.receipt as { omitted: string[] }).omitted).toContain("parkReceipt");
       expect(json.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed" });
@@ -470,6 +471,48 @@ describe("queue write receipt (output.compact)", () => {
           [`GET /api/queue/${id}`]: { status: 200, data: recoveredRow },
         })) as Row;
         expect(requestPaths).toContain(`/api/queue/${id}`);
+        expect(json.wake).toEqual({
+          evidence: "suppressed",
+          detail: "park request: no immediate terminal wake was requested; the returned row did not confirm the park",
+        });
+      },
+    );
+
+    it.each<readonly [string, { status: number; data: unknown }]>([
+      ["502 indeterminate forwarded response", { status: 502, data: { error: "remote_queue_write_failed", failureClass: "unreachable", outcome: "indeterminate", detail: "socket hang up" } }],
+      ["unusable 2xx create response", { status: 201, data: { qitemId: DEFAULT_ROW_ID } }],
+    ])(
+      "a parked create recovered after %s never claims park confirmation in compact output",
+      async (_label, postReply) => {
+        const id = DEFAULT_ROW_ID;
+        const recoveredRow = row({
+          qitemId: id,
+          sourceSession: "stub@rig",
+          state: "blocked",
+          blockedOn: "external:release",
+        });
+        const baseArgv = [
+          "create", "--destination", "worker@r", "--body", BODY, "--summary", "s",
+          "--id", id, "--blocked-on", "external:release", "--wake-after", "15m",
+        ];
+
+        const out = await run(baseArgv, {
+          "POST /api/queue/create": postReply,
+          [`GET /api/queue/${id}`]: { status: 200, data: recoveredRow },
+        });
+        expect(requestPaths).toContain(`/api/queue/${id}`);
+        expect(out).toContain("  park: not confirmed");
+        expect(out).not.toContain("park: confirmed");
+        expect(out).toContain("wake: park request: no immediate terminal wake was requested; the returned row did not confirm the park");
+
+        logs = [];
+        requestPaths = [];
+        const json = JSON.parse(await run([...baseArgv, "--json"], {
+          "POST /api/queue/create": postReply,
+          [`GET /api/queue/${id}`]: { status: 200, data: recoveredRow },
+        })) as Row;
+        expect(requestPaths).toContain(`/api/queue/${id}`);
+        expect(json).not.toHaveProperty("persisted");
         expect(json.wake).toEqual({
           evidence: "suppressed",
           detail: "park request: no immediate terminal wake was requested; the returned row did not confirm the park",

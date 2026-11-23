@@ -1886,14 +1886,21 @@ describe("rig queue CLI", () => {
       const id = "qitem-readback-positive-park-row";
       const { deps, calls } = makeDeps({
         postError: { path: "/api/queue/create", error: new DaemonConnectionError("connection dropped", "ECONNRESET") },
-        routes: { [`GET /api/queue/${id}`]: { status: 200, data: validParkCreateResponse(id) } },
+        routes: { [`GET /api/queue/${id}`]: { status: 200, data: {
+          qitemId: id,
+          sourceSession: STUB_SENDER,
+          destinationSession: "bob@rig",
+          body: "Wait",
+          state: "blocked",
+          blockedOn: "external:condition",
+        } } },
       });
 
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
 
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).toMatchObject({ qitemId: id, parkWarning: null });
-      expect(result).not.toHaveProperty("parkReceipt");
+      expect(result).toMatchObject({ qitemId: id, state: "blocked", blockedOn: "external:condition" });
+      expect(result).not.toHaveProperty("parkWarning");
       expect(result).not.toHaveProperty("persisted");
       expect(process.exitCode).toBeUndefined();
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);

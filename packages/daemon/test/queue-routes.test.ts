@@ -192,12 +192,17 @@ describe("queue routes", () => {
     });
 
     expect(response.status).toBe(201);
-    expect(await response.json()).toMatchObject({
+    const reparkBody = await response.json() as { parkWarning?: { code?: string; message?: string } };
+    expect(reparkBody).toMatchObject({
       qitemId: "qitem-create-repark-same-interval",
       state: "blocked",
       blockedOn: "external:earlier",
-      parkWarning: { code: "qitem_park_not_confirmed" },
+      parkWarning: {
+        code: "qitem_park_not_confirmed",
+        message: "The row is blocked, but the requested blocker or timer is not confirmed.",
+      },
     });
+    expect(reparkBody.parkWarning?.message).not.toContain("The row is live and may start early.");
   });
 
   it("same-ID park retries return the saved row and warning without adding a timer", async () => {

@@ -125,6 +125,13 @@ describe("queue create --return-route", () => {
       + "prompts follow their usual path."]);
   });
 
+  it("prints a period before the session hint for a 3-part issued-actor return route", async () => {
+    await create(deps("conversation-3f2a9c1b7e44@kernel@host-a"), ["--return-route", "auto", "--host", "host-b"]);
+    expect(stderr.filter(line => line.startsWith("Return route: "))).toEqual(["Return route: conversation-3f2a9c1b7e44@kernel@host-a is recorded with this work. "
+      + "It names a conversation on another host, and the work's host sends prompts only to a route on its own host: this work's questions and its seats' "
+      + "prompts follow their usual path. Put OPENRIG_SESSION_NAME='conversation-3f2a9c1b7e44@kernel@host-a' in front of your other queue commands for this work."]);
+  });
+
   it("a local create whose named route is a registered person's prints the daemon's reason and no route line", async () => {
     const message = "The return route sam@kernel wasn't kept: it's a registered person's address, and a person is reached through the gateway, not a return route.";
     const d: QueueDeps = {

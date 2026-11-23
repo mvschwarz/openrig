@@ -94,7 +94,7 @@ function unconfirmedParkWarning(state: unknown, extraMessage?: string): Record<s
   if (state === "pending") {
     messages.push("The row is live and may start early.", EARLY_START_PARK_WARNING, "This request suppresses only the direct nudge.");
   } else if (state === "blocked") {
-    messages.push("The row is live and may start early.");
+    messages.push("The row is blocked, but the requested blocker or timer is not confirmed.");
   } else if (state === "in-progress") {
     messages.push("The row is live and has already been claimed.");
   } else if (typeof state === "string" && ["done", "failed", "denied", "canceled", "handed-off"].includes(state)) {

@@ -326,10 +326,29 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(receiptFactory).not.toHaveBeenCalled();
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
-    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(1);
     expect(stderr.join("\n")).toContain(`committed after all: row ${ID} (read back by its ID).`);
     expect(stderr.join("\n")).not.toContain(`committed after all: row ${ID} on host 'host-a'`);
     expect(stderr.join("\n")).not.toContain("row was forwarded");
+    expect(process.exitCode ?? 0).toBe(0);
+  });
+
+  it("keeps own-host read-back local via daemon self-ID even when hosts.yaml maps that host to a different URL", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), "hosts:\n  - id: host-a\n    transport: http\n    url: http://external-host-a.example:7433\n");
+    const receiptFactory = vi.fn((base: string) => {
+      throw new Error(`receipt reader must reuse the selected client for ${base}`);
+    });
+    const { calls, error } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: ROW },
+    }, ["--host", "host-a"], (deps) => { deps.receiptReadClientFactory = receiptFactory; });
+    expect(error).toBeNull();
+    expect(receiptFactory).not.toHaveBeenCalled();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
+    expect(calls.filter((call) => call.base === LOCAL && call.method === "get" && call.path === "/healthz")).toHaveLength(1);
+    expect(stderr.join("\n")).toContain(`committed after all: row ${ID} (read back by its ID).`);
+    expect(stderr.join("\n")).not.toContain(`committed after all: row ${ID} on host 'host-a'`);
     expect(process.exitCode ?? 0).toBe(0);
   });
 
@@ -392,7 +411,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(JSON.parse(stdout.join("\n"))).not.toHaveProperty("host");
   });
 
-  it("reads a forwarded create once without a separate healthz identity request", async () => {
+  it("reads a forwarded create once from the remote without requesting remote healthz identity", async () => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
     const remoteRequests: Array<{ url: string; method?: string }> = [];
     const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], {}, [], (deps, recordedCalls) => {
@@ -418,7 +437,8 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
     expect(remoteRequests).toEqual([{ url: `${REMOTE}/api/queue/${ID}`, method: "GET" }]);
-    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    expect(calls.filter((call) => call.base === LOCAL && call.method === "get" && call.path === "/healthz")).toHaveLength(1);
+    expect(calls.filter((call) => call.base === REMOTE && call.method === "get" && call.path === "/healthz")).toHaveLength(0);
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ qitemId: ID, state: "pending" });
   });
 
@@ -520,7 +540,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toHaveLength(1);
     expect(stderr.join("\n")).toContain(`committed after all: row ${ID} on host 'vps-b'`);
-    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    expect(calls.filter((call) => call.base === LOCAL && call.method === "get" && call.path === "/healthz")).toHaveLength(1);
     expect(process.exitCode ?? 0).toBe(0);
   });
 
@@ -530,7 +550,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toHaveLength(1);
     expect(stderr.join("\n")).toContain(`committed after all: row ${ID} on host 'vps-b'`);
-    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    expect(calls.filter((call) => call.base === LOCAL && call.method === "get" && call.path === "/healthz")).toHaveLength(1);
     expect(process.exitCode ?? 0).toBe(0);
   });
 
@@ -546,7 +566,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toHaveLength(1);
     expect(stderr.join("\n")).toContain(`committed after all: row ${ID}`);
-    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    expect(calls.filter((call) => call.base === LOCAL && call.method === "get" && call.path === "/healthz")).toHaveLength(1);
     expect(process.exitCode ?? 0).toBe(0);
   });
 

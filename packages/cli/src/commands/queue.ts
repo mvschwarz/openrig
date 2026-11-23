@@ -111,7 +111,7 @@ function printCreateReturnRoute(row: QueueRow): void {
   if (typeof row.returnRoute !== "string") return;
   const route = row.returnRoute;
   const sessionPrefix = row.returnRouteBasis === "issued-actor"
-    ? ` Put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.`
+    ? `. Put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.`
     : ".";
   if (route.split("@").length === 3) {
     console.error(`Return route: ${route} is recorded with this work. It names a conversation on another host, and the work's host sends prompts only to a route on its own host: this work's questions and its seats' prompts follow their usual path${sessionPrefix}`);
@@ -648,6 +648,11 @@ async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: st
   const remote = remoteHostOf(hostId);
   let options: { timeoutMs: number; headers?: Record<string, string> } = { timeoutMs: CREATE_READ_BACK_TIMEOUT_MS };
   if (!remote) return { reader: client, options, remote: undefined, targetEstablished: true };
+  // Check the selected daemon's own host ID before registry lookup so a --host
+  // naming this daemon stays local even when hosts.yaml maps it to another URL.
+  if (await daemonSelfHostId(client) === remote) {
+    return { reader: client, options, remote: undefined, targetEstablished: true };
+  }
   const registry = loadHostRegistry();
   if (registry.ok) {
     const learned = loadHostBindings();
@@ -665,11 +670,6 @@ async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: st
       if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
       return { reader: (deps.receiptReadClientFactory ?? deps.clientFactory)(match.host.url), options, remote, targetEstablished: true };
     }
-  }
-  // An unregistered --host can still name this daemon itself. Use its own
-  // reported ID only when no eligible registry entry identifies the target.
-  if (await daemonSelfHostId(client) === remote) {
-    return { reader: client, options, remote: undefined, targetEstablished: true };
   }
   return { reader: client, options, remote: undefined, targetEstablished: false };
 }
@@ -1704,7 +1704,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId, persisted: true, delivery }, status, resultReceipt);
               return;
             }
-            await printWriteResult(client, opts.json ?? false, receipt ? { ...outputCreated, persisted: true } : outputCreated, status, resultReceipt);
+            await printWriteResult(client, opts.json ?? false, outputCreated, status, resultReceipt);
             return;
           }
           if (status < 400) {

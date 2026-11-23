@@ -1356,8 +1356,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(calls.postBodies).toEqual([expect.objectContaining({ hostId: source.hostId,
       destinationSession: "worker@scope", qitemId: "qitem-create-contract", tags })]);
     expect(calls.committedBeforeLoss).toEqual([stored]);
-    expect(calls.healthReads).toBe(0);
-    expect(calls.healthResults).toEqual([]);
+    expect(calls.healthReads).toBe(1);
     expect(calls.readbacks.map(call => call.url)).toEqual(["/api/queue/qitem-create-contract"]);
     expect(calls.readbacks[0]?.base).toBe(registryUrl);
     expect(stderr.join("\n")).toContain("committed after all: row qitem-create-contract");
@@ -1366,7 +1365,8 @@ describe("queue create scope advisories preserve admission and output", () => {
   }
 
   it.each(["--host", "qualified destination"] as const)("keeps recovered own-host %s advice local after a committed response is lost", async form => {
-    await recoverOwnHost(form);
+    const calls = await recoverOwnHost(form);
+    expect(calls.healthResults).toEqual([source.hostId]);
     expect.soft(scopeLines()).toContain("mission:missing-mission");
     expect.soft(scopeLines()).toMatch(/\bunavailable\b/i);
     expect.soft(scopeLines()).toMatch(/\boutcome\b|\bresult\b/i);
@@ -1375,14 +1375,14 @@ describe("queue create scope advisories preserve admission and output", () => {
   });
 
   it.each(["--host", "qualified destination"] as const)(
-    "uses the registered endpoint for own-host %s recovery without reading host identity",
+    "falls back to the registered endpoint for own-host %s recovery when host identity is unreadable",
     async form => {
       const calls = await recoverOwnHost(form, () => {
-        throw new Error("create receipt recovery must not request host identity");
+        throw new Error("fixture health unavailable");
       });
 
-      expect(calls.healthResults).toEqual([]);
-      expect(calls.healthReads).toBe(0);
+      expect(calls.healthResults).toEqual(["unreadable"]);
+      expect(calls.healthReads).toBe(1);
       expect(calls.readbacks).toEqual([{
         base: "http://own-host-recovery.invalid:39001",
         url: "/api/queue/qitem-create-contract",
@@ -1404,8 +1404,8 @@ describe("queue create scope advisories preserve admission and output", () => {
     (["different", "null", "unreadable"] as const).map(later => ({ form, later }))))(
     "keeps registered own-host $form recovery independent of a post-write health value of $later", async ({ form, later }) => {
       const calls = await recoverOwnHost(form, healthAfterMatchedRecovery(later));
-      expect(calls.healthReads).toBe(0);
-      expect(calls.healthResults).toEqual([]);
+      expect(calls.healthReads).toBe(1);
+      expect(calls.healthResults).toEqual([later === "different" ? "replacement-fixture" : later === "null" ? null : "unreadable"]);
       expect(calls.readbacks[0]?.base).toBe("http://own-host-recovery.invalid:39001");
       expect.soft(scopeLines()).toContain("mission:missing-mission");
       expect.soft(scopeLines()).toMatch(/\bunavailable\b/i);
