@@ -11,7 +11,7 @@ import { PERMISSION_REQUEST_GRACE_MS } from "./seat-activity-service.js";
 import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
 import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
-import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
+import { findQueueRecovery, recoveryTag, withRecoveryIndex } from "./queue-recovery.js";
 import { PROMPT_ROUTED_WORK_PREFIX, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RETURN_ROUTE_NOTE_PREFIX, isEpisodeRelay,
   promptKindFromReason, resolveEscalationReturnRoute, routeOnThisHost, type PromptKind } from "./return-route.js";
 import { isTypedGateBlocker } from "./queue-blocker.js";
@@ -486,6 +486,18 @@ function findWakeRecovery(db: Database.Database, qitemId: string) {
           AND t.actor_session = q.source_session AND t.transition_note IN (?, ?))`)
         .get(recovery.qitemId, PROMPT_ALERT_TAG, PROMPT_RETIRED_NOTE, LEGACY_PROMPT_RETIRED_NOTE));
   return endedPrompt ? null : recovery;
+}
+
+/** Below this many rows, reading each row's recovery custody on its own costs less than building the recovery index
+ * once: on a 1.9 GB queue copy (5,672 recovery-tagged rows), the index took ~80 ms and a row read 7-25 ms. */
+export const RECOVERY_INDEX_MIN_ROWS = 4;
+
+/** queueRecoveryOwnsWake for a set of rows read in one synchronous pass: the ids whose wake the recovery already
+ * owns. From RECOVERY_INDEX_MIN_ROWS rows up, the pass shares one recovery index. getRow reads a row; the custody
+ * check reads only the row's own fields, so it can skip the waiting view. */
+export function queueRecoveryOwnedAmong(db: Database.Database, qitemIds: string[], getRow: (qitemId: string) => QueueItem | null): Set<string> {
+  const owned = () => new Set(qitemIds.filter((qitemId) => queueRecoveryOwnsWake(db, getRow(qitemId))));
+  return qitemIds.length < RECOVERY_INDEX_MIN_ROWS ? owned() : withRecoveryIndex(db, owned);
 }
 
 /** Another consumer may diagnose the same parked seat, but the existing

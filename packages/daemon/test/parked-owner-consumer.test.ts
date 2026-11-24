@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -35,6 +35,8 @@ import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { pruneWatchdogHistory } from "../src/domain/queue-retention.js";
+import { queueRecoveryOwnedAmong, queueRecoveryOwnsWake, RECOVERY_INDEX_MIN_ROWS } from "../src/domain/queue-wake-ladder.js";
+import { RECOVERY_INDEX_SQL, recoveryTag } from "../src/domain/queue-recovery.js";
 
 const RIG = "test-rig";
 const SEAT = `dev-planner@${RIG}`;
@@ -772,6 +774,32 @@ describe("a delivered reminder whose rows stay unclaimed reaches someone who can
     expect(store.appended.filter((a) => a.note.startsWith(ESCALATED_PREFIX))).toHaveLength(1);
   });
 
+  it("doesn't send another seat a reminder naming a row that closed while the notice was going out", async () => {
+    const other = "qitem-z-0c1d2e3f";
+    const store = new RowStore();
+    store.openIds = (dest) => (dest === SEAT2 ? [other] : ROW_IDS);
+    const history: WatchdogHistoryEntry[] = [];
+    let now = Date.parse("2026-10-11T00:00:00.000Z");
+    const told: Escalation[] = [];
+    const evaluate = (seats: ParkedSeatDiagnosisView[], escalate: (input: Escalation) => Promise<string[]>) =>
+      makeParkedOwnerConsumerPolicy({ ...makeDeps(seats, store, history), now: () => now,
+        escalateUnclaimed: async (input) => { told.push(input); return escalate(input); } }).evaluate(makeJob());
+    const first = await evaluate([unclaimedSeat()], async () => [SEAT2]);
+    history.unshift(sentHistory({ episodeKey: String(first.notes?.["episodeKey"]), primaryRow: String(first.notes?.["primaryRow"]) }));
+    await evaluate([parkedSeat({ parked: false })], async () => [SEAT2]);
+    now += 16 * 60_000;
+    // SEAT2 was the last one sent to, so this pass reads SEAT (the notice) before SEAT2 (a reminder).
+    history.unshift({ ...sentHistory({ episodeKey: "k-other", primaryRow: other }), deliveryTargetSession: SEAT2, evaluationNotes: {} });
+    const seat2 = parkedSeat({ sessionName: SEAT2, obligations: { items: [{ qitemId: other, state: "pending", summary: null }], held: [] } });
+    const result = await evaluate([unclaimedSeat(), seat2], async () => {
+      store.openIds = (dest) => (dest === SEAT2 ? [] : ROW_IDS);   // SEAT2's row closes meanwhile
+      return [SEAT2];
+    });
+    expect(told).toHaveLength(1);
+    expect(result.action).toBe("skip");
+    expect(result.notes?.["skippedSeats"]).toEqual(expect.arrayContaining([{ seat: SEAT2, why: "obligation-closed-between-derive-and-wake" }]));
+  });
+
   it("doesn't repeat the escalation on a later tick", async () => {
     const { store, told, advance, wake, resume } = harness();
     await wake();
@@ -1139,6 +1167,7 @@ describe("a wake escalation about the seat's own prompt is not that seat's work"
       appendNote: (q, note) => { repo.update({ qitemId: q, actorSession: "watchdog@system", transitionNote: note }); return { ok: true }; },
       recordNudgeResult: (q, result) => repo.recordNudgeAttempt(q, result),
       listOpenIds: (dest) => repo.listOpenObligations(dest, 500).map((r) => r.qitemId),
+      recoveryOwnedAmong: (ids) => queueRecoveryOwnedAmong(db, ids, (id) => repo.getById(id, { waiting: false })),
     };
     const policy = makeParkedOwnerConsumerPolicy({ diagnoseRig: () => diagnosis as never, history: { listForJob: () => [], countForJob: () => 0 },
       rows, occupantGeneration: () => "gen-1", now: () => NOW });
@@ -1210,5 +1239,45 @@ describe("#3315 a parked owner on a tmux server the daemon can't reach", () => {
     expect(store.nudges).toEqual([]);
     gone = false;
     expect((await policy().evaluate(makeJob())).action).toBe("send");
+  });
+});
+
+// The recheck's batch custody read (what startup wires) must answer what the per-row check answers, on both sides of
+// the index threshold: a recheck that missed a recovery-owned row would wake a seat for a row its ladder already owns.
+describe("queueRecoveryOwnedAmong answers the per-row recovery custody check", () => {
+  let db: Database.Database;
+  let repo: QueueRepository;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true } as never);
+  });
+  afterEach(() => db.close());
+
+  const indexBuilds = <T>(run: () => T): { value: T; builds: number } => {
+    const prepare = db.prepare.bind(db);
+    let builds = 0;
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql: string) => { if (sql === RECOVERY_INDEX_SQL) builds++; return prepare(sql); });
+    try { return { value: run(), builds }; } finally { spy.mockRestore(); }
+  };
+
+  it.each([
+    { rows: 3, builds: 0, index: "no index build" },
+    { rows: 5, builds: 1, index: "one index build" },
+  ])("$rows open rows, one of them with an open recovery row: the same set as the per-row check, $index", async ({ rows, builds }) => {
+    expect(rows < RECOVERY_INDEX_MIN_ROWS).toBe(builds === 0);
+    const ids: string[] = [];
+    for (let i = 0; i < rows; i++) {
+      ids.push((await repo.create({ sourceSession: "sender@r", destinationSession: SEAT, body: `obligation ${i}`, nudge: false })).qitemId);
+    }
+    const owned = ids[1]!;
+    await repo.create({ sourceSession: "sender@r", destinationSession: SEAT2, body: "recovery", tags: [recoveryTag(owned)], nudge: false });
+
+    const perRow = new Set(ids.filter((id) => queueRecoveryOwnsWake(db, repo.getById(id))));
+    const batch = indexBuilds(() => queueRecoveryOwnedAmong(db, ids, (id) => repo.getById(id, { waiting: false })));
+    expect(perRow).toEqual(new Set([owned]));
+    expect(batch.value).toEqual(perRow);
+    expect(batch.builds).toBe(builds);
   });
 });
