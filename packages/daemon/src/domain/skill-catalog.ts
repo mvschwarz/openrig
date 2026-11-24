@@ -701,7 +701,10 @@ function replaceGitIgnoreBlock(original: string, begin: string, end: string, pat
 
 function isGitIgnored(repoRoot: string, path: string): boolean {
   try {
-    execFileSync("git", ["-C", repoRoot, "check-ignore", "-q", "--no-index", "--", path], { stdio: "ignore" });
+    execFileSync("git", ["-C", repoRoot, "check-ignore", "-q", "--no-index", "--", path], {
+      stdio: "ignore",
+      timeout: CATALOG_GIT_TIMEOUT_MS,
+    });
     return true;
   } catch (err) {
     if ((err as { status?: number | null }).status === 1) return false;
@@ -712,7 +715,10 @@ function isGitIgnored(repoRoot: string, path: string): boolean {
 function isGitTracked(repoRoot: string, path: string): boolean {
   const relative = nodePath.relative(repoRoot, path);
   try {
-    execFileSync("git", ["-C", repoRoot, "ls-files", "--error-unmatch", "--", relative], { stdio: "ignore" });
+    execFileSync("git", ["-C", repoRoot, "ls-files", "--error-unmatch", "--", relative], {
+      stdio: "ignore",
+      timeout: CATALOG_GIT_TIMEOUT_MS,
+    });
     return true;
   } catch (err) {
     if ((err as { status?: number | null }).status === 1) return false;
@@ -764,8 +770,11 @@ function planGitIgnores(input: {
     repoRoot = execFileSync("git", ["-C", input.cwd, "rev-parse", "--show-toplevel"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      timeout: CATALOG_GIT_TIMEOUT_MS,
     }).trim();
-  } catch {
+  } catch (error) {
+    // A timed-out probe leaves Git coverage unknown. Stop before projecting files we may need to ignore.
+    if (error instanceof Error && "code" in error && error.code === "ETIMEDOUT") throw error;
     return [];
   }
   const canonicalRepoRoot = realpathSync(repoRoot);
