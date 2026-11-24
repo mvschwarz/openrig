@@ -210,6 +210,11 @@ const modeBars = [
 // Claude seats; reported as the last line on another seat) below the mode bar.
 const updateBanner = "Update available! Run: mise upgrade claude";
 const clearHint = "new task? /clear to save 324.1k tokens";
+// Constructed from the known one-line text: Claude word wrap and tmux cell wrap.
+const wrappedClearHints = [
+  ["new task? /clear to save", "324.1k tokens"],
+  ["new task? /clear to save 324.", "1k tokens"],
+];
 // Claude's footer once it has installed an update, in both spellings seen: "/restart to apply" on a Claude seat
 // (2026-10-30) and "Restart to apply" in startup-submit-confirmation's screen.
 const installedSlash = "✔ Update installed · /restart to apply";
@@ -217,7 +222,7 @@ const installedWord = "✔ Update installed · Restart to apply";
 // Claude 2.1.319's wording, on its own row under the footer in a 49-column pane (#2605).
 const installedUpdate = "✔ Update installed · Restart to update";
 const warningSets = [[update], [focus], [weekly], [update, focus], [updateBanner], [clearHint], [update, updateBanner],
-  [installedSlash], [installedWord], [installedUpdate], [update, installedSlash]];
+  [installedSlash], [installedWord], [installedUpdate], [update, installedSlash], ...wrappedClearHints];
 // Native, from a Claude seat running a hook mid-turn (2026-10-05): the timer follows a hook label.
 const hookRow = "✽ Sketching… (running PostToolUse hook · 3m 12s · ↓ 7.9k tokens)";
 function modePane(hint: string, trailers: string[], composer = "❯\u00a0", before = "● Ready.\n\n✻ Crunched for 2s") {
@@ -284,6 +289,14 @@ describe("#808: Claude permission-mode footers below status warnings", () => {
     expect(classifyPaneActivity(reported)).toMatchObject({ state: "agent_idle", reason: "idle_prompt", evidence: "❯" });
     expect(classifyPaneActivity(reported.replace("Update available! Run: mise upgrade claude", clearHint)))
       .toMatchObject({ state: "agent_idle", reason: "idle_prompt", evidence: "❯" });
+  });
+
+  it.each([
+    ["new task? /clear to save", "324.1k tokens remaining"],
+    ["new task? /clear to save", "", "324.1k tokens"],
+    ["Continue?", "324.1k tokens"],
+  ])("keeps an unrecognized two-row suffix unknown: %s", (...trailers) => {
+    expect(classifyPaneActivity(modePane(modeBars[3][1], trailers), { runtime: "claude-code" }).state).toBe("unknown");
   });
 
   // The installed-update footer last, as a Claude seat showed it (2026-10-30): an empty prompt under it read unknown,
@@ -409,6 +422,14 @@ describe("first guarded Claude send with retained warning-shaped composer", () =
     expect(result).toMatchObject({ ok: true, sent: true, activity: { state: "idle", evidenceSource: "pane_heuristic" } });
     expect(f.sendText).toHaveBeenCalledTimes(1);
     expect(f.sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("explicit wait sends once past a wrapped /clear hint", async () => {
+    const f = setup(modePane(modeBars[3][1], wrappedClearHints[0]!));
+    const result = await f.transport.send(f.name, "ordinary marker", { waitForIdleMs: 200 });
+    expect(result).toMatchObject({ ok: true, sent: true, activity: { state: "idle", evidenceSource: "pane_heuristic" } });
+    expect(f.sendText).toHaveBeenCalledTimes(1);
+    expect(f.sendKeys).toHaveBeenCalledExactlyOnceWith(f.name, ["Enter"]);
   });
 
   it.each(modeBars)("#808: explicit wait leaves a draft and current work untouched: %s", async (_name, hint) => {
