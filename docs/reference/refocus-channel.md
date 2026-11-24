@@ -27,9 +27,9 @@ Claude Code reads this variable from v2.1.280. OpenRig doesn't check the Claude 
 variable, starts normally, and doesn't load these hooks. The behaviour was checked on Claude Code 2.1.296 and not on
 earlier versions.
 A Claude started from inside a seat (its shell or Bash tool) inherits the seat's environment and so loads the plugin as well.
-A seat-scoped tool of your own (an MCP server, a cache) should read `OPENRIG_SEAT_LAUNCH_DIR`, which every seat launched
-in an absolute folder gets whatever its plugins (see "Launch environment" in [rig-spec.md](rig-spec.md)), not `OPENRIG_SEAT_PROJECT_DIR`,
-which only this plugin's seats get and which switches the plugin's hooks on.
+A seat-scoped tool of your own (an MCP server, a cache) should read `OPENRIG_SEAT_LAUNCH_DIR`. Every seat launched in an
+absolute folder gets it, whatever plugins it selected (see "Launch environment" in [rig-spec.md](rig-spec.md)). Don't use
+`OPENRIG_SEAT_PROJECT_DIR` for this: only this plugin's seats get it, and setting it switches the plugin's hooks on.
 A seat that loads the plugin is also given `OPENRIG_SEAT_PROJECT_DIR`, its launch project, and the plugin's seat effects (the
 activity and session-identity posts, the compaction hooks, refocus, and the first-launch marker) run only when that Claude's
 `CLAUDE_PROJECT_DIR` names the same folder (compared by real path, so a trailing slash or symlink doesn't matter). A nested
