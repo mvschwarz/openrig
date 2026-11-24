@@ -129,7 +129,9 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
   Bringing a drained agent back is done by a later change.
 - **After `pool: {}`.** Clearing the block on re-apply leaves the job running: it drains the free agents with the
   block it was last ensured with (`context.pool`), leaves busy agents `live` until they are free, and ends
-  (`terminal`) once every agent is `drained`.
+  (`terminal`) once every agent is `drained` and the block is still absent. A `live` agent positively gone (its latest
+  session `exited`, or its node confirmed stopped) with no work is drained by the checked stop for its recorded session,
+  with no capture; an unknown or stale status is not gone.
 - **Holds.** The whole pool is held, and nothing is moved, drained or added, while:
   - the job is not `active` (stopped by an operator, or ended);
   - the stored block can't be read (the notes carry an advisory; nothing is removed);

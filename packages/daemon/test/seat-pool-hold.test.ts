@@ -176,7 +176,8 @@ function poolWorld(db: Database.Database = fullDb(), opts: { drain?: boolean } =
   };
   const capture = vi.fn((_rigId: string) => ({ snapshotId: "snap-drain" }));
   const stopSeat = vi.fn(async (_input: { seatRef: string; reason: string; expected: { nodeId: string; sessionId: string } }) => ({ ok: true as const }));
-  if (opts.drain) deps.drain = { lifecycle: (ids, fn) => guard.lifecycle(ids, fn), capture, stopSeat };
+  const refresh = vi.fn(async (_input: { rigId: string; nodeId: string; sessionId: string }) => {});
+  if (opts.drain) deps.drain = { lifecycle: (ids, fn) => guard.lifecycle(ids, fn), refresh, capture, stopSeat };
   const reg = { db, rigRepo, jobsRepo, warn: vi.fn() };
   /** An engine and an executor over this database: a new pair is what a daemon restart gives. */
   const compose = () => {
@@ -282,7 +283,7 @@ function poolWorld(db: Database.Database = fullDb(), opts: { drain?: boolean } =
     operations: (db.prepare("SELECT COUNT(*) AS n FROM operation_correlations").get() as { n: number }).n,
   });
   return {
-    db, bus, rigRepo, podRepo, slots, sessions, queue, outbox, jobsRepo, history, guard, activity, clock, hooks, deps, reg, capture, stopSeat,
+    db, bus, rigRepo, podRepo, slots, sessions, queue, outbox, jobsRepo, history, guard, activity, clock, hooks, deps, reg, refresh, capture, stopSeat,
     exporter, converge,
     get engine() { return composed.engine; }, get executor() { return composed.executor; },
     restart, compose, teardown, downTmux, restorer, up, launchSeats, snapshotCapture, checkpointStore,
@@ -832,6 +833,8 @@ describe("seat-pool holds: no drain while held (#3395 Piece 1)", () => {
       expect(released.drains).toEqual([
         expect.objectContaining({ slotNumber: 1, outcome: "drained", phase: "drained", stop: { cause: "drain", result: "stopped" } }),
       ]);
+      // the drain's normal path: the resume refresh ran before the capture
+      expect(w.refresh).toHaveBeenCalledTimes(1);
       expect(w.capture).toHaveBeenCalledTimes(1);
       expect(w.stopSeat).toHaveBeenCalledTimes(1);
     } finally {

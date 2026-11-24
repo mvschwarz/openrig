@@ -75,7 +75,7 @@ function drainWorld() {
   const activity = new Map<string, ArbitratedSeatState>();
   const clock = { now: new Date(Date.now() + 3_600_000) };
   /** Runs when a drain asks for the agent's lifecycle lease, after its slot went to `draining`. */
-  const hooks: { beforeLifecycle?: () => Promise<void> | void } = {};
+  const hooks: { beforeLifecycle?: () => Promise<void> | void; beforeCustody?: () => void } = {};
 
   const latestOf = (nodeId: string) => db.prepare("SELECT id, status FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1")
     .get(nodeId) as { id: string; status: string } | undefined;
@@ -112,7 +112,7 @@ function drainWorld() {
     heldCount: (id) => outbox.heldCount(id),
     confirmedStopped: (id) => nodeExecutorConfirmedStopped(db, id),
     seatState: (id) => activity.get(id) ?? null,
-    custody: (ids, fn) => guard.custody(ids, fn),
+    custody: (ids, fn) => { hooks.beforeCustody?.(); return guard.custody(ids, fn); },
     now: () => clock.now,
     drain: {
       lifecycle: async (ids, fn) => { await hooks.beforeLifecycle?.(); return guard.lifecycle(ids, fn); },
@@ -788,6 +788,157 @@ describe("seat-pool drain: after `pool: {}` (#3395 Piece 1)", () => {
       expect(w.jobsRepo.getByIdOrThrow(job.jobId).state).toBe("terminal");
       // the nodes stay
       expect(w.rigRepo.getRig(m.rigId)!.nodes.map((n) => n.id)).toEqual(expect.arrayContaining([m.nodeId, s1.nodeId, s2.nodeId]));
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("After `pool: {}`, an agent whose session exited while its slot was `live` is stopped by the checked stop for its recorded session, with no capture, its slot is `drained`, and the job ends.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model({ ...SPEC, min: 1 });
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      const sessionId = w.latestOf(s1.nodeId)!.id;
+      w.sessions.updateStatus(sessionId, "exited");
+      w.db.prepare("UPDATE nodes SET pool = NULL WHERE id = ?").run(m.nodeId);
+      w.stopResults.push({ ok: false, code: "session_not_live", message: "The session is not live." });
+
+      const out = await w.engine.evaluate(w.jobsRepo.getByIdOrThrow(job.jobId));
+      expect(out.outcome).toMatchObject({ action: "terminal", reason: "seat_pool_removed_drained" });
+      expect((out.outcome as { notes: Record<string, unknown> }).notes.drains).toEqual([
+        expect.objectContaining({ slotNumber: 1, session: s1.session, outcome: "drained", phase: "drained", stop: expect.objectContaining({ result: "absent" }) }),
+      ]);
+      expect(w.stopSeat).toHaveBeenCalledTimes(1);
+      expect(w.stopSeat.mock.calls[0]![0].expected).toEqual({ nodeId: s1.nodeId, sessionId });
+      expect(w.captures).toHaveLength(0);
+      expect(w.phases(m)).toEqual(["drained"]);
+      expect(w.jobsRepo.getByIdOrThrow(job.jobId).state).toBe("terminal");
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("After `pool: {}`, a row that reaches a gone agent while its stop probes the session keeps it `live`: the absence alone does not drain it.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model({ ...SPEC, min: 1 });
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      w.sessions.updateStatus(w.latestOf(s1.nodeId)!.id, "exited");
+      w.db.prepare("UPDATE nodes SET pool = NULL WHERE id = ?").run(m.nodeId);
+      // the session is absent, so the stop returns before its final step (no recheck); a row arrives during the probe
+      w.stopSeat.mockImplementationOnce(async () => {
+        await w.row(s1.session);
+        return { ok: false, code: "session_not_live", message: "The session is not live." };
+      });
+
+      const out = await w.engine.evaluate(w.jobsRepo.getByIdOrThrow(job.jobId));
+      expect(out.outcome).toMatchObject({ action: "skip", reason: "seat_pool_report" });
+      expect((out.outcome as { notes: Record<string, unknown> }).notes.drains).toEqual([
+        expect.objectContaining({ slotNumber: 1, outcome: "returned", phase: "live", code: "work_arrived" }),
+      ]);
+      expect(w.phases(m)).toEqual(["live"]);
+      expect(w.jobsRepo.getByIdOrThrow(job.jobId).state).toBe("active");
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("After `pool: {}`, a row admitted to a gone agent while the real checked stop's probe is paused, its session still present, is seen at the stop's final step: nothing is detached or killed and the slot goes back to `live`.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model({ ...SPEC, min: 1 });
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      w.sessions.updateStatus(w.latestOf(s1.nodeId)!.id, "exited");
+      w.db.prepare("UPDATE nodes SET pool = NULL WHERE id = ?").run(m.nodeId);
+      const { probed, release, effectsSent } = realCheckedStop(w, s1);
+
+      const run = w.engine.evaluate(w.jobsRepo.getByIdOrThrow(job.jobId));
+      await probed;
+      const q = await w.row(s1.session);
+      release();
+      const out = await run;
+
+      expect(effectsSent()).toEqual([]);
+      expect(w.queue.getById(q)).toMatchObject({ state: "pending", destinationSession: s1.session });
+      expect((out.outcome as { notes: Record<string, unknown> }).notes.drains).toEqual([
+        expect.objectContaining({ slotNumber: 1, outcome: "returned", phase: "live", code: "work_arrived" }),
+      ]);
+      expect(w.phases(m)).toEqual(["live"]);
+      expect(w.jobsRepo.getByIdOrThrow(job.jobId).state).toBe("active");
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("After `pool: {}`, a block stored again while the last agent's stop runs, after every earlier read, keeps the job active once the slot is `drained`.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model({ ...SPEC, min: 1 });
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      const stored = w.db.prepare("SELECT pool FROM nodes WHERE id = ?").get(m.nodeId) as { pool: string };
+      w.db.prepare("UPDATE nodes SET pool = NULL WHERE id = ?").run(m.nodeId);
+      w.stopSeat.mockImplementationOnce(async ({ expected }) => {
+        w.db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(stored.pool, m.nodeId);
+        w.sessions.updateStatus(expected.sessionId, "stopped");
+        return { ok: true };
+      });
+
+      const out = await w.engine.evaluate(w.jobsRepo.getByIdOrThrow(job.jobId));
+      expect(w.phases(m)).toEqual(["drained"]);
+      expect(out.outcome).toMatchObject({ action: "skip", reason: "seat_pool_report" });
+      expect(w.jobsRepo.getByIdOrThrow(job.jobId).state).toBe("active");
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("After `pool: {}`, an agent with an unknown status stays `live` and nothing is stopped: only an exited session or a confirmed stop is gone.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model({ ...SPEC, min: 1 });
+      const s1 = w.agent(m, 1);
+      const job = w.jobFor(m);
+      w.sessions.updateStatus(w.latestOf(s1.nodeId)!.id, "unknown");
+      w.db.prepare("UPDATE nodes SET pool = NULL WHERE id = ?").run(m.nodeId);
+
+      const out = await w.engine.evaluate(w.jobsRepo.getByIdOrThrow(job.jobId));
+      expect(out.outcome).toMatchObject({ action: "skip", reason: "seat_pool_report" });
+      expect(w.stopSeat).not.toHaveBeenCalled();
+      expect(w.phases(m)).toEqual(["live"]);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("After `pool: {}` with every agent drained, a block stored again while the evaluation waits for custody keeps the job active.", async () => {
+    const w = drainWorld();
+    try {
+      const m = w.model(SPEC);
+      w.agent(m, 1, "drained");
+      const job = w.jobFor(m);
+      const stored = w.db.prepare("SELECT pool FROM nodes WHERE id = ?").get(m.nodeId) as { pool: string };
+      w.db.prepare("UPDATE nodes SET pool = NULL WHERE id = ?").run(m.nodeId);
+      // the evaluation has read the block (none) and planned; the block comes back while it waits for the model's custody
+      let gate!: () => void;
+      const held = w.guard.custody([m.nodeId], () => new Promise<void>((resolve) => { gate = resolve; }));
+      let planned!: () => void;
+      const reached = new Promise<void>((resolve) => { planned = resolve; });
+      w.hooks.beforeCustody = () => planned();
+      const evaluation = w.engine.evaluate(w.jobsRepo.getByIdOrThrow(job.jobId));
+      await reached;
+      w.db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(stored.pool, m.nodeId);
+      gate();
+      await held;
+
+      const out = await evaluation;
+      expect(out.outcome).toMatchObject({ action: "skip", reason: "seat_pool_report" });
+      expect((out.outcome as { notes: Record<string, unknown> }).notes).toMatchObject({ block: "stored" });
+      expect((out.outcome as { notes: Record<string, unknown> }).notes).not.toHaveProperty("removal");
+      expect(w.jobsRepo.getByIdOrThrow(job.jobId).state).toBe("active");
     } finally {
       w.db.close();
     }
