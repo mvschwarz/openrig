@@ -164,16 +164,25 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     expect(existsSync(join(marker.outputDir, "restore-instructions.md"))).toBe(true);
   });
 
-  it("with no packet root set, writes the packet in the OpenRig home's runtime folder, owner-only, and names it", () => {
-    const { stdout, status } = runHook(openrigHome, true, { OPENRIG_COMPACTION_OUT_ROOT: undefined });
-    expect(status).toBe(0);
+  // A seat's packet location, from its launch: no explicit root, the launch project as a seat has it.
+  function seatEnv(project: string | undefined, granted: string | undefined): NodeJS.ProcessEnv {
+    return { OPENRIG_COMPACTION_OUT_ROOT: undefined, OPENRIG_COMPACTION_PACKET_ROOT: granted,
+      OPENRIG_SEAT_PROJECT_DIR: project, CLAUDE_PROJECT_DIR: project };
+  }
+
+  it("a seat whose launch grants the OpenRig home's packet folder gets its packet there, owner-only, and the hook names it", () => {
     const packets = join(openrigHome, "run", "compaction-restore");
+    const project = join(tmpDir, "project");
+    mkdirSync(project);
+    const { stdout, status } = runHook(openrigHome, true, seatEnv(project, packets));
+    expect(status).toBe(0);
     const markerPath = pendingMarker(openrigHome);
     const marker = JSON.parse(readFileSync(markerPath, "utf8"));
     expect(dirname(marker.outputDir)).toBe(packets);
     expect(existsSync(join(marker.outputDir, "restore-instructions.md"))).toBe(true);
     expect(statSync(packets).mode & 0o777).toBe(0o700);
     expect(statSync(marker.outputDir).mode & 0o777).toBe(0o700);
+    expect(existsSync(join(project, ".openrig"))).toBe(false);
     const message = JSON.parse(stdout).systemMessage as string;
     expect(message).toContain(`it writes under ${packets}`);
     expect(message).not.toContain("/tmp/claude-compaction-restore");
@@ -181,9 +190,48 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     // A marker that doesn't name its packet: the bridge points at the same folder.
     delete marker.outputDir;
     writeFileSync(markerPath, JSON.stringify(marker));
-    const bridge = runBridge(openrigHome, { hook_event_name: "UserPromptSubmit" }, { OPENRIG_COMPACTION_OUT_ROOT: undefined });
+    const bridge = runBridge(openrigHome, { hook_event_name: "UserPromptSubmit" }, seatEnv(project, packets));
     expect(bridge.status).toBe(0);
     expect(JSON.parse(bridge.stdout.trim()).hookSpecificOutput.additionalContext).toContain(`Restore packet: ${packets}`);
+  });
+
+  it("a seat launched before packets moved (no packet folder in its launch) gets its packet beside its restore maps, which it reads without a grant", () => {
+    const project = join(tmpDir, "project");
+    mkdirSync(project);
+    const { stdout, status } = runHook(openrigHome, true, seatEnv(project, undefined));
+    expect(status).toBe(0);
+    const packets = join(project, ".openrig", "compaction", "packets");
+    const marker = JSON.parse(readFileSync(pendingMarker(openrigHome), "utf8"));
+    expect(dirname(marker.outputDir)).toBe(packets);
+    expect(existsSync(join(marker.outputDir, "restore-instructions.md"))).toBe(true);
+    expect(statSync(packets).mode & 0o777).toBe(0o700);
+    expect(statSync(marker.outputDir).mode & 0o777).toBe(0o700);
+    // The compaction folder ignores itself in Git, as the daemon makes it for the maps; nothing went to the home's folder.
+    expect(readFileSync(join(project, ".openrig", "compaction", ".gitignore"), "utf8")).toBe("*\n");
+    expect(existsSync(join(openrigHome, "run", "compaction-restore"))).toBe(false);
+    expect(JSON.parse(stdout).systemMessage).toContain(`it writes under ${packets}`);
+    // The manual route (the agent's own shell has the seat's launch project, not Claude's hook variable) picks the same folder.
+    const manual = spawnSync(process.execPath, [join(dirname(HOOK_SCRIPT), "restore-from-jsonl.mjs"), "--json", join(tmpDir, "transcript.jsonl")], {
+      encoding: "utf8", env: { ...process.env, OPENRIG_HOME: openrigHome, ...seatEnv(project, undefined), CLAUDE_PROJECT_DIR: undefined },
+    });
+    expect(manual.status, manual.stderr).toBe(0);
+    expect(dirname(JSON.parse(manual.stdout).outputDir)).toBe(packets);
+  });
+
+  it("without OpenRig's ignore file in the launch project, or with no launch project known, the packet goes to the OpenRig home's folder", () => {
+    const project = join(tmpDir, "project");
+    mkdirSync(join(project, ".openrig", "compaction"), { recursive: true });
+    writeFileSync(join(project, ".openrig", "compaction", ".gitignore"), "maps/\n");
+    expect(runHook(openrigHome, true, seatEnv(project, undefined)).status).toBe(0);
+    const marker = JSON.parse(readFileSync(pendingMarker(openrigHome), "utf8"));
+    expect(dirname(marker.outputDir)).toBe(join(openrigHome, "run", "compaction-restore"));
+    expect(existsSync(join(project, ".openrig", "compaction", "packets"))).toBe(false);
+    expect(readFileSync(join(project, ".openrig", "compaction", ".gitignore"), "utf8")).toBe("maps/\n");
+
+    // No launch project known at all (no seat variables): the home's folder too.
+    rmSync(join(openrigHome, "compaction"), { recursive: true, force: true });
+    expect(runHook(openrigHome, true, seatEnv(undefined, undefined)).status).toBe(0);
+    expect(dirname(JSON.parse(readFileSync(pendingMarker(openrigHome), "utf8")).outputDir)).toBe(join(openrigHome, "run", "compaction-restore"));
   });
 
   it("HG-6: inline message is appended to systemMessage", () => {
@@ -378,7 +426,7 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
 
   it("a packet that takes longer than the wait keeps building in the background; the hook says so, and the finisher writes the marker", async () => {
     const hook = slowSkill(`import fs from "node:fs"; import path from "node:path";
-const out = process.argv[process.argv.indexOf("--out") + 1];
+const out = process.env.OPENRIG_COMPACTION_OUT_ROOT; // the hook passes no --out; the real script reads this first
 setTimeout(() => { const dir = path.join(out, "late-packet"); fs.mkdirSync(dir, { recursive: true }); process.stdout.write(JSON.stringify({ ok: true, outputDir: dir })); }, 2000);
 `);
     const started = Date.now();
@@ -457,7 +505,7 @@ setTimeout(() => { const dir = path.join(out, "late-packet"); fs.mkdirSync(dir, 
 
   it("an earlier compaction's undelivered marker isn't delivered for the new build and doesn't clear its sentinel; the new packet is delivered", async () => {
     const hook = slowSkill(`import fs from "node:fs"; import path from "node:path";
-const out = process.argv[process.argv.indexOf("--out") + 1];
+const out = process.env.OPENRIG_COMPACTION_OUT_ROOT; // the hook passes no --out; the real script reads this first
 setTimeout(() => { const dir = path.join(out, "late-packet"); fs.mkdirSync(dir, { recursive: true }); process.stdout.write(JSON.stringify({ ok: true, outputDir: dir })); }, 1500);
 `);
     runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "200" }, hook);
@@ -479,7 +527,7 @@ setTimeout(() => { const dir = path.join(out, "late-packet"); fs.mkdirSync(dir, 
     // The first build to start (A) is slow; the second (B) is fast.
     const flag = join(tmpDir, "first-build-started");
     const hook = slowSkill(`import fs from "node:fs"; import path from "node:path";
-const out = process.argv[process.argv.indexOf("--out") + 1];
+const out = process.env.OPENRIG_COMPACTION_OUT_ROOT; // the hook passes no --out; the real script reads this first
 const first = !fs.existsSync(${JSON.stringify(flag)}); fs.writeFileSync(${JSON.stringify(flag)}, "");
 setTimeout(() => { const dir = path.join(out, first ? "packet-a" : "packet-b"); fs.mkdirSync(dir, { recursive: true }); process.stdout.write(JSON.stringify({ ok: true, outputDir: dir })); }, first ? 2500 : 0);
 `);
@@ -516,7 +564,7 @@ setTimeout(() => { const dir = path.join(out, first ? "packet-a" : "packet-b"); 
     expect(bridgeContext()).toContain("OpenRig compaction restore packet is available");
     const earlier = readFileSync(marker, "utf8");
     const hook = slowSkill(`import fs from "node:fs"; import path from "node:path";
-const out = process.argv[process.argv.indexOf("--out") + 1];
+const out = process.env.OPENRIG_COMPACTION_OUT_ROOT; // the hook passes no --out; the real script reads this first
 setTimeout(() => { const dir = path.join(out, "late-packet"); fs.mkdirSync(dir, { recursive: true }); process.stdout.write(JSON.stringify({ ok: true, outputDir: dir })); }, 1500);
 `);
     runHook(openrigHome, true, { OPENRIG_COMPACTION_RESTORE_TIMEOUT_MS: "200" }, hook);

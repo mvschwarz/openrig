@@ -131,6 +131,8 @@ delete process.env["RIGGED_HOME"];
 // fixture home as well (removed with it), so a test that forgets its own root can't share one and a seat's value
 // can't reach the suite. Tests that set their own root still do.
 process.env["OPENRIG_COMPACTION_OUT_ROOT"] = path.join(fixtureHome, "compaction-packets");
+// A seat's launch names its own packet folder; a suite run from a seat never inherits it.
+delete process.env["OPENRIG_COMPACTION_PACKET_ROOT"];
 // Legacy ~/.rigged discovery and ordinary home-based config must also stay local
 // to this fixture. Merely changing HOME would not override OPENRIG_HOME or DB.
 // Keep ordinary user files outside the state root, as in a real installation.

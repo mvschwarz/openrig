@@ -14,6 +14,7 @@ import { createDaemon } from "./startup.js";
 import { removeParentSessionEnv } from "./domain/parent-session-env.js";
 import { resolveBindPlan } from "./domain/bind-plan.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
+import { sweepCompactionPackets } from "./domain/compaction-packet-sweep.js";
 import {
   createStuckSweepStatus,
   resolveStuckSweepIntervalSeconds,
@@ -166,6 +167,22 @@ export function startQueueRetentionScheduler(deps: {
   runOnce(); // boot sweep (fire-and-forget)
   const DAILY_MS = 24 * 60 * 60 * 1000;
   return setInterval(runOnce, DAILY_MS);
+}
+
+/** Claude's restore packets live in the OpenRig home, which nothing clears as the OS clears /tmp: a boot sweep and a daily
+ *  one remove the packets no restore can still need (`sweepCompactionPackets`). A failure is logged, never fatal. Returns
+ *  the daily interval handle, cleared on shutdown. */
+export function startCompactionPacketSweep(openrigHome: string): ReturnType<typeof setInterval> {
+  const runOnce = (): void => {
+    try {
+      const { removed } = sweepCompactionPackets({ openrigHome });
+      if (removed.length > 0) console.log(`[compaction-packets] removed ${removed.length} restore packet folder(s) no restore needs`);
+    } catch (err) {
+      console.error(`[compaction-packets] sweep error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  runOnce();
+  return setInterval(runOnce, 24 * 60 * 60 * 1000);
 }
 
 /** S02 (OPR.0.5.5.2) — start the STANDING STUCK SWEEP: both halves of "is anything
@@ -399,6 +416,7 @@ export async function startServer(port?: number) {
   let monitorsStarted = false;
   let retentionTimer: ReturnType<typeof setInterval> | null = null;
   let stuckSweepTimer: ReturnType<typeof setInterval> | null = null;
+  let packetSweepTimer: ReturnType<typeof setInterval> | null = null;
   let wakeLadderScheduler: WakeLadderScheduler | null = null;
   // P7 — lifecycle heartbeat: advance last-seen every tick while running.
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -460,6 +478,7 @@ export async function startServer(port?: number) {
         retentionTimer = startQueueRetentionScheduler(deps);
         // S02 — the standing stuck sweep: nobody has to remember to run the verbs.
         stuckSweepTimer = startStuckSweepScheduler(deps);
+        packetSweepTimer = startCompactionPacketSweep(OPENRIG_HOME);
         // Issue #1856: stream intake for the queue worker.
         deps.streamIntakeCoordinator?.start();
         // S01 — wake-or-escalate on batons: a failed baton wake retries on schedule,
@@ -502,6 +521,7 @@ export async function startServer(port?: number) {
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         if (retentionTimer) clearInterval(retentionTimer);
         if (stuckSweepTimer) clearInterval(stuckSweepTimer);
+        if (packetSweepTimer) clearInterval(packetSweepTimer);
       }],
       ["runtime-probes", () => stopRuntimeProbes()],
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
