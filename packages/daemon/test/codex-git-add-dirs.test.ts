@@ -145,7 +145,7 @@ describe("Codex resume and fork git add-dirs (a restored seat keeps .git writabl
     expect(resume).toMatch(/ resume 'thread-1' -C '[^']* repo' --add-dir '[^']*\/\.git'$/);
     const fork = await launchCommand(repo, { fork: true });
     expect(addDirs(fork)).toEqual(fresh);
-    expect(fork).toMatch(/ fork 'parent-thread' --add-dir '[^']*\/\.git'$/);
+    expect(fork).toMatch(/ fork 'parent-thread' -C '[^']* repo' --add-dir '[^']*\/\.git'$/);
   });
 
   it("the resume and fork proofs still find the process when the cwd has a space, which ps does not quote", async () => {
@@ -244,7 +244,7 @@ describe("Codex seat folder add-dir (a seat keeps its LEARNED.md and recap writa
     expect(resume).toMatch(/ resume 'thread-1' -C '[^']* repo' --add-dir '[^']*\/\.git' --add-dir '[^']*\/seats\/dev'$/);
     const fork = await launchCommand(repo, { fork: true });
     expect(addDirs(fork)).toEqual(expected);
-    expect(fork).toMatch(/ fork 'parent-thread' --add-dir '[^']*\/\.git' --add-dir '[^']*\/seats\/dev'$/);
+    expect(fork).toMatch(/ fork 'parent-thread' -C '[^']* repo' --add-dir '[^']*\/\.git' --add-dir '[^']*\/seats\/dev'$/);
   });
 
   it("the resume and fork proofs still find the process when the seat folder's path has a space", async () => {

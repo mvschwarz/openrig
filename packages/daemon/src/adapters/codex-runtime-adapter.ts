@@ -1003,8 +1003,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // -s workspace-write floor flag.
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
       // The git dirs and the seat folder follow the parent id: ps flattens argv, so a path with a space placed before the
-      // id would be read as the id when the fork is verified.
-      const cmd = `codex${daemonArg}${postureArg}${networkArg}${loginShellArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}${seatFolderArg}`;
+      // id would be read as the id when the fork is verified. -C names the seat's directory, as on a fresh launch and a
+      // resume: without it, a parent recorded in another directory makes Codex ask which one to use.
+      const cmd = `codex${daemonArg}${postureArg}${networkArg}${loginShellArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)} -C ${shellQuote(binding.cwd)}${gitDirArg}${seatFolderArg}`;
       const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };

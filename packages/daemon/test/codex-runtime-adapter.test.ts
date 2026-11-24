@@ -122,11 +122,11 @@ function expectedResumeCommand(token = "sess-456", queueRoot: string | null = te
   return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -c 'allow_login_shell=false'${modelArg}${effortArg} resume ${quote(token)}${queueDirArg} -C ${quote(cwd)}${gitDirOption(gitCwd)}`;
 }
 
-function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null; gitCwd?: string | null } = {}): string {
+function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null; gitCwd?: string | null; cwd?: string } = {}): string {
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
   const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -c 'allow_login_shell=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}${gitDirOption(options.gitCwd === undefined ? "/project" : options.gitCwd)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -c 'allow_login_shell=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)} -C ${quote(options.cwd ?? "/project")}${gitDirOption(options.gitCwd === undefined ? "/project" : options.gitCwd)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
