@@ -115,7 +115,7 @@ describe("rig skill audit", () => {
       logs.length = 0;
       await skillCommand(makeDeps({ status: 200, data })).parseAsync(["node", "rig", "audit"]);
       expect(logs.at(-1)).toContain("doesn't say whether that's safe");
-      expect(logs.at(-1)).toContain("rig skill loadout --runtime <claude-code|codex> --cwd <target> --project-root <project> --json");
+      expect(logs.at(-1)).toContain("rig skill loadout --runtime <claude-code|codex|omp-tui> --cwd <target> --project-root <project> --json");
     }
   });
 
@@ -126,7 +126,7 @@ describe("rig skill audit", () => {
     audit.outputHelp();
     expect(help).toContain('"stale" is a date finding');
     expect(help).toContain("whether a copy is safe to refresh or overwrite");
-    expect(help).toContain("rig skill loadout --runtime <claude-code|codex> --cwd <target> --project-root <project> --json");
+    expect(help).toContain("rig skill loadout --runtime <claude-code|codex|omp-tui> --cwd <target> --project-root <project> --json");
     expect(help).toContain("which leaves any difference unknown");
     expect(help).toContain("its origin stays unknown");
   });

@@ -12,8 +12,8 @@ import { queueItemsScanIndexesSchema } from "../../src/db/migrations/183_queue_i
 import { rigSeatSliceSchema } from "../../src/db/migrations/189_rig_seat_slice.js";
 import { networkRequestsSchema } from "../../src/db/migrations/184_network_requests.js";
 import { rigDeliveryDrainsSchema } from "../../src/db/migrations/170_rig_delivery_drains.js";
-import { ompTuiRuntimeSwitchesSchema } from "../../src/db/migrations/191_omp_tui_runtime_switches.js";
-import { ompSwitchAdoptionSchema } from "../../src/db/migrations/192_omp_switch_adoption.js";
+import { ompTuiRuntimeSwitchesSchema } from "../../src/db/migrations/195_omp_tui_runtime_switches.js";
+import { ompSwitchAdoptionSchema } from "../../src/db/migrations/196_omp_switch_adoption.js";
 import { queueReturnRouteSchema } from "../../src/db/migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "../../src/db/migrations/165_run_bound_activity_grants.js";
 import { seatRuntimeHomeRecordsSchema } from "../../src/db/migrations/169_seat_runtime_home_records.js";

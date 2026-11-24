@@ -15,8 +15,8 @@ import { networkRequestsSchema } from "./migrations/184_network_requests.js";
 
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
-import { ompTuiRuntimeSwitchesSchema } from "./migrations/191_omp_tui_runtime_switches.js";
-import { ompSwitchAdoptionSchema } from "./migrations/192_omp_switch_adoption.js";
+import { ompTuiRuntimeSwitchesSchema } from "./migrations/195_omp_tui_runtime_switches.js";
+import { ompSwitchAdoptionSchema } from "./migrations/196_omp_switch_adoption.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "./migrations/165_run_bound_activity_grants.js";
 import { nodeInputRouteSchema } from "./migrations/171_node_input_route.js";

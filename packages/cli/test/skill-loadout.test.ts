@@ -102,6 +102,6 @@ describe("rig skill loadout", () => {
     const cmd = skillCommand();
     await cmd.parseAsync(["node", "rig", "loadout", "--runtime", "terminal", "--cwd", project]);
     expect(process.exitCode).toBe(1);
-    expect(errors).toEqual(["invalid_runtime: --runtime must be claude-code or codex"]);
+    expect(errors).toEqual(["invalid_runtime: --runtime must be claude-code, codex or omp-tui"]);
   });
 });
