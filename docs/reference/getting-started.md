@@ -156,8 +156,7 @@ before-install view explain that access before you choose it.
 
 WSL2 is the Windows route OpenRig supports. OpenRig's automated tests don't run on
 it yet; this is one user's working setup.
-[dajiaohuang](https://github.com/dajiaohuang)
-[ran OpenRig 0.6.6 under WSL2](https://github.com/mvschwarz/openrig/issues/88#issuecomment-6043925546)
+Wu Shuwen ran OpenRig 0.6.6 under WSL2
 on Ubuntu 24.04, with Node.js 24.14.1, tmux 3.4, Codex CLI 0.161.0 and Pi
 (`@earendil-works/pi-coding-agent`) 1.0.4, headless, as the distribution's root
 user.
