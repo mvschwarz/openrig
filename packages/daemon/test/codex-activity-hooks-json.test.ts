@@ -1,5 +1,5 @@
 // A Codex home that keeps its hooks in hooks.json gets OpenRig's activity hooks there too, so Codex never sees both formats in
-// one layer. The user's hooks stay where they are; only OpenRig's own groups are written, moved or removed.
+// one layer. The user's hooks stay where they are; only OpenRig's own groups are written or removed.
 import { describe, it, expect, vi } from "vitest";
 import nodeFs from "node:fs";
 import { parse as parseToml } from "smol-toml";
@@ -57,23 +57,55 @@ describe("Codex activity hooks with an existing hooks.json", () => {
     expect(config).not.toContain(`${HOOKS}:session_start:0:0`);
   });
 
-  it("moves OpenRig's inline block from an earlier launch out of config.toml, so the layer keeps one format", () => {
-    const first = mockCodexFs({ [RELAY]: "// relay" });
+  it("leaves both sources and their choices untouched when a JSON installer adds hooks to an inline home", () => {
+    const inline = '[[hooks.PreToolUse]]\nmatcher = "shell_command"\n[[hooks.PreToolUse.hooks]]\ntype = "command"\ncommand = "echo inline"\n';
+    const first = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: inline });
     adapter(first.fs).ensureCodexActivityHooks();
-    expect(first.store[CONFIG]).toContain("# BEGIN OPENRIG MANAGED ACTIVITY HOOKS");
-
-    const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: first.store[CONFIG]!, [HOOKS]: JSON.stringify({ hooks: {} }) });
-    adapter(m.fs).ensureCodexActivityHooks();
-    expect(m.store[CONFIG]).not.toContain("# BEGIN OPENRIG MANAGED ACTIVITY HOOKS");
-    expect(m.store[CONFIG]).not.toContain("[[hooks.");
-    expect(JSON.parse(m.store[HOOKS]!).hooks.Stop).toEqual([ours()]);
+    const config = first.store[CONFIG]!
+      + `\n[hooks.state."${CONFIG}:pre_tool_use:0:0"]\nenabled = false\ntrusted_hash = "inline-choice"\n`
+      + `\n[hooks.state."${HOOKS}:session_start:0:0"]\nenabled = true\ntrusted_hash = "json-choice"\n`;
+    const json = JSON.stringify({ hooks: { SessionStart: [USER_GROUP] } });
+    const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config, [HOOKS]: json });
+    const warning = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      adapter(m.fs).ensureCodexActivityHooks();
+      expect(m.writes).toEqual([]);
+      expect(m.store[CONFIG]).toBe(config);
+      expect(m.store[HOOKS]).toBe(json);
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining("both config.toml and hooks.json define hooks"));
+    } finally {
+      warning.mockRestore();
+    }
   });
 
-  it("leaves a user's own inline hooks in config.toml", () => {
-    const userInline = '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "echo bye"\n';
-    const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: userInline, [HOOKS]: JSON.stringify({ hooks: {} }) });
+  it("keeps OpenRig's inline hooks when an empty hooks.json appears", () => {
+    const movedRelay = "/new/daemon/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
+    const m = mockCodexFs({ [RELAY]: "// relay", [movedRelay]: "// new relay" });
     adapter(m.fs).ensureCodexActivityHooks();
+    m.store[CONFIG] = m.store[CONFIG]!.replace(`[hooks.state."${CONFIG}:stop:0:0"]\n`,
+      `[hooks.state."${CONFIG}:stop:0:0"]\nenabled = false\n`);
+    const json = JSON.stringify({ hooks: {} });
+    m.store[HOOKS] = json;
+
+    adapter(m.fs, movedRelay).ensureCodexActivityHooks();
+
+    expect(m.store[HOOKS]).toBe(json);
+    expect(m.store[CONFIG]).toContain("# BEGIN OPENRIG MANAGED ACTIVITY HOOKS");
+    expect(m.store[CONFIG]).toContain(`command = 'node "${movedRelay}"'`);
+    expect(m.store[CONFIG]).not.toContain(`command = 'node "${RELAY}"'`);
+    expect(m.store[CONFIG]).toContain(`[hooks.state."${CONFIG}:stop:0:0"]\nenabled = false\n`);
+  });
+
+  it("does not start using JSON when only config.toml defines user hooks", () => {
+    const userInline = '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "echo bye"\n';
+    const json = JSON.stringify({ hooks: { SessionStart: [{ hooks: [] }] } });
+    const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: userInline, [HOOKS]: json });
+
+    adapter(m.fs).ensureCodexActivityHooks();
+
     expect(m.store[CONFIG]).toContain(userInline.trimEnd());
+    expect(m.store[CONFIG]).toContain("# BEGIN OPENRIG MANAGED ACTIVITY HOOKS");
+    expect(m.store[HOOKS]).toBe(json);
   });
 
   it("is idempotent, and a new relay path replaces OpenRig's group where it is", () => {
@@ -136,52 +168,21 @@ describe("Codex activity hooks without a hooks.json", () => {
 
 describe("Codex activity hooks with a hooks.json keep the person's own state (#1957 round 1)", () => {
   const state = (config: string) => (parseToml(config) as { hooks?: { state?: Record<string, Record<string, unknown>> } }).hooks?.state ?? {};
-  const inlineThenJson = (disableStop: boolean) => {
-    const first = mockCodexFs({ [RELAY]: "// relay" });
-    adapter(first.fs).ensureCodexActivityHooks();
-    let config = first.store[CONFIG]!;
-    // The person turns OpenRig's inline Stop hook off in Codex (its group is first among the inline Stop groups).
-    if (disableStop) config = config.replace(`[hooks.state."${CONFIG}:stop:0:0"]\n`, `[hooks.state."${CONFIG}:stop:0:0"]\nenabled = false\n`);
-    expect(state(config)[`${CONFIG}:stop:0:0`]?.enabled).toBe(disableStop ? false : undefined);
+  it.each([false, true])("retains an explicit JSON choice (%s) alongside stale inline trust state", enabled => {
+    const jsonKey = `${HOOKS}:stop:1:0`;
+    const inlineKey = `${CONFIG}:stop:0:0`;
+    const config = `[hooks.state."${inlineKey}"]\nenabled = false\ntrusted_hash = "old-inline"\n\n`
+      + `[hooks.state."${jsonKey}"]\nenabled = ${enabled}\n`;
     const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config, [HOOKS]: JSON.stringify({ hooks: { Stop: [USER_GROUP] } }) });
-    adapter(m.fs).ensureCodexActivityHooks();
-    return m;
-  };
+    const a = adapter(m.fs);
+    a.ensureCodexActivityHooks();
 
-  it("a disable of OpenRig's inline hook moves with it to hooks.json (F1)", () => {
-    const m = inlineThenJson(true);
     expect(JSON.parse(m.store[HOOKS]!).hooks.Stop).toEqual([USER_GROUP, ours()]);
-    const moved = state(m.store[CONFIG]!)[`${HOOKS}:stop:1:0`]!;
-    expect(moved.enabled).toBe(false);
-    expect(moved.trusted_hash).toBe(trustOf("Stop", 1).hash);
-    // The other events weren't disabled, so they're only trusted.
-    expect(state(m.store[CONFIG]!)[`${HOOKS}:session_start:0:0`]).toEqual({ trusted_hash: trustOf("SessionStart", 0).hash });
-  });
-
-  it("an enabled inline hook moves as trusted only (F1 control)", () => {
-    const m = inlineThenJson(false);
-    expect(state(m.store[CONFIG]!)[`${HOOKS}:stop:1:0`]).toEqual({ trusted_hash: trustOf("Stop", 1).hash });
-  });
-
-  it("does not replace an explicit JSON enable with an old inline disable", () => {
-    const first = mockCodexFs({ [RELAY]: "// relay" });
-    adapter(first.fs).ensureCodexActivityHooks();
-    const config = first.store[CONFIG]!
-      + `\n[hooks.state."${HOOKS}:stop:0:0"]\nenabled = true\n`;
-    const disabled = config.replace(`[hooks.state."${CONFIG}:stop:0:0"]\n`,
-      `[hooks.state."${CONFIG}:stop:0:0"]\nenabled = false\n`);
-    const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: disabled, [HOOKS]: JSON.stringify({ hooks: {} }) });
-    adapter(m.fs).ensureCodexActivityHooks();
-    expect(state(m.store[CONFIG]!)[`${HOOKS}:stop:0:0`]?.enabled).toBe(true);
-  });
-
-  it("does not re-disable a JSON hook after the person re-enables it", () => {
-    const m = inlineThenJson(true);
-    m.store[CONFIG] = m.store[CONFIG]!.replace(`[hooks.state."${HOOKS}:stop:1:0"]\nenabled = false\n`,
-      `[hooks.state."${HOOKS}:stop:1:0"]\nenabled = true\n`);
-    expect(state(m.store[CONFIG]!)[`${HOOKS}:stop:1:0`]?.enabled).toBe(true);
-    adapter(m.fs).ensureCodexActivityHooks();
-    expect(state(m.store[CONFIG]!)[`${HOOKS}:stop:1:0`]?.enabled).toBe(true);
+    expect(state(m.store[CONFIG]!)[jsonKey]).toEqual({ enabled, trusted_hash: trustOf("Stop", 1).hash });
+    expect(state(m.store[CONFIG]!)[inlineKey]).toEqual({ enabled: false, trusted_hash: "old-inline" });
+    const after = m.store[CONFIG];
+    a.ensureCodexActivityHooks();
+    expect(m.store[CONFIG]).toBe(after);
   });
 
   const linkedSources = (run: (sources: string[]) => void) => {
