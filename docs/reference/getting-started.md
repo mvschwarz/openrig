@@ -192,15 +192,15 @@ agent doing the setup. These use this release's tag:
 
 ```sh
 # Claude Code
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs" --skill rigs --agent claude-code
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.23/skills/rigs" --skill rigs --agent claude-code
 
 # Codex
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs" --skill rigs --agent codex
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.23/skills/rigs" --skill rigs --agent codex
 # OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs" --skill rigs --agent pi
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.23/skills/rigs" --skill rigs --agent pi
 ```
 
-**OMP:** this pin installs the shared skill only. The `v0.7.21` skill includes OMP attachment guidance (`rig attach --self … --runtime omp`),
+**OMP:** this pin installs the shared skill only. The `v0.7.23` skill includes OMP attachment guidance (`rig attach --self … --runtime omp`),
 but complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
 signed in. To invoke the skill in OMP, type `/skill:rigs`; if OMP was already open when you installed it, type
 `/reload-plugins` first.
@@ -221,11 +221,11 @@ You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.21/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.23/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.21/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.23/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check if the installed checker is
 present (otherwise it reports the check skipped), then runs `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints

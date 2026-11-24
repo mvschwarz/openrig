@@ -1,9 +1,87 @@
-# What changed in OpenRig 0.7.22
+# What changed in OpenRig 0.7.23
+
+This note is for an agent on an install that was just upgraded to 0.7.23.
+OpenRig 0.7.23 is a patch for teams that reach past one computer, and for recovery that says what it did. A seat connected to a hub can send requests to its peers there and get the answers back as local work. Codex seats explain sign-in and restart in place on a Mac. `rig start --last` names any rig it leaves out.
+
+## Before you upgrade
+
+Run the upgrade in the environment that owns your daemon, keeping the same `OPENRIG_HOME` (legacy `RIGGED_HOME`) if you set it. Stop the daemon, back up its database, install the patch, then restart it. Your agents keep running; do not use `rig down` for this upgrade.
+
+If the daemon was started with `--db`, or with `OPENRIG_DB` (legacy `RIGGED_DB`) set differently from this shell, replace the `DB=` line below with that actual database path. Pass the same `--db "$DB"` to every `rig daemon start`, including recovery; `rig config get db.path` reads this shell's configuration, not the running daemon's launch arguments or environment.
+
+```sh
+DB="$(rig config get db.path)" &&
+STOP="$(rig daemon stop)" && printf '%s\n' "$STOP" &&
+{ printf '%s\n' "$STOP" | grep -qx 'Daemon stopped' || { echo "The stop wasn't confirmed clean; see below before continuing." >&2; false; }; } &&
+BACKUP="$DB.before-0.7.23-$(date -u +%Y%m%dT%H%M%SZ)" &&
+{ [ ! -e "$BACKUP" ] || { echo "$BACKUP already exists; keep it and run again." >&2; false; }; } &&
+cp "$DB" "$BACKUP" &&
+{ [ ! -e "$DB-wal" ] || cp "$DB-wal" "$BACKUP-wal"; } &&
+npm install -g @openrig/cli@0.7.23 &&
+rig daemon start --db "$DB"
+```
+
+A failure stops the following commands; fix it before continuing. Back up and install only after `rig daemon stop` prints `Daemon stopped`. If it reports no recorded target or doesn't confirm the stop, make sure the daemon is running on its original home and database, then run the whole block again; `daemon-shutdown.json`, `daemon.log` and `rig context get help` explain an unconfirmed stop.
+
+This release adds twelve additive database migrations (`179_remote_control_observations` through `194_workflow_run_title`), which apply at the first start; coming from 0.7.19 or earlier, 0.7.20's three apply too. Keep the backup, because downgrading a migrated database is not established. Bundled `openrig` is 0.7.23; `openrig-core` is 0.1.37.
+
+## Requests between connected teams
+
+A seat connected to a hub can list its peers there with `rig network peers <binding-or-seat>`, and send one a request with `rig network request <binding-or-seat> <peer> --id <request-id> --body-file <path>`. The daemon reaches the hub as the seat's participant, so the agent never holds that token, and the answer comes back to a local queue item. A provider-managed binding can rotate its credential without changing identity and finish its removal after a local disconnect, retrying lost replies after a restart. Grant keys accept an opaque prefixed principal from the issuing service, and a new connection says when setup is still finishing. ([#3686](https://github.com/mvschwarz/openrig/pull/3686), [#3816](https://github.com/mvschwarz/openrig/pull/3816), [#3740](https://github.com/mvschwarz/openrig/pull/3740), [#3725](https://github.com/mvschwarz/openrig/pull/3725), [#3754](https://github.com/mvschwarz/openrig/pull/3754))
+
+## Codex and Claude seats
+
+A Codex seat at the newer sign-in chooser reports that it needs signing in and tells the person to open its terminal. On a Mac, `rig seat restart <codex-seat> --keep-conversation` and `rig provider switch` now restart a Codex seat in place on its own conversation. A status line the person chose is read as the status line, a seat moved with `rig seat set-runtime` launches on its new runtime, and an idle Codex seat's permission alert reads its pane. ([#3808](https://github.com/mvschwarz/openrig/pull/3808), [#3840](https://github.com/mvschwarz/openrig/pull/3840), [#3803](https://github.com/mvschwarz/openrig/pull/3803), [#3807](https://github.com/mvschwarz/openrig/pull/3807), [#3713](https://github.com/mvschwarz/openrig/pull/3713))
+
+For Claude, a foreground process alone no longer proves a resumed conversation, and the trust dialog is read from its first frame. A paste submits when a notice shares the paste-hint row, and a wrapped launch names a conflicting `claude` function or alias. Auth and billing stop failures raise attention with typed reasons, finished-turn prose above an idle prompt reads idle, and a seat's self-report follows it after `/rename`. ([#3712](https://github.com/mvschwarz/openrig/pull/3712), [#3518](https://github.com/mvschwarz/openrig/pull/3518), [#3724](https://github.com/mvschwarz/openrig/pull/3724), [#3747](https://github.com/mvschwarz/openrig/pull/3747), [#3571](https://github.com/mvschwarz/openrig/pull/3571), [#3545](https://github.com/mvschwarz/openrig/pull/3545), [#3605](https://github.com/mvschwarz/openrig/pull/3605))
+
+## Restore and recovery
+
+`rig start --last` names every rig it leaves out, and why. A restore that rolls a resume back tells the seat's owner, a recreated seat's checks and reports follow its live node, and a seat's continuity notice stays armed across `rig up --existing` and `rig seat launch --fresh`. Stopped seats survive unreadable tmux probes, a fresh launch reopens the terminal server over a stale socket, and the PreCompact hook builds a packet from the last 256 MB of a larger transcript and says what it covers. The docs show how to keep tmux experiments off the team's server and bring seats back if one ends it. ([#3823](https://github.com/mvschwarz/openrig/pull/3823), [#3714](https://github.com/mvschwarz/openrig/pull/3714), [#3813](https://github.com/mvschwarz/openrig/pull/3813), [#3706](https://github.com/mvschwarz/openrig/pull/3706), [#3588](https://github.com/mvschwarz/openrig/pull/3588), [#3715](https://github.com/mvschwarz/openrig/pull/3715), [#3471](https://github.com/mvschwarz/openrig/pull/3471), [#3798](https://github.com/mvschwarz/openrig/pull/3798), [#3786](https://github.com/mvschwarz/openrig/pull/3786), [#3589](https://github.com/mvschwarz/openrig/pull/3589), [#3718](https://github.com/mvschwarz/openrig/pull/3718), [#3832](https://github.com/mvschwarz/openrig/pull/3832), [#3796](https://github.com/mvschwarz/openrig/pull/3796))
+
+## Queue and workflow
+
+`rig queue relay-answer` lets an agent pass on a person's answer to the agent that asked; it's always shown as relayed. With `cold_start: true` on a pod or member, queued work for a dormant seat starts just that seat. Queue transfer exports `openrig.queue-transfer/v2` and stages an import for review. Run titles show on queue packets, workflow steps take an optional label, and same-role handoffs get advice and `next_owner: same_as_previous`. `rig queue list` says when it cut a page. A usage-limit blocker releases its dependents at its wake time, a draft-held wake retries when the seat goes idle, and refused creates are recorded in the event log. ([#3539](https://github.com/mvschwarz/openrig/pull/3539), [#3173](https://github.com/mvschwarz/openrig/pull/3173), [#3762](https://github.com/mvschwarz/openrig/pull/3762), [#3776](https://github.com/mvschwarz/openrig/pull/3776), [#3846](https://github.com/mvschwarz/openrig/pull/3846), [#3812](https://github.com/mvschwarz/openrig/pull/3812), [#3764](https://github.com/mvschwarz/openrig/pull/3764), [#3595](https://github.com/mvschwarz/openrig/pull/3595), [#3711](https://github.com/mvschwarz/openrig/pull/3711), [#3563](https://github.com/mvschwarz/openrig/pull/3563), [#3580](https://github.com/mvschwarz/openrig/pull/3580), [#3790](https://github.com/mvschwarz/openrig/pull/3790), [#3773](https://github.com/mvschwarz/openrig/pull/3773), [#3802](https://github.com/mvschwarz/openrig/pull/3802), [#3770](https://github.com/mvschwarz/openrig/pull/3770), [#3818](https://github.com/mvschwarz/openrig/pull/3818))
+
+## Seat pools and opt-in controls
+
+The seat pool adds agents through topology add with the model member's launch settings, holds a whole rig, and dispatches waiting rows to free pool agents; drained pool agents stay down on `rig up`. Opt-in `keep_alive` relaunches a seat that falls. Also opt-in: seat grouping beneath `openrigseats.slice`, a per-rig onboarding pack override, a trace of state-changing requests, and `daemon.start_readiness_wait_seconds`, with docs for running the daemon under a supervisor. ([#3810](https://github.com/mvschwarz/openrig/pull/3810), [#3771](https://github.com/mvschwarz/openrig/pull/3771), [#3494](https://github.com/mvschwarz/openrig/pull/3494), [#3495](https://github.com/mvschwarz/openrig/pull/3495), [#3424](https://github.com/mvschwarz/openrig/pull/3424), [#3568](https://github.com/mvschwarz/openrig/pull/3568), [#3789](https://github.com/mvschwarz/openrig/pull/3789), [#3720](https://github.com/mvschwarz/openrig/pull/3720), [#3660](https://github.com/mvschwarz/openrig/pull/3660), [#3661](https://github.com/mvschwarz/openrig/pull/3661))
+
+## Terminal, TUI, Slack and tools
+
+- Terminal: a browser viewer can learn the pane's size with `?geometry=1`, Herdr views open once and keep agents at their own size, and undelivered WebSocket input is reported. ([#3775](https://github.com/mvschwarz/openrig/pull/3775), [#3801](https://github.com/mvschwarz/openrig/pull/3801), [#3752](https://github.com/mvschwarz/openrig/pull/3752))
+- TUI and Slack: a Feed row jumps to the seat that raised it, the reply composer follows the caret, and Slack links HTTPS evidence and bounds status text. ([#3769](https://github.com/mvschwarz/openrig/pull/3769), [#3763](https://github.com/mvschwarz/openrig/pull/3763), [#3684](https://github.com/mvschwarz/openrig/pull/3684), [#3717](https://github.com/mvschwarz/openrig/pull/3717))
+- MCP and ACP: endpoints carry instructions and static resources and resolve callers through an embedding authority, and explicit ACP agent commands run. ([#3805](https://github.com/mvschwarz/openrig/pull/3805), [#3787](https://github.com/mvschwarz/openrig/pull/3787), [#3806](https://github.com/mvschwarz/openrig/pull/3806), [#3669](https://github.com/mvschwarz/openrig/pull/3669))
+- Faster reads: a request's related rows, delegated-decision and lineage reads, the fleet rollup, slice listings and `rig ps` do less work. ([#3730](https://github.com/mvschwarz/openrig/pull/3730), [#3734](https://github.com/mvschwarz/openrig/pull/3734), [#3735](https://github.com/mvschwarz/openrig/pull/3735), [#3736](https://github.com/mvschwarz/openrig/pull/3736), [#3700](https://github.com/mvschwarz/openrig/pull/3700), [#3733](https://github.com/mvschwarz/openrig/pull/3733))
+- Install and data: a fresh install pins a compatible `@hono/node-ws`, the CLI reports the Node 22.14 minimum consistently, migrations record what they applied, transcripts and the event stream recover from partial lines and rollbacks, and the VPS bootstrap verifies its installers. ([#3742](https://github.com/mvschwarz/openrig/pull/3742), [#3822](https://github.com/mvschwarz/openrig/pull/3822), [#3384](https://github.com/mvschwarz/openrig/pull/3384), [#3826](https://github.com/mvschwarz/openrig/pull/3826), [#3824](https://github.com/mvschwarz/openrig/pull/3824), [#3795](https://github.com/mvschwarz/openrig/pull/3795))
+- Also: `rig scope slice create --depends-on` writes what readiness reads, held messages retire without a seat identity, terminal mission views resolve through the project catalog, progress files ignore commented-out headings, and the docs clarify daemon bearer-token boundaries. ([#3618](https://github.com/mvschwarz/openrig/pull/3618), [#3729](https://github.com/mvschwarz/openrig/pull/3729), [#3613](https://github.com/mvschwarz/openrig/pull/3613), [#3522](https://github.com/mvschwarz/openrig/pull/3522), [#3745](https://github.com/mvschwarz/openrig/pull/3745))
+
+## Behaviour that changed
+
+- `rig start --last` lists the rigs it leaves out (`leftOut` in `--json`) with each one's reason; left-out rigs don't change its exit code. ([#3823](https://github.com/mvschwarz/openrig/pull/3823))
+- Adding a person whose id a seat already uses prints a warning; the person is still added. ([#3690](https://github.com/mvschwarz/openrig/pull/3690))
+
+## Known issues
+
+- After a reboot, a rig with a seat that has neither saved startup context nor a resume token is left out of `rig start --last`; the output names it and why.
+- A seat whose tmux session is gone can read as running if its pane id is reused, and a slow restore of a seat's original conversation can report the wrong outcome. Check the seat's screen with `rig capture`.
+- A `rig send` while Claude's `AskUserQuestion` dialog is open can become its answer.
+- When a Codex seat's `config.toml` or `hooks.json` is a symbolic link, hook trust is recorded under the link's target, so hooks may need review again. With a linked `config.toml`, OpenRig can miss a setting that turns its hooks off. Review hook prompts yourself.
+- The tmux outage record is in memory, so a restart during a loss records it again.
+- Only one earlier restore packet is kept aside while a new one builds.
+- A percent `context-usage-threshold` doesn't fire for a Pi seat; use a token threshold.
+- A return route doesn't guarantee a question's arrival.
+
+## Credits
+
+Thanks to Dery Ferdika, Devulapalli Naga Sri Vaishnavi, Edward Bowie, Evgeny Zotov, Leon.C, Mike Schwarz, NIKHILA, Roberto Campos, Wu Shuwen, billbenetti, bobbiejaxn, dajiaohuang, and w4rc0n. Their contributions also run the Linux seat-environment check on every merge to main and pin the two redaction pattern lists to each other.
+
+## What changed in OpenRig 0.7.22
 
 This note is for an agent on an install that was just upgraded to 0.7.22.
 OpenRig 0.7.22 is a patch for a useful first result, responsive coordination and state that tells the truth: a person's agent can wait for its task's answer, several slow daemon reads do less work, and more status reads unknown instead of guessing.
 
-## Before you upgrade
+### Before you upgrade
 
 Run the upgrade in the environment that owns your daemon, keeping the same `OPENRIG_HOME` (legacy `RIGGED_HOME`) if you set it. Stop the daemon, back up its database, install the patch, then restart it. Your agents keep running; do not use `rig down` for this upgrade.
 
@@ -29,42 +107,42 @@ A clean stop after restarting confirms only the new daemon’s shutdown, not whe
 
 This release adds no database migration. Coming from 0.7.19 or earlier, 0.7.20's three additive migrations (`176_node_statusline_throttle`, `177_workflow_bound_pod` and `178_seat_pool`) apply at the first start; keep the backup, because downgrading a migrated database is not established. Bundled `openrig` is 0.7.22; `openrig-core` is 0.1.36.
 
-## A person's agent and first answers
+### A person's agent and first answers
 
 The `rigs` skill tells a person's agent to wait in the background for its task and hand on the goal row itself, and a new task without a return route inherits the route of the one routed task its creator holds. This ships guidance and a route, not a measured change in agent behaviour. `rig_queue_show` takes an optional `waitSeconds`. `rig mcp token add … --person <entity_id>` lets a token-file grant answer that person's questions through the existing optional MCP connection. ([#3656](https://github.com/mvschwarz/openrig/pull/3656), [#3655](https://github.com/mvschwarz/openrig/pull/3655), [#3526](https://github.com/mvschwarz/openrig/pull/3526), [#3527](https://github.com/mvschwarz/openrig/pull/3527))
 
 `rig_team` shows network participants as remote, the project list includes declared rigs, and an ESM host can import `@openrig/cli/mcp.js`. ([#3672](https://github.com/mvschwarz/openrig/pull/3672), [#3671](https://github.com/mvschwarz/openrig/pull/3671), [#3682](https://github.com/mvschwarz/openrig/pull/3682))
 
-## Responsive coordination
+### Responsive coordination
 
 Queue list pages name handed-off rows' successors in one batched read, the stuck sweep reads successors from a bounded range, `/api/ps` folds only the rigs it returns, and completing a mission skips rebuilding the slice listing. These narrow particular slow reads; they aren't a release-wide speed-up. The slow-operation log names eight full queue scans still on the main thread; that shows where reads block and doesn't fix them. ([#3666](https://github.com/mvschwarz/openrig/pull/3666), [#3689](https://github.com/mvschwarz/openrig/pull/3689), [#3646](https://github.com/mvschwarz/openrig/pull/3646), [#3356](https://github.com/mvschwarz/openrig/pull/3356), [#3687](https://github.com/mvschwarz/openrig/pull/3687))
 
 `rig up --timeout <seconds>` sets the CLI's wait and a remote timeout reads unknown; the daemon's own start budget is unchanged. `rig start --concurrency N` runs up to N restores at once (default one). `daemon.identity_poll_interval_ms` sets the identity check's cadence. ([#3608](https://github.com/mvschwarz/openrig/pull/3608), [#3336](https://github.com/mvschwarz/openrig/pull/3336), [#3648](https://github.com/mvschwarz/openrig/pull/3648))
 
-## State that tells the truth
+### State that tells the truth
 
 A seat at its usage limit reads unknown with its reported reset, never working; this reports the limit and doesn't recover the account. Readiness counts active work, TUI lines with no source read not applicable, and an unchanged judge list keeps judgments current. ([#3510](https://github.com/mvschwarz/openrig/pull/3510), [#3620](https://github.com/mvschwarz/openrig/pull/3620), [#3624](https://github.com/mvschwarz/openrig/pull/3624), [#3629](https://github.com/mvschwarz/openrig/pull/3629))
 
 `rig stream show` names an item's intake row, `rig up` names seats that failed to launch, and a daemon that can't bind exits with one `OPENRIG_LISTEN_FAILED` line (code 69). `rig send` notes a seat's waiting permission or MCP elicitation request without holding the send. Watchdog status, handover recaps and package installs report more exactly. ([#3639](https://github.com/mvschwarz/openrig/pull/3639), [#3477](https://github.com/mvschwarz/openrig/pull/3477), [#3612](https://github.com/mvschwarz/openrig/pull/3612), [#3659](https://github.com/mvschwarz/openrig/pull/3659), [#3657](https://github.com/mvschwarz/openrig/pull/3657), [#3570](https://github.com/mvschwarz/openrig/pull/3570), [#3653](https://github.com/mvschwarz/openrig/pull/3653), [#3676](https://github.com/mvschwarz/openrig/pull/3676), [#3692](https://github.com/mvschwarz/openrig/pull/3692))
 
-## Recovery and seats
+### Recovery and seats
 
 A restore packet that outlives the PreCompact hook's wait is built in the background; meanwhile the earlier packet is kept aside, not delivered. Transcripts past 512 MB get a packet. Restore notices for a parentless seat go to the person. An open permission alert can try waking its owner again when it observes a new prompt. This change is source-tested; installed prompt-episode behavior has not been verified. ([#3709](https://github.com/mvschwarz/openrig/pull/3709), [#3582](https://github.com/mvschwarz/openrig/pull/3582), [#3640](https://github.com/mvschwarz/openrig/pull/3640), [#3650](https://github.com/mvschwarz/openrig/pull/3650), [#3678](https://github.com/mvschwarz/openrig/pull/3678), [#3680](https://github.com/mvschwarz/openrig/pull/3680), [#3611](https://github.com/mvschwarz/openrig/pull/3611))
 
 A Codex restart preview no longer writes `config.toml`, and Codex's activity hook survives a Node install move. Pi and OMP seats read recovered only when their checks agree and raise attention on a refused prompt. Large Claude settings use a private settings file, and snapshots find a rig by name. ([#3707](https://github.com/mvschwarz/openrig/pull/3707), [#3610](https://github.com/mvschwarz/openrig/pull/3610), [#3564](https://github.com/mvschwarz/openrig/pull/3564), [#3603](https://github.com/mvschwarz/openrig/pull/3603), [#3630](https://github.com/mvschwarz/openrig/pull/3630), [#3622](https://github.com/mvschwarz/openrig/pull/3622), [#3532](https://github.com/mvschwarz/openrig/pull/3532), [#2892](https://github.com/mvschwarz/openrig/pull/2892), [#3566](https://github.com/mvschwarz/openrig/pull/3566), [#3476](https://github.com/mvschwarz/openrig/pull/3476))
 
-## Queue, Slack, terminal and tools
+### Queue, Slack, terminal and tools
 
 - Queue: `rig queue update --expect-state` checks state inside the update (older daemons ignore it); workflow abort, sweeps, wakes and reminders handle more edge cases. ([#3567](https://github.com/mvschwarz/openrig/pull/3567), [#3662](https://github.com/mvschwarz/openrig/pull/3662), [#3609](https://github.com/mvschwarz/openrig/pull/3609), [#3541](https://github.com/mvschwarz/openrig/pull/3541), [#3623](https://github.com/mvschwarz/openrig/pull/3623), [#3651](https://github.com/mvschwarz/openrig/pull/3651), [#3647](https://github.com/mvschwarz/openrig/pull/3647), [#3481](https://github.com/mvschwarz/openrig/pull/3481), [#3594](https://github.com/mvschwarz/openrig/pull/3594), [#3174](https://github.com/mvschwarz/openrig/pull/3174))
 - Slack: direct-ask closes record who answered, settled cards show labels as written, and repeated notices edit one post. ([#3644](https://github.com/mvschwarz/openrig/pull/3644), [#3577](https://github.com/mvschwarz/openrig/pull/3577), [#3397](https://github.com/mvschwarz/openrig/pull/3397))
 - Terminal: Source tests cover ignoring stale tmux-probe results after newer state arrives; installed outage and recovery behavior has not been verified. tmux 3.4 keeps OpenRig's panes, Herdr views recover after a restart, and the TUI seat page offers run ▸. ([#3493](https://github.com/mvschwarz/openrig/pull/3493), [#3514](https://github.com/mvschwarz/openrig/pull/3514), [#3371](https://github.com/mvschwarz/openrig/pull/3371), [#3501](https://github.com/mvschwarz/openrig/pull/3501), [#3641](https://github.com/mvschwarz/openrig/pull/3641), [#3380](https://github.com/mvschwarz/openrig/pull/3380))
 - Tools and docs: sandbox proxies are honoured, frontmatter, Git context and bundle links handle edge cases, `tar` is past an advisory range, and the reference gains four topics. ([#3557](https://github.com/mvschwarz/openrig/pull/3557), [#3294](https://github.com/mvschwarz/openrig/pull/3294), [#3695](https://github.com/mvschwarz/openrig/pull/3695), [#3696](https://github.com/mvschwarz/openrig/pull/3696), [#3694](https://github.com/mvschwarz/openrig/pull/3694), [#3381](https://github.com/mvschwarz/openrig/pull/3381), [#3607](https://github.com/mvschwarz/openrig/pull/3607), [#3626](https://github.com/mvschwarz/openrig/pull/3626), [#3627](https://github.com/mvschwarz/openrig/pull/3627), [#3619](https://github.com/mvschwarz/openrig/pull/3619))
 
-## Seat pools
+### Seat pools
 
 The seat pool still has no on-switch. A stored launch warns once about an unusable `pool:` block, the planner reports `max_reached` though nothing calls it, and the docs name which commands leave pool agents out. ([#3559](https://github.com/mvschwarz/openrig/pull/3559), [#3652](https://github.com/mvschwarz/openrig/pull/3652), [#3632](https://github.com/mvschwarz/openrig/pull/3632))
 
-## Known limits
+### Known limits
 
 - A restore or `rig start` can label a Claude seat `resumed` before its conversation is confirmed, and a send can land on Claude's trust dialog. Check the seat's screen; a fix has merged for a later release.
 - A `rig send` while Claude's `AskUserQuestion` dialog is open can become its answer (seen on Claude Code 2.1.322 and 2.1.323).
@@ -77,7 +155,7 @@ The seat pool still has no on-switch. A stored launch warns once about an unusab
 - A return route doesn't guarantee a question's arrival.
 - A fresh npm install can print a peer-dependency warning for @hono/node-ws and leave npm ls reporting an invalid dependency graph. The default daemon start and terminal WebSocket round trip worked in the tested installation.
 
-## Credits
+### Credits
 
 Thanks to Aschenbath, Dery Ferdika, Edward Bowie, Evgeny Zotov, JUSHUANGHUI LI, James B. Shields, Mike Schwarz, NIKHILA, Roberto Campos, Wu Shuwen, billbenetti, and ziadeh. Their contributions also keep test daemons off the default port and let a contributor's checkout install under npm 12.
 
