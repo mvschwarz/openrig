@@ -532,7 +532,9 @@ export class CodexInPlaceRestart {
       if (!facts.cwd) return { ok: false, code: "settings_unverified", message: "The running Codex's working directory could not be read. Nothing was stopped." };
       cwd = facts.cwd;
     }
-    const relaunchBinding: NodeBinding = { ...binding, cwd };
+    // Codex works in its -C directory, which keeps the process's own cwd (a launch from another directory shows the
+    // launcher's), so the relaunch names the running Codex's -C when it had one, else the observed directory.
+    const relaunchBinding: NodeBinding = { ...binding, cwd: runningWorkingRoot(runningArgv, cwd) };
     let launchShell: string | undefined;
     if (binding.launchWrapper?.length) {
       launchShell = paneShape === "shell_backed"
@@ -1060,6 +1062,18 @@ const VALUE_OPTIONS: Record<string, keyof Omit<EffectiveSettings, "bypass" | "co
   "-a": "approval", "--ask-for-approval": "approval", "-c": "config", "--config": "config",
   "-C": null, "--cd": null, "--add-dir": null, "-i": null, "--image": null,
 };
+
+/** The directory a running Codex works in: its last -C/--cd (relative to `cwd`, its process cwd), else `cwd`. */
+function runningWorkingRoot(argv: string[], cwd: string): string {
+  let root: string | undefined;
+  for (let index = 1; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    if (arg.startsWith("--cd=")) root = arg.slice("--cd=".length);
+    else if ((arg === "-C" || arg === "--cd") && argv[index + 1] !== undefined) root = argv[++index];
+    else if (Object.hasOwn(VALUE_OPTIONS, arg)) index += 1;
+  }
+  return root ? nodePath.resolve(cwd, root) : cwd;
+}
 
 /** The launch choices a running Codex's argv records, reused so the relaunch keeps them without probing. */
 function runningLaunch(argv: string[]): RunningCodexLaunch {
