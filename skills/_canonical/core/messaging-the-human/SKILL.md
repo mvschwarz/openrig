@@ -1,6 +1,6 @@
 ---
 name: messaging-the-human
-description: "Use when project policy calls for a human decision or update, a human delivery is pending or failed, or a reply must resume the right work."
+description: "Use when you're about to ask a person something (a question, a choice or an approval), before you use your harness's own question prompt, which shows only in your terminal; and when project policy calls for a human decision or update, a human delivery is pending or failed, or a reply must resume the right work."
 metadata:
   cli_surfaces_referenced:
     - gateway human list

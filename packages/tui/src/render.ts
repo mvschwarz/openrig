@@ -72,6 +72,36 @@ function padLeft(text: string | number | null | undefined, width: number): strin
   return fit(text, width, "right");
 }
 
+const commandGraphemes = new Intl.Segmenter();
+
+function commandViewport(draft: string, cols: number, caret = draft.length): string {
+  const prefix = "cmd ▸ ";
+  if (!draft) return `${prefix}▊`;
+  const budget = cols - columns(prefix) - 1;
+  if (budget <= 0) return `${prefix.slice(0, Math.max(0, cols - 1))}▊`;
+
+  const segments = commandGraphemes.segment(draft);
+  const point = segments.containing(caret)?.index ?? draft.length;
+  const after = draft.slice(point);
+  const afterWidth = columns(after);
+  const beforeWidth = columns(draft.slice(0, point));
+  const rightContext = Math.min(afterWidth, Math.floor(budget / 2));
+  let left = budget - rightContext - 1;
+  let start = point;
+  if (beforeWidth <= budget) {
+    start = 0;
+  } else {
+    for (let part = segments.containing(start - 1); part; part = segments.containing(start - 1)) {
+      left -= columns(part.segment);
+      if (left < 0) break;
+      start = part.index;
+    }
+  }
+  const before = (start > 0 ? "…" : "") + draft.slice(start, point);
+  const right = budget - columns(before);
+  return `${prefix}${before}▊${right > 0 ? pad(after, right) : ""}`;
+}
+
 type Align = "left" | "right";
 type AgentColumnKey = "rig" | "pod" | "seat" | "runtime" | "model" | "effort" | "context" | "status" | "queue" | "work" | "now" | "actions";
 type AgentColumn = [key: AgentColumnKey, name: string, width: number, align: Align];
@@ -1507,6 +1537,8 @@ export interface RenderOptions {
   /** I5 — the live command context (from the C3 detector); default "standard". */
   commandContext?: string;
   completion?: { candidates: string[]; message: string } | null;
+  /** Display-only UTF-16 insertion offset; the terminal editor defaults to the end. */
+  readonly commandCaret?: number;
   cols?: number;
   rows?: number;
   /** wall-clock ms for time-driven motion (spinner frames, flash windows);
@@ -1680,7 +1712,7 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   const flashRows: number[] = [];
   let flashAck = false;
 
-  lines.push(pad(`cmd ▸ ${inputLine}▊${inputLine ? "" : "  " + readStatus(load, state.timeZone)}`, cols));
+  lines.push(pad(commandViewport(inputLine, cols, options.commandCaret) + (inputLine ? "" : "  " + readStatus(load, state.timeZone)), cols));
   if (load.stale && !inputLine) hitMap.push({ y: 1, x1: 9, x2: cols, action: { type: "noop" } });
   if (options.completion) {
     lines.push(pad(options.completion.message, cols));
@@ -1854,14 +1886,14 @@ function crashCartShell(
   contentTitle: string,
   cols: number,
   rows: number,
-  inputLine: string,
+  commandLine: string,
   opts?: { wrap?: boolean; scroll?: number },
 ): Screen {
   const explW = explorerWidth(cols);
   const lines: string[] = [];
   const segRows: NonNullable<Screen["segRows"]> = {};
   const hitMap: Screen["hitMap"] = [];
-  lines.push(pad(`cmd ▸ ${inputLine}▊`, cols));
+  lines.push(pad(commandLine, cols));
   lines.push(paneRule(cols, explW, "top", "{ EXPLORER }", contentTitle));
 
   // The explorer's source note, then any discovered rigs (name + seat count).
@@ -1982,7 +2014,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
     })), Math.max(1, cols - explW - 2));
     const selected = content.findIndex((line) => line.action?.type === "startup" && line.action.key === `select:${startup.local?.selected ?? startup.selected}`);
     const scroll = startup.local && !startup.local.result.entries ? startup.local.scroll : startup.expanded ? startup.scroll : Math.max(0, selected - Math.max(1, rows - 12));
-    const screen = crashCartShell(content, { note: "startup", rows: [] }, "START AND RETURN", cols, rows, "", { scroll });
+    const screen = crashCartShell(content, { note: "startup", rows: [] }, "START AND RETURN", cols, rows, commandViewport("", cols), { scroll });
     screen.lines[rows - 1] = pad("? Help · w Skip · L Local · ↑↓ scroll · Enter read · Esc Back · q Quit", cols);
     return screen;
   }
@@ -1992,12 +2024,13 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   // verbatim; all rails stand. DOWN → cockpit; UNVERIFIED → cannot-verify (no restore).
   // B1 ROUND 2 — an ACTIVE fleet restore takes precedence over the cockpit: the operator sees live
   // progress (from the poll stream) and, on done, the rollup + keyboard-walkable triage list.
+  const commandLine = commandViewport(inputLine, cols, options.commandCaret);
   if (options.restore) {
     const led = buildLedgerExplorer(options.crashCart?.foundOnHost ?? []);
     // wrap: the triage needs are full sentences — wrap them to the pane so the EXACT need is never
     // clipped off the edge. scroll: a triage list longer than the viewport is vertically scrollable so
     // the final row's exact need is reachable (HIGH-2 — keyboard-walkable, not viewport-truncated).
-    return crashCartShell(renderRestoreLifecycleView(options.restore), led, "RESTORE", cols, rows, inputLine, {
+    return crashCartShell(renderRestoreLifecycleView(options.restore), led, "RESTORE", cols, rows, commandLine, {
       wrap: true,
       scroll: options.restoreScroll ?? 0,
     });
@@ -2014,7 +2047,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
       { text: "" },
       { text: "r retry · d details · q quit" },
       ...(options.unavailableExpanded ? [{ text: "" }, { text: detail }] : []),
-    ], { note: "state unavailable", rows: [] }, "STARTUP", cols, rows, inputLine,
+    ], { note: "state unavailable", rows: [] }, "STARTUP", cols, rows, commandLine,
     { wrap: true, scroll: options.restoreScroll ?? 0 });
   }
   if (options.daemonState === "down" && options.crashCart) {
@@ -2026,11 +2059,11 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
       : options.confirm
       ? [...renderConfirmBanner(options.confirm), ...renderCrashCartView(options.crashCart)]
       : renderCrashCartView(options.crashCart);
-    return crashCartShell(content, led, "CRASH-CART", cols, rows, inputLine, options.confirm ? { wrap: true } : undefined);
+    return crashCartShell(content, led, "CRASH-CART", cols, rows, commandLine, options.confirm ? { wrap: true } : undefined);
   }
   if (options.daemonState === "unverified" && options.daemonEvidence) {
     const led = { note: "daemon unverified", rows: [] }; // No ledger discovery occurred on this path.
-    return crashCartShell(renderUnverifiedView(options.daemonEvidence), led, "DAEMON?", cols, rows, inputLine);
+    return crashCartShell(renderUnverifiedView(options.daemonEvidence), led, "DAEMON?", cols, rows, commandLine);
   }
   // PULSE (founder Option-B): a content-pane view inside the NORMAL explorer│
   // content chrome — renderPulseScreen builds its own split (sidebar + lanes)
@@ -2054,7 +2087,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   // shell accepts typing from the empty state, so the honest readiness
   // affordance must show BEFORE the first key (no new focus state; stylize
   // paints the cell; the shared motion clock controls its visibility).
-  lines.push(pad(`cmd ▸ ${inputLine}▊${inputLine ? "" : "  " + readStatus(load, state.timeZone)}`, cols));
+  lines.push(pad(commandLine + (inputLine ? "" : "  " + readStatus(load, state.timeZone)), cols));
   if (load.stale && !inputLine) hitMap.push({ y: 1, x1: 9, x2: cols, action: { type: "noop" } });
   if (options.completion) {
     lines.push(pad(options.completion.message, cols));

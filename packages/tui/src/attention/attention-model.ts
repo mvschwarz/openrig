@@ -108,11 +108,9 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
       }
       // The settings page that decides this request directly (a pairing request's Approve and Deny), opened on it.
       if (d.item.settingsLink) lines.push(listItem(d.item.settingsLink.label, { type: "config-category", category: d.item.settingsLink.category, focus: d.item.settingsLink.focus }));
-      // Chat, as on the Feed card: open the asker's own terminal to answer in your own words.
       if (d.item.asker) {
-        const view = seatViewOf(snap, d.item.asker);
-        lines.push(view ? listItem(`Chat with ${d.item.asker} (opens its terminal)`, { type: "act", act: "open-terminal", view })
-          : { text: `Chat: ${d.item.asker} isn't in this instance's loaded topology.` });
+        lines.push(askerTerminalLink(snap, d.item.asker)
+          ?? { text: `Chat: ${d.item.asker} isn't in this instance's loaded topology.` });
       }
       lines.push({ text: `Source: ${d.item.source}` });
     }
@@ -126,6 +124,7 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
       if (!items.length) lines.push({ text: state.filter ? "  No matches in the served items." : bad.some(s => kind === "action" ? s.source === "queue" : s.source !== "queue") ? "  Unknown: a required source is unavailable or partial." : "  No current items in the available source window." });
       for (const i of items) {
         lines.push(listItem(`[${i.urgency}] ${i.summary}`, { type: "attention-open", id: i.id }));
+        if (i.asker) lines.push(askerTerminalLink(snap, i.asker, 4) ?? { text: `    From: ${i.asker}` });
         if (i.recipient) lines.push({ text: `    To: ${i.recipient}` });
         if (i.humanQuestions?.length) lines.push({ text: `    Questions: ${i.humanQuestions.length}, ${unansweredCount(i)} unanswered` });
         if (i.id.startsWith("human-update:") || i.id.startsWith("queue-update:")) lines.push({ text: "    No action needed" });
@@ -198,6 +197,11 @@ function questionLines(item: AttentionItem): string[] {
       ? `answered: ${q.options.find(o => o.id === answer)?.label ?? answer}` : `answered in their words: ${answer.text}`;
     return [`${n + 1}. ${q.question} (${state})`, `   Options: ${q.options.map(o => o.recommended ? `${o.label} (recommended)` : o.label).join(" · ")}`];
   })];
+}
+
+function askerTerminalLink(snap: FleetSnapshot, asker: string, indent = 2): ContentLine | null {
+  const view = seatViewOf(snap, asker);
+  return view ? listItem(`Chat with ${asker} (opens its terminal)`, { type: "act", act: "open-terminal", view }, indent) : null;
 }
 
 /** The terminal view of one local seat, the same view as the agents table's own `term ▸`. */

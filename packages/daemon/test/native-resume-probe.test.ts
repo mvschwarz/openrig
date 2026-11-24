@@ -18,7 +18,7 @@ const firstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login.t
 const legacyFirstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login-0.162.1.txt", import.meta.url), "utf8");
 const apiKeyLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-api-key-login.txt", import.meta.url), "utf8");
 const narrowFirstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login-80x24.txt", import.meta.url), "utf8");
-const managedFirstLoginPrompts = ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt"]
+const managedFirstLoginPrompts = ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt", "codex-first-login-0.171.0.txt"]
   .map(name => fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
 
 describe("Codex first-login readiness", () => {
@@ -471,7 +471,22 @@ describe("native resume probe", () => {
       status: "resumed",
       code: "active_runtime",
       detail: "Claude is the active foreground process in the probe pane.",
+      foregroundOnly: true,
     });
+  });
+
+  it("reads an auto-mode composer whose header scrolled out as Claude's drawn screen, not the process alone", () => {
+    const probe = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
+      paneContent: `● Done.\n${"─".repeat(60)}\n❯ \n${"─".repeat(60)}\n  ⏵⏵ auto mode on (shift+tab to cycle)` });
+    expect(probe).toMatchObject({ status: "resumed", code: "active_runtime" });
+    expect(probe.foregroundOnly).toBeUndefined();
+  });
+
+  it("reads the trust dialog's heading, drawn before its options, as the trust gate, not the foreground process", () => {
+    const heading = "user@host:~$ ( . '/home/user/tmp/openrig-tmux-send-launch.txt' )\n\n" + "─".repeat(80)
+      + "\n Accessing workspace:\n\n /home/user";
+    expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent: heading }))
+      .toMatchObject({ status: "inconclusive", code: "trust_gate" });
   });
 
   it("classifies a Claude workspace trust prompt as blocked, not resumed", () => {

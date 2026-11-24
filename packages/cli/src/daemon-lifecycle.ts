@@ -5,7 +5,7 @@ import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemo
 import { daemonFetch, SandboxProxyError } from "./daemon-transport.js";
 import { blockedConnectionGuidance, daemonMayAnswer, isBlockedConnectionCode } from "./daemon-reachability.js";
 export { daemonMayAnswer } from "./daemon-reachability.js";
-import type { DaemonStartLock } from "./daemon-start-lock.js";
+import type { DaemonStartLock, ReservationMark } from "./daemon-start-lock.js";
 import { DAEMON_START_READINESS_WAIT_MS as STARTUP_READINESS_DEADLINE_MS, DAEMON_START_PROBE_TIMEOUT_MS as STARTUP_PROBE_TIMEOUT_MS, DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, occupiedPortGuidance, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
 import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
@@ -253,6 +253,8 @@ export interface StartOptions {
   // into the daemon process env as OPENRIG_NO_KERNEL.
   skipKernelBoot?: boolean;
   allowDbConflict?: boolean;
+  /** #3637: how long this start waits for its child's readiness (daemon.start_readiness_wait_seconds); 180 s when unset. */
+  readinessWaitSeconds?: number;
 }
 
 export interface LifecycleDeps {
@@ -298,6 +300,9 @@ export interface LifecycleDeps {
   /** #3315 — release a spent start reservation still holding exactly `raw` (production: archiveSpentReservation);
    *  returns where it went, or undefined when it was left in place. Absent = stop never releases one. */
   releaseStartReservation?: (file: string, raw: string) => string | undefined;
+  /** #3637: records on the reservation that stop is stopping or retained it (`markReservationRetained`): its new text,
+   *  that it changed, or that the mark couldn't be written (and the claim it still holds, if it took one). */
+  retainStartReservation?: (file: string, raw: string, reason: string) => ReservationMark;
   // OPR.0.4.2.1 — optional injectable delay for the status-probe bounded settle/retry.
   // Defaults to a real setTimeout in production; tests pass a no-op to stay fast. Optional so
   // existing deps / mocks / callers are untouched.
@@ -324,7 +329,7 @@ const DEFAULT_DB = "openrig.sqlite";
 // bounded, but do not kill a healthy daemon during first-boot slack.
 // #1786: one elapsed deadline, started when the readiness loop begins (after the
 // child is spawned and its handlers are attached), covers every primary probe,
-// listener check and backoff in one 180-second owned-child wait. Each probe
+// listener check and backoff in one owned-child wait of daemon.start_readiness_wait_seconds (default 180 s). Each probe
 // may take up to STARTUP_PROBE_TIMEOUT_MS, so a busy child that answers correctly
 // in a second is accepted, but no probe timer outlives the deadline (a 2s startup
 // ceiling, not a universal header wait). The deadline only stops new probes and
@@ -739,6 +744,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
   // (loopback + tailscale auto-detect).
   const explicitHost = opts.host;
   const probeHost = explicitHost ?? DEFAULT_HOST;
+  const readinessWaitMs = opts.readinessWaitSeconds !== undefined ? opts.readinessWaitSeconds * 1000 : STARTUP_READINESS_DEADLINE_MS;
 
   // Check if already running
   const existing = readState(deps);
@@ -893,7 +899,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     let lastProbe = "health endpoint not responding";
     let unverified: string[] | null = null;
     const readinessStartedAt = Date.now();
-    deadline = readinessStartedAt + STARTUP_READINESS_DEADLINE_MS;
+    deadline = readinessStartedAt + readinessWaitMs;
     let nextProgressAt = readinessStartedAt + STARTUP_PROGRESS_INTERVAL_MS;
     // Since when only listeners other than the probed one have been uncertain, round after round.
     let secondaryOnlySince: number | null = null;
@@ -932,7 +938,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       if (unverified === null || unverified.some((host) => formatDaemonHostForUrl(host) === formatDaemonHostForUrl(probeHost))) secondaryOnlySince = null;
       else if (Date.now() - (secondaryOnlySince ??= Date.now()) >= STARTUP_SECONDARY_GRACE_MS) break;
       if (remaining() > 0 && Date.now() >= nextProgressAt) {
-        console.error(`Waiting for daemon child ${pid} readiness (${Math.floor((Date.now() - readinessStartedAt) / 1000)}s elapsed; ${STARTUP_READINESS_DEADLINE_MS / 1000}s limit). This start has not published readiness.`);
+        console.error(`Waiting for daemon child ${pid} readiness (${Math.floor((Date.now() - readinessStartedAt) / 1000)}s elapsed; ${readinessWaitMs / 1000}s limit). This start has not published readiness.`);
         nextProgressAt = Date.now() + STARTUP_PROGRESS_INTERVAL_MS;
       }
       await Promise.race([new Promise((resolve) => setTimeout(resolve, Math.min(HEALTHZ_DELAY_MS, remaining()))), failed]);
@@ -1041,17 +1047,20 @@ interface StartReservation {
   startToken?: string; pidNamespace?: string; endpoint?: string;
 }
 
-/** #3315 — the strict read stop acts on: exactly the launcher record and the one child record startDaemon writes. */
+/** #3315 — the strict read stop acts on: exactly the launcher record and the one child record startDaemon writes,
+ *  then only the retention records an earlier stop appended (#3637). */
 function readStartReservation(deps: LifecycleDeps, file: string): StartReservation | "absent" | "malformed" {
   const raw = deps.exists(file) ? deps.readFile(file) : null;
   if (raw === null) return "absent";
   const lines = raw.split("\n").filter((line) => line.trim());
-  if (lines.length !== 2) return "malformed";
+  if (lines.length < 2) return "malformed";
   let head: Record<string, unknown>;
   let child: Record<string, unknown>;
   try {
     head = JSON.parse(lines[0]!) ?? {};
     child = JSON.parse(lines[1]!) ?? {};
+    // #3637: after them, only the records of an earlier stop that retained it.
+    for (const line of lines.slice(2)) if ((JSON.parse(line) as { retainedBy?: unknown } | null)?.retainedBy !== "stop") return "malformed";
   } catch {
     return "malformed";
   }
@@ -1090,7 +1099,7 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
   const r = readStartReservation(deps, file);
   if (r === "absent") return undefined;
   const refuse = (why: string) => ({ refusal: `Start reservation ${file} not used: ${why}; no signal sent.` });
-  if (r === "malformed") return refuse("it is not a launcher record followed by one child record");
+  if (r === "malformed") return refuse("it is not a launcher record followed by one child record (and any stop retention records)");
   if (deps.exists(resolveLifecycleFile(deps, "daemon.json"))) {
     return refuse("a daemon.json is present but unreadable, and nothing ties it to the reserved child");
   }
@@ -1158,31 +1167,77 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
   const after = childIdentity(" after the listener check");
   if (after) return refuse(after);
 
-  const notBefore = Date.now();
-  deps.kill(r.childPid, "SIGTERM");
-  const deadline = Date.now() + DAEMON_STOP_WAIT_MS;
-  while (deps.isProcessAlive(r.childPid) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  // #3637: mark it before the signal, so no start archives it while this stop verifies the shutdown. A reservation
+  // that changed refuses, as before; a mark that just couldn't be written doesn't: the stop checks the child again,
+  // goes on and says so. If the mark call took the removers' claim, the stop holds it until the shutdown is verified
+  // and writes any retention under it, so no start archives the reservation meanwhile.
+  let current = r.raw;
+  let holding: Extract<ReservationMark, { unwritten: string }> | undefined;
+  if (deps.retainStartReservation) {
+    const mark = deps.retainStartReservation(file, current, "stopping");
+    if ("changed" in mark) return refuse(`the reservation changed while stop was checking it: ${mark.changed}`);
+    if ("written" in mark) current = mark.written;
+    else {
+      // A claim that is not this stop's may be a removal in progress, which only follows a dead child: check it again.
+      const again = childIdentity(" after the stopping mark");
+      if (again) { mark.release?.(); return refuse(again); }
+      if (mark.release) holding = mark;
+      console.warn(`Start reservation ${file}: the "stopping" mark was not written: ${mark.unwritten}; stop checked the child again and goes on.`);
+    }
   }
-  const present = deps.isProcessAlive(r.childPid);
-  const effect = await ctx.listener();
-  const observation = `targeted ${ctx.target}; checked ${ctx.check}; start-reservation child PID ${r.childPid} ${present ? "present" : "absent"}; listener ${effect}; SIGTERM requested at ${new Date(notBefore).toISOString()}`;
-  if (present) {
-    throw new Error(`Daemon did not exit after SIGTERM within ${DAEMON_STOP_WAIT_MS}ms; ${observation}` +
-      (effect === "responding" ? " (still listening)" : "") + "; start reservation retained.");
+  const verified = (): void => { holding?.release?.(); holding = undefined; };
+  try {
+    const notBefore = Date.now();
+    deps.kill(r.childPid, "SIGTERM");
+    const deadline = Date.now() + DAEMON_STOP_WAIT_MS;
+    while (deps.isProcessAlive(r.childPid) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const present = deps.isProcessAlive(r.childPid);
+    const effect = await ctx.listener();
+    const observation = `targeted ${ctx.target}; checked ${ctx.check}; start-reservation child PID ${r.childPid} ${present ? "present" : "absent"}; listener ${effect}; SIGTERM requested at ${new Date(notBefore).toISOString()}`;
+    // #3637: each retention below is recorded on the reservation, so a later start keeps refusing it; the error says
+    // when the record couldn't be written, and why.
+    const retained = (reason: string): string => {
+      if (!deps.retainStartReservation) return "start reservation retained";
+      // Under the claim this stop still holds, if it holds one; then that claim goes.
+      const mark = holding?.retry ? holding.retry(reason) : deps.retainStartReservation(file, current, reason);
+      verified();
+      if ("changed" in mark) return `start reservation changed while stop was verifying: ${mark.changed} (inspect ${file})`;
+      if ("unwritten" in mark) {
+        mark.release?.();
+        const unmarked = current === r.raw ? "; a later start may take it for abandoned" : "";
+        return `start reservation kept, but its retention record was not written: ${mark.unwritten}${unmarked} (inspect ${file})`;
+      }
+      current = mark.written;
+      return "start reservation retained";
+    };
+    if (present) {
+      const kept = retained("not-exited");
+      throw new Error(`Daemon did not exit after SIGTERM within ${DAEMON_STOP_WAIT_MS}ms; ${observation}` +
+        (effect === "responding" ? " (still listening)" : "") + `; ${kept}.`);
+    }
+    if (effect !== "refused") {
+      const kept = retained("listener-unverified");
+      throw new Error(`Daemon stop verification is unverified: ${observation}; ${kept}.`);
+    }
+    const { receipt, receiptPath } = readShutdownReceipt(deps, path.join(home, "daemon.json"));
+    if (!(receipt?.pid === r.childPid && Date.parse(receipt.startedAt) >= notBefore)) {
+      const kept = retained("no-receipt");
+      throw new Error(`Daemon process stopped; ${observation}; drain completion unverified (no matching shutdown receipt); ${kept}. Inspect ${path.join(home, "daemon.log")}.`);
+    }
+    if (!isCleanShutdown(receipt)) {
+      const kept = retained("incomplete-shutdown");
+      throw new Error(`Daemon stopped with incomplete shutdown: ${receipt.outcome}; phase=${receipt.phase}; ${observation}. Pending effects are unverified; ${kept}; inspect ${receiptPath}.`);
+    }
+    // Both PIDs it names are gone: release the reservation, unless it changed meanwhile.
+    verified();
+    const released = liveness(r.launcherPid) === "dead" ? deps.releaseStartReservation?.(file, current) : undefined;
+    if (!released) console.warn(`Start reservation ${file} was not released; inspect it before 'rig daemon start'.`);
+    return "stopped";
+  } finally {
+    verified();
   }
-  if (effect !== "refused") throw new Error(`Daemon stop verification is unverified: ${observation}; start reservation retained.`);
-  const { receipt, receiptPath } = readShutdownReceipt(deps, path.join(home, "daemon.json"));
-  if (!(receipt?.pid === r.childPid && Date.parse(receipt.startedAt) >= notBefore)) {
-    throw new Error(`Daemon process stopped; ${observation}; drain completion unverified (no matching shutdown receipt); start reservation retained. Inspect ${path.join(home, "daemon.log")}.`);
-  }
-  if (!isCleanShutdown(receipt)) {
-    throw new Error(`Daemon stopped with incomplete shutdown: ${receipt.outcome}; phase=${receipt.phase}; ${observation}. Pending effects are unverified; start reservation retained; inspect ${receiptPath}.`);
-  }
-  // Both PIDs it names are gone: release the reservation, unless it changed meanwhile.
-  const released = liveness(r.launcherPid) === "dead" ? deps.releaseStartReservation?.(file, r.raw) : undefined;
-  if (!released) console.warn(`Start reservation ${file} was not released; inspect it before 'rig daemon start'.`);
-  return "stopped";
 }
 
 export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-target"> {

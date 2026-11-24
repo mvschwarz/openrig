@@ -52,6 +52,7 @@ interface InstanceRow {
   spec_json?: string | null;
   /** Migration 154 (#2730): the root objective it was started with; null for older instances. */
   root_objective?: string | null;
+  run_title?: string | null;
 }
 
 /** Defensive column probe (the detectQueueColumn house pattern) —
@@ -92,6 +93,7 @@ export interface CreateWorkflowInstanceInput {
   startedSpec?: StartedWorkflowSpec;
   /** #2730: what the run is for, as `--root-objective` gave it. */
   rootObjective?: string;
+  runTitle?: string;
   lifecycle?: {
     operationKey: string;
     compiledInputDigest: string;
@@ -119,6 +121,7 @@ export class WorkflowInstanceStore {
   private readonly hasBoundPodColumn: boolean;
   private readonly hasSpecColumn: boolean;
   private readonly hasRootObjectiveColumn: boolean;
+  private readonly hasRunTitleColumn: boolean;
   private readonly hasFrontierBindingsTable: boolean;
   private readonly hasFailureOccurrencesTable: boolean;
 
@@ -134,6 +137,7 @@ export class WorkflowInstanceStore {
     this.hasScopeColumn = detectInstanceColumn(db, "scope_json");
     this.hasSpecColumn = detectInstanceColumn(db, "spec_json");
     this.hasRootObjectiveColumn = detectInstanceColumn(db, "root_objective");
+    this.hasRunTitleColumn = detectInstanceColumn(db, "run_title");
     this.hasFrontierBindingsTable = tableExists(db, "workflow_frontier_bindings");
     this.hasFailureOccurrencesTable = tableExists(db, "workflow_failure_occurrences");
   }
@@ -163,6 +167,9 @@ export class WorkflowInstanceStore {
     const specVal = this.hasSpecColumn ? ", ?, ?" : "";
     const objectiveCol = this.hasRootObjectiveColumn ? ", root_objective" : "";
     const objectiveVal = this.hasRootObjectiveColumn ? ", ?" : "";
+    if (input.runTitle && !this.hasRunTitleColumn) throw new WorkflowInstanceError("run_title_unavailable", "workflow run title requires migration 194");
+    const titleCol = this.hasRunTitleColumn ? ", run_title" : "";
+    const titleVal = this.hasRunTitleColumn ? ", ?" : "";
     const params: unknown[] = [
       instanceId,
       input.workflowName,
@@ -184,12 +191,13 @@ export class WorkflowInstanceStore {
     if (this.hasScopeColumn) params.push(input.scope ? JSON.stringify(input.scope) : null);
     if (this.hasSpecColumn) params.push(input.startedSpec?.sourcePath ?? null, input.startedSpec ? JSON.stringify(input.startedSpec.spec) : null);
     if (this.hasRootObjectiveColumn) params.push(input.rootObjective ?? null);
+    if (this.hasRunTitleColumn) params.push(input.runTitle ?? null);
     this.db
       .prepare(
         `INSERT INTO workflow_instances (
            instance_id, workflow_name, workflow_version, created_by_session,
-           created_at, status, current_frontier_json, current_step_id, hop_count${boundRigCol}${podCol}${lifecycleCols}${scopeCol}${specCol}${objectiveCol}
-         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0${boundRigVal}${podVal}${lifecycleVals}${scopeVal}${specVal}${objectiveVal})`,
+           created_at, status, current_frontier_json, current_step_id, hop_count${boundRigCol}${podCol}${lifecycleCols}${scopeCol}${specCol}${objectiveCol}${titleCol}
+         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0${boundRigVal}${podVal}${lifecycleVals}${scopeVal}${specVal}${objectiveVal}${titleVal})`,
       )
       .run(...(params as never[]));
     return this.getByIdOrThrow(instanceId);
@@ -516,6 +524,7 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
       ? { sourcePath: row.spec_source_path, spec: JSON.parse(row.spec_json) as WorkflowSpec }
       : null,
     rootObjective: row.root_objective ?? null,
+    runTitle: row.run_title ?? null,
   };
 }
 

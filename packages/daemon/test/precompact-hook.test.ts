@@ -15,7 +15,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -44,7 +44,7 @@ const BRIDGE_SCRIPT = resolve(
 );
 const APPEND_MARKER = "Operator-configured post-compaction restore instruction";
 
-function runHook(openrigHome: string, withTranscript = true, extraEnv: NodeJS.ProcessEnv = {}, hook = HOOK_SCRIPT): { stdout: string; stderr: string; status: number | null } {
+function runHook(openrigHome: string, withTranscript = true, extraEnv: NodeJS.ProcessEnv = {}, hook = HOOK_SCRIPT, transcriptSize = 0): { stdout: string; stderr: string; status: number | null } {
   const fixtureRoot = dirname(openrigHome);
   const transcript = join(fixtureRoot, "transcript.jsonl");
   if (withTranscript) writeFileSync(transcript, `${JSON.stringify({
@@ -52,6 +52,8 @@ function runHook(openrigHome: string, withTranscript = true, extraEnv: NodeJS.Pr
     cwd: fixtureRoot,
     message: { role: "user", content: "Resume the private compaction fixture." },
   })}\n`);
+  // A larger size extends the file without writing it (a sparse file): the hook only reads its size.
+  if (withTranscript && transcriptSize) truncateSync(transcript, transcriptSize);
   const result = spawnSync(process.execPath, [hook], {
     input: JSON.stringify({ cwd: fixtureRoot, ...(withTranscript ? { transcript_path: transcript } : {}) }),
     encoding: "utf8",
@@ -543,6 +545,25 @@ setTimeout(() => { const dir = path.join(out, "late-packet"); fs.mkdirSync(dir, 
     const narrative = readFileSync(JSON.parse(run.stdout).narrative, "utf8");
     expect(narrative).toContain("before compaction");
     expect(narrative).not.toContain("appended after");
+  });
+
+  it("asks for a tail packet when the transcript is over 256 MB, and for the whole session otherwise", () => {
+    // A copy beside a stand-in that records the arguments it was given.
+    const scripts = join(tmpDir, "skill", "scripts");
+    mkdirSync(scripts, { recursive: true });
+    copyFileSync(HOOK_SCRIPT, join(scripts, "precompact-hook.mjs"));
+    const argsFile = join(tmpDir, "args.json");
+    writeFileSync(join(scripts, "restore-from-jsonl.mjs"), `import fs from "node:fs";
+fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));
+console.log(JSON.stringify({ ok: true, outputDir: ${JSON.stringify(tmpDir)} }));
+`);
+    const argsFor = (size: number) => {
+      expect(runHook(openrigHome, true, {}, join(scripts, "precompact-hook.mjs"), size).status).toBe(0);
+      return JSON.parse(readFileSync(argsFile, "utf8")) as string[];
+    };
+    expect(argsFor(300 * 1024 * 1024).slice(-2)).toEqual(["--tail-bytes", String(256 * 1024 * 1024)]);
+    expect(argsFor(256 * 1024 * 1024)).not.toContain("--tail-bytes");
+    expect(argsFor(0)).not.toContain("--tail-bytes");
   });
 });
 

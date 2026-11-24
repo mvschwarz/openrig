@@ -6,7 +6,9 @@ const { watch, createProofPolicyRead, readProjectReadiness, resolveProjectRoot, 
 }));
 // Real-location checks see every fixture path as itself (no links in these mocked trees).
 vi.mock("node:fs", () => ({ watch, existsSync: () => true, realpathSync: (p: string) => p }));
-vi.mock("../src/domain/proof/judgments.js", () => ({ createProofPolicyRead, readProjectReadiness, readProjectReadinessAsync: async (...args: unknown[]) => readProjectReadiness(...args), resolveProjectRoot, proofFs }));
+// The watcher's real-location walk is the real one, so it sees the node:fs mock above like the rest of the watcher does.
+vi.mock("../src/domain/proof/judgments.js", async (importOriginal) => ({ createProofPolicyRead, readProjectReadiness, readProjectReadinessAsync: async (...args: unknown[]) => readProjectReadiness(...args), resolveProjectRoot, proofFs,
+  nearestExistingAncestor: (await importOriginal<typeof import("../src/domain/proof/judgments.js")>()).nearestExistingAncestor }));
 import { watchProofSources } from "../src/domain/proof/source-watch.js";
 import type { EventBus } from "../src/domain/event-bus.js";
 afterEach(() => { vi.useRealTimers(); vi.resetAllMocks(); proofFs.exists.mockImplementation(() => true); });

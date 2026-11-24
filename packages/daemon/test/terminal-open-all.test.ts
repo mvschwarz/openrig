@@ -730,6 +730,28 @@ it.each([true, false])("combined same-name live rigs retain separate reuse ident
   expect(h.calls.filter(call => call.method === "workspace.close")).toEqual([]);
 });
 
+// Open all opens what's absent and focuses what's there, whoever calls it: a repeat without reuseLive adds no view and no
+// tile (each tile is one more tmux client of its seat). An explicit reuseLive: false still opens a copy.
+it.each([
+  [undefined, ["reused"], 1],
+  [false, ["opened"], 2],
+] as const)("open all with reuseLive=%s reuses a live workspace by default", async (reuseLive, outcomes, workspaces) => {
+  const h = makeInMemoryHerdr({ reuseLive: true });
+  const svc = new TerminalService({ ...privateTerminalTmuxDeps(), resolveProvider: () => h.adapter,
+    viewsStore: { get: () => null, list: () => [] }, listRigNames: () => ["alpha"],
+    listRigs: () => [{ id: "alpha-id", name: "alpha" }],
+    listRigSeats: () => [makeRigSeat("alpha", "lead"), makeRigSeat("alpha", "impl")], listPodSeats: () => null,
+    hasSession: () => true, resolveHost: () => null,
+  });
+  const first = await svc.openAll({ provider: "herdr" });
+  expect(first.rigs.map(row => row.outcome)).toEqual(["opened"]);
+  const tiles = h.panes.length;
+  const second = await svc.openAll({ provider: "herdr", ...(reuseLive === undefined ? {} : { reuseLive }) });
+  expect(second.rigs.map(row => row.outcome)).toEqual(outcomes);
+  expect(h.workspaces).toHaveLength(workspaces);
+  expect(h.panes).toHaveLength(tiles * workspaces);
+});
+
 it("combined exact ID wins over another rig name and complete ownership has no incomplete warning", async () => {
   const h = makeInMemoryHerdr();
   const seats = vi.fn((id: string) => [makeRigSeat(id === "collision" ? "wanted" : "collision", "op")]);

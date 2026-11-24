@@ -101,6 +101,7 @@ describe("READ_THROUGH_ALLOWLIST matcher (arch P1 — the named closed set)", ()
       "/api/specs/library",
       "/api/specs/library/rig-spec-1/review",
       "/api/scopes/slice", // #3093 fleet Projects: a fleet slice's detail keeps its origin host
+      "/api/queue/open-human-updates",
     ];
     for (const p of positives) expect(isReadThroughPath(p), p).toBe(true);
   });
@@ -154,6 +155,7 @@ describe("READ_THROUGH_ALLOWLIST matcher (arch P1 — the named closed set)", ()
       "/api/specs/library",
       "/api/specs/library/:id/review",
       "/api/scopes/slice", // #3093 fleet Projects read-view
+      "/api/queue/open-human-updates",
     ]);
   });
 });

@@ -14,7 +14,7 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import { shellQuote } from "./shell-quote.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
-import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME } from "../domain/native-resume-probe.js";
 import { verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
@@ -228,7 +228,8 @@ export class ClaudeResumeAdapter {
       code: "attention_required",
       message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
     }));
-    return result.ok ? { ...result, appliedLaunch, ...(tokenWarnings.length ? { warnings: tokenWarnings } : {}) } : result;
+    const warnings = result.ok ? [...tokenWarnings, ...(result.warnings ?? [])] : [];
+    return result.ok ? { ...result, appliedLaunch, ...(warnings.length ? { warnings } : {}) } : result;
   }
 
   private async verifyResume(tmuxSessionName: string, resumeToken: string): Promise<ResumeResult> {
@@ -268,7 +269,10 @@ export class ClaudeResumeAdapter {
         };
       }
 
-      if (probe.status === "resumed") {
+      // A foreground Claude alone is a running process, not a resumed conversation: keep polling for its screen (a dialog
+      // Claude opens first, such as its trust dialog in a moved folder, is drawn after the process starts) or its
+      // "No conversation found", and accept it at the final read below, with its warning, if that's still all there is.
+      if (probe.status === "resumed" && !probe.foregroundOnly) {
         return { ok: true };
       }
 
@@ -292,7 +296,7 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "attention_required", message: finalProbe.detail, evidence: finalContent.split("\n").slice(-12).join("\n") };
     }
     if (finalProbe.status === "resumed") {
-      return { ok: true };
+      return finalProbe.foregroundOnly ? { ok: true, warnings: [CLAUDE_PROCESS_ONLY_RESUME] } : { ok: true };
     }
 
     // The exact --resume identity is stronger evidence than a pane command or

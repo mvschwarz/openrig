@@ -30,6 +30,7 @@ import type {
   SnapshotData,
   SessionSourceSpec,
   NodeLaunchRecipe,
+  SeatSliceMode,
   StartupBlock,
   StartupFile,
 } from "./types.js";
@@ -156,6 +157,8 @@ function isStoredRigSpec(value: unknown): value is NodeLaunchRecipe["rigSpec"] {
   if (typeof spec.version !== "string" || typeof spec.name !== "string" || !Array.isArray(spec.pods)) return false;
   if (spec.cultureFile !== undefined && typeof spec.cultureFile !== "string") return false;
   if (spec.nonInterruptive !== undefined && typeof spec.nonInterruptive !== "boolean") return false;
+  if (spec.seatSlice !== undefined && spec.seatSlice !== "rig") return false;
+  if (spec.defaultOnboardingPack !== undefined && typeof spec.defaultOnboardingPack !== "boolean") return false;
   if (spec.permissionPolicy !== undefined && typeof spec.permissionPolicy !== "string") return false;
   if (spec.env !== undefined && !isStringRecord(spec.env)) return false;
   if (spec.managedBlocks !== undefined) {
@@ -199,6 +202,7 @@ function isStoredRigSpec(value: unknown): value is NodeLaunchRecipe["rigSpec"] {
         && (entry.permissionPolicy === undefined || typeof entry.permissionPolicy === "string")
         && (entry.env === undefined || isStringRecord(entry.env))
         && (entry.restorePolicy === undefined || typeof entry.restorePolicy === "string")
+        && (entry.keepAlive === undefined || typeof entry.keepAlive === "boolean")
         && (entry.compactionStrategy === undefined || typeof entry.compactionStrategy === "string")
         && (entry.mechanic === undefined || typeof entry.mechanic === "string")
         && (entry.startup === undefined || isStoredStartupBlock(entry.startup))
@@ -217,6 +221,7 @@ export interface RigStartupLayers {
   root: string;
   cultureFile?: string;
   startup?: StartupBlock;
+  defaultOnboardingPack?: boolean;
   podStartupFiles?: Record<string, StartupFile[]>;
   /** Export-only authored actions, never inherited by seats added later. */
   podStartupActions?: Record<string, StartupBlock["actions"]>;
@@ -341,6 +346,8 @@ interface NodeOptions {
   launchWrapper?: readonly string[] | null;
   /** The seat's own process limits (spec `process_limits`); null/absent = none. */
   processLimits?: ProcessLimits | null;
+  /** #2940: the seat's resolved keep_alive; absent = off. */
+  keepAlive?: boolean;
   /** #3416 (3): a Claude seat's status line throttle in seconds (spec `statusline_throttle`); null/absent = none. */
   statuslineThrottle?: number | null;
   /** #3395: the seat pool block this node is the model of (spec `pool`); null/absent = none. */
@@ -461,6 +468,31 @@ export class RigRepository {
     return row?.non_interruptive === 1;
   }
 
+  /** #80: persist the rig's seat grouping (spec `seat_slice`), or null for none. A grouping is never silently dropped:
+   *  without the column it needs a migration. */
+  setRigSeatSlice(rigId: string, mode: SeatSliceMode | null): void {
+    if (!this.hasRigColumn("seat_slice")) {
+      if (mode !== null) throw new Error("Cannot persist seat_slice: database migration is required");
+      return;
+    }
+    this.db.prepare("UPDATE rigs SET seat_slice = ?, updated_at = ? WHERE id = ?").run(mode, new Date().toISOString(), rigId);
+  }
+
+  getRigSeatSlice(rigId: string): SeatSliceMode | null {
+    if (!this.hasRigColumn("seat_slice")) return null;
+    const row = this.db.prepare("SELECT seat_slice FROM rigs WHERE id = ?").get(rigId) as { seat_slice: string | null } | undefined;
+    return row?.seat_slice === "rig" ? "rig" : null;
+  }
+
+  /** #80: the name of the rig whose slice a seat's new scopes go beneath, read at each launch; undefined when the seat's
+   *  rig doesn't group its seats (or the seat is unknown). */
+  getNodeSeatSliceRig(nodeId: string): string | undefined {
+    if (!this.hasRigColumn("seat_slice")) return undefined;
+    const row = this.db.prepare("SELECT r.name AS name, r.seat_slice AS seat_slice FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?")
+      .get(nodeId) as { name: string; seat_slice: string | null } | undefined;
+    return row?.seat_slice === "rig" ? row.name : undefined;
+  }
+
   /** Persist the rig-level `env:` block from the spec, or null to clear. */
   setRigEnv(rigId: string, env: SeatEnv | null): void {
     if (!this.hasRigColumn("env_json")) return;
@@ -516,8 +548,8 @@ export class RigRepository {
       .run(file ?? null, new Date().toISOString(), rigId);
   }
 
-  /** The rig's `culture_file` and rig `startup` block as its spec declared them, and the absolute root their paths
-   *  resolve against (migration 121). A seat added to the rig later reads them back. Null when neither was declared. */
+  /** The rig's authored startup layers and the absolute root their paths resolve against (migration 121).
+   *  A seat added to the rig later reads them back. */
   setRigStartupLayers(rigId: string, layers: RigStartupLayers | null): void {
     if (!this.hasRigColumn("startup_layers_json")) return;
     this.db.prepare("UPDATE rigs SET startup_layers_json = ?, updated_at = ? WHERE id = ?")
@@ -678,6 +710,8 @@ export class RigRepository {
       // Written atomically with creation: a seat never exists without the limit it was created with.
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
+    // #2940: likewise, a seat never exists without the keep_alive it was declared with.
+    if (opts?.keepAlive && !this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     if (opts?.statuslineThrottle) {
       validateStatuslineThrottle(opts.statuslineThrottle, "statusline_throttle");
       // As with process limits: a seat never exists without the throttle it was created with.
@@ -844,6 +878,7 @@ export class RigRepository {
       this.setNodeLaunchWrapper(id, opts.launchWrapper);
     }
     if (opts?.processLimits) this.setNodeProcessLimits(id, opts.processLimits);
+    if (opts?.keepAlive) this.setNodeKeepAlive(id, true);
     if (opts?.statuslineThrottle) this.setNodeStatuslineThrottle(id, opts.statuslineThrottle);
     if (opts?.pool) this.setNodePool(id, opts.pool);
 
@@ -860,6 +895,22 @@ export class RigRepository {
     return this.rowToNode(
       this.db.prepare("SELECT * FROM nodes WHERE id = ?").get(id) as NodeRow
     );
+  }
+
+  /** #2940: keep the seat's launch recipe current with the keep_alive its member declares in the spec applied now
+   *  (undefined: it declares none). The recipe is written when the seat is created, while each applied spec rewrites the
+   *  resolved value; an export reads the member's own declaration from the recipe, so without this a later
+   *  `keep_alive: false` would be exported as nothing and come back on from the agent spec. */
+  setNodeAuthoredKeepAlive(nodeId: string, logicalId: string, keepAlive: boolean | undefined): void {
+    const recipe = this.getNodeLaunchRecipe(nodeId);
+    if (!recipe || !Array.isArray(recipe.rigSpec.pods)) return;
+    const [podId, memberId] = logicalId.split(".");
+    const pods = recipe.rigSpec.pods.filter((pod) => pod && pod.id === podId);
+    const members = pods.length === 1 && Array.isArray(pods[0]!.members) ? pods[0]!.members.filter((member) => member && member.id === memberId) : [];
+    if (members.length !== 1 || members[0]!.keepAlive === keepAlive) return;
+    if (keepAlive === undefined) delete members[0]!.keepAlive;
+    else members[0]!.keepAlive = keepAlive;
+    this.db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), nodeId);
   }
 
   /** Return the durable source for rebuilding a pod-aware seat, if available. */
@@ -1005,6 +1056,16 @@ export class RigRepository {
     const row = this.db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(nodeId) as
       { process_limits: string | null } | undefined;
     return parseStoredProcessLimits(row?.process_limits, `Seat ${nodeId} process_limits`);
+  }
+
+  /** Persist a seat's resolved keep_alive (#2940). Off needs no column: a database without it already treats every seat
+   *  as off; turning it on there throws instead of being dropped. */
+  setNodeKeepAlive(nodeId: string, value: boolean): boolean {
+    if (!this.hasNodeColumn("keep_alive")) {
+      if (value) throw new Error("Cannot persist keep_alive: database migration is required");
+      return false;
+    }
+    return this.db.prepare("UPDATE nodes SET keep_alive = ? WHERE id = ?").run(value ? 1 : 0, nodeId).changes > 0;
   }
 
   /** #3416 (3): persist or clear (null) a Claude seat's status line throttle in seconds. Its launches read it. */
@@ -1336,6 +1397,7 @@ export class RigRepository {
       ...(launchWrapper ? { launchWrapper } : {}),
       ...(processLimits ? { processLimits } : {}),
       ...(processLimitsError ? { processLimitsError } : {}),
+      ...(row.keep_alive === 1 ? { keepAlive: true } : {}),
       ...(storedStatuslineThrottle(row.statusline_throttle_seconds) !== null ? { statuslineThrottle: storedStatuslineThrottle(row.statusline_throttle_seconds) } : {}),
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
@@ -1436,6 +1498,7 @@ interface NodeRow {
   claude_mcp?: ClaudeMcp | null;
   launch_wrapper?: string | null;
   process_limits?: string | null;
+  keep_alive?: number;
   statusline_throttle_seconds?: number | null;
   effort_choice?: string | null;
   codex_config_profile?: string | null;

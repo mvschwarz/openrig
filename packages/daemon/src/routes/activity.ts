@@ -9,6 +9,7 @@ import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import { hookEventState, isRunnerExit } from "../domain/agent-activity-store.js";
+import { RemoteControlObservationStore, parseRemoteControlReport } from "../domain/remote-control-observations.js";
 import { WorkingLivenessGate, isWorkingLivenessBeat, workingLivenessSeconds, type WorkingLivenessIgnored } from "../domain/working-liveness.js";
 import type { EventBus } from "../domain/event-bus.js";
 import type { StreamStore } from "../domain/stream-store.js";
@@ -26,6 +27,7 @@ import { validateResumeToken, validateSessionFileFormat } from "../domain/resume
 import { loadCommunityHarnessPreset } from "../domain/community-harness-presets.js";
 import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { transportSenderSession } from "./require-sender-identity.js";
+import { isClaudeRateLimitHook } from "../domain/provider/claude-interruption.js";
 import {
   PiUsageEntriesStore, hasPiUsageChargesTable, hasPiUsageEntriesTable, validPiProviderCharge, validPiUsageFact,
 } from "../domain/pi-usage-entries-store.js";
@@ -36,7 +38,7 @@ import {
 // ALREADY-NORMALIZED state is the input (one event-name parser, no twin).
 
 /** Translate a recorded hook activity into oracle evidence. Returns null for states the
- *  oracle should not consume (unknown = noise, never evidence). needs_input becomes
+ *  oracle should not consume (unknown = noise, never evidence), except a typed usage limit. needs_input becomes
  *  COUNT+reason on the hooks rung — never an activity value (the taxonomy's binding
  *  exclusion); the turn's working/idle stays whatever other evidence says. */
 export function evidenceFromHookActivity(input: {
@@ -76,6 +78,12 @@ export function evidenceFromHookActivity(input: {
   if (input.activity.rawEvent === "Stop" && isRunnerExit(input.activity.rawSubtype, input.runtime, input.activity.communityRunner === true)) {
     return { ...base, activity: "unknown", needsInput: { count: 0, reason: null } };
   }
+  // A typed usage limit (#2917, #99) is evidence, not noise: it ends the turn, and it never counts as waiting on a person.
+  // The oracle holds it until a newer turn starts, so an older working report can't outlast it.
+  if (isClaudeRateLimitHook(input.runtime, input.activity.rawEvent, input.activity.rawSubtype)) {
+    return { ...base, activity: "unknown", needsInput: { count: 0, reason: null },
+      usageLimit: { resetsAt: input.activity.resetsAt ?? null } };
+  }
   switch (input.activity.state) {
     case "running":
       return { ...base, activity: "working", needsInput: { count: 0, reason: null },
@@ -107,6 +115,24 @@ export function restoredRunnerHookEvidence(
     ...(isWorkingLivenessBeat(latest.rawEvent, latest.rawSubtype)
       ? { workingLivenessSeconds: workingLivenessSeconds(latest.livenessSeconds) } : {}),
     activity: { ...latest, state }, seq: 0 });
+}
+
+/** The typed usage limit a seat still held when the daemon stopped, as the oracle evidence its live report was, for
+ *  restoring after a restart: Claude's is its hook evidence again, and Codex's banner is held on the sampling rung that
+ *  read it from the pane. Null when none is in force; the store's own read throws when it can't be read, or when a limit
+ *  may be in force but its occupant can't be shown. */
+export function restoredUsageLimitEvidence(
+  store: Pick<AgentActivityStore, "latestHeldUsageLimit">,
+  seat: { seatNodeId: string; sessionName: string },
+  runtime: string,
+): ActivityEvidence | null {
+  const held = store.latestHeldUsageLimit({ nodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime });
+  if (!held) return null;
+  if (runtime === "codex") {
+    return { seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, rung: "window-sampling", sourceId: "codex:limit-banner",
+      seq: 0, observedAt: held.eventAt ?? held.sampledAt, usageLimit: { resetsAt: null } };
+  }
+  return evidenceFromHookActivity({ seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime, activity: held, seq: 0 });
 }
 
 /** The relay route a hook post names: "plugin" or "managed". An untagged post (an older relay) stays untagged; any
@@ -141,6 +167,19 @@ function liveOccupantGeneration(c: Context, store: AgentActivityStore, nodeId: s
   } catch {
     return null;
   }
+}
+/** #3513: whether `generation` is still the seat's occupant: the current one, or one followed only by no-launch
+ *  adoptions (reconcile, bind, self-attach), whose hooks keep their launch generation. The identity gate's own rule
+ *  (SessionRegistry.isOccupantContinuedByAdoption); an unreadable ledger is no evidence, so nothing is recorded. */
+function continuesCurrentOccupant(c: Context, store: AgentActivityStore, nodeId: string): (generation: string) => boolean {
+  const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
+  return (generation) => {
+    try {
+      return registry.isOccupantContinuedByAdoption(nodeId, generation);
+    } catch {
+      return false;
+    }
+  };
 }
 function nextHookSeq(key: string): number {
   const next = (hookEvidenceSeq.get(key) ?? 0) + 1;
@@ -715,6 +754,8 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
     const tokenPersisted = validation.ok
       && (persistHook(validation.resumeType, validation.token)
         || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token));
+    // SessionStart posts activity first. The accepted identity can be the first record of this conversation.
+    if (tokenPersisted) observeRemoteControl(c, store, body);
     eventBus.emit({
       type: "agent.session_identity",
       rigId: resolved.rigId,
@@ -756,6 +797,9 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
 
   // #2702: a turn, stop or notification from another runtime started inside the seat is that harness's, not the seat's.
   if (reportedByAnotherRuntime(body)) return c.json({ ok: true, ignored: "transcript_not_this_session" });
+  // #3513: take reports before the permission and PostToolBatch branches return. The fixed PermissionRequest
+  // diagnostic carries no conversation or Remote Control fields.
+  observeRemoteControl(c, store, body);
 
   // All tools in this actor's batch have resolved. An individual PostToolUse can belong to a parallel tool,
   // and a subagent's batch says nothing about the main session's permission. Only the current occupant can
@@ -822,6 +866,27 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
   const recorded = recordHookActivity(c, store, body);
   if ("ignored" in recorded) return c.json({ ok: true, ignored: recorded.ignored });
   return "refused" in recorded ? recorded.refused : c.json({ ok: true, activity: recorded.activity });
+}
+
+/** #3513: keep what the seat's own Claude hooks say about its Remote Control session, for the node read. Only the
+ *  current occupant's hook in the seat's own conversation counts (the store checks the conversation); a delayed event
+ *  from an earlier occupant is not recorded. This optional observation never changes how the event itself is recorded. */
+function observeRemoteControl(c: Context, store: AgentActivityStore, body: Record<string, unknown>): void {
+  if (body.runtime !== "claude-code") return;
+  const report = parseRemoteControlReport(body);
+  if (!report) return;
+  const generation = stringOrNull(body.generation);
+  const conversationId = stringOrNull(body.sessionId);
+  const occurredAt = stringOrNull(body.occurredAt);
+  if (!generation || !conversationId || !occurredAt || !Number.isFinite(Date.parse(occurredAt))) return;
+  try {
+    const sessionName = stringOrNull(body.sessionName);
+    const seat = store.resolveSession({ sessionName, nodeId: stringOrNull(body.nodeId) });
+    if (!seat || seat.runtime !== "claude-code" || (sessionName && sessionName !== seat.sessionName)
+      || (body.nodeId != null && body.nodeId !== seat.nodeId)) return;
+    new RemoteControlObservationStore(store.db).record({ nodeId: seat.nodeId, generation, conversationId, report,
+      observedAt: new Date(occurredAt).toISOString(), isCurrentOccupant: continuesCurrentOccupant(c, store, seat.nodeId) });
+  } catch { /* An optional observation never affects the event's own recording. */ }
 }
 
 /** Record one hook event for its seat and feed it to the activity oracle: the tail of the hook ingress, also used when a
@@ -1161,7 +1226,7 @@ activityRoutes.get("/parked", (c) => {
     | undefined;
   const queueRepo = c.get("queueRepo" as never) as
     | {
-        listOpenObligations: (destinationSession: string, limit: number) => Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null }>;
+        listOpenObligations: (destinationSession: string, limit: number) => Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null; blockedOn?: string | null; updatedAt?: string | null }>;
         getParkWakeStatus: (qitemId: string) => import("../domain/queue-wake-repository.js").ParkWakeStatus | null;
         parkWakeServedByOwnReminder?: (qitemId: string) => boolean;
       }

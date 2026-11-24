@@ -18,11 +18,13 @@ import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "..
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
 import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "../queue-artifact.js";
 import { resolveSenderSession } from "../sender-identity.js";
+import { queueExportCommand } from "./queue-export.js";
+import { queueImportCommand, queueStagingCommand } from "./queue-import.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
  *
- * Backed by `/api/queue`. Operates only via the daemon HTTP API.
+ * Backed by `/api/queue`, except for the local read-only export.
  * Does NOT touch the POC `rigx-queue-proto` filesystem state.
  *
  * Hot-potato strict-rejection is enforced at the daemon; `update --state done`
@@ -168,7 +170,9 @@ function terminalDeliveryResult(
     "verified": "Terminal receipt confirmed: the wake rendered in the destination pane.",
     "delivered-ack-pending": "Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed.",
     "claimed": "Terminal receipt unconfirmed, but the seat has claimed the item (claimed).",
-    "retained": `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; inspect it with rig seat held-messages ${seat}.`,
+    "retained": wakeResult === "retained:draft_aware"
+      ? `The wake is held (${wakeResult}): nothing was typed into the pane. It's tried again when the seat next reports idle while it's still in draft-aware mode, within the wake retry cap; if it's still held past that cap or the unconfirmed window, its sender and the seat's owner are told once. Inspect it with rig seat held-messages ${seat}.`
+      : `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; if it's still held past the unconfirmed window, its sender and the seat's owner are told once. Inspect it with rig seat held-messages ${seat}.`,
     // A hosted member with no wake trigger: no wake exists to fail, and the work waits to be read.
     "failed": wakeResult?.startsWith("awaiting-pickup:")
       ? `No wake is sent (${wakeResult}): the work waits in the member's queue until it reads it.`
@@ -348,6 +352,15 @@ async function withClient<T>(
     }
     throw err;
   }
+}
+
+/** GET /api/queue/list's page marker (#3572): the limit the daemon applied, and whether more rows matched than it
+ *  returned. null from a daemon that doesn't send it, or without an explicit 0 or 1, which says nothing either way. */
+function queueListPage(headers: Headers | undefined): { limit: number; truncated: boolean } | null {
+  const limit = headers?.get("X-OpenRig-Limit");
+  const truncated = headers?.get("X-OpenRig-Truncated");
+  if (!limit || !/^\d+$/.test(limit) || (truncated !== "0" && truncated !== "1")) return null;
+  return { limit: Number(limit), truncated: truncated === "1" };
 }
 
 function printResult(json: boolean, body: unknown, status: number): void {
@@ -1298,6 +1311,9 @@ const QUEUE_HOST_ROW_OPTION_HELP =
 
 export function queueCommand(depsOverride?: QueueDeps): Command {
   const cmd = new Command("queue").description("Coordination L3 — owned-work queue + inbox/outbox");
+  cmd.addCommand(queueExportCommand());
+  cmd.addCommand(queueImportCommand());
+  cmd.addCommand(queueStagingCommand());
   const getDeps = (): QueueDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
@@ -1802,6 +1818,28 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
     });
 
   cmd
+    .command("relay-answer <qitemId>")
+    .description("Record a person's verbatim answer given elsewhere and return it when the ask is fully answered")
+    .requiredOption("--attributed-to <person>", "The person who actually answered (a human seat or @external address), e.g. reader@external")
+    .requiredOption("--channel <channel>", "Where the person gave the answer")
+    .requiredOption("--text <text>", "The person's verbatim words")
+    .option("--question-id <id>", "Exact question ID (required for a structured ask)")
+    .option("--option-id <id>", "Exact option ID, when they chose an option")
+    .option("--answered-at <iso>", "When the person answered, only if known")
+    .option("--json", "JSON output for agents")
+    .action(async (qitemId: string, opts: { attributedTo: string; channel: string; text: string; questionId?: string; optionId?: string; answeredAt?: string; json?: boolean }) => {
+      if (!requireSeatSession("actor")) return;
+      const { json, ...submission } = opts;
+      await withClient(getDeps(), async (client) => {
+        const res = await client.post<{ replyQitemId: string | null; unanswered: string[] }>(`/api/queue/${encodeURIComponent(qitemId)}/relayed-answer`, submission);
+        if (res.status >= 400 || !res.data) return printQueueItemResult(client, qitemId, json ?? false, res.data, res.status);
+        if (json) console.log(JSON.stringify(res.data));
+        else if (res.data.replyQitemId) console.log(`RELAYED answer returned as ${res.data.replyQitemId}`);
+        else console.log(`RELAYED answer recorded; still open: ${res.data.unanswered.join(", ")}`);
+      });
+    });
+
+  cmd
     .command("tag <qitemId>")
     .description("Add tags to a qitem in any state, changing nothing else: its existing tags stay, a tag it already has adds nothing, and a closed row stays closed. The tags added are recorded on the row's history with who added them. Tags are never removed or rewritten.")
     .requiredOption("--add <tag>", "A tag to add, exact and case-sensitive; repeat for several (commas are literal)", (value: string, previous: string[] = []) => [...previous, value], [] as string[])
@@ -1849,6 +1887,9 @@ Every deliberate HELD row should name its continuation and one live wake:
   --wake-after <duration>  arm a timer atomically with the park
 
 A live blocker qitem supplied with --on also wakes the row when resolved.
+
+--on external:<name> with no wake is an event-only hold: it stays visible, no
+reminder fires, and rig queue resolve <qitemId> --decision "..." ends it.
 
 HELD is only for a row that must stay on the queue while waiting. Work with a
 workspace home that is deferred/not-imminent belongs in its mission/slice.`)
@@ -2459,6 +2500,9 @@ Examples:
           }
         }
         printResult(useJson, res.data, res.status);
+        // The rows stay on stdout as they were; only a page the daemon says it cut adds a line on stderr.
+        const page = res.status < 400 ? queueListPage(res.headers) : null;
+        if (page?.truncated) console.error(`this page stops at --limit ${page.limit} and more rows match; pass a larger --limit to see the rest`);
       }, remote !== undefined, remote);
     });
 
