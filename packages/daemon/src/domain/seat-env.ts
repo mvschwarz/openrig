@@ -100,6 +100,18 @@ export function parseSeatEnvKeys(raw: string | undefined): string[] {
   return [...seen];
 }
 
-export function removedSeatEnvKeys(previousKeysRaw: string | undefined, nextEnv: Readonly<Record<string, string>>): string[] {
-  return parseSeatEnvKeys(previousKeysRaw).filter((key) => !Object.prototype.hasOwnProperty.call(nextEnv, key));
+export function diffSeatEnvKeys(
+  previousKeysRaw: string | undefined,
+  nextEnv: Readonly<Record<string, string>>,
+): { nextDeclaredKeys: string[]; remove: string[]; reconcile: string[] } {
+  const nextDeclaredKeys = parseSeatEnvKeys(nextEnv[SEAT_ENV_KEYS_VAR]);
+  const nextDeclaredSet = new Set(nextDeclaredKeys);
+  const remove: string[] = [];
+  const reconcile: string[] = [];
+  for (const key of parseSeatEnvKeys(previousKeysRaw)) {
+    if (nextDeclaredSet.has(key)) continue;
+    if (Object.prototype.hasOwnProperty.call(nextEnv, key)) reconcile.push(key);
+    else remove.push(key);
+  }
+  return { nextDeclaredKeys, remove, reconcile };
 }

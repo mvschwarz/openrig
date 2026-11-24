@@ -1,6 +1,6 @@
 import { ActivityGrantStore } from "./activity-grants.js";
 import { ulid } from "ulid";
-import { SEAT_ENV_KEYS_VAR, removedSeatEnvKeys, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
+import { SEAT_ENV_KEYS_VAR, diffSeatEnvKeys, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "./claude-core-plugin-env.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
@@ -606,8 +606,8 @@ export class SuccessorSessionLauncher {
     return { ok: false, observed };
   }
 
-  /** Mark removed OpenRig-owned keys with session-local `-r` and sync `OPENRIG_SEAT_ENV_KEYS`
-   *  before respawn; fails open with warnings so a session-env error never aborts cutover. */
+  /** Reconcile dropped OpenRig-owned keys (`-r` when absent, `setSessionEnv` when supplied by
+   *  `sessionEnv`) and sync `OPENRIG_SEAT_ENV_KEYS` before respawn, retaining failed keys to retry. */
   private async syncSeatSessionEnv(session: string, nextEnv: Readonly<Record<string, string>>): Promise<string[]> {
     if (typeof this.tmuxAdapter.getSessionEnv !== "function") return [];
     let previousKeysRaw: string | undefined;
@@ -617,21 +617,34 @@ export class SuccessorSessionLauncher {
       return [`Could not read ${SEAT_ENV_KEYS_VAR} for session "${session}" before respawn; dropped seat environment keys may remain.`];
     }
     const warnings: string[] = [];
-    const removed = removedSeatEnvKeys(previousKeysRaw, nextEnv);
+    const retainedFailedKeys: string[] = [];
+    const { nextDeclaredKeys, remove, reconcile } = diffSeatEnvKeys(previousKeysRaw, nextEnv);
     if (typeof this.tmuxAdapter.unsetSessionEnv === "function") {
-      for (const key of removed) {
+      for (const key of remove) {
         try {
           await this.tmuxAdapter.unsetSessionEnv(session, key, { remove: true });
         } catch {
+          retainedFailedKeys.push(key);
           warnings.push(`Could not remove dropped seat environment key ${key} from session "${session}" before respawn.`);
         }
       }
     }
-    const nextKeysRaw = nextEnv[SEAT_ENV_KEYS_VAR];
-    if (nextKeysRaw !== undefined) {
-      if (nextKeysRaw !== previousKeysRaw && typeof this.tmuxAdapter.setSessionEnv === "function") {
+    if (typeof this.tmuxAdapter.setSessionEnv === "function") {
+      for (const key of reconcile) {
         try {
-          await this.tmuxAdapter.setSessionEnv(session, SEAT_ENV_KEYS_VAR, nextKeysRaw);
+          await this.tmuxAdapter.setSessionEnv(session, key, nextEnv[key]!);
+        } catch {
+          retainedFailedKeys.push(key);
+          warnings.push(`Could not restore session environment key ${key} for session "${session}" before respawn.`);
+        }
+      }
+    }
+    const effectiveKeys = [...nextDeclaredKeys, ...retainedFailedKeys];
+    const effectiveKeysRaw = effectiveKeys.length > 0 ? effectiveKeys.join(",") : undefined;
+    if (effectiveKeysRaw !== undefined) {
+      if (effectiveKeysRaw !== previousKeysRaw && typeof this.tmuxAdapter.setSessionEnv === "function") {
+        try {
+          await this.tmuxAdapter.setSessionEnv(session, SEAT_ENV_KEYS_VAR, effectiveKeysRaw);
         } catch {
           warnings.push(`Could not update ${SEAT_ENV_KEYS_VAR} for session "${session}" before respawn.`);
         }

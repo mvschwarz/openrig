@@ -223,14 +223,67 @@ describe("SuccessorSessionLauncher", () => {
       departingSessionName: "dev-impl@rig",
     });
     expect(res.ok).toBe(true);
-    // HOME stays because sessionEnv supplies it; only DO_NOT_TRACK is marked removed.
+    // DO_NOT_TRACK is marked removed (-r); HOME is dropped from the seat declaration but supplied by
+    // sessionEnv, so its session value is reconciled to /daemon-home before leaving OPENRIG_SEAT_ENV_KEYS.
     expect(order).toEqual([
       "signal",
       "get:OPENRIG_SEAT_ENV_KEYS",
       "unset:DO_NOT_TRACK:r",
+      "set:HOME=/daemon-home",
       "set:OPENRIG_SEAT_ENV_KEYS=MODE",
       "respawn",
     ]);
+  });
+
+  it("retains failed removals in OPENRIG_SEAT_ENV_KEYS even when the new declaration is empty", async () => {
+    const getSessionEnv = vi.fn(async () => "STUCK_KEY,DROPPED_OK");
+    const setSessionEnv = vi.fn(async () => {});
+    const unsetSessionEnv = vi.fn(async (_s: string, key: string) => {
+      if (key === "STUCK_KEY") throw new Error("tmux set-environment failed");
+    });
+    const tmux = {
+      listPanes, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand,
+      getSessionEnv, setSessionEnv, unsetSessionEnv,
+    } as unknown as TmuxAdapter;
+    const subject = new SuccessorSessionLauncher(tmux, discoveryRepo, {
+      runtimeAdapters: { codex: fakeAdapter("codex") }, readinessTimeoutMs: 50, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5,
+    });
+    const res = await subject.createSuccessor({
+      node: { id: "node-1", runtime: "codex", cwd: "/w", seatEnv: {} },
+      departingSessionName: "dev-impl@rig",
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.warnings?.some((w) => w.includes("STUCK_KEY"))).toBe(true);
+    expect(unsetSessionEnv).toHaveBeenCalledWith("dev-impl@rig", "STUCK_KEY", { remove: true });
+    expect(unsetSessionEnv).toHaveBeenCalledWith("dev-impl@rig", "DROPPED_OK", { remove: true });
+    expect(unsetSessionEnv).not.toHaveBeenCalledWith("dev-impl@rig", "OPENRIG_SEAT_ENV_KEYS", expect.anything());
+    expect(setSessionEnv).toHaveBeenCalledWith("dev-impl@rig", "OPENRIG_SEAT_ENV_KEYS", "STUCK_KEY");
+  });
+
+  it("retains a key in OPENRIG_SEAT_ENV_KEYS when reconciling its sessionEnv value fails", async () => {
+    const getSessionEnv = vi.fn(async () => "HOME,MODE");
+    const setSessionEnv = vi.fn(async (_s: string, key: string) => {
+      if (key === "HOME") throw new Error("tmux set-environment failed");
+    });
+    const unsetSessionEnv = vi.fn(async () => {});
+    const tmux = {
+      listPanes, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand,
+      getSessionEnv, setSessionEnv, unsetSessionEnv,
+    } as unknown as TmuxAdapter;
+    const subject = new SuccessorSessionLauncher(tmux, discoveryRepo, {
+      sessionEnv: { HOME: "/daemon-home" },
+      runtimeAdapters: { codex: fakeAdapter("codex") }, readinessTimeoutMs: 50, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5,
+    });
+    const res = await subject.createSuccessor({
+      node: { id: "node-1", runtime: "codex", cwd: "/w", seatEnv: { MODE: "fast" } },
+      departingSessionName: "dev-impl@rig",
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.warnings?.some((w) => w.includes("HOME") && !w.includes("/daemon-home"))).toBe(true);
+    }
+    expect(setSessionEnv).toHaveBeenCalledWith("dev-impl@rig", "HOME", "/daemon-home");
+    expect(setSessionEnv).toHaveBeenCalledWith("dev-impl@rig", "OPENRIG_SEAT_ENV_KEYS", "MODE,HOME");
   });
 
   it("clears OPENRIG_SEAT_ENV_KEYS with -r when the successor declares an empty seat env", async () => {
