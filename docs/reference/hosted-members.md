@@ -238,6 +238,22 @@ or object access. Resources contain the supplied text, not a file path or a load
 resource URIs follow the SDK's existing registration error behavior. Without an introduction, the
 existing initialization instructions remain unchanged.
 
+### Handle provider removal separately from work grants
+
+An embedding can supply `onBindingLeave(request, signal)` to `startMcpHttpServer`. It handles
+`POST /mcp/bindings/leave` independently of ordinary MCP grant resolution. `request` includes the opaque
+removal `token`, `bindingId`, `hubSeat`, `provider` references and `removalRevision`. The provider owns
+checking that removal-only capability and performing idempotent cleanup. It must not accept a work
+credential as a removal capability or grant work access to a removal credential.
+
+Return `{ removalRevision, removedAt }`, `{ removalRevision, alreadyRemoved: true }`, or
+`{ removalRevision, superseded: true }`. To refuse, return `{ refused: true, code }` with a fixed diagnostic
+code, not names or credentials. Core echoes the original references in a successful receipt; a mismatched
+revision or ambiguous result is unavailable. The existing `resolverTimeoutMs` budget (default 5,000 ms)
+bounds body reading and this hook, and the signal is canceled on disconnect or timeout. No provider hook
+means the endpoint remains absent. The customer's connector retries pending removals after lost replies;
+a superseded receipt never means the newer credential was removed.
+
 ### Supply a caller resolver
 
 An embedding can pass `resolver` and `resolverTimeoutMs` to `startMcpHttpServer`. The supported
