@@ -34,6 +34,7 @@ import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { credentialTaint, judgeChargeProvenance, piCredentialEvidence, piCredentialNotice, type PiCredentialEvidence } from "./pi-readiness.js";
 import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary, type PiUsageFact } from "../domain/pi-usage-facts.js";
 import { validateLaunchWrapper } from "../domain/launch-wrapper.js";
+import { alignPiSessionCwd, piSessionCwdNotice } from "./pi-session-cwd.js";
 import { OpenRouterChargeLookup, openRouterGenerationFetcher, type ChargeProvenance } from "./pi-openrouter-charge.js";
 import { OMP_MAX_FRAME_BYTES, OmpFrameDecoder, ompProtocolV2Limit } from "./omp-rpc-frame.js";
 import {
@@ -3121,6 +3122,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         return fs.readFileSync(file, "utf8");
       },
     })}`);
+  }
+  if (args.sessionFile) {
+    // Pi takes a resumed session's folder from its header: after a seat moved, point it at the seat's folder.
+    const notice = piSessionCwdNotice(alignPiSessionCwd({
+      sessionFile: args.sessionFile, cwd: args.cwd, sessionsDir: paths.sessionsDir, rewrite: runtime === "pi",
+    }), runtime);
+    if (notice) console.log(notice);
   }
   console.log(`[${runtime}-runner] starting ${runtime} --mode rpc (seat ${args.sessionName})`);
   console.log(`[${runtime}-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
