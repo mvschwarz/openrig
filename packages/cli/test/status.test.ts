@@ -91,7 +91,7 @@ function createDaemonServer(
     port: 0,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
     listen: () => new Promise<number>((resolve) => {
-      server.listen(0, () => {
+      server.listen(0, "127.0.0.1", () => {
         const addr = server.address();
         const port = typeof addr === "object" && addr ? addr.port : 0;
         resolve(port);
@@ -588,7 +588,7 @@ describe("rig status", () => {
         port: 0,
         close: () => new Promise<void>((r) => server.close(() => r())),
         listen: () => new Promise<number>((r) => {
-          server.listen(0, () => {
+          server.listen(0, "127.0.0.1", () => {
             const addr = server.address();
             r(typeof addr === "object" && addr ? addr.port : 0);
           });
@@ -797,7 +797,7 @@ describe("rig status --json", () => {
       if (url.pathname === "/healthz") { res.writeHead(200, { "Content-Type": "application/json" }); res.end("{}"); return; }
       res.writeHead(404); res.end();
     });
-    const port = await new Promise<number>((r) => server.listen(0, () => r((server.address() as { port: number }).port)));
+    const port = await new Promise<number>((r) => server.listen(0, "127.0.0.1", () => r((server.address() as { port: number }).port)));
     try {
       process.exitCode = undefined;
       const parsed = JSON.parse(await run(runningDeps(port), ["--json"]));

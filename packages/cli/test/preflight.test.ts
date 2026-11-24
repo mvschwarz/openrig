@@ -148,7 +148,7 @@ describe("SystemPreflight", () => {
   it("port in use → ready: false with guidance", async () => {
     // Start a server on a known port
     const server = net.createServer();
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as net.AddressInfo).port;
 
     const pf = createPreflight();
@@ -337,7 +337,7 @@ describe("Preflight CLI", () => {
     mkdirSync(homeDir, { recursive: true });
     // Create a server on a known port to trigger port-in-use
     const server = (await import("node:net")).createServer();
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const usedPort = (server.address() as net.AddressInfo).port;
     const configPath = join(tmpDir, "config-port.json");
     const { writeFileSync: wf2 } = await import("node:fs");

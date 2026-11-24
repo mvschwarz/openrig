@@ -243,7 +243,7 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
       }
       return send(500, { error: "not found" });
     });
-    await new Promise<void>((r) => server.listen(0, r));
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => server.close());

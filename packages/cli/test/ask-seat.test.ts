@@ -98,7 +98,7 @@ describe("rig ask --seat (L1 CLI)", () => {
         res.end(JSON.stringify(payload));
       });
     });
-    await new Promise<void>((r) => server.listen(0, r));
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => server.close());

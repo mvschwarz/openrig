@@ -53,7 +53,7 @@ describe("rig ps reads its archived count from the daemon's header (#3636)", () 
       if (url === "/api/ps?includeArchived=true") res.end(JSON.stringify([ACTIVE, ARCHIVED]));
       else res.end(JSON.stringify([]));
     });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => server.close());

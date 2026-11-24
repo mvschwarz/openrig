@@ -87,7 +87,7 @@ describe("Discover + Claim CLI", () => {
         res.end(JSON.stringify({ error: "not found" }));
       }
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
     port = (server.address() as { port: number }).port;
   });
 
@@ -147,7 +147,7 @@ describe("Discover + Claim CLI", () => {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "tmux boom" }));
     });
-    await new Promise<void>((resolve) => { failServer.listen(0, resolve); });
+    await new Promise<void>((resolve) => { failServer.listen(0, "127.0.0.1", resolve); });
     const failPort = (failServer.address() as { port: number }).port;
 
     const prog = new Command();

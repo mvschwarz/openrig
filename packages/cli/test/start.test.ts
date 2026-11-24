@@ -126,7 +126,7 @@ describe("rig start (OPR.0.3.4.1)", () => {
         res.writeHead(404).end();
       });
     });
-    await new Promise<void>((r) => { server.listen(0, r); });
+    await new Promise<void>((r) => { server.listen(0, "127.0.0.1", r); });
     port = (server.address() as { port: number }).port;
   });
 

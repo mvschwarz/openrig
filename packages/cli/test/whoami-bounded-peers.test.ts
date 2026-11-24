@@ -92,7 +92,7 @@ describe("rig whoami --json: bounded peers (output.compact, output.whoami_peers)
         res.end(JSON.stringify({ error: "not found" }));
       }
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => { server.close(); });

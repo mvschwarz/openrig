@@ -54,7 +54,7 @@ describe("waitForKernelReady deadline bounds", () => {
       }, 400);
     });
 
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as { port: number }).port;
     const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -78,7 +78,7 @@ describe("waitForKernelReady deadline bounds", () => {
       }, 400);
     });
 
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as { port: number }).port;
     const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -98,7 +98,7 @@ describe("waitForKernelReady deadline bounds", () => {
       res.end(JSON.stringify({ kernel_state: "ready", variant: "fast" }));
     });
 
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as { port: number }).port;
     const baseUrl = `http://127.0.0.1:${port}`;
 
