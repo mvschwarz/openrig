@@ -1,3 +1,4 @@
+import { networkBindingProvidersSchema } from "./migrations/191_network_binding_providers.js";
 import { nodeKeepAliveSchema } from "./migrations/181_node_keep_alive.js";
 import { sessionStopAttemptSchema } from "./migrations/180_session_stop_attempt.js";
 import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js";
@@ -384,6 +385,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueRelayedAnswersSchema,
   queueItemsScanIndexesSchema,
   rigSeatSliceSchema,
+  networkBindingProvidersSchema,
   workflowRunTitleSchema,
   networkRequestsSchema,
 ];

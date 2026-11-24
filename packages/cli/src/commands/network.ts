@@ -16,6 +16,9 @@ interface Binding {
   /** Hub items someone else closed before this binding's result reached them. */
   closedElsewhere?: Array<{ hubItem: string; localItem: string }>;
   participantName?: string | null;
+  credentialCleanup?: "pending" | "complete";
+  providerRemoval?: "pending" | "confirmed" | "unconfirmed" | "superseded" | null;
+  providerRemovalReason?: string | null;
   /** For an ended binding made through the account: whether the account confirmed it stopped listing the name. */
   accountRemoval?: "confirmed" | "unconfirmed" | "old-installation" | null;
 }
@@ -27,6 +30,10 @@ const ACCOUNT_WRITE_TIMEOUT_MS = 45_000;
 const accountNote = (b: Binding): string => {
   if (b.accountRemoval === "unconfirmed") return `\n  couldn't confirm the account dropped ${b.participantName}: run rig network disconnect ${b.id} again`;
   if (b.accountRemoval === "old-installation") return `\n  ${b.participantName} may still be listed under the old installation: remove it on the account page`;
+  if (b.providerRemoval === "pending") return "\n  provider removal pending; the connection provider has not confirmed it";
+  if (b.providerRemoval === "unconfirmed") return "\n  provider removal unconfirmed; check the connection provider";
+  if (b.providerRemoval === "superseded") return "\n  provider removal superseded; this revision was not confirmed removed";
+  if (b.providerRemoval === "confirmed" && !b.accountRemoval) return "\n  provider removal confirmed";
   return "";
 };
 
@@ -55,11 +62,12 @@ export function shownHubUrl(hubUrl: string): string {
 }
 
 function line(b: Binding): string {
+  const cleanup = b.credentialCleanup === "pending" ? "\n  credential cleanup pending; the connector will retry" : "";
   const contact = b.lastContactAt ? `last contact ${b.lastContactAt}` : "no contact yet";
   const state = b.state === "active" ? contact : `${b.state}${b.stateReason ? ` (${b.stateReason})` : ""}`;
   const plain = b.unencrypted ? "  UNENCRYPTED (http, allowed for this binding)" : "";
   const conflicts = (b.closedElsewhere ?? []).map((c) => `\n  hub item ${c.hubItem} was closed elsewhere before its result arrived; the result stays on ${c.localItem}`).join("");
-  return `${b.id}  ${b.localSession} -> ${b.hubSeat} at ${shownHubUrl(b.hubUrl)}${plain}  ${state}${b.lastError && b.state === "active" ? `  last error: ${b.lastError}` : ""}${conflicts}${accountNote(b)}`;
+  return `${b.id}  ${b.localSession} -> ${b.hubSeat} at ${shownHubUrl(b.hubUrl)}${plain}  ${state}${b.lastError && b.state === "active" ? `  last error: ${b.lastError}` : ""}${conflicts}${accountNote(b)}${cleanup}`;
 }
 
 /** `rig network`: connect a selected local seat to a participant of a remote hub (an account's network rig, or

@@ -20,6 +20,8 @@ export function networkRoutes(opts?: { bearerToken?: string | null; home?: strin
   router.use("/bindings", async (c, next) => (c.req.method === "GET" ? next() : requireAuth(c, next)));
   router.use("/bindings/:id/disconnect", requireAuth);
   router.use("/bindings/:id/requests", requireAuth);
+  router.use("/bindings/:id/credential", requireAuth);
+  router.use("/bindings/:id", async (c, next) => (c.req.method === "GET" ? next() : requireAuth(c, next)));
   router.use("/installations", requireAuth);
 
   const home = opts?.home ?? OPENRIG_HOME;
@@ -51,8 +53,22 @@ export function networkRoutes(opts?: { bearerToken?: string | null; home?: strin
       if (body.hubUrl === undefined && body.token === undefined && body.participantName !== undefined) {
         return c.json(await installations(c).connect(store(c), { session: body.session, name: body.participantName }), 201);
       }
-      return c.json(store(c).create({ session: body.session, hubUrl: body.hubUrl, hubSeat: body.hubSeat, token: body.token, allowHttp: body.allowHttp }), 201);
+      return c.json(store(c).create({ session: body.session, hubUrl: body.hubUrl, hubSeat: body.hubSeat, token: body.token, allowHttp: body.allowHttp, provider: body.provider, removal: body.removal }), 201);
     } catch (error) { return refused(c, error); }
+  });
+
+  router.post("/bindings/:id/credential", async (c) => {
+    const body = await json(c);
+    if (!body) return c.json({ error: "invalid_body", message: "The body must be JSON." }, 400);
+    try { return c.json(store(c).rotateCredential(c.req.param("id"), { expectedRevision: body.expectedRevision, provider: body.provider, token: body.token, removal: body.removal })); }
+    catch (error) { return refused(c, error); }
+  });
+
+  router.patch("/bindings/:id", async (c) => {
+    const body = await json(c);
+    if (!body) return c.json({ error: "invalid_body", message: "The body must be JSON." }, 400);
+    try { return c.json(store(c).reportProviderRemoval(c.req.param("id"), { provider: body.provider, removalRevision: body.removalRevision, status: body.providerRemoval, reason: body.reason })); }
+    catch (error) { return refused(c, error); }
   });
 
   router.post("/installations", async (c) => {
