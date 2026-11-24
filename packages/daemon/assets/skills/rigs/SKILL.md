@@ -22,9 +22,16 @@ if the person asks. Give what they want built to OpenRig's operator (step 2) ins
   to allow the commands that keep asking, for their project only (step 2).
 - **Hand work over with a return route** (`--return-route auto`, or `self` if this session joined; step 2), so most of
   the team's questions come to this conversation's address (choice dialogs and other hosts keep their path), and its
-  result is in the handed-over task's resolution. Set it before you promise to report back. This chat has no wake of
-  its own: say you'll check when they ask, and each turn list your address's tasks, read the handed-over task (`rig
-  queue show <id> --full`, following its successors) and check the seats. Offer a wake only where their app has one.
+  result is in the handed-over task's resolution. Set it before you promise to report back. Where your app wakes you
+  when a background command ends (Claude Code versions that do), start this wait with your shell tool's background
+  option right after the handover, with your address in place of `<address>`, so you hear when the work moves:
+
+      until OPENRIG_SESSION_NAME='<address>' rig queue list --owned --state pending --json 2>/dev/null | grep -q '"qitemId"'; do sleep 20; done
+
+  When it ends, claim each pending task at once (claiming isn't answering), handle it, then start the wait again
+  (step 2, "Get woken when a task arrives at your address"). Elsewhere this chat has no wake of its own: say you'll
+  check when they ask, and each turn list your address's tasks, read the handed-over task (`rig queue show <id>
+  --full`, following its successors) and check the seats.
 - **Don't send them to attach** to a seat's terminal to answer, and with no display (headless or SSH) they answer here
   too: don't tell the operator they'll answer in its pane unless they chose that. Bring the prompt here. If the
   operator or a seat sent it to you, record their words and let that sender pass them on; otherwise send their choice
