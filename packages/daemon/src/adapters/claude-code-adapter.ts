@@ -146,7 +146,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private autoDriveProviderPrompts: boolean;
   private listProcesses?: NativeProcessLister;
   private readinessTimeoutMs?: number;
-  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
+  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; inPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
@@ -357,7 +357,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   async launchHarness(
     binding: NodeBinding,
-    opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource; freshInPlace?: boolean; beforeNativeDispatch?: () => boolean },
+    opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource; inPlace?: boolean; beforeNativeDispatch?: () => boolean },
   ): Promise<HarnessLaunchResult> {
     binding = { ...binding };
     if (binding.accountHome !== undefined && (!this.claudeManagedLaunch || !this.seatLaunchEnvironment)) {
@@ -511,6 +511,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!enterResult.ok) {
         return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
       }
+      if (opts.inPlace) {
+        this.autoLaunches.set(binding.nodeId, {
+          binding, token: forkSessionId, inPlace: true, executable: managed?.executable,
+          scriptLaunch: managed?.executableIsScript,
+        });
+      }
       // As with a fresh launch, nothing is read back from Claude's session files: a same-name
       // file can belong to an earlier occupant or another seat sharing the config directory.
       return { ok: true, resumeToken: forkSessionId, resumeType: "claude_id", appliedLaunch, ...launchedExecutable, ...launchNotes() };
@@ -552,9 +558,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const launch = { binding, token: opts.resumeToken ?? generatedSessionId!,
-      freshInPlace: opts.freshInPlace === true && !opts.resumeToken, executable: managed?.executable,
+      inPlace: opts.inPlace === true && !opts.resumeToken, executable: managed?.executable,
       scriptLaunch: managed?.executableIsScript } as
-      { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess };
+      { binding: NodeBinding; token: string; inPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess };
     this.autoLaunches.set(binding.nodeId, launch);
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding);
@@ -586,7 +592,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       ? options.observationPass.lister(this.listProcesses ?? listNativeProcessesOrThrow, this.listProcesses ?? listNativeProcesses)
       : this.listProcesses;
     const historyProbe = await this.assessManagedProbe(binding, paneCommand, paneContent, options, listProcesses);
-    const probe = await this.assessFreshInPlaceProbe(binding, historyProbe);
+    const probe = await this.assessInPlaceProbe(binding, historyProbe);
 
     // A script-launched Claude reads as `sh` until the script hands over the foreground, so the label alone
     // is not a return to a shell. Say so only for a proven idle shell (the rule Codex's checkReady uses).
@@ -631,14 +637,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   // -- Private helpers --
 
-  /** A fresh in-place launch keeps the retiree's scrollback. Its readiness requires a current
+  /** An in-place launch keeps the retiree's scrollback. Its readiness requires a current
    * prompt and stable process proof for that exact launch. Missing observations stay inconclusive. */
-  private async assessFreshInPlaceProbe(
+  private async assessInPlaceProbe(
     binding: NodeBinding,
     historyProbe: ReturnType<typeof assessNativeResumeProbe>,
   ) {
     const launch = this.autoLaunches.get(binding.nodeId);
-    if (historyProbe.status !== "resumed" || !launch?.freshInPlace || !binding.tmuxPane || !binding.tmuxSession
+    if (historyProbe.status !== "resumed" || !launch?.inPlace || !binding.tmuxPane || !binding.tmuxSession
       || launch.binding.id !== binding.id || launch.binding.tmuxPane !== binding.tmuxPane
       || launch.binding.tmuxSession !== binding.tmuxSession
       || launch.binding.launchGeneration !== binding.launchGeneration) return historyProbe;
@@ -650,21 +656,21 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     let occupant: "own" | "another" | "unknown" | "absent" = "unknown";
     try { occupant = await this.paneOccupant(binding, false, { positiveConflictOnly: true }); } catch { /* unavailable */ }
     if (this.autoLaunches.get(binding.nodeId) !== launch) return {
-      status: "inconclusive" as const, code: "awaiting_runtime", detail: "The fresh launch changed during readiness observation.",
+      status: "inconclusive" as const, code: "awaiting_runtime", detail: "The in-place launch changed during readiness observation.",
     };
     if (occupant === "another") return {
       status: "inconclusive" as const, code: "claude_launch_identity_conflict",
-      detail: "A different runtime identity occupies the fresh launch's pane.",
+      detail: "A different runtime identity occupies the in-place launch's pane.",
     };
     if (!screen?.trim()) return {
       status: "inconclusive" as const, code: "awaiting_runtime",
-      detail: "The fresh launch's current Claude prompt could not be observed.",
+      detail: "The in-place launch's current Claude prompt could not be observed.",
     };
     // A process label alone cannot establish an interactive prompt. This probe uses the current
     // frame and the same exact, stable launch proof as managed headerless readiness.
     const current = await this.assessManagedProbe(binding, null, screen, { requireCurrentLaunch: true });
     if (this.autoLaunches.get(binding.nodeId) !== launch) return {
-      status: "inconclusive" as const, code: "awaiting_runtime", detail: "The fresh launch changed during readiness observation.",
+      status: "inconclusive" as const, code: "awaiting_runtime", detail: "The in-place launch changed during readiness observation.",
     };
     return current;
   }
@@ -684,7 +690,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // before pinning that process as the ready launch.
       if (!hasClaudeDrawnInput(paneContent)) return {
         status: "inconclusive" as const, code: "awaiting_runtime",
-        detail: "Waiting for the fresh Claude launch to draw its current input frame.",
+        detail: "Waiting for Claude to draw its current input frame.",
       };
       probe = {
         status: "inconclusive", code: "awaiting_runtime",

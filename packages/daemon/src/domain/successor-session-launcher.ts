@@ -493,7 +493,7 @@ export class SuccessorSessionLauncher {
     try {
       launch = await adapter.launchHarness(binding, staged
         ? { name: staged.canonicalSession }
-        : { name: tmuxSession, ...(forkSource ? { forkSource } : { freshInPlace: true }) });
+        : { name: tmuxSession, inPlace: true, ...(forkSource ? { forkSource } : {}) });
     } catch (err) {
       return { ok: false, code: "successor_launch_failed", message: `Successor harness launch threw: ${err instanceof Error ? err.message : String(err)}` };
     }

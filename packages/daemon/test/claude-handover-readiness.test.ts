@@ -140,18 +140,23 @@ describe("Claude fresh in-place handover readiness", () => {
 
 
   it.each(["classic-predecessor-history", "screen-without-predecessor-history", "new-runtime-already-ready", "running-before-claude-draws", "retained-header-before-claude-draws", "retained-frame-before-claude-draws", "stale-wrapper-screen-unavailable", "working-wrapper-screen-unavailable", "staged-packet-screen-unavailable", "complete-staged-packet", "same-sized-different-paste", "unverifiable-packet-screen-unavailable", "working-headerless-auto-proof", "working-headerless-auto-unavailable", "working-headerless-accept-edits-unavailable", "working-headerless-bypass-unavailable",
+    "fork-missing-conversation", "fork-resumes",
     ...["shell", "script"].flatMap(process => ["prompt", "command"].flatMap(frame =>
       ["readable", "unreadable"].map(listing => `classic-chevron-${process}-${frame}-${listing}`))),
   ])("1544 %s", async mode => {
     const startedAtMs = Date.parse("2026-10-19T21:30:00Z");
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(startedAtMs);
-    const { node } = seedSeat({ runtime: "claude-code" });
+    const { node, sessionId } = seedSeat({ runtime: "claude-code" });
+    const fork = mode === "fork-missing-conversation" || mode === "fork-resumes";
+    const parentToken = "11111111-1111-4111-8111-111111111111";
+    const missingConversation = mode === "fork-missing-conversation";
+    if (fork && sessionId) sessionRegistry.updateResumeToken(sessionId, "claude_id", parentToken, "scrape");
     let elapsed = 0, requested = false, packetPasted = false, packetText = "", packetEnterCount = 0;
     const chevron = mode.startsWith("classic-chevron-");
     const script = chevron && mode.includes("-script-");
     const unreadable = chevron && mode.endsWith("-unreadable");
-    const retainedInput = mode.startsWith("retained-");
+    const retainedInput = fork || mode.startsWith("retained-");
     const drawLater = mode === "running-before-claude-draws" || retainedInput;
     const shellPrompt = drawLater ? "❯ claude --permission-mode acceptEdits --session-id 22222222-2222-4222-8222-222222222222 --name dev-impl@seat-rig"
       : chevron ? mode.includes("-command-") ? "❯ /bin/sh fixture-launch.txt" : "❯ " : "operator@host$ ";
@@ -178,10 +183,13 @@ describe("Claude fresh in-place handover readiness", () => {
     const completeStagedPacketMode = mode === "complete-staged-packet";
     const sameSizedDifferentPasteMode = mode === "same-sized-different-paste";
     const unverifiablePacketMode = mode === "unverifiable-packet-screen-unavailable";
-    const pane = () => headerless ? identicalFrame + "\n" + headerlessFrame : unavailable ? identicalFrame
+    const forkExited = () => missingConversation && requested && elapsed >= drawnAt;
+    const pane = () => forkExited() ? `No conversation found with session ID: ${parentToken}\noperator@host$ `
+      : headerless ? identicalFrame + "\n" + headerlessFrame : unavailable ? identicalFrame
       : stagedPacketMode && requested && elapsed < nativeAt ? oldFrame + "\n" + shellPrompt : requested && elapsed >= drawnAt ? freshFrame
       : mode === "classic-predecessor-history" || chevron || drawLater ? oldFrame + "\n" + shellPrompt : shellPrompt;
-    getPaneCommand.mockImplementation(async () => (unavailable || headerless) && requested ? "sh" : requested && elapsed >= nativeAt ? "claude" : requested && script ? "sh" : "zsh");
+    getPaneCommand.mockImplementation(async () => forkExited() ? "zsh"
+      : (unavailable || headerless) && requested ? "sh" : requested && elapsed >= nativeAt ? "claude" : requested && script ? "sh" : "zsh");
     capturePaneScreen.mockImplementation(async (target: string) => {
       let returnedPane: string | null;
       if (unverifiablePacketMode && packetPasted && packetEnterCount > 0) {
@@ -301,10 +309,23 @@ describe("Claude fresh in-place handover readiness", () => {
       new OutboxHandler(db).retain({ outboxId: "held-1", senderSession: "orch-lead@seat-rig", destinationSession: "dev-impl@seat-rig", body: "Real work for you" },
         { nodeId: node.id, session: "dev-impl@seat-rig", occupant: null, pane: null });
     }
-    const result = await handover.handover({ seatRef: "dev-impl@seat-rig", source: "fresh", reason: "bounded scrollback reproduction" });
+    const seatRef = "dev-impl@seat-rig";
+    const result = await handover.handover({ seatRef, source: fork ? `fork:${seatRef}` : "fresh", reason: "bounded scrollback reproduction" });
     const sessions = db.prepare("SELECT session_name,status,resume_token,startup_status FROM sessions ORDER BY id").all();
     observations.push({ mode, result, trace, reads, listProcessesCalls: listProcesses.mock.calls.length,
       sessions, respawn: respawnPane.mock.calls });
+    if (fork) {
+      expect(packetPasted).toBe(false);
+      if (missingConversation) {
+        expect(result).toMatchObject({ ok: false, code: "successor_create_failed", message: expect.stringMatching(/requested session no longer exists/i) });
+        expect(sessions).toEqual([expect.objectContaining({ status: "running", resume_token: parentToken })]);
+      } else {
+        expect(reads[0]).toMatchObject({ result: { ready: false } });
+        expect(result).toMatchObject({ ok: true, result: { currentStatus: { continuityOutcome: "forked", handoverResult: "complete" } } });
+        expect(sessions).toContainEqual(expect.objectContaining({ status: "running", resume_token: successorToken }));
+      }
+      return;
+    }
     if (unavailable || (headerless && mode.endsWith("-unavailable"))) {
       expect(result.ok).toBe(false);
       expect(packetPasted).toBe(false);
@@ -376,7 +397,7 @@ describe("Claude fresh in-place handover readiness", () => {
       expect(first.result.ready).toBe(false);
       expect((reads.at(-1) as any).result.ready).toBe(true);
     }
-    expect(trace.find((x: any) => x.kind === "launch-intent")).toMatchObject({ opts: { freshInPlace: true } });
+    expect(trace.find((x: any) => x.kind === "launch-intent")).toMatchObject({ opts: { inPlace: true } });
     if (completeStagedPacketMode) {
       const packetInputs = trace.filter((x: any) => x.kind === "input");
       expect(packetInputs).toHaveLength(2);

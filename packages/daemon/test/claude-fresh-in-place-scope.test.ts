@@ -25,7 +25,7 @@ function fixture() {
   return { adapter, capturePaneScreen, capturePaneContent, getPaneCommand, getPanePid, listProcesses };
 }
 const launch = (adapter: ClaudeCodeAdapter, opts: Partial<Parameters<RuntimeAdapter["launchHarness"]>[1]> = {}) =>
-  adapter.launchHarness(binding, { name: "seat", freshInPlace: true, ...opts });
+  adapter.launchHarness(binding, { name: "seat", inPlace: true, ...opts });
 
 function ownProcess(pid = 101): NativeProcessRow[] {
   const startedAt = "Mon Oct 19 21:30:00 2026";
@@ -54,7 +54,7 @@ describe("fresh in-place readiness requires current launch evidence", () => {
     const f = fixture();
     if (mode === "ordinary-fresh") await f.adapter.launchHarness(binding, { name: "seat" });
     if (mode === "resume") await launch(f.adapter, { resumeToken: token });
-    if (mode === "fork") await launch(f.adapter, { forkSource: { kind: "native_id", value: token } });
+    if (mode === "fork") await f.adapter.launchHarness(binding, { name: "seat", forkSource: { kind: "native_id", value: token } });
     expect(await f.adapter.checkReady(binding)).toEqual({ ready: true });
     expect(f.capturePaneScreen).not.toHaveBeenCalled();
   });
