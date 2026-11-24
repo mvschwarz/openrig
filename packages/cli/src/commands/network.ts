@@ -181,5 +181,45 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
       });
     });
 
+  cmd.command("peers")
+    .description("List the peers a connected seat can send requests to, as its hub answers")
+    .argument("<binding-or-seat>", "The binding id, or the connected seat's address")
+    .option("--json", "Print JSON")
+    .action(async (ref: string, opts: { json?: boolean }) => {
+      const daemon = await client();
+      if (!daemon) return;
+      const res = await daemon.get<Record<string, unknown>>(`/api/network/bindings/${encodeURIComponent(ref)}/peers`, { timeoutMs: ACCOUNT_WRITE_TIMEOUT_MS });
+      finish(res.status, res.data, opts.json, (d) => {
+        const team = (d.team ?? {}) as { seats?: Array<{ session?: string; label?: string | null }>; hostedMembers?: Array<{ session?: string; label?: string | null }> };
+        const peers = [...(team.seats ?? []), ...(team.hostedMembers ?? [])].filter((p) => typeof p.session === "string");
+        if (!peers.length) return `The hub lists no peers for ${String(d.hubSeat)}.`;
+        return [`Peers ${String(d.hubSeat)} can send to:`, ...peers.map((p) => `  ${p.session}${p.label ? `  ${p.label}` : ""}`)].join("\n");
+      });
+    });
+
+  cmd.command("request")
+    .description("Send a request to a peer through a connected seat's hub; its answer comes back to a local queue item")
+    .argument("<binding-or-seat>", "The binding id, or the connected seat's address")
+    .argument("<peer>", "The peer's address in the hub, as rig network peers lists it")
+    .requiredOption("--id <request-id>", "Your own id for this request, unique to it: the local item's id. Retry only with the same id")
+    .requiredOption("--body-file <path>", "A file holding the request: what to do and what to return")
+    .option("--summary <text>", "One-line summary")
+    .option("--json", "Print JSON")
+    .action(async (ref: string, peer: string, opts: { id: string; bodyFile: string; summary?: string; json?: boolean }) => {
+      let body: string;
+      try { body = readFileSync(opts.bodyFile, "utf8"); } catch (error) {
+        console.error(`Can't read the body file: ${(error as Error).message}`);
+        process.exitCode = 1;
+        return;
+      }
+      const daemon = await client();
+      if (!daemon) return;
+      const res = await daemon.post<Record<string, unknown>>(`/api/network/bindings/${encodeURIComponent(ref)}/requests`,
+        { peer, requestId: opts.id, body, summary: opts.summary }, { headers: operatorAuthHeaders(), timeoutMs: ACCOUNT_WRITE_TIMEOUT_MS });
+      finish(res.status, res.data, opts.json, (d) => String(d.message ?? ""));
+      // Refused by the hub: the request is recorded and closed failed, which isn't success.
+      if (res.status < 400 && (res.data as { state?: unknown } | null)?.state === "refused") process.exitCode = 1;
+    });
+
   return cmd;
 }
