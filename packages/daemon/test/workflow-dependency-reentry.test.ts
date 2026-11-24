@@ -68,9 +68,29 @@ const STRAIGHT = `workflow:
       gate: {target: human@host, summary: Sign-off, evidence_ref: proof/straight.md}
 `;
 
+const SINGLE = `workflow:
+  id: single-successor
+  version: 1
+  entry: {role: owner}
+  loop_guards: {max_hops: 7}
+  roles:
+    owner: {preferred_targets: [owner@rig]}
+  steps:
+    - id: implement
+      actor_role: owner
+      depends_on: []
+      allowed_exits: [handoff]
+    - id: verify
+      actor_role: owner
+      depends_on: [implement]
+      allowed_exits: [done, failed]
+      next_hop: {on: {failed: implement}}
+`;
+
 describe("dependency graph re-entry through a routed exit", () => {
   let db: ReturnType<typeof createDb>;
   let runtime: WorkflowRuntime;
+  let queue: QueueRepository;
   let dir: string;
   // Unset means real time. A test sets it to move the workflow clock by hand.
   let clock: Date | undefined;
@@ -78,7 +98,7 @@ describe("dependency graph re-entry through a routed exit", () => {
     db = createDb(); migrate(db, ALL_MIGRATIONS);
     db.prepare("INSERT INTO rigs(id,name) VALUES('rig','rig')").run();
     const bus = new EventBus(db);
-    const queue = new QueueRepository(db, bus, { validateRig: () => true, transport: {
+    queue = new QueueRepository(db, bus, { validateRig: () => true, transport: {
       send: async () => ({ ok: false, reason: "controlled terminal is stopped" }),
     } });
     queue.attachOutbox(new OutboxHandler(db));
@@ -97,6 +117,60 @@ describe("dependency graph re-entry through a routed exit", () => {
     runtime.project({ instanceId, currentPacketId: packet, actorSession: "owner@rig", exit });
   const packetFor = (result: { nextStepIds: string[]; nextQitemIds: string[] }, stepId: string) =>
     result.nextQitemIds[result.nextStepIds.indexOf(stepId)]!;
+
+  it("honors explicit owners for a single handoff and a failed verification retry", async () => {
+    const run = await start(SINGLE);
+    const review = await runtime.project({ instanceId: run.id, currentPacketId: run.entry,
+      actorSession: "owner@rig", exit: "handoff", nextOwnerSession: "reviewer@rig" });
+    expect(review.nextOwnerSession).toBe("reviewer@rig");
+    expect(queue.getById(review.nextQitemId!)?.destinationSession).toBe("reviewer@rig");
+    expect(queue.getById(run.entry)?.closureTarget).toBe("reviewer@rig");
+
+    const retry = await runtime.project({ instanceId: run.id, currentPacketId: review.nextQitemId!,
+      actorSession: "reviewer@rig", exit: "failed", nextOwnerSession: "builder@rig" });
+    expect(retry.nextStepId).toBe("implement");
+    expect(retry.nextOwnerSession).toBe("builder@rig");
+    expect(queue.getById(retry.nextQitemId!)?.destinationSession).toBe("builder@rig");
+  });
+
+  it("rejects an ambiguous owner override before closing a branching packet", async () => {
+    const run = await start(BUILD);
+    const packetBefore = queue.getById(run.entry);
+    const countBefore = db.prepare("SELECT COUNT(*) AS count FROM queue_items").get();
+    await expect(runtime.project({ instanceId: run.id, currentPacketId: run.entry,
+      actorSession: "owner@rig", exit: "handoff", nextOwnerSession: "reviewer@rig" }))
+      .rejects.toMatchObject({ code: "next_owner_ambiguous" });
+    expect(queue.getById(run.entry)).toEqual(packetBefore);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items").get()).toEqual(countBefore);
+    expect(runtime.trailLog.listForInstance(run.id)).toEqual([]);
+  });
+
+  it("retains the human gate's role owner and park when an owner override is supplied", async () => {
+    const source = SINGLE.replace("      next_hop:",
+      "      gate: {target: human@host, summary: Sign-off, evidence_ref: proof/review.md}\n      next_hop:");
+    const run = await start(source);
+    const review = await runtime.project({ instanceId: run.id, currentPacketId: run.entry,
+      actorSession: "owner@rig", exit: "handoff", nextOwnerSession: "reviewer@rig" });
+    expect(review.nextOwnerSession).toBe("owner@rig");
+    expect(queue.getById(review.nextQitemId!)).toMatchObject({
+      destinationSession: "owner@rig", state: "blocked", blockedOn: "human@host",
+    });
+  });
+
+  it("checks the explicitly chosen owner's harness before writing", async () => {
+    for (const [name, harness] of [["owner", "codex"], ["reviewer", "claude-code"]]) {
+      db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES(?, 'rig', ?, ?)").run(name, name, harness);
+      db.prepare("INSERT INTO sessions(id,node_id,session_name,status) VALUES(?, ?, ?, 'running')")
+        .run(`session-${name}`, name, `${name}@rig`);
+    }
+    const run = await start(SINGLE.replace("      next_hop:", "      harness: codex\n      next_hop:"));
+    const packetBefore = queue.getById(run.entry);
+    await expect(runtime.project({ instanceId: run.id, currentPacketId: run.entry,
+      actorSession: "owner@rig", exit: "handoff", nextOwnerSession: "reviewer@rig" }))
+      .rejects.toMatchObject({ code: "harness_pin_unsatisfied" });
+    expect(queue.getById(run.entry)).toEqual(packetBefore);
+    expect(runtime.trailLog.listForInstance(run.id)).toEqual([]);
+  });
 
   it("re-runs both reviews and reopens the gate after the sign-off sends implement back", async () => {
     const run = await start(BUILD);

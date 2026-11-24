@@ -1160,12 +1160,25 @@ export class WorkflowProjector {
   }
 
   /** Owner and gate for each step about to be projected, resolved before anything is written. */
-  private planSuccessors(instance: WorkflowInstance, spec: WorkflowSpec, steps: WorkflowStepSpec[]): SuccessorPlan[] {
+  private planSuccessors(instance: WorkflowInstance, spec: WorkflowSpec, steps: WorkflowStepSpec[], nextOwnerSession?: string): SuccessorPlan[] {
+    if (nextOwnerSession && steps.length > 1) {
+      throw new WorkflowProjectorError("next_owner_ambiguous",
+        "nextOwnerSession cannot select an owner for multiple dependency successors; omit --next-owner or route to a single step",
+        { instanceId: instance.instanceId, stepIds: steps.map((step) => step.id), nextOwnerSession });
+    }
     return steps.map((step) => {
       const gate = step.gate
         ? compileGate(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig, instance.boundPod))
         : null;
-      const owner = gate?.destinationSession ?? resolveDefaultOwner(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig, instance.boundPod));
+      let owner: string | null;
+      if (gate) {
+        owner = gate.destinationSession;
+      } else if (nextOwnerSession) {
+        reconcileExplicitOwnerHarness(step, nextOwnerSession, (session) => this.nodeRuntimeOf(session));
+        owner = nextOwnerSession;
+      } else {
+        owner = resolveDefaultOwner(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig, instance.boundPod));
+      }
       if (!owner) {
         throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve next owner for dependency step "${step.id}"`, { instanceId: instance.instanceId, stepId: step.id });
       }
@@ -1381,7 +1394,7 @@ export class WorkflowProjector {
     const createdPackets: ProjectedSuccessor[] = [];
     this.eventBus.withNotifyEnvelope((register) => {
       const addEvent = (event: PersistedEvent): void => { emitted.push(event); register(event); };
-      const ownerPlans = this.planSuccessors(instance, spec, nextSteps);
+      const ownerPlans = this.planSuccessors(instance, spec, nextSteps, input.nextOwnerSession);
 
       if (!alreadyClosed) {
         const closureOwner = ownerPlans.length === 1 ? ownerPlans[0]!.owner : null;
