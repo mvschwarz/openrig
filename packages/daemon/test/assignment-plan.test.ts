@@ -94,11 +94,14 @@ describe("the assignment plan", () => {
     expect(precheck.mock.calls.map(([s]) => s.session)).toEqual(["off@fleet"]);
   });
 
-  it("Codex continuity: in place on Linux; unsupported in place on macOS unless --account-home, then a fresh successor; never a fallback", async () => {
+  it("Codex continuity: in place on Linux and macOS; unsupported in place elsewhere unless --account-home, then a fresh successor; never a fallback", async () => {
     const seats = [seat("c@fleet", { runtime: "codex" })];
     expect((await plan({ account: CODEX, seats }).result).rows[0]!.continuity).toBe("in place: the seat restarts on the same conversation");
+    // macOS reads the running Codex from its launch record and lsof (#3840), so it restarts in place as on Linux.
     const mac = await plan({ account: CODEX, seats, platform: "darwin" }).result;
-    expect(mac.rows[0]!.continuity).toMatch(/^unsupported in place: a Codex seat switches in place only on Linux/);
+    expect(mac.rows[0]!.continuity).toBe("in place: the seat restarts on the same conversation");
+    const windows = await plan({ account: CODEX, seats, platform: "win32" }).result;
+    expect(windows.rows[0]!.continuity).toBe("unsupported in place: a Codex seat switches in place only on Linux and macOS (name a prepared home with --account-home for a fresh successor)");
     const prepared = await plan({ account: CODEX, seats, platform: "darwin", accountHome: "/prepared/home" }).result;
     expect(prepared.rows[0]!.continuity).toBe("fresh successor with handover, on /prepared/home");
     expect(prepared.accountHome).toBe("/prepared/home");
@@ -162,9 +165,13 @@ describe("the assignment plan", () => {
     expect((await plan({ account: CODEX, seats: [seat("own@fleet", { runtime: "codex", configured: reg })] }).result).rows[0]!.effect).toBe("kept_override");
     // Moving to a named account home changes no shared home.
     expect((await plan({ account: CODEX, seats: [seat("c1@fleet", { runtime: "codex" })], accountHome: "/prepared" }).result).codexHomes).toEqual([]);
-    // Nothing switches in place on macOS, so no home is switched and nothing restarts.
-    expect((await plan({ account: CODEX, seats: [seat("c1@fleet", { runtime: "codex" }), seat("peer@other", { runtime: "codex", rigName: "other" })],
-      platform: "darwin" }).result).codexHomes).toEqual([]);
+    // macOS switches the home in place as Linux does, so it lists the same seats; elsewhere nothing switches in place, so no
+    // home is switched and nothing restarts.
+    const onHome = [seat("c1@fleet", { runtime: "codex" }), seat("peer@other", { runtime: "codex", rigName: "other" })];
+    expect((await plan({ account: CODEX, seats: onHome, platform: "darwin" }).result).codexHomes)
+      .toEqual((await plan({ account: CODEX, seats: onHome, platform: "linux" }).result).codexHomes);
+    expect((await plan({ account: CODEX, seats: onHome, platform: "darwin" }).result).codexHomes).not.toEqual([]);
+    expect((await plan({ account: CODEX, seats: onHome, platform: "win32" }).result).codexHomes).toEqual([]);
     // A seat on another home can't switch in place: only the account's own home is listed.
     const mixed = await plan({ account: CODEX, seats: [seat("c1@fleet", { runtime: "codex" }), seat("c9@fleet", { runtime: "codex", codexHome: "/homes/b" })] }).result;
     expect(mixed.codexHomes.map((h) => [h.home, h.seats.map((s) => s.seat)])).toEqual([["/homes/a", ["c1@fleet"]]]);

@@ -1204,7 +1204,7 @@ never run it as a form. "Whatever you think" or "skip" is an answer: write down 
 4. **Ask what you may do on your own:** move a machine's seats without asking; machines or seats to ask about first
    or never move; sign-ins (may agents, and through which browser or profile, or always ask). Say what's supported
    today: a Claude or Codex seat moves with `rig provider switch`, and a whole rig with `rig provider assign`; a Codex
-   seat moves in place only on Linux, with every seat on its Codex home; and a sign-in preference is used only where a
+   seat moves in place only on Linux and macOS, with every seat on its Codex home; and a sign-in preference is used only where a
    sign-in route and access exist.
 5. **Ask how to reach them** (their seat's queue, a chat channel, the Fleet app), for what, and what to do when they
    don't answer. A channel they name is a preference: check the route with `messaging-the-human`, and use a queue

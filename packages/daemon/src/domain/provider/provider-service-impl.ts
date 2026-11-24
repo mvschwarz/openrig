@@ -146,7 +146,7 @@ export interface ProviderServiceImplDeps {
   codexLogins?: CodexHomeLogins;
   /** What would outrank a Claude seat's own token; without it, Claude seats aren't moved. */
   claudePrecedence?: ClaudeCredentialPrecedence;
-  /** Where a Codex seat can switch in place (Linux); tests pin it. */
+  /** Where a Codex seat can switch in place (Linux and macOS); tests pin it. */
   platform?: NodeJS.Platform;
 }
 

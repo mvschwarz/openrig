@@ -217,10 +217,13 @@ export function assignmentStanding(seat: PlanSeatFacts, account: AccountRef | nu
   return override ? { state: "override", override } : { state: "not_applied" };
 }
 
-/** A Codex seat switches in place only on Linux, on the home the account's login is saved in, and not when it moves to a
+/** A Codex seat switches in place only on Linux and macOS, on the home the account's login is saved in, and not when it moves to a
  *  named account home instead. */
+/** Where the in-place restart can read the running Codex (/proc on Linux; its launch record and lsof on macOS). */
+const IN_PLACE_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set(["linux", "darwin"]);
+
 function codexInPlace(seat: PlanSeatFacts, input: AssignmentPlanInput): boolean {
-  return !input.accountHome && input.platform === "linux" && sameHome(input, seat.codexHome, input.account.codexHome);
+  return !input.accountHome && IN_PLACE_PLATFORMS.has(input.platform) && sameHome(input, seat.codexHome, input.account.codexHome);
 }
 
 function continuity(seat: PlanSeatFacts, input: AssignmentPlanInput, check: PlanCheck): string {
@@ -235,7 +238,7 @@ function continuity(seat: PlanSeatFacts, input: AssignmentPlanInput, check: Plan
   }
   if (input.accountHome) return `fresh successor with handover, on ${input.accountHome}`;
   if (!sameHome(input, seat.codexHome, account.codexHome)) return `unsupported in place: the seat runs on ${seat.codexHome}, and this login is saved in ${account.codexHome}`;
-  if (input.platform !== "linux") return "unsupported in place: a Codex seat switches in place only on Linux (name a prepared home with --account-home for a fresh successor)";
+  if (!IN_PLACE_PLATFORMS.has(input.platform)) return "unsupported in place: a Codex seat switches in place only on Linux and macOS (name a prepared home with --account-home for a fresh successor)";
   return "in place: the seat restarts on the same conversation";
 }
 

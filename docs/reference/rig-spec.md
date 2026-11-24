@@ -946,7 +946,7 @@ The rows read like this:
 - **Seats of the other runtime** are listed as not affected.
 
 Codex seats have two extra cases:
-- **In place, on Linux only.** A Codex seat switches in place by changing its Codex home's active login, so every seat
+- **In place, on Linux and macOS only.** A Codex seat switches in place by changing its Codex home's active login, so every seat
   on that home moves with it. The plan lists each home's seats: this rig's "would restart", and a seat in another rig
   shows the `rig seat restart` it would need, whatever its rig is named. Elsewhere the row reads "unsupported in place".
 - **To a prepared home.** `--account-home <dir>` moves the seats that aren't on the account yet to that home instead,
@@ -962,7 +962,7 @@ time. Seats move one at a time, and each gets one result:
 | `unchanged` | Already on the account, or kept as an override. |
 | `switched` | Moved to the account. A running seat was relaunched or restarted on it. A stopped Claude seat has the reference saved for its next launch. A Codex seat's move is confirmed at its next tool turn. The detail says when a token hasn't taken effect yet. |
 | `pending-successor` | Moved to the prepared home, where a fresh successor took the seat with a handover. |
-| `unsupported` | Can't move in place here, for example a Codex seat that isn't on Linux. |
+| `unsupported` | Can't move in place here, for example a Codex seat that isn't on Linux or macOS. |
 | `failed-before-effect` | Refused or failed before changing anything, including a seat whose precheck was unsafe (unless another seat then switched its Codex home: that's `unknown`, with its restart command). |
 | `unknown` | Something may have changed. The result names the command that recovers or checks it. |
 
@@ -1012,7 +1012,7 @@ the login a running session uses.
 **What it doesn't do.**
 - It doesn't sign in, or create or copy credentials. Signing in on another machine is tracked in #3628.
 - It doesn't assign seats added to the rig later: run the assignment again.
-- A Codex seat moves in place only on Linux.
+- A Codex seat moves in place only on Linux and macOS.
 
 ### Choosing the Claude instruction file
 

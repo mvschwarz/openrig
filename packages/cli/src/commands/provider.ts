@@ -1147,7 +1147,7 @@ The daemon that runs the rig computes the plan from what it already has, and cha
 configured account, whether it has its own choice of account (kept unless --include-overrides), the switch's precheck
 verdict, whether it keeps its conversation, and what it's doing now. A busy seat is noted, not refused.
 A Claude seat is relaunched in place on the same conversation; a stopped one picks the account up at its next launch.
-A Codex seat switches in place only on Linux, by changing its Codex home's active login, so every seat on that home moves
+A Codex seat switches in place only on Linux and macOS, by changing its Codex home's active login, so every seat on that home moves
 with it: the plan lists each one, in this rig ("would restart") or not ("not restarted; needs rig seat restart <seat>").
 Elsewhere it reads "unsupported in place"; name a prepared home with --account-home to move it as a fresh successor
 with a handover instead. Nothing falls back to that by itself.
