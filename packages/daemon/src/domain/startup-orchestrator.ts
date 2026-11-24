@@ -1,4 +1,5 @@
 import { ActivityGrantStore } from "./activity-grants.js";
+import { CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE } from "./claude-activity-hooks.js";
 import { nonInterruptiveNotice } from "../adapters/non-interruptive.js";
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { randomUUID } from "node:crypto";
@@ -461,6 +462,11 @@ export class StartupOrchestrator {
     // RestoreOrchestrator already reconciled the saved activity selection before
     // native resume. Fresh launches still project empty plans to support removal.
     let projectionResult: ProjectionResult;
+    if (input.adapter.runtime === "claude-code" && !input.preserveStartupContext) {
+      const claudeActivitySelected = input.plan.entries.some(entry => entry.category === "runtime_resource"
+        && entry.resourceType === CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE);
+      input = { ...input, binding: { ...input.binding, claudeActivitySelected } };
+    }
     if (!(input.preserveStartupContext && input.adapter.runtime === "claude-code" && input.plan.entries.length === 0)) try {
       const skip = input.replaySkip;
       const projectedPlan = skip && skip.entryIds.size > 0

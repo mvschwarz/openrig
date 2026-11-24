@@ -1,14 +1,9 @@
 # Custom Claude status line
 
-OpenRig installs a silent context collector as `statusLine.command` in the seat
-working directory's `.claude/settings.local.json`. Claude's project-local setting
-overrides your user-level status line, so a renderer configured only in
-`~/.claude/settings.json` can disappear in that directory. Other Claude sessions
-using the same directory also read that setting.
-
-Since 0.6.5, OpenRig preserves a custom, nonempty project-local status line command,
-including a wrapper or a command composed with shell operators. It still refreshes
-its own collector script. If your command does not run the collector, context and
+OpenRig supplies its silent context collector in the managed Claude session's launch
+settings when your settings have no custom status line. Your status line stays in
+use when configured, including a wrapper or a command composed with shell operators.
+If your command does not run the collector, context and
 provider usage stop updating, and Claude resume-token capture at adoption or
 handover loses its current session evidence. An earlier sidecar can remain and
 contain an older session ID; without one, context and capture report
@@ -26,21 +21,19 @@ placeholder paths and `my-statusline` with your actual commands:
 #!/bin/sh
 input=$(cat)
 printf '%s' "$input" |
-  node '/seat/cwd/.openrig/context-collector.cjs' \
+  node '/installed/openrig/assets/claude-statusline-context.cjs' \
     '/instance/home/state/context-usage' \
     '/instance/home/state/provider-usage' >/dev/null 2>&1
 printf '%s' "$input" | my-statusline
 ```
 
-Take the collector path and both directory arguments from the existing generated
-`statusLine.command` in that seat's `.claude/settings.local.json`, leaving out
-its leading `exec`: it only lets the generated single command replace its shell,
-and a wrapper doesn't need it. The instance home is the selected `OPENRIG_HOME`. Keep paths quoted, including paths with
+Use the collector script shipped with the OpenRig installation and the selected
+instance's `OPENRIG_HOME` for the two state directories. Keep paths quoted, including paths with
 spaces. Each command needs the same status line JSON on stdin: simply running
 the collector and renderer in sequence against a single stdin lets the first
 consume the input.
 
-In that same settings file, merge this field while preserving your other settings:
+In the Claude settings file that owns your renderer, add this field while preserving your other settings:
 
 ```json
 {
@@ -58,10 +51,16 @@ native Windows support.
 
 ## A throttled seat
 
-A seat with `statusline_throttle` (see the rig spec reference) keeps its throttled status line in its own launch
-settings, not in `.claude/settings.local.json`, so the generated command in that file is the same as for any other seat.
-A status line command of your own there, such as the wrapper above, wins over the throttle: the launch skips the
-throttle and says so.
+A seat with `statusline_throttle` (see the rig spec reference) applies the throttle to its launch-local collector.
+A status line command of your own, such as the wrapper above, keeps control of that status line.
+
+## Earlier project-local installations
+
+Earlier releases wrote the collector and relay hooks into `.claude/settings.local.json`. Updating the daemon leaves
+those entries in place while a running seat may still depend on them. Use the existing `rig down` cleanup when
+you can stop the seats sharing that directory. It preserves unrelated settings and leaves malformed files for the owner.
+The next managed launch supplies its own settings. An ordinary Claude session can read any old project-local entries
+that still exist. An earlier local collector can also hide a status line configured at the user scope until cleanup.
 
 ## Check after an upgrade or instance change
 

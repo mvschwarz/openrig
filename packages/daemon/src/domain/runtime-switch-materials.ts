@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE } from "./claude-activity-hooks.js";
 import nodePath from "node:path";
 import type Database from "better-sqlite3";
 import type { AgentSpec, Node, RigSpec, RigSpecPod, RigSpecPodMember, StartupAction } from "./types.js";
@@ -47,7 +48,7 @@ export interface RuntimeSwitchMaterials {
   warnings: string[];
   /** Writes the target's seat storage, projects its materials and delivers its pre-launch files. Returns notes. */
   prepare(binding: NodeBinding, adapter: RuntimeAdapter): Promise<string[]>;
-  bindingAdditions(): Pick<NodeBinding, "seatSkillsRoot" | "claudeManagedBlockFile">;
+  bindingAdditions(): Pick<NodeBinding, "seatSkillsRoot" | "claudeManagedBlockFile" | "claudeActivitySelected">;
 }
 
 export interface RuntimeSwitchMaterialsInput {
@@ -182,6 +183,8 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
     },
     bindingAdditions: () => ({
       seatSkillsRoot: seatSkills.skillsRoot,
+      ...(runtime === "claude-code" ? { claudeActivitySelected: plan.entries.some(entry => entry.category === "runtime_resource"
+        && entry.resourceType === CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE) } : {}),
       ...(runtime === "claude-code" && input.claudeManagedBlockFile ? { claudeManagedBlockFile: input.claudeManagedBlockFile } : {}),
     }),
     async prepare(binding, adapter) {

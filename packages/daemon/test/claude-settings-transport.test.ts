@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { transportClaudeSettings, ownClaudeSettings } from "../src/adapters/claude-settings-transport.js";
+import { composeClaudeLaunchSettings, transportClaudeSettings, ownClaudeSettings } from "../src/adapters/claude-settings-transport.js";
 import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 import { resumedClaudeArguments, sentClaudeAutoMode } from "../src/domain/claude-continuation-launch.js";
 
@@ -16,6 +16,49 @@ const seat = () => {
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 describe("Claude settings file transport", () => {
+  it.each([false, true])("keeps file-backed settings private while adding launch settings (equals form %s)", inline => {
+    const context = seat(), warnings: string[] = [];
+    const source = path.join(context.openrigHome, "operator.json");
+    const original = '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo user"}]}]},"other":"operator fixture"}\n';
+    fs.writeFileSync(source, original);
+    const argv = inline ? ["--settings=operator.json", "--model", "test"] : ["--settings", "operator.json", "--model", "test"];
+    const args = composeClaudeLaunchSettings(argv, context, context.openrigHome, warnings, settings => ({
+      ...settings, statusLine: { type: "command", command: "echo launcher" },
+    }));
+    const file = inline ? args[0]!.slice(11) : args[1]!;
+    expect(args).toEqual(inline ? [`--settings=${file}`, "--model", "test"] : ["--settings", file, "--model", "test"]);
+    expect(file).not.toBe(source);
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual({ ...JSON.parse(original), statusLine: { type: "command", command: "echo launcher" } });
+    expect(args.join(" ")).not.toContain("operator fixture");
+    expect(fs.readFileSync(source, "utf8")).toBe(original);
+    expect(warnings).toEqual([]);
+    const continued = resumedClaudeArguments({ args, warnings }, [], "same", undefined, undefined, { environment: ["new"] }, context);
+    expect(continued).toContain(inline ? `--settings=${file}` : file);
+    expect(continued.join(" ")).not.toContain("operator fixture");
+  });
+
+  it("preserves the original file argument when a private composed value cannot be staged", () => {
+    const context = seat(), warnings: string[] = [];
+    const source = path.join(context.openrigHome, "operator.json");
+    fs.writeFileSync(source, '{"opaque":"fixture-only"}');
+    fs.writeFileSync(path.join(context.openrigHome, "state"), "not a directory");
+    const argv = ["--settings", source];
+    const args = composeClaudeLaunchSettings(argv, context, context.openrigHome, warnings, settings => ({ ...settings, idleCompaction: false }));
+    expect(args).toEqual(argv);
+    expect(warnings).toEqual([expect.stringContaining("kept the original --settings file")]);
+    expect(warnings.join(" ")).not.toContain("fixture-only");
+  });
+
+  it("keeps malformed settings for Claude to handle", () => {
+    const context = seat(), warnings: string[] = [];
+    const source = path.join(context.openrigHome, "operator.json");
+    fs.writeFileSync(source, "[broken fixture");
+    const argv = ["--settings", source];
+    expect(composeClaudeLaunchSettings(argv, context, context.openrigHome, warnings, () => ({ idleCompaction: false }))).toEqual(argv);
+    expect(warnings).toEqual([expect.stringContaining("kept the original --settings file")]);
+  });
+
   it("keeps the exact 64 KiB margin inline and stages the next byte", () => {
     const context = seat(), value = JSON.stringify({ x: "x".repeat(65528) });
     expect(Buffer.byteLength(value)).toBe(65536);

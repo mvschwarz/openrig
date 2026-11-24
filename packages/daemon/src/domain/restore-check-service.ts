@@ -1230,8 +1230,8 @@ export class RestoreCheckService {
       };
     }
 
-    // Current Claude activity hooks are selected as a runtime resource and
-    // delivered by ClaudeCodeAdapter: settings in the seat CWD, relay in instance state.
+    // Current Claude activity hooks are selected as a runtime resource. Managed
+    // launches compose them in session settings, with the relay in instance state.
     // Do not require the retired internal control-plane shell hooks on public installs.
     const startup = node.nodeId ? this.deps.getStartupContext(node.nodeId) : null;
     if (startup?.status === "ok" && !startup.projectionEntries.some((entry) => (
@@ -1259,12 +1259,19 @@ export class RestoreCheckService {
           remediationSafe: false,
         };
       }
-      if (!this.deps.exists(relayPath) || !this.deps.exists(settingsPath)) {
+      if (!this.deps.exists(relayPath)) {
         return {
           check: `seat.${session}.hooks`, status: "yellow",
-          evidence: `Claude activity hook delivery is incomplete: expected relay ${relayPath} and settings ${settingsPath}`,
-          remediation: "Relaunch the seat to project its selected Claude activity hooks",
+          evidence: `Claude activity hooks are selected, but the relay is unavailable at ${relayPath}`,
+          remediation: "Relaunch the seat to stage its selected Claude activity relay",
           remediationSafe: false,
+        };
+      }
+      if (!this.deps.exists(settingsPath)) {
+        return {
+          check: `seat.${session}.hooks`, status: "yellow",
+          evidence: "Claude activity hooks are selected for launch and the relay is present. This check has no project-local settings to inspect and has not verified native hook execution.",
+          remediation: "",
         };
       }
       let settings: unknown;

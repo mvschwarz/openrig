@@ -21,7 +21,9 @@ import { fileURLToPath } from "node:url";
 import { discoverTailscaleSelfNames } from "./middleware/browser-boundary.js";
 import { configureShadowCapture } from "./domain/shadow-capture.js";
 import { SeatDeliveryGuard, resolveExternalCliOccupant, resolveGuardTarget } from "./domain/seat-delivery-guard.js";
-import { seatCodexCorePluginDir, vendoredCorePluginDir } from "./domain/claude-core-plugin-env.js";
+import { CLAUDE_PLUGIN_DIRS_ENV, seatCodexCorePluginDir, vendoredCorePluginDir } from "./domain/claude-core-plugin-env.js";
+import { CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE, claudeActivityRelayPath, deriveRelayEvents } from "./domain/claude-activity-hooks.js";
+import { withClaudeLaunchTelemetry, type ClaudeLaunchTelemetry } from "./adapters/claude-launch-telemetry.js";
 import { queueRecoveryOwnsWake } from "./domain/queue-wake-ladder.js";
 import { HealthPolicyStore } from "./domain/health-policy.js";
 import { HealthCheckpointSource } from "./domain/health-checkpoints.js";
@@ -916,6 +918,52 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN: process.env.OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN,
   }, (session, key) => tmuxAdapter.getSessionEnv(session, key));
   claudeManagedLaunch.onTokenNotApplied = (event) => { eventBus.emit(event); };
+  const claudeCollectorAssetPath = nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs");
+  const claudeHooksManifestPath = nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json");
+  const relay = claudeActivityRelayPath(OPENRIG_HOME);
+  const readHookAssets = { exists: fs.existsSync, readFile: (file: string) => fs.readFileSync(file, "utf8") };
+  const claudeLaunchTelemetry: ClaudeLaunchTelemetry = async (input) => {
+    const getPaneEnv = (name: string) => tmuxAdapter.getSessionEnv(input.paneSession, name).catch(() => undefined);
+    const configDir = input.configDir ?? await getPaneEnv("CLAUDE_CONFIG_DIR")
+      ?? claudeManagedLaunch.configPaths(input.cwd, input.nodeId).configDir;
+    const corePlugin = vendoredCorePluginDir();
+    let activitySelected = input.activitySelected;
+    if (activitySelected === undefined) {
+      const row = db.prepare("SELECT projection_entries_json FROM node_startup_context WHERE node_id = ?")
+        .get(input.nodeId) as { projection_entries_json: string } | undefined;
+      try {
+        const entries: unknown = JSON.parse(row?.projection_entries_json ?? "[]");
+        activitySelected = Array.isArray(entries) && entries.some(entry => entry?.category === "runtime_resource"
+          && entry.resourceType === CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE);
+      } catch { input.warnings.push("OpenRig could not read the seat's saved Claude activity-hook selection."); }
+    }
+    let events = activitySelected ? deriveRelayEvents(readHookAssets, claudeHooksManifestPath) : [];
+    if (events.length && corePlugin) {
+      const pluginFlag = "--plugin-dir";
+      const flagDirs = input.args.flatMap((arg, index) => arg.startsWith(`${pluginFlag}=`) ? [arg.slice(pluginFlag.length + 1)]
+        : arg === pluginFlag && input.args[index + 1] !== undefined ? [input.args[index + 1]!] : []);
+      const pluginOnArgv = flagDirs.some(dir => nodePath.resolve(input.cwd, dir) === corePlugin);
+      const pluginDirs = await getPaneEnv(CLAUDE_PLUGIN_DIRS_ENV);
+      const pluginOnEnv = pluginDirs?.split(nodePath.delimiter).includes(corePlugin);
+      // The core plugin's CLI environment channel was added in Claude Code 2.1.280.
+      const version = pluginOnEnv && !pluginOnArgv ? await hookBridge.claudeVersionFor(input.executable) : null;
+      const [major = 0, minor = 0, patch = 0] = (version ?? "").split(".").map(Number);
+      if (pluginOnArgv || major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 280)))) {
+        const provided = deriveRelayEvents(readHookAssets, nodePath.join(corePlugin, "hooks", "claude.json"));
+        if (fs.existsSync(nodePath.join(corePlugin, "hooks", "scripts", "activity-relay.cjs"))) {
+          events = events.filter(({ event }) => !provided.some(hook => hook.event === event));
+        }
+      }
+    }
+    if (events.length && !fs.existsSync(relay)) {
+      input.warnings.push("OpenRig's Claude activity relay could not be staged; activity hooks were omitted from launch settings.");
+      events = [];
+    }
+    return withClaudeLaunchTelemetry(input.args, { openrigHome: OPENRIG_HOME, session: input.session,
+      cwd: input.cwd, configDir: nodePath.resolve(input.cwd, configDir), collector: claudeCollectorAssetPath, relay, events,
+      throttleSeconds: rigRepo.getNodeStatuslineThrottle(input.nodeId),
+    }, input.warnings);
+  };
   // The compaction settings a managed restore reads, at each launch, so the launch grants those files too (#1940).
   const restoreReadPolicy = () => {
     try {
@@ -925,7 +973,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   };
   const claudeResume = new ClaudeResumeAdapter(tmuxAdapter, { claudeManagedLaunch, seatLaunchEnvironment, openrigHome: OPENRIG_HOME, restoreReadPolicy,
     hookBridgeLaunch: (nodeId, executable) => hookBridge.launchWanted(nodeId, executable),
-    statuslineThrottleLaunch: (nodeId) => rigRepo.getNodeStatuslineThrottle(nodeId) });
+    launchTelemetry: claudeLaunchTelemetry });
   // #275: one reader for both Codex launch adapters, with the PATH, HOME and CODEX_HOME a seat session gets.
   const readCodexNetworkDefault = codexNetworkDefaultReader({ launchPath: process.env.PATH, home: daemonHome, codexHome });
   const prepareTeamWorkspace = (sessionName: string) => prepareCodexTeamWorkspace(sessionName,
@@ -1173,7 +1221,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter, readFile: (p: string) => fs.readFileSync(p, "utf-8") });
   const runtimeSettings = new ContextPackSettingsStore().resolveConfig();
-  const claudeCollectorAssetPath = nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs");
   // #2456: the adapters' guidance writes check and keep OpenRig's record of each managed block.
   const guidanceBlockRecords = managedBlockRecords(db);
   let codexActivityRelayPath: string | undefined;
@@ -1182,7 +1229,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   } catch (error) {
     console.warn("Could not stage the Codex activity relay; using the shipped relay:", error);
   }
-  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, restoreReadPolicy, hookBridgeLaunch: (nodeId: string, executable?: string) => hookBridge.launchWanted(nodeId, executable), statuslineThrottleLaunch: (nodeId: string) => rigRepo.getNodeStatuslineThrottle(nodeId), fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: claudeCollectorAssetPath, autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), managedBlockRecords: guidanceBlockRecords, recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
+  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, restoreReadPolicy, hookBridgeLaunch: (nodeId: string, executable?: string) => hookBridge.launchWanted(nodeId, executable), launchTelemetry: claudeLaunchTelemetry, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: claudeCollectorAssetPath, autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), managedBlockRecords: guidanceBlockRecords, recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
   const codexAdapter = new CodexRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, prepareTeamWorkspace, prepareSeatFolder, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, seatHome: (nodeId: string, ignoreAccountHome?: boolean) => seatRuntimeHome(db, nodeId, "codex", ignoreAccountHome).home, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, codexLoginShell: readCodexLoginShell, activityRelayPath: codexActivityRelayPath ?? nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveCorePluginDir: () => vendoredCorePluginDir(), resolveCorePluginSelected: (nodeId: string) => Boolean(seatCodexCorePluginDir({ id: nodeId, runtime: "codex" }, db)), resolveHooksEnabled: async () => {
     const { SettingsStore } = await import("./domain/user-settings/settings-store.js");
     return new SettingsStore().resolveOne("runtime.codex.hooks_enabled").value as boolean;
@@ -3126,7 +3173,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // drains the same statusline cache directory the read model scans.
   const { UsageSamplesStore, providerWindowSamplesFromSignals } = await import("./domain/usage-samples-store.js");
   const usageSamplesStore = new UsageSamplesStore(db);
-  const contextMonitor = new ContextMonitor(db, contextUsageStore, claudeAdapter, compactionEnforcer, {
+  const contextMonitor = new ContextMonitor(db, contextUsageStore, undefined, compactionEnforcer, {
     "claude-code": claudeAdapter,
     codex: codexAdapter,
     pi: piAdapter,

@@ -60,8 +60,8 @@ Setting up Node.js on Linux, on a Mac where you aren't an administrator, or on W
 >   yours.
 > - **Starting OpenRig, for the coding agent you use** (paths are the usual defaults):
 >   - Codex: hooks and trust in `~/.codex/config.toml`.
->   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
->     `.claude/settings.local.json`, plus a status line unless you already have your own.
+>   - Claude Code: workspace trust in `~/.claude.json`, plus activity hooks and context collection
+>     in the managed session's launch settings when selected. Your own status line takes precedence.
 >   - Discovery skills go in `~/.claude/skills` and `~/.agents/skills`.
 > - **Starting a team in your project:** adds managed guidance to `AGENTS.md` or `CLAUDE.md`, plus the team's skills
 >   and plugins.
@@ -217,7 +217,7 @@ using a published package, since repository guidance can be ahead of npm.
 | **npm installation** | Installs the CLI (`rig` and `openrig-tui`), bundled components and dependencies under your npm prefix (with Bun, under Bun's global directory). OpenRig's postinstall checks the Node.js version and that the SQLite module loads; Bun may block this script. It does not run daemon or provider setup. |
 | **`rig setup`** | Attempts missing tools and writes an OpenRig block in `~/.tmux.conf` for mouse support and scrollback. Installs herdr by default on macOS and Linux unless declined with `--no-herdr`; an unavailable herdr install is a warning. On macOS the installing agent offers Ghostty, and `--ghostty` attempts it after acceptance. Existing cmux settings are left unchanged. `--full` adds workstation tools. `--dry-run` shows setup's plan without applying it. |
 | **Daemon startup** | Creates/updates instance state under `OPENRIG_HOME` (normally `~/.openrig`), including its database and managed plugin resources. Seeds the `openrig-skills` discovery skill, the `refocusing` skill and the person-facing `rigs` skill in `~/.claude/skills` and `~/.agents/skills`, subject to existing version ownership. When a Codex seat is already recorded and `runtime.codex.hooks_enabled` is enabled (the default), ensures its hook configuration and trust records as described below. With no recorded Codex seat, enabled hooks wait for its first launch; disabled hooks still remove a stale OpenRig-managed hook block, if present. |
-| **Rig/seat launch and attachment** | Creates tmux sessions, supplies seat identity and daemon connection environment, and projects selected guidance, skills, plugins and runtime resources into the workspace. Managed startup pre-trusts the workspace. Claude context collection can also be provisioned for attached sessions and refreshed during monitoring. In a Git repository, newly created files under `.codex/plugins/shared:openrig-core/` (or the unqualified `.codex/plugins/openrig-core/`) are added to the repository's Git `info/exclude` inside an `# BEGIN OpenRig generated files` block; new `AGENTS.md`, `CLAUDE.md` and `CLAUDE.local.md` files stay visible with a warning. |
+| **Rig/seat launch and attachment** | Creates tmux sessions, supplies seat identity and daemon connection environment, and projects selected guidance, skills, plugins and runtime resources into the workspace. Managed startup pre-trusts the workspace. Claude context collection for a launch stays with that session. In a Git repository, newly created files under `.codex/plugins/shared:openrig-core/` (or the unqualified `.codex/plugins/openrig-core/`) are added to the repository's Git `info/exclude` inside an `# BEGIN OpenRig generated files` block; new `AGENTS.md`, `CLAUDE.md` and `CLAUDE.local.md` files stay visible with a warning. |
 | **Bundle install** (`rig bundle install`, or `rig up` with a `.rigbundle` or GitHub link) | Writes the bundle's files into the install target: `--target`, or the current directory for `rig up` and for a GitHub link. `rig bundle install` with a local archive needs `--target`. Routes its declared skills, plugins and context packs into your libraries. A GitHub link's archive is kept under `OPENRIG_HOME/bundle-imports/`, and installs are recorded in `OPENRIG_HOME/bundle-audit.jsonl`. A bundle that carries a project creates it under `workspace.projects_root` and records it, with the rig's association, in the workspace catalog. |
 | **Explicit permission configuration** | The built-in bootstrap does **not** add `rig` command allow rules to your settings files; a team seat with no permission policy, per-seat choice or (for Codex) named profile gets the per-launch [team default](docs/reference/rig-spec.md#team-launch-defaults) instead. Agent-guided setup recommends keeping it and requires your actual answer before the agent [adds remembered rules at your chosen scope](docs/reference/getting-started.md#have-your-agent-configure-permissions). No/no answer keeps the team default and preserves settings; existing choices and stricter rules remain relevant. Broader access is separate. |
 
@@ -228,12 +228,11 @@ user's home; changing `OPENRIG_HOME` alone does not isolate provider configurati
   With an explicit permission mode, it uses the launch-selected `HOME/.claude.json`,
   or `<CLAUDE_CONFIG_DIR>/.claude.json` when that variable is set. Classic startup
   writes `HOME/.claude.json`, and also `<CLAUDE_CONFIG_DIR>/.claude.json` when the
-  daemon has that variable set. In the workspace, `.claude/settings.local.json` receives
-  the context collector's `statusLine` command and selected activity hooks;
-  a user's own status-line command is preserved, so it can prevent collector
-  installation. Selected settings resources can still replace overlapping keys.
-  The collector script lives under `.openrig/`, and the activity-hook relay under
-  the instance's `state/claude-activity-hooks/`. Selected settings/MCP resources can also
+  daemon has that variable set. The context collector and selected activity hooks are
+  composed into a managed Claude launch. OpenRig leaves your status line in use when present.
+  Earlier releases put their collector and hooks into project-local settings. See the
+  [cleanup guidance](docs/reference/claude-status-line.md#earlier-project-local-installations).
+  Selected settings/MCP resources can still
   change that settings file and `.mcp.json`. The shared settings resource enables
   Exa/Context7 MCP entries and leaves existing `permissions.defaultMode` and permission
   rules unchanged. Managed launch flags select the session mode. Selected MCP resources

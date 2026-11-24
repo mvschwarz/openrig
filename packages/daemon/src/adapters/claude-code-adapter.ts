@@ -2,6 +2,7 @@ import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode } f
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { transportClaudeSettings } from "./claude-settings-transport.js";
+import type { ClaudeLaunchTelemetry } from "./claude-launch-telemetry.js";
 import { claudeMcpArgs } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import nodePath from "node:path";
@@ -28,7 +29,6 @@ import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume
 import { shellQuote, shellWord } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, managedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
 import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
-import { throttledStatusLineForLaunch } from "../domain/claude-statusline-throttle.js";
 import { insideMissingFolder, isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { claudeStrictTrustRoot } from "../domain/claude-git-trust-root.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
@@ -140,7 +140,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private stateDir: string | null;
   private restoreReadPolicy: (() => RestoreReadPolicy | null) | null;
   private hookBridgeLaunch: ((nodeId: string, executable?: string) => boolean | Promise<boolean>) | null;
-  private statuslineThrottleLaunch: ((nodeId: string) => number | null | Promise<number | null>) | null;
+  private launchTelemetry?: ClaudeLaunchTelemetry;
   private collectorAssetPath: string | null;
   private nodeExecutable: string;
   private autoDriveProviderPrompts: boolean;
@@ -168,8 +168,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     /** Slice 13: whether this launch adds a seat's hook bridge (opted in, on a Claude with asyncRewake), read at each
      *  launch; absent, no launch adds it. */
     hookBridgeLaunch?: (nodeId: string, executable?: string) => boolean | Promise<boolean>;
-    /** #3416 (3): the seat's status line throttle in seconds, or null when it has none; read at each launch. */
-    statuslineThrottleLaunch?: (nodeId: string) => number | null | Promise<number | null>;
+    launchTelemetry?: ClaudeLaunchTelemetry;
     collectorAssetPath?: string;
     /** Interpreter used to write generated Claude commands; defaults to this daemon runtime. */
     nodeExecutable?: string;
@@ -198,7 +197,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.stateDir = deps.stateDir ?? null;
     this.restoreReadPolicy = deps.restoreReadPolicy ?? null;
     this.hookBridgeLaunch = deps.hookBridgeLaunch ?? null;
-    this.statuslineThrottleLaunch = deps.statuslineThrottleLaunch ?? null;
+    this.launchTelemetry = deps.launchTelemetry;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
     this.nodeExecutable = deps.nodeExecutable ?? process.execPath;
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
@@ -258,7 +257,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     );
     let activityOutcome: ActivityHookOutcome = { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
     try {
-      activityOutcome = this.reconcileClaudeActivityHooks(binding.cwd, activityEntries.length > 0);
+      if (this.launchTelemetry) {
+        if (activityEntries.length > 0) {
+          const delivery = validateClaudeActivityHookDelivery(this.fs, this.activityRelayPath, this.claudeHooksManifestPath);
+          if (delivery.deliverable) this.stageActivityRelay(claudeActivityRelayPath(this.stateDir ?? undefined));
+          activityOutcome.delivered = delivery.deliverable;
+        }
+      } else activityOutcome = this.reconcileClaudeActivityHooks(binding.cwd, activityEntries.length > 0);
     } catch (err) {
       // #226: delivery at '/' is still attempted (it works where '/' is writable); when it fails there, say why.
       // A binding without a cwd (startup bootstraps the stored node's selection) gets the plain warning.
@@ -291,7 +296,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     // Best-effort: provision context collector for managed Claude sessions
-    try { this.ensureContextCollector(binding); } catch (err) {
+    try { if (!this.launchTelemetry) this.ensureContextCollector(binding); } catch (err) {
       // Log but don't fail — collector provisioning is best-effort
       console.error(`[openrig] context collector provisioning warning: ${(err as Error).message}`);
     }
@@ -450,9 +455,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       ({ ...observeClaudePermission(posture), claudeAutoMode });
     const appliedLaunch = appliedWith(autoMode.block ?? null);
     const hookBridge = (await this.hookBridgeLaunch?.(binding.nodeId, binding.claudeExecutable ?? undefined)) === true;
-    const statusLine = await this.throttledStatusLine(binding.nodeId, binding.cwd, opts.name, tokenWarnings);
     const settingsSeat = { openrigHome: this.stateDir, session: opts.name };
-    const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, { ...binding, hookBridge, ...(statusLine ? { statusLine } : {}) }), {
+    const transportSettings = async (args: string[]) => transportClaudeSettings(await this.launchTelemetry?.({
+      args, nodeId: binding.nodeId, cwd: binding.cwd, session: opts.name, paneSession: binding.tmuxSession!,
+      configDir: managed?.configDir ?? binding.claudeLaunch?.configDir ?? undefined,
+      executable: managed?.executable ?? binding.claudeExecutable, activitySelected: binding.claudeActivitySelected, warnings: tokenWarnings,
+    }) ?? args, settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
+    const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, { ...binding, hookBridge }), {
       openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
     });
     const permissionArg = (args: string[]) => posture + args.map(arg => ` ${shellQuote(arg)}`).join("");
@@ -494,7 +503,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
       const forkSessionId = this.sessionIdFactory();
-      const launchArgs = transportClaudeSettings(permissionArgs(forkSessionId), settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
+      const launchArgs = await transportSettings(permissionArgs(forkSessionId));
       const permissionMode = permissionArg(launchArgs);
       const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
         "--resume", parentId, "--fork-session", "--session-id", forkSessionId, "--name", opts.name])
@@ -521,8 +530,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     let nativeArgs = resumedClaudeArguments(opts.resumeToken ? binding.claudeLaunch : undefined, ["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
       ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture, autoMode.block ?? null, settingsSeat);
     const sentNative = !!managed || !!(opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable);
-    if (sentNative) nativeArgs = transportClaudeSettings(nativeArgs, settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
-    else launchArgs = transportClaudeSettings(launchArgs, settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
+    if (sentNative) nativeArgs = await transportSettings(nativeArgs);
+    else launchArgs = await transportSettings(launchArgs);
     const permissionMode = permissionArg(launchArgs);
     const cmd = managed ? managed.command(nativeArgs, opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
       ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${shellWord(opts.name)}`
@@ -1345,16 +1354,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    */
   /** #3416 (3): the throttled status line for this launch's --settings, when the seat opted in and its folder's own
    *  status line is OpenRig's collector or absent; otherwise undefined, with a note when the folder's settings win. */
-  private async throttledStatusLine(nodeId: string, cwd: string | null | undefined, sessionName: string,
-    notes: string[]): Promise<Record<string, unknown> | undefined> {
-    const seconds = await this.statuslineThrottleLaunch?.(nodeId) ?? null;
-    if (seconds === null || !this.stateDir || !cwd) return undefined;
-    const result = throttledStatusLineForLaunch({ readFile: (p: string) => this.fs.readFile(p), exists: (p: string) => this.fs.exists(p), cwd,
-      stateDir: this.stateDir, nodeExecutable: this.nodeExecutable, sessionName, seconds });
-    if ("note" in result) { notes.push(result.note); return undefined; }
-    return result.statusLine;
-  }
-
   private provisionContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
     if (!this.stateDir || !this.collectorAssetPath || !binding.cwd) return;
     // A seat folder this machine doesn't have isn't recreated to hold the collector (insideMissingFolder); this runs on
@@ -1403,6 +1402,24 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     existing["statusLine"] = { ...statusLine, type: "command", command: collectorCmd };
 
     this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
+  }
+
+  private stageActivityRelay(relayDest: string): void {
+    this.fs.mkdirp(nodePath.dirname(relayDest));
+    // Sibling seats share this relay. Do not truncate identical bytes while a hook reads it.
+    if (!this.fs.exists(relayDest) || this.fs.readFile(relayDest) !== this.fs.readFile(this.activityRelayPath!)) {
+      this.fs.copyFile(this.activityRelayPath!, relayDest);
+    }
+    this.preserveMode(this.activityRelayPath!, relayDest);
+    const descriptorSource = nodePath.join(nodePath.dirname(this.activityRelayPath!), "permission-stop-descriptor.cjs");
+    const descriptorDest = nodePath.join(nodePath.dirname(relayDest), "permission-stop-descriptor.cjs");
+    try {
+      if (this.fs.exists(descriptorSource)
+        && (!this.fs.exists(descriptorDest) || this.fs.readFile(descriptorDest) !== this.fs.readFile(descriptorSource))) {
+        this.fs.copyFile(descriptorSource, descriptorDest);
+        this.preserveMode(descriptorSource, descriptorDest);
+      }
+    } catch { /* Formatter unavailable: the relay withholds details; existing hooks remain deliverable. */ }
   }
 
   /**
@@ -1467,23 +1484,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // 2. Deliverable enable: copy the relay asset + upsert the owned entry for each
     //    PREVALIDATED relay event (derived from the canonical manifest above).
     if (deliverable) {
-      this.fs.mkdirp(nodePath.dirname(relayDest));
-      // Sibling seats share this relay. Do not truncate identical bytes while a hook reads it.
-      if (!this.fs.exists(relayDest) || this.fs.readFile(relayDest) !== this.fs.readFile(this.activityRelayPath!)) {
-        this.fs.copyFile(this.activityRelayPath!, relayDest);
-      }
-      this.preserveMode(this.activityRelayPath!, relayDest);
-      // The relay can run without its diagnostic formatter (it withholds details), but a managed
-      // copy needs the sibling asset too. Missing assets do not suppress existing activity hooks.
-      const descriptorSource = nodePath.join(nodePath.dirname(this.activityRelayPath!), "permission-stop-descriptor.cjs");
-      const descriptorDest = nodePath.join(nodePath.dirname(relayDest), "permission-stop-descriptor.cjs");
-      try {
-        if (this.fs.exists(descriptorSource)
-          && (!this.fs.exists(descriptorDest) || this.fs.readFile(descriptorDest) !== this.fs.readFile(descriptorSource))) {
-          this.fs.copyFile(descriptorSource, descriptorDest);
-          this.preserveMode(descriptorSource, descriptorDest);
-        }
-      } catch { /* Formatter unavailable: the relay withholds details; existing hooks remain deliverable. */ }
+      this.stageActivityRelay(relayDest);
       for (const { event, timeout } of derivedEvents) {
         const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
         const hook: Record<string, unknown> = { type: "command", command: ownedCmd };
