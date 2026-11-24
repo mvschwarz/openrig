@@ -826,7 +826,11 @@ describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's w
         res.end();
       }
     });
-    await new Promise<void>((resolve) => target.listen(0, resolve));
+    // Bind the loopback address the route is pointed at. A wildcard bind
+    // ("::") does not reserve 127.0.0.1:<port> on macOS, so a concurrent
+    // 127.0.0.1:0 listener (another test file or process) can take the same
+    // port number and answer this suite's requests instead of the target.
+    await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", resolve));
     targetPort = (target.address() as { port: number }).port;
   });
   afterEach(() => {
@@ -868,7 +872,9 @@ describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's w
     const start = () => app.request("/api/hosts/pair", {
       method: "POST", headers: auth, body: JSON.stringify({ url: `127.0.0.1:${targetPort}` }),
     });
-    const { pairId } = await (await start()).json() as { pairId: string };
+    const first = await start();
+    expect(first.status).toBe(200);
+    const { pairId } = await first.json() as { pairId: string };
     const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + minutes * 60 * 1000);
     try {
       expect((await start()).status).toBe(200);
@@ -912,6 +918,7 @@ describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's w
       headers: auth,
       body: JSON.stringify({ url: `127.0.0.1:${targetPort}` }),
     });
+    expect(started.status).toBe(200);
     const { pairId } = await started.json() as { pairId: string };
 
     targetState = { status: "denied" };
@@ -991,6 +998,7 @@ describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's w
       headers: auth,
       body: JSON.stringify({ url: `127.0.0.1:${targetPort}`, id: "vps-mid" }),
     });
+    expect(started.status).toBe(200);
     const { pairId } = await started.json() as { pairId: string };
 
     const tokenPath = join(home, "secrets", "host-vps-mid.token");
