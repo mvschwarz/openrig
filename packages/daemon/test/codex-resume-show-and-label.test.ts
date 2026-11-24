@@ -513,7 +513,7 @@ describe("Issue #2989 — node-inventory & getNodeDetail Codex show-and-label pr
       override.codexPermissions,
     );
     expect(res.ok).toBe(true);
-    return sent[0]!.replace("env CODEX_HOME='/seat-codex-home' ", "").replace(" -c 'allow_login_shell=false'", "");
+    return sent[0]!.replace("env CODEX_HOME='/seat-codex-home' ", "").replace(" -c 'allow_login_shell=false'", "").replace(" -C '/work'", "");
   }
 
   it("M1: shares one pure resolveLaunchOverrideFromFacts decision between NativePermissionStore.launchOverride and batched inventory across selection, envelope, kernel, team, runtime-switch target, and refusal cases", async () => {

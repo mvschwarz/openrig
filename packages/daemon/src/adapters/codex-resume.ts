@@ -146,7 +146,8 @@ export class CodexResumeAdapter {
     // The seat's own writable roots, as a launch gets them: its git metadata dirs (so it can still commit) and its topology
     // folder (its LEARNED.md and recap). Only on the plain workspace-write floor: a named profile here isn't checked for
     // read-only, and Codex refuses a writable root under one, so it gets none. After the conversation id, so the resume
-    // proof reads the id even from a path with a space.
+    // proof reads the id even from a path with a space. -C names the seat's directory, as a fresh launch does: without it, a
+    // conversation recorded in another directory makes Codex ask which one to use.
     const plainFloor = !codexConfigProfile?.trim() && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write";
     const ownRoots = plainFloor
       ? [...(await this.options.resolveGitAddDirs?.(cwd) ?? []), this.options.prepareSeatFolder?.(tmuxSessionName)] : [];
@@ -160,7 +161,7 @@ export class CodexResumeAdapter {
       `${postureArg}${networkArg}${this.options.codexLoginShell?.() ? "" : codexNonLoginShellArg}`,
       daemonSupport?.kind === "supported",
       effort,
-    ) + ownRoots.filter((root): root is string => !!root).map((root) => ` --add-dir ${shellQuote(root)}`).join("");
+    ) + ` -C ${shellQuote(cwd)}` + ownRoots.filter((root): root is string => !!root).map((root) => ` --add-dir ${shellQuote(root)}`).join("");
 
     const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
     const staged = this.options.seatLaunchEnvironment

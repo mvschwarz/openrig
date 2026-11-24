@@ -1883,7 +1883,7 @@ describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () =
         : w.calls.find((call) => call.startsWith("respawn "))!.slice("respawn ".length);
       expect(launchedCommand).toContain(expectedPrefix);
       expect(launchedCommand).toContain("--no-daemon -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.5' -c 'model_reasoning_effort=\"high\"' resume");
-      expect(launchedCommand).toContain(`'${TOKEN}' --add-dir '/shared/one'`);
+      expect(launchedCommand).toContain(`'${TOKEN}' -C '/work' --add-dir '/shared/one'`);
       // The running Codex kept its login shell, so the relaunch does too.
       expect(launchedCommand).not.toContain("allow_login_shell");
       if (shape === "shell_backed") {
