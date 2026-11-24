@@ -18,6 +18,7 @@ import path from "node:path";
 import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { shellQuote } from "../src/adapters/shell-quote.js";
+import { killTmuxServerAndWait, tmuxServerProcesses } from "./helpers/tmux-server-exit.js";
 import { startTranscriptRotation, stopTranscriptRotation, getActiveRotationCount, getLastCaptureAt } from "../src/domain/transcript-rotation.js";
 const run = promisify(exec);
 const runFile = promisify(execFile);
@@ -32,6 +33,7 @@ describe.skipIf(process.platform === "win32")("native failed-kill transcript con
     const sessionName = "worker@kill-fixture";
     const db = createDb();
     migrate(db, ALL_MIGRATIONS);
+    let tmuxProcesses = new Set<number>();
     try {
       await runFile("tmux", ["-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", "server", "sleep 60"], { env });
       const tmuxAdapter = new TmuxAdapter(async (command) => {
@@ -39,6 +41,8 @@ describe.skipIf(process.platform === "win32")("native failed-kill transcript con
         return (await run(`tmux -S ${shellQuote(socket)} ${command.slice(5)}`, { env })).stdout;
       });
       expect(await tmuxAdapter.createSession(sessionName, temp)).toEqual({ ok: true });
+      // Teardown can kill the seat's shell before cleanup lists the server's panes.
+      tmuxProcesses = await tmuxServerProcesses(socket, env);
       const rigRepo = new RigRepository(db);
       const sessionRegistry = new SessionRegistry(db);
       const eventBus = new EventBus(db);
@@ -72,11 +76,11 @@ describe.skipIf(process.platform === "win32")("native failed-kill transcript con
       }
     } finally {
       stopTranscriptRotation(sessionName);
-      await runFile("tmux", ["-S", socket, "kill-server"], { env }).catch(() => {});
+      // The seat's shell writes its history into HOME as it exits.
+      await killTmuxServerAndWait(socket, env, tmuxProcesses);
       db.close();
-      // tmux's children can still finish writing as its server exits.
-      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
-      fs.rmSync(socketDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+      fs.rmSync(temp, { recursive: true, force: true });
+      fs.rmSync(socketDir, { recursive: true, force: true });
     }
   });
 });
