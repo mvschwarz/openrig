@@ -588,7 +588,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const listProcesses = options?.observationPass
       ? options.observationPass.lister(this.listProcesses ?? listNativeProcessesOrThrow, this.listProcesses ?? listNativeProcesses)
       : this.listProcesses;
-    const historyProbe = await this.assessManagedProbe(binding, paneCommand, paneContent, options, listProcesses);
+    let historyProbe = await this.assessManagedProbe(binding, paneCommand, paneContent, options, listProcesses);
+    // A "No conversation found" above the line that ran the pane's current launch is an earlier launch's (the rule both
+    // resume verifiers use), so readiness judges what this launch drew below that line. The tmux adapter keeps that line
+    // for whichever adapter staged the launch; with none (an inline launch, or a daemon restart since), the report stands.
+    const typedLine = historyProbe.code === "no_conversation_found" ? this.tmux.stagedLaunchTypedLine?.(binding.tmuxSession) : undefined;
+    if (typedLine) {
+      const report = noConversationFoundOwner(paneContent, { typedLine, unread: this.tmux.stagedLaunchUnread?.(binding.tmuxSession) === true });
+      if (report.owner === "earlier" && report.since !== undefined) {
+        historyProbe = await this.assessManagedProbe(binding, paneCommand, report.since, options, listProcesses);
+      }
+    }
     const probe = await this.assessFreshInPlaceProbe(binding, historyProbe);
 
     // A script-launched Claude reads as `sh` until the script hands over the foreground, so the label alone

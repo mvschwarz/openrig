@@ -1241,7 +1241,7 @@ describe("Claude Code runtime adapter", () => {
         listProcesses: () => (opts.rows ?? (() => occupied))(reads),
         ...(staged ? { seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never } : {}) });
       const result = await adapter.launchHarness({ ...makeBinding(), tmuxPane: "%1" }, { name: "dev-impl@test-rig", resumeToken: "abc-123" });
-      return { result, reads, tmux };
+      return { result, reads, tmux, adapter };
     };
 
     it("doesn't end the wait on Claude's process alone, and lets it stand with a note when the longer wait ends", async () => {
@@ -1442,6 +1442,39 @@ describe("Claude Code runtime adapter", () => {
           const { result } = await run({ launchScript: { readAt: 0 }, paneCommand: "zsh", rows: shellOnly,
             screen: () => `${earlierNotFound}${typed}\nNo conversation found with session ID: abc-123\nzsh$ ` });
           expect(result).toMatchObject({ ok: false, recovery: "retry_fresh", missingConversation: true });
+        });
+
+        // Readiness after the launch judges the report the same way: the startup orchestrator's wait calls checkReady, which
+        // reads the pane again, so an earlier report above the typed line mustn't fail a seat that resumed below it.
+        it("readiness after the launch: an earlier report above the typed line doesn't fail the resumed seat", async () => {
+          const { result, adapter } = await run({ launchScript: { readAt: 0 }, paneCommand: "claude", screen: () => `${earlierNotFound}${typed}\n${tui}` });
+          expect(result).toMatchObject({ ok: true, resumeToken: "abc-123" });
+          const ready = await adapter.checkReady({ ...makeBinding(), tmuxPane: "%1" });
+          expect(ready, JSON.stringify(ready)).toMatchObject({ ready: true });
+        });
+
+        it("readiness after the launch: a report below the typed line is still this launch's", async () => {
+          const { adapter } = await run({ launchScript: { readAt: 0 }, paneCommand: "zsh", rows: shellOnly,
+            screen: () => `${earlierNotFound}${typed}\nNo conversation found with session ID: abc-123\nzsh$ ` });
+          const ready = await adapter.checkReady({ ...makeBinding(), tmuxPane: "%1" });
+          expect(ready, JSON.stringify(ready)).toMatchObject({ ready: false, code: "no_conversation_found" });
+        });
+
+        // The restore path resumes through ClaudeResumeAdapter, so this adapter holds no launch of its own for the seat; the
+        // tmux adapter's record of the line it staged still places the report.
+        it("readiness for a resume another adapter staged: an earlier report above its typed line doesn't fail it, and with no staged line the report stands", async () => {
+          const tmux = mockTmux();
+          tmux.stagedLaunchUnread = vi.fn(() => false);
+          tmux.stagedLaunchTypedLine = vi.fn((target: string) => (target === "r01-impl" ? typed : undefined));
+          (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
+          (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(`${earlierNotFound}${typed}\n${tui}`);
+          (tmux as unknown as { getPanePid: unknown }).getPanePid = vi.fn(async () => 10);
+          const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => occupied });
+          const ready = await adapter.checkReady({ ...makeBinding(), tmuxPane: "%1" });
+          expect(ready, JSON.stringify(ready)).toMatchObject({ ready: true });
+          tmux.stagedLaunchTypedLine = vi.fn(() => undefined);
+          const unplaced = await adapter.checkReady({ ...makeBinding(), tmuxPane: "%1" });
+          expect(unplaced, JSON.stringify(unplaced)).toMatchObject({ ready: false, code: "no_conversation_found" });
         });
 
         it("an earlier report still above the typed line is waited past while Claude starts below it", async () => {
