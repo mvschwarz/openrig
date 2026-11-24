@@ -148,3 +148,25 @@ test("offline npm pack carries staged asset bytes and executability, with npm's 
     fs.rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+test("the CLI package's own files list keeps staged Python bytecode caches out of the pack", { skip: process.platform === "win32" }, () => {
+  const f = fixture();
+  const cliFiles = JSON.parse(fs.readFileSync(new URL("../packages/cli/package.json", import.meta.url), "utf8")).files;
+  const planted = { "tools/helper.py": "print('fixture')\n", "tools/__pycache__/helper.cpython-312.pyc": "bytecode fixture\n", "tools/legacy.pyc": "loose bytecode fixture\n" };
+  try {
+    fs.mkdirSync(join(f.assets, "tools/__pycache__"), { recursive: true });
+    for (const [name, text] of Object.entries(planted)) fs.writeFileSync(join(f.assets, name), text);
+    const copied = stage(f, "0022");
+    assert.equal(copied.error, undefined, copied.stderr);
+    assert.equal(copied.status, 0, copied.stderr);
+    for (const name of Object.keys(planted)) assert.ok(fs.existsSync(join(f.staged, name)), `staging copies ${name} verbatim; the pack list is the filter`);
+    fs.writeFileSync(join(f.cli, "package.json"), JSON.stringify({ name: "openrig-assets-fixture", version: "1.0.0", private: true, files: cliFiles }));
+    const packed = packEntry(execFileSync("npm", ["pack", "--dry-run", "--offline", "--ignore-scripts", "--json"], { cwd: f.cli, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }));
+    const paths = packed.files.map(file => file.path);
+    assert.ok(paths.includes("daemon/assets/tools/helper.py"), "Python sources beside the cache still ship");
+    assert.ok(paths.includes("daemon/assets/data.bin"), "ordinary staged assets still ship");
+    assert.deepEqual(paths.filter(path => /(^|\/)__pycache__(\/|$)|\.pyc$/.test(path)), [], "no Python bytecode cache may ship");
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
