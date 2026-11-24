@@ -283,6 +283,9 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     expect(envPark).toBeDefined();
     expect(validateRelayOutboundEnvelope(envPark)).toEqual({ ok: true, envelope: envPark });
     expect(envPark.deliveryId).toBe("dec-park-1");
+    // #3844: a bridge acking after its own delivery step can name the row and notification from the envelope alone.
+    expect(envPark.qitemId).toBe("q-park-1");
+    expect(envPark.notificationKey).toBe("q-park-1:7");
     expect(envPark.recipient).toEqual({ handle: "sam_wa" });
     expect(envPark.intent).toBe("decision");
     expect(envPark.outcome).toBe("interrupt");
@@ -337,6 +340,8 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     expect(envUpdate.intent).toBe("update");
     expect(envUpdate.outcome).toBe("notify");
     expect(envUpdate.replyRef).toBeNull();
+    expect(envUpdate.qitemId).toBe("q-upd-1");
+    expect(envUpdate.notificationKey).toBe("q-upd-1:1");
 
     // 3. Multi-item digest -> top-level replyRef is null; per-question refs in items[] prevent one reply from approving several
     const digestDecision: OutboundDecision = {

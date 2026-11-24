@@ -52,6 +52,10 @@ export interface RelayDigestItem {
 export interface RelayOutboundEnvelope {
   v: 1;
   deliveryId: string;
+  /** #3844: the queue row this envelope was composed from, and its opaque notification key. Single-item envelopes
+   *  carry them at the top level; digest items already carry their own. Absent on envelopes frozen before this field. */
+  qitemId?: string;
+  notificationKey?: string;
   recipient: {
     handle: string;
   };
@@ -100,6 +104,8 @@ const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 const ALLOWED_ENVELOPE_KEYS = new Set([
   "v",
   "deliveryId",
+  "qitemId",
+  "notificationKey",
   "recipient",
   "intent",
   "outcome",
@@ -220,6 +226,12 @@ export function validateRelayOutboundEnvelope(
   if (uk) return { ok: false, error: `relay envelope has unknown key "${uk}"` };
   if (raw.v !== RELAY_PROTOCOL_VERSION) return { ok: false, error: `relay envelope.v must be ${RELAY_PROTOCOL_VERSION}` };
   if (!nonEmptyStr(raw.deliveryId)) return { ok: false, error: "relay envelope.deliveryId must be a non-empty string" };
+  // Additive in protocol v1: a buffered envelope from an older daemon may omit both, so neither is required.
+  for (const key of ["qitemId", "notificationKey"] as const) {
+    if (raw[key] !== undefined && !nonEmptyStr(raw[key])) {
+      return { ok: false, error: `relay envelope.${key} must be a non-empty string when present` };
+    }
+  }
   if (!isObj(raw.recipient)) return { ok: false, error: "relay envelope.recipient must be an object" };
   const ruk = unknownKey(raw.recipient, ALLOWED_RECIPIENT_KEYS);
   if (ruk) return { ok: false, error: `relay envelope.recipient has unknown key "${ruk}"` };
@@ -279,6 +291,8 @@ export function validateRelayOutboundEnvelope(
     envelope: {
       v: RELAY_PROTOCOL_VERSION,
       deliveryId: raw.deliveryId,
+      ...(typeof raw.qitemId === "string" ? { qitemId: raw.qitemId } : {}),
+      ...(typeof raw.notificationKey === "string" ? { notificationKey: raw.notificationKey } : {}),
       recipient: { handle: raw.recipient.handle },
       intent: raw.intent,
       outcome: raw.outcome,
@@ -499,6 +513,8 @@ export function prepareRelayDecision(decision: OutboundDecision, opts: PrepareRe
   const envelope: RelayOutboundEnvelope = {
     v: RELAY_PROTOCOL_VERSION,
     deliveryId: decision.decisionId,
+    // #3844: a single-item envelope carries the row link directly; a digest's items[] already carry theirs.
+    ...(items ? {} : { qitemId: p.qitemId, notificationKey: p.notificationKey ?? p.qitemId }),
     recipient: { handle: binding.handle },
     intent,
     outcome,

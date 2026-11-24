@@ -89,6 +89,8 @@ OPENRIG_RELAY_INBOUND_TOKEN=sec_inbound_token_value
 {
   "v": 1,
   "deliveryId": "dec-019283-abc",
+  "qitemId": "qitem-019283",
+  "notificationKey": "qitem-019283:4",
   "recipient": { "handle": "alice-ops" },
   "intent": "decision",
   "outcome": "interrupt",
@@ -99,7 +101,9 @@ OPENRIG_RELAY_INBOUND_TOKEN=sec_inbound_token_value
 ```
 
 - `v`: Protocol version integer (`1`).
-- `deliveryId`: Stable whole-decision delivery identifier (`<decisionId>`).
+- `deliveryId`: Stable whole-decision delivery identifier (`<decisionId>`). It remains the custody key for the ack route.
+- `qitemId`: The queue row this single-item envelope was composed from. With `notificationKey`, it lets a bridge that acks only after its own delivery step map the envelope to its row without reproducing OpenRig's text composition. Multi-item digests carry these fields on each `items[]` entry instead. Envelopes frozen before these fields existed may omit both; bridges that need a row link for them still need a fallback.
+- `notificationKey`: Opaque notification key for the row, the same value digest items carry. Never interpreted by the bridge.
 - `recipient.handle`: Recipient's registered safe alias for this connector.
 - `intent`: `"decision"` (actionable question) or `"update"` (informational notice).
 - `outcome`: Delivery classification (`"interrupt"`, `"notify"`, or `"digest"`).
