@@ -1,3 +1,4 @@
+import { networkBindingProvidersSchema } from "./migrations/191_network_binding_providers.js";
 import { nodeKeepAliveSchema } from "./migrations/181_node_keep_alive.js";
 import { sessionStopAttemptSchema } from "./migrations/180_session_stop_attempt.js";
 import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js";
@@ -10,6 +11,7 @@ import { workflowRunTitleSchema } from "./migrations/194_workflow_run_title.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
 import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";
+import { networkRequestsSchema } from "./migrations/184_network_requests.js";
 
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
@@ -383,5 +385,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueRelayedAnswersSchema,
   queueItemsScanIndexesSchema,
   rigSeatSliceSchema,
+  networkBindingProvidersSchema,
   workflowRunTitleSchema,
+  networkRequestsSchema,
 ];
