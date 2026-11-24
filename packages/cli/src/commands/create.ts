@@ -44,7 +44,9 @@ export function createCommand(depsOverride?: StatusDeps): Command {
       try {
         agentRef = await resolveDefaultAgentRef(client, opts.runtime);
       } catch (err) {
-        console.error(err instanceof Error ? err.message : String(err));
+        const detail = err instanceof Error ? err.message : String(err);
+        if (opts.json) console.log(JSON.stringify({ ok: false, detail }, null, 2));
+        else console.error(detail);
         process.exitCode = 1;
         return;
       }
