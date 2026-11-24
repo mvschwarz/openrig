@@ -45,7 +45,7 @@ For Claude, a foreground process alone no longer proves a resumed conversation, 
 
 ## Seat pools and opt-in controls
 
-The seat pool adds agents through topology add with the model member's launch settings, holds a whole rig, and dispatches waiting rows to free pool agents; drained pool agents stay down on `rig up`. Opt-in `keep_alive` relaunches a seat that falls. Also opt-in: seat grouping beneath `openrigseats.slice`, a per-rig onboarding pack override, a trace of state-changing requests, and `daemon.start_readiness_wait_seconds`, with docs for running the daemon under a supervisor. ([#3810](https://github.com/mvschwarz/openrig/pull/3810), [#3771](https://github.com/mvschwarz/openrig/pull/3771), [#3494](https://github.com/mvschwarz/openrig/pull/3494), [#3495](https://github.com/mvschwarz/openrig/pull/3495), [#3424](https://github.com/mvschwarz/openrig/pull/3424), [#3568](https://github.com/mvschwarz/openrig/pull/3568), [#3789](https://github.com/mvschwarz/openrig/pull/3789), [#3720](https://github.com/mvschwarz/openrig/pull/3720), [#3660](https://github.com/mvschwarz/openrig/pull/3660), [#3661](https://github.com/mvschwarz/openrig/pull/3661))
+The seat pool's add, whole-rig hold and dispatch paths are in place, but nothing arms a pool yet (see Known issues). Opt-in `keep_alive` relaunches a seat that falls. Also opt-in: seat grouping beneath `openrigseats.slice`, a per-rig onboarding pack override, a trace of state-changing requests, and `daemon.start_readiness_wait_seconds`, with docs for running the daemon under a supervisor. ([#3810](https://github.com/mvschwarz/openrig/pull/3810), [#3771](https://github.com/mvschwarz/openrig/pull/3771), [#3494](https://github.com/mvschwarz/openrig/pull/3494), [#3495](https://github.com/mvschwarz/openrig/pull/3495), [#3424](https://github.com/mvschwarz/openrig/pull/3424), [#3568](https://github.com/mvschwarz/openrig/pull/3568), [#3789](https://github.com/mvschwarz/openrig/pull/3789), [#3720](https://github.com/mvschwarz/openrig/pull/3720), [#3660](https://github.com/mvschwarz/openrig/pull/3660), [#3661](https://github.com/mvschwarz/openrig/pull/3661))
 
 ## Terminal, TUI, Slack and tools
 
@@ -71,10 +71,11 @@ The seat pool adds agents through topology add with the model member's launch se
 - Only one earlier restore packet is kept aside while a new one builds.
 - A percent `context-usage-threshold` doesn't fire for a Pi seat; use a token threshold.
 - A return route doesn't guarantee a question's arrival.
+- Nothing arms a seat pool yet: its storage, add and dispatch paths ship, but a `pool:` block starts no agents.
 
 ## Credits
 
-Thanks to Dery Ferdika, Devulapalli Naga Sri Vaishnavi, Edward Bowie, Evgeny Zotov, Leon.C, Mike Schwarz, NIKHILA, Roberto Campos, Wu Shuwen, billbenetti, bobbiejaxn, dajiaohuang, and w4rc0n. Their contributions also run the Linux seat-environment check on every merge to main and pin the two redaction pattern lists to each other.
+Thanks to Dery Ferdika, Devulapalli Naga Sri Vaishnavi, Edward Bowie, Evgeny Zotov, Leon.C, Mike Schwarz, NIKHILA, Roberto Campos, Wu Shuwen (dajiaohuang), billbenetti, bobbiejaxn, and w4rc0n. Their contributions also run the Linux seat-environment check on every merge to main and pin the two redaction pattern lists to each other.
 
 ## What changed in OpenRig 0.7.22
 
