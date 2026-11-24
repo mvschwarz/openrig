@@ -334,7 +334,7 @@ describe("network connector", () => {
     const { chmodSync } = await import("node:fs");
     const b = bind();
     hub.revoked = true;
-    const secrets = join(home, "network-secrets");
+    const secrets = join(home, "network-secrets", b.id);
     chmodSync(secrets, 0o500);
     try {
       expect(await pass(b.id)).toMatchObject({ error: "revoked" });

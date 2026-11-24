@@ -169,6 +169,35 @@ If the credential can't be removed, the binding still ends, and the error names 
 `rig network disconnect <binding id>` to run again. The daemon also removes credentials whose binding isn't active
 each time it starts.
 
+## Provider-managed bindings
+
+An integration can pass `provider: { id, installation, participant, remoteInstallation? }` to
+`POST /api/network/bindings`, alongside the existing seat, hub URL and token. Provider references are
+opaque metadata. A separate `removal: { revision, token }` capability authorizes leaving that binding;
+it is stored separately from its work credential and is never returned by a read. Direct bindings
+remain provider-free. Existing enrolled bindings expose their recorded installation and participant as
+provider metadata without reconnecting or moving their files.
+
+To refresh a credential for the same binding, call `POST /api/network/bindings/<id>/credential` with
+`{ expectedRevision, provider, token, removal? }`. Use the current `credentialRevision` and exact provider
+object from GET (omit `provider` for a direct binding). A managed rotation needs a new removal revision
+and capability too. This preserves binding, node, hub and work/receipt IDs; changing identity requires a
+separate binding. Immutable private files are staged before the DB selects their revision. An interrupted
+attempt can leave unused files for the credential sweep, without replacing the selected revision.
+
+Disconnect commits local inactive state and provider removal intent together, then removes the work
+credential. A cleanup failure leaves that state readable as `credentialCleanup: "pending"` and is retried by the connector. A separate pass in the
+existing connector handles ended bindings with removal capabilities, using persisted retry times and
+bounded requests. A lost reply stays `pending`; only a matching provider/revision receipt confirms removal. Its safe fields remain readable as `providerRemovalReceipt`.
+`superseded` is terminal and does not claim removal. A provider refusal is `unconfirmed`, with its code,
+and stops automatic retries. `rig network status` displays these states separately from local disconnect.
+
+An integration can report its own completed reconciliation with `PATCH /api/network/bindings/<id>` and
+`{ provider, removalRevision, providerRemoval: "confirmed" | "unconfirmed" | "superseded", reason? }`.
+The original provider and removal revision must match the ended binding. Lifecycle writes use the same
+configured daemon bearer as existing network writes. Existing account callbacks remain in place; this
+interface does not perform a live provider migration or replace their cleanup journey.
+
 ## Limits
 
 - The connector polls, so new work normally waits up to one interval before it reaches the seat, and longer when the

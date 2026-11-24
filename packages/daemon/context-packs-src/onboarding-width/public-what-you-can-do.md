@@ -1677,7 +1677,7 @@ your circumstances is configuration, and the ones that are not, another agent ca
   ignored and shown. `rig up --env` leaves both names out. A conversation saved under an earlier home
   doesn't resume in the new one, and live usage refresh still reads only the daemon's own logins.
 - **`rig provider precheck --seat <seat> --to-account <name>`**, then **`rig provider switch --seat
-  <seat> --to-account <name>`** — move one Codex seat (Linux only) to a login saved in its Codex home
+  <seat> --to-account <name>`** — move one Codex seat (Linux or macOS) to a login saved in its Codex home
   (`rig auth save`), on the same conversation: it saves the outgoing login, activates the chosen one,
   restarts the seat in place and prints a restart command for every peer on that home. For a Claude
   seat, `--to-account <label> --token-file <absolute path>` moves it to its own subscription token
