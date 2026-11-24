@@ -198,8 +198,65 @@ describe("SuccessorSessionLauncher", () => {
     expect(respawnPane.mock.calls[0]![2].env).not.toHaveProperty("OPENRIG_SEAT_ENV_KEYS");
   });
 
-  it("never reads or writes the departing session's environment: a handover that works on main works here, whatever tmux does to those calls", async () => {
-    const refused = async () => { throw new Error("tmux environment calls are not part of a handover"); };
+  it("marks dropped OpenRig-owned keys removed with -r and updates OPENRIG_SEAT_ENV_KEYS before respawn", async () => {
+    const order: string[] = [];
+    const getSessionEnv = vi.fn(async (_s: string, key: string) => {
+      order.push(`get:${key}`);
+      return key === "OPENRIG_SEAT_ENV_KEYS" ? "DO_NOT_TRACK,MODE,HOME" : undefined;
+    });
+    const setSessionEnv = vi.fn(async (_s: string, key: string, value: string) => { order.push(`set:${key}=${value}`); });
+    const unsetSessionEnv = vi.fn(async (_s: string, key: string, opts?: { remove?: boolean }) => {
+      order.push(`unset:${key}:${opts?.remove ? "r" : "u"}`);
+    });
+    const signal = vi.fn(async (...args: unknown[]) => { order.push("signal"); return (signalPaneProcess as any)(...args); });
+    const respawn = vi.fn(async (...args: unknown[]) => { order.push("respawn"); return (respawnPane as any)(...args); });
+    const tmux = {
+      listPanes, respawnPane: respawn, setRemainOnExit, signalPaneProcess: signal, isPaneDead, getDefaultShell, getPaneCommand,
+      getSessionEnv, setSessionEnv, unsetSessionEnv,
+    } as unknown as TmuxAdapter;
+    const subject = new SuccessorSessionLauncher(tmux, discoveryRepo, {
+      sessionEnv: { OPENRIG_HOME: "/home", HOME: "/daemon-home" },
+      runtimeAdapters: { codex: fakeAdapter("codex") }, readinessTimeoutMs: 50, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5,
+    });
+    const res = await subject.createSuccessor({
+      node: { id: "node-1", runtime: "codex", cwd: "/w", seatEnv: { MODE: "fast" } },
+      departingSessionName: "dev-impl@rig",
+    });
+    expect(res.ok).toBe(true);
+    // HOME stays because sessionEnv supplies it; only DO_NOT_TRACK is marked removed.
+    expect(order).toEqual([
+      "signal",
+      "get:OPENRIG_SEAT_ENV_KEYS",
+      "unset:DO_NOT_TRACK:r",
+      "set:OPENRIG_SEAT_ENV_KEYS=MODE",
+      "respawn",
+    ]);
+  });
+
+  it("clears OPENRIG_SEAT_ENV_KEYS with -r when the successor declares an empty seat env", async () => {
+    const getSessionEnv = vi.fn(async () => "DO_NOT_TRACK,OLD_KEY");
+    const setSessionEnv = vi.fn(async () => {});
+    const unsetSessionEnv = vi.fn(async () => {});
+    const tmux = {
+      listPanes, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand,
+      getSessionEnv, setSessionEnv, unsetSessionEnv,
+    } as unknown as TmuxAdapter;
+    const subject = new SuccessorSessionLauncher(tmux, discoveryRepo, {
+      runtimeAdapters: { codex: fakeAdapter("codex") }, readinessTimeoutMs: 50, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5,
+    });
+    const res = await subject.createSuccessor({
+      node: { id: "node-1", runtime: "codex", cwd: "/w", seatEnv: {} },
+      departingSessionName: "dev-impl@rig",
+    });
+    expect(res.ok).toBe(true);
+    expect(unsetSessionEnv).toHaveBeenCalledWith("dev-impl@rig", "DO_NOT_TRACK", { remove: true });
+    expect(unsetSessionEnv).toHaveBeenCalledWith("dev-impl@rig", "OLD_KEY", { remove: true });
+    expect(unsetSessionEnv).toHaveBeenCalledWith("dev-impl@rig", "OPENRIG_SEAT_ENV_KEYS", { remove: true });
+    expect(setSessionEnv).not.toHaveBeenCalled();
+  });
+
+  it("fails open with a warning when reading or writing the departing session's environment fails", async () => {
+    const refused = async () => { throw new Error("tmux environment calls unavailable"); };
     const tmux = {
       listPanes, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand,
       getSessionEnv: refused, setSessionEnv: refused, unsetSessionEnv: refused,
@@ -211,6 +268,7 @@ describe("SuccessorSessionLauncher", () => {
       });
       const res = await plain.createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w", ...(seatEnv ? { seatEnv } : {}) }, departingSessionName: "dev-impl@rig" });
       expect(res.ok).toBe(true);
+      if (res.ok) expect(res.warnings?.some((w) => w.includes("OPENRIG_SEAT_ENV_KEYS"))).toBe(true);
       expect(respawnPane).toHaveBeenCalledTimes(1);
     }
   });

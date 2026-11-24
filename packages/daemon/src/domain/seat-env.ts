@@ -90,3 +90,16 @@ export function seatEnvLaunchVars(env: SeatEnv): SeatEnv {
   const keys = Object.keys(env);
   return keys.length > 0 ? { ...env, [SEAT_ENV_KEYS_VAR]: keys.join(",") } : {};
 }
+
+export function parseSeatEnvKeys(raw: string | undefined): string[] {
+  if (!raw) return [];
+  const seen = new Set<string>();
+  for (const key of raw.split(",")) {
+    if (key && key !== "TMUX" && key !== "TMUX_PANE" && validateSeatEnvName(key) === null) seen.add(key);
+  }
+  return [...seen];
+}
+
+export function removedSeatEnvKeys(previousKeysRaw: string | undefined, nextEnv: Readonly<Record<string, string>>): string[] {
+  return parseSeatEnvKeys(previousKeysRaw).filter((key) => !Object.prototype.hasOwnProperty.call(nextEnv, key));
+}
