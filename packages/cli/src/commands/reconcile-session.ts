@@ -79,7 +79,7 @@ continuity remain unverified; ordinary sends still apply their existing checks.`
 
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
 
       const body: Record<string, unknown> = {};
       if (opts.rig) body["rigId"] = opts.rig;

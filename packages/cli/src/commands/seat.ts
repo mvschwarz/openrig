@@ -565,7 +565,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
 
   const guardRequest = async (method: "GET" | "POST", path: string, body: Record<string, unknown> | undefined, json?: boolean) => {
     const deps = getDeps(); const daemon = await getDaemonStatus(deps.lifecycleDeps);
-    if (!daemonStatusGuard(daemon)) return;
+    if (!daemonStatusGuard(daemon, { json })) return;
     const client = deps.clientFactory(getDaemonUrl(daemon));
     const result = method === "GET" ? await client.get<Record<string, unknown>>(path) : await client.post<Record<string, unknown>>(path, body ?? {});
     console.log(JSON.stringify(result.data, null, json ? undefined : 2));
@@ -585,7 +585,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
         return;
       }
       const deps = getDeps(); const daemon = await getDaemonStatus(deps.lifecycleDeps, { cleanupStaleState: false });
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const path = `/api/startup/${encodeURIComponent(opts.rig)}/nodes/${encodeURIComponent(opts.nodeId)}/history`;
       const response = opts.snapshotId && opts.historySessionId
@@ -758,7 +758,7 @@ Examples:
     .action(async (seat: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
 
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.get<SeatStatusResponse | SeatStatusError>(`/api/seat/status/${encodeURIComponent(seat)}`);
@@ -839,7 +839,7 @@ rig seat handover, THEN retarget the view. Examples:
 
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
 
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.post<SeatSwitchClientResponse | SeatStatusError>(
@@ -896,7 +896,7 @@ identity remains unverified; a version number alone cannot clear it.
     .action(async (session: string, opts: { reason?: string; json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(status));
       const res = await client.post<Record<string, unknown>>(
         `/api/sessions/${encodeURIComponent(session)}/clear-attention`,
@@ -1291,7 +1291,7 @@ Examples:
     .action(async (seat: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.get<Record<string, unknown>>(`/api/seat/effort/${encodeURIComponent(seat)}`);
       if (opts.json) {
@@ -1323,7 +1323,7 @@ Example:
     .action(async (seat: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.get<Record<string, unknown>>(`/api/seat/runtime-home/${encodeURIComponent(seat)}`);
       if (opts.json) {
@@ -1919,7 +1919,7 @@ The token is read from STDIN only (never an argument). Examples:
         return;
       }
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(status));
       const res = await client.post<Record<string, unknown>>(
         `/api/sessions/${encodeURIComponent(session)}/resume-token`,

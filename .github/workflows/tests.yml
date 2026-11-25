@@ -83,8 +83,9 @@ jobs:
     # Runs on push to main too. This is the only job that proves the Linux seat-isolation posture
     # (/proc seat environments, canonical-input limits under `unshare --net`, no ambient
     # credentials), and a merge to main is exactly where a change that passed on macOS can land
-    # without ever having been run under that confinement. The two 90-minute suites below stay
-    # off push so a merge does not pay for the whole matrix twice.
+    # without ever having been run under that confinement. package-tests below stays off push, and the
+    # macOS daemon and cli suites run in macos-package-tests.yml for an approved head, so a merge does
+    # not pay for the whole matrix twice.
     # Cover /proc seat environments and Linux canonical-input limits that macOS cannot exercise.
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -119,25 +120,17 @@ jobs:
 
   package-tests:
     if: ${{ github.event_name != 'push' }}
-    # daemon and cli run on macOS, the platform OpenRig runs on: several of their tests read macOS
-    # ps columns, file-inode behaviour and release tags. tui and ui run on Ubuntu under the
-    # linux-seat-environment confinement; that is its own confinement, not the macOS sandbox.
+    # tui and ui run on Ubuntu under the linux-seat-environment confinement on every push. The daemon and cli
+    # suites run on macOS, the platform OpenRig runs on, in macos-package-tests.yml, for a head a maintainer
+    # approved; they keep the same `package-tests (<package>)` check names.
     # The explicit name keeps each check as `package-tests (<package>)`.
     name: package-tests (${{ matrix.package }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.package == 'daemon' && 90 || 60 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - package: daemon
-            os: macos-latest
-          - package: cli
-            os: macos-latest
-          - package: tui
-            os: ubuntu-latest
-          - package: ui
-            os: ubuntu-latest
+        package: [tui, ui]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -147,18 +140,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - if: runner.os == 'macOS'
-        run: brew install tmux
-      - if: runner.os == 'Linux'
-        name: Install the real terminal
+      - name: Install the real terminal
         run: |
           sudo apt-get update
           sudo apt-get install --yes tmux
       - run: npm ci
       - name: Build the packages the tests import
         run: npm run build
-      - if: runner.os == 'Linux'
-        name: Run the suite without ambient credentials or external network (Linux)
+      - name: Run the suite without ambient credentials or external network
         run: |
           set -euo pipefail
           suite_root=$(mktemp -d "$RUNNER_TEMP/opr-test.XXXXXX")
@@ -172,31 +161,10 @@ jobs:
             CI=true TERM=xterm-256color \
             npm run test -w "packages/$4"
           SUITE
-      - if: runner.os == 'macOS'
-        name: Run the suite without ambient credentials or external network
-        run: |
-          suite_root=$(mktemp -d "$RUNNER_TEMP/opr-test.XXXXXX")
-          suite_root=$(cd "$suite_root" && pwd -P)
-          mkdir -p "$suite_root/home" "$suite_root/bin"
-          # Same system bytes, nonprivileged mode; no system file is changed.
-          /usr/bin/install -m 0755 /bin/ps "$suite_root/bin/ps"
-          # Only this job's temporary sockets (including tmux) are reachable.
-          env -i HOME="$suite_root/home" PATH="$PATH" TMPDIR="$suite_root" TMUX_TMPDIR="$suite_root" \
-            CI=true TERM=xterm-256color \
-            sandbox-exec -D IPC_ROOT="$suite_root" -p '(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))(allow network-outbound (subpath (param "IPC_ROOT")))' \
-            /bin/bash -s "${{ matrix.package }}" <<'SUITE'
-          set -euo pipefail
-          node scripts/ci-macos-process-probe.mjs
-          # The production readers use bare ps. Select real system bytes only after
-          # self/owned-child observation and network/IPC confinement are proved.
-          export PATH="$TMPDIR/bin:$PATH"
-          test "$(command -v ps)" = "$TMPDIR/bin/ps"
-          exec npm run test -w "packages/$1"
-          SUITE
 
   daemon-ubuntu:
     if: ${{ github.event_name != 'push' }}
-    # The full daemon suite on Ubuntu, beside `package-tests (daemon)` on macOS, which is unchanged.
+    # The full daemon suite on Ubuntu, beside `package-tests (daemon)` on macOS (macos-package-tests.yml), which is unchanged.
     # It adds evidence and replaces no macOS coverage. Confinement is package-tests' Linux one.
     # Tests needing tmux control mode, zsh or ksh skip when the runner lacks them; the job summary
     # lists the tests that did not run and the daemon-ubuntu-results JSON report has them all.

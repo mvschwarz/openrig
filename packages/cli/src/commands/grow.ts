@@ -70,7 +70,7 @@ export function growCommand(depsOverride?: StatusDeps): Command {
 
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(status));
 
       const resolution = await resolveRigHandle(client, rigId);
@@ -126,7 +126,9 @@ export function growCommand(depsOverride?: StatusDeps): Command {
       try {
         agentRef = await resolveDefaultAgentRef(client, opts.runtime);
       } catch (err) {
-        console.error(err instanceof Error ? err.message : String(err));
+        const detail = err instanceof Error ? err.message : String(err);
+        if (opts.json) console.log(JSON.stringify({ ok: false, detail }, null, 2));
+        else console.error(detail);
         process.exitCode = 1;
         return;
       }
