@@ -15,7 +15,7 @@ import {
 export interface RiggedConfig {
   specs: { builtinsVisible: boolean };
   launch: { nonInterruptive: boolean; codexLoginShell: boolean };
-  daemon: { port: number; host: string; dbConflict?: "warn" | "stop"; seatPollIntervalMs?: number; identityPollIntervalMs?: number };
+  daemon: { port: number; host: string; dbConflict?: "warn" | "stop"; seatPollIntervalMs?: number; identityPollIntervalMs?: number; startReadinessWaitSeconds?: number };
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer.
   // OPR.0.4.6.MH1 FR-4 — the own-host display name (default "localhost").
   host: { selected: string; name: string };
@@ -283,7 +283,7 @@ const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH = getDefaultOpenRigP
 
 const DEFAULTS = {
   launch: { nonInterruptive: false, codexLoginShell: false },
-  daemon: { port: 7433, host: "127.0.0.1", dbConflict: "warn", seatPollIntervalMs: 1000, identityPollIntervalMs: 5000 },
+  daemon: { port: 7433, host: "127.0.0.1", dbConflict: "warn", seatPollIntervalMs: 1000, identityPollIntervalMs: 5000, startReadinessWaitSeconds: 180 },
   // OPR.0.4.6.MH1 FR-1 — "local" ≡ no remote selection (LOCAL_HOST_ID).
   // FR-4 — own-host display name; default "localhost" (PRD-named).
   host: { selected: "local", name: "localhost" },
@@ -460,6 +460,9 @@ export const VALID_KEYS = [
   "daemon.seat_poll_interval_ms",
   // #3146: the seat identity reconciler's cadence; startup-only (read once when the daemon starts). Twin of the daemon key.
   "daemon.identity_poll_interval_ms",
+  // #3637: how long a start waits for its child's readiness (rig daemon start, rig start, rig up, the TUI); read by
+  // each start, not by the running daemon. Twin of the daemon key.
+  "daemon.start_readiness_wait_seconds",
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer (the
   // kubectl current-context shape). ONE static key, lockstep with the
   // daemon settings-store twin (parity test pins both). Registry-
@@ -636,6 +639,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "daemon.db_conflict": { primary: "OPENRIG_DAEMON_DB_CONFLICT" },
   "daemon.seat_poll_interval_ms": { primary: "OPENRIG_SEAT_POLL_INTERVAL_MS" },
   "daemon.identity_poll_interval_ms": { primary: "OPENRIG_IDENTITY_POLL_INTERVAL_MS" },
+  "daemon.start_readiness_wait_seconds": { primary: "OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS" },
   "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
   "transcripts.enabled": { primary: "OPENRIG_TRANSCRIPTS_ENABLED", legacy: "RIGGED_TRANSCRIPTS_ENABLED" },
   "transcripts.path": { primary: "OPENRIG_TRANSCRIPTS_PATH", legacy: "RIGGED_TRANSCRIPTS_PATH" },
@@ -759,6 +763,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "daemon.db_conflict": ["daemon", "dbConflict"],
   "daemon.seat_poll_interval_ms": ["daemon", "seatPollIntervalMs"],
   "daemon.identity_poll_interval_ms": ["daemon", "identityPollIntervalMs"],
+  "daemon.start_readiness_wait_seconds": ["daemon", "startReadinessWaitSeconds"],
   "db.path": ["db", "path"],
   "transcripts.enabled": ["transcripts", "enabled"],
   "transcripts.path": ["transcripts", "path"],
@@ -1091,6 +1096,13 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error("Invalid transcripts.poll_interval_seconds: must be an integer in [1, 3600]");
     }
   },
+  "daemon.start_readiness_wait_seconds": (raw, coerced) => {
+    // The ceiling is the Node timer bound on a caller's budget (DAEMON_START_READINESS_WAIT_MAX_SECONDS in
+    // daemon-shutdown.ts): the TUI's start call can't time out later than 2^31 - 1 ms.
+    if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isSafeInteger(coerced) || coerced < 1 || coerced > 2147464) {
+      throw new Error(`Invalid value for daemon.start_readiness_wait_seconds: must be a whole number of seconds in [1, 2147464], got "${raw}"`);
+    }
+  },
   "runtime.readiness_timeout_seconds": (raw, coerced) => {
     if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1 || coerced > 600) {
       throw new Error(`Invalid value for runtime.readiness_timeout_seconds: must be an integer in [1, 600], got "${raw}"`);
@@ -1402,6 +1414,7 @@ export class ConfigStore {
         dbConflict: v("daemon.db_conflict") as "warn" | "stop",
         seatPollIntervalMs: v("daemon.seat_poll_interval_ms") as number,
         identityPollIntervalMs: v("daemon.identity_poll_interval_ms") as number,
+        startReadinessWaitSeconds: v("daemon.start_readiness_wait_seconds") as number,
       },
       host: {
         selected: v("host.selected") as string,

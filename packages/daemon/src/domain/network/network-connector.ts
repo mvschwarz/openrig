@@ -11,10 +11,12 @@
 // participant land on that one item, so a lost response never starts a second one. An item whose local record is gone
 // reads unknown and is never run again.
 import type Database from "better-sqlite3";
+import { runNetworkProviderRemovalPass } from "./network-provider-removal.js";
 import { createHash } from "node:crypto";
 import { QueueRepositoryError, type QueueItem, type QueueRepository } from "../queue-repository.js";
 import { NetworkBindingError, readNetworkCredential, type NetworkBinding, type NetworkBindingStore } from "./network-bindings.js";
 import { connectMcpHub, HubError, type HubConnect, type HubItem, type HubSession } from "./hub-client.js";
+import { noteEndedBindingRequests, reconcileNetworkRequests } from "./network-requests.js";
 
 /** OpenRig's own sender: the connector creates the local item for the hub's requester, who is named first in it. */
 const LOCAL_SOURCE = "daemon@kernel";
@@ -24,6 +26,12 @@ const MAX_PAGES = 8;
 const REPORT_LIMIT = 50;
 /** How long one binding's pass may take before its connection is closed, so one slow hub can't hold the others. */
 const PASS_TIMEOUT_MS = 60_000;
+/** A network answers a new connection `grant_authority_unavailable` on purpose until it has set the participant up. A
+ *  binding that has never had contact asks again this soon, instead of backing off, for this long after it was made. */
+const SETUP_RETRY_MS = 5_000;
+const SETUP_WINDOW_MS = 60_000;
+/** What status shows for that answer on a binding that has never had contact: the hub was reached. */
+const SETTING_UP = "The network is still finishing setup for this agent. Try again in a moment.";
 
 /** The local item for a hub item, by what it is. A retry, a restart or a new binding for the same seat, hub and
  *  participant lands on the same item. */
@@ -37,6 +45,7 @@ export interface NetworkConnectorDeps {
   bindings: NetworkBindingStore;
   home: string;
   connect?: HubConnect;
+  removalFetch?: typeof fetch;
   now?: () => Date;
   log?: (line: string) => void;
   passTimeoutMs?: number;
@@ -51,7 +60,9 @@ export interface NetworkPassResult {
   unknown: number;
   /** Why the pass stopped early, if it did. `revoked` ended the binding; `no_session` left the hub's items pending;
    *  `local` is a failure here, not the hub's. */
-  error?: HubError["kind"] | "credential" | "no_session" | "http_not_allowed" | "local";
+  error?: HubError["kind"] | "credential" | "no_session" | "http_not_allowed" | "local" | "credential_changed";
+  /** The hub answered `grant_authority_unavailable` to a binding that has never had contact: still being set up. */
+  settingUp?: boolean;
 }
 
 /** The seat's current address: the node's latest session, as the queue's other node lookups read it. */
@@ -78,6 +89,8 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
   opts: { signal?: AbortSignal } = {}): Promise<NetworkPassResult> {
   const now = deps.now ?? (() => new Date());
   const result: NetworkPassResult = { bindingId: binding.id, taken: 0, pickupsSent: 0, resultsSent: 0, unknown: 0 };
+  const currentRevision = () => (deps.bindings.get(binding.id)?.credentialRevision ?? 0) === (binding.credentialRevision ?? 0);
+  if (!currentRevision()) return { ...result, error: "credential_changed" };
   // The token goes to a plain-http hub only on the person's recorded choice for this binding.
   if (binding.unencrypted && !binding.allowHttp) {
     deps.bindings.recordError(binding.id, `${binding.hubUrl} is plain http and this binding has no --allow-http choice, so its token isn't sent. Connect again with the hub's https URL, or with --allow-http.`);
@@ -85,7 +98,7 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
   }
   let token: string;
   try {
-    token = readNetworkCredential(deps.home, binding.id);
+    token = readNetworkCredential(deps.home, binding.id, binding.credentialRevision);
   } catch (error) {
     deps.bindings.recordError(binding.id, error instanceof NetworkBindingError ? error.message : String(error));
     return { ...result, error: "credential" };
@@ -100,14 +113,25 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
   opts.signal?.addEventListener("abort", onStop, { once: true });
   // Checked before every take, and again just before a local item is made: an ended binding, the pass's deadline or
   // the connector's stop starts no local work, even when a hub answer arrives late.
-  const live = () => !deadline.signal.aborted && deps.bindings.get(binding.id)?.state === "active";
+  const live = () => !deadline.signal.aborted && currentRevision() && deps.bindings.get(binding.id)?.state === "active";
 
   let hub: HubSession | null = null;
   try {
     hub = await (deps.connect ?? connectMcpHub)(binding.hubUrl, token, deadline.signal);
     // Work goes to the seat at its current address. With no session there's nobody to give it to, so nothing is taken.
     const destination = currentSession(deps.db, binding.nodeId);
-    if (destination) {
+    // Taking work needs the hub's queue list. A grant for sending only (team, create and show) doesn't offer it; there's
+    // no inbound work to take then, and the answers to the seat's requests are still read below. A tool list that can't
+    // be read (anything but a refused credential) takes no work this pass, still reads the answers, and is reported.
+    let inbound = false;
+    let discovery: HubError | null = null;
+    try {
+      inbound = await hub.offers("rig_queue_list");
+    } catch (error) {
+      if (!(error instanceof HubError) || error.kind === "revoked" || deadline.signal.aborted) throw error;
+      discovery = error;
+    }
+    if (destination && inbound) {
       // What this participant already holds (claimed before a restart, or through an earlier binding) comes first.
       for (const held of await hub.listOwned("in-progress", PAGE * MAX_PAGES)) {
         if (!live()) break;
@@ -133,13 +157,29 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
     }
     // Report back what happened locally, for the items this binding holds. A revoked binding never gets here.
     if (live()) await reportBack(deps, binding, hub, now, result);
+    // Then the requests this seat sent through the hub: a create whose answer was lost, and each answer that arrived.
+    // `live()` includes the credential revision, so a replaced credential stops this between requests.
+    const unread = live() ? await reconcileNetworkRequests(deps, binding, hub, now, live) : null;
+    if (!currentRevision()) return { ...result, error: "credential_changed" };
     deps.bindings.recordContact(binding.id, now());
-    if (!destination) {
+    // The hub stopped answering while requests were read: the work done stands, and the pass reads unavailable, so the
+    // next one backs off.
+    if (unread) {
+      deps.bindings.recordError(binding.id, unread.message);
+      return { ...result, error: "unavailable" };
+    }
+    if (discovery) {
+      deps.bindings.recordError(binding.id, `The hub's tool list couldn't be read, so no work was taken in this pass: ${discovery.message}`);
+      return { ...result, error: discovery.kind };
+    }
+    if (!destination && inbound) {
       deps.bindings.recordError(binding.id, `${binding.localSession} has no session here, so its hub items stay pending until it has one.`);
       return { ...result, error: "no_session" };
     }
     return result;
   } catch (error) {
+    // A late failure belongs to the credential used by this pass, never its replacement.
+    if (!currentRevision()) return { ...result, error: "credential_changed" };
     if (deadline.signal.aborted) {
       deps.bindings.recordError(binding.id, opts.signal?.aborted
         ? "The connector stopped during this pass and closed its connection to the hub."
@@ -151,6 +191,7 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
       deps.bindings.recordError(binding.id, `A local error stopped this pass: ${error instanceof Error ? error.message : String(error)}`);
       return { ...result, error: "local" };
     }
+    const settingUp = error.code === "grant_authority_unavailable" && !binding.lastContactAt;
     if (error.kind === "revoked") {
       try {
         deps.bindings.markRevoked(binding.id, error.message);
@@ -160,10 +201,12 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
         deps.bindings.recordError(binding.id, cleanup.message);
       }
       deps.log?.(`network ${binding.id}: revoked by the hub; no new work comes in through it`);
+      // Requests sent through it can't be read now: each says so once, and stays open for a new binding to take over.
+      noteEndedBindingRequests(deps, binding, deps.log);
     } else {
-      deps.bindings.recordError(binding.id, error.message);
+      deps.bindings.recordError(binding.id, settingUp ? SETTING_UP : error.message);
     }
-    return { ...result, error: error.kind };
+    return { ...result, error: error.kind, ...(settingUp ? { settingUp } : {}) };
   } finally {
     clearTimeout(timer);
     opts.signal?.removeEventListener("abort", onStop);
@@ -341,6 +384,8 @@ export interface NetworkConnectorSnapshot {
  *  call at all. */
 export class NetworkConnectorService {
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private removalTimer: ReturnType<typeof setTimeout> | null = null;
+  private removalInFlight: Promise<void> | null = null;
   private inFlight: Promise<void> | null = null;
   private stopped = false;
   private stopping: AbortController | null = null;
@@ -364,14 +409,16 @@ export class NetworkConnectorService {
     if (swept.removed.length) this.deps.log?.(`network connector: removed the credentials of ended bindings ${swept.removed.join(", ")}`);
     if (swept.failed.length) this.deps.log?.(`network connector: couldn't remove the credentials of ended bindings ${swept.failed.join(", ")}`);
     this.schedule(0);
+    this.scheduleRemovals(0);
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
     this.stopping?.abort();
     if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-    await this.inFlight;
+    if (this.removalTimer) clearTimeout(this.removalTimer);
+    this.timer = null; this.removalTimer = null;
+    await Promise.all([this.inFlight, this.removalInFlight]);
   }
 
   /** One round: a pass for each active binding that's due. Exposed for tests and status. */
@@ -386,6 +433,11 @@ export class NetworkConnectorService {
         const due = this.due.get(binding.id);
         if (due && due.at > at) continue;
         const pass = await runNetworkBindingPass(this.deps, binding, { signal: this.stopping?.signal });
+        // Soon after connect, a network still setting the participant up isn't a failure to back off from.
+        if (pass.settingUp && at - Date.parse(binding.createdAt) < SETUP_WINDOW_MS) {
+          this.due.set(binding.id, { at: at + Math.min(SETUP_RETRY_MS, this.intervalMs), backoffMs: due?.backoffMs ?? this.intervalMs, last: pass });
+          continue;
+        }
         const failing = pass.error === "unavailable" || pass.error === "refused" || pass.error === "credential" || pass.error === "local";
         const backoffMs = failing ? Math.min(this.maxBackoffMs, (due?.backoffMs ?? this.intervalMs) * 2) : this.intervalMs;
         const jitter = 1 + (this.random() * 0.4 - 0.2);
@@ -393,6 +445,31 @@ export class NetworkConnectorService {
       }
     })();
     try { await this.inFlight; } finally { this.inFlight = null; }
+  }
+
+  /** Its own pass/timer: ended bindings have no work pass, and a slow removal must not block active work. */
+  async roundRemovals(): Promise<void> {
+    if (this.removalInFlight) return this.removalInFlight;
+    this.removalInFlight = (async () => {
+      const cleanup = this.deps.bindings.sweepCredentials();
+      if (cleanup.failed.length) this.deps.log?.("network leave: credential-cleanup-pending");
+      const at = (this.deps.now ?? (() => new Date()))().getTime();
+      for (const removal of this.deps.bindings.pendingProviderRemovals().filter((r) => r.hasCapability && Date.parse(r.nextAttemptAt) <= at).slice(0, 25)) {
+        if (this.stopped) break;
+        const backoff = Math.min(this.maxBackoffMs, this.intervalMs * 2 ** Math.min(removal.attempts + 1, 20));
+        await runNetworkProviderRemovalPass(this.deps, removal, { signal: this.stopping?.signal, retryDelayMs: Math.round(backoff * (0.8 + this.random() * 0.4)) });
+      }
+    })();
+    try { await this.removalInFlight; } finally { this.removalInFlight = null; }
+  }
+
+  private scheduleRemovals(ms: number): void {
+    if (this.stopped) return;
+    this.removalTimer = setTimeout(() => {
+      void this.roundRemovals().catch(() => this.deps.log?.("network leave: local-error"))
+        .finally(() => this.scheduleRemovals(Math.min(this.intervalMs, 5_000)));
+    }, ms);
+    this.removalTimer.unref?.();
   }
 
   snapshot(): NetworkConnectorSnapshot {

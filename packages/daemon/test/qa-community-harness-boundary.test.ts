@@ -72,14 +72,36 @@ describe("independent community-harness interface boundaries", () => {
       CREATE TABLE schema_migrations(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
       INSERT INTO schema_migrations VALUES ('114_session_agent_app.sql', 'sentinel-original-timestamp');`);
     const rowsBefore = db.prepare("SELECT * FROM sessions ORDER BY id").all();
-    const ledgerBefore = db.prepare("SELECT * FROM schema_migrations").all();
-    const schemaBefore = db.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name").all();
+    const ledgerRowBefore = db.prepare("SELECT name, applied_at FROM schema_migrations").all();
     statements.length = 0;
     migrate(db, [retainedSelectionSchema]);
-    expect(statements.filter(sql => /\b(?:ALTER|UPDATE|DELETE)\b/i.test(sql))).toEqual([]);
+    // One ALTER, and only that: a ledger written before the hash column existed gains the column once.
+    // It is nullable, an older daemon still reads the table, and nothing else about the ledger moves.
+    const writes = statements.filter(sql => /\b(?:ALTER|UPDATE|DELETE)\b/i.test(sql));
+    expect(writes.map(sql => sql.replace(/\s+/g, " ").trim())).toEqual([
+      "ALTER TABLE schema_migrations ADD COLUMN content_hash TEXT",
+    ]);
+    // The retained data is untouched, and the existing entry keeps its own timestamp and gains no hash:
+    // what it applied is not known, and this run does not claim to know it.
     expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(rowsBefore);
-    expect(db.prepare("SELECT * FROM schema_migrations").all()).toEqual(ledgerBefore);
-    expect(db.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name").all()).toEqual(schemaBefore);
+    expect(db.prepare("SELECT name, applied_at FROM schema_migrations").all()).toEqual(ledgerRowBefore);
+    expect(db.prepare("SELECT content_hash FROM schema_migrations").get()).toEqual({ content_hash: null });
+    // Every table's schema is unchanged except that one column.
+    const schemaNow = db.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name").all() as
+      { name: string; sql: string }[];
+    const schemaBefore = new Map([
+      ["schema_migrations", "CREATE TABLE schema_migrations(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"],
+      ["sessions", "CREATE TABLE sessions(id TEXT PRIMARY KEY, agent_app TEXT)"],
+    ]);
+    for (const table of schemaNow) {
+      if (table.name === "schema_migrations") {
+        expect(table.sql).toContain("content_hash TEXT");
+        expect(table.sql.replace(", content_hash TEXT", "")).toBe(schemaBefore.get(table.name));
+        continue;
+      }
+      if (table.name.startsWith("sqlite_")) continue;
+      expect(table.sql, table.name).toBe(schemaBefore.get(table.name));
+    }
     expect(sessionCommunityHarnessSelect(db)).toBe("s.agent_app");
   });
 

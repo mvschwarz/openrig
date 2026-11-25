@@ -183,7 +183,7 @@ describe("terminal and transport bearer diagnostics", () => {
     expect(denied.status).toBe(401);
     const body = await denied.json();
     expect(body.message).toBe("Mission Control auth failed: bearer token does not match");
-    expect(body.what_to_do).toBe("Set OPENRIG_AUTH_BEARER_TOKEN in the daemon's environment, restart the daemon, and resend the request with `Authorization: Bearer <token>`. In the web UI, open it once with #mcToken=<token> after its address.");
+    expect(body.what_to_do).toBe("Set OPENRIG_AUTH_BEARER_TOKEN in the daemon's environment, restart the daemon, and resend the request with `Authorization: Bearer <token>`.");
     expect(body.why_it_matters).toContain("Mission Control write verbs");
     expect(JSON.stringify(body)).not.toContain(terminalToken);
     expect(JSON.stringify(body)).not.toContain(missionControlToken);

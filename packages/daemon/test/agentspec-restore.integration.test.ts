@@ -266,7 +266,14 @@ describe("AS-T09: Continuity + snapshot/restore evolution", () => {
       launchHarness: vi.fn(async () => ({ ok: true })),
     };
 
-    const mockTmux = { createSession: vi.fn(async () => ({ ok: true })), killSession: vi.fn(async () => ({ ok: true })), listSessions: vi.fn(async () => []), hasSession: vi.fn(async () => true), sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })), listWindows: vi.fn(async () => []), listPanes: vi.fn(async () => []) } as any;
+    const mockTmux = {
+      createSession: vi.fn(async () => ({ ok: true })), killSession: vi.fn(async () => ({ ok: true })),
+      listSessions: vi.fn(async () => []), hasSession: vi.fn(async () => true),
+      sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
+      listWindows: vi.fn(async () => []),
+      listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }]),
+      getPanePid: vi.fn(async () => 4242), getPaneCommand: vi.fn(async () => "claude"),
+    } as any;
     const nodeLauncher = new NodeLauncher({ db: ctx.db, rigRepo: ctx.rigRepo, sessionRegistry: ctx.sessionRegistry, eventBus: ctx.eventBus, tmuxAdapter: mockTmux });
 
     const restoreOrch = new RestoreOrchestrator({

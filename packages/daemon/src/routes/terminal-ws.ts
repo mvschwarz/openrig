@@ -23,7 +23,7 @@ export function terminalAuthMiddleware(opts: { bearerToken: string | null }) {
     }
     const queryToken = c.req.query("token");
     if (queryToken && constantTimeEqual(queryToken.trim(), token)) { await next(); return; }
-    return c.json({ error: "unauthorized", hint: "Pass terminal token via Authorization header or ?token= query. In the web UI, open it once with #termToken=<token> after its address." }, 401);
+    return c.json({ error: "unauthorized", hint: "Pass terminal token via Authorization header or ?token= query" }, 401);
   };
 }
 
@@ -65,6 +65,10 @@ export function registerTerminalWs(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (upgradeWebSocket as any)((c: any) => {
       const sessionName = c.req.param("sessionName")!;
+      // `?geometry=1` opts this viewer in to the pane's size, sent as a BINARY frame holding UTF-8 JSON
+      // `{"type":"geometry","cols":N,"rows":M}`. Terminal output is always a text frame, so the two can't be confused.
+      // Without the flag, the frames on this socket are unchanged.
+      const wantsGeometry = c.req.query("geometry") === "1";
       let broker: TerminalSessionBroker | null = null;
       let subscriber: TerminalSubscriber | null = null;
       // The WebSocket can close DURING the async attach (before the broker
@@ -82,8 +86,10 @@ export function registerTerminalWs(
 
       const handleFrame = async (data: string): Promise<void> => {
         if (!broker) return;
+        let msg: Record<string, unknown>;
+        try { msg = JSON.parse(data) as Record<string, unknown>; }
+        catch { return; } // Malformed frames are not input attempts.
         try {
-          const msg = JSON.parse(data) as Record<string, unknown>;
           if (msg.type === "keys" && Array.isArray(msg.keys)) {
             await broker.input({ type: "keys", keys: msg.keys as string[] });
           } else if (msg.type === "text" && typeof msg.text === "string") {
@@ -97,11 +103,16 @@ export function registerTerminalWs(
           // FR-7: there is intentionally NO resize branch. The broker owns the
           // fixed canonical geometry; a client-driven resize is ignored so
           // multiple viewers cannot shrink the shared pane.
-        } catch { /* ignore malformed frames */ }
+        } catch (error) {
+          const reason = (error as { code?: unknown })?.code;
+          const code = typeof reason === "string" && /^[a-z0-9_]+$/.test(reason) ? reason : "terminal_input_failed";
+          // Terminal frames are text, written directly by every viewer. Report to this sender only, without echoing input.
+          try { subscriber?.send(`\r\n[OpenRig: terminal input was not sent (${code}).]\r\n`); } catch { /* disconnected */ }
+        }
       };
 
       return {
-        async onOpen(_evt: unknown, ws: { send(data: string): void; close(code: number, reason: string): void }) {
+        async onOpen(_evt: unknown, ws: { send(data: string | Uint8Array): void; close(code: number, reason: string): void }) {
           const tmux = c.get("tmuxAdapter") as TmuxAdapter | undefined;
           if (!tmux) { ws.close(1011, "tmux adapter unavailable"); return; }
           // Adapt the WebSocket to a broker subscriber. The broker owns the pipe,
@@ -110,6 +121,11 @@ export function registerTerminalWs(
             send: (data: string) => { try { ws.send(data); } catch { /* closed socket */ } },
             close: (code: number, reason: string) => { try { ws.close(code, reason); } catch { /* already closed */ } },
           };
+          if (wantsGeometry) {
+            sub.geometry = (cols: number, rows: number) => {
+              try { ws.send(new TextEncoder().encode(JSON.stringify({ type: "geometry", cols, rows }))); } catch { /* closed socket */ }
+            };
+          }
           subscriber = sub;
           let b: TerminalSessionBroker;
           try {

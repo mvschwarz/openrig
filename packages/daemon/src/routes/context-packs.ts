@@ -26,7 +26,8 @@ import { parseManifest } from "../domain/context-packs/manifest-parser.js";
 import { composeNamedProfile, composeProfile, ProfileComposeError, type ComposeInput, type ComposeRuntime, type ComposeSituation } from "../domain/context-packs/profile-composer.js";
 import { isSeatRecapAddress, makeProfileReadFile, sourceKindForAddress, SourceResolutionError, type ProfileSourceRoots, type SourceReadRecord } from "../domain/context-packs/profile-source-resolver.js";
 import { AddressResolutionError, parseAddress, resolveAddress } from "../domain/markdown-address.js";
-import { SettingsStore } from "../domain/user-settings/settings-store.js";
+import { SettingsStore, resolveLegacyTopologyRigsRoot } from "../domain/user-settings/settings-store.js";
+import { traceTopologyChain } from "../domain/topology-trace.js";
 import { RecapWriteError, writeSeatRecapAt } from "../domain/context-packs/seat-recap-store.js";
 
 interface ComposeBody {
@@ -61,6 +62,24 @@ function isRelativeMarkdownAddress(value: unknown): value is string {
 
 export function contextPacksRoutes(): Hono {
   const router = new Hono();
+
+  // Fixed seat knowledge, using the same canonical/legacy resolver as CLI context trace. No pack lookup or ancestor read.
+  router.get("/seat-knowledge", (c) => {
+    const rig = c.req.query("rig"); const seat = c.req.query("seat");
+    if (!rig || !seat) return c.json({ error: "invalid_target", message: "rig and seat are required" }, 400);
+    try {
+      const topologyRoot = String(new SettingsStore().resolveOne("topology.root").value);
+      const legacyRigsRoot = resolveLegacyTopologyRigsRoot();
+      const files = ["LEARNED.md", "RECAP.md"].map((name) => {
+        const level = traceTopologyChain({ topologyRoot, legacyRigsRoot, rig, seat, name, altitudes: ["seat"] }).levels[0]!;
+        return { name, ...level, extent: level.source === "absent" ? "absent" : "whole-file" };
+      });
+      return c.json({ rig, seat, topologyRoot, files });
+    } catch (error) {
+      if (error instanceof Error && /^invalid (rig|seat|name) /.test(error.message)) return c.json({ error: "invalid_target", message: error.message }, 400);
+      return c.json({ error: "seat_knowledge_unavailable", message: "The requested seat files could not be read." }, 503);
+    }
+  });
 
   // GET /library
   router.get("/library", (c) => {
