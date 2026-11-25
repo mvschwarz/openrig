@@ -49,13 +49,16 @@ function defaultReadTokenFile(path: string): string {
   return readFileSync(path, "utf8").trim();
 }
 
-/** A hub URL as status prints it: a query string can carry a credential the person pasted, so its value isn't shown. */
+/** A hub URL as status prints it: a query string or a fragment can carry a credential the person pasted, so neither is
+ *  shown. The daemon's queue text and whoami hide them the same way. */
 export function shownHubUrl(hubUrl: string): string {
   try {
     const url = new URL(hubUrl);
-    if (!url.search) return hubUrl;
+    const hidden = [url.search && "query", url.hash && "fragment"].filter(Boolean).join(" and ");
+    if (!hidden) return hubUrl;
     url.search = "";
-    return `${url.toString()} (query hidden)`;
+    url.hash = "";
+    return `${url.toString()} (${hidden} hidden)`;
   } catch {
     return hubUrl;
   }
@@ -217,6 +220,21 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
     .requiredOption("--body-file <path>", "A file holding the request: what to do and what to return")
     .option("--summary <text>", "One-line summary")
     .option("--json", "Print JSON")
+    .addHelpText("after", `
+Waiting for the answer: the local item <request-id> belongs to OpenRig, so nothing
+wakes you when it closes. To be woken, park a row of your own on it:
+  rig queue create --id <request-id>-wait --destination <your seat> --summary "Report <request-id>'s answer" --body "..."
+  rig queue claim <request-id>-wait
+  rig queue block <request-id>-wait --on <request-id> --continuation "read <request-id> and report its answer"
+Then check once: rig queue show <request-id>. If it already reads closed (done, failed,
+canceled or denied), or isn't found, nothing will wake you for it: read the answer now
+and close your own row. (For a request id starting qitem-, block itself refuses a
+closed item.) Otherwise, when <request-id> closes, your row returns to pending and
+you're woken. A request whose binding ends, or that the hub never answers, stays open:
+add --wake-after 4h (your choice) to the block to be woken anyway.
+A request id starting fold:, auth: or external: is read by block as a gate, not as
+this item, so nothing wakes the row for it: give a request you'll wait on another id.
+rig whoami names your binding.`)
     .action(async (ref: string, peer: string, opts: { id: string; bodyFile: string; summary?: string; json?: boolean }) => {
       let body: string;
       try { body = readFileSync(opts.bodyFile, "utf8"); } catch (error) {
