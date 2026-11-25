@@ -81,9 +81,28 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
   - `n` is one more than the highest slot number on record, skipping a logical id the rig already has. An add that
     ends with no node removes its slot row, which frees its number;
   - the add is reserved and issued under the model's custody lease, with an operation id, and runs after the lease is
-    released; the evaluation that issued it reports `in flight (attempt <id>)`, and so does every later one while it
-    has not settled, without issuing it again. A later evaluation reports how it settled: `running`, or `no_node`
-    with the add's code;
+    released. Just before the issue, under the same lease, the evaluation reads the job, the holds and the stored
+    block again and plans again with the reservation counted: a lower `max`, `drain: true`, any other change to the
+    block, a hold (such as a `rig.stopped` recorded since the plan) or surplus that reaches the reservation cancels
+    it. A cancelled add has no operation row and is never called; its slot row goes, and the notes report it under
+    `add.cancelled` as `cancelled: not issued`, with the cause in `code`;
+  - the evaluation that issued the add reports `in flight (attempt <id>)`, and so does every later one while its call
+    has not returned, without issuing it again. `max` dropping meanwhile does not cancel or drain an issued add: it
+    settles first. A later evaluation reports how it settled, in `attempt.status` (never as a stop), from the node's
+    latest session:
+
+    | `attempt.status` | When | The slot |
+    | --- | --- | --- |
+    | `running` | The agent's latest session runs (or is idle) with its startup `ready`. | `live`; from there it serves and drains like any other agent, and above `max` it receives no row. |
+    | `no_node` | No node was created, with the add's code (for example `preflight_failed`). | Removed, which frees its number. |
+    | `not_running` | The node exists but does not run: its latest session `exited`, or its executor is confirmed stopped (`probe_absent`), in `attempt.observed`; with the launch's error when the add's call returned. | `drained`, with a reuse hold (JSON `{ code, observed, error? }`: the launch's status or code, or `not_running` when the call never returned; what was observed; the launch's error, if any): never tried again, and it takes no room under `max`. Reported in `slots` every evaluation. |
+    | `unknown` | Anything else (startup not ready, no session yet), with what was read. | Stays `adding` and issued, read again every evaluation until it settles; never issued again, never stopped, and no other free agent is drained because of it. |
+
+  - after a daemon restart, an attempt that no process runs any more is settled by the next evaluation: a reservation
+    that was never issued is cancelled (`cancelled: not issued`), and an issued add is read again by replaying its
+    operation id with what it was issued on, which never runs the add again. With no node recorded, its slot row goes
+    and it is reported `no_node`, `not launched (interrupted before create)`; with a node, it settles by the table
+    above. What settles this way is reported with the evaluation's other settlements, and kept in the job's history;
   - while a slot is `drained`, no new number is added, and the notes report `held: drained slot awaiting comeback`
     for the add only: rows still move.
 - **Latency.** The job runs every 60 seconds, so a row that has waited `dispatch_after_s` is considered by the next
@@ -156,7 +175,7 @@ gone, its job moves, drains and adds nothing and reports `held: model node gone`
 
 ## What the job does not do yet
 
-It does not bring drained agents back, and while a slot is `drained` it adds no new number. An add that creates its node
-but does not settle running (the agent failed to start, needs attention, or its state is unknown) stays in flight;
-nothing yet settles it, and an add cut off by a daemon restart is not resumed. An add that settles running after
-`rig down` keeps running.
+It does not bring drained agents back, and while a slot is `drained` (an add that settled `not_running` included) it
+adds no new number. An add whose launch failed or needs attention while its session still runs is reported `unknown`
+and stays issued; nothing yet settles it. An add that settles running after `rig down` keeps running: the pool does not
+yet stop an add it issued before the rig went down.
