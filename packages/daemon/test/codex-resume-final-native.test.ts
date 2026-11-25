@@ -56,8 +56,10 @@ async function finalObservation(output: string) {
       if (captures === 3) {
         // Two loop observations exercise a retry before the final read.
         expect(sleep).toHaveBeenCalledExactlyOnceWith(200);
-        // Release output only at that final boundary, avoiding timer races.
-        fs.writeFileSync(gate, output);
+        // At the final boundary, publish the complete file: the stub reads it as soon as it exists.
+        const stagedGate = `${gate}.part`;
+        fs.writeFileSync(stagedGate, output);
+        fs.renameSync(stagedGate, gate);
         await expect.poll(() => nativeCapture(target, lines), {
           timeout: fixtureWaitMs, message: "waiting for fixture output before the final resume observation",
         }).toContain(output);
