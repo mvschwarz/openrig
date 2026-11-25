@@ -11,8 +11,17 @@ new instance, or before a deliberate restart of an existing daemon:
 rig config set terminal.tmux_server isolated
 ```
 
-The setting is read once at daemon startup. Changing it does not move a running
-seat. Inspect the effective choice with:
+Isolation separates the seats from your own tmux server, so a server-wide command
+on yours, such as `tmux kill-server`, doesn't end them. It doesn't protect the
+seats' server from the agents running on it: each seat's pane carries tmux's `TMUX`
+value for that server, so a tmux command an agent runs there without `-L` or `-S`,
+`tmux kill-server` included, acts on the seats' own server and can end every seat
+on it.
+
+The setting is read once at daemon startup, and a restart keeps the previous server
+while registered sessions remain on it (see
+[Existing teams and deferred migration](#existing-teams-and-deferred-migration)).
+Changing it does not move a running seat. Inspect the effective choice with:
 
 ```sh
 rig terminal status --json
@@ -176,6 +185,22 @@ session names on the selected server.
 Dedicated selection requires POSIX tmux. On native Windows (not a supported platform;
 the [README](../../README.md) covers WSL2), psmux retains its existing server behavior; requesting `isolated` produces a status note and a pending choice.
 
+## Background work after a pane disappears
+
+When an unexpectedly missing seat pane or session is positively observed, `rig ps`
+reports that background work is unknown. It also lists descendants sampled under
+that occupant before the loss when their PID and start time still match a later
+process observation. The executable name is shown without arguments or paths.
+This is a partial observation, not a complete process inventory: unsampled or
+unreadable work, a daemon restart, or changed process identity can leave the
+list empty while work is still running. Explicitly stopped seats are not labeled
+as unexpected loss. OpenRig does not terminate these processes.
+Live-pane samples are taken only on identity-check passes that already inspect
+native processes; if no such pass occurs before the loss, attribution remains
+unknown. On a host with only token-bound Claude seats, these native-process
+samples are not taken, so the process list remains empty. A later check of previously sampled identities shares the existing
+process-table reader and does not create a new polling loop.
+
 ## When the server stops answering
 
 The tmux server can go away while the daemon keeps running: something kills it, or
@@ -208,6 +233,22 @@ run: a daemon restarted during a loss records it again. In between:
   when it has not answered, `rig doctor` fails the `terminal_server` check, and
   healthz carries the state in `terminals` while `status` stays `ok`, because the
   daemon itself is up.
+
+To bring the seats back after the server has died, including when it left its
+socket file behind (as after `tmux kill-server`), run `rig up <rig> --existing`
+for each rig that ran on it. The restore finds the seats' sessions gone, starts the
+tmux server again, and resumes each seat's conversation where its provider history
+allows; a seat without usable history waits for an explicit fresh-start choice, as
+in the restoration rules above. The command talks to the daemon, not to tmux, so
+run it from any terminal that wasn't on the lost server.
+
+`rig seat launch <seat> --fresh --reason "<why>"` can also reopen a dead server
+whose socket file remains, one seat at a time, unless the seat's recorded process
+is still running: then it refuses, launches nothing and asks you to end that process
+first, because the server may only have lost its socket. That is a deliberate blank
+replacement, not a resume: the seat starts a new conversation and none of its
+earlier ones is resumed. `--reason` is required. Use it when you want that seat to
+start over, not to get its conversation back.
 
 ## Two instances on one machine
 

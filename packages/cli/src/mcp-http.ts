@@ -379,6 +379,18 @@ async function nodeSeat(client: DaemonClient, seat: string): Promise<"found" | "
   return matches === 1 ? "found" : matches === 0 ? "absent" : unavailable(`${matches} nodes are named ${seat}`);
 }
 
+/** Provider-owned removal, separate from ordinary MCP work grants. Core treats every reference/token as opaque. */
+export interface BindingLeaveRequest {
+  bindingId: string;
+  hubSeat: string;
+  provider: { id: string; installation: string; participant: string; remoteInstallation?: string };
+  removalRevision: string;
+  token: string;
+}
+export type BindingLeaveResult =
+  | ({ removalRevision: string } & ({ removedAt: string } | { alreadyRemoved: true } | { superseded: true }))
+  | { refused: true; code: string };
+
 export type McpHttpOptions = {
   daemonUrl: string;
   host: string;
@@ -395,6 +407,9 @@ export type McpHttpOptions = {
   resolverTimeoutMs?: number;
   /** Endpoint-owned introduction and static resources, beside Core's caller-scoped guidance. */
   instructions?: McpInstructionExtension;
+  /** Handles POST /mcp/bindings/leave with its separate removal capability. No work-grant resolver/fallback is used.
+   *  The provider authenticates/removes idempotently; Core bounds the body+hook by resolverTimeoutMs and echoes context. */
+  onBindingLeave?: (request: BindingLeaveRequest, signal: AbortSignal) => Promise<BindingLeaveResult>;
   /** Operator-configured receiver for external callers omitting a task destination; never an authority grant. */
   taskDestination?: string;
   /** rig mcp serve --front-door: a caller that isn't external gets the front-door instructions, not the member workflow. */
@@ -558,6 +573,45 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     // The OAuth metadata is static and public: served before any credential or grant-service call, whatever the Host.
     if (discovery && req.method === "GET" && pathname === discovery.path) {
       reply(res, 200, discovery.document);
+      return;
+    }
+    if (pathname === "/mcp/bindings/leave" && opts.onBindingLeave) {
+      if (req.method !== "POST") { reply(res, 405, { error: "method_not_allowed" }, { Allow: "POST" }); return; }
+      const token = req.headers.authorization?.match(/^Bearer ([^\s]+)$/i)?.[1];
+      if (!token) { reply(res, 401, { error: "removal_credential_required" }); return; }
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), resolverTimeout); timer.unref?.();
+      const stop = () => controller.abort();
+      req.once("aborted", stop); res.once("close", stop);
+      const bounded = <T>(operation: Promise<T>): Promise<T> => Promise.race([operation, new Promise<T>((_resolve, reject) => {
+        controller.signal.addEventListener("abort", () => reject(new Error("removal_unavailable")), { once: true });
+        if (controller.signal.aborted) reject(new Error("removal_unavailable"));
+      })]);
+      try {
+        let body: Record<string, unknown>;
+        try { body = JSON.parse(await readBody(req, controller.signal)) as Record<string, unknown>; }
+        catch (error) {
+          reply(res, controller.signal.aborted ? 503 : (error as Error).message === "body_too_large" ? 413 : 400, { error: "invalid_removal_request" }); return;
+        }
+        const provider = body?.provider as Record<string, unknown> | undefined;
+        if (!body || ["bindingId", "hubSeat", "removalRevision"].some((k) => typeof body[k] !== "string" || !(body[k] as string).trim())
+          || !provider || ["id", "installation", "participant"].some((k) => typeof provider[k] !== "string" || !(provider[k] as string).trim())
+          || (provider.remoteInstallation !== undefined && (typeof provider.remoteInstallation !== "string" || !provider.remoteInstallation.trim()))) {
+          reply(res, 400, { error: "invalid_removal_request" }); return;
+        }
+        const context = { bindingId: body.bindingId as string, hubSeat: body.hubSeat as string, removalRevision: body.removalRevision as string,
+          provider: { id: provider.id as string, installation: provider.installation as string, participant: provider.participant as string,
+            ...(provider.remoteInstallation === undefined ? {} : { remoteInstallation: provider.remoteInstallation as string }) } };
+        const outcome = await bounded(Promise.resolve().then(() => opts.onBindingLeave!({ ...context, token }, controller.signal)));
+        if ("refused" in outcome && outcome.refused) {
+          reply(res, 403, { ...context, refused: true, code: /^[a-zA-Z0-9_-]{1,80}$/.test(outcome.code) ? outcome.code : "provider_refused" }); return;
+        }
+        const receipt = outcome as { removalRevision?: unknown; removedAt?: unknown; alreadyRemoved?: unknown; superseded?: unknown };
+        const outcomes = [typeof receipt.removedAt === "string" && receipt.removedAt.length > 0, receipt.alreadyRemoved === true, receipt.superseded === true].filter(Boolean).length;
+        if (receipt.removalRevision !== context.removalRevision || outcomes !== 1) { reply(res, 503, { error: "invalid_removal_receipt" }); return; }
+        reply(res, 200, { ...context, ...(typeof receipt.removedAt === "string" ? { removedAt: receipt.removedAt } : receipt.alreadyRemoved === true ? { alreadyRemoved: true } : { superseded: true }) });
+      } catch { if (!res.destroyed && !res.writableEnded) reply(res, 503, { error: "removal_unavailable" }); }
+      finally { clearTimeout(timer); req.off("aborted", stop); res.off("close", stop); }
       return;
     }
     if (pathname !== "/mcp") {

@@ -270,6 +270,24 @@ cited here by number with the code that carries them):
   eligible (`routes/up.ts:137–146`). Otherwise it errors with code
   `no_snapshot` and guidance ("… current DB state is insufficient for
   rehydrate. Start fresh with: rig up <spec-path>", `routes/up.ts:118–123`).
+  Eligibility (`assessCurrentStateRehydrateEligibility`) is the one rule for
+  both fallbacks, `chooseRestoreSnapshot` (`rig up --existing`, daemon start)
+  and `POST /api/rigs/:id/up` (`rig start`), and restore-check reports it. A
+  seat with neither startup context nor a resume token blocks, unless its
+  current occupant resolves unambiguously, as the auto-rehydrate capture
+  resolves it, under `resume_if_possible`, and another seat is eligible. That
+  seat is listed in `awaitingDecision`: the capture keeps its row and null
+  token, and restore stops it as `awaiting-decision` before any launch while
+  the other seats resume from their own rows. Its result carries
+  `noStartupContext` and names no fresh launch, which would refuse without
+  startup context; the CLI doesn't offer one either. It names
+  `rig seat set-resume-token` only when that command records on this seat's
+  session: its lookup (`findResumeContextByName`, the newest row under the
+  name) returns the occupant's row, and the runtime has a token type
+  (`resumeTypeForRuntime`). Otherwise it names manual recovery alone. An
+  eligible agent seat whose current occupant has no token stops the same way,
+  so it is listed too, and `noSeatStarts` marks a rig where every seat would
+  wait.
 - Post-command handoff: `down` output includes the snapshot ID and
   `To restore: rig up <name>` (or `rig restore <snapshotId> --rig <rigId>`
   when the name is not unique); `up` output includes node statuses and an

@@ -297,6 +297,13 @@ describe("agent pane activity classifier", () => {
     expect(unknown).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
   });
 
+  it.each(["/rc failed", "/rc connecting…", "/rc active", "/rc reconnecting"])("reads the empty prompt above Claude's %j indicator as idle, and nothing like it", indicator => {
+    expect(classifyPaneActivity(currentClaudeUpdateLayout("❯ ", indicator), { runtime: "claude-code" })).toMatchObject({ state: "agent_idle", reason: "idle_prompt" });
+    expect(classifyPaneActivity(currentClaudeUpdateLayout("❯ deploy the release", indicator), { runtime: "claude-code" }).state).not.toBe("agent_idle");
+    const selected = classifyPaneActivity(currentClaudeUpdateLayout("❯ ", `${indicator} · Enter to view`), { runtime: "claude-code" });
+    expect(selected).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
+  });
+
   it("classifies typed Claude prompt text above an idle footer as attention, not idle", () => {
     const result = classifyPaneActivity([
       "❯ I am still typing a message",

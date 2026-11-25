@@ -14,7 +14,7 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import { shellQuote } from "./shell-quote.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
-import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, noConversationFoundOwner } from "../domain/native-resume-probe.js";
 import { verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
@@ -223,7 +223,10 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "resume_failed", message: keyResult.message };
     }
 
-    const result = await this.verifyResume(tmuxSessionName, resumeToken!).catch((error): ResumeResult => ({
+    // A launch sent through sendShellCommand (managed, or classic with the seat's launch environment) went as a staged
+    // script, run by the line it typed; that line marks this launch in the pane. One typed inline has none.
+    const launchLine = managed || this.options.seatLaunchEnvironment ? this.tmux.stagedLaunchTypedLine?.(tmuxSessionName) : undefined;
+    const result = await this.verifyResume(tmuxSessionName, resumeToken!, launchLine).catch((error): ResumeResult => ({
       ok: false,
       code: "attention_required",
       message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
@@ -232,27 +235,38 @@ export class ClaudeResumeAdapter {
     return result.ok ? { ...result, appliedLaunch, ...(warnings.length ? { warnings } : {}) } : result;
   }
 
-  private async verifyResume(tmuxSessionName: string, resumeToken: string): Promise<ResumeResult> {
+  private async verifyResume(tmuxSessionName: string, resumeToken: string, launchLine?: string): Promise<ResumeResult> {
     const pollMs = this.options.pollMs ?? 200;
     const maxWaitMs = this.options.maxWaitMs ?? 5_000;
     const sleepFn = this.options.sleep ?? sleep;
     const attempts = Math.max(1, Math.floor(maxWaitMs / Math.max(pollMs, 1)) + 1);
+    // Only a "No conversation found" below this launch's typed line is this launch's (noConversationFoundOwner). An earlier
+    // launch's is set aside, and the screen this launch has drawn below that line is judged instead. One that can't be
+    // placed (any, while the launch is unread; one whose typed line isn't in view) keeps polling.
+    const notFoundOwner = (content: string) => noConversationFoundOwner(content,
+      { typedLine: launchLine, unread: this.tmux.stagedLaunchUnread?.(tmuxSessionName) === true });
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSessionName);
       const paneContent = (await this.tmux.capturePaneContent(tmuxSessionName, 40)) ?? "";
-      const probe = assessNativeResumeProbe({
+      let probe = assessNativeResumeProbe({
         runtime: "claude-code",
         paneCommand,
         paneContent,
       });
 
       if (probe.code === "no_conversation_found") {
-        return {
-          ok: false,
-          code: "retry_fresh",
-          message: "Claude resume failed: no conversation found for the requested session",
-        };
+        const report = notFoundOwner(paneContent);
+        if (report.owner === "this") {
+          return {
+            ok: false,
+            code: "retry_fresh",
+            message: "Claude resume failed: no conversation found for the requested session",
+          };
+        }
+        if (report.owner === "earlier" && report.since !== undefined) {
+          probe = assessNativeResumeProbe({ runtime: "claude-code", paneCommand, paneContent: report.since });
+        }
       }
 
       // L3: Claude resume-selection prompt → attention_required (not failed).
@@ -283,14 +297,30 @@ export class ClaudeResumeAdapter {
 
     const finalCommand = await this.tmux.getPaneCommand(tmuxSessionName);
     const finalContent = (await this.tmux.capturePaneContent(tmuxSessionName, 40)) ?? "";
-    const finalProbe = assessNativeResumeProbe({
+    let finalProbe = assessNativeResumeProbe({
       runtime: "claude-code",
       paneCommand: finalCommand,
       paneContent: finalContent,
     });
+    let finalScreen = finalContent;
 
     if (finalProbe.code === "no_conversation_found") {
-      return { ok: false, code: "retry_fresh", message: "Claude resume failed: no conversation found for the requested session" };
+      const report = notFoundOwner(finalContent);
+      if (report.owner === "this") {
+        return { ok: false, code: "retry_fresh", message: "Claude resume failed: no conversation found for the requested session" };
+      }
+      if (report.owner === "earlier" && report.since !== undefined) {
+        finalScreen = report.since;
+        finalProbe = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: finalCommand, paneContent: finalScreen });
+      } else {
+        return {
+          ok: false,
+          code: "attention_required",
+          message: `Claude resume could not be verified; launch retained: the "No conversation found" on screen may be from an earlier launch (${report.owner === "earlier"
+            ? "the pane's shell hasn't read this launch yet" : "this launch's typed line, which would tell, isn't in view"}), so Claude may still be starting.`,
+          evidence: finalContent.split("\n").slice(-12).join("\n"),
+        };
+      }
     }
     if (finalProbe.status === "attention_required") {
       return { ok: false, code: "attention_required", message: finalProbe.detail, evidence: finalContent.split("\n").slice(-12).join("\n") };
@@ -304,7 +334,7 @@ export class ClaudeResumeAdapter {
     // (or behind a shell label, below), after the untrusted screen classifiers have had their say.
     const mayBeWrappedComposer = finalProbe.status === "inconclusive"
       || (finalProbe.status === "failed" && finalProbe.code === "returned_to_shell");
-    if (/(^|\n)\s*❯/.test(finalContent) && mayBeWrappedComposer) {
+    if (/(^|\n)\s*❯/.test(finalScreen) && mayBeWrappedComposer) {
       const identity = await verifyClaudePaneProcess({
         target: tmuxSessionName,
         tmux: this.tmux,
@@ -315,7 +345,7 @@ export class ClaudeResumeAdapter {
         const verifiedProbe = assessNativeResumeProbe({
           runtime: "claude-code",
           paneCommand: finalCommand,
-          paneContent: finalContent,
+          paneContent: finalScreen,
           claudeResumeIdentityVerified: true,
         });
         if (verifiedProbe.status === "resumed") {
@@ -330,7 +360,10 @@ export class ClaudeResumeAdapter {
     if (finalProbe.code === "returned_to_shell") {
       // A shell label alone isn't a return to the shell: a launch script still starting Claude holds the pane the
       // same way. Only a proven, stable idle shell ends the resume; anything else keeps the launch for attention.
-      if (await verifyPaneIdleShell({ target: tmuxSessionName, tmux: this.tmux,
+      // A shell that hasn't read the launch yet (a new pane's shell still running its startup files) is idle the same
+      // way; the launch's own script, still there, tells them apart.
+      const unread = this.tmux.stagedLaunchUnread?.(tmuxSessionName) === true;
+      if (!unread && await verifyPaneIdleShell({ target: tmuxSessionName, tmux: this.tmux,
         ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}) })) {
         return {
           ok: false,
@@ -350,7 +383,9 @@ export class ClaudeResumeAdapter {
       return {
         ok: false,
         code: "attention_required",
-        message: "Claude resume could not be verified; launch retained: the pane shows a shell that isn't a proven idle shell, so a launch script may still be starting Claude.",
+        message: unread
+          ? "Claude resume could not be verified; launch retained: the pane's shell hasn't read the launch yet (it may still be running its startup files), so Claude may still be starting."
+          : "Claude resume could not be verified; launch retained: the pane shows a shell that isn't a proven idle shell, so a launch script may still be starting Claude.",
         evidence: finalContent.split("\n").slice(-12).join("\n"),
       };
     }

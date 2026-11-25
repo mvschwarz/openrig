@@ -69,6 +69,17 @@ const fromRow = (row: SlotRow): SeatPoolSlot => ({
   createdAt: row.created_at,
 });
 
+/** A recorded outcome as an object; one that isn't a JSON object reads as empty. */
+function readOutcome(text: string | null): Record<string, unknown> {
+  if (text === null) return {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
 export class SeatPoolSlotsRepository {
   constructor(private readonly db: Database.Database) {}
 
@@ -176,6 +187,38 @@ export class SeatPoolSlotsRepository {
   forModel(modelNodeId: string): SeatPoolSlot[] {
     return (this.db.prepare("SELECT * FROM seat_pool_slots WHERE model_node_id = ? ORDER BY slot_number").all(modelNodeId) as SlotRow[])
       .map(fromRow);
+  }
+
+  /**
+   * Moves a slot from `from` to `to`, only while it is still in `from`: false when it moved on. With `stop`, also sets
+   * (an object) or clears (null) the `stop` key of the slot's recorded outcome, keeping its other keys.
+   */
+  setPhase(input: { slotId: string; from: SeatPoolSlotPhase; to: SeatPoolSlotPhase; at: string; stop?: Record<string, unknown> | null }): boolean {
+    return this.db.transaction(() => {
+      const row = this.db.prepare("SELECT phase, attempt_outcome FROM seat_pool_slots WHERE slot_id = ?").get(input.slotId) as
+        { phase: SeatPoolSlotPhase; attempt_outcome: string | null } | undefined;
+      if (!row || row.phase !== input.from) return false;
+      let outcome = row.attempt_outcome;
+      if (input.stop !== undefined) {
+        const kept = { ...readOutcome(outcome) };
+        delete kept.stop;
+        const next = input.stop === null ? kept : { ...kept, stop: input.stop };
+        outcome = Object.keys(next).length > 0 ? JSON.stringify(next) : null;
+      }
+      // The phase's time changes only with the phase: rewriting the outcome of a slot that stays where it is keeps it.
+      this.db.prepare(
+        "UPDATE seat_pool_slots SET phase = ?, phase_changed_at = CASE WHEN phase = ? THEN phase_changed_at ELSE ? END, attempt_outcome = ? WHERE slot_id = ?",
+      ).run(input.to, input.to, input.at, outcome, input.slotId);
+      return true;
+    })();
+  }
+
+  /** The `stop` key of the slot's recorded outcome: what the pool's last stop of this agent returned. Null: none. */
+  stopOutcome(slotId: string): Record<string, unknown> | null {
+    const row = this.db.prepare("SELECT attempt_outcome FROM seat_pool_slots WHERE slot_id = ?").get(slotId) as
+      { attempt_outcome: string | null } | undefined;
+    const stop = readOutcome(row?.attempt_outcome ?? null).stop;
+    return stop !== null && typeof stop === "object" && !Array.isArray(stop) ? stop as Record<string, unknown> : null;
   }
 
   /** Whether the node is a pool agent the pool drained: restore keeps it down until the pool brings it back. */

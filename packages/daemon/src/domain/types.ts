@@ -706,6 +706,9 @@ export interface RestoreNodeResult {
   /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
    *  and doesn't leave the rig partially restored. */
   noConversation?: true;
+  /** An `awaiting-decision` seat with no saved startup context: a fresh start (`rig seat launch --fresh`) reads that
+   *  context and refuses without it, so the seat's reason offers none and callers shouldn't either. */
+  noStartupContext?: true;
   /** #3253: the seat was launched without its requested process limit (the request stays stored; a fresh launch
    *  applies it). */
   processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
