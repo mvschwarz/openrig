@@ -1228,6 +1228,9 @@ interface NeedsInputShape {
   reason: string | null;
 }
 
+/** The pane's own interactive prompts the structural recognizer reads: a picker or question, and a permission or
+ *  confirmation. A draft in the input box is not one. */
+const DIALOG_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt"]);
 const CODEX_STRUCTURAL_PROMPT_SOURCE = "codex:structural-prompt";
 /** A declared-hooks community seat's dialog as the structural recognizer reads it. */
 const PRESET_STRUCTURAL_PROMPT_SOURCE = "community:structural-prompt";
@@ -1238,7 +1241,7 @@ const CLAUDE_SELF_REPORT_SOURCE = "claude:pid-json";
  *  complete empty composer (0), observed at the capture's start. Null for anything else. */
 function codexPromptObservation(frame: StructuralObservation, sessionName: string):
   { observedAt: string; needsInput: NeedsInputShape } | null {
-  if (frame.state === "attention" && (frame.reason === "selection_prompt" || frame.reason === "permission_prompt")) {
+  if (frame.state === "attention" && DIALOG_PROMPT_REASONS.has(frame.reason ?? "")) {
     return { observedAt: frame.captureStartedAt!, needsInput: { count: 1, reason: frame.reason } };
   }
   if (frame.idleFrame?.runtime === "codex" && frame.idleFrame.sessionName === sessionName) {
@@ -1247,10 +1250,12 @@ function codexPromptObservation(frame: StructuralObservation, sessionName: strin
   return null;
 }
 
-/** What a qualified frame of a declared-hooks community seat says: a dialog the recognizer reads as needing a person (1),
- *  observed at the capture's start. Null for anything else, which withdraws the source: it never reads idle. */
+/** What a qualified frame of a declared-hooks community seat says: a picker or permission prompt on screen (1), observed
+ *  at the capture's start. Null for anything else, a draft in the input box included, which withdraws the source: a
+ *  person typing, or type-ahead during a long tool call, isn't a question, and the source never reads idle. */
 function presetPromptObservation(frame: StructuralObservation): { observedAt: string; needsInput: NeedsInputShape } | null {
-  return frame.state === "attention" ? { observedAt: frame.captureStartedAt!, needsInput: { count: 1, reason: frame.reason } } : null;
+  return frame.state === "attention" && DIALOG_PROMPT_REASONS.has(frame.reason ?? "")
+    ? { observedAt: frame.captureStartedAt!, needsInput: { count: 1, reason: frame.reason } } : null;
 }
 
 /** One relay route's consecutive agreements toward promoting a trial rung. */

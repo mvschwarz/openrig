@@ -8,7 +8,7 @@ import { CommunityHarnessRuntimeAdapter, launchedCommunityHarness } from "../src
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { AgentActivityStore, hookEventState } from "../src/domain/agent-activity-store.js";
 import { SeatActivityService } from "../src/domain/seat-activity-service.js";
 import { activityRoutes, restoredRunnerHookEvidence } from "../src/routes/activity.js";
 import { nodesRoutes } from "../src/routes/sessions.js";
@@ -135,10 +135,11 @@ function fixture(opts: { hooks?: string[]; runner?: boolean; runtime?: string } 
     sweep: () => oracle.pollAllRunningTmuxSeats(db),
     screen(motion: "moving" | "quiet") { paneAt = Math.floor(Date.now() / 1000) - (motion === "moving" ? 0 : 60); },
     /** The structural frame the recognizer read: a dialog, an unrecognized screen, or a failed read (null). */
-    frame(shows: "dialog" | "unrecognized" | null, at: { started?: number; checked?: number } = {}) {
+    frame(shows: "dialog" | "draft" | "unrecognized" | null, at: { started?: number; checked?: number } = {}) {
       const started = at.started ?? Date.now();
-      frame = shows === null ? null : { state: shows === "dialog" ? "attention" : "unknown",
-        reason: shows === "dialog" ? "selection_prompt" : "community_harness_no_idle_signal", evidence: "› 1. Yes, proceed",
+      frame = shows === null ? null : { state: shows === "unrecognized" ? "unknown" : "attention",
+        reason: shows === "dialog" ? "selection_prompt" : shows === "draft" ? "prompt_draft" : "community_harness_no_idle_signal",
+        evidence: shows === "draft" ? "› fix the flaky test next" : "› 1. Yes, proceed",
         observedAt: iso(started), captureStartedAt: iso(started), ...(at.checked ? { checkedAt: iso(at.checked) } : {}) };
     },
     /** A new occupant under the same session name, launched with the same declaration. */
@@ -156,6 +157,14 @@ function fixture(opts: { hooks?: string[]; runner?: boolean; runtime?: string } 
     db, oracle, ref: () => ({ seatNodeId: node.id, sessionName: session.sessionName }),
   };
 }
+
+describe("PostToolUse is a working beat only for a community preset's own hooks", () => {
+  it("reads running for a community harness and stays noise for built-in runtimes", () => {
+    expect(hookEventState("PostToolUse", null, "synth")).toBe("running");
+    for (const builtIn of ["claude-code", "codex", "pi", "omp"]) expect(hookEventState("PostToolUse", null, builtIn)).toBe("unknown");
+    expect(hookEventState("PostToolUse", null, null)).toBe("unknown");
+  });
+});
 
 describe("a declared-hooks seat's activity follows its own hooks", () => {
   it("reads PreToolUse and PostToolUse working and Stop idle; without a declared turn start, a quiet pane then reads unknown, never idle", async () => {
@@ -255,6 +264,19 @@ describe("a declared-hooks seat's attention from the screen", () => {
     seat.frame("dialog"); seat.later(10); await seat.sweep();
     expect(seat.state()?.needsInput.count).toBe(1);
     seat.later(500); seat.frame("unrecognized"); await seat.sweep();
+    expect(seat.state()?.needsInput.count).toBe(0);
+  });
+
+  it("doesn't raise needs-input for a draft frame newer than the latest hook: typing isn't a question", async () => {
+    const seat = fixture({ hooks: PARTIAL });
+    await seat.post("PreToolUse");
+    seat.later(500); seat.frame("draft"); seat.screen("quiet"); await seat.sweep();
+    expect(seat.state()?.needsInput.count).toBe(0);
+    expect(seat.state()?.activity).toBe("working");
+    // A dialog after it still counts, and a draft that replaces the dialog withdraws it.
+    seat.later(500); seat.frame("dialog"); await seat.sweep();
+    expect(seat.state()?.needsInput.count).toBe(1);
+    seat.later(500); seat.frame("draft"); await seat.sweep();
     expect(seat.state()?.needsInput.count).toBe(0);
   });
 

@@ -238,8 +238,9 @@ stamped when it arrives, so a late one can be taken as current: send `occurredAt
 
 **Attention from the screen.** A permission question or numbered choice that OpenRig recognizes on screen reads as needs
 input while that reading is fresh (5 seconds) and its capture started after the seat's latest hook. The next hook post
-ends it, as does a screen showing no dialog or a failed read. A dialog OpenRig doesn't recognize reads as the hooks and
-the turn-start rule say.
+ends it, as does a screen showing no dialog or a failed read. A draft in the input box isn't a dialog: someone typing,
+or type-ahead during a long tool call, isn't a question. A dialog OpenRig doesn't recognize reads as the hooks and the
+turn-start rule say.
 
 **Good to know:**
 - **The declaration is fixed at launch,** as `runner` is: each launch, a handover's successor included, records it on the
