@@ -367,6 +367,16 @@ What reads these declarations:
 
 ## Route details
 
+- **Early Claude compaction acknowledgement:** Send `{"session":"<session>","earlyAck":true}` to
+  `POST /api/compaction/trigger` to receive HTTP 202 with
+  `{"ok":true,"session":"<session>","stage":"preparing","attemptId":"<id>"}` once the daemon admits
+  your attempt. The receipt confirms admission to preparation only. Use the returned session in
+  `GET /api/compaction/state?session=<session>` and match `preparation.attemptId` to follow that attempt
+  and see whether `/compact` was submitted. A concurrent request refused as `409 already_in_progress`
+  receives no attempt ID. If the 202 response is lost, the request may still be running. Inspect state
+  and the seat before taking further action. Do not retry automatically or assume a new ID in seat state
+  belongs to the lost request. Omitting `earlyAck` or sending `false` uses the blocking response.
+  Pi's trigger returns HTTP 422 for `earlyAck:true`.
 - **Every seat's name in one read:** `GET /api/ps?seats=true` adds `seats`, the rig's seat session names, to each
   entry of the usual `/api/ps` body, from the same read. Use it instead of reading each rig's nodes when only the
   names are needed. The default body has no `seats`, and neither does a daemon from before this option.
