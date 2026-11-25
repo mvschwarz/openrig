@@ -467,6 +467,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const topologyValidateRig = makeTopologyDestinationCheck({
     findRigsByName: (name) => rigRepo.findRigsByName(name),
     loadHumanRegistry: () => loadHumanRegistry(),
+    db,
   });
   // Seat absence in positively known local topology is advice, never admission
   // authority. Keep every typed destination intact, including adopted aliases.
