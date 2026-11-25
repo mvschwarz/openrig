@@ -1,11 +1,10 @@
-import fs from "node:fs";
 import path from "node:path";
 import { projectRootForLocalSettings } from "../domain/claude-credential-precedence.js";
 import { isOwnedCollectorCommand, isOwnedRelayCommand, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
 import { type ActivityRelayEvent, managedClaudeNodeCommand, parseManagedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
 import { storedStatuslineThrottle, throttledCollectorCommand } from "../domain/claude-statusline-throttle.js";
 import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
-import { composeClaudeLaunchSettings, type ClaudeSettingsSeat } from "./claude-settings-transport.js";
+import { composeClaudeLaunchSettings, readSettingsFile, type ClaudeSettingsSeat } from "./claude-settings-transport.js";
 
 export type ClaudeLaunchTelemetry = (input: {
   args: string[];
@@ -26,7 +25,8 @@ function asObject(value: unknown): Settings | undefined {
 
 function readSettings(file: string): Settings | undefined {
   try {
-    const text = fs.readFileSync(file, "utf8");
+    // Keep following settings-layer symlinks and check the opened target before reading it.
+    const text = readSettingsFile(file, { followSymlinks: true });
     return text.trim() === "" ? {} : asObject(JSON.parse(text));
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? {} : undefined;
@@ -34,20 +34,35 @@ function readSettings(file: string): Settings | undefined {
 }
 
 /** Scope follows Claude's own flags. Managed settings still outrank the launch's value. */
-function settingsLayers(args: string[], cwd: string, configDir: string): Array<Settings | undefined> {
+function settingsLayers(args: string[], cwd: string, configDir: string, warnings: string[]): Array<Settings | undefined> {
   let sources = "user,project,local";
   for (const [index, arg] of args.entries()) {
     if (arg === "--setting-sources") sources = args[index + 1] ?? "";
     else if (arg.startsWith("--setting-sources=")) sources = arg.slice("--setting-sources=".length);
   }
   const enabled = sources.split(",");
-  const localRoot = projectRootForLocalSettings(cwd) ?? cwd;
   const files = [
     ...(enabled.includes("user") ? [path.join(configDir, "settings.json")] : []),
     ...(enabled.includes("project") ? [path.join(cwd, ".claude", "settings.json")] : []),
-    ...(enabled.includes("local") ? [...new Set([cwd, localRoot])].map(dir => path.join(dir, ".claude", "settings.local.json")) : []),
   ];
-  return files.map(readSettings);
+  let localRootUnreadable = false;
+  if (enabled.includes("local")) {
+    files.push(path.join(cwd, ".claude", "settings.local.json"));
+    try {
+      const localRoot = projectRootForLocalSettings(cwd);
+      if (localRoot && localRoot !== cwd) files.push(path.join(localRoot, ".claude", "settings.local.json"));
+    } catch {
+      localRootUnreadable = true;
+    }
+  }
+  const layers = files.map(readSettings);
+  if (localRootUnreadable) {
+    warnings.push("OpenRig could not read the Claude project root and left the status line to Claude.");
+    layers.push(undefined);
+  } else if (layers.includes(undefined)) {
+    warnings.push("OpenRig could not inspect a Claude settings file and left the status line to Claude.");
+  }
+  return layers;
 }
 
 function hookEntries(settings: Settings | undefined, event: string): Settings[] {
@@ -72,8 +87,7 @@ type LaunchMaterial = ClaudeSettingsSeat & {
 /** Put OpenRig's telemetry in Claude's one launch-local settings value. Existing projects are read-only. */
 export function withClaudeLaunchTelemetry(args: string[], material: LaunchMaterial, warnings: string[]): string[] {
   if (args.includes("--bare") || args.includes("--safe-mode")) return args;
-  const layers = settingsLayers(args, material.cwd, material.configDir);
-  if (layers.includes(undefined)) warnings.push("OpenRig could not inspect a Claude settings file and left the status line to Claude.");
+  const layers = settingsLayers(args, material.cwd, material.configDir, warnings);
   return composeClaudeLaunchSettings(args, material, material.cwd, warnings, settings => {
     const result = { ...settings };
     const hooks = { ...asObject(settings.hooks) };

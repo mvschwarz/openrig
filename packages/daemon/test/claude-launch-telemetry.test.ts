@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -66,6 +68,56 @@ describe("Claude seat launch telemetry", () => {
     expect(f.read(f.compose()).statusLine).toBeUndefined();
     expect(f.warnings.join(" ")).toContain("left the status line to Claude");
     expect(fs.readFileSync(f.local, "utf8")).toBe("{unparseable");
+  });
+
+  it.skipIf(process.platform === "win32")("leaves the status line alone when an enabled settings path is a FIFO", async () => {
+    const f = fixture();
+    const file = path.join(f.configDir, "settings.json");
+    execFileSync("mkfifo", [file]);
+    // A writer releases the old blocking reader so the regression fails without hanging the runner.
+    const writer = spawn(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], '{}')", file], { stdio: "ignore" });
+    const exited = once(writer, "close");
+    try {
+      const settings = f.read(f.compose());
+      expect(settings.statusLine).toBeUndefined();
+      expect(settings.hooks).toHaveProperty("SessionStart");
+      expect(f.warnings).toEqual([expect.stringContaining("left the status line to Claude")]);
+    } finally {
+      writer.kill();
+      await exited;
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("preserves a renderer reached through a regular settings symlink", () => {
+    const f = fixture();
+    fs.writeFileSync(path.join(f.configDir, "renderer.json"), '{"statusLine":{"type":"command","command":"echo custom"}}');
+    fs.symlinkSync("renderer.json", path.join(f.configDir, "settings.json"));
+    expect(f.read(f.compose()).statusLine).toBeUndefined();
+    expect(f.warnings).toEqual([]);
+  });
+
+  it.each([true, false])("handles an unreadable worktree root when local settings enabled is %s", localEnabled => {
+    const f = fixture();
+    const dotGit = path.join(f.cwd, ".git");
+    fs.writeFileSync(dotGit, "gitdir: /main/.git/worktrees/project\n");
+    const read = vi.spyOn(fs, "readFileSync").mockImplementationOnce(() => {
+      throw Object.assign(new Error("unreadable fixture"), { code: "EACCES" });
+    });
+    try {
+      const settings = f.read(f.compose(localEnabled ? [] : ["--setting-sources=user,project"]));
+      expect(settings.hooks).toHaveProperty("SessionStart");
+      if (localEnabled) {
+        expect(read).toHaveBeenCalledWith(dotGit, "utf8");
+        expect(settings.statusLine).toBeUndefined();
+        expect(f.warnings).toEqual([expect.stringContaining("project root")]);
+      } else {
+        expect(read).not.toHaveBeenCalledWith(dotGit, "utf8");
+        expect(settings.statusLine.command).toContain(f.collector);
+        expect(f.warnings).toEqual([]);
+      }
+    } finally {
+      read.mockRestore();
+    }
   });
 
   it("does not skip the collector for a user settings source that the launch excluded", () => {

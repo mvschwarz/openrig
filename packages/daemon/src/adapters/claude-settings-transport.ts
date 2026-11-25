@@ -67,8 +67,9 @@ function settingsObject(raw: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function readSettingsFile(file: string): string {
-  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
+export function readSettingsFile(file: string, { followSymlinks = false }: { followSymlinks?: boolean } = {}): string {
+  const flags = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | (followSymlinks ? 0 : fs.constants.O_NOFOLLOW);
+  const fd = fs.openSync(file, flags);
   try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > MAX_SETTINGS_FILE_BYTES) throw new Error("invalid file");
