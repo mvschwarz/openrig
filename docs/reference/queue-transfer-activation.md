@@ -78,6 +78,8 @@ Activation is two commits. A crash between them leaves an `activating` ledger ro
 
 `status` reports retained restrictions in `fenced` and lists the items still awaiting reconciliation separately in `reconciliationOwed`. A reconciled item remains fenced and cannot be reopened at the source. An empty ledger reports `recordsUnavailable`; it does not say no transfer happened. Destination `replay` checks restored items, erasure markers and imported history and reports what is missing without reconstructing or rerunning work.
 
+Run `status` on the source to see `postReconciliationLateReports`: history added on retained fences after the first reconciliation, with an `ownerItem` where the destination item is confirmed. If an operator bearer is configured, the read must include it to show the supplement; the status summary is still available without it. The supplement is read-only and does not modify the stored reconciliation or its exact retry.
+
 ## Limits
 
 - No failover, heartbeat detection, replication or automatic routing between hosts.
