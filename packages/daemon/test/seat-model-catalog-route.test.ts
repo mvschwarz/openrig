@@ -103,6 +103,17 @@ describe("seat model catalog", () => {
     expect(body.catalog.models[0]).not.toHaveProperty("runtimeVersion");
   });
 
+  it("uses the same trimmed model and effort spelling as the setting writes", async () => {
+    const { url } = seed();
+    preset('model_catalog: {models: [{id: " custom/unlisted ", effort_levels: [" future-level "]}]}');
+    const response = await setup.app.request(url);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.catalog.models).toMatchObject([
+      { id: body.saved.model, effortLevels: [body.saved.effort.choice] },
+    ]);
+  });
+
   it("exposes saved choices for Codex without a supported source and preserves save-with-warning", async () => {
     const { node, url } = seed("codex");
     const save = await setup.app.request(`/api/seat/set-effort/node/${node.id}`, {

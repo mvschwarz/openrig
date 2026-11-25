@@ -148,7 +148,10 @@ function parseModelCatalog(value: unknown): PresetModelCatalog | undefined {
     if (!isRecord(entry) || !isLabel(entry.id)) return;
     const levels = entry.effort_levels;
     if (levels !== undefined && (!Array.isArray(levels) || !levels.every(isLabel))) return;
-    models.push({ id: entry.id, ...(levels === undefined ? {} : { effortLevels: levels }) });
+    models.push({
+      id: entry.id.trim(),
+      ...(levels === undefined ? {} : { effortLevels: levels.map(level => level.trim()) }),
+    });
   }
   return { ...(version === undefined ? {} : { runtimeVersion: version }), models };
 }
