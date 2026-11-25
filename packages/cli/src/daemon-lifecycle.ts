@@ -1120,8 +1120,11 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
     : deps.isProcessAlive(pid) ? "alive" : "dead";
   if (!r.startToken || !r.endpoint) {
     // #3953: with its launcher gone, no start is in progress, so stop may still identify the daemon another way.
-    return { ...refuse("it records no child identity (an older CLI's reservation, or one whose start could not identify the child)"),
-      ...(liveness(r.launcherPid) === "dead" ? { olderLock: true as const } : {}) };
+    const launcherLiveness = liveness(r.launcherPid);
+    const starting = launcherLiveness === "dead" ? ""
+      : `; launcher PID ${r.launcherPid} is ${launcherLiveness === "alive" ? "alive" : "of unknown liveness"}, so a start may be in progress`;
+    return { ...refuse(`it records no child identity (an older CLI's reservation, or one whose start could not identify the child)${starting}`),
+      ...(launcherLiveness === "dead" ? { olderLock: true as const } : {}) };
   }
   if (new URL(ctx.target).origin !== r.endpoint) {
     return refuse(`its child was launched to listen at ${r.endpoint}, not at the checked ${ctx.check} (set OPENRIG_URL=${r.endpoint} to check it)`);
@@ -1271,7 +1274,7 @@ async function identifyLoggingDaemon(deps: LifecycleDeps, check: string): Promis
   if (!Number.isSafeInteger(pid) || (pid as number) <= 0) return { why: `the listener at ${check} names no PID` };
   const writes = deps.writesOutputTo(pid as number, log);
   if (typeof writes === "object") return { why: `whether PID ${pid} writes ${log} couldn't be read (${writes.failure})` };
-  if (!writes) return { why: `the listener at ${check} is PID ${pid}, which doesn't write ${log}, so it isn't this home's daemon` };
+  if (!writes) return { why: `the listener at ${check} is PID ${pid}, which doesn't write ${log}, so it isn't shown to be this home's daemon` };
   return { pid: pid as number, log };
 }
 

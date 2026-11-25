@@ -137,7 +137,10 @@ export function realDeps(): LifecycleDeps {
     spawn: (cmd, args, opts) => spawn(cmd, args, opts as Parameters<typeof spawn>[2]),
     fetch: async (url, init) => {
       let body = "";
-      const res = await fetchWithTimeout(daemonFetch(url, globalThis.fetch), url, init?.signal ? { signal: init.signal } : {}, {
+      // #3957: each health probe on a connection of its own. With `connection: close`, undici closes the socket after the
+      // response, so no later probe reuses one the daemon has since closed: a stopped listener reads refused, not reset.
+      const probeInit: RequestInit = { headers: { connection: "close" }, ...(init?.signal ? { signal: init.signal } : {}) };
+      const res = await fetchWithTimeout(daemonFetch(url, globalThis.fetch), url, probeInit, {
         timeoutMs: 1_500,
         timeoutMessage: `Daemon health probe timed out for ${url}`,
         consumeResponse: async (response) => { body = await response.text(); },

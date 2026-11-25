@@ -2885,7 +2885,7 @@ describe("#3953 — stop: a live daemon whose record is missing", () => {
 
   it("never chooses a process that only owns the port: a listener whose PID doesn't write this home's log is refused", async () => {
     const message = await expectRefused(unrecordedDeps({ answers: { pid: 999 } }),
-      /Not identified as this home's daemon: the listener at \S+ is PID 999, which doesn't write \S+daemon\.log, so it isn't this home's daemon; no signal sent\.$/);
+      /Not identified as this home's daemon: the listener at \S+ is PID 999, which doesn't write \S+daemon\.log, so it isn't shown to be this home's daemon; no signal sent\.$/);
     expect(message).not.toMatch(/stopped/);
     await expectRefused(unrecordedDeps({ writes: false }), /is PID 6262, which doesn't write/);
   });
@@ -2903,7 +2903,8 @@ describe("#3953 — stop: a live daemon whose record is missing", () => {
     // Both PIDs it names are gone now: the next start archives it, as it archives any abandoned reservation.
     expect(fs.existsSync(lockFile())).toBe(true);
     fs.rmSync(lockFile());
-    const starting = await expectRefused(unrecordedDeps({ lock: olderLock(), alive: [DAEMON, LAUNCHER] }), /records no child identity/);
+    const starting = await expectRefused(unrecordedDeps({ lock: olderLock(), alive: [DAEMON, LAUNCHER] }),
+      /records no child identity .*; launcher PID 4242 is alive, so a start may be in progress; no signal sent\./);
     expect(starting).not.toMatch(/Not identified/);
   });
 
@@ -2965,15 +2966,17 @@ describe.skipIf(process.platform === "win32")("#3953 — realDeps reads a proces
   // The whole stop, with real processes, HTTP and signals: a stand-in for a daemon (not OpenRig) that writes this test
   // home's daemon.log, answers /healthz with its PID on its own port, and on SIGTERM closes its listener and connections,
   // drains briefly and writes a clean shutdown receipt, as the daemon does.
-  const STAND_IN = `const http=require("node:http"),fs=require("node:fs"),path=require("node:path");const dir=process.argv[1];
+  const STAND_IN = `const http=require("node:http"),fs=require("node:fs"),path=require("node:path");const dir=process.argv[1],instant=process.argv[2]==="instant";
 const server=http.createServer((q,r)=>{r.setHeader("content-type","application/json");r.end(JSON.stringify({status:"ok",pid:process.pid}))});
 server.listen(0,"127.0.0.1",()=>console.log("listening "+server.address().port));
-process.on("SIGTERM",()=>{const t=new Date().toISOString();server.close();server.closeAllConnections();setTimeout(()=>{fs.writeFileSync(path.join(dir,"daemon-shutdown.json"),JSON.stringify({schema:"openrig.daemon-shutdown/v1",pid:process.pid,startedAt:t,completedAt:new Date().toISOString(),outcome:"clean",phase:"complete",failures:[]}));process.exit(0)},200)});`;
+process.on("SIGTERM",()=>{const t=new Date().toISOString();const done=()=>{fs.writeFileSync(path.join(dir,"daemon-shutdown.json"),JSON.stringify({schema:"openrig.daemon-shutdown/v1",pid:process.pid,startedAt:t,completedAt:new Date().toISOString(),outcome:"clean",phase:"complete",failures:[]}));process.exit(0)};
+if(instant)return done();server.close();server.closeAllConnections();setTimeout(done,200)});`;
 
-  async function standIn(output: string): Promise<{ child: import("node:child_process").ChildProcess; port: number }> {
+  /** `instant`: exits the moment it's signalled, closing nothing first (the case that left a pooled socket to reset). */
+  async function standIn(output: string, exit: "drain" | "instant" = "drain"): Promise<{ child: import("node:child_process").ChildProcess; port: number }> {
     const fd = fs.openSync(output, "a");
     const { spawn } = await import("node:child_process");
-    const child = spawn(process.execPath, ["-e", STAND_IN, path.dirname(STATE_FILE)], { stdio: ["ignore", fd, fd] });
+    const child = spawn(process.execPath, ["-e", STAND_IN, path.dirname(STATE_FILE), exit], { stdio: ["ignore", fd, fd] });
     fs.closeSync(fd);
     for (let i = 0; i < 100; i++) {
       const port = /listening (\d+)/.exec(fs.readFileSync(output, "utf8"))?.[1];
@@ -2995,7 +2998,7 @@ process.on("SIGTERM",()=>{const t=new Date().toISOString();server.close();server
     try {
       // Another home's process on the checked port: refused, nothing signalled.
       process.env["OPENRIG_URL"] = `http://127.0.0.1:${theirs.port}`;
-      await expect(stopDaemon(realDeps())).rejects.toThrow(new RegExp(`is PID ${theirs.child.pid}, which doesn't write .*daemon\\.log, so it isn't this home's daemon; no signal sent\\.$`));
+      await expect(stopDaemon(realDeps())).rejects.toThrow(new RegExp(`is PID ${theirs.child.pid}, which doesn't write .*daemon\\.log, so it isn't shown to be this home's daemon; no signal sent\\.$`));
       expect(theirs.child.exitCode).toBeNull();
       expect(theirs.child.signalCode).toBeNull();
 
@@ -3014,6 +3017,51 @@ process.on("SIGTERM",()=>{const t=new Date().toISOString();server.close();server
       fs.rmSync(elsewhere, { recursive: true, force: true });
     }
   }, 30_000);
+
+  // #3957: a stop's probes must not reuse a pooled connection the daemon has since closed: reused, it resets, and a stop
+  // that worked read "listener unavailable … unverified". Each probe asks for a connection of its own.
+  it("sends every health probe on a connection of its own", async () => {
+    const { createServer } = await import("node:http");
+    const seen: Array<string | undefined> = [];
+    let connections = 0;
+    const server = createServer((req, res) => { seen.push(req.headers.connection); res.end(JSON.stringify({ pid: 1 })); });
+    server.on("connection", () => { connections++; });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/healthz`;
+      const probe = realDeps().fetch;
+      for (let i = 0; i < 3; i++) expect(await (await probe(url)).json?.()).toEqual({ pid: 1 });
+      expect(seen).toEqual(["close", "close", "close"]);
+      expect(connections).toBe(3);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("a daemon that exits the moment it's signalled, closing nothing first, still reads as stopped", async () => {
+    const savedUrl = process.env["OPENRIG_URL"];
+    const receipt = path.join(path.dirname(STATE_FILE), "daemon-shutdown.json");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (let round = 0; round < 3; round++) {
+        fs.rmSync(LOG_FILE, { force: true });
+        fs.rmSync(receipt, { force: true });
+        const ours = await standIn(LOG_FILE, "instant");
+        try {
+          process.env["OPENRIG_URL"] = `http://127.0.0.1:${ours.port}`;
+          expect(await stopDaemon(realDeps())).toBe("stopped");
+        } finally {
+          ours.child.kill("SIGKILL");
+        }
+      }
+    } finally {
+      if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
+      else delete process.env["OPENRIG_URL"];
+      fs.rmSync(LOG_FILE, { force: true });
+      fs.rmSync(receipt, { force: true });
+    }
+  }, 60_000);
 });
 
 describe("#3315 — archiveSpentReservation", () => {
