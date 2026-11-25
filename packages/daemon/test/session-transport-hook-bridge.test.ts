@@ -653,6 +653,32 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     expect(check).not.toHaveBeenCalled();
   });
 
+  it("delivers only the unfenced member when a grouped wake's peer is fenced after bridge deposit", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const repo = queueOn(s);
+    const outbox = new OutboxHandler(s.db);
+    const lead = await repo.create({ qitemId: "qitem-lead", sourceSession: "peer@team", destinationSession: s.sessionName, body: "work", nudge: false });
+    const peer = await repo.create({ qitemId: "qitem-peer", sourceSession: "peer@team", destinationSession: s.sessionName, body: "work", nudge: false });
+    for (const row of [lead, peer]) {
+      outbox.record({ outboxId: `wake-intent-${row.qitemId}`, senderSession: row.sourceSession, destinationSession: s.sessionName,
+        body: `wake for ${row.qitemId}`, auditPointer: row.qitemId, tags: ["queue:return:paired"] });
+    }
+    const send = vi.spyOn(s.transport, "send");
+    await repo.drainPendingWakeIntents();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(s.sessionName, expect.stringContaining(`wake for ${lead.qitemId}\nwake for ${peer.qitemId}`),
+      expect.objectContaining({ committedOutboxIds: [`wake-intent-${lead.qitemId}`, `wake-intent-${peer.qitemId}`] }));
+    expect(s.bridge.queued(s.nodeId)).toHaveLength(2);
+    s.db.exec(`INSERT INTO queue_transfer_ledger (record_id, side, kind, transfer_id, archive_digest, origin_host_id,
+      origin_minted_at, destination_host_id, authorization_digest, mapping_digest, actor, recorded_at)
+      VALUES ('rel', 'origin', 'relinquished', 'transfer', 'digest', 'origin', 'minted', 'target', 'auth', 'map', 'operator', '1')`);
+    s.db.prepare(`INSERT INTO queue_transfer_relinquished (qitem_id, record_id, archive_digest, destination_host_id, source_state)
+      VALUES (?, 'rel', 'digest', 'target', 'pending')`).run(peer.qitemId);
+
+    expect(s.bridge.poll(s.nodeId, armId)).toMatchObject({ action: "deliver", messages: [{ outboxId: `wake-intent-${lead.qitemId}`, text: `wake for ${lead.qitemId}` }] });
+  });
+
   it.each(["poll", "fallback"] as const)("skips an explicit wake fenced after bridge deposit at %s", async (mode) => {
     const s = await seat();
     const { armId } = s.optInAndArm();
