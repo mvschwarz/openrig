@@ -10,6 +10,14 @@ export const CASES = {
   fixture: { file: 'scenarios/scenario-02-baton.yaml', destination: 'dev-worker@scn-baton', failedStep: 3 },
   library: { file: 'library/queue-baton-survives-restart.yaml', destination: 'dev-qa@dev-pair-stub', failedStep: 4, seed: 'baton-drop' },
 };
+// A fresh seat also has a pending roster notice with no mission. The held slice is a choice, not current work.
+const parkedContext = [
+  'does not settle one mission (a row names no mission)',
+  '- regression / SCN.1 — ',
+  'HELD WORK (blocked; this is not next):\n- refocus-baton — ',
+  'blocked on external:scenario-release',
+  'POSSIBLE NEXT WORK (pending; no order implied):\n- qitem-roster-ready-',
+];
 // Stub-script scenarios run in their passing form only. Their planted failures are
 // product-code mutations, so they stay per-PR evidence outside CI.
 export const PASSING_CASES = {
@@ -18,9 +26,8 @@ export const PASSING_CASES = {
     includes: ['Trace the exact held work'], excludes: ['FALLBACK'] },
   // The parked case with the work packet switched off: the held row's slice as labelled context, never as current work.
   'refocus-parked-off': { file: 'library/refocus-parked-baton-packet-off.yaml', scenario: 'refocus-parked-baton-packet-off', kind: 'hook',
-    includes: ['CONTEXT FROM HELD AND PENDING WORK — nothing is in progress', 'Trace the exact held work',
-      'HELD WORK (blocked; this is not next):\n- refocus-baton — '],
-    excludes: ['FALLBACK', 'WORK FROM QUEUE EVIDENCE'] },
+    includes: [...parkedContext, 'FALLBACK — no current typed baton'],
+    excludes: ['CONTEXT FROM HELD AND PENDING WORK', 'WORK FROM QUEUE EVIDENCE'] },
   transcript: { file: 'library/transcript-reads-addressed-seat.yaml', scenario: 'transcript-reads-addressed-seat' },
   capture: { file: 'library/capture-returns-addressed-seat.yaml', scenario: 'capture-returns-addressed-seat' },
   'daemon-restart': { file: 'library/daemon-restart-preserves-team-identity.yaml', scenario: 'daemon-restart-preserves-team-identity' },
@@ -85,9 +92,8 @@ export function verifyRun(mode, exitCode, report, caseName = 'fixture') {
     if (mode === 'healthy') {
       // The work packet is on: the parked row is held work, and its slice is labelled context, never the current work.
       assert.equal(exitCode, 0); assert.equal(report.result.verdict, 'PASS'); assert.equal(report.fault, null);
-      assert.ok(context.includes('HELD WORK (blocked; this is not next):\n- refocus-baton — '));
-      assert.ok(context.includes('blocked on external:scenario-release'));
-      assert.ok(context.includes('CONTEXT FROM HELD AND PENDING WORK — nothing is in progress'));
+      for (const text of parkedContext) assert.ok(context.includes(text), text);
+      assert.ok(!context.includes('CONTEXT FROM HELD AND PENDING WORK'));
       assert.ok(!context.includes('WORK FROM QUEUE EVIDENCE'));
     } else {
       assert.equal(mode, 'seeded'); assert.equal(exitCode, 1);
