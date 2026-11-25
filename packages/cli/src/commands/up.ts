@@ -741,7 +741,7 @@ wait expires, check rig ps before deciding what to do next.
         }
         console.log(`Rig "${rigName ?? rigId}" restored (ID: ${rigId})`);
         if (rigResult) console.log(`Result: ${rigResult}`);
-        const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string; noConversation?: true; guidanceGaps?: string[]; restoreGaps?: string[] }>) ?? [];
+        const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string; noConversation?: true; noStartupContext?: true; guidanceGaps?: string[]; restoreGaps?: string[] }>) ?? [];
         for (const n of nodes) {
           // OPR.0.3.4.2 — the five-term vocabulary renders distinctly; the
           // awaiting-decision reason is part of the line (not a dead end), and so is a failed seat's (such as a seat held
@@ -784,7 +784,8 @@ wait expires, check rig ps before deciding what to do next.
         // deliberate fresh-prime (operation B). Headless: the machine status
         // stays awaiting-decision with the explicit --fresh hint. NEVER an
         // auto-substitution.
-        const awaiting = nodes.filter((n) => n.status === "awaiting-decision");
+        // A seat with no saved startup context can't start fresh (its reason says so), so it isn't offered one.
+        const awaiting = nodes.filter((n) => n.status === "awaiting-decision" && !n.noStartupContext);
         if (awaiting.length > 0) {
           const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY) || Boolean(deps.promptYesNo);
           if (interactive) {
