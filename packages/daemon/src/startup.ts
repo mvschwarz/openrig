@@ -1918,8 +1918,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           ? (transcriptsPath ?? getCompatibleOpenRigPath("transcripts"))
           : getCompatibleOpenRigPath("transcripts"),
         exec: execDep,
-        chatSearchFn: (rigId: string, pattern: string) =>
-          chatRepoForAsk.searchChat(rigId, pattern).map((m) => ({
+        chatSearchFn: (rigId: string, keywords: string[]) =>
+          chatRepoForAsk.searchChat(rigId, keywords).map((m) => ({
             sender: m.sender,
             body: m.body,
             createdAt: m.createdAt,
@@ -3256,6 +3256,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       home: effectiveOpenRigHome,
       queueRepo: queueRepoInstance,
       resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract, effectiveOpenRigHome),
+      filesAllowlist: () => deps.filesAllowlist ?? [],
       log: (m) => console.log(`[gateway] ${m}`),
     }),
     log: (m) => console.log(`[gateway] ${m}`),

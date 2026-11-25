@@ -34,6 +34,8 @@ export interface QueueItem {
   summary?: string | null;
   body?: string | null;
   evidenceRef?: string | null;
+  /** The shared roots evidenceRef's writer may read, recorded with it; absent for a writer with no root grant. */
+  evidenceRefRoots?: string[];
   notificationKey?: string | null;
   ownerNotificationKind?: string | null;
   ownerNotificationLevel?: OwnerNotificationLevel | null;
@@ -182,6 +184,7 @@ function project(q: RepoQueueItem, transition: QueueTransition, entities: readon
     summary: (r.summary as string | null) ?? null,
     body: personFacingBody((r.body as string | null) ?? null, (r.tags as string[] | null) ?? null),
     evidenceRef: (r.evidenceRef as string | null) ?? null,
+    ...(Array.isArray(q.evidenceRefRoots) ? { evidenceRefRoots: q.evidenceRefRoots } : {}),
     notificationKey: `${q.qitemId}:${transition.transitionId}`,
     ownerNotificationKind: transition.ownerNotificationKind,
     ownerNotificationLevel: transition.ownerNotificationLevel,

@@ -245,6 +245,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "044_queue_item_summary.sql": "queue-spine EXTENSION column — suites needing the summary column migrate it inline.",
   "047_events_node_type_index.sql": "events perf index — index/perf suites add it inline; the core edge uses the base events table.",
   "048_queue_item_evidence_ref.sql": "queue-spine EXTENSION column — suites needing evidence_ref migrate it inline.",
+  "196_queue_item_evidence_ref_roots.sql": "queue-spine EXTENSION column beside evidence_ref (048) — suites needing evidence_ref migrate both inline.",
   "049_workflow_instance_version.sql": "workflow subsystem column — workflow-* suites migrate the workflow schema inline.",
   "050_workflow_spec_json.sql": "workflow subsystem column — workflow-* suites migrate the workflow schema inline.",
   "051_workflow_resume.sql": "workflow subsystem column — workflow-* suites migrate the workflow schema inline.",

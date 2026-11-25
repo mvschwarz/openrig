@@ -184,6 +184,8 @@ it("sends the operator bearer on its writes, so a daemon with one configured tak
 it("status hides a hub URL's query string and leaves a plain URL as it is", () => {
   expect(shownHubUrl("https://hub.example.test/rig?token=s3cret&x=1")).toBe("https://hub.example.test/rig (query hidden)");
   expect(shownHubUrl("https://hub.example.test/rig?token=s3cret")).not.toContain("s3cret");
+  expect(shownHubUrl("https://hub.example.test/rig#token=s3cret")).toBe("https://hub.example.test/rig (fragment hidden)");
+  expect(shownHubUrl("https://hub.example.test/rig?token=s3cret#x=s3cret")).toBe("https://hub.example.test/rig (query and fragment hidden)");
   expect(shownHubUrl("https://hub.example.test/rig")).toBe("https://hub.example.test/rig");
   expect(shownHubUrl("not a url")).toBe("not a url");
 });
