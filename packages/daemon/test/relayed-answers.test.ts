@@ -93,7 +93,7 @@ it("keeps other questions open and commits one return across failures and repeat
   expect(f.repo.getById(f.ask.qitemId)?.closureReason).toBe("relayed-answer");
 });
 
-it("records a partial relay on a fenced ask but refuses relay completion atomically", async () => {
+it.each([false, true])("keeps partial and final fenced answers as history without return work (direct=%s)", async direct => {
   const f = await fixture(true);
   const { qitemId } = f.ask;
   f.db.exec("INSERT INTO self_host_identity VALUES (1, 'origin', 'minted', 'reconciled')");
@@ -112,10 +112,15 @@ it("records a partial relay on a fenced ask but refuses relay completion atomica
   expect(f.history()).toEqual(history);
   expect(scheduler()).toEqual(before);
 
-  const completion = await f.relay({ questionId: "second", optionId: "yes" });
-  expect(completion.status).toBe(409);
-  expect(await completion.json()).toMatchObject({ error: "qitem_fenced" });
-  expect(f.history()).toEqual(history);
+  const outbox = f.db.prepare("SELECT * FROM outbox_entries");
+  const beforeOutbox = outbox.all();
+  const final = { questionId: "second", optionId: "yes" };
+  vi.setSystemTime(new Date("2026-02-03T04:05:07Z"));
+  const completion = await (direct ? f.correct(final) : f.relay(final));
+  expect(completion.status, await completion.text()).toBe(200);
+  expect(f.history()).toEqual([...history, expect.objectContaining({ questionId: "second", kind: direct ? "direct-answer" : "relayed-answer" })]);
+  expect(f.repo.transitionLog.listForQitem(qitemId).at(-1)?.transitionNote).toContain(direct ? "Yes" : "Not this week.");
+  expect(outbox.all()).toEqual(beforeOutbox);
   expect(scheduler()).toEqual(before);
   expect(f.db.prepare("SELECT qitem_id FROM queue_transfer_relinquished").pluck().all()).toEqual([qitemId]);
   expect(f.db.prepare("SELECT qitem_id FROM queue_items WHERE reply_to = ?").all(qitemId)).toEqual([]);

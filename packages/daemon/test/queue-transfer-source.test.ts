@@ -74,15 +74,17 @@ function activation(input: ReturnType<typeof snapshot>): TransferActivation {
     history: { transitionsImported: 0, wakeEvidenceImportedNotScheduled: 0, missionControlActionsImported: 0 } };
 }
 
-it.each([false, true])("reconciles a confirmed row without overwriting late reports (late=%s)", late => {
+it.each(["none", "terminal", "note"])("reconciles a confirmed row without overwriting late reports (%s)", late => {
   const input = snapshot();
   const result = activation(input);
   expect(() => source.reconcile({ ...input, result })).toThrow(expect.objectContaining({ code: "not_relinquished" }));
   source.relinquish(input);
-  if (late) repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "done", closureReason: "no-follow-on" });
+  if (late === "terminal") repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "done", closureReason: "no-follow-on" });
+  if (late === "note") repo.update({ qitemId: "qitem-a", actorSession: "b@old", transitionNote: "late ordinary note" });
   const report = source.reconcile({ ...input, result });
-  expect(report).toMatchObject({ evacuation: late ? "incomplete" : "complete", rows: [{ qitemId: "qitem-a", outcome: late ? "late_report" : "superseded" }] });
-  expect(repo.getById("qitem-a")).toMatchObject(late ? { state: "done" } : { state: "canceled", closureReason: "superseded", closureTarget: "qitem-a@target" });
+  expect(report).toMatchObject({ evacuation: late !== "none" ? "incomplete" : "complete", rows: [{ qitemId: "qitem-a", outcome: late !== "none" ? "late_report" : "superseded" }] });
+  expect(repo.getById("qitem-a")).toMatchObject(late === "none" ? { state: "canceled", closureReason: "superseded", closureTarget: "qitem-a@target" } : { state: late === "note" ? "pending" : "done" });
+  if (late === "note") expect(report.lateReports).toMatchObject([{ qitemId: "qitem-a", transitions: [{ transitionNote: "late ordinary note" }] }]);
   expect(source.reconcile({ ...input, result })).toEqual({ ...report, replayed: true });
   expect(() => repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "pending", reopen: true, transitionNote: "retry" })).toThrow(/fenced/);
 });

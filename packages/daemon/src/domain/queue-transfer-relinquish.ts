@@ -141,24 +141,24 @@ export class QueueTransferSource {
         const archived = archive.rows.find(row => row.qitemId === qitemId);
         let outcome: string;
         if (!live && erased.get(qitemId)) outcome = "confirmed_erased";
-        else if (live && archived && fields.some(column => (live[column] ?? null) !== (archived.wire[transferWireKey(column)] ?? null))) {
-          outcome = "late_report";
-          lateReports.push({ qitemId, currentState: live.state, transitions: this.repo.transitionLog.listForQitem(qitemId).filter(entry => entry.ts >= prior.recordedAt) });
-        } else if (live && archived && isTerminalState(state)) {
+        else if (live && archived) {
           const archivedIds = new Set(archived.transitions.map(entry => entry.transitionId));
           const added = this.repo.transitionLog.listForQitem(qitemId).filter(entry => !archivedIds.has(entry.transitionId));
           // The fence append is ordered even when it shares a millisecond with a late report.
           // Replaying a portable receipt restores the fence without necessarily restoring its note.
           const fenceIndex = added.findIndex(entry => entry.transitionNote === relinquishedNote);
           const late = fenceIndex >= 0 ? added.slice(fenceIndex + 1) : added.filter(entry => entry.ts >= prior.recordedAt);
-          outcome = late.length ? "late_report" : "confirmed_history";
-          if (late.length) lateReports.push({ qitemId, currentState: live.state, transitions: late });
-        } else if (live && archived && created.has(qitemId)) {
-          outcome = "superseded";
-          const closureTarget = `${qitemId}@${destinationHostId}`;
-          supersede.run(recordedAt, closureTarget, qitemId);
-          this.repo.transitionLog.append({ ...actor, qitemId, state: "canceled", closureReason: "superseded", closureTarget,
-            transitionNote: `superseded: transferred to ${destinationHostId} as ${qitemId} (operation ${result.operationId})` });
+          if (late.length || fields.some(column => (live[column] ?? null) !== (archived.wire[transferWireKey(column)] ?? null))) {
+            outcome = "late_report";
+            lateReports.push({ qitemId, currentState: live.state, transitions: late });
+          } else if (isTerminalState(state)) outcome = "confirmed_history";
+          else if (created.has(qitemId)) {
+            outcome = "superseded";
+            const closureTarget = `${qitemId}@${destinationHostId}`;
+            supersede.run(recordedAt, closureTarget, qitemId);
+            this.repo.transitionLog.append({ ...actor, qitemId, state: "canceled", closureReason: "superseded", closureTarget,
+              transitionNote: `superseded: transferred to ${destinationHostId} as ${qitemId} (operation ${result.operationId})` });
+          } else outcome = !result.rows.erased.includes(qitemId) ? "unconfirmed" : "left_to_operator";
         } else outcome = !created.has(qitemId) && !result.rows.erased.includes(qitemId) ? "unconfirmed" : "left_to_operator";
         mark.run(recordedAt, outcome, qitemId, prior.id);
         counts[outcome] = (counts[outcome] ?? 0) + 1;

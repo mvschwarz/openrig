@@ -2759,6 +2759,7 @@ export class QueueRepository {
         || isHostPairingAsk(ask) || ask.tags?.includes("runner-permission") || ask.tags?.includes(PROMPT_ALERT_TAG)) {
         refuse("Only ordinary asks to a person take relayed answers, not permission requests or host pairing.");
       }
+      const fenced = !!this.transferFence(ask.qitemId);
       const questions = ask.humanQuestions ?? [];
       const submission = "relay" in input ? input.relay : input.direct;
       const named = questions.find(q => q.id === submission.questionId);
@@ -2774,11 +2775,12 @@ export class QueueRepository {
       const openQuestions = () => unansweredQuestions(questions.filter(q => !journal.relays.some(r => r.questionId === q.id)), direct);
       const unanswered = () => ask.state === "pending" ? openQuestions().map(q => q.id) : [];
       const receipt = (replyQitemId = journal.returnId, disposition?: "corrected" | "unplaced"): RelayedAnswerReceipt => ({
-        item: this.getByIdOrThrow(input.qitemId), replyQitemId, unanswered: unanswered(), ...(disposition ? { [disposition]: true } : {}),
+        item: this.getByIdOrThrow(input.qitemId), replyQitemId: fenced ? null : replyQitemId, unanswered: unanswered(), ...(disposition ? { [disposition]: true } : {}),
       });
       const at = new Date().toISOString();
       const identity = { identityProvenance: input.identityProvenance, identityPrincipal: input.identityPrincipal };
       const deliver = (qitemId: string, summary: string, body: string, tag: string) => {
+        if (fenced) return;
         const create = { qitemId, sourceSession: input.actorSession, destinationSession: ask.sourceSession, summary, body,
           tags: [tag, ...(ask.tags ?? []).filter(t => /^(project|mission|slice):/.test(t))], inboundReplyTo: ask.qitemId,
           nudge: input.nudge, ...identity };
@@ -2801,8 +2803,8 @@ export class QueueRepository {
             && prior.channel === relay.channel && prior.optionId === relay.optionId && prior.answeredAt === relay.answeredAt) return receipt();
           refuse("This question already has a relay; a direct answer can correct it.");
         }
-        if (ask.state !== "pending" || ask.blockedOn || (named && Object.hasOwn(direct, named.id))
-          || this.getById(humanAnswerId(ask.qitemId)) || (!ask.relayedAnswers && this.answersForAsk(ask.qitemId).length > 0)) {
+        if (!fenced && (ask.state !== "pending" || ask.blockedOn || (named && Object.hasOwn(direct, named.id))
+          || this.getById(humanAnswerId(ask.qitemId)) || (!ask.relayedAnswers && this.answersForAsk(ask.qitemId).length > 0))) {
           refuse("This question is not waiting for a relayed answer.");
         }
         if (!ask.relayedAnswers && Object.keys(direct).length) {
@@ -2876,9 +2878,8 @@ export class QueueRepository {
             attachments.body, attachments.tag);
         }
       }
-      const completed = !unplacedId && ask.state === "pending" && unanswered().length === 0;
+      const completed = !fenced && !unplacedId && ask.state === "pending" && unanswered().length === 0;
       if (completed) {
-        this.assertNotFenced(ask.qitemId);
         if (!journal.returnId) {
           // First completion only. After a deliberate reopen, the journal still names the
           // original return row; re-inserting the same deterministic id would roll back the
@@ -2903,7 +2904,8 @@ export class QueueRepository {
       this.db.prepare("UPDATE queue_items SET relayed_answers = ?, human_answers = ?, ts_updated = ? WHERE qitem_id = ?")
         .run(JSON.stringify(journal), Object.keys(direct).length ? JSON.stringify(direct) : null, at, ask.qitemId);
       events.push(...this.updateInTransactionalContext({ qitemId: ask.qitemId, actorSession: input.actorSession, ...identity,
-        transitionNote: completed ? "RELAYED answer set returned to the asking seat" : correctionId ? "Direct correction to a RELAYED answer" : unplacedId ? "Direct reply returned without placing it" : "relay" in input ? "RELAYED answer recorded" : "Direct answer recorded",
+        transitionNote: fenced ? `Late ${"relay" in input ? `relay attributed to ${input.relay.attributedTo}` : "direct answer"}${named ? ` (${named.id})` : ""}: ${submission.text ?? option?.label ?? ""}`
+          : completed ? "RELAYED answer set returned to the asking seat" : correctionId ? "Direct correction to a RELAYED answer" : unplacedId ? "Direct reply returned without placing it" : "relay" in input ? "RELAYED answer recorded" : "Direct answer recorded",
         ...(completed ? { state: "done", closureReason: "relayed-answer", resolution: renderRelayedAnswers(journal, questions, direct) } : {}),
       }, completed ? "complete" : "record").persistedEvents);
       return unplacedId ? receipt(unplacedId, "unplaced") : correctionId ? receipt(correctionId, "corrected") : receipt();
@@ -4156,8 +4158,8 @@ export class QueueRepository {
     persistedEvents: PersistedEvent[];
   } {
     const completingRelay = relayWrite === "complete";
-    const recordingRelay = relayWrite === "record" && input.state === undefined;
-    if (!recordingRelay && !["done", "failed", "denied", "canceled"].some(state => state === input.state)) this.assertNotFenced(input.qitemId);
+    const historyNote = input.state === undefined && !!input.transitionNote?.trim() && input.summary === undefined && input.closureRequiredAt === undefined;
+    if (!historyNote && !["done", "failed", "denied", "canceled"].some(state => state === input.state)) this.assertNotFenced(input.qitemId);
     if (input.closureReason === "relayed-answer" && !completingRelay) {
       throw new QueueRepositoryError("invalid_closure_reason", "Use the relay-answer operation to record a relayed answer.");
     }
