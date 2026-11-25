@@ -44,7 +44,7 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 import { parseFrontmatter } from "./slices/slice-indexer.js";
 import { reanchorBuiltinStartupFile } from "./builtin-startup-files.js";
-import { isOpenRigSender } from "../lib/pane-envelope.js";
+import { isRosterReadyNotice } from "./roster-ready-notice.js";
 
 export interface RoleOrientation {
   state: "unknown" | "no-record" | "not-declared" | "missing" | "present";
@@ -732,9 +732,8 @@ export interface WorkCandidates {
   candidates: WorkCandidate[];
   /** In-progress rows whose work the queue cannot name. */
   unknown: Array<{ qitemId: string | null; summary: string | null; reason: string }>;
-  /** `openrigNotice` marks a row OpenRig itself sent that names no mission (a freshly built rig's roster-ready notice,
-   *  say): it isn't the seat's work toward any mission, so refocus lists it but sets it aside when deciding whether
-   *  the rows settle one mission. */
+  /** `openrigNotice` marks the roster-ready notice when it names no mission. Other rows OpenRig sends can carry real
+   *  work (for example, a relayed network request), so sender alone doesn't identify an informational notice. */
   next: Array<{ qitemId: string | null; summary: string | null; openrigNotice?: true } & RowScope>;
   held: Array<{ qitemId: string | null; summary: string | null; blockedOn: string | null; continuation: string | null; openrigNotice?: true } & RowScope>;
   /** Mission directories on this host, bounded, so an agent can name one without guessing. */
@@ -932,8 +931,10 @@ export function deriveWorkCandidates(
     const missions = tagValues(tags, MISSION_TAG);
     const qitemId = row.qitemId ?? null;
     const summary = row.summary ?? null;
-    // OpenRig's own row naming no mission is a notice, not the seat's work toward a mission.
-    const notice = missions.length === 0 && isOpenRigSender(row.sourceSession ?? "") ? { openrigNotice: true as const } : {};
+    // The roster notice is information about the team, not work. Reuse its existing identity predicate; the daemon
+    // also sends real work on behalf of other actors, which must still participate in the mission choice.
+    const notice = missions.length === 0 && isRosterReadyNotice({ qitem_id: qitemId ?? "", source_session: row.sourceSession ?? "" })
+      ? { openrigNotice: true as const } : {};
     if (row.state === "pending") {
       next.push({ qitemId, summary: summaryOf(row), ...notice, ...scopeOf(row, missionsRoot, resolvedScopes) });
       continue;

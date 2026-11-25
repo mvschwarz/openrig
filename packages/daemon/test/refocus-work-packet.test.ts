@@ -818,6 +818,19 @@ describe("trace-to-root with nothing in progress — held and pending work as co
     expect(packed.stdout).toContain(`${CONTEXT}, and every held and pending row (1 held, 0 pending; 1 OpenRig notice set aside)`);
   });
 
+  it("keeps daemon-relayed mission-less work in the mission decision and lists it", () => {
+    const w = world();
+    const relayed: Row = { qitemId: "qitem-net-work", state: "pending", sourceSession: "daemon@kernel",
+      summary: "From assistant@team via network hub: Review a different project", tags: ["network-binding:b1", "network-hub-item:h1"] };
+    for (const result of [plain(w, heldWork(w, [parked(["mission:release-a"]), relayed])),
+      packet(w, [parked(["mission:release-a"]), relayed])]) {
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout).toContain("does not settle one mission (a row names no mission)");
+      expect(result.stdout).not.toContain(CONTEXT);
+      expect(result.stdout).toContain("- qitem-net-work — From assistant@team via network hub: Review a different project");
+    }
+  });
+
   it("still leaves the choice open for a mission-less row a seat sent, and counts an OpenRig row that names a mission", () => {
     const w = world();
     const fromSeat = plain(w, heldWork(w, [parked(["mission:release-a"]), rosterNotice("lead@team")]));

@@ -637,9 +637,9 @@ def held_context(evidence, root, depth, failures, extra_roots=(), packet=False):
     agent to choose from; open is true when one of them has no folder, so only the generic route can reach it. Missions
     are compared by resolved directory, never by name, and only across the daemon's whole lists: a cut list, a row naming
     no mission, one that did not resolve or one found only under a fallback missions root leaves the choice to the agent.
-    Held rows come first only in the listing. OpenRig's own notices (a row OpenRig itself sent that names no mission, such
-    as a freshly built rig's roster-ready notice; the daemon marks it openrigNotice) aren't the seat's work toward any
-    mission: they're set aside here, and stay listed."""
+    Held rows come first only in the listing. A freshly built rig's roster-ready notice naming no mission (the daemon
+    marks it openrigNotice) isn't the seat's work toward any mission: it's set aside here, and stays listed. Other rows
+    OpenRig sends, such as relayed network work, still participate in the mission choice."""
     held, following = evidence.get("held") or [], evidence.get("next") or []
     notices = sum(1 for row in [*held, *following] if row.get("openrigNotice"))
     held = [row for row in held if not row.get("openrigNotice")]

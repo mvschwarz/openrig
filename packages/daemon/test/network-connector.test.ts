@@ -20,6 +20,7 @@ import { networkRoutes } from "../src/routes/network.js";
 import { NetworkConnectorService, networkClosedElsewhere, networkLocalItemId, runNetworkBindingPass, type NetworkConnectorDeps } from "../src/domain/network/network-connector.js";
 import { listNetworkPeers, networkHubRequestId, networkRequestBlocker, originateNetworkRequest } from "../src/domain/network/network-requests.js";
 import { OPENRIG_SENDER } from "../src/lib/pane-envelope.js";
+import { deriveWorkCandidates } from "../src/domain/current-work.js";
 
 const PARTICIPANT = "alex@team";
 /** Another seat in the participant's hub rig, which the participant may send to. */
@@ -159,6 +160,17 @@ describe("network connector", () => {
   const pass = (bindingId: string) => runNetworkBindingPass(deps, bindings.get(bindingId)!);
   /** The local items carrying this hub item. */
   const runs = (hubId: string) => repo.list({ limit: 500 }).filter((i) => (i.tags ?? []).includes(`network-hub-item:${hubId}`));
+
+  it("keeps a relayed hub request as unscoped work rather than an OpenRig notice", async () => {
+    const b = bind();
+    hub.add("hub-refocus");
+    expect(await pass(b.id)).toMatchObject({ taken: 1 });
+    const [local] = runs("hub-refocus");
+    expect(local).toMatchObject({ sourceSession: "daemon@kernel", state: "pending" });
+    const work = deriveWorkCandidates([local!], join(home, "missions"), { getRow: () => null, continuationOf: () => null });
+    expect(work.next).toHaveLength(1);
+    expect(work.next[0]).not.toHaveProperty("openrigNotice");
+  });
 
   it("takes a hub item into the bound seat once, says where it came from first, then carries pickup and the result back in order", async () => {
     const b = bind();

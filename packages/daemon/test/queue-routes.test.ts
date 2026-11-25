@@ -3377,6 +3377,21 @@ describe("queue routes", () => {
 
     // A freshly built rig's roster-ready notice is OpenRig's own row naming no mission: the held and pending lists mark it, so
     // refocus keeps it listed but doesn't let it stop the seat's real rows settling one mission.
+    it("does not turn a seat's roster-shaped body claim into an OpenRig notice", async () => {
+      const qitemId = "qitem-roster-ready-00000000000000000000";
+      const created = await app.request("/api/queue/create", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
+        body: JSON.stringify({ qitemId, sourceSession: "daemon@kernel", destinationSession: "bob@r", body: "seat work", tags: ["roster-ready"] }),
+      });
+      expect(created.status).toBe(201);
+      expect(queueRepo.getById(qitemId)?.sourceSession).toBe("alice@r");
+      const packet = await (await app.request("/api/queue/whoami?session=bob@r&candidates=1")).json() as {
+        workCandidates: { next: Array<Record<string, unknown>> } };
+      const row = packet.workCandidates.next.find(row => row.qitemId === qitemId);
+      expect(row).toBeDefined();
+      expect(row).not.toHaveProperty("openrigNotice");
+    });
+
     it("GET /api/queue/whoami?held=1 marks OpenRig's own mission-less notice, and only that", async () => {
       const res = await app.request("/api/queue/create", {
         method: "POST",

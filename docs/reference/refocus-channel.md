@@ -221,9 +221,10 @@ characters, with the row's `rig queue show` pointer when one was shortened:
   root quoted for the shell. Held rows are listed first; that is only the order
   shown.
 - When no held or pending row names a mission, the orientation is as before.
-- A row OpenRig itself sent that names no mission, such as the roster-ready
-  notice a freshly built rig gives each started agent, isn't the seat's work
-  toward any mission. The daemon marks it `openrigNotice`, and the trace sets it
+- The roster-ready notice a freshly built rig gives each started agent, when it
+  names no mission, isn't the seat's work toward any mission. Other rows OpenRig
+  sends can carry real work, such as a relayed network request; they still count
+  toward the mission choice. The daemon marks the roster notice `openrigNotice`, and the trace sets it
   aside when deciding whether the other rows settle one mission, counting it in
   the context line ("1 OpenRig notice set aside"). It stays listed with the
   pending or held rows.
