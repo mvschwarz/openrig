@@ -185,6 +185,47 @@ With the switch on:
 `trace-to-root.py --packet --work-candidates <path|->` renders the same packet
 by hand.
 
+## With nothing in progress: held and pending work as context
+
+When a seat holds no in-progress row, `rig queue whoami --json --held-work` also
+carries its held (blocked) and pending rows as `heldAndPendingWork`: up to 50 of
+each, with which list was cut. Without `--held-work` the answer is unchanged.
+Each row has its summary (or, when it has none, its body's first line with words in it), its `mission:` and `slice:` tags, and
+the mission and slice folders they resolve to through the row's project, or why
+they don't. When a row's project can't be used, its tags are resolved under the
+configured missions root instead. If another root could hold a mission of the
+same name (the catalogue lists other projects, or it or the row's project in it
+can't be read), `missionsRootFallback` says why, even when the mission is found
+there. With no catalogue configured the configured root is the only root, and
+the field stays empty. Completed rows are never read, and none of this changes what counts
+as current work. With the work packet off, the hook asks for these rows on its
+one lookup and passes them to the trace; with it on, the work packet's
+`workCandidates` carries the same rows and fields. The trace shows them as
+context, never as current work, each tag and reason as one line of at most 160
+characters, with the row's `rig queue show` pointer when one was shortened:
+
+- When every held and pending row resolves to one mission folder through its
+  own project and neither list was cut, the trace shows that mission's chain under
+  `CONTEXT FROM HELD AND PENDING WORK`, down to the slice when every row
+  resolves to the same slice. Missions are compared by folder, so one mission
+  name in two projects is two missions. Using this context does not resume a
+  task.
+- Otherwise (rows naming different missions, a row with no mission tag, a tag
+  that doesn't resolve here, a mission found only through the fallback missions
+  root, which may be another project's mission of the same name, or a cut list)
+  it lists each mission the rows name with its folder and the command that
+  reads it, and keeps the broad orientation. A folder outside `workspace.root`
+  gets a command that names the known root holding it as `--work-root`, so the
+  command works as the agent's own call. Only when a mission has no folder does
+  the generic `--work-start <missions root>/<mission>` route appear, with the
+  root quoted for the shell. Held rows are listed first; that is only the order
+  shown.
+- When no held or pending row names a mission, the orientation is as before.
+
+In every case the held and pending rows follow the work section, labelled as in
+the work packet. `trace-to-root.py --work-basis <basis> --held-work <path|->`
+renders this by hand.
+
 ## Relation to chain files
 
 The chain files are the durable, altitude-addressed home of orientation

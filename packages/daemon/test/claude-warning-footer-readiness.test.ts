@@ -424,8 +424,8 @@ describe("first guarded Claude send with retained warning-shaped composer", () =
     expect(f.sendKeys).toHaveBeenCalledTimes(1);
   });
 
-  it("explicit wait sends once past a wrapped /clear hint", async () => {
-    const f = setup(modePane(modeBars[3][1], wrappedClearHints[0]!));
+  it.each([[], ["/rc failed"]].map(indicator => ({ indicator })))("explicit wait sends once past a wrapped /clear hint with $indicator below it", async ({ indicator }) => {
+    const f = setup(modePane(modeBars[3][1], [...wrappedClearHints[0]!, ...indicator]));
     const result = await f.transport.send(f.name, "ordinary marker", { waitForIdleMs: 200 });
     expect(result).toMatchObject({ ok: true, sent: true, activity: { state: "idle", evidenceSource: "pane_heuristic" } });
     expect(f.sendText).toHaveBeenCalledTimes(1);

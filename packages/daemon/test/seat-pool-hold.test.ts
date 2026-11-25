@@ -141,7 +141,8 @@ function claudeAdapter(): RuntimeAdapter {
 type Model = { rigId: string; nodeId: string; logicalId: string; podId: string; session: string };
 type Agent = { nodeId: string; session: string };
 
-function poolWorld(db: Database.Database = fullDb()) {
+/** `drain`: compose the drain's effects, with the capture and the stop as spies (the stop succeeds). */
+function poolWorld(db: Database.Database = fullDb(), opts: { drain?: boolean } = {}) {
   const bus = new EventBus(db);
   const rigRepo = new RigRepository(db);
   const podRepo = new PodRepository(db);
@@ -173,6 +174,10 @@ function poolWorld(db: Database.Database = fullDb()) {
     now: () => clock.now,
     add: { exportMember: (rigId, nodeId) => exporter.exportedRawMemberFromNode(rigId, nodeId), converge, makeFolder: vi.fn() },
   };
+  const capture = vi.fn((_rigId: string) => ({ snapshotId: "snap-drain" }));
+  const stopSeat = vi.fn(async (_input: { seatRef: string; reason: string; expected: { nodeId: string; sessionId: string } }) => ({ ok: true as const }));
+  const refresh = vi.fn(async (_input: { rigId: string; nodeId: string; sessionId: string }) => {});
+  if (opts.drain) deps.drain = { lifecycle: (ids, fn) => guard.lifecycle(ids, fn), refresh, capture, stopSeat };
   const reg = { db, rigRepo, jobsRepo, warn: vi.fn() };
   /** An engine and an executor over this database: a new pair is what a daemon restart gives. */
   const compose = () => {
@@ -278,7 +283,7 @@ function poolWorld(db: Database.Database = fullDb()) {
     operations: (db.prepare("SELECT COUNT(*) AS n FROM operation_correlations").get() as { n: number }).n,
   });
   return {
-    db, bus, rigRepo, podRepo, slots, sessions, queue, outbox, jobsRepo, history, guard, activity, clock, hooks, deps, reg,
+    db, bus, rigRepo, podRepo, slots, sessions, queue, outbox, jobsRepo, history, guard, activity, clock, hooks, deps, reg, refresh, capture, stopSeat,
     exporter, converge,
     get engine() { return composed.engine; }, get executor() { return composed.executor; },
     restart, compose, teardown, downTmux, restorer, up, launchSeats, snapshotCapture, checkpointStore,
@@ -772,6 +777,78 @@ describe("seat-pool holds: the job's own state and its model (#3395 Piece 1)", (
         id: "impl-s2", agent_ref: "", profile: "default", runtime: "claude-code", cwd: "/tmp",
         claude_mcp: "none", statusline_throttle: 45, restore_policy: "resume_if_possible", keep_alive: false,
       });
+    } finally {
+      w.db.close();
+    }
+  });
+});
+
+describe("seat-pool holds: no drain while held (#3395 Piece 1)", () => {
+  /** A pool with one free agent idle past `idle_grace_s` and nothing to do: unheld, the cycle drains it. */
+  const drainablePool = () => {
+    const w = poolWorld(fullDb(), { drain: true });
+    const m = w.model();
+    const s1 = w.agent(m, 1);
+    const job = w.jobFor(m);
+    return { w, m, s1, job };
+  };
+  const expectNoDrain = (w: ReturnType<typeof poolWorld>, m: Model, notes: Record<string, unknown>) => {
+    expect(notes).not.toHaveProperty("drains");
+    expect(w.capture).not.toHaveBeenCalled();
+    expect(w.stopSeat).not.toHaveBeenCalled();
+    expect(w.slots.forModel(m.nodeId).map((s) => s.phase)).toEqual(["live"]);
+  };
+
+  it("While the job is stopped, no drain is planned and no capture or `stopSeat` is made.", async () => {
+    const { w, m, job } = drainablePool();
+    try {
+      w.jobsRepo.stop(job.jobId);
+      // the engine evaluates only active jobs: the executor is asked directly, as the policy would hand it the job
+      const stored = w.jobsRepo.getByIdOrThrow(job.jobId);
+      const result = await w.executor.cycle({ jobId: stored.jobId, context: (parseYaml(stored.specYaml) as { context: Record<string, unknown> }).context });
+      const notes = (result as { notes: Record<string, unknown> }).notes;
+      expect(notes.held).toEqual({ cause: "job stopped", message: "held: job stopped" });
+      expectNoDrain(w, m, notes);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("From `rig down` until a later `restore.completed`, no drain is planned and no capture or `stopSeat` is made; once released, the free agent is drained.", async () => {
+    const { w, m, s1, job } = drainablePool();
+    try {
+      const { snapshotId } = await w.down(m.rigId);
+      const stopped = w.events(m.rigId, "rig.stopped").at(-1)!;
+      w.ready(s1);
+      const notes = await w.notesOf(job.jobId);
+      expect(notes.held).toEqual(rigStopped(stopped));
+      expectNoDrain(w, m, notes);
+
+      expect(snapshotId).toBeTruthy();
+      const restored = await w.up(snapshotId!);
+      expect(restored.ok, JSON.stringify(restored)).toBe(true);
+      w.ready(s1);
+      const released = await w.notesOf(job.jobId);
+      expect(released).not.toHaveProperty("held");
+      expect(released.drains).toEqual([
+        expect.objectContaining({ slotNumber: 1, outcome: "drained", phase: "drained", stop: { cause: "drain", result: "stopped" } }),
+      ]);
+      // the drain's normal path: the resume refresh ran before the capture
+      expect(w.refresh).toHaveBeenCalledTimes(1);
+      expect(w.capture).toHaveBeenCalledTimes(1);
+      expect(w.stopSeat).toHaveBeenCalledTimes(1);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("While the stored block can't be read, no drain is planned and no capture or `stopSeat` is made.", async () => {
+    const { w, m, job } = drainablePool();
+    try {
+      w.db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(JSON.stringify({ max: 2, min: 5 }), m.nodeId);
+      const notes = await w.notesOf(job.jobId);
+      expect(notes.held).toEqual({ cause: "pool block unreadable", message: "held: pool block unreadable" });
+      expectNoDrain(w, m, notes);
     } finally {
       w.db.close();
     }

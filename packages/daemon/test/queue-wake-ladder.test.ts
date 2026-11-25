@@ -1073,6 +1073,109 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(store.resolveOne("queue.wake_unconfirmed_window_minutes" as never)).toMatchObject({ value: 30, source: "default" });
     expect(store.resolveOne("queue.wake_swap_grace_seconds" as never)).toMatchObject({ value: 180, source: "default" });
   });
+
+  // ── Permission prompt read clear: the alert each seat's clear bounds ─────────
+
+  const CLEARED_NOTE = "prompt escalation: the seat's prompt read clear";
+  const clearMarks = (qitemId: string) => repo.listTransitions(qitemId)
+    .filter(t => t.actorSession === "wake-ladder@system" && t.transitionNote === CLEARED_NOTE).length;
+  const readClear = (...seats: Array<[string, string]>) => (only?: string) => seats
+    .filter(([dest]) => !only || dest === only)
+    .map(([destination, episode]) => ({ destination, episode, state: "clear" as const,
+      observedAt: new Date().toISOString(), evidenceRef: "retained hook" }));
+  async function closedAlert(tags: string[], minutesAgo: number): Promise<string> {
+    const row = await repo.create({ sourceSession: "sender@r", destinationSession: "desk@r", body: "alert", tags, nudge: false });
+    db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?")
+      .run(new Date(Date.UTC(2026, 0, 1, 12) - minutesAgo * 60_000).toISOString(), row.qitemId);
+    repo.update({ qitemId: row.qitemId, actorSession: "desk@r", state: "done", closureReason: "no-follow-on" } as never);
+    return row.qitemId;
+  }
+
+  it("seats read clear in one tick with no prompt alert: nothing is marked and no row appears", async () => {
+    await tick({ readPermissionPrompts: readClear(["a-seat@r", "e1"], ["b-seat@r", "e1"]) });
+    expect(repo.list({ limit: 100 })).toEqual([]);
+    expect(db.prepare("SELECT count(*) AS n FROM queue_transitions WHERE transition_note = ?").get(CLEARED_NOTE)).toEqual({ n: 0 });
+  });
+
+  it("seats read clear in one tick: each marks only its newest closed alert of that episode, ties to the higher id", async () => {
+    const { PROMPT_ALERT_TAG: alert } = await ladderMod();
+    const episode = (dest: string, ep: string, rest = "after:start") => `prompt-episode:${dest}|permission-hook:${ep}|${rest}`;
+    const aOld = await closedAlert([alert, episode("a-seat@r", "e1")], 30);
+    const aTie = [
+      await closedAlert([alert, episode("a-seat@r", "e1", "prompt:2026-01-01T11:50:00.000Z|after:start")], 10),
+      await closedAlert([alert, episode("a-seat@r", "e1", "prompt:2026-01-01T11:50:00.000Z|after:start")], 10),
+    ];
+    // Newer, but not the seat's episode: another episode that shares its text, another seat that shares its name,
+    // a row without the alert tag, and a seat that read nothing.
+    const others = [
+      await closedAlert([alert, episode("a-seat@r", "e10")], 5),
+      await closedAlert([alert, episode("a-seat@r2", "e1")], 4),
+      await closedAlert([episode("a-seat@r", "e1")], 3),
+      await closedAlert([alert, episode("c-seat@r", "e1")], 1),
+    ];
+    // Seat b's newest alert already carries the clear: its older one stays unmarked.
+    const bOld = await closedAlert([alert, episode("b-seat@r", "e1")], 20);
+    const bNew = await closedAlert(["owner-decision", alert, episode("b-seat@r", "e1")], 2);
+    repo.transitionLog.append({ qitemId: bNew, state: "done", actorSession: "wake-ladder@system", transitionNote: CLEARED_NOTE });
+
+    await tick({ readPermissionPrompts: readClear(["a-seat@r", "e1"], ["b-seat@r", "e1"]) });
+
+    const aPick = [...aTie].sort().at(-1)!;
+    expect(clearMarks(aPick)).toBe(1);
+    for (const id of [aOld, ...aTie.filter(id => id !== aPick), ...others, bOld]) expect(clearMarks(id)).toBe(0);
+    expect(clearMarks(bNew)).toBe(1);
+    // A second clear tick finds the same alerts already marked.
+    await tick({ readPermissionPrompts: readClear(["a-seat@r", "e1"], ["b-seat@r", "e1"]) });
+    expect(clearMarks(aPick)).toBe(1);
+    expect(clearMarks(bNew)).toBe(1);
+  });
+
+  it("open newer alert keeps an older closed alert of the same episode unmarked", async () => {
+    const { PROMPT_ALERT_TAG: alert } = await ladderMod();
+    const tag = "prompt-episode:a-seat@r|permission-hook:e1|after:start";
+    const older = await closedAlert([alert, tag], 20);
+    const open = await repo.create({ sourceSession: "sender@r", destinationSession: "desk@r", body: "alert", tags: [alert, tag], nudge: false });
+    db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(new Date(Date.UTC(2026, 0, 1, 12) - 60_000).toISOString(), open.qitemId);
+    await tick({ readPermissionPrompts: readClear(["a-seat@r", "e1"]) });
+    expect(repo.getById(open.qitemId)?.state).toBe("pending");
+    expect(clearMarks(older)).toBe(0);
+    expect(clearMarks(open.qitemId)).toBe(0);
+  });
+
+  it("an episode containing '|' still matches by prefix", async () => {
+    const { PROMPT_ALERT_TAG: alert } = await ladderMod();
+    const mine = await closedAlert([alert, "prompt-episode:a-seat@r|permission-hook:g|1|after:start"], 10);
+    const other = await closedAlert([alert, "prompt-episode:a-seat@r|permission-hook:g|2|after:start"], 5);
+    await tick({ readPermissionPrompts: readClear(["a-seat@r", "g|1"]) });
+    expect(clearMarks(mine)).toBe(1);
+    expect(clearMarks(other)).toBe(0);
+  });
+
+  it("alert-row reads per tick do not grow with the number of clear seats", async () => {
+    const { PROMPT_ALERT_TAG: alert } = await ladderMod();
+    const seats = ["s1@r", "s2@r", "s3@r", "s4@r", "s5@r", "s6@r"];
+    for (const s of seats) await closedAlert([alert, `prompt-episode:${s}|permission-hook:e1|after:start`], 10);
+    const reads = async (n: number) => {
+      let count = 0;
+      const spied = db as unknown as { prepare: (sql: string) => Record<string, (...a: unknown[]) => unknown> };
+      const original = spied.prepare;
+      spied.prepare = function (sql: string) {
+        const st = original.call(db, sql);
+        if (sql.includes('"wake-prompt-refusal"')) for (const m of ["get", "all", "iterate"]) {
+          const f = st[m].bind(st);
+          st[m] = (...a: unknown[]) => { count++; return f(...a); };
+        }
+        return st;
+      };
+      try { await tick({ readPermissionPrompts: readClear(...seats.slice(0, n).map(s => [s, "e1"] as [string, string])) }); }
+      finally { spied.prepare = original; }
+      return count;
+    };
+    const one = await reads(1);
+    const six = await reads(6);
+    expect(one).toBeGreaterThan(0);
+    expect(six).toBe(one);
+  });
 });
 
 describe("wake ladder retry — envelope sender", () => {

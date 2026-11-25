@@ -44,6 +44,11 @@ export const CLAUDE_STATUS_DECORATIONS = [
   /^current: \d+(?:\.\d+){2} · latest: \d+(?:\.\d+){2} ✔ Update installed · Restart to update$/,
   /^\/rc$/,
 ];
+// Claude's Remote Control indicator, on its own row under the mode footer, in its other unselected labels (Claude Code
+// 2.1.316 to 2.1.332): connecting, active ("/rc" above once it has been seen a few times), reconnecting and failed. The
+// footer search skips these exact rows only. A selected indicator (↓) is drawn inverse with its "· <key> view" hint, and
+// Enter opens its panel, so it is never one of them. Not in STATUS_NOTICE: no frame shows one on the paste hint's row.
+export const CLAUDE_REMOTE_CONTROL_ROWS = [/^\/rc (?:connecting…|active|reconnecting|failed)$/];
 // Only a known effort hint, context warning, or a notice the reader knows on its own row (the lists above, each
 // `^…$`) may share the paste-hint row. A wide pane draws a notice there in full; a narrow one gives it its own row,
 // skipped as a status row, so a row clipped to that width (ending in `…`) never shares the hint's (#3231). Any other
