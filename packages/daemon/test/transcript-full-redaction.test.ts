@@ -106,6 +106,12 @@ describe("transcript redaction keeps identifiers", () => {
       [`-${jwt}`, "-[REDACTED]"],
       [`id_token_${jwt} next`, "id_token_[REDACTED] next"],
       [`x-a_b-${jwt}`, "x-a_b-[REDACTED]"],
+      // JWTs joined by "-" or "_": every one goes, not only the first one's header.
+      [`${jwt}-${jwt}`, "[REDACTED]"],
+      [`${jwt}_${jwt}`, "[REDACTED]"],
+      [`label-${jwt}_${jwt}-${jwt} next`, "label-[REDACTED] next"],
+      // Joined by a dot, each is its own match, so the second one's signature goes too.
+      [`${jwt}.${jwt}`, "[REDACTED].[REDACTED]"],
     ];
     for (const [text, masked] of cases) {
       expect(redactTranscriptContent(text), text).toBe(masked);
@@ -124,9 +130,13 @@ describe("transcript redaction keeps identifiers", () => {
       expect(hasTranscriptSecret(text)).toBe(false);
       expect(performance.now() - started).toBeLessThan(100);
     }
-    // A long label in front of a real JWT is walked once.
+    // A long label in front of a real JWT is walked once, a long joined chain is one match, and a payload that never
+    // finishes after a JWT gives the one JWT back.
     const started = performance.now();
     expect(redactTranscriptContent("a-".repeat(50_000) + jwt)).toBe("a-".repeat(50_000) + "[REDACTED]");
+    expect(redactTranscriptContent(`${jwt}-`.repeat(5_000) + jwt)).toBe("[REDACTED]");
+    expect(redactTranscriptContent(jwt + ".eyJ" + "a".repeat(100_000))).toBe("[REDACTED].eyJ" + "a".repeat(100_000));
+    expect(redactTranscriptContent(jwt + "-eyJ".repeat(25_000) + ".x")).toBe("[REDACTED].x");
     expect(performance.now() - started).toBeLessThan(100);
   });
 
