@@ -51,6 +51,21 @@ describe("rig reach: observed gaps versus unexpanded native policy", () => {
     expect(found.tmpdir).toBe("/home/qa/qa-tmp");
   });
 
+  it("keeps the daemon's node conditional when the seat's rig runs on another node", () => {
+    // The daemon runs on /opt/daemon-node; the seat's PATH finds /usr/bin/node, which :root covers. Only the daemon's is denied.
+    const daemonNode = "/opt/daemon-node/bin/node";
+    const gap = codexRigReach(policy({ ":root": "read", "/opt/daemon-node": "deny" }), { ...paths, node: daemonNode });
+    expect(gap).toEqual({ unreadable: [], network: "on", unverified: [{ what: "node", path: daemonNode }] });
+    const text = codexRigReachWarning("dev.qa", gap!, "linux");
+    expect(text).not.toContain("can't run rig");
+    expect(text).not.toContain("To fix it");
+    expect(text).not.toMatch(/add (that|those) paths? with read access/);
+    expect(text).toBe("dev.qa: this seat's codex_permissions read coverage is not verified. The permissions don't show that the"
+      + ` seat can read node (${daemonNode}), the one this daemon runs on. In the seat, rig runs on the first node on the seat's`
+      + " PATH, which may be another one; if it's this one, the seat needs to read it too. Run rig whoami inside the seat to"
+      + " check; do not change a working policy just for this advisory. The launch continues with the permissions as written.");
+  });
+
   it("keeps a known broad read quiet even with a redundant minimal read", () => {
     expect(codexRigReach(policy({ ":root": "read", ":minimal": "read" }), paths)).toBeNull();
   });

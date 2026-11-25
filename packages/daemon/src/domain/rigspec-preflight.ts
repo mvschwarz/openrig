@@ -546,8 +546,14 @@ async function preflightMembers(
 /** A Codex seat whose declared sandbox can't read what rig needs, or has network off, can't take its tasks; say so, and
  *  launch as written. */
 function warnRigReach(label: string, permissions: CodexMemberPermissions | undefined, cwd: string | undefined, warnings: string[], env?: SeatEnv): void {
-  const gap = permissions && codexRigReach(permissions, { ...seatRigReachPaths(env), cwd });
-  if (gap) warnings.push(codexRigReachWarning(label, gap));
+  if (!permissions) return;
+  try {
+    const gap = codexRigReach(permissions, { ...seatRigReachPaths(env), cwd });
+    if (gap) warnings.push(codexRigReachWarning(label, gap));
+  } catch {
+    // Advisory only, as in the setter: a lookup that throws must not become a preflight error, nor read as covered.
+    warnings.push(`${label}: rig read coverage for this seat's codex_permissions could not be checked. The launch continues with the permissions as written; run rig whoami inside the seat to check.`);
+  }
 }
 
 /** A Codex login-shell lookup for each distinct declared seat environment, advisory only.

@@ -282,7 +282,7 @@ describe("whether a Codex seat's declared sandbox lets it run rig (a launch warn
   it.each<[string, CodexMemberPermissions, Partial<typeof paths>, CodexRigReachGap | null]>([
     ["~/ and literal grants with network on", list({ "~/.openrig": "read", "/home/u/.nvm": "read", ":workspace_roots": "write" }), {}, null],
     ["the OpenRig home left out", list({ "/home/u/.nvm": "read", ":workspace_roots": "write" }), {}, { unreadable: [HOME], network: "on" }],
-    ["the rig install and node left out", list({ "~/.openrig": "write", ":workspace_roots": "write" }), {}, { unreadable: [INSTALL, NODE], network: "on" }],
+    ["the rig install and node left out", list({ "~/.openrig": "write", ":workspace_roots": "write" }), {}, { unreadable: [INSTALL], network: "on", unverified: [NODE] }],
     ["network off with every folder readable", list({ ":root": "read" }, false), {}, { unreadable: [], network: "off" }],
     [":root read", list({ ":root": "read" }), {}, null],
     [":root write", list({ ":root": "write" }), {}, null],
@@ -290,13 +290,13 @@ describe("whether a Codex seat's declared sandbox lets it run rig (a launch warn
     ["a deny under a granted ancestor", list({ ":root": "read", "~/.openrig": "deny" }), {}, { unreadable: [HOME], network: "on" }],
     ["a closer read under a denied ancestor stays unverified", list({ "/home/u": "deny", "/home/u/.openrig": "read", "~/.nvm": "read" }), {},
       { unreadable: [], network: "on", unverified: [HOME, INSTALL, NODE] }],
-    [":root deny", list({ ":root": "deny", ":workspace_roots": "write" }), {}, { unreadable: [HOME, INSTALL, NODE], network: "on" }],
+    [":root deny", list({ ":root": "deny", ":workspace_roots": "write" }), {}, { unreadable: [HOME, INSTALL], network: "on", unverified: [NODE] }],
     ["a sibling path that only shares a prefix", list({ "/home/u/.open": "read", "~/.nvm": "read" }), {}, { unreadable: [HOME], network: "on" }],
     [":workspace_roots with the folders inside the seat's cwd", list({ ":workspace_roots": "write" }), { cwd: "/home/u" }, null],
     [":project_roots, the same selector", list({ ":project_roots": "read" }), { cwd: "/home/u" }, null],
-    [":workspace_roots with the folders outside the seat's cwd", list({ ":workspace_roots": "write" }), {}, { unreadable: [HOME, INSTALL, NODE], network: "on" }],
+    [":workspace_roots with the folders outside the seat's cwd", list({ ":workspace_roots": "write" }), {}, { unreadable: [HOME, INSTALL], network: "on", unverified: [NODE] }],
     [":workspace_roots with no known cwd", list({ ":workspace_roots": "write" }), { cwd: undefined }, { unreadable: [], network: "on", unverified: [HOME, INSTALL, NODE] }],
-    [":minimal, which doesn't cover /home", list({ ":minimal": "read", ":workspace_roots": "write" }), {}, { unreadable: [HOME, INSTALL, NODE], network: "on" }],
+    [":minimal, which doesn't cover /home", list({ ":minimal": "read", ":workspace_roots": "write" }), {}, { unreadable: [HOME, INSTALL], network: "on", unverified: [NODE] }],
     [":minimal with rig and node in system folders", list({ ":minimal": "read" }),
       { rigInstall: "/usr/lib/node_modules/@openrig/cli", node: "/usr/bin" }, { unreadable: [HOME], network: "on",
         unverified: [{ what: "the rig install", path: "/usr/lib/node_modules/@openrig/cli" }, { what: "node", path: "/usr/bin" }] }],
@@ -320,35 +320,39 @@ describe("whether a Codex seat's declared sandbox lets it run rig (a launch warn
   });
 
   it("names only what's missing, with the fix, and says the launch continues", () => {
+    const breaks = "can't read or close its queued tasks, ask a question or send a message through rig; messages typed into its terminal still arrive.";
     expect(codexRigReachWarning("dev.impl", { unreadable: [HOME, INSTALL], network: "off" }, "linux")).toBe(
       "dev.impl: this seat's codex_permissions don't let it read the OpenRig home (/home/u/.openrig) or the rig install"
       + " (/home/u/.nvm/versions/node/v22/lib/node_modules/@openrig/cli), and network is off. Inside its sandbox the agent"
-      + " can't run rig or reach the OpenRig daemon, so its tasks, questions and messages won't reach it. The launch continues"
+      + ` can't run rig or reach the OpenRig daemon, so it ${breaks} The launch continues`
       + " with the permissions as written. To fix it: add those paths with read access and turn network on"
       + " (network_access: true), then run rig whoami inside the seat.");
-    expect(codexRigReachWarning("dev.impl", { unreadable: [HOME, INSTALL, NODE], network: "on" }, "linux")).toBe(
-      "dev.impl: this seat's codex_permissions don't let it read the OpenRig home (/home/u/.openrig), the rig install"
-      + " (/home/u/.nvm/versions/node/v22/lib/node_modules/@openrig/cli) or node (/home/u/.nvm/versions/node/v22/bin)."
-      + " Inside its sandbox the agent can't run rig, so its tasks, questions and messages won't reach it. The launch"
+    expect(codexRigReachWarning("dev.impl", { unreadable: [HOME, INSTALL], network: "on", unverified: [NODE] }, "linux")).toBe(
+      "dev.impl: this seat's codex_permissions don't let it read the OpenRig home (/home/u/.openrig) or the rig install"
+      + " (/home/u/.nvm/versions/node/v22/lib/node_modules/@openrig/cli)."
+      + ` Inside its sandbox the agent can't run rig, so it ${breaks} The launch`
       + " continues with the permissions as written. To fix it: add those paths with read access, then run rig whoami"
-      + " inside the seat.");
+      + " inside the seat. The permissions don't show that the seat can read node (/home/u/.nvm/versions/node/v22/bin), the"
+      + " one this daemon runs on. In the seat, rig runs on the first node on the seat's PATH, which may be another one; if"
+      + " it's this one, the seat needs to read it too."
+      + " Run rig whoami inside the seat to check; do not change a working policy just for this advisory.");
     expect(codexRigReachWarning("dev.review", { unreadable: [], network: "read-only" }, "linux")).toBe(
       "dev.review: this seat's codex_permissions use the read-only sandbox, where network is always off. The rig command"
-      + " talks to the OpenRig daemon over 127.0.0.1, which a Codex sandbox with network off can't reach, so the agent's tasks, questions"
-      + " and messages won't reach it. The launch continues with the permissions as written. To fix it: use sandbox:"
+      + ` talks to the OpenRig daemon over 127.0.0.1, which a Codex sandbox with network off can't reach, so the agent ${breaks}`
+      + " The launch continues with the permissions as written. To fix it: use sandbox:"
       + " workspace-write with network_access: true, or keep it read-only with a filesystem list of \":root\": read and"
       + " network_access: true, then run rig whoami inside the seat.");
   });
 
   it("says may, not can't, for network off where it wasn't measured (macOS)", () => {
+    const breaks = "can't read or close its queued tasks, ask a question or send a message through rig; messages typed into its terminal still arrive.";
     expect(codexRigReachWarning("dev.impl", { unreadable: [], network: "off" }, "darwin")).toBe(
       "dev.impl: network is off in this seat's codex_permissions. The rig command talks to the OpenRig daemon over 127.0.0.1, which a"
-      + " Codex sandbox with network off may not reach (seen on Linux), so the agent's tasks, questions and messages may not"
-      + " reach it. The launch continues with the permissions as written. To fix it: turn network on (network_access: true),"
+      + ` Codex sandbox with network off may not reach (seen on Linux). If it doesn't, the agent ${breaks}`
+      + " The launch continues with the permissions as written. To fix it: turn network on (network_access: true),"
       + " then run rig whoami inside the seat.");
     expect(codexRigReachWarning("dev.impl", { unreadable: [HOME], network: "off" }, "darwin")).toContain(
-      "Inside its sandbox the agent can't run rig, and with network off it may not reach the OpenRig daemon either, so its"
-      + " tasks, questions and messages won't reach it.");
+      `Inside its sandbox the agent can't run rig, and with network off it may not reach the OpenRig daemon either, so it ${breaks}`);
   });
 
   it("tells the setter too, and records the permissions as given", async () => {

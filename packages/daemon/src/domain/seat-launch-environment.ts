@@ -51,8 +51,9 @@ function pairedCli(): { folder: string; rig: string } {
 }
 
 /** The folders a seat's rig reads, for the Codex sandbox check (codexRigReach): the OpenRig home holding the seat's
- * rig link, the paired CLI that link resolves to, and the node running this daemon, which the usual install shares.
- * A folder that can't be found is left out. */
+ * rig link, the paired CLI that link resolves to, and the node running this daemon. rig in the seat runs on the first
+ * node on the pane's PATH, which may be another one, so that node is a hint, never a definite gap. A folder that can't
+ * be found is left out. */
 export function seatRigReachPaths(env: Readonly<Record<string, string | undefined>> = {}): Omit<CodexRigReachPaths, "cwd"> {
   const real = (find: () => string) => { try { return realpathSync(find()); } catch { return undefined; } };
   const openrigHome = path.resolve(getOpenRigHome());
