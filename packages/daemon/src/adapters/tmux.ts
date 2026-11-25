@@ -35,6 +35,8 @@ interface TmuxShellCommandOptions {
   /** The staged script is POSIX shell only (a Claude seat's token step): with sourceInPane, a POSIX pane still sources it,
    *  but a fish pane runs it with /bin/sh instead of sourcing it. */
   posix?: boolean;
+  /** Reports the exact line about to be sent to the pane, including any staging. */
+  onInvocation?: (invocation: string) => void;
 }
 
 /**
@@ -2251,6 +2253,7 @@ export class TmuxAdapter {
         await this.fileOps.writeFile(path, `/bin/rm -f -- ${shellQuote(path)} 2>/dev/null || command rm -f -- ${shellQuote(path)} || true\n${options.execInScript ? "exec " : ""}${command}\n`, { mode: 0o600, flag: "wx" });
         created = true;
       }
+      options.onInvocation?.(invocation);
       const text = await this.sendText(target, invocation, beforeInput);
       if (!text.ok) return text;
       const enter = await this.sendKeys(target, ["Enter"], beforeInput);
@@ -3041,11 +3044,15 @@ export class TmuxAdapter {
    * screen, NOT `-S -<lines>` scrollback: scrollback reintroduces the row drift
    * the absolute-paint seed exists to eliminate.
    */
-  async capturePaneScreen(paneId: string, opts?: { escapeSequences?: boolean }): Promise<string | null> {
+  async capturePaneScreen(paneId: string, opts?: { escapeSequences?: boolean; joinWrappedLines?: boolean }): Promise<string | null> {
     const target = exactTarget(paneId, "pane");
+    const flags = [
+      ...(opts?.escapeSequences ? ["-e"] : []),
+      ...(opts?.joinWrappedLines ? ["-J"] : []),
+    ];
     try {
-      const output = await this.run(["tmux", "capture-pane", "-p", ...(opts?.escapeSequences ? ["-e"] : []), "-t", target],
-        `tmux capture-pane -p${opts?.escapeSequences ? " -e" : ""} -t ${shellQuote(target)}`);
+      const output = await this.run(["tmux", "capture-pane", "-p", ...flags, "-t", target],
+        ["tmux", "capture-pane", "-p", ...flags, "-t", shellQuote(target)].join(" "));
       return output || null;
     } catch {
       return null;

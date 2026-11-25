@@ -14,7 +14,7 @@ import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SeatHandoverService } from "../src/domain/seat-handover-service.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
-import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import type { ReadinessResult, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { observeCodexSandbox } from "../src/domain/permission-drift.js";
 import { type OccupantInvalidator } from "../src/domain/occupant-invalidator.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
@@ -140,7 +140,7 @@ describe("Claude fresh in-place handover readiness", () => {
 
 
   it.each(["classic-predecessor-history", "screen-without-predecessor-history", "new-runtime-already-ready", "running-before-claude-draws", "retained-header-before-claude-draws", "retained-frame-before-claude-draws", "stale-wrapper-screen-unavailable", "working-wrapper-screen-unavailable", "staged-packet-screen-unavailable", "complete-staged-packet", "same-sized-different-paste", "unverifiable-packet-screen-unavailable", "working-headerless-auto-proof", "working-headerless-auto-unavailable", "working-headerless-accept-edits-unavailable", "working-headerless-bypass-unavailable",
-    "fork-missing-conversation", "fork-resumes",
+    "fork-missing-conversation", "fork-resumes", "fork-staged-resumes",
     ...["shell", "script"].flatMap(process => ["prompt", "command"].flatMap(frame =>
       ["readable", "unreadable"].map(listing => `classic-chevron-${process}-${frame}-${listing}`))),
   ])("1544 %s", async mode => {
@@ -148,7 +148,8 @@ describe("Claude fresh in-place handover readiness", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(startedAtMs);
     const { node, sessionId } = seedSeat({ runtime: "claude-code" });
-    const fork = mode === "fork-missing-conversation" || mode === "fork-resumes";
+    const fork = mode.startsWith("fork-");
+    const stagedFork = mode === "fork-staged-resumes";
     const parentToken = "11111111-1111-4111-8111-111111111111";
     const missingConversation = mode === "fork-missing-conversation";
     if (fork && sessionId) sessionRegistry.updateResumeToken(sessionId, "claude_id", parentToken, "scrape");
@@ -160,12 +161,20 @@ describe("Claude fresh in-place handover readiness", () => {
     const drawLater = mode === "running-before-claude-draws" || retainedInput;
     const shellPrompt = drawLater ? "❯ claude --permission-mode acceptEdits --session-id 22222222-2222-4222-8222-222222222222 --name dev-impl@seat-rig"
       : chevron ? mode.includes("-command-") ? "❯ /bin/sh fixture-launch.txt" : "❯ " : "operator@host$ ";
+    const stagedInvocation = "/bin/sh '/fixture/openrig-tmux-send-123-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.txt'";
+    let forkCommand = "";
+    const launchLine = () => fork
+      ? `${missingConversation ? "operator@host$ " : "operator@host% "}${stagedFork ? stagedInvocation : forkCommand}`
+      : shellPrompt;
     const headerless = mode.startsWith("working-headerless-");
     const auto = mode.startsWith("working-headerless-auto");
     const bypass = mode === "working-headerless-bypass-unavailable";
-    if (auto || bypass) new NativePermissionStore(db).write(node.id, { runtime: "claude-code", mode: auto ? "auto" : "bypassPermissions" }, "fixture", "headerless qualification");
+    if (auto || bypass || stagedFork) {
+      const permissionMode = auto ? "auto" : bypass ? "bypassPermissions" : "acceptEdits";
+      new NativePermissionStore(db).write(node.id, { runtime: "claude-code", mode: permissionMode }, "fixture", "managed launch");
+    }
     const nativeAt = mode === "new-runtime-already-ready" || mode === "working-wrapper-screen-unavailable" || mode === "complete-staged-packet" || headerless || drawLater ? 0 : 500;
-    const drawnAt = drawLater ? 500 : nativeAt;
+    const drawnAt = fork ? 1500 : drawLater ? 500 : nativeAt;
     const unavailable = mode === "stale-wrapper-screen-unavailable" || mode === "working-wrapper-screen-unavailable";
     const identicalFrame = "Claude Code v2.1.303\n─────────\n❯ \n─────────\n  ⏵⏵ accept edits on (shift+tab to cycle)";
     const autoFrame = "Restored conversation\n─────────\n❯ \n─────────\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents";
@@ -173,8 +182,8 @@ describe("Claude fresh in-place handover readiness", () => {
     const oldFrame = "Claude Code v2.1.303\n❯ predecessor finished turn\n  ⏵⏵ accept edits on (shift+tab to cycle)";
     const freshFrame = drawLater ? "───────── dev-impl@seat-rig ─\n❯ \n─────────\n  ⏵⏵ accept edits on (shift+tab to cycle)"
       : identicalFrame;
-    const startingFrame = retainedInput
-      ? `${mode === "retained-header-before-claude-draws" ? oldFrame : identicalFrame}\n${shellPrompt}`
+    const startingFrame = () => retainedInput
+      ? `${mode === "retained-header-before-claude-draws" ? oldFrame : identicalFrame}\n${launchLine()}`
       : shellPrompt;
     const emptyComposerFrame = "Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)";
     const stagedPacketFrame = () => `Claude Code v2.1.303\n${packetText.split("\n").map((line, index) => index === 0 ? `❯ ${line}` : `  ${line}`).join("\n")}\n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)`;
@@ -186,8 +195,9 @@ describe("Claude fresh in-place handover readiness", () => {
     const forkExited = () => missingConversation && requested && elapsed >= drawnAt;
     const pane = () => forkExited() ? `No conversation found with session ID: ${parentToken}\noperator@host$ `
       : headerless ? identicalFrame + "\n" + headerlessFrame : unavailable ? identicalFrame
-      : stagedPacketMode && requested && elapsed < nativeAt ? oldFrame + "\n" + shellPrompt : requested && elapsed >= drawnAt ? freshFrame
-      : mode === "classic-predecessor-history" || chevron || drawLater ? oldFrame + "\n" + shellPrompt : shellPrompt;
+      : stagedPacketMode && requested && elapsed < nativeAt ? oldFrame + "\n" + shellPrompt
+      : requested && elapsed >= drawnAt ? fork ? `${startingFrame()}\n${freshFrame}` : freshFrame
+      : mode === "classic-predecessor-history" || chevron || drawLater ? oldFrame + "\n" + launchLine() : shellPrompt;
     getPaneCommand.mockImplementation(async () => forkExited() ? "zsh"
       : (unavailable || headerless) && requested ? "sh" : requested && elapsed >= nativeAt ? "claude" : requested && script ? "sh" : "zsh");
     capturePaneScreen.mockImplementation(async (target: string) => {
@@ -207,7 +217,7 @@ describe("Claude fresh in-place handover readiness", () => {
       } else if (stagedPacketMode && requested && elapsed < nativeAt) {
         returnedPane = null;
       } else {
-        returnedPane = unavailable ? null : headerless ? headerlessFrame : requested && elapsed < drawnAt ? startingFrame : pane();
+        returnedPane = unavailable ? null : headerless ? headerlessFrame : requested && elapsed < drawnAt ? startingFrame() : pane();
       }
       trace.push({ kind: "current-frame", target, elapsed, returnedPane });
       return returnedPane;
@@ -234,8 +244,11 @@ describe("Claude fresh in-place handover readiness", () => {
       trace.push({ kind: "history", elapsed, lines, returnedPane });
       return returnedPane;
     });
-    const target = { ...tmux(), capturePaneContent, getPanePid: vi.fn(async () => 100),
-      sendShellCommand: async (session: string, text: string) => sendText(session, text) } as unknown as TmuxAdapter;
+    const sendShellCommand: TmuxAdapter["sendShellCommand"] = async (session, text, _beforeInput, options) => {
+      if (stagedFork) options?.onInvocation?.(stagedInvocation);
+      return sendText(session, text);
+    };
+    const target = { ...tmux(), capturePaneContent, getPanePid: vi.fn(async () => 100), sendShellCommand } as unknown as TmuxAdapter;
     const fsError = () => { throw new Error("unexpected filesystem access"); };
     const listProcesses = vi.fn(() => {
       // A transient process-read failure can recover once the new runtime starts.
@@ -271,9 +284,9 @@ describe("Claude fresh in-place handover readiness", () => {
     });
     const claude = new ClaudeCodeAdapter({ tmux: target, fsOps: { exists: () => false, readFile: fsError,
       writeFile: fsError, mkdirp: fsError, copyFile: fsError }, listProcesses, sleep: async () => {}, sessionIdFactory: () => successorToken,
-      ...(headerless ? { claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`,
+      ...(headerless || stagedFork ? { claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`,
         assertCurrent: () => {}, configDir: "/fixture" }) } as never } : {}) });
-    const reads: unknown[] = [];
+    const reads: { elapsed: number; successorRuntimeStarted: boolean; result: ReadinessResult }[] = [];
     const readiness = vi.fn(async (binding) => {
       const result = await claude.checkReady(binding);
       reads.push({ elapsed, successorRuntimeStarted: requested && elapsed >= nativeAt, result });
@@ -282,6 +295,7 @@ describe("Claude fresh in-place handover readiness", () => {
     const successorToken = "22222222-2222-4222-8222-222222222222";
     sendText.mockImplementation(async (session: string, text: string) => {
       if (!requested && text.includes("claude ") && text.includes("--session-id")) {
+        if (fork) forkCommand = text;
         requested = true; trace.push({ kind: "launch-text", elapsed, session, text, nativeAt });
         return { ok: true };
       }
@@ -316,11 +330,14 @@ describe("Claude fresh in-place handover readiness", () => {
       sessions, respawn: respawnPane.mock.calls });
     if (fork) {
       expect(packetPasted).toBe(false);
+      expect(reads[0]).toMatchObject({ successorRuntimeStarted: true, result: { ready: false } });
       if (missingConversation) {
+        expect(reads).not.toContainEqual(expect.objectContaining({ result: expect.objectContaining({ ready: true }) }));
         expect(result).toMatchObject({ ok: false, code: "successor_create_failed", message: expect.stringMatching(/requested session no longer exists/i) });
         expect(sessions).toEqual([expect.objectContaining({ status: "running", resume_token: parentToken })]);
       } else {
-        expect(reads[0]).toMatchObject({ result: { ready: false } });
+        expect(reads.at(-1)).toMatchObject({ result: { ready: true } });
+        expect(reads.at(-1)?.elapsed).toBeGreaterThanOrEqual(drawnAt);
         expect(result).toMatchObject({ ok: true, result: { currentStatus: { continuityOutcome: "forked", handoverResult: "complete" } } });
         expect(sessions).toContainEqual(expect.objectContaining({ status: "running", resume_token: successorToken }));
       }
@@ -369,7 +386,7 @@ describe("Claude fresh in-place handover readiness", () => {
       expect(first.result.ready).toBe(false);
       expect(first.successorRuntimeStarted).toBe(true);
       expect((trace.find((x: any) => x.kind === "packet-paste") as any).elapsed).toBeGreaterThanOrEqual(drawnAt);
-      expect(trace).toContainEqual({ kind: "current-frame", target: "%9", elapsed: 0, returnedPane: startingFrame });
+      expect(trace).toContainEqual({ kind: "current-frame", target: "%9", elapsed: 0, returnedPane: startingFrame() });
     } else if (chevron) {
       expect(first.result.ready).toBe(false);
       expect(first.successorRuntimeStarted).toBe(false);

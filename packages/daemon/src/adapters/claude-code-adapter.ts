@@ -128,7 +128,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private autoDriveProviderPrompts: boolean;
   private listProcesses?: NativeProcessLister;
   private readinessTimeoutMs?: number;
-  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; inPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
+  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; inPlace?: boolean; shellInvocation?: string;
+    executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
@@ -403,7 +404,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!opts.beforeNativeDispatch!()) throw new Error("Selected history changed before Claude input");
     } : undefined;
     const beforeManagedInput = opts.beforeNativeDispatch ? () => { assertSelected?.(); managed?.assertCurrent?.(); } : managed?.assertCurrent;
-    const sendClassic = async (cmd: string) => {
+    const sendClassic = async (cmd: string, onInvocation?: (invocation: string) => void) => {
       if (!this.seatLaunchEnvironment) {
         if (binding.launchWrapper?.length) return { ok: false as const, message: "launch_wrapper support unavailable; no agent started." };
         if (seatToken?.ref.kind === "api-key") return { ok: false as const, code: "api_key_unavailable", message: "This launch cannot apply the selected API key; no Claude process started." };
@@ -420,7 +421,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       }
       if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude input" };
       // The token step is POSIX shell: a fish pane runs the launch with /bin/sh rather than sourcing it.
-      const shellOptions = { sourceInPane: true, ...(seatToken && staged.includes(seatToken.step) ? { posix: true } : {}) };
+      const shellOptions = { sourceInPane: true, ...(seatToken && staged.includes(seatToken.step) ? { posix: true } : {}),
+        ...(onInvocation ? { onInvocation } : {}) };
       return assertSelected ? this.tmux.sendShellCommand(session, staged, assertSelected, shellOptions)
         : this.tmux.sendShellCommand(session, staged, undefined, shellOptions);
     };
@@ -484,8 +486,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         // parent id needs the same quoting as --model/--effort above (and as
         // the codex fork path) — a hostile id must not leave --resume.
         : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${opts.name}`;
-      const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
-        : await sendClassic(cmd);
+      let shellInvocation = cmd;
+      const onInvocation = (invocation: string) => { shellInvocation = invocation; };
+      const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent, { onInvocation })
+        : await sendClassic(cmd, onInvocation);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
       }
@@ -495,7 +499,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       }
       if (opts.inPlace) {
         this.autoLaunches.set(binding.nodeId, {
-          binding, token: forkSessionId, inPlace: true, executable: managed?.executable,
+          binding, token: forkSessionId, inPlace: true, shellInvocation, executable: managed?.executable,
           scriptLaunch: managed?.executableIsScript,
         });
       }
@@ -625,8 +629,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       || launch.binding.tmuxSession !== binding.tmuxSession
       || launch.binding.launchGeneration !== binding.launchGeneration) return historyProbe;
 
+    const { shellInvocation } = launch;
     let screen: string | null = null;
-    try { screen = await this.tmux.capturePaneScreen(binding.tmuxPane); } catch { /* unavailable */ }
+    try {
+      screen = shellInvocation ? await this.tmux.capturePaneScreen(binding.tmuxPane, { joinWrappedLines: true })
+        : await this.tmux.capturePaneScreen(binding.tmuxPane);
+    } catch { /* unavailable */ }
     // Missing process evidence is unknown, not a conflicting recipient. Keep that distinction
     // while requiring positive launch evidence before admitting the current prompt below.
     let occupant: "own" | "another" | "unknown" | "absent" = "unknown";
@@ -642,8 +650,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       status: "inconclusive" as const, code: "awaiting_runtime",
       detail: "The in-place launch's current Claude prompt could not be observed.",
     };
-    // A process label alone cannot establish an interactive prompt. This probe uses the current
-    // frame and the same exact, stable launch proof as managed headerless readiness.
+    // A retained frame can precede the shell's echo while the fork already owns the foreground.
+    // Use the command sent to this pane so the boundary works with any shell prompt.
+    if (shellInvocation) {
+      const rows = screen.split(/\r?\n/);
+      const launchRow = rows.map(row => row.includes(shellInvocation)).lastIndexOf(true);
+      if (launchRow >= 0) screen = rows.slice(launchRow + 1).join("\n");
+    }
+    // Require the current frame and the same exact, stable process proof as managed headerless readiness.
     const current = await this.assessManagedProbe(binding, null, screen, { requireCurrentLaunch: true });
     if (this.autoLaunches.get(binding.nodeId) !== launch) return {
       status: "inconclusive" as const, code: "awaiting_runtime", detail: "The in-place launch changed during readiness observation.",
