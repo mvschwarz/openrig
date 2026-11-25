@@ -224,8 +224,8 @@ describe("resolveLiveCodexThreadId", () => {
     });
     expect(out).toEqual({ ok: true, id: "thread-preloaded" });
     expect(readPids).toEqual([31]);
-    const chain = verifiedPaneProcessChain(rows, 10, "codex");
-    expect(chain.rows.map((row) => row.pid).sort((a, b) => a - b)).toEqual([10, 31]);
+    const chain = JSON.parse(verifiedPaneProcessChain(rows, 10, "codex")) as Array<Array<[number, number, string | null, string]>>;
+    expect(chain.flat().map(([pid]) => pid).sort((a, b) => a - b)).toEqual([10, 31]);
   });
 });
 

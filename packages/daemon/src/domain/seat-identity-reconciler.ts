@@ -679,8 +679,12 @@ export class SeatIdentityReconciler {
         ...base, verdict: verified ? "verified" : "mismatch",
         observedAt: seat.runtime === "codex" && verified && native ? native.observedAt : base.observedAt,
         evidenceSource: "pane_process", reason: verified ? null : "process_identity_ambiguous",
-        evidence: { registeredPane: seat.tmux_pane, observedPanePid: pid, observedPid: native?.process.pid ?? pid,
-          observedCommand: native?.process.command ?? command, matchedLayer: verified ? 1 : null },
+        evidence: {
+          registeredPane: seat.tmux_pane, observedPanePid: pid, observedPid: native?.process.pid ?? pid,
+          ...(verified && native?.process.startedAt ? { observedPidStartedAt: native.process.startedAt } : {}),
+          ...(verified && native?.paneStartedAt ? { observedPanePidStartedAt: native.paneStartedAt } : {}),
+          observedCommand: native?.process.command ?? command, matchedLayer: verified ? 1 : null,
+        },
       };
     }
     const match = classifyPaneRuntimeMatch(command, seat.runtime);

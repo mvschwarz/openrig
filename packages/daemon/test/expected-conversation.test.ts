@@ -16,6 +16,7 @@ import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 import { ProcessCensus } from "../src/domain/process-census.js";
 import { CodexThreadIdResolver } from "../src/domain/codex-thread-id.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { rebindAndVerifyPaneIdentity } from "../src/domain/seat-attention-reconciler.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { resolveExpectedConversation } from "../src/domain/expected-conversation.js";
@@ -44,7 +45,7 @@ function fixture(runtime: "claude-code" | "codex" = "claude-code", guarded = fal
   const observedAt = new Date().toISOString();
   const before = lstart(new Date(Date.now() - 60_000));
   new SeatIdentityStore(db).upsert({ nodeId: node.id, verdict: "verified", evidenceSource: "pane_process", reason: null,
-    evidence: { registeredPane: "%1", observedPid: 20, observedPanePid: 10, observedCommand: runtime, matchedLayer: 1 }, sessionName, observedAt });
+    evidence: { registeredPane: "%1", observedPid: 20, observedPanePid: 10, observedPidStartedAt: before, observedPanePidStartedAt: before, observedCommand: runtime, matchedLayer: 1 }, sessionName, observedAt });
   let pasted = false, staged = "", composer = "";
   const frame = () => ({ screen: ["Ready", "────────────────────", `❯ ${composer}`, "────────────────────", "? for shortcuts", ""].join("\n"), cursor: { x: 2 + composer.length, y: 2, width: 240, height: 60 }, inMode: false });
   let current = A, afterLoad: (() => void) | undefined, beforeKeys: (() => void) | undefined;
@@ -341,13 +342,16 @@ it.each([["claude-code", false], ["codex", false], ["claude-code", true], ["code
 it.each<[string, "claude-code" | "codex", boolean, "root" | "native", string]>([
   ["dual-PID Claude pane root", "claude-code", false, "root", "pane root"],
   ["dual-PID Claude native process", "claude-code", false, "native", "native Claude process"],
-  ["legacy Claude pane root", "claude-code", true, "root", "pane root"],
+  ["legacy Claude pane root with recorded start", "claude-code", true, "root", "pane root"],
   ["dual-PID Codex pane root", "codex", false, "root", "pane root"],
   ["dual-PID Codex native process", "codex", false, "native", "native Codex process"],
-  ["legacy Codex pane root", "codex", true, "root", "pane root"],
-])("refuses %s when its verified PID belongs to a process started after the verdict", async (_case, runtime, legacy, target, label) => {
+  ["legacy Codex pane root with recorded start", "codex", true, "root", "pane root"],
+])("refuses %s when its verified PID carries a different start time than recorded", async (_case, runtime, legacy, target, label) => {
   const f = fixture(runtime);
-  if (legacy) f.db.prepare("UPDATE seat_identity_verdicts SET observed_pid=10, observed_pane_pid=NULL WHERE node_id=?").run(f.node.id);
+  if (legacy) {
+    f.db.prepare("UPDATE seat_identity_verdicts SET observed_pid=10, observed_pane_pid=NULL, observed_pid_started_at=?, observed_pane_pid_started_at=NULL WHERE node_id=?")
+      .run(f.before, f.node.id);
+  }
   const later = lstart(new Date(Date.parse(f.observedAt) + 5_000));
   vi.mocked(ProcessCensus.prototype.list).mockResolvedValue([
     { pid: 10, ppid: 1, command: "zsh", startedAt: target === "root" ? later : f.before },
@@ -355,22 +359,90 @@ it.each<[string, "claude-code" | "codex", boolean, "root" | "native", string]>([
   ]);
   await expect(resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store)).rejects.toMatchObject({
     code: "expected_identity_unavailable",
-    message: expect.stringContaining(`its ${label} did not start before it was verified`),
+    message: expect.stringContaining(`its ${label} start time changed since verification`),
   });
   const response = await f.app.request(f.readUrl());
   expect(response.status).toBe(409);
   expect(await response.json()).toMatchObject({ error: "expected_identity_unavailable" });
+  const send = await f.transport.send(f.expected.sessionName, "for A", { expectedIdentity: f.expected } as never);
+  expect(send).toMatchObject({ ok: false, sent: false, reason: "expected_identity_unavailable" });
+  expect(f.commands.some(command => command.includes("paste-buffer") || command.includes("send-keys"))).toBe(false);
 });
 
-it.each(["same-second", "missing-start"] as const)("refuses a verified pane root with %s start time", async kind => {
-  const f = fixture("claude-code");
-  const rootStart = kind === "same-second" ? lstart(new Date(Date.parse(f.observedAt))) : undefined;
+it.each<[string, "claude-code" | "codex", "same-second" | "unknown-start" | "stamp-before-sample", boolean]>([
+  ["Claude same-second start (recorded)", "claude-code", "same-second", false],
+  ["Claude same-second start (legacy without recorded start)", "claude-code", "same-second", true],
+  ["Codex same-second start (recorded)", "codex", "same-second", false],
+  ["Codex same-second start (legacy without recorded start)", "codex", "same-second", true],
+  ["Claude unknown root and native start", "claude-code", "unknown-start", false],
+  ["Claude legacy unknown root and native start", "claude-code", "unknown-start", true],
+  ["Codex unknown pane root start", "codex", "unknown-start", false],
+  ["Claude stamp-before-sample verdict", "claude-code", "stamp-before-sample", false],
+  ["Claude legacy stamp-before-sample verdict", "claude-code", "stamp-before-sample", true],
+  ["Codex stamp-before-sample verdict", "codex", "stamp-before-sample", false],
+  ["Codex legacy stamp-before-sample verdict", "codex", "stamp-before-sample", true],
+])("does not refuse %s without positive evidence of a changed process, including on typed send", async (_case, runtime, kind, legacy) => {
+  const f = fixture(runtime);
+  const nowMs = Date.now();
+  const sameSecond = lstart(new Date(nowMs));
+  const afterStamp = lstart(new Date(nowMs + 2_000));
+  const nativeCmd = runtime === "codex" ? `codex resume ${A}` : `claude --session-id ${A}`;
+  const liveRootStart = kind === "unknown-start" ? undefined : kind === "same-second" ? sameSecond : afterStamp;
+  const liveNativeStart = kind === "unknown-start"
+    ? (runtime === "codex" ? f.before : undefined)
+    : kind === "same-second" ? sameSecond : afterStamp;
+  const verdictObservedAt = kind === "stamp-before-sample" ? new Date(nowMs).toISOString() : new Date(nowMs).toISOString();
+  if (legacy) {
+    f.db.prepare("UPDATE seat_identity_verdicts SET observed_pid=10, observed_pane_pid=NULL, observed_pid_started_at=NULL, observed_pane_pid_started_at=NULL, observed_at=? WHERE node_id=?")
+      .run(verdictObservedAt, f.node.id);
+  } else {
+    f.db.prepare("UPDATE seat_identity_verdicts SET observed_pid_started_at=?, observed_pane_pid_started_at=?, observed_at=? WHERE node_id=?")
+      .run(liveNativeStart ?? f.before, liveRootStart ?? f.before, verdictObservedAt, f.node.id);
+  }
   vi.mocked(ProcessCensus.prototype.list).mockResolvedValue([
-    { pid: 10, ppid: 1, command: "zsh", ...(rootStart ? { startedAt: rootStart } : {}) },
-    { pid: 20, ppid: 10, command: `claude --session-id ${A}`, startedAt: f.before },
+    { pid: 10, ppid: 1, command: "zsh", ...(liveRootStart ? { startedAt: liveRootStart } : {}) },
+    { pid: 15, ppid: 10, command: "sh wrapper.sh", ...(kind === "same-second" ? { startedAt: sameSecond } : {}) },
+    { pid: 20, ppid: 15, command: nativeCmd, ...(liveNativeStart ? { startedAt: liveNativeStart } : {}) },
+  ]);
+  const resolved = await resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store);
+  expect(resolved.identity).toEqual(f.expected);
+  const send = await f.transport.send(f.expected.sessionName, "for A", { expectedIdentity: f.expected } as never);
+  expect(send.ok, JSON.stringify(send)).toBe(true);
+  expect(f.commands.filter(command => command.includes("paste-buffer"))).toHaveLength(1);
+  expect(f.commands.filter(command => command.includes("send-keys") && command.includes("Enter"))).toHaveLength(1);
+});
+
+it("retains exact pane and native start times from rebindAndVerifyPaneIdentity and refuses only when live start disagrees", async () => {
+  const f = fixture("claude-code");
+  const stampBeforeSample = new Date(Date.now() + 1_000);
+  const processStart = lstart(new Date(Date.now() + 3_000));
+  const reusedStart = lstart(new Date(Date.now() + 10_000));
+  const nativeRows = [
+    { pid: 10, ppid: 1, pgid: 10, tpgid: 20, executableName: "zsh", command: "zsh", startedAt: processStart },
+    { pid: 20, ppid: 10, pgid: 20, tpgid: 20, executableName: "claude", command: `claude --session-id ${A}`, startedAt: processStart },
+  ];
+  vi.mocked(f.tmux.getPaneCommand).mockResolvedValue("zsh");
+  const rebound = await rebindAndVerifyPaneIdentity({
+    db: f.db, sessionRegistry: f.registry, tmux: f.tmux, nodeId: f.node.id, sessionName: f.expected.sessionName,
+    runtime: "claude-code", expectedResumeToken: A, now: () => stampBeforeSample,
+    listProcesses: async () => nativeRows,
+  });
+  expect(rebound).toMatchObject({ ok: true, pane: "%1", pid: 10 });
+  expect(new SeatIdentityStore(f.db).getForNode(f.node.id)).toMatchObject({
+    verdict: "verified",
+    evidence: { observedPanePid: 10, observedPid: 20, observedPanePidStartedAt: processStart, observedPidStartedAt: processStart },
+  });
+
+  vi.mocked(ProcessCensus.prototype.list).mockResolvedValue(nativeRows);
+  expect((await resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store)).identity).toEqual(f.expected);
+
+  vi.mocked(ProcessCensus.prototype.list).mockResolvedValue([
+    nativeRows[0]!,
+    { ...nativeRows[1]!, startedAt: reusedStart },
   ]);
   await expect(resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store)).rejects.toMatchObject({
     code: "expected_identity_unavailable",
+    message: expect.stringContaining("native Claude process start time changed since verification"),
   });
 });
 
@@ -497,38 +569,6 @@ it.each(["mutated", "spawned"] as const)("refuses dual-PID Claude when a second 
   await expect(resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store)).rejects.toMatchObject({
     code: "expected_identity_mismatch",
     message: expect.stringContaining("changed during native resolution"),
-  });
-});
-
-it.each<[string, "claude-code" | "codex", "same-second" | "missing"]>([
-  ["legacy Claude same-second start", "claude-code", "same-second"],
-  ["legacy Claude missing start", "claude-code", "missing"],
-  ["legacy Codex same-second start", "codex", "same-second"],
-  ["legacy Codex missing start", "codex", "missing"],
-])("refuses %s when an unrecorded native chain process cannot be ordered before the opening census", async (_case, runtime, mode) => {
-  const f = fixture(runtime);
-  f.db.prepare("UPDATE seat_identity_verdicts SET observed_pid=10, observed_pane_pid=NULL WHERE node_id=?").run(f.node.id);
-  const nativeCmd = runtime === "codex" ? `codex resume ${A}` : `claude --session-id ${A}`;
-  vi.mocked(ProcessCensus.prototype.list).mockImplementation(async () => [
-    { pid: 10, ppid: 1, command: "zsh", startedAt: f.before },
-    { pid: 20, ppid: 10, command: nativeCmd, ...(mode === "same-second" ? { startedAt: lstart(new Date()) } : {}) },
-  ]);
-  await expect(resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store)).rejects.toMatchObject({
-    code: "expected_identity_mismatch",
-    message: expect.stringContaining("did not start before the opening census"),
-  });
-});
-
-it("refuses when an intermediate launcher in the opening chain started in the opening census second", async () => {
-  const f = fixture("claude-code");
-  vi.mocked(ProcessCensus.prototype.list).mockImplementation(async () => [
-    { pid: 10, ppid: 1, command: "zsh", startedAt: f.before },
-    { pid: 15, ppid: 10, command: "sh wrapper.sh", startedAt: lstart(new Date()) },
-    { pid: 20, ppid: 15, command: `claude --session-id ${A}`, startedAt: f.before },
-  ]);
-  await expect(resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store)).rejects.toMatchObject({
-    code: "expected_identity_mismatch",
-    message: expect.stringContaining("did not start before the opening census"),
   });
 });
 

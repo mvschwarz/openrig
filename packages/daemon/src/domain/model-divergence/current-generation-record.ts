@@ -10,7 +10,6 @@ import { piSeatPaths } from "../../adapters/pi-runner-protocol.js";
 import { canonicalModelPin, modelsMatch } from "./model-divergence-monitor.js";
 import { isShellForeground } from "../shell-classifier.js";
 import { commandNamesClaude } from "../native-process-lineage.js";
-import { lstartToMinTs } from "../codex-thread-id.js";
 
 export interface ProcessRow {
   pid: number;
@@ -286,19 +285,21 @@ function cleanString(value: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-/** Whether a census row started strictly before a verdict's `observedAt` second (fails closed on missing/unparseable start). */
-export function startedBeforeVerdict(row: ProcessRow | undefined, observedAt: string): boolean {
-  const started = lstartToMinTs(row?.startedAt);
-  return started !== undefined && started < Math.floor(Date.parse(observedAt) / 1000);
+/** Positive evidence only: true when both the verdict and the live census row carry start times and they differ. */
+export function processStartMismatchesVerdict(
+  row: ProcessRow | undefined,
+  recordedStartedAt: string | null | undefined,
+): boolean {
+  return Boolean(recordedStartedAt && row?.startedAt && row.startedAt !== recordedStartedAt);
 }
 
-/** Snapshot of every contributing runtime process chain up to `panePid` (PID, PPID, start time, command) plus the unique rows in it. */
+/** Snapshot of every contributing runtime process chain up to `panePid` (PID, PPID, start time, command). */
 export function verifiedPaneProcessChain(
   processes: ProcessRow[],
   panePid: number,
   runtime: "claude-code" | "codex",
   nativePid?: number,
-): { signature: string; rows: ProcessRow[] } {
+): string {
   const byPid = new Map(processes.map((row) => [row.pid, row]));
   const pinnedNative = nativePid !== undefined
     && (nativePid !== panePid || matchesRuntimeRoot(byPid.get(panePid), (cmd) => isRuntimeCommand(cmd, runtime)));
@@ -310,18 +311,15 @@ export function verifiedPaneProcessChain(
   const leafSet = new Set<number>(findDescendants(processes, panePid, leafMatcher));
   if (pinnedNative) leafSet.add(nativePid);
   const leaves = [...leafSet].sort((a, b) => a - b);
-  const rowsByPid = new Map<number, ProcessRow>();
-  const chains = leaves.map((leaf) => {
+  return JSON.stringify(leaves.map((leaf) => {
     const chain: Array<[number, number, string | null, string]> = [];
     const seen = new Set<number>();
     for (let row = byPid.get(leaf); row && !seen.has(row.pid); row = row.pid === panePid ? undefined : byPid.get(row.ppid)) {
       seen.add(row.pid);
-      rowsByPid.set(row.pid, row);
       chain.push([row.pid, row.ppid, row.startedAt ?? null, row.command]);
     }
     return chain;
-  });
-  return { signature: JSON.stringify(chains), rows: [...rowsByPid.values()] };
+  }));
 }
 
 /** The live codex occupant's thread id, via its own pid's log join — bypasses the stored resume

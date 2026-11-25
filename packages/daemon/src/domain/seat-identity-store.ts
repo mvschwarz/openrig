@@ -9,6 +9,8 @@ interface VerdictRow {
   registered_pane: string | null;
   observed_pid: number | null;
   observed_pane_pid: number | null;
+  observed_pid_started_at?: string | null;
+  observed_pane_pid_started_at?: string | null;
   observed_command: string | null;
   matched_layer: number | null;
   session_name: string | null;
@@ -25,6 +27,8 @@ function rowToVerdict(row: VerdictRow): SeatIdentityVerdict {
       registeredPane: row.registered_pane,
       observedPid: row.observed_pid,
       ...(row.observed_pane_pid != null ? { observedPanePid: row.observed_pane_pid } : {}),
+      ...(row.observed_pid_started_at != null ? { observedPidStartedAt: row.observed_pid_started_at } : {}),
+      ...(row.observed_pane_pid_started_at != null ? { observedPanePidStartedAt: row.observed_pane_pid_started_at } : {}),
       observedCommand: row.observed_command,
       matchedLayer: row.matched_layer,
     },
@@ -46,7 +50,19 @@ function rowToVerdict(row: VerdictRow): SeatIdentityVerdict {
  * the fail-open-on-unknown contract.
  */
 export class SeatIdentityStore {
+  private startedAtColumns = false;
   constructor(private readonly db: Database.Database) {}
+
+  private hasStartedAtColumns(): boolean {
+    if (this.startedAtColumns) return true;
+    try {
+      const cols = new Set((this.db.prepare("PRAGMA table_info(seat_identity_verdicts)").all() as Array<{ name: string }>).map((c) => c.name));
+      this.startedAtColumns = cols.has("observed_pid_started_at") && cols.has("observed_pane_pid_started_at");
+    } catch {
+      return false;
+    }
+    return this.startedAtColumns;
+  }
 
   /** Upsert one node's verdict by observation time, so an older sweep finishing late cannot replace a new launch's
    *  completion observation. The current verdict is replaced, pids included. The
@@ -55,7 +71,36 @@ export class SeatIdentityStore {
    *  Returns whether the observation was accepted. */
   upsert(v: SeatIdentityVerdict): boolean {
     const observedProcess = v.evidence.observedPid != null || v.evidence.observedPanePid != null;
-    const result = this.db.prepare(`
+    const withStart = this.hasStartedAtColumns();
+    const result = this.db.prepare(withStart ? `
+      INSERT INTO seat_identity_verdicts
+        (node_id, verdict, evidence_source, reason, registered_pane, observed_pid, observed_pane_pid,
+         observed_pid_started_at, observed_pane_pid_started_at, observed_command, matched_layer, session_name, observed_at,
+         evidence_pid, evidence_pane_pid, evidence_at)
+      VALUES (@node_id, @verdict, @evidence_source, @reason, @registered_pane, @observed_pid, @observed_pane_pid,
+         @observed_pid_started_at, @observed_pane_pid_started_at, @observed_command, @matched_layer, @session_name, @observed_at,
+         @evidence_pid, @evidence_pane_pid, @evidence_at)
+      ON CONFLICT(node_id) DO UPDATE SET
+        verdict = excluded.verdict,
+        evidence_source = excluded.evidence_source,
+        reason = excluded.reason,
+        registered_pane = excluded.registered_pane,
+        observed_pid = excluded.observed_pid,
+        observed_pane_pid = excluded.observed_pane_pid,
+        observed_pid_started_at = excluded.observed_pid_started_at,
+        observed_pane_pid_started_at = excluded.observed_pane_pid_started_at,
+        observed_command = excluded.observed_command,
+        matched_layer = excluded.matched_layer,
+        session_name = excluded.session_name,
+        observed_at = excluded.observed_at,
+        evidence_pid = CASE WHEN excluded.evidence_at IS NOT NULL THEN excluded.evidence_pid
+          WHEN excluded.session_name IS seat_identity_verdicts.session_name THEN seat_identity_verdicts.evidence_pid END,
+        evidence_pane_pid = CASE WHEN excluded.evidence_at IS NOT NULL THEN excluded.evidence_pane_pid
+          WHEN excluded.session_name IS seat_identity_verdicts.session_name THEN seat_identity_verdicts.evidence_pane_pid END,
+        evidence_at = CASE WHEN excluded.evidence_at IS NOT NULL THEN excluded.evidence_at
+          WHEN excluded.session_name IS seat_identity_verdicts.session_name THEN seat_identity_verdicts.evidence_at END
+      WHERE excluded.observed_at >= seat_identity_verdicts.observed_at
+    ` : `
       INSERT INTO seat_identity_verdicts
         (node_id, verdict, evidence_source, reason, registered_pane, observed_pid, observed_pane_pid, observed_command, matched_layer, session_name, observed_at,
          evidence_pid, evidence_pane_pid, evidence_at)
@@ -87,6 +132,10 @@ export class SeatIdentityStore {
       registered_pane: v.evidence.registeredPane,
       observed_pid: v.evidence.observedPid,
       observed_pane_pid: v.evidence.observedPanePid ?? null,
+      ...(withStart ? {
+        observed_pid_started_at: v.evidence.observedPidStartedAt ?? null,
+        observed_pane_pid_started_at: v.evidence.observedPanePidStartedAt ?? null,
+      } : {}),
       observed_command: v.evidence.observedCommand,
       matched_layer: v.evidence.matchedLayer,
       session_name: v.sessionName,

@@ -7,9 +7,9 @@ import { SeatIdentityStore } from "./seat-identity-store.js";
 import { ProcessCensus } from "./process-census.js";
 import { CodexThreadIdResolver } from "./codex-thread-id.js";
 import {
+  processStartMismatchesVerdict,
   resolveIdentityVerifiedClaudeRecord,
   resolveLiveCodexThreadId,
-  startedBeforeVerdict,
   verifiedPaneProcessChain,
 } from "./model-divergence/current-generation-record.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
@@ -67,22 +67,24 @@ export async function resolveExpectedConversation(expected: ExpectedConversation
   try {
     rootPid = await tmux.getPanePid(pane);
     if (!rootPid || rootPid !== (proof.evidence.observedPanePid ?? proof.evidence.observedPid)) unavailable("The pane process no longer matches its verified occupant.");
-    const openingCensusAt = new Date().toISOString();
     const processes = await census.list();
     const nativePid = proof.evidence.observedPanePid != null ? proof.evidence.observedPid ?? undefined : undefined;
-    const verifiedPids: Array<[string, number]> = [["pane root", rootPid]];
+    const recordedRootStart = proof.evidence.observedPanePidStartedAt
+      ?? (proof.evidence.observedPanePid == null || proof.evidence.observedPid === rootPid ? proof.evidence.observedPidStartedAt : undefined);
+    const verifiedProcesses: Array<[string, number, string | null | undefined]> = [["pane root", rootPid, recordedRootStart]];
     if (nativePid !== undefined && nativePid !== rootPid) {
-      verifiedPids.push([`native ${expected.runtime === "claude-code" ? "Claude" : "Codex"} process`, nativePid]);
+      verifiedProcesses.push([
+        `native ${expected.runtime === "claude-code" ? "Claude" : "Codex"} process`,
+        nativePid,
+        proof.evidence.observedPidStartedAt,
+      ]);
     }
-    for (const [label, verifiedPid] of verifiedPids) {
-      if (!startedBeforeVerdict(processes.find((row) => row.pid === verifiedPid), proof.observedAt)) {
-        unavailable(`The pane process no longer matches its verified occupant: its ${label} did not start before it was verified.`);
+    for (const [label, verifiedPid, recordedStart] of verifiedProcesses) {
+      if (processStartMismatchesVerdict(processes.find((row) => row.pid === verifiedPid), recordedStart)) {
+        unavailable(`The pane process no longer matches its verified occupant: its ${label} start time changed since verification.`);
       }
     }
     const chain = verifiedPaneProcessChain(processes, rootPid, expected.runtime, nativePid);
-    if (chain.rows.some((row) => !startedBeforeVerdict(row, openingCensusAt))) {
-      mismatch("A process in the verified pane chain did not start before the opening census.");
-    }
     const deps = {
       getPanePid: async () => rootPid!,
       listProcesses: async (opts?: { fresh?: boolean }) => opts?.fresh ? census.list(opts) : processes,
@@ -115,7 +117,7 @@ export async function resolveExpectedConversation(expected: ExpectedConversation
     assertCurrent();
     if (await tmux.getPanePid(pane) !== rootPid) mismatch("The pane process changed during native resolution.");
     const closingProcesses = await census.list({ fresh: true });
-    if (verifiedPaneProcessChain(closingProcesses, rootPid, expected.runtime, nativePid).signature !== chain.signature) {
+    if (verifiedPaneProcessChain(closingProcesses, rootPid, expected.runtime, nativePid) !== chain) {
       mismatch("The pane process changed during native resolution.");
     }
     assertCurrent();
