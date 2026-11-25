@@ -107,6 +107,20 @@ it.each([false, true])("distinguishes the fence note from a same-millisecond ter
     transitions: [expect.objectContaining({ transitionNote: "late terminal note" })] }] : []);
 });
 
+it("reports a retained fence after reconciliation and still refuses reopen", () => {
+  const input = snapshot();
+  const result = activation(input);
+  source.relinquish(input);
+  expect(transferStatus(db, result.archiveDigest)).toMatchObject({ transfers: [{ reconciliationOwed: ["qitem-a"] }] });
+  source.reconcile({ ...input, result });
+  expect(transferStatus(db, result.archiveDigest)).toMatchObject({ evacuation: "complete",
+    transfers: [{ restriction: "scoped", fenced: ["qitem-a"], reconciliationOwed: [] }] });
+  expect(repo.getById("qitem-a")).toMatchObject({ state: "canceled" });
+  expect(repo.transferFence("qitem-a")).toMatchObject({ fenced: true });
+  expect(() => repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "pending", reopen: true, transitionNote: "retry" }))
+    .toThrow(expect.objectContaining({ code: "qitem_fenced" }));
+});
+
 it("restores only the receipt's fence and reports incomplete status without a destination result", () => {
   const restored = new Database(":memory:");
   try {

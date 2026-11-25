@@ -1797,14 +1797,14 @@ export class QueueRepository {
 
   transferFence(qitemId: string) {
     if (!this.hasTransferFence) return undefined;
-    const fence = this.db.prepare<[string], { destinationHostId: string; archiveDigest: string }>(`SELECT destination_host_id AS destinationHostId,
-      archive_digest AS archiveDigest FROM queue_transfer_relinquished WHERE qitem_id = ?`).get(qitemId);
+    const fence = this.db.prepare<[string], { destinationHostId: string; archiveDigest: string; reconciledAt: string | null }>(`SELECT destination_host_id AS destinationHostId,
+      archive_digest AS archiveDigest, reconciled_at AS reconciledAt FROM queue_transfer_relinquished WHERE qitem_id = ?`).get(qitemId);
     return fence && { fenced: true as const, ...fence };
   }
 
   assertNotFenced(qitemId: string): void {
     const fence = this.transferFence(qitemId);
-    if (fence) throw new QueueRepositoryError("qitem_fenced", `fenced: awaiting reconciliation (transfer ${fence.archiveDigest.slice(0, 12)})`, fence);
+    if (fence) throw new QueueRepositoryError("qitem_fenced", `fenced: ${fence.reconciledAt ? "retained after reconciliation" : "awaiting reconciliation"} (transfer ${fence.archiveDigest.slice(0, 12)})`, fence);
   }
 
   private dispatchableTransferRow(): string {

@@ -8,10 +8,12 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { QueueTransferActivation } from "../src/domain/queue-transfer-activation.js";
 import { buildQueueTransfer } from "../src/domain/queue-transfer-export.js";
 import { mappingDigest } from "../src/domain/queue-transfer-mapping.js";
+import { transferSelection } from "../src/domain/queue-transfer-operation.js";
 import { parseQueueTransfer } from "../src/domain/queue-transfer-parse.js";
 import { AUTHORIZATION_KIND, RECEIPT_KIND, authorizationDigest, parseAuthorization, parseReceipt, rowsDigest } from "../src/domain/queue-transfer-records.js";
 import { QueueTransferStaging } from "../src/domain/queue-transfer-staging.js";
 import { QueueTransitionLog } from "../src/domain/queue-transition-log.js";
+import { QueueWakeRepository } from "../src/domain/queue-wake-repository.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { replayTransfer } from "../src/domain/queue-transfer-recovery.js";
 
@@ -42,7 +44,7 @@ function stage(state: string, scrubbed = false, history = "", blockedOn: string 
   const receipt = parseReceipt({ kind: RECEIPT_KIND, transferId: parsed.transferId, archiveDigest: parsed.digest,
     origin: parsed.origin, destination: { hostId: "target", mappingDigest: mappingDigest(seatMapping) }, sourceState: "isolated",
     method: "operator-attestation", intervention: "power removed", limits: "offline", actor: "operator", recordedAt: "3",
-    rowsDigest: rowsDigest(parsed.rows), authorizationDigest: authorizationDigest(authorization), note: "" });
+    rowsDigest: rowsDigest(transferSelection(parsed)), authorizationDigest: authorizationDigest(authorization), note: "" });
   return { importId: manifest.importId, authorization, receipt, actor: { actorSession: "operator" } };
 }
 
@@ -109,6 +111,20 @@ it("shows imported actions and transitions as history but not as local receipts 
   expect(actions.findOperation("qitem-a", "source-op")).toBeNull();
 });
 
+it.each([false, true])("keeps source timer evidence as history without a local timer (fired=%s)", fired => {
+  const input = stage("blocked", false, `INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, actor_session)
+    VALUES (50, 'qitem-a', '1', 'blocked', 'a@old'), (51, 'qitem-a', '2', 'blocked', 'a@old');
+    INSERT INTO queue_transition_wakes VALUES (50, 'qitem-a', 'armed', 'timer', 'source-timer', NULL);
+    ${fired ? "INSERT INTO queue_transition_wakes VALUES (51, 'qitem-a', 'fired', 'timer', 'source-timer', 'delivered');" : ""}`);
+  expect(service.activate(input)).toMatchObject({ history: { wakeEvidenceImportedNotScheduled: fired ? 2 : 1 } });
+  const log = new QueueTransitionLog(db);
+  const wakes = new QueueWakeRepository(db);
+  expect(log.listForQitem("qitem-a").flatMap(row => wakes.getForTransition(row.transitionId)?.phase ?? [])).toEqual(fired ? ["armed", "fired"] : ["armed"]);
+  expect(db.prepare("SELECT 1 FROM watchdog_jobs").get()).toBeUndefined();
+  expect(wakes.getStatus("qitem-a")).toBeNull();
+  expect(wakes.findQitemsByGeneratedTimer("source-timer")).toEqual([]);
+});
+
 it.each(["continuation: inspect the result", "no current plan"])("keeps only the current imported park plan (%s) when restoring a wait", note => {
   db.exec(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body)
     VALUES ('qitem-blocker', '1', '1', 'a@old', 'b@old', 'pending', 'blocker')`);
@@ -123,11 +139,34 @@ it.each(["continuation: inspect the result", "no current plan"])("keeps only the
   expect(log.currentParkContinuation("qitem-a")).toBe(note.startsWith("continuation:") ? "inspect the result" : null);
 });
 
-it("reports a missing restored row without reconstructing work", () => {
-  const result = service.activate(stage("blocked"));
+it.each(["blocked", "done"])("reports a missing restored %s row without reconstructing work", state => {
+  const result = service.activate(stage(state));
   if (result?.status !== "activated") throw new Error("expected activation");
   expect(replayTransfer(db, result)).toMatchObject({ restore: "complete" });
   db.exec("DELETE FROM queue_items WHERE qitem_id = 'qitem-a'");
   expect(replayTransfer(db, result)).toMatchObject({ restore: "incomplete", missingRows: ["qitem-a"] });
   expect(db.prepare("SELECT 1 FROM queue_items").get()).toBeUndefined();
+});
+
+it("reports a missing restored erased-ID marker without recreating it", () => {
+  const result = service.activate(stage("done", false, `INSERT INTO queue_erased_ids (qitem_id, erased_at, reason) VALUES ('qitem-erased', '2', 'erased')`));
+  if (result?.status !== "activated") throw new Error("expected activation");
+  expect(replayTransfer(db, result)).toMatchObject({ restore: "complete" });
+  db.exec("DELETE FROM queue_erased_ids WHERE qitem_id = 'qitem-erased'");
+  expect(replayTransfer(db, result)).toMatchObject({ restore: "incomplete", missingRows: ["qitem-erased"] });
+  expect(db.prepare("SELECT 1 FROM queue_erased_ids").get()).toBeUndefined();
+});
+
+it.each(["queue_transitions", "queue_transition_wakes", "mission_control_actions"])("reports missing imported %s without rebuilding it", table => {
+  const result = service.activate(stage("done", false, `INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, actor_session)
+    VALUES (50, 'qitem-a', '1', 'blocked', 'a@old');
+    INSERT INTO queue_transition_wakes VALUES (50, 'qitem-a', 'armed', 'timer', 'source-timer', NULL);
+    INSERT INTO mission_control_actions (action_id, action_verb, qitem_id, actor_session, acted_at, audit_notes_json)
+    VALUES ('action-a', 'approve', 'qitem-a', 'a@old', '1', '{}');`));
+  if (result?.status !== "activated") throw new Error("expected activation");
+  expect(replayTransfer(db, result)).toMatchObject({ restore: "complete" });
+  const where = table === "queue_transitions" ? " WHERE transition_id IN (SELECT transition_id FROM queue_transfer_transition_origins)" : "";
+  db.exec(`DELETE FROM ${table}${where}`);
+  expect(replayTransfer(db, result)).toMatchObject({ restore: "incomplete", missingHistory: ["qitem-a"] });
+  expect(db.prepare(`SELECT 1 FROM ${table}${where}`).get()).toBeUndefined();
 });
