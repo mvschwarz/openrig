@@ -478,7 +478,8 @@ Legacy (schema version 1) bundles keep their old behavior: `--target` is only wh
 
 ### Member working directories in a carried project
 
-A schema-version-2 bundle can refer to a registered project by ID in a member's `cwd`:
+A member's `cwd` in any rig spec can refer to a registered project by ID (the `cwd` row in [the rig spec reference](rig-spec.md)).
+A schema-version-2 bundle can also carry that project, and registers it before its first member launches (below):
 
 ```yaml
 cwd: "${project:demo}/services/api"

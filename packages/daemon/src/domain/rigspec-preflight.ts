@@ -91,10 +91,15 @@ export class RigSpecPreflight {
       }
     }
 
+    // Resolve once: a failed project lookup is a preflight error, including the
+    // later Codex reach advisory, which must not attempt the same lookup again.
+    const resolvedCwds = new Map<string, string>();
     // cwd existence
     for (const node of spec.nodes) {
       if (node.cwd) {
-        const cwd = resolveAuthoredCwd(node.cwd, null);
+        let cwd: string;
+        try { cwd = resolveAuthoredCwd(node.cwd, null); resolvedCwds.set(node.id, cwd); }
+        catch (err) { errors.push(`${node.id}: ${(err as Error).message}`); continue; }
         if (!existsSync(cwd)) {
           errors.push(`cwd '${cwd}' does not exist for node '${node.id}'`);
         } else {
@@ -129,7 +134,7 @@ export class RigSpecPreflight {
     }
 
     for (const node of spec.nodes) {
-      if (node.runtime === "codex") warnRigReach(node.id, node.codexPermissions, node.cwd ? resolveAuthoredCwd(node.cwd, null) : undefined, warnings);
+      if (node.runtime === "codex" && (!node.cwd || resolvedCwds.has(node.id))) warnRigReach(node.id, node.codexPermissions, resolvedCwds.get(node.id), warnings);
     }
     if (errors.length === 0) {
       await warnRigLoginPath(spec.nodes.filter(node => node.runtime === "codex").map(node => ({ label: node.id, env: {} })), this.exec, warnings);

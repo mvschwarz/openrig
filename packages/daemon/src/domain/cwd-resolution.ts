@@ -22,10 +22,13 @@ export function expandCwd(
  * Actual launch never receives these roots: it reads the registered catalog. */
 export type PlannedProjectRoots = Readonly<Record<string, string>>;
 
+/** Expected project lookup/syntax failure, reported by launch and preflight boundaries. */
+export class ProjectCwdError extends Error {}
+
 export function projectCwdReference(authored: string): { id: string; suffix: string } | undefined {
   if (!authored.includes("${project:")) return undefined;
   const match = /^\$\{project:([^{}\/\\:\s]+)\}(\/.*)?$/.exec(authored);
-  if (!match || match[2]?.includes("${project:")) throw new Error('Project cwd must be "${project:project-id}" or "${project:project-id}/relative/path"; correct the cwd or supply --cwd.');
+  if (!match || match[2]?.includes("${project:")) throw new ProjectCwdError('Project cwd must be "${project:project-id}" or "${project:project-id}/relative/path"; correct the cwd or supply --cwd.');
   return { id: match[1]!, suffix: match[2] ?? "" };
 }
 
@@ -38,11 +41,11 @@ export function resolveProjectCwd(authored: string, plannedRoots?: PlannedProjec
   try { root = selectCatalogProject(catalog, ref.id)?.root; }
   catch (err) {
     if (!(err instanceof ProjectReadError) || !["project_not_found", "project_root_missing"].includes(err.code) || !planned) {
-      throw new Error(`Cannot resolve project cwd '${ref.id}': ${(err as Error).message}. Register that project or supply --cwd.`);
+      throw new ProjectCwdError(`Cannot resolve project cwd '${ref.id}': ${(err as Error).message}. Register that project or supply --cwd.`);
     }
   }
   root ??= planned;
-  if (!root) throw new Error(`Cannot resolve project cwd '${ref.id}': no registered project in ${catalog}. Install its carried project, register it, or supply --cwd.`);
+  if (!root) throw new ProjectCwdError(`Cannot resolve project cwd '${ref.id}': no registered project in ${catalog}. Register that project or supply --cwd.`);
   // The catalog root is already resolved; a literal '$' in its name is not an environment reference.
   return nodePath.resolve(root, "." + ref.suffix);
 }

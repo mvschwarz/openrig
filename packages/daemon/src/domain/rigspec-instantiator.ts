@@ -21,7 +21,7 @@ import { deriveCanonicalSessionName, validateSessionComponents } from "./session
 import { LegacyRigSpecSchema as RigSpecSchema } from "./rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import type { LegacyRigSpec as RigSpec, LegacyRigSpecEdge as RigSpecEdge, InstantiateOutcome, InstantiateResult } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
-import { resolveLaunchCwd } from "./cwd-resolution.js";
+import { resolveLaunchCwd, ProjectCwdError } from "./cwd-resolution.js";
 import type { RecordCreated } from "./operation-correlation.js";
 import { markRigBuilding, unmarkRigBuilding } from "./rigs-being-built.js";
 
@@ -921,6 +921,9 @@ export class PodRigInstantiator {
         },
       };
     } catch (err) {
+      if (err instanceof ProjectCwdError) {
+        return { ok: false, code: "preflight_failed", errors: [err.message], warnings: preflightWarnings };
+      }
       if (err && typeof err === "object" && "code" in err && "message" in err) {
         const typed = err as { code: string; message: string; existingNodeId?: string };
         if (typed.code === "materialize_conflict") {

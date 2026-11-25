@@ -23,7 +23,7 @@ import { unpack } from "./bundle-archive.js";
 import { parsePodBundleManifest } from "./bundle-types.js";
 import os from "node:os";
 import fs from "node:fs";
-import { getOpenRigInstallCwdError, resolveLaunchCwd, normalizeCwdOverride, projectCwdReference, type PlannedProjectRoots } from "./cwd-resolution.js";
+import { getOpenRigInstallCwdError, resolveLaunchCwd, normalizeCwdOverride, projectCwdReference, ProjectCwdError, type PlannedProjectRoots } from "./cwd-resolution.js";
 import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
 import { execRuntimeProbe } from "../adapters/runtime-probe-exec.js";
 import { routeBundleContents, registerDeclaredBundleProject, routingFailureWarnings, thrownMessage, type BundleContentRouting, type BundleContentRoutingOptions } from "./bundle-content-routing.js";
@@ -349,6 +349,7 @@ export class BootstrapOrchestrator {
         stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: spec.name, specVersion: spec.schemaVersion, source: "rig_bundle" } });
       } catch (err) {
         const msg = (err as Error).message;
+        if (err instanceof ProjectCwdError) return this.cwdPreflightFailure(run, stages, warnings, msg);
         stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "bundle_error", error: msg } });
         errors.push(msg);
         this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
@@ -388,6 +389,7 @@ export class BootstrapOrchestrator {
         stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: spec.name, specVersion: spec.schemaVersion } });
       } catch (err) {
         const msg = (err as Error).message;
+        if (err instanceof ProjectCwdError) return this.cwdPreflightFailure(run, stages, warnings, msg);
         const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? "file_not_found"
           : msg.includes("YAML") || msg.includes("parse") ? "parse_error"
           : "read_error";
@@ -1044,6 +1046,12 @@ export class BootstrapOrchestrator {
       });
       return { ok: true, rollback };
     };
+  }
+
+  private cwdPreflightFailure(run: { id: string }, stages: BootstrapStageResult[], warnings: string[], message: string): BootstrapResult {
+    stages.push({ stage: "preflight", status: "blocked", detail: { code: "preflight_failed", errors: [message] } });
+    this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+    return { runId: run.id, status: "failed", stages, errors: [message], warnings };
   }
 
   private resolveLegacyNodeCwds(spec: RigSpec, specRoot: string, cwdOverride?: string): RigSpec {
