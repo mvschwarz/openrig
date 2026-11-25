@@ -52,6 +52,13 @@ describe("proof-contract fenced examples", () => {
     ]);
   });
 
+  it.each(["    ", "\t"])("does not open an HTML comment inside indented code (%j)", indent => {
+    const block = [indent + "<!-- literal example", "", "- [ ] verified"].join("\n");
+    expect(parseLogicalCheckboxes(block)).toEqual([
+      { checked: false, rawText: "verified", sourceLine: 3 },
+    ]);
+  });
+
   it("ignores the remainder of an unclosed example", () => {
     expect(parseLogicalCheckboxes("~~~md\n- [ ] example")).toEqual([]);
   });
