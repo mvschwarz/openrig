@@ -2262,6 +2262,9 @@ export class QueueRepository {
     opts?: { explicit?: boolean },
   ): Promise<void> {
     if (nudgeOpt === false) return;
+    // A relinquished row's ownership moved to the destination; its fence stops this legacy
+    // dispatch path too, not only the durable wake-intent drain that checks it at claim.
+    if (this.transferFence(qitemId)) return;
     if (!opts?.explicit && this.deliveryDrains.holds(destinationSession)) return;
     if (!this.transport) return;
     const outcome = await this.performWakeSend(qitemId, destinationSession, sourceSession, bodyOverride, undefined, undefined, trigger, undefined, opts?.explicit === true);
