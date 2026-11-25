@@ -9,8 +9,8 @@
 
 /** Explicit credential shapes, each a known token or key format rather than a length rule. A pattern's first
  *  capture group, when it has one, is the visible context kept in front of `[REDACTED]`. Every pattern runs in
- *  linear time on transcript-sized text: classes that meet at a repeat don't overlap, there's no lazy scan, and the
- *  one lookbehind checks a single character. */
+ *  linear time on transcript-sized text: classes that meet at a repeat don't overlap, the one lazy repeat (a JWT's
+ *  label) is tried once per run of token characters, and the one lookbehind checks a single character. */
 export const TRANSCRIPT_SECRET_PATTERNS: readonly RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{16,}\b/g, // OpenAI and Anthropic API keys
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, // GitHub tokens
@@ -28,9 +28,11 @@ export const TRANSCRIPT_SECRET_PATTERNS: readonly RegExp[] = [
   /(\b(?:AccountKey|SharedAccessKey)\s*=\s*)[A-Za-z0-9+/=]{20,}/gi, // Azure connection-string keys
   /(\bAuthorization["']?\s*[=:]\s*["']?Basic\s+)[A-Za-z0-9+/=]{8,}/gi, // HTTP Basic credentials
   /\bAIza[0-9A-Za-z_-]{35}/g, // Google API keys
-  // JSON Web Tokens, starting only where a run of token characters starts. Starting after any "-" inside a run
-  // would rescan the rest of the run from each one, which is quadratic on a long run with no dot.
-  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  // JSON Web Tokens, also right after a "-" or "_" (a label or a leading minus), which stays in front of `[REDACTED]`.
+  // A header ends where its run of token characters ends, so every start inside one run has the same end. The match
+  // starts only at a run's start and checks that end once; starting after each "-" would rescan the run from each one,
+  // which is quadratic on a long run with no dot.
+  /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})((?:[A-Za-z0-9]*[-_])*?)eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
   // Private keys: the BEGIN line, the body and the END line when it's there (a body cut off before its END line still
   // goes). The body is runs of base64, or an encrypted key's Proc-Type and DEK-Info lines, each after whitespace or an
   // escaped line break, so a key inside a JSON string goes too. No run can match the characters that end it, which

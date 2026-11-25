@@ -25,6 +25,7 @@ const encryptedKey = "-----BEGIN RSA " + "PRIVATE KEY-----\nProc-Type: 4,ENCRYPT
   + "\n\n" + "QUJDRA".repeat(13) + "\n-----END RSA " + "PRIVATE KEY-----";
 const awsCliSecret = "wJalr" + "Z".repeat(35);
 const urlPassword = "s3cr3t".repeat(8);
+const jwt = "eyJ" + "hbGciOiJIUzI1NiJ9" + ".eyJ" + "zdWIiOiIxMjM0In0" + "." + "s".repeat(20);
 
 describe("transcript redaction keeps identifiers", () => {
   it("leaves commits, hashes, paths and ids unchanged", () => {
@@ -97,14 +98,36 @@ describe("transcript redaction keeps identifiers", () => {
     expect(redactTranscriptContent("https://example.com?x=a:b@other#f")).toBe("https://example.com?x=a:b@other#f");
   });
 
+  it("masks a JWT glued after a label's '-' or '_', or a leading minus, keeping what's in front", () => {
+    const cases: Array<[string, string]> = [
+      [jwt, "[REDACTED]"],
+      [`token=${jwt}`, "token=[REDACTED]"],
+      [`label-${jwt}`, "label-[REDACTED]"],
+      [`-${jwt}`, "-[REDACTED]"],
+      [`id_token_${jwt} next`, "id_token_[REDACTED] next"],
+      [`x-a_b-${jwt}`, "x-a_b-[REDACTED]"],
+    ];
+    for (const [text, masked] of cases) {
+      expect(redactTranscriptContent(text), text).toBe(masked);
+      expect(hasTranscriptSecret(text), text).toBe(true);
+    }
+    // After a letter or digit it's part of another word, as before.
+    expect(redactTranscriptContent(`abc${jwt}`)).toBe(`abc${jwt}`);
+  });
+
   it("runs in linear time on JWT-shaped runs that never finish", () => {
     // Starting a JWT after every "-" of a run is quadratic: about 5 s on the first text.
-    for (const text of ["eyJ-".repeat(25_000), "eyJ" + "a".repeat(100_000)]) {
+    for (const text of ["eyJ-".repeat(25_000), "eyJ" + "a".repeat(100_000), "a-eyJ".repeat(20_000), "a_eyJ".repeat(20_000) + ".eyJ",
+      "a-".repeat(50_000) + "x." + jwt.slice(jwt.indexOf(".") + 1)]) {
       const started = performance.now();
       expect(redactTranscriptContent(text)).toBe(text);
       expect(hasTranscriptSecret(text)).toBe(false);
       expect(performance.now() - started).toBeLessThan(100);
     }
+    // A long label in front of a real JWT is walked once.
+    const started = performance.now();
+    expect(redactTranscriptContent("a-".repeat(50_000) + jwt)).toBe("a-".repeat(50_000) + "[REDACTED]");
+    expect(performance.now() - started).toBeLessThan(100);
   });
 
   it("is the rule the CLI's restore packets import", () => {
