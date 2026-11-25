@@ -1151,17 +1151,6 @@ function makeQueueNoteError(
   });
 }
 
-function requireNonEmptyResolvedNote(note: string, source: string): string {
-  if (Buffer.byteLength(note, "utf8") > 0) return note;
-  throw makeQueueNoteError(
-    `${source} resolved to 0 bytes.`,
-    `${source} resolved to 0 bytes; an empty note is not a valid queue transition note.`,
-    source.startsWith("stdin")
-      ? "Pipe non-empty content to stdin, or pass a non-empty file with --note-file <path>."
-      : "Add content to the file, or pass a different non-empty note source.",
-  );
-}
-
 export async function resolveQueueNote(
   opts: ResolveNoteOpts,
   stdinReader: () => Promise<string> = defaultStdinReader,
@@ -1198,7 +1187,7 @@ export async function resolveQueueNote(
         "Pipe readable UTF-8 text to stdin, or pass a file path with --note-file <path>.",
       );
     }
-    return requireNonEmptyResolvedNote(text, "stdin (--note-file -)");
+    return text;
   }
 
   let stat: fs.Stats;
@@ -1238,7 +1227,7 @@ export async function resolveQueueNote(
       "Check file permissions and readability, or use --note-file - to read from stdin.",
     );
   }
-  return requireNonEmptyResolvedNote(content, `--note-file ${filePath}`);
+  return content;
 }
 
 /** The states that close a row; `rig queue update --resolution` needs one of them. */

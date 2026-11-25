@@ -211,25 +211,19 @@ describe("resolveQueueNote unit tests", () => {
     });
   });
 
-  it("rejects 0-byte --note-file and names the file", async () => {
+  it("passes 0-byte --note-file through as empty string", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "queue-note-empty-"));
     const notePath = path.join(tmp, "empty.md");
     fs.writeFileSync(notePath, "", "utf8");
     try {
-      await expect(resolveQueueNote({ noteFile: notePath })).rejects.toMatchObject({
-        fact: expect.stringContaining(notePath),
-        consequence: expect.stringMatching(/did not run/),
-      });
+      await expect(resolveQueueNote({ noteFile: notePath })).resolves.toBe("");
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
 
-  it("rejects 0-byte stdin on --note-file -", async () => {
-    await expect(resolveQueueNote({ noteFile: "-" }, async () => "")).rejects.toMatchObject({
-      fact: expect.stringMatching(/stdin \(--note-file -\) resolved to 0 bytes/i),
-      consequence: expect.stringMatching(/did not run/),
-    });
+  it("passes 0-byte stdin on --note-file - through as empty string", async () => {
+    await expect(resolveQueueNote({ noteFile: "-" }, async () => "")).resolves.toBe("");
   });
 
   it("wraps stdin reader error on --note-file -", async () => {
@@ -411,21 +405,37 @@ describe("rig queue update --note-file CLI integration", () => {
     }
   });
 
-  it("rejects 0-byte --note-file even with --state and leaves row untouched", async () => {
+  it("passes 0-byte --note-file through on state-changing update just like --note \"\"", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "queue-update-empty-"));
+    const notePath = path.join(tmp, "empty.md");
+    fs.writeFileSync(notePath, "", "utf8");
+    try {
+      const { stderr, exit } = await runCli([
+        "update", id, "--state", "done", "--closure-reason", "no-follow-on", "--note-file", notePath, "--json",
+      ]);
+      expect(exit, stderr).toBeFalsy();
+      expect(seenRequests.length).toBeGreaterThan(0);
+      expect(repo.getByIdOrThrow(id)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("forwards 0-byte --note-file on note-only update so the daemon refuses with state_or_note_required", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "queue-update-empty-note-only-"));
     const notePath = path.join(tmp, "empty.md");
     fs.writeFileSync(notePath, "", "utf8");
     try {
       const before = repo.getByIdOrThrow(id);
       const beforeTxns = transitions(id).length;
-      const { stderr, exit } = await runCli([
-        "update", id, "--state", "done", "--closure-reason", "no-follow-on", "--note-file", notePath,
+      const { stdout, stderr, exit } = await runCli([
+        "update", id, "--note-file", notePath, "--json",
       ]);
       expect(exit).toBe(1);
-      expect(seenRequests).toEqual([]);
+      expect(seenRequests.length).toBeGreaterThan(0);
       expect(repo.getByIdOrThrow(id)).toEqual(before);
       expect(transitions(id).length).toBe(beforeTxns);
-      expect(stderr).toContain(notePath);
+      expect(`${stdout}\n${stderr}`).toContain("state_or_note_required");
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
