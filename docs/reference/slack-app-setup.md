@@ -154,6 +154,12 @@ Human-row posts suppress link and media previews by default. Run `rig slack setu
 allow Slack previews, or `rig slack setup --unfurl off` to suppress them again. The selection reaches
 the running connector on its next rewire or daemon restart; it does not remove already posted previews.
 
+A local image, video or PDF named as an item's evidence is uploaded into the post's thread. When a connected
+assistant whose grant may read only some shared roots names the file (a non-owner `rig mcp token` or grant-service
+grant), it's uploaded only from inside those roots, checked when the file is read, including where a link in a root
+leads. Otherwise the post says the evidence file isn't attached, and the item keeps its evidence pointer. Files named by
+local seats and owner grants upload as before.
+
 To have reactions ignored instead, run `rig slack setup --reactions off`. The agent that asked
 never hears of a reaction, including one still waiting to be retried, and a person answers an ask by
 typing a reply in its thread. Slack still sends the event and the manifest keeps it, so switching

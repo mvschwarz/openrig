@@ -130,6 +130,7 @@ describe("same-daemon escalation routes (#605)", () => {
     const b = seat("b", "top.lead", "lead@b");
     rigs.addEdge(a.rig.id, a.node.id, "lead@b", "escalates_to");
     const original = await work(a.session); // listed first: routed to lead@b before the pass's first yield
+    seat("lane", "work.other", "other@lane");
     for (let i = 0; i < 60; i++) await work("other@lane");
     setImmediate(() => db.prepare("DELETE FROM edges WHERE kind = 'escalates_to'").run());
     expect((await sweep()).outcome).toBe("findings");
