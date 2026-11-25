@@ -4889,9 +4889,17 @@ export class QueueRepository {
     const targets = this.wakeRepo.findQitemsByGeneratedTimer(jobId);
     if (targets.length === 0) return null;
     if (this.wakeRepo.findCurrentQitemsByGeneratedTimer(jobId).some(({ qitemId }) => !this.transferFence(qitemId))) return null;
-    if (this.wakeRepo.findLiveQitemsByAttachedWatchdog(jobId).some(({ qitemId }) => !this.transferFence(qitemId))
-      && targets.every(({ qitemId }) => !this.transferFence(qitemId))) return null;
+    if (this.wakeRepo.findLiveQitemsByAttachedWatchdog(jobId).some(({ qitemId }) => !this.transferFence(qitemId))) return null;
     return "park_timer_target_terminal";
+  }
+
+  /** A shared timer can outlive its fenced origin, but its original message belongs to that row. */
+  resolveSharedParkReminder(jobId: string): string | null {
+    if (!this.wakeRepo.findQitemsByGeneratedTimer(jobId).some(({ qitemId }) => this.transferFence(qitemId))) return null;
+    const local = this.wakeRepo.findLiveQitemsByAttachedWatchdog(jobId)
+      .filter(({ qitemId }) => !this.transferFence(qitemId))
+      .map(({ qitemId }) => qitemId).sort();
+    return `Shared wake timer fired for parked work:\n${local.map(id => `- ${id}`).join("\n")}`;
   }
 
   /** A usage-limit blocker's timer is a time event with no recipient: the blocker is addressed to `wake-ladder@<rig>`,

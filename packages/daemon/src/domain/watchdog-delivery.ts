@@ -53,6 +53,7 @@ export function makeWatchdogDeliver(deps: {
    *  on them, not made into another row. */
   resolveParkedRows?: (input: { jobId: string; targetSession: string }) => string[];
   notificationCurrent?: (jobId: string) => boolean;
+  resolveSharedParkReminder?: (jobId: string) => string | null;
   /** Writes each note on its parked row, in one transaction, while the row is still `owner`'s and its current park is
    *  still the job's; returns the rows noted. */
   noteParkedRows?: (input: { owner: string; notes: Array<{ qitemId: string; jobId: string; note: string }> }) => string[];
@@ -102,10 +103,14 @@ export function makeWatchdogDeliver(deps: {
     }
   };
 
-  const deliver: DeliveryFn = async ({ targetSession, message, continuityAction }, source) => {
+  const deliver: DeliveryFn = async ({ targetSession, message: originalMessage, continuityAction }, source) => {
     let continuityActionCompleted = false;
-    const notificationCurrent = () => (source.members ?? [source]).every(({ jobId }) => deps.notificationCurrent?.(jobId) !== false);
     try {
+      const sharedReminder = source.members ? null : deps.resolveSharedParkReminder?.(source.jobId) ?? null;
+      const message = sharedReminder ?? originalMessage;
+      // The seat lease can delay input. Refuse a frozen payload if the transfer changed which rows it can name.
+      const notificationCurrent = () => (source.members ?? [source]).every(({ jobId }) =>
+        deps.notificationCurrent?.(jobId) !== false && (deps.resolveSharedParkReminder?.(jobId) ?? null) === sharedReminder);
       if (!notificationCurrent()) return { status: "failed", sent: false, inputPhase: "not_reached" };
       const checkTerminal = () => {
         if (source.policy === PARKED_OWNER_POLICY_NAME && deps.isTerminalSeat?.(targetSession))
@@ -134,7 +139,7 @@ export function makeWatchdogDeliver(deps: {
       const fact = readSendOutcome(result, writtenFact(result));
       if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted, fact };
       return result.ok
-        ? { status: "ok", continuityActionCompleted, fact }
+        ? { status: "ok", continuityActionCompleted, fact, ...(sharedReminder === null ? {} : { sentMessage: message }) }
         : { status: "failed", fact, error: result.error, sent: result.sent, ...(result.reason ? { transportReason: result.reason } : {}),
           ...(result.inputPhase ? { inputPhase: result.inputPhase } : {}),
           ...(result.sent === false && result.inputPhase === "not_reached" && result.noInputCode ? { code: result.noInputCode } : {}), continuityActionCompleted };

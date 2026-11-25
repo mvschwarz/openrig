@@ -109,6 +109,37 @@ describe("due parked-row reminders for one seat", () => {
     expect(disposition(stale.jobId, stale.qitemId)).toMatchObject({ state: "terminal", terminalReason: "park_timer_target_terminal", wakePhase: "armed" });
   });
 
+  it.each([false, true])("keeps a fenced generating row's timer only for live attachments (all fenced: %s)", async (allFenced) => {
+    const owner = seat();
+    const origin = await park(owner, "timer origin");
+    const attach = async (body: string) => {
+      const row = await deps.queueRepo.create({ sourceSession: "orch@rig", destinationSession: owner, body, nudge: false });
+      deps.queueRepo.update({ qitemId: row.qitemId, actorSession: owner, state: "blocked", blockedOn: "external:wait",
+        transitionNote: "attached to timer", wakeWatchdogId: origin.jobId });
+      return row.qitemId;
+    };
+    const stale = await attach("transferred attachment");
+    const live = await attach("local attachment");
+    db.exec(`INSERT INTO queue_transfer_ledger (record_id, side, kind, transfer_id, archive_digest, origin_host_id,
+      origin_minted_at, destination_host_id, authorization_digest, mapping_digest, actor, recorded_at)
+      VALUES ('shared-park-rel-${seq}', 'origin', 'relinquished', 'transfer', 'shared-digest-${seq}', 'origin', 'minted', 'target', 'auth', 'map', 'operator', '1')`);
+    const fence = db.prepare(`INSERT INTO queue_transfer_relinquished (qitem_id, record_id, archive_digest, destination_host_id, source_state)
+      VALUES (?, ?, ?, 'target', 'blocked')`);
+    for (const id of [origin.qitemId, stale, ...(allFenced ? [live] : [])]) fence.run(id, `shared-park-rel-${seq}`, `shared-digest-${seq}`);
+    due(origin.jobId);
+
+    expect(deps.queueRepo.resolveWatchdogPreDeliveryTerminalReason(origin.jobId)).toBe(allFenced ? "park_timer_target_terminal" : null);
+    await deps.watchdogScheduler!.runTickNow();
+
+    expect(sends).toEqual(allFenced ? [] : [{ session: owner, text: expect.stringContaining(live) }]);
+    if (!allFenced) {
+      expect(sends[0]?.text).not.toContain(origin.qitemId);
+      expect(sends[0]?.text).not.toContain(stale);
+    }
+    expect(disposition(origin.jobId, stale).wakePhase).toBe("armed");
+    expect(disposition(origin.jobId, live).wakePhase).toBe(allFenced ? "armed" : "fired");
+  });
+
   it("arrive as one message per scheduler pass, naming every row", async () => {
     const owner = seat();
     const rows = [await park(owner, "first wait"), await park(owner, "second wait"), await park(owner, "third wait")];
