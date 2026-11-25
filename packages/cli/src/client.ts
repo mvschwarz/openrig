@@ -172,8 +172,8 @@ interface DaemonClientOptions {
    *  id and, for a grant-service grant, grant id and version; never a credential). */
   principal?: { source: string; id: string; grant?: string; version?: number | string; label?: string };
   /** With sessionName: a scoped (non-owner) caller's shared roots, sent as X-OpenRig-File-Roots on every request so an
-   *  evidence file it names is attached only within them. It only narrows; absent for a caller with no root grant. */
-  fileRoots?: readonly string[];
+   *  evidence file it names is attached only within them. JSON null explicitly identifies an owner grant; absent for local calls without a grant. */
+  fileRoots?: readonly string[] | null;
 }
 
 /** Routing state published by daemon start, not a health check or sibling-home discovery. */
@@ -205,7 +205,7 @@ export class DaemonClient {
   private originUnknown = false;
   private sessionName?: string;
   private readonly principal?: DaemonClientOptions["principal"];
-  private readonly fileRoots?: readonly string[];
+  private readonly fileRoots?: readonly string[] | null;
 
   /** Isolated terminal tools require this home's durable identity, even on loopback. */
   async isLocalInstance(): Promise<boolean> {

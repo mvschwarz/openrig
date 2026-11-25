@@ -218,20 +218,6 @@ function attachmentScope(opts: SubsystemSlackDeliveryOpts, q: OutboundPostPayloa
   return Array.isArray(roots) ? { roots: (opts.filesAllowlist?.() ?? []).filter((root) => roots.includes(root.name)) } : undefined;
 }
 
-/** Whether a scoped writer's evidence is a local attachment outside its roots, judged as the read will judge it. A file
- *  that's missing or unreadable isn't this case: it's skipped as any missing attachment is. */
-function outsideWriterRoots(opts: SubsystemSlackDeliveryOpts, q: OutboundPostPayload): boolean {
-  const scope = attachmentScope(opts, q);
-  const ref = typeof q.evidenceRef === "string" ? q.evidenceRef : "";
-  if (!scope || !path.isAbsolute(ref) || !LOCAL_ATTACHMENT_EXT.has(path.extname(ref).toLowerCase())) return false;
-  try {
-    resolveAllowedAbsoluteFile(scope.roots, ref);
-    return false;
-  } catch (e) {
-    return e instanceof FilePathSafetyError && e.code !== "stat_failed";
-  }
-}
-
 /** Whether the opened file is still the one at this real path, with no link anywhere on the way to it. */
 function stillAt(realPath: string, opened: fs.Stats): boolean {
   try {
@@ -325,12 +311,24 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // attempts still reconcile first, including a landed message that no longer renders (#899).
     // A rejection is recorded against the plain render, so a repeat note can't make a rejected payload look new.
     const renders = new Map<string, ReturnType<typeof buildOutboundMessage>>();
-    // Said in the post, not only logged: a scoped writer's evidence file outside its roots won't be attached.
-    const evidenceNotAttached = outsideWriterRoots(opts, q);
+    // Qualify/read once per attempt, lazily at render. The note and upload describe the same snapshot even if a
+    // reference changes while Slack is posting; an already-landed decision normally reconciles without a file read.
+    let attachmentRead = false;
+    let attachment: ReturnType<typeof defaultReadLocalImage> = null;
+    const localAttachment = () => {
+      if (!attachmentRead) {
+        attachmentRead = true;
+        attachment = q.evidenceRef && !/^https:\/\//.test(String(q.evidenceRef))
+          ? (opts.readLocalImage ?? defaultReadLocalImage)(String(q.evidenceRef), attachmentScope(opts, q)) : null;
+      }
+      return attachment;
+    };
     const render = (possibleRepeat = false, stateUnconfirmed = false, quietUnreadable = false) => {
       const cached = renders.get(`${possibleRepeat}:${stateUnconfirmed}:${quietUnreadable}`);
       if (cached) return cached;
       const { mediaRefs, evidenceLink } = evidenceAttachment(q.media, q.evidenceRef);
+      const local = localAttachment();
+      const evidenceNotAttached = !!local && "skipped" in local && local.skipped === "outside the shared roots its writer may read";
       const built = buildOutboundMessage(
         {
           qitemId: q.qitemId ?? decision.decisionId,
@@ -557,10 +555,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // HTTPS evidence already appeared as a link in the posted message. Unsupported
     // local files are skipped. A failed upload is logged without reposting the decision.
     // A writer whose roots were recorded with the reference (a scoped grant) has it attached only from inside them.
-    const scope = attachmentScope(opts, q);
-    const local = q.evidenceRef && !/^https:\/\//.test(String(q.evidenceRef))
-      ? (opts.readLocalImage ?? defaultReadLocalImage)(String(q.evidenceRef), scope)
-      : null;
+    const local = localAttachment();
     if (local && "skipped" in local) {
       log(`ATTACHMENT skipped for ${q.qitemId ?? decision.decisionId}: ${path.basename(String(q.evidenceRef))} ${local.skipped} (text delivered; attachment missing)`);
     } else if (local) {

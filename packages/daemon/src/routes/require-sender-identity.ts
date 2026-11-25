@@ -247,13 +247,14 @@ export const FILE_ROOTS_HEADER = "x-openrig-file-roots";
 
 /** The file authority an evidenceRef written by this request carries: the caller's roots when the adapter sent them, and
  *  none when they're unreadable or when the request came through the adapter (it named a principal) without them. A
- *  request with neither header is a local writer with no root grant: null, attached as before. */
+ *  request with neither header is a local writer with no root grant: null, attached as before.
+ *  The adapter sends an explicit JSON null for an owner grant, which may also name a principal. */
 export function evidenceRefRootsFrom(c: Context): string[] | null {
   const raw = c.req.header(FILE_ROOTS_HEADER);
   if (raw !== undefined) {
     try {
       const parsed: unknown = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed.filter((root): root is string => typeof root === "string") : [];
+      return parsed === null ? null : Array.isArray(parsed) ? parsed.filter((root): root is string => typeof root === "string") : [];
     } catch {
       return [];
     }

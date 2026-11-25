@@ -60,6 +60,17 @@ it("preserves source history and verbatim routes without copying outside work or
   expect(result.origin).not.toHaveProperty("generation");
 });
 
+it("archives the evidence authority verbatim and removes it for scrubbed content", () => {
+  seed();
+  db.prepare("UPDATE queue_items SET evidence_ref = ?, evidence_ref_roots = ? WHERE qitem_id = ?")
+    .run("/fixture/chart.png", '["proof"]', "qitem-a");
+  expect(readQueueTransfer(db, { kind: "qitems", names: ["qitem-a"] }).rows[0])
+    .toMatchObject({ evidenceRef: "/fixture/chart.png", evidenceRefRoots: '["proof"]' });
+  db.exec("UPDATE queue_items SET content_erased_at = 'scrub time' WHERE qitem_id = 'qitem-a'");
+  expect(readQueueTransfer(db, { kind: "qitems", names: ["qitem-a"] }).rows[0])
+    .toMatchObject({ evidenceRef: null, evidenceRefRoots: null });
+});
+
 it("includes all erasure receipts when exporting the whole host", () => {
   seed();
   const host = readQueueTransfer(db, { kind: "host" });

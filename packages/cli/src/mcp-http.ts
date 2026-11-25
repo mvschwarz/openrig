@@ -398,7 +398,7 @@ export type McpHttpOptions = {
   tokenFile: string;
   /** Builds the daemon client for one request; sessionName is the grant's seat (absent: the env's), and principal the
    *  caller whose grant was checked. */
-  clientFactory?: (daemonUrl: string, sessionName?: string, principal?: McpPrincipal, fileRoots?: readonly string[]) => DaemonClient;
+  clientFactory?: (daemonUrl: string, sessionName?: string, principal?: McpPrincipal, fileRoots?: readonly string[] | null) => DaemonClient;
   /** Grants come from an external grant service instead of the token file, which is then never read. */
   grantService?: GrantServiceOptions;
   /** Resolve opaque credentials per request, instead of a grant service or token file. No fallback on failure. */
@@ -483,11 +483,11 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   if (!loopback && !configured) {
     throw new McpHttpConfigError(`Serving on ${opts.host} needs authentication: add a grant with rig mcp token add, then start again. With no grants, the server stays on loopback.`);
   }
-  const makeClient = opts.clientFactory ?? ((url: string, sessionName?: string, principal?: McpPrincipal, fileRoots?: readonly string[]) =>
-    new DaemonClient(url, sessionName === undefined ? undefined : { sessionName, ...(principal ? { principal } : {}), ...(fileRoots ? { fileRoots } : {}) }));
+  const makeClient = opts.clientFactory ?? ((url: string, sessionName?: string, principal?: McpPrincipal, fileRoots?: readonly string[] | null) =>
+    new DaemonClient(url, sessionName === undefined ? undefined : { sessionName, ...(principal ? { principal } : {}), ...(fileRoots !== undefined ? { fileRoots } : {}) }));
   /** The shared roots a scoped caller's evidence may be attached from: its grant's, for every caller that isn't the owner.
    *  An owner, or a loopback caller with no grant, has no root grant and attaches as a local seat does. */
-  const evidenceRoots = (access: McpAccess | undefined): readonly string[] | undefined => access && !access.owner ? access.roots : undefined;
+  const evidenceRoots = (access: McpAccess | undefined): readonly string[] | null | undefined => access ? (access.owner ? null : access.roots) : undefined;
   let boundPort = opts.port;
   // A token-file grant's last call, for rig_team's presence. An external caller isn't a team member, so none is kept.
   const presenceFile = nodePath.join(nodePath.dirname(opts.tokenFile), MCP_PRESENCE_FILE);

@@ -519,7 +519,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     }
     /** Ana's ask through the Slack projection and payload the connector uses, delivered to a fake Slack: what was posted,
      *  and the exact bytes of every upload. */
-    async function deliverAsk(qitemId: string) {
+    async function deliverAsk(qitemId: string, onPost?: () => void, recordedPayload?: ReturnType<typeof toPayload>) {
       const ports = makeQueuePorts(repo, { loadHumanRegistry: () => ({ ok: true as const, entities: people ?? [] }), sharedChannels: () => [] });
       const ask = (await ports.listHumanAlerts({ minimumLevel: "NOTICE" })).find((item) => item.qitemId === qitemId);
       expect(ask).toBeDefined();
@@ -527,7 +527,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       const uploaded: Buffer[] = [];
       const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
       const fetchImpl: FetchImpl = async (url, init) => {
-        if (url.endsWith("chat.postMessage")) { posted.push(String(init?.body ?? "")); return json({ ok: true, ts: "9000.1" }); }
+        if (url.endsWith("chat.postMessage")) { posted.push(String(init?.body ?? "")); onPost?.(); return json({ ok: true, ts: "9000.1" }); }
         if (url.endsWith("files.getUploadURLExternal")) return json({ ok: true, upload_url: "https://files.slack.invalid/put/1", file_id: "F1" });
         if (url === "https://files.slack.invalid/put/1") { uploaded.push(Buffer.from(init?.body as Uint8Array)); return new Response("ok", { status: 200 }); }
         if (url.endsWith("files.completeUploadExternal")) return json({ ok: true });
@@ -542,7 +542,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
         filesAllowlist: allowlist, log: () => {},
       } as never);
       const out = await deliver({ kind: "outbound_decision", decisionId: `d-${qitemId}-${run}`, op: "post_message", entityBindingRef: "human-ana#slack",
-        payload: toPayload(ask!) } as never);
+        payload: recordedPayload ?? toPayload(ask!) } as never);
       expect(out.ok).toBe(true);
       return { posted, uploaded, ask: ask! };
     }
@@ -600,10 +600,20 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       expect((await deliverAsk(qitemId)).uploaded).toEqual([]);
     });
 
-    it("an owner grant has no root limit, as before", async () => {
+    it("an attributed owner grant has no root limit, as before", async () => {
+      const identity = path.join(home, "identity.sqlite");
+      const idDb = createDb(identity);
+      idDb.exec("CREATE TABLE self_host_identity (singleton INTEGER PRIMARY KEY, host_id TEXT)");
+      idDb.prepare("INSERT INTO self_host_identity VALUES (1, 'owner-fixture')").run();
+      idDb.close();
+      vi.stubEnv("OPENRIG_DB", identity);
+      setSelfHostId("owner-fixture");
+      closers.push(async () => { vi.unstubAllEnvs(); });
       const local = file(outside, "owner.png", "OWNER-BYTES");
       const call = await connect((await listen()).url, await grant("boss", { owner: true }));
       const qitemId = await parkWithEvidence(call, "boss@team", local);
+      expect(db.prepare("SELECT identity_principal AS who FROM queue_transitions WHERE qitem_id = ? AND identity_principal IS NOT NULL").all(qitemId))
+        .toContainEqual({ who: JSON.stringify({ source: "file", id: "boss" }) });
       expect(repo.getById(qitemId)!.evidenceRefRoots).toBeUndefined();
       expect((await deliverAsk(qitemId)).uploaded.map((b) => b.toString())).toEqual(["OWNER-BYTES"]);
     });
@@ -641,6 +651,38 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       repo.update({ qitemId, actorSession: "lead@team", state: "blocked", blockedOn: ANA, summary: "The y axis: is it right?", evidenceRef: secret,
         transitionNote: "Attaching it myself." } as never);
       expect(repo.getById(qitemId)!.evidenceRefRoots).toBeUndefined();
+      expect((await deliverAsk(qitemId)).uploaded.map(b => b.toString())).toEqual(["OUTSIDE-BYTES"]);
+      // A durable decision saved before that rewrite still uses its original authority on an actual delivery.
+      const replay = JSON.parse(JSON.stringify(toPayload(firstAsk)));
+      expect((await deliverAsk(qitemId, undefined, replay)).uploaded).toEqual([]);
+    });
+
+    it.each(["route", "handoff"] as const)("mission-control %s copies the reference without promoting its writer", async (verb) => {
+      const evidence = file(outside, "handoff.pdf", "OUTSIDE-BYTES");
+      const call = await connect((await listen()).url, await grant("grok"));
+      const qitemId = await parkWithEvidence(call, "grok@team", evidence);
+      const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
+      const result = await contract.act({ verb, qitemId, actorSession: ANA, destinationSession: "lead@team", notify: false });
+      const successor = result.createdQitemId!;
+      repo.update({ qitemId: successor, actorSession: "lead@team", state: "blocked", blockedOn: ANA, summary: "Please check the inherited chart" } as never);
+      const outcome = await deliverAsk(successor);
+      expect(outcome.uploaded).toEqual([]);
+      expect(outcome.posted[0]).toContain(NOT_ATTACHED);
+      expect(repo.getById(successor)).toMatchObject({ evidenceRef: evidence, evidenceRefRoots: [] });
+    });
+
+    it("the attachment note describes the actual read if a link changes while the post awaits Slack", async () => {
+      const inside = file(shared, "original.png", "IN-ROOT-BYTES");
+      const outsideFile = file(outside, "later.png", "OUTSIDE-BYTES");
+      const link = path.join(shared, "moving.png");
+      fs.symlinkSync(inside, link);
+      const call = await connect((await listen()).url, await grant("grok", { roots: ["proof"] }));
+      const qitemId = await parkWithEvidence(call, "grok@team", link);
+      const outcome = await deliverAsk(qitemId, () => { fs.unlinkSync(link); fs.symlinkSync(outsideFile, link); });
+      const bytes = outcome.uploaded.map(b => b.toString());
+      expect(bytes).not.toContain("OUTSIDE-BYTES");
+      // A checked snapshot may be sent, or a later read may skip it: the visible note must match that decision.
+      expect(outcome.posted[0].includes(NOT_ATTACHED)).toBe(bytes.length === 0);
     });
 
     it("a trusted local seat's evidence anywhere still uploads, as before", async () => {
