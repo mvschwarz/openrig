@@ -132,7 +132,7 @@ describe("ChatRepository", () => {
     chatRepo.send(rigId, "bob", "deploy message");
     chatRepo.send(rigId, "alice", "another deploy msg");
     chatRepo.sendTopic(rigId, "bob", "standup", "daily standup");
-    chatRepo.send(rigId, "bob", "standup message - should NOT appear");
+    chatRepo.send(rigId, "bob", "standup message — should NOT appear");
 
     const messages = chatRepo.history(rigId, { topic: "deploy" });
     const bodies = messages.map((m) => m.body);
@@ -142,7 +142,7 @@ describe("ChatRepository", () => {
     expect(bodies).toContain("another deploy msg");
     // Should NOT include messages from the next topic
     expect(bodies).not.toContain("daily standup");
-    expect(bodies).not.toContain("standup message - should NOT appear");
+    expect(bodies).not.toContain("standup message — should NOT appear");
   });
 
   it("sendTopic creates topic-kind message", () => {
@@ -239,5 +239,3 @@ describe("ChatRepository", () => {
     expect(result[0]!.body).toBe("alice review msg");
   });
 });
-
-

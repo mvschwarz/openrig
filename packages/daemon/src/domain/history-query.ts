@@ -14,8 +14,8 @@ export interface SearchResult {
 }
 
 /** One keyword hit from a seat-scoped search, labeled with the generation
- *  (tenure) segment it fell in - the segments are delimited by the
- *  `--- SESSION BOUNDARY . ---` markers a seat's log accumulates across tenures. */
+ *  (tenure) segment it fell in — the segments are delimited by the
+ *  `--- SESSION BOUNDARY … ---` markers a seat's log accumulates across tenures. */
 export interface SeatHit {
   generation: number;
   text: string;
@@ -34,9 +34,9 @@ export interface SeatSearchResult {
   generations: number;
   hits: SeatHit[];
   insufficient: boolean;
-  /** honest-degraded signal - never a silent zero-hits that implies the seat never spoke */
+  /** honest-degraded signal — never a silent zero-hits that implies the seat never spoke */
   degraded?: { reason: SeatDegradeReason; message: string };
-  /** large-file advisory (pin 5) - surfaced, never a silent slow read */
+  /** large-file advisory (pin 5) — surfaced, never a silent slow read */
   advisory?: string;
 }
 
@@ -89,7 +89,7 @@ function escapeRegex(s: string): string {
 
 /** A JSONL event line can be huge; cap what we echo so a hit stays readable. */
 function truncateExcerpt(line: string, max = 240): string {
-  return line.length > max ? `${sliceWhole(line, max)}.` : line;
+  return line.length > max ? `${sliceWhole(line, max)}…` : line;
 }
 
 function extractLiteralKeywords(question: string): string[] {
@@ -130,7 +130,7 @@ function stripAnsi(text: string): string {
 const SEAT_BOUNDARY_RE = /^--- SESSION BOUNDARY: .* at .* ---\s*$/;
 
 /** Above this size a seat search surfaces a large-file advisory (pin 5) rather
- *  than reading silently - the full read still runs; the caller is told. */
+ *  than reading silently — the full read still runs; the caller is told. */
 const SEAT_LARGE_FILE_BYTES = 25 * 1024 * 1024; // 25 MB
 
 export class HistoryQuery {
@@ -147,7 +147,7 @@ export class HistoryQuery {
   }
 
   /** Locate a session's JSONL by token: `<projectsRoot>/<any-encoded-cwd>/<token>.jsonl`.
-   *  Token alone is enough (we scan the encoded-cwd dirs) - the founder's "I have
+   *  Token alone is enough (we scan the encoded-cwd dirs) — the founder's "I have
    *  the token, go find something". Returns null when nothing matches. */
   private locateSessionFile(token: string): string | null {
     const root = this.claudeProjectsRoot;
@@ -166,8 +166,8 @@ export class HistoryQuery {
   }
 
   /**
-   * L2 - search ONE session's JSONL by its token (read-only). Locates the file
-   * under ~/.claude/projects/<encoded-cwd>/<token>.jsonl and greps it (rggrep
+   * L2 — search ONE session's JSONL by its token (read-only). Locates the file
+   * under ~/.claude/projects/<encoded-cwd>/<token>.jsonl and greps it (rg→grep
    * fallback; streaming, so a large 100s-of-MB session file is safe). Honest:
    * a token with no session file returns session_not_found teaching, never a
    * silent empty; a large file surfaces an advisory (pin 5).
@@ -183,7 +183,7 @@ export class HistoryQuery {
         insufficient: true,
         degraded: {
           reason: "session_not_found",
-          message: `No session JSONL found for token '${sessionToken}' under ${this.claudeProjectsRoot}. Check the token - or the session may have run under a different host/home.`,
+          message: `No session JSONL found for token '${sessionToken}' under ${this.claudeProjectsRoot}. Check the token — or the session may have run under a different host/home.`,
         },
       };
     }
@@ -204,7 +204,7 @@ export class HistoryQuery {
     }
 
     const advisory = sizeBytes > SEAT_LARGE_FILE_BYTES
-      ? `Session JSONL is large (${(sizeBytes / 1024 / 1024).toFixed(1)} MB); the search streams via rg/grep - a broad query may take a moment.`
+      ? `Session JSONL is large (${(sizeBytes / 1024 / 1024).toFixed(1)} MB); the search streams via rg/grep — a broad query may take a moment.`
       : undefined;
 
     const keywords = extractKeywords(question);
@@ -252,12 +252,12 @@ export class HistoryQuery {
 
     const pattern = keywords.join("|");
 
-    // Try rg first - use -e to avoid dash-led patterns being parsed as flags
+    // Try rg first — use -e to avoid dash-led patterns being parsed as flags
     const rgResult = await this.exec("rg", ["-i", "--no-filename", "-e", pattern, rigDir]);
 
     if (rgResult.exitCode === 0 || rgResult.exitCode === 1) {
       const excerpts = this.parseExcerpts(rgResult.stdout);
-      // exit 0 = matches found, exit 1 = no matches  insufficient
+      // exit 0 = matches found, exit 1 = no matches → insufficient
       return { backend: "rg", excerpts, insufficient: excerpts.length === 0 };
     }
 
@@ -267,7 +267,7 @@ export class HistoryQuery {
       return { backend: "grep", excerpts: [], insufficient: true };
     }
 
-    // Use -e for grep too - prevents dash-led patterns from being parsed as flags
+    // Use -e for grep too — prevents dash-led patterns from being parsed as flags
     const grepResult = await this.exec("grep", ["-E", "-i", "-h", "-e", pattern, ...logFiles]);
 
     if (grepResult.exitCode === 0 || grepResult.exitCode === 1) {
@@ -275,15 +275,15 @@ export class HistoryQuery {
       return { backend: "grep", excerpts, insufficient: excerpts.length === 0 };
     }
 
-    // Both backends failed (exit code 2+) - honest error
+    // Both backends failed (exit code 2+) — honest error
     return { backend: "none", excerpts: [], insufficient: true, error: "Search backends (rg, grep) both failed. Check that rg or grep is installed and the transcript directory is readable." };
   }
 
   /**
-   * L1 - seat-scoped, cross-generation transcript search. Scopes to ONE seat's
+   * L1 — seat-scoped, cross-generation transcript search. Scopes to ONE seat's
    * `<rig>/<sessionName>.log` (never the whole rig dir) and labels every hit with
-   * the generation (tenure) it fell in - the generations are the segments between
-   * `--- SESSION BOUNDARY . ---` markers the seat's log accumulates as agents come
+   * the generation (tenure) it fell in — the generations are the segments between
+   * `--- SESSION BOUNDARY … ---` markers the seat's log accumulates as agents come
    * and go. Cross-generation is the point: a hit from before and after a boundary
    * proves the search spans tenures. Honest-degraded (never a silent zero-hits):
    * a missing / empty / boundary-only transcript says so.
@@ -298,7 +298,7 @@ export class HistoryQuery {
         insufficient: true,
         degraded: {
           reason: "capture_missing",
-          message: `No transcript captured for seat '${seatSessionName}' in rig '${rigName}' - the seat may never have been managed on this host, or capture is disabled. This is not proof the seat never spoke.`,
+          message: `No transcript captured for seat '${seatSessionName}' in rig '${rigName}' — the seat may never have been managed on this host, or capture is disabled. This is not proof the seat never spoke.`,
         },
       };
     }
@@ -313,7 +313,7 @@ export class HistoryQuery {
           insufficient: true,
           degraded: {
             reason: "capture_empty",
-            message: `Transcript for seat '${seatSessionName}' is empty (0 bytes) - no captured history yet, not proof the seat never spoke.`,
+            message: `Transcript for seat '${seatSessionName}' is empty (0 bytes) — no captured history yet, not proof the seat never spoke.`,
           },
         };
       }
@@ -330,7 +330,7 @@ export class HistoryQuery {
     }
 
     const advisory = sizeBytes > SEAT_LARGE_FILE_BYTES
-      ? `Transcript is large (${(sizeBytes / 1024 / 1024).toFixed(1)} MB); the full file was read - for a very large seat history prefer a more specific question.`
+      ? `Transcript is large (${(sizeBytes / 1024 / 1024).toFixed(1)} MB); the full file was read — for a very large seat history prefer a more specific question.`
       : undefined;
 
     const keywords = extractKeywords(question);
@@ -359,7 +359,7 @@ export class HistoryQuery {
         advisory,
         degraded: {
           reason: "boundary_only",
-          message: `Seat '${seatSessionName}' transcript contains only session-boundary markers - no captured conversation. This host may be on boundary-only transcript capture; the record is degraded, not absent.`,
+          message: `Seat '${seatSessionName}' transcript contains only session-boundary markers — no captured conversation. This host may be on boundary-only transcript capture; the record is degraded, not absent.`,
         },
       };
     }
@@ -397,5 +397,3 @@ export class HistoryQuery {
     }
   }
 }
-
-
