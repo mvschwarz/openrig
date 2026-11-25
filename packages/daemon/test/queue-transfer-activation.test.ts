@@ -27,9 +27,9 @@ beforeEach(() => {
 });
 afterEach(() => { source.close(); db.close(); });
 
-function stage(state: string, scrubbed = false, history = "") {
-  source.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body, content_erased_at)
-    VALUES ('qitem-a', '1', '1', 'a@old', 'b@old', ?, 'secret', ?)`).run(state, scrubbed ? "2" : null);
+function stage(state: string, scrubbed = false, history = "", blockedOn: string | null = null) {
+  source.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body, content_erased_at, blocked_on)
+    VALUES ('qitem-a', '1', '1', 'a@old', 'b@old', ?, 'secret', ?, ?)`).run(state, scrubbed ? "2" : null, blockedOn);
   source.exec(history);
   const { archive } = buildQueueTransfer(source, { kind: "host" });
   const manifest = new QueueTransferStaging(db).import(archive).stage;
@@ -80,18 +80,35 @@ it("fails closed before recording activation when runnable work has no wake stor
 
 it("shows imported actions and transitions as history but not as local receipts or activity", () => {
   const input = stage("blocked", false, `INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, actor_session, transition_note, owner_notification_level)
-    VALUES (50, 'qitem-a', '1', 'in-progress', 'a@old', 'relay-owner-notification-accepted notification_key=source-key', 'NOTICE');
+    VALUES (49, 'qitem-a', '1', 'pending', 'a@old', NULL, NULL),
+           (50, 'qitem-a', '2', 'in-progress', 'a@old', 'relay-owner-notification-accepted notification_key=source-key', 'NOTICE'),
+           (51, 'qitem-a', '3', 'failed', 'a@old', NULL, NULL);
     INSERT INTO mission_control_actions (action_id, action_verb, qitem_id, actor_session, acted_at, audit_notes_json)
     VALUES ('action-a', 'approve', 'qitem-a', 'a@old', '1', '{"operation":"source-op"}');`);
   service.activate(input);
   const log = new QueueTransitionLog(db);
-  expect(log.listForQitem("qitem-a")[0]).toMatchObject({ importedFrom: { hostId: "origin", mintedAt: "minted", transitionId: 50 } });
-  expect(log.listRecentForRig("old").some(row => row.actorSession === "a@old")).toBe(false);
+  expect(log.listForQitem("qitem-a")).toContainEqual(expect.objectContaining({ importedFrom: { hostId: "origin", mintedAt: "minted", transitionId: 50 } }));
+  const local = log.append({ qitemId: "qitem-a", state: "done", closureReason: "no-follow-on", actorSession: "local@old" });
+  expect(log.listRecentForRig("old").map(row => row.transitionId)).toEqual([local.transitionId]);
   expect(log.hasRelayOwnerNotificationReceipt("qitem-a", "source-key")).toBe(false);
   expect(log.activeOwnerNotificationEpisodes()).toEqual([]);
   const actions = new MissionControlActionLog(db);
   expect(actions.listForQitem("qitem-a")).toMatchObject([{ importedFrom: "origin/minted" }]);
   expect(actions.findOperation("qitem-a", "source-op")).toBeNull();
+});
+
+it.each(["continuation: inspect the result", "no current plan"])("keeps only the current imported park plan (%s) when restoring a wait", note => {
+  db.exec(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body)
+    VALUES ('qitem-blocker', '1', '1', 'a@old', 'b@old', 'pending', 'blocker')`);
+  const input = stage("blocked", false, `INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, actor_session, transition_note)
+    VALUES (48, 'qitem-a', '1', 'blocked', 'b@old', 'continuation: stale plan'),
+           (49, 'qitem-a', '2', 'in-progress', 'b@old', NULL),
+           (50, 'qitem-a', '3', 'blocked', 'b@old', '${note}')`, "qitem-blocker");
+  expect(service.activate(input)).toMatchObject({ waits: { restoredContinuations: ["qitem-a"] } });
+  const log = new QueueTransitionLog(db);
+  expect(log.listForQitem("qitem-a")).toContainEqual(expect.objectContaining({ transitionNote: note,
+    importedFrom: { hostId: "origin", mintedAt: "minted", transitionId: 50 } }));
+  expect(log.currentParkContinuation("qitem-a")).toBe(note.startsWith("continuation:") ? "inspect the result" : null);
 });
 
 it("reports a missing restored row without reconstructing work", () => {

@@ -370,7 +370,7 @@ function qualifiesAsRecent(row: Pick<RecentQueueTransitionRow, "state" | "closur
  * This log is the authoritative audit trail for queue state evolution.
  */
 /** The prefix `rig queue block --continuation` writes on the park transition, matched exactly. */
-const CONTINUATION_MARKER = "continuation: ";
+export const CONTINUATION_MARKER = "continuation: ";
 
 export class QueueTransitionLog {
   readonly db: Database.Database;

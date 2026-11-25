@@ -5,6 +5,7 @@ import type { QueueTransferObject } from "./queue-transfer-format.js";
 import { applyTransferMapping, mappingDigest, transferReadiness } from "./queue-transfer-mapping.js";
 import { assertAuthorization, assertTransferSchema, QueueTransferOperationError, transferSelection, type TransferActor } from "./queue-transfer-operation.js";
 import { parseQueueTransfer, QueueTransferParseError, type ParsedQueueTransfer } from "./queue-transfer-parse.js";
+import { CONTINUATION_MARKER } from "./queue-transition-log.js";
 import { ACTIVATION_KIND, authorizationDigest, parseActivationResult, rowsDigest, type TransferActivation, type TransferAuthorization, type TransferReceipt } from "./queue-transfer-records.js";
 import { QueueTransferStaging } from "./queue-transfer-staging.js";
 import { historyWriter, transferInsert } from "./queue-transfer-write.js";
@@ -129,7 +130,16 @@ export class QueueTransferActivation {
           const restored = !!disposition || ((localBlocker || localSeat) && lastArm?.wakeKind !== "watchdog" && lastArm?.wakeKind !== "timer");
           rows.blocked.push({ qitemId, blockedOn, wait: restored ? "restored_continuation" : "transferred_blocked" });
           (restored ? waits.restoredContinuations : waits.transferredBlocked).push(qitemId);
-          if (!restored) {
+          if (restored) {
+            const newestFirst = [...archived.transitions].sort((a, b) => Number(b.transitionId) - Number(a.transitionId));
+            for (const entry of newestFirst) {
+              if (entry.state !== "blocked") break;
+              if (typeof entry.transitionNote === "string" && entry.transitionNote.startsWith(CONTINUATION_MARKER)) {
+                this.repo.transitionLog.append({ qitemId, state, ...actor, transitionNote: entry.transitionNote });
+                break;
+              }
+            }
+          } else {
             warnings.push({ qitemId, code: "wait_without_continuation" });
             unresolvedContinuations.push({ qitemId, kind: "blocked_wait", detail: blockedOn ?? "" });
           }
