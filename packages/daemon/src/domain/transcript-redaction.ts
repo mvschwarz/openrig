@@ -10,8 +10,8 @@
 /** Explicit credential shapes, each a known token or key format rather than a length rule. A pattern's first
  *  capture group, when it has one, is the visible context kept in front of `[REDACTED]`. Every pattern runs in
  *  linear time on transcript-sized text: classes that meet at a repeat don't overlap, the one lazy repeat (a JWT's
- *  label) is tried once per run of token characters, a JWT's run-start lookbehind checks a single character, and its
- *  joined-header lookbehind reads back over the one run just matched. */
+ *  label) is tried once per run of token characters, a JWT's run-start lookbehind checks a single character, its
+ *  joined-header lookbehinds read back over one run, and its check past a joined signature reads at most three fields. */
 export const TRANSCRIPT_SECRET_PATTERNS: readonly RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{16,}\b/g, // OpenAI and Anthropic API keys
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, // GitHub tokens
@@ -34,7 +34,9 @@ export const TRANSCRIPT_SECRET_PATTERNS: readonly RegExp[] = [
   // starts only at a run's start and checks that end once; starting after each "-" would rescan the run from each one,
   // which is quadratic on a long run with no dot. JWTs joined by "-" or "_" go as one: a signature runs to its run's
   // end, taking the next header with it, and when that run ends in a joined header its payload and signature follow.
-  /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})((?:[A-Za-z0-9]*[-_])*?)eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:(?<=[-_]eyJ[A-Za-z0-9_-]{8,})\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})*/g,
+  // Unless the next three fields are a whole JWT of their own, whose second field joins nothing further: then this
+  // signature only ends like a header, and the match stops so that JWT is matched next, signature and all.
+  /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})((?:[A-Za-z0-9]*[-_])*?)eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:(?<=[-_]eyJ[A-Za-z0-9_-]{8,})(?!\.eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}(?<![-_]eyJ[A-Za-z0-9_-]{8,})\.[A-Za-z0-9_-]{8,})\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})*/g,
   // Private keys: the BEGIN line, the body and the END line when it's there (a body cut off before its END line still
   // goes). The body is runs of base64, or an encrypted key's Proc-Type and DEK-Info lines, each after whitespace or an
   // escaped line break, so a key inside a JSON string goes too. No run can match the characters that end it, which

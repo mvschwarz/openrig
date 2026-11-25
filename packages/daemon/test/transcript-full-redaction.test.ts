@@ -121,6 +121,24 @@ describe("transcript redaction keeps identifiers", () => {
     expect(redactTranscriptContent(`abc${jwt}`)).toBe(`abc${jwt}`);
   });
 
+  it("masks every JWT when a signature only ends like a joined header, or a joined signature starts like one", () => {
+    const signed = (signature: string) => jwt.slice(0, jwt.lastIndexOf(".") + 1) + signature;
+    for (const marker of ["-eyJ" + "abcdefghijk", "_eyJ" + "abcdefghijk"]) {
+      for (const separator of [".", "-", "_"]) {
+        for (const label of ["", "label-"]) {
+          const text = label + signed("x".repeat(43) + marker) + separator + signed("y".repeat(43));
+          // Joined by a dot they're two matches; joined by "-" or "_", one.
+          expect(redactTranscriptContent(text), `${marker[0]} ${separator} ${label}`).toBe(label + (separator === "." ? "[REDACTED].[REDACTED]" : "[REDACTED]"));
+          expect(hasTranscriptSecret(text)).toBe(true);
+        }
+      }
+    }
+    // A chain whose middle signature starts with "eyJ" still goes whole, and a JWT that ends like a header, then a dot,
+    // then a joined chain is two matches.
+    expect(redactTranscriptContent(`${jwt}-${signed("eyJ" + "q".repeat(20))}-${jwt}`)).toBe("[REDACTED]");
+    expect(redactTranscriptContent(`${signed("x".repeat(43) + "-eyJ" + "abcdefghijk")}.${jwt}-${jwt}`)).toBe("[REDACTED].[REDACTED]");
+  });
+
   it("runs in linear time on JWT-shaped runs that never finish", () => {
     // Starting a JWT after every "-" of a run is quadratic: about 5 s on the first text.
     for (const text of ["eyJ-".repeat(25_000), "eyJ" + "a".repeat(100_000), "a-eyJ".repeat(20_000), "a_eyJ".repeat(20_000) + ".eyJ",
@@ -137,6 +155,8 @@ describe("transcript redaction keeps identifiers", () => {
     expect(redactTranscriptContent(`${jwt}-`.repeat(5_000) + jwt)).toBe("[REDACTED]");
     expect(redactTranscriptContent(jwt + ".eyJ" + "a".repeat(100_000))).toBe("[REDACTED].eyJ" + "a".repeat(100_000));
     expect(redactTranscriptContent(jwt + "-eyJ".repeat(25_000) + ".x")).toBe("[REDACTED].x");
+    const endsLikeHeader = jwt.slice(0, jwt.lastIndexOf(".") + 1) + "x".repeat(43) + "-eyJ" + "abcdefghijk";
+    expect(redactTranscriptContent(`${endsLikeHeader}.`.repeat(5_000) + jwt)).toBe("[REDACTED].".repeat(5_000) + "[REDACTED]");
     expect(performance.now() - started).toBeLessThan(100);
   });
 
