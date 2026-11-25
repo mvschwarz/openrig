@@ -1,3 +1,5 @@
+import { createPrivateTextFile } from "../private-text-file.js";
+import { windowsAuthFile } from "../windows-owned-text.js";
 // A selected local seat joined to one participant of a remote hub: the account's network rig, which this daemon reaches
 // as an MCP client with that participant's own credential (an external grant). The binding names the local seat by its
 // durable node id, so a renamed or relaunched seat keeps it; the hub address represents the seat and never renames it.
@@ -117,12 +119,17 @@ export function readPrivateToken(file: string, missing: (file: string) => string
   try { stat = lstatSync(file); } catch {
     throw new NetworkBindingError("credential_missing", missing(file), 404);
   }
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CREDENTIAL_BYTES || (stat.mode & 0o077) !== 0) {
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CREDENTIAL_BYTES || (process.platform !== "win32" && (stat.mode & 0o077) !== 0)) {
     throw new NetworkBindingError("credential_unsafe", `${file} must be a regular file readable only by this user.`);
+  }
+  let windowsContents: string | undefined;
+  if (process.platform === "win32") {
+    try { windowsContents = Buffer.from(windowsAuthFile("auth-read", file), "base64").toString("utf8"); }
+    catch { throw new NetworkBindingError("credential_unsafe", `${file} must be a regular file readable only by this user.`); }
   }
   // A parse error can quote the file's text, which holds the token: say only which file.
   let value: { version?: unknown; token?: unknown };
-  try { value = JSON.parse(readFileSync(file, "utf8")) as typeof value; } catch {
+  try { value = JSON.parse(windowsContents ?? readFileSync(file, "utf8")) as typeof value; } catch {
     throw new NetworkBindingError("credential_invalid", `${file} isn't a network credential.`);
   }
   if (value === null || typeof value !== "object" || value.version !== 1 || typeof value.token !== "string" || !value.token) {
@@ -143,11 +150,14 @@ export function writePrivateToken(file: string, token: string): () => void {
   };
   try {
     madeFolder = mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-    const fd = openSync(file, "wx", 0o600);
-    created = true;
-    try { writeFileSync(fd, `${JSON.stringify({ version: 1, token })}\n`); fsyncSync(fd); } finally { closeSync(fd); }
-    // Flush the directory entry before a DB revision can select this immutable file.
-    if (process.platform !== "win32") {
+    const content = `${JSON.stringify({ version: 1, token })}\n`;
+    if (process.platform === "win32") {
+      createPrivateTextFile(file, content);
+      created = true;
+    } else {
+      const fd = openSync(file, "wx", 0o600);
+      created = true;
+      try { writeFileSync(fd, content); fsyncSync(fd); } finally { closeSync(fd); }
       const folder = openSync(dirname(file), "r");
       try { fsyncSync(folder); } finally { closeSync(folder); }
     }
