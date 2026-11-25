@@ -274,7 +274,7 @@ it. Don't move global skills into a project just to get a record.
     .action(async (opts: { json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(status));
 
       const res = await client.get<AuditResponse>("/api/skills/audit");
