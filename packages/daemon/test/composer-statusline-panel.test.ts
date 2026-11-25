@@ -147,6 +147,14 @@ describe("Claude composer with the background task panel below its footer (#2700
     expect(inspectComposerInput(banner, runtime)).toMatchObject({ state: "empty" });
   });
 
+  it.each(RUNTIMES)("case 9b: reads the empty composer with the Remote Control indicator between the footer and the panel (runtime %s)", runtime => {
+    // Edited: Claude's "/rc failed" indicator row right under the mode footer, above the blank row and the panel.
+    const failed = edit(F2, rows => { rows.splice(6, 0, `${" ".repeat(68)}\x1b[38;5;211m/rc\x1b[39m \x1b[38;5;211mfailed\x1b[39m`); });
+    expect(inspectComposerInput(failed, runtime)).toMatchObject({ state: "empty" });
+    // Edited: the same row as a near miss, which leaves the panel without a footer right above it.
+    expect(inspectComposerInput(edit(F2, rows => { rows.splice(6, 0, "/rc failed now"); }), runtime)).toMatchObject(unrecognized);
+  });
+
   it.each(RUNTIMES)("case 9c: leaves Claude's effort row under the footer as it was, without a \"◯\" row (runtime %s)", runtime => {
     // Edited: the panel replaced by Claude 2.1.220's effort row right under the mode footer. It is not a task panel,
     // so it is not skipped and the read stays what it was before the panel was recognized.
