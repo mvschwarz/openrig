@@ -606,8 +606,8 @@ export class SuccessorSessionLauncher {
    * the retiree, or a failure if it never became dead (then commit never runs).
    * #3901: the graceful step is the runtime's own exit, measured natively (runtime-exit.ts): TERM to Claude Code itself
    * (not to the pane's shell, which ignores it), `/exit` typed into an idle Codex with an empty input box. Another runtime,
-   * or an agent that can't be identified, keeps the pane-level TERM then KILL. Every effect is held to `terminal`, the
-   * pane's terminal as it was resolved.
+   * or an agent that can't be identified, keeps the pane-level TERM then KILL. The signals and typed input are held to
+   * `terminal`, the pane's terminal as it was resolved.
    */
   private async terminateRetiree(paneId: string, inputTarget: string, runtime: string | null, terminal: PaneTerminal | null | undefined): Promise<PaneTerminationResult> {
     return terminatePaneInPlace(this.tmuxAdapter, paneId, { pollMs: this.exitPollMs, timeoutMs: this.exitTimeoutMs, sleep: this.sleep }, "Retiree", inputTarget,

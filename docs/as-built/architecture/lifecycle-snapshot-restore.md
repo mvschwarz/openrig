@@ -259,8 +259,8 @@ cited here by number with the code that carries them):
   writes between take time of their own. Only sessions the stop below would
   end are touched (`downDisposition`, shared with the kill loop), with the
   stop's own proof: the pane's session id and tmux server (pid and start
-  time) read together, the seat's marker read by that id, and each effect held
-  to that session and server. The exit is read from the process table, never
+  time) read together, the seat's marker read by that id, and each signal and
+  typed input held to that session and server. The exit is read from the process table, never
   from the pane. Closing the terminals still stops everything afterwards.
   `--force` skips the step. The result's `runtimeExits` says, per seat, what
   the step saw, with a sentence: `graceful` (its own shutdown, or no agent
@@ -333,10 +333,12 @@ cited here by number with the code that carries them):
   pane. Another runtime, an agent that can't be identified, or an exit that
   couldn't be checked (an unreadable process table, KILL withheld because its
   check didn't hold) keeps the pane-level TERM then KILL, reported forced;
-  only an agent seen running after its KILL fails the handover
-  (`retiree_not_terminated`). The pane's terminal (session id and tmux server)
-  is read as the pane is resolved, and every effect, the pane-level ones
-  included, is held to it: a pane seen in another session or on another
+  the handover fails (`retiree_not_terminated`) only for an agent seen running
+  after its KILL, or when the pane's own end can't be established (its dead
+  state unreadable). The pane's terminal (session id and tmux server) is read
+  as the pane is resolved, and the destructive effects (the agent's signals,
+  typed input and the pane-level retirement signals) are held to it, though
+  setting remain-on-exit and the later respawn aren't: a pane seen in another session or on another
   server is left alone (`guard_target_changed`). `sideEffects.departingProcess`
   and `departingProcessDetail` say how the occupant ended. The fresh
   source delivers a daemon-built restore packet (`buildRestorePacket`,

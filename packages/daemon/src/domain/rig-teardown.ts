@@ -575,7 +575,7 @@ export class RigTeardownOrchestrator {
   /** #3901: let each seat's agent exit through its own shutdown before its terminal closes. Only a session the kill below
    *  would end is touched (downDisposition), with the proof the kill itself uses (killSession): the pane's session, read
    *  with its immutable id and its tmux server (pid and start time) in one read, carries the seat's OpenRig marker, read
-   *  by that id, and every effect after is held to that session and server. An entry says only what this step saw of the
+   *  by that id, and each signal and typed input after is held to that session and server. An entry says only what this step saw of the
    *  agent; whether its terminal then closed is the kill's own result (sessionsKilled, errors). A failure here never
    *  stops the down. */
   private async exitSeatRuntimes(sessions: LatestNodeSession[], archivedRig: boolean): Promise<NonNullable<TeardownResult["runtimeExits"]>> {

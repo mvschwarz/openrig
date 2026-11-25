@@ -38,10 +38,11 @@ export interface PaneOccupant {
  * #3901: with an `occupant` whose runtime has its own exit (runtime-exit.ts), that agent exits first and its exit is read
  * from the process table; then the pane is retired: a shell left at its prompt gets HUP (KILL after the window), which says
  * nothing about how the agent ended. Otherwise (another runtime, no agent identified, or an exit that couldn't be
- * verified) the pane's root gets TERM, then KILL after the window, as before, reported forced. Only an agent seen still
- * running after its KILL fails the cutover. With an occupant, the pane's terminal (its tmux session and server) is read
- * first, and every effect after it, the pane-level ones included, is held to it: a pane seen in another session or on
- * another server is left alone (`guard_target_changed`).
+ * verified) the pane's root gets TERM, then KILL after the window, as before, reported forced. The cutover fails only for
+ * an agent seen still running after its KILL, or when the pane's own end can't be established (its dead state unreadable).
+ * With an occupant, the pane's terminal (its tmux session and server) is read first, and the destructive effects after it
+ * (the agent's signals, the typed input, and the pane-level retirement signals) are held to it: a pane seen in another
+ * session or on another server is left alone (`guard_target_changed`). Setting remain-on-exit and the later respawn aren't.
  */
 export async function terminatePaneInPlace(
   tmux: PaneCutoverTmux,
@@ -52,7 +53,7 @@ export async function terminatePaneInPlace(
   occupant?: PaneOccupant,
 ): Promise<PaneTerminationResult> {
   const failures: string[] = [];
-  // The pane's terminal (null: unreadable), which every effect below is held to.
+  // The pane's terminal (null: unreadable), which the signals and typed input below are held to.
   const terminal = occupant?.terminal !== undefined ? occupant.terminal : occupant && tmux.paneTerminal ? await tmux.paneTerminal(paneId) : undefined;
   const pin = terminal ? pinTerminal(tmux as Pick<TmuxAdapter, "paneTerminal">, terminal) : terminal;
   const signalPane = paneSignal(tmux, inputTarget, pin);

@@ -91,7 +91,7 @@ export interface RuntimeExitInput {
   /** Where effects go: the seat's node id under the delivery guard (which resolves it to the seat's pane), else the pane. */
   inputTarget: string;
   runtime: string | null;
-  /** The terminal the pane was first read in (with the seat's marker, for `rig down`), which every effect is held to.
+  /** The terminal the pane was first read in (with the seat's marker, for `rig down`), which each signal and typed input is held to.
    *  Null when it couldn't be read: nothing is sent, and the caller stops the pane as before. */
   pin?: TerminalPin | null;
 }
