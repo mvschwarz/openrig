@@ -13,8 +13,8 @@ import { rigSeatSliceSchema } from "../../src/db/migrations/189_rig_seat_slice.j
 import { communityHarnessRuntimeSwitchesSchema } from "../../src/db/migrations/179_community_harness_runtime_switches.js";
 import { networkRequestsSchema } from "../../src/db/migrations/184_network_requests.js";
 import { rigDeliveryDrainsSchema } from "../../src/db/migrations/170_rig_delivery_drains.js";
-import { ompTuiRuntimeSwitchesSchema } from "../../src/db/migrations/196_omp_tui_runtime_switches.js";
-import { ompSwitchAdoptionSchema } from "../../src/db/migrations/197_omp_switch_adoption.js";
+import { ompTuiRuntimeSwitchesSchema } from "../../src/db/migrations/197_omp_tui_runtime_switches.js";
+import { ompSwitchAdoptionSchema } from "../../src/db/migrations/198_omp_switch_adoption.js";
 import { queueReturnRouteSchema } from "../../src/db/migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "../../src/db/migrations/165_run_bound_activity_grants.js";
 import { seatRuntimeHomeRecordsSchema } from "../../src/db/migrations/169_seat_runtime_home_records.js";
@@ -247,6 +247,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "044_queue_item_summary.sql": "queue-spine EXTENSION column — suites needing the summary column migrate it inline.",
   "047_events_node_type_index.sql": "events perf index — index/perf suites add it inline; the core edge uses the base events table.",
   "048_queue_item_evidence_ref.sql": "queue-spine EXTENSION column — suites needing evidence_ref migrate it inline.",
+  "196_queue_item_evidence_ref_roots.sql": "queue-spine EXTENSION column beside evidence_ref (048) — suites needing evidence_ref migrate both inline.",
   "049_workflow_instance_version.sql": "workflow subsystem column — workflow-* suites migrate the workflow schema inline.",
   "050_workflow_spec_json.sql": "workflow subsystem column — workflow-* suites migrate the workflow schema inline.",
   "051_workflow_resume.sql": "workflow subsystem column — workflow-* suites migrate the workflow schema inline.",

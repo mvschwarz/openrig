@@ -274,6 +274,20 @@ describe("rig whoami --json: bounded peers (output.compact, output.whoami_peers)
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
+
+  // A connected seat finds `rig network` from whoami: the compact JSON keeps the binding, and the text names it.
+  it("keeps a seat's network binding in compact JSON and names it in the text", async () => {
+    vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "1");
+    const networkBinding = { id: "netb-00000000000000000002", hubSeat: "alex@team", hubUrl: "https://hub.example/mcp (query hidden)" };
+    const bound = response(SMALL_PEERS);
+    served = { ...bound, identity: { ...bound.identity, networkBinding } };
+    expect(JSON.parse(await run("--json")).identity.networkBinding).toEqual(networkBinding);
+    expect(await run()).toContain("Network:    netb-00000000000000000002, as alex@team at https://hub.example/mcp (query hidden) (experimental and unsupported). "
+      + "rig network peers netb-00000000000000000002 lists whom you can ask.");
+    served = response(SMALL_PEERS);
+    expect(JSON.parse(await run("--json")).identity).not.toHaveProperty("networkBinding");
+    expect(await run()).not.toContain("Network:");
+  });
 });
 
 describe("output.whoami_peers: registered like output.compact", () => {

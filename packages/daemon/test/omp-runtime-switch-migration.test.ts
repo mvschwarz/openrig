@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
-import { ompTuiRuntimeSwitchesSchema } from "../src/db/migrations/196_omp_tui_runtime_switches.js";
+import { ompTuiRuntimeSwitchesSchema } from "../src/db/migrations/197_omp_tui_runtime_switches.js";
 
 it("retains an interrupted runtime switch when upgrading to OMP-capable switches", () => {
   const db = createDb();

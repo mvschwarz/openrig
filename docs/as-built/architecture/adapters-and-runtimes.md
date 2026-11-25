@@ -402,7 +402,10 @@ After the check, the local seats whose tiles opened go to `RexAgentStatusRelay`
 client attached to the seat whose `client_termtype` (its XTVERSION reply) names
 Rex. Later activity changes (the same hook-or-pane resolution that recovers
 prompt wakes in `startup.ts`) are written to each Rex client that doesn't already
-have that report; an unknown activity is written as `state=clear`. A client the
+have that report; an unknown activity is written as `state=clear`. Every report,
+a clear included, carries `id=openrig`, so it replaces and clears only OpenRig's
+own record and leaves the agent's own report (the record without an id) and its
+other records alone. A client the
 relay has no record for (after a daemon restart, or one that moved from another
 seat) gets the current report too, a clear included. After a partial write, the
 next write to that terminal starts with ST to close the unfinished OSC. The relay
