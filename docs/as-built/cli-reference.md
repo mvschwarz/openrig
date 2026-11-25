@@ -1262,6 +1262,8 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | `rig network connect <seat>` | — | `--as <participant>` **required**<br>`--hub <url>`<br>`--token-file <path>`<br>`--allow-http`<br>`--json` |
 | `rig network status` | — | `--json` |
 | `rig network disconnect <binding-or-seat>` | — | `--reason <text>`<br>`--json` |
+| `rig network peers <binding-or-seat>` | — | `--json` |
+| `rig network request <binding-or-seat> <peer>` | — | `--id <request-id>` **required**<br>`--body-file <path>` **required**<br>`--summary <text>`<br>`--json` |
 
 ### startup-proof
 
@@ -1278,7 +1280,7 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | `rig scope slice` | — | — |
 | `rig scope slice ls` | — | `--mission <name>`<br>`--state <state>`<br>`--json` |
 | `rig scope slice show <slice-path>` | — | `--mission <name>`<br>`--json` |
-| `rig scope slice create <mission> <slug>` | — | `--template <kind>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--readme-only`<br>`--json` |
+| `rig scope slice create <mission> <slug>` | — | `--template <kind>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--execution-depends-on <dot-id...>`<br>`--readme-only`<br>`--json` |
 | `rig scope slice ship <slice-path> <release-mission>` | — | `--mission <name>`<br>`--json` |
 | `rig scope slice close <slice-path>` | — | `--reason <reason>` **required**<br>`--in-place`<br>`--note <text>`<br>`--mission <name>`<br>`--json` |
 | `rig scope slice move <slice-path> <dest-mission>` | — | `--mission <name>`<br>`--json` |

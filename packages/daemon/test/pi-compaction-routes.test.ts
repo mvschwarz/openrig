@@ -140,6 +140,18 @@ describe("Pi compaction route with real runner", () => {
     expect(f.commands).toEqual(["/openrig-compact attempt-1"]);
   });
 
+  it("refuses early acknowledgement for Pi before sending any input", async () => {
+    const f = fixture();
+    const response = await f.app.request("/api/compaction/trigger", {
+      method: "POST",
+      headers: { Authorization: "Bearer synthetic-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ session: "pi@test", earlyAck: true }),
+    });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ ok: false, reason: "early_ack_unsupported" });
+    expect(f.commands).toEqual([]);
+  });
+
   it("reports a later unsupported compact RPC as that attempt's outcome and refuses retry", async () => {
     const f = fixture();
     const first = await f.trigger();

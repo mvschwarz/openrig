@@ -28,6 +28,7 @@ import { buildOutboundMessage } from "../../daemon/src/domain/gateway/slack/mess
 import { mcpCommand } from "../src/commands/mcp.js";
 import { addGrant, McpHttpConfigError, revokeGrant, startMcpHttpServer, withGrantsLock, rotateGrant, type McpHttpOptions } from "../src/mcp-http.js";
 import { setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
+import { DaemonClient } from "../src/client.js";
 
 const INITIALIZE = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "probe", version: "1" } } };
 
@@ -660,6 +661,72 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       expect((await post(served.url, { Authorization: `Bearer ${credential}` })).status).toBe(401);
     });
 
+    it.each([
+      ["result", 0, 0], ["result", 1, 1], ["result", 1001, 2], ["result", 600_001, 600],
+      ["access", 0, 0], ["access", 1, 1], ["access", 1001, 2], ["access", 600_001, 600],
+    ] as const)("normalizes generic new-work backoff from %s (%i ms -> %i seconds)", async (location, delay, seconds) => {
+      prepare();
+      const answer = profile();
+      const delayed = location === "result" ? { ...answer, access: { ...answer.access, newWorkRetryAfterMs: 9000 }, newWorkRetryAfterMs: delay }
+        : { ...answer, access: { ...answer.access, newWorkRetryAfterMs: delay } };
+      const call = await connect((await listen({ resolver: async () => delayed })).url, credential);
+      const result = await call("rig_queue_create", { qitemId: "qitem-delay-boundary", destination: "peer@team", body: "work" });
+      if (seconds === 0) {
+        expect(result.isError).toBe(false);
+        expect(rows()).toBe(1);
+      } else {
+        expect(result.structured).toMatchObject({ code: "fair_use_retry_later", retryable: true, retryAfterSeconds: seconds,
+          qitemId: "qitem-delay-boundary", outcome: "not_written" });
+        expect(result.text).toContain("this connection is waiting");
+        expect(result.text).not.toContain("this account");
+        expect(rows()).toBe(0);
+      }
+    });
+
+    it("keeps opaque resolver callers' reads, settlement and landed retries usable during generic backoff", async () => {
+      prepare();
+      let delay = 0;
+      const call = await connect((await listen({ resolver: async () => ({ ...profile(), newWorkRetryAfterMs: delay }) })).url, credential);
+      expect((await call("rig_queue_create", { qitemId: "qitem-landed-generic", destination: "peer@team", body: "landed" })).isError).toBe(false);
+      await repo.create({ qitemId: "qitem-owned-generic", sourceSession: "peer@team", destinationSession: "caller@team", body: "finish this" });
+      delay = 9000;
+      const held = await call("rig_queue_create", { destination: "peer@team", body: "new work" });
+      expect(held.structured).toMatchObject({ code: "fair_use_retry_later", retryable: true, retryAfterSeconds: 9, outcome: "not_written", qitemId: expect.any(String) });
+      expect((await call("rig_queue_create", { qitemId: "qitem-landed-generic", destination: "peer@team", body: "landed" })).isError).toBe(false);
+      expect((await call("rig_queue_show", { qitemId: "qitem-owned-generic" })).isError).toBe(false);
+      expect((await call("rig_queue_list")).isError).toBe(false);
+      expect((await call("rig_queue_claim", { qitemId: "qitem-owned-generic" })).isError).toBe(false);
+      expect((await call("rig_queue_update", { qitemId: "qitem-owned-generic", state: "done", closureReason: "no-follow-on", resolution: "finished" })).isError).toBe(false);
+      expect(repo.getById("qitem-owned-generic")?.state).toBe("done");
+      expect(rows()).toBe(2);
+    });
+
+    it.each(["unavailable", "disconnected", "absent"] as const)("reports %s readback honestly during generic backoff", async reading => {
+      prepare();
+      const served = await listen({ resolver: async () => ({ ...profile(), newWorkRetryAfterMs: 1001 }),
+        clientFactory: (url, sessionName, principal) => {
+          const client = new DaemonClient(url, { sessionName, principal });
+          const get = client.get.bind(client);
+          client.get = async (route, ...rest) => {
+            if (route === "/api/queue/qitem-unread-generic") {
+              if (reading === "disconnected") throw new Error("fixture read failed");
+              return { status: reading === "absent" ? 404 : 503, data: {} };
+            }
+            return get(route, ...rest);
+          };
+          return client;
+        } });
+      const call = await connect(served.url, credential);
+      const held = await call("rig_queue_create", { qitemId: "qitem-unread-generic", destination: "peer@team", body: "maybe earlier" });
+      expect(held.structured).toMatchObject({ code: "fair_use_retry_later", retryAfterSeconds: 2, qitemId: "qitem-unread-generic", outcome: "not_written" });
+      if (reading === "absent") expect(held.structured).not.toHaveProperty("earlierAttempt");
+      else {
+        expect(held.structured).toHaveProperty("earlierAttempt", "unknown");
+        expect(held.text).toContain("Whether an earlier attempt with this id was saved is unknown");
+      }
+      expect(rows()).toBe(0);
+    });
+
     it("passes ordered operation metadata and retains authentication before parse errors", async () => {
       prepare();
       let denied = false;
@@ -929,6 +996,20 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       const denied = await call("rig_queue_create", { destination: "peer@team", body: "work" }).catch(() => ({ isError: true }));
       expect(denied.isError).toBe(true);
       expect(rows()).toBe(0);
+    });
+
+    it.each([[0, 0], [0.001, 1], [1.001, 2], [600.001, 600]])("normalizes local new-work backoff (%s seconds -> %i seconds)", async (delay, seconds) => {
+      prepare();
+      const token = await scopedGrant({ newWorkRetryAfterSeconds: delay });
+      const call = await connect((await listen()).url, token);
+      const result = await call("rig_queue_create", { qitemId: "qitem-local-delay", destination: "peer@team", body: "work" });
+      if (seconds === 0) {
+        expect(result.isError).toBe(false);
+        expect(rows()).toBe(1);
+      } else {
+        expect(result.structured).toMatchObject({ code: "fair_use_retry_later", retryAfterSeconds: seconds, outcome: "not_written", qitemId: "qitem-local-delay" });
+        expect(rows()).toBe(0);
+      }
     });
 
     it("applies local new-work backoff while same-id retries, reads and existing work continue", async () => {

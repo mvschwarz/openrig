@@ -147,11 +147,54 @@ describe("Claude composer with the background task panel below its footer (#2700
     expect(inspectComposerInput(banner, runtime)).toMatchObject({ state: "empty" });
   });
 
+  it.each(RUNTIMES)("case 9b: reads the empty composer with the Remote Control indicator between the footer and the panel (runtime %s)", runtime => {
+    // Edited: Claude's "/rc failed" indicator row right under the mode footer, above the blank row and the panel.
+    const failed = edit(F2, rows => { rows.splice(6, 0, `${" ".repeat(68)}\x1b[38;5;211m/rc\x1b[39m \x1b[38;5;211mfailed\x1b[39m`); });
+    expect(inspectComposerInput(failed, runtime)).toMatchObject({ state: "empty" });
+    // Edited: the same row as a near miss, which leaves the panel without a footer right above it.
+    expect(inspectComposerInput(edit(F2, rows => { rows.splice(6, 0, "/rc failed now"); }), runtime)).toMatchObject(unrecognized);
+  });
+
   it.each(RUNTIMES)("case 9c: leaves Claude's effort row under the footer as it was, without a \"◯\" row (runtime %s)", runtime => {
     // Edited: the panel replaced by Claude 2.1.220's effort row right under the mode footer. It is not a task panel,
     // so it is not skipped and the read stays what it was before the panel was recognized.
     const effort = edit(F2, rows => { rows.splice(6, 3, "  ● high · /effort", ""); });
     expect(inspectComposerInput(effort, runtime)).toMatchObject(unrecognized);
+  });
+});
+
+// F3: an idle Claude 2.1.330 seat whose Remote Control connection failed, with "/rc failed" on its own row under the mode
+// footer and the update banner (owner-sanitized capture, rows 18-22 as captured: prompt, closing rule, footer, banner,
+// indicator). Every draft-aware send to it held as draft_input_unknown.
+const F3 = load("claude-rc-failed-composer.json");
+const F3_PROMPT_ROW = 18;
+const F3_INDICATOR_ROW = 22;
+
+describe("Claude composer above the Remote Control indicator (F3)", () => {
+  it("case 0: keeps the captured fixture as described", () => {
+    expect(F3.cursor).toEqual({ x: 2, y: F3_PROMPT_ROW, width: 80, height: 24 });
+    const rows = plain(F3.screen).split("\n");
+    expect(rows[20]).toMatch(/^ {2}⏵⏵ bypass permissions on/);
+    expect(rows[21]!.trim()).toBe("✔ Update installed · /restart to apply");
+    expect(rows[F3_INDICATOR_ROW]).toBe(`${" ".repeat(68)}/rc failed`);
+  });
+
+  it.each(RUNTIMES)("reads the captured idle composer as empty, and the seat as idle (runtime %s)", runtime => {
+    expect(inspectComposerInput(F3, runtime)).toMatchObject({ state: "empty", rows: [""] });
+    expect(classifyPaneActivity(plain(F3.screen), { runtime: "claude-code" })).toMatchObject({ state: "agent_idle" });
+  });
+
+  it.each(RUNTIMES)("reads a draft on the captured prompt row as its exact text (runtime %s)", runtime => {
+    // Edited: a draft typed on the captured prompt row, the cursor after it.
+    const draft = edit(F3, rows => { rows[F3_PROMPT_ROW] = "\x1b[39m❯\xa0preserve this draft"; }, { x: 2 + "preserve this draft".length });
+    expect(inspectComposerInput(draft, runtime)).toMatchObject({ state: "text", rows: ["preserve this draft"], cursorAtEnd: true });
+  });
+
+  it.each(RUNTIMES)("keeps a near miss of the indicator, or the indicator selected, unrecognized (runtime %s)", runtime => {
+    // Edited: the indicator row redrawn as a near miss, as the selected indicator with its key hint, and drawn inverse.
+    for (const row of [`${" ".repeat(64)}/rc failed now`, `${" ".repeat(52)}/rc failed · Enter to view`, `${" ".repeat(68)}\x1b[7m/rc failed\x1b[27m`]) {
+      expect(inspectComposerInput(edit(F3, rows => { rows[F3_INDICATOR_ROW] = row; }), runtime)).toMatchObject(unrecognized);
+    }
   });
 });
 
@@ -269,15 +312,18 @@ const LABEL = "[Pasted text #1 +70 lines]";
 const PASTE_HINT = "  \x1b[38;5;246mpaste again to expand\x1b[39m";
 
 describe.each([
-  ["F1", F1, 6],
-  ["F2", F2, 5],
-] as const)("draft-aware delivery to a real %s composer (#2700)", (name, base, footerRow) => {
+  ["F1", F1, 6, PROMPT_ROW],
+  ["F2", F2, 5, PROMPT_ROW],
+  ["F3", F3, 20, F3_PROMPT_ROW],
+] as const)("draft-aware delivery to a real %s composer (#2700)", (name, base, footerRow, promptRow) => {
+  const typedOn = (text: string) =>
+    edit(base, rows => { rows[promptRow] = `${PROMPT}${text}`; }, { x: 2 + [...text].length });
   // What the seat shows for the delivery's own body: a short message on the prompt row, or, for a long one, Claude's
   // collapsed label with its mode footer replaced by the paste hint (as claude-paste-footer.json records it).
   const shown = (body: string) => {
     if (!body) return edit(base);
-    if (!body.includes("\n")) return typed(base, body);
-    return edit(typed(base, LABEL), rows => { rows[footerRow] = PASTE_HINT; });
+    if (!body.includes("\n")) return typedOn(body);
+    return edit(typedOn(LABEL), rows => { rows[footerRow] = PASTE_HINT; });
   };
 
   it(`case 12: delivers a short message into the empty ${name} composer`, async () => {
@@ -299,7 +345,7 @@ describe.each([
 
   it(`case 12: holds a delivery behind a person's draft in the ${name} composer as busy`, async () => {
     // Edited: the person's unfinished note on the prompt row, unchanged for every read.
-    const f = delivery(() => typed(base, "unfinished note")); await f.enable();
+    const f = delivery(() => typedOn("unfinished note")); await f.enable();
     expect(await f.send(`${name}-draft`, "incoming message")).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
     expect(f.writes).toEqual([]);
     expect(f.submissions).toEqual([]);

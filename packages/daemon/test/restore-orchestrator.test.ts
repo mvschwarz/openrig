@@ -48,6 +48,7 @@ import { Hono } from "hono";
 import { providerRoutes } from "../src/routes/provider.js";
 import type { ClaudeSeatRelaunch } from "../src/domain/provider/provider-service.js";
 import { buildRestorePlanPreview } from "../src/domain/restore-plan-preview.js";
+import { validateResumeToken } from "../src/domain/resume-token-validation.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, observeOmpApprovalMode, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
@@ -4797,6 +4798,44 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  // A seat waiting with no saved startup context: `rig seat set-resume-token` has no token type for a community harness,
+  // so the reason doesn't name it for the shipped Cursor example's seat, which resumes but recorded no conversation.
+  it("a resumable community seat with no token or startup context waits, and its reason names no token command it can't use", async () => {
+    const saved = process.env["OPENRIG_HOME"];
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "restore-community-no-context-"));
+    try {
+      process.env["OPENRIG_HOME"] = home;
+      fs.mkdirSync(path.join(home, "community-harnesses"));
+      fs.copyFileSync(path.resolve(__dirname, "../../../docs/reference/community-harness-examples/cursor/cursor.yaml"),
+        path.join(home, "community-harnesses", "cursor.yaml"));
+      const rig = rigRepo.createRig("test-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-cursor", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "cursor", podId: "pod-cursor" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.recordCommunityHarnessSelection(session.id, "cursor");
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+      const launchHarness = vi.fn(async () => ({ ok: true as const }));
+      const mockAdapter = { runtime: "cursor", listInstalled: vi.fn(async () => []), project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })), checkReady: vi.fn(async () => ({ ready: true })), launchHarness };
+      const result = await createOrchestrator().restore(snap.id, { adapters: { cursor: mockAdapter as never } });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      const restored = result.result.nodes.find((n) => n.nodeId === node.id)!;
+      expect(restored).toMatchObject({ status: "awaiting-decision", noStartupContext: true });
+      expect(restored.error).toBe("Original session unresumable: no resume token was captured for this seat. The seat has no saved startup context either, so it can't be started fresh. No session was started. Restore the original session manually.");
+      expect(launchHarness).not.toHaveBeenCalled();
+      // The command would address this session; its runtime is what it refuses (the route answers 422 invalid_token).
+      expect(sessionRegistry.findResumeContextByName("dev-impl@test-rig")).toMatchObject({ sessionId: session.id, runtime: "cursor" });
+      expect(validateResumeToken("cursor", "chat-abc")).toMatchObject({ ok: false });
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("a free-text runtime seat that wasn't launched for a community harness keeps the existing restore result", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-free-text", rig.id, "Dev");
@@ -6891,7 +6930,12 @@ describe("RestoreOrchestrator", () => {
       if (!result.ok) return;
       const node = result.result.nodes[0]!;
       expect(node.status).toBe("awaiting-decision");
-      expect(node.error).toMatch(/rig seat launch 'worker@[^']+' --fresh --reason "<why>"/);
+      // This seat has no saved startup context, so the fresh launch would refuse: the reason offers none and names how to
+      // record the token instead.
+      expect(node.error).toContain("The seat has no saved startup context either, so it can't be started fresh.");
+      expect(node.error).toMatch(/rig seat set-resume-token \S+ --token-stdin/);
+      expect(node.error).not.toContain("rig seat launch");
+      expect(node.noStartupContext).toBe(true);
       // ZERO session started: launchNode never called, session count unchanged.
       expect(launchSpy).not.toHaveBeenCalled();
       expect(after.c).toBe(before.c);

@@ -417,6 +417,7 @@ export function queueRoutes(): Hono {
         : err.code === "qitem_not_claimable" ? 409
         : err.code === "qitem_not_in_progress" ? 409
         : err.code === "qitem_already_terminal" ? 409
+        : err.code === "relayed_answer_refused" ? 409
         // An update's expected state (--expect-state) no longer matches the row; nothing was written.
         : err.code === "qitem_state_changed" ? 409
         // OPR.0.4.6.MH3 Q-a: same minted id, different destination/source =
@@ -1419,6 +1420,28 @@ export function queueRoutes(): Hono {
     }
   });
 
+  app.post("/:qitemId/relayed-answer", async (c) => {
+    const body = await c.req.json<Record<string, unknown> | null>().catch(() => null);
+    const { attributedTo, text, channel, questionId, optionId, answeredAt, actor } = body ?? {};
+    if (typeof attributedTo !== "string" || !attributedTo.trim() || typeof text !== "string" || !text.trim()
+      || typeof channel !== "string" || !channel.trim() || (questionId !== undefined && typeof questionId !== "string")
+      || (optionId !== undefined && typeof optionId !== "string")
+      || (answeredAt !== undefined && (typeof answeredAt !== "string"
+        || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(answeredAt) || !Number.isFinite(Date.parse(answeredAt))))) {
+      return c.json({ error: "invalid_relayed_answer", message: "Pass attributedTo, verbatim text and channel; name questionId/optionId as applicable, and supply answeredAt as an ISO timestamp only if known." }, 400);
+    }
+    const identity = requireSenderIdentity(c, { verb: "relay an answer", bodyClaim: typeof actor === "string" ? actor : null });
+    if (!identity.ok) return identity.response;
+    { const held = switchCustody(c, identity.session); if (held) return held; }
+    try {
+      return c.json(getRepo(c).writeRelayedAnswer({ qitemId: c.req.param("qitemId"), actorSession: identity.session,
+        identityProvenance: resolveRecordedProvenance(c, identity),
+        relay: { attributedTo, text, channel, questionId, optionId, answeredAt } }));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
   // A decision made on the person's behalf, inside the decision room of the mode they have on. Recorded by the agent that
   // asked, on the ask's own row, beside the person's answers and never as one; refused when there's no room to decide in.
   app.post("/:qitemId/delegated-decision", async (c) => {
@@ -1638,7 +1661,7 @@ export function queueRoutes(): Hono {
   // `state=...`). Composable with destinationSession/sourceSession/
   // targetRepo/limit.
   // OPR.0.4.4.15 FR-1 — the aggregated attention read: ONE payload in the
-  // shared P4 fanout contract ({items, hosts}), local always included,
+  // shared P4 fanout contract ({items, hosts}); absent a host query, local is included,
   // subscribed remote hosts fanned out DAEMON-SIDE (bearer never in the
   // browser). A NEW sibling endpoint by arch ruling 3 — the existing
   // /list?attention=1 wire below stays byte-preserved (the strongest form
@@ -1656,7 +1679,7 @@ export function queueRoutes(): Hono {
       listLocalAttention: () => repo.listAttention({ state: ["pending", "in-progress", "blocked"] }) as unknown as AttentionItem[],
       listSubscriptions: () => (store ? store.listFeedHostSubscriptions() : []),
       loadRegistry: registryLoader,
-    });
+    }, c.req.query("host"));
     return c.json(payload);
   });
 
