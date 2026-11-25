@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { Hono } from "hono";
 import Database from "better-sqlite3";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NetworkBindingStore } from "../../daemon/src/domain/network/network-bindings.js";
@@ -234,4 +234,82 @@ it("says the hub lists no peers when the only entry is the asking seat", async (
   expect(String(out.mock.calls.at(-1)?.[0])).toBe("The hub lists no peers for alex@team.");
   await cli().parseAsync(["node", "rig", "network", "peers", "netb-fixture", "--json"]);
   expect(JSON.parse(String(out.mock.calls.at(-1)?.[0])).team).not.toHaveProperty("hostedMembers");
+});
+
+/** No seat to default to: no seat env and no tmux pane to read one from. */
+function outsideASeat() {
+  vi.stubEnv("OPENRIG_SESSION_NAME", "");
+  vi.stubEnv("RIGGED_SESSION_NAME", "");
+  vi.stubEnv("TMUX_PANE", "");
+}
+
+// Left out, the binding or seat is the calling seat, which the daemon resolves to that seat's binding.
+it("lists the calling seat's peers when no binding or seat is named, and with no seat names the missing argument", async () => {
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  hubPeers([{ session: "lead@team" }]);
+  vi.stubEnv("OPENRIG_SESSION_NAME", "dev-impl@lab");
+  await cli().parseAsync(["node", "rig", "network", "peers", "--json"]);
+  expect(JSON.parse(String(out.mock.calls.at(-1)?.[0])).bindingId).toBe("dev-impl@lab");
+  expect(process.exitCode).toBeUndefined();
+
+  outsideASeat();
+  out.mockClear();
+  await cli().parseAsync(["node", "rig", "network", "peers"]);
+  expect(err.mock.calls.at(-1)?.[0]).toBe("error: missing required argument 'binding-or-seat'");
+  expect(process.exitCode).toBe(1);
+  expect(out).not.toHaveBeenCalled();
+});
+
+it("says the calling seat has no binding when it isn't connected", async () => {
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.stubEnv("OPENRIG_SESSION_NAME", "dev-impl@lab");
+  await cli().parseAsync(["node", "rig", "network", "peers"]);
+  expect(err.mock.calls.at(-1)?.[0]).toBe("No network binding or connected seat is named 'dev-impl@lab'. (binding_not_found)");
+  expect(process.exitCode).toBe(1);
+});
+
+function hubRequests() {
+  app = new Hono();
+  app.post("/api/network/bindings/:id/requests", async (c) => c.json({ ref: c.req.param("id"), ...(await c.req.json()), state: "sent", message: "Sent." }, 201));
+}
+
+it("sends a request through the calling seat when only the peer is named, and through a named binding as before", async () => {
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  hubRequests();
+  const ask = join(home, "ask.md");
+  writeFileSync(ask, "Summarize the open review.");
+  vi.stubEnv("OPENRIG_SESSION_NAME", "dev-impl@lab");
+
+  await cli().parseAsync(["node", "rig", "network", "request", "lead@team", "--id", "req-1", "--body-file", ask, "--json"]);
+  expect(posts.at(-1)?.url).toBe("/api/network/bindings/dev-impl%40lab/requests");
+  expect(JSON.parse(String(out.mock.calls.at(-1)?.[0]))).toMatchObject({ ref: "dev-impl@lab", peer: "lead@team", requestId: "req-1", body: "Summarize the open review." });
+
+  await cli().parseAsync(["node", "rig", "network", "request", "netb-fixture", "lead@team", "--id", "req-2", "--body-file", ask, "--json"]);
+  expect(posts.at(-1)?.url).toBe("/api/network/bindings/netb-fixture/requests");
+  expect(JSON.parse(String(out.mock.calls.at(-1)?.[0]))).toMatchObject({ ref: "netb-fixture", peer: "lead@team", requestId: "req-2" });
+  expect(process.exitCode).toBeUndefined();
+});
+
+it("names the missing peer, or with only a peer and no seat the missing binding, and sends nothing", async () => {
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  hubRequests();
+  vi.stubEnv("OPENRIG_SESSION_NAME", "dev-impl@lab");
+  await cli().parseAsync(["node", "rig", "network", "request", "--id", "req-1", "--body-file", join(home, "missing.md")]);
+  expect(err.mock.calls.at(-1)?.[0]).toBe("error: missing required argument 'peer'");
+  expect(process.exitCode).toBe(1);
+
+  process.exitCode = undefined;
+  outsideASeat();
+  await cli().parseAsync(["node", "rig", "network", "request", "lead@team", "--id", "req-1", "--body-file", join(home, "missing.md")]);
+  expect(err.mock.calls.at(-1)?.[0]).toBe("error: missing required argument 'binding-or-seat'");
+  expect(process.exitCode).toBe(1);
+  expect(posts).toEqual([]);
+});
+
+it("shows the binding or seat as optional in each verb's usage", () => {
+  const network = networkCommand();
+  const usage = (name: string) => network.commands.find((c) => c.name() === name)!.helpInformation().split("\n")[0];
+  expect(usage("peers")).toBe("Usage: network peers [options] [binding-or-seat]");
+  expect(usage("request")).toBe("Usage: network request [options] [binding-or-seat] <peer>");
 });

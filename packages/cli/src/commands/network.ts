@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { lstatSync, readFileSync } from "node:fs";
 import { DaemonClient, operatorAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { resolveSenderSession } from "../sender-identity.js";
 import { realDeps } from "./daemon.js";
 
 export interface NetworkDeps {
@@ -107,6 +108,17 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
     }
     console.log(json ? JSON.stringify(data, null, 2) : ok(data as Record<string, unknown>));
   };
+  const missingArgument = (name: string) => {
+    console.error(`error: missing required argument '${name}'`);
+    process.exitCode = 1;
+  };
+  /** A left-out binding or seat is the calling seat, resolved as the seat-acting verbs resolve it; the daemon finds a
+   *  seat's binding by its address. With no seat to use, the error is the one the required argument gave. */
+  const ownSeat = (): string | undefined => {
+    const seat = resolveSenderSession();
+    if (!seat) missingArgument("binding-or-seat");
+    return seat;
+  };
 
   cmd.command("enroll")
     .description("Enroll this daemon in an account with the one-time code its page shows, so seats connect by name")
@@ -198,9 +210,11 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
 
   cmd.command("peers")
     .description("List the peers a connected seat can send requests to, as its hub answers")
-    .argument("<binding-or-seat>", "The binding id, or the connected seat's address")
+    .argument("[binding-or-seat]", "The binding id, or the connected seat's address. Left out, your own seat")
     .option("--json", "Print JSON")
-    .action(async (ref: string, opts: { json?: boolean }) => {
+    .action(async (given: string | undefined, opts: { json?: boolean }) => {
+      const ref = given ?? ownSeat();
+      if (!ref) return;
       const daemon = await client();
       if (!daemon) return;
       const res = await daemon.get<Record<string, unknown>>(`/api/network/bindings/${encodeURIComponent(ref)}/peers`, { timeoutMs: ACCOUNT_WRITE_TIMEOUT_MS });
@@ -214,8 +228,11 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
 
   cmd.command("request")
     .description("Send a request to a peer through a connected seat's hub; its answer comes back to a local queue item")
-    .argument("<binding-or-seat>", "The binding id, or the connected seat's address")
-    .argument("<peer>", "The peer's address in the hub, as rig network peers lists it")
+    // Commander fills arguments in order, so an optional one can't come before a required one: both are optional here,
+    // and one argument given is the peer.
+    .usage("[options] [binding-or-seat] <peer>")
+    .argument("[binding-or-seat]", "The binding id, or the connected seat's address. Left out, your own seat")
+    .argument("[peer]", "The peer's address in the hub, as rig network peers lists it")
     .requiredOption("--id <request-id>", "Your own id for this request, unique to it: the local item's id. Retry only with the same id")
     .requiredOption("--body-file <path>", "A file holding the request: what to do and what to return")
     .option("--summary <text>", "One-line summary")
@@ -235,7 +252,11 @@ add --wake-after 4h (your choice) to the block to be woken anyway.
 A request id starting fold:, auth: or external: is read by block as a gate, not as
 this item, so nothing wakes the row for it: give a request you'll wait on another id.
 rig whoami names your binding.`)
-    .action(async (ref: string, peer: string, opts: { id: string; bodyFile: string; summary?: string; json?: boolean }) => {
+    .action(async (first: string | undefined, second: string | undefined, opts: { id: string; bodyFile: string; summary?: string; json?: boolean }) => {
+      if (first === undefined) return missingArgument("peer");
+      const peer = second ?? first;
+      const ref = second === undefined ? ownSeat() : first;
+      if (!ref) return;
       let body: string;
       try { body = readFileSync(opts.bodyFile, "utf8"); } catch (error) {
         console.error(`Can't read the body file: ${(error as Error).message}`);
