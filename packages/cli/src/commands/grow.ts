@@ -235,13 +235,13 @@ export function growCommand(depsOverride?: StatusDeps): Command {
         if (detail && !nodes.some((node) => node.error && detail.includes(node.error))) {
           console.error(`  ${detail}`);
         }
-        for (const warning of warnings) console.error(`  Warning: ${warning}`);
         if (retryTargets.length > 0) {
           console.error("  Failed nodes can be relaunched individually. Recover by:");
           for (const target of retryTargets) console.error(`    rig launch ${resolvedRigId} ${target}`);
         }
       }
 
+      if (!opts.json) for (const warning of warnings) console.error(`  Warning: ${warning}`);
       if (!ok) process.exitCode = 1;
     });
 

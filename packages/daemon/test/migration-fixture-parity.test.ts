@@ -199,6 +199,45 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
       db.close();
     }
   });
+
+  it("181_node_keep_alive adds an off-by-default keep_alive column and the per-seat budget, and guards pre-181 databases", () => {
+    expect(ALL_MIGRATIONS.some((m) => m.name === "181_node_keep_alive.sql")).toBe(true);
+    const db = new Database(":memory:");
+    try {
+      db.pragma("foreign_keys = ON");
+      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "181_node_keep_alive.sql"));
+      const repo = new RigRepository(db);
+      const rig = repo.createRig("pre-181");
+      const legacyNode = repo.addNode(rig.id, "legacy", { runtime: "codex" });
+      expect("keepAlive" in legacyNode).toBe(false);
+      expect(repo.setNodeKeepAlive(legacyNode.id, false)).toBe(false);
+      expect(() => repo.setNodeKeepAlive(legacyNode.id, true)).toThrow(/migration/i);
+      expect(() => repo.addNode(rig.id, "unmigrated-kept", { runtime: "codex", keepAlive: true })).toThrow(/migration/i);
+      expect(db.prepare("SELECT id FROM nodes WHERE logical_id = 'unmigrated-kept'").get()).toBeUndefined();
+
+      migrate(db, ALL_MIGRATIONS);
+      const col = (db.prepare("PRAGMA table_info(nodes)").all() as Array<{ name: string; notnull: number; dflt_value: string | null }>)
+        .find((c) => c.name === "keep_alive");
+      expect(col?.notnull).toBe(1);
+      expect(col?.dflt_value).toBe("0");
+      // The existing node keeps today's behaviour: off.
+      expect(db.prepare("SELECT keep_alive FROM nodes WHERE id = ?").get(legacyNode.id)).toEqual({ keep_alive: 0 });
+      expect(() => db.prepare("UPDATE nodes SET keep_alive = 2 WHERE id = ?").run(legacyNode.id)).toThrow(/CHECK/i);
+      const kept = repo.addNode(rig.id, "migrated-kept", { runtime: "codex", keepAlive: true });
+      expect(kept.keepAlive).toBe(true);
+
+      // The budget row belongs to its seat and goes with it.
+      db.prepare("INSERT INTO node_keep_alive_budget (node_id, incident_id) VALUES (?, ?)").run(kept.id, "incident-1");
+      expect(db.prepare(
+        "SELECT attempts, exhausted_at, recovered_at, last_outcome FROM node_keep_alive_budget WHERE node_id = ?",
+      ).get(kept.id)).toEqual({ attempts: 0, exhausted_at: null, recovered_at: null, last_outcome: null });
+      expect(() => db.prepare("UPDATE node_keep_alive_budget SET last_outcome = 'maybe' WHERE node_id = ?").run(kept.id)).toThrow(/CHECK/i);
+      db.prepare("DELETE FROM nodes WHERE id = ?").run(kept.id);
+      expect(db.prepare("SELECT COUNT(*) AS n FROM node_keep_alive_budget").get()).toEqual({ n: 0 });
+    } finally {
+      db.close();
+    }
+  });
 });
 
 

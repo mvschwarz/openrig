@@ -163,6 +163,8 @@ describe("routine closed-work retention", () => {
   });
 
   it("removes content past the content window and the row past the metadata window, from when each row closed", async () => {
+    db.prepare("UPDATE queue_items SET relayed_answers = ? WHERE qitem_id = 'r-old-done'")
+      .run(JSON.stringify({ relays: [{ text: "secret-r-old-done relay" }], corrections: [{ text: "secret-r-old-done correction" }], returnId: null }));
     const report = await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 90 }, apply: true, nowIso: NOW });
     expect(report.qitems.map((q) => [q.qitemId, q.action])).toEqual([["r-ancient-canceled", "delete"], ["r-old-done", "scrub"]]);
     const all = everything();
@@ -173,6 +175,7 @@ describe("routine closed-work retention", () => {
     // The scrubbed row stays, with its identity, endpoints and state.
     const kept = db.prepare("SELECT source_session, destination_session, state, body, content_erased_at FROM queue_items WHERE qitem_id = 'r-old-done'").get();
     expect(kept).toEqual({ source_session: A, destination_session: B, state: "done", body: "", content_erased_at: NOW });
+    expect(repo.getById("r-old-done")).not.toHaveProperty("relayedAnswers");
     const event = db.prepare("SELECT payload FROM events WHERE json_extract(payload, '$.qitemId') = 'r-old-done'").get() as { payload: string };
     expect(JSON.parse(event.payload)).toMatchObject({ type: "queue.created", qitemId: "r-old-done", contentErased: true });
     // A second sweep finds nothing more to do.

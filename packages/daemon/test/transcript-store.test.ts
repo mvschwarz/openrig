@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, chmodSync, existsS
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TranscriptStore } from "../src/domain/transcript-store.js";
+import { HistoryQuery } from "../src/domain/history-query.js";
 import {
   startTranscriptRotation,
   stopTranscriptRotation,
@@ -50,6 +51,44 @@ describe("TranscriptStore", () => {
   });
 
   describe("writeBoundaryMarker", () => {
+    it("keeps a boundary after an unterminated transcript through the next capture", async () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      const session = "dev-impl@my-rig";
+      store.ensureTranscriptDir("my-rig");
+      const file = store.getTranscriptPath("my-rig", session);
+      writeFileSync(file, "prior output");
+      expect(store.writeBoundaryMarker("my-rig", session, "restore")).toBe(true);
+      const adapter = { capturePaneContent: vi.fn(async () => "successor output\n") };
+      try {
+        startTranscriptRotation(adapter as unknown as TmuxAdapter, session, file, { lines: 20, pollIntervalMs: 60_000 });
+        await vi.waitFor(() => expect(readFileSync(file, "utf8")).toContain("successor output"));
+        expect(readFileSync(file, "utf8")).toMatch(/^--- SESSION BOUNDARY: restore at .* ---\nsuccessor output\n$/);
+        const history = new HistoryQuery({ transcriptsRoot: tmpDir, exec: async () => ({ stdout: "", exitCode: 1 }) });
+        expect((await history.searchSeat("my-rig", session, "successor")).hits[0]?.generation).toBe(2);
+      } finally {
+        stopTranscriptRotation(session);
+      }
+    });
+
+    it.each([
+      ["an unterminated transcript", "prior output", "prior output\n"],
+      ["a newline-terminated transcript", "prior output\n", "prior output\n"],
+      ["an empty transcript", "", ""],
+    ])("writes a recognizable boundary after %s", async (_label, initial, prefix) => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      const file = store.getTranscriptPath("my-rig", "dev-impl@my-rig");
+      writeFileSync(file, initial);
+      expect(store.writeBoundaryMarker("my-rig", "dev-impl@my-rig", "restore")).toBe(true);
+      const withMarker = readFileSync(file, "utf8");
+      expect(withMarker.startsWith(`${prefix}--- SESSION BOUNDARY:`)).toBe(true);
+      writeFileSync(file, `${withMarker}successor output\n`);
+      const history = new HistoryQuery({ transcriptsRoot: tmpDir, exec: async () => ({ stdout: "", exitCode: 1 }) });
+      const result = await history.searchSeat("my-rig", "dev-impl@my-rig", "successor");
+      expect(result.generations).toBe(2);
+      expect(result.hits).toEqual([{ generation: 2, text: "successor output" }]);
+    });
+
     it("appends marker with ISO timestamp to file and returns true", () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("my-rig");

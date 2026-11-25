@@ -13,12 +13,13 @@ describe("recovery lookup work and fresh disposition", () => {
   function row(id: string, state = "pending", tags: string | null = "[]", updated = at) {
     db.prepare(`INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,tags,body)
       VALUES (?, ?, ?, 'sender@r', 'worker@r', ?, ?, 'exact retained body')`).run(id, at, updated, state, tags);
+    if (state === "done") db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session,closure_reason) VALUES (?,?,'done','owner@r','no-follow-on')").run(id, updated);
   }
   function transition(id: string, ts = at) {
     db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session,transition_note) VALUES (?,?,'pending','owner@r','actual owner change')").run(id, ts);
   }
-  beforeEach(() => { db = new Database(":memory:"); migrate(db, ALL_MIGRATIONS); repo = new QueueRepository(db, new EventBus(db)); });
-  afterEach(() => { vi.restoreAllMocks(); db.close(); });
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date(at)); db = new Database(":memory:"); migrate(db, ALL_MIGRATIONS); repo = new QueueRepository(db, new EventBus(db)); });
+  afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); db.close(); });
 
   it("reads a complete queue row once without a second unused recovery scan for its delivery receipt", () => {
     row("source"); row("arbitrary recovery", "blocked", JSON.stringify([recoveryTag("source")]));

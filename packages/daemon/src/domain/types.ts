@@ -47,6 +47,8 @@ export interface Node {
   processLimits?: import("./process-limits.js").ProcessLimits | null;
   /** #3253: the stored process_limits can't be read (kept as stored; only this seat's launch and status are affected). */
   processLimitsError?: string;
+  /** #2940: the seat declares keep_alive (resolved member > profile > agent defaults); present only when on. */
+  keepAlive?: boolean;
   /** #3416 (3): the seat's status line throttle in seconds (spec `statusline_throttle`, `rig seat set-statusline-throttle`);
    *  null/absent = none. */
   statuslineThrottle?: number | null;
@@ -137,6 +139,8 @@ export interface Session {
 export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unknown";
 /** A send's own screen check as it reported it, or nulls when none ran. */
 export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
+/** A seat's current usage-limit reading: when OpenRig recorded it, and the reset it states. */
+export type UsageLimitReading = { asOf: string; resetsAt: string };
 
 /** Facts a runner reports about its own process; launch authentication is not independent native verification. */
 export interface RunnerObservations {
@@ -205,7 +209,12 @@ export type RigEvent =
   | { type: "node.codex_permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; replaced?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.codex_profile_changed"; rigId: string; nodeId: string; from: string | null; to: string | null; observation?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
-  | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; reason: string; operator: string | null }
+  | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; sessionId?: string; reason: string; operator: string | null }
+  // #2940: the keep_alive supervisor's recovery of a fallen seat. `attempted` is persisted with the attempt's count before
+  // its launch starts; `exhausted` once per incident, when the attempts ran out or a launch outcome needs a person.
+  | { type: "seat.keep_alive.attempted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number }
+  | { type: "seat.keep_alive.recovered"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number; status: string }
+  | { type: "seat.keep_alive.exhausted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number; status?: string; lastError?: string }
   | { type: "session.cleaned"; rigId: string; nodeId: string; sessionName: string | null; reason: string; operator: string | null; actions: { sessionsExited: string[]; bindingCleared: boolean } }
   | { type: "node.launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
   | { type: "topology.roster_recorded"; rigId: string; intendedNodeIds: string[]; source: "materialized_topology" }
@@ -243,7 +252,10 @@ export type RigEvent =
       /** Slice 13: the seat routes through its hook bridge, which couldn't take this send (its waiter expired, say), so it
        *  went to typed delivery: why, as the sender's warning said it. A message queued for the bridge and typed later is
        *  named by `transport.hook_bridge_fallback` instead. */
-      hookBridgeUnavailable?: string }
+      hookBridgeUnavailable?: string;
+      /** The seat's current usage-limit reading when the send started, for a send whose text reached the input: its
+       *  agent isn't expected to read the text before the stated reset. */
+      usageLimit?: UsageLimitReading }
   /** Slice 13: a Claude seat's hook bridge. A waiter armed at a turn boundary; a batch was delivered into the seat's
    *  context (one model turn on the seat's login; delivered, not acted on); a waiter expired before its hook's timeout; or
    *  queued messages were handed back to typed delivery because the bridge had no live arm. */
@@ -382,6 +394,12 @@ export type RigEvent =
   // (null for legacy/omitted — always present, never absent, so consumers
   // can title feed cards without a second fetch).
   | { type: "queue.created"; qitemId: string; sourceSession: string; destinationSession: string; priority: string; tier: string | null; summary: string | null }
+  // #3728: a queue write or send the daemon refused or could not settle, so it stays diagnosable when the caller loses
+  // stderr. Three outcomes stay apart: these refusals (nothing stored), a send kept as a failed message in the sender's
+  // outbox (queue outbox list, not an event), and a forwarded write whose result is unknown. Never carries the body.
+  | { type: "queue.create_refused"; sourceSession: string | null; destinationSession: string | null; reason: string; status: number; hostId: string | null }
+  | { type: "queue.create_remote_unknown"; qitemId: string | null; sourceSession: string | null; destinationSession: string | null; hostId: string; failureClass: string }
+  | { type: "transport.send_refused"; senderSession: string | null; session: string | null; reason: string; status: number }
   | { type: "queue.handed_off"; qitemId: string; fromSession: string; toSession: string; closureReason: "handed_off_to"; summary: string | null }
   | { type: "queue.claimed"; qitemId: string; destinationSession: string; claimedAt: string; closureRequiredAt: string | null; summary: string | null }
   | { type: "queue.unclaimed"; qitemId: string; destinationSession: string; reason: string; summary: string | null }
@@ -604,6 +622,15 @@ export interface RestoreResult {
   excludedNodes?: RestoreExcludedNode[];
   /** The notice for seats this attempt left as bare shells: who was told, and the seats with no single destination. */
   harnessNotStarted?: import("./harness-not-started-notice.js").HarnessNotStartedReport;
+  /** Seats this restore left stopped on purpose, outside `nodes` so they don't count in `rigResult`: a seat pool agent
+   *  the pool drained (#3395) stays down until the pool brings it back. Present only when there is one. */
+  keptDown?: RestoreKeptDownNode[];
+}
+
+export interface RestoreKeptDownNode {
+  nodeId: string;
+  logicalId: string;
+  reason: "drained pool agent, not started";
 }
 
 export type RestoreRigResult = "fully_restored" | "partially_restored" | "failed" | "not_attempted";
@@ -622,8 +649,9 @@ export interface RestoreValidationBlocker {
 export interface RestoreNodeResult {
   /** Saved intended seat when this attempt launched a recreated node; nodeId names the registered current node. */
   intendedNodeId?: string;
-  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so. */
-  stage?: "harness_not_started";
+  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so.
+   *  `resume_rolled_back`: its resume failed and the blank session it launched was rolled back, so no agent runs in it. */
+  stage?: "harness_not_started" | "resume_rolled_back";
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
   launchStarted?: true;
   /** An in-place restore failed before its takeover stopped anything. It says nothing about whether the seat's process runs. */
@@ -633,11 +661,13 @@ export interface RestoreNodeResult {
   /** Set only by an explicit selected-history startup; these are runtime row IDs, not native tokens. */
   sourceSessionId?: string;
   resultSessionId?: string;
-  /** Set only by an explicit selected-history startup: this launch was rolled back, and the seat's binding and sessions
-   *  as they were before it were put back. */
+  /** Set by an explicit selected-history startup, and by a keep_alive relaunch refused for a daemon shutdown (#2940):
+   *  this launch was rolled back (every terminal it started was stopped, tmux confirmed it), and the seat's binding and
+   *  sessions as they were before it were put back. */
   compensated?: true;
-  /** Set only by an explicit selected-history startup: this seat's restore returned before its launch, so no terminal was
-   *  started, no session registered and no resume sent. */
+  /** Set by an explicit selected-history startup, and by a keep_alive relaunch refused for a daemon shutdown (#2940):
+   *  this seat's restore returned before its launch, so no terminal was started, no session registered and no resume
+   *  sent. */
   notStarted?: true;
   // L3: `attention_required` is set when the post-launch probe detects a
   // Claude resume-selection prompt. `operator_recovered` is the terminal
@@ -676,6 +706,9 @@ export interface RestoreNodeResult {
   /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
    *  and doesn't leave the rig partially restored. */
   noConversation?: true;
+  /** An `awaiting-decision` seat with no saved startup context: a fresh start (`rig seat launch --fresh`) reads that
+   *  context and refuses without it, so the seat's reason offers none and callers shouldn't either. */
+  noStartupContext?: true;
   /** #3253: the seat was launched without its requested process limit (the request stays stored; a fresh launch
    *  applies it). */
   processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
@@ -809,6 +842,7 @@ export interface SeatIdentityVerdict {
     | "pane_pid_gone"
     | "binding_pane_missing"
     | "session_missing"
+    | "session_missing_tmux_unavailable"
     | "pane_exited"
     | "tmux_unavailable"
     | null;
@@ -825,10 +859,11 @@ export interface SeatIdentityVerdict {
   observedAt: string;
 }
 
-/** Only a confirmed missing session proves the seat is no longer running.
+/** Only a confirmed missing session proves the seat is no longer running. A later unreadable sample
+ * retains that evidence and notes its uncertainty; it is not a new absence observation.
  * Callers must first gate the verdict to the current session and binding. */
 export function identityVerdictConfirmsSessionMissing(verdict: SeatIdentityVerdict | null | undefined): boolean {
-  return verdict?.reason === "session_missing";
+  return verdict?.reason === "session_missing" || verdict?.reason === "session_missing_tmux_unavailable";
 }
 
 /** Positive executor absence only. Unknown identity or an unreadable pane never proves an exit.
@@ -886,6 +921,14 @@ export interface NodeInventoryEntry {
   /** The latest session was explicitly stopped and has no replacement binding.
    * It remains non-running, but is not a missing member in the rig lifecycle. */
   intentionallyStopped?: boolean;
+  /** #2940: a supported stop was requested and is not confirmed yet; the seat is not reported as exited. */
+  stopRequested?: boolean;
+  /** #2940: the seat declares keep_alive, so the daemon relaunches it when it falls; absent = off. */
+  keepAlive?: boolean;
+  /** #2940: the keep_alive seat's current recovery incident, when it has one: the attempts spent, whether they ran out
+   *  (the seat then waits for a person, as lifecycle `attention_required` while it isn't running), the last error and
+   *  when the last attempt started. */
+  keepAliveIncident?: { attempts: number; exhausted: boolean; lastError: string | null; lastAttemptAt: string | null };
   // Current projection: an applicable identity failure down-ranks a running
   // session to attention_required; the stored startup result stays unchanged.
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
@@ -1187,6 +1230,9 @@ export interface LifecycleDefaults {
    *  is a materialization-time refusal for apprentice-handover. */
   mechanic?: string;
   restorePolicy?: "resume_if_possible" | "relaunch_fresh" | "checkpoint_only";
+  /** #2940: relaunch the seat when it falls while the daemon runs (not when it is stopped on purpose). Absent at every
+   *  level = off; unlike the fields above, the defaults level doesn't materialize it. */
+  keepAlive?: boolean;
 }
 
 /** What a restore that keeps a seat's conversation does with this skill's copy in the seat's storage: keep the saved
@@ -1434,6 +1480,8 @@ export interface RigSpecPodMember {
   env?: Record<string, string>;
   cwd: string;
   restorePolicy?: string;
+  /** #2940: spec `keep_alive`; overrides the agent spec's lifecycle.keep_alive (most-specific-wins). Absent = inherit. */
+  keepAlive?: boolean;
   /** OPR.0.5.6.20 — per-member continuity override (most-specific-wins; canonical or
    *  deprecated-alias spelling, normalized at resolution). Absent = inherit. */
   compactionStrategy?: string;
@@ -1454,6 +1502,9 @@ export interface RigSpecPodMember {
    * `sessionSource.mode: "fork"` per v0 schema (validateStarterRef).
    */
   starterRef?: StarterRefSpec;
+  /** #2829 slice 1 — opt-in queue-driven cold start: queued work targeting this
+   * dormant seat of a running rig launches just this seat's runner. Default off. */
+  coldStart?: boolean;
 }
 
 export interface RigSpecPodEdge {
@@ -1474,6 +1525,8 @@ export interface RigSpecPod {
   summary?: string;
   continuityPolicy?: ContinuityPolicySpec;
   startup?: StartupBlock;
+  /** #2829 slice 1 — pod-level default for member `cold_start`; a member's own flag wins. */
+  coldStart?: boolean;
   members: RigSpecPodMember[];
   edges: RigSpecPodEdge[];
 }
@@ -1512,9 +1565,14 @@ export interface WorkspaceSpec {
   knowledgeRoot?: string;
 }
 
+/** #80: how a rig groups its seats' systemd scopes. `rig`: beneath the rig's own slice under openrigseats.slice. */
+export type SeatSliceMode = "rig";
+
 export interface RigSpec {
   /** Authored launch-warning choice; an explicit launch option takes precedence. */
   nonInterruptive?: boolean;
+  /** #80: spec `seat_slice`; absent keeps today's launch paths. */
+  seatSlice?: SeatSliceMode;
   version: string;
   name: string;
   summary?: string;
@@ -1526,6 +1584,8 @@ export interface RigSpec {
   env?: Record<string, string>;
   /** #25: per-runtime managed-block destination. Absent = CLAUDE.md. */
   managedBlocks?: { "claude-code"?: import("./managed-blocks.js").ClaudeManagedBlockFile };
+  /** Override the daemon's default onboarding pack setting for this rig. */
+  defaultOnboardingPack?: boolean;
   docs?: RigSpecDoc[];
   startup?: StartupBlock;
   services?: RigServicesSpec;

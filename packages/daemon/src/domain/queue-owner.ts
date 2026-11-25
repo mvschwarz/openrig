@@ -55,7 +55,12 @@ export function resolveSessionNodeId(db: Database.Database, session: string): st
  *  (there is no orchestrator session to wake — never synthesize one). */
 export function defaultResolveOrchestrator(db: Database.Database, session: string): string | null {
   const nodeId = resolveSessionNodeId(db, session);
-  if (!nodeId) return null;
+  return nodeId ? orchestratorOfNode(db, nodeId) : null;
+}
+
+/** defaultResolveOrchestrator for a known node: the source of its delegates_to edge, at that parent's CURRENT canonical
+ *  session binding, or null. */
+export function orchestratorOfNode(db: Database.Database, nodeId: string): string | null {
   const row = db
     .prepare(
       `SELECT s.session_name AS parentSession FROM edges e
@@ -82,6 +87,16 @@ export function resolveRigRepresentative(db: Database.Database, rigName: string)
 
 /** The same delegation-root rule for a rig already known by id, so another rig with the same name doesn't matter. */
 export function resolveRigRepresentativeById(db: Database.Database, rigId: string): string | null {
+  const nodeId = resolveRigRepresentativeNodeId(db, rigId);
+  if (!nodeId) return null;
+  const row = db
+    .prepare("SELECT session_name FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+    .get(nodeId) as { session_name: string } | undefined;
+  return row?.session_name ?? null;
+}
+
+/** The declared representative's stable node identity, independent of its session spelling. */
+export function resolveRigRepresentativeNodeId(db: Database.Database, rigId: string): string | null {
   const roots = db
     .prepare(
       `SELECT n.id AS nodeId FROM nodes n
@@ -90,9 +105,5 @@ export function resolveRigRepresentativeById(db: Database.Database, rigId: strin
           AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.target_id = n.id AND e.kind = 'delegates_to')`,
     )
     .all(rigId) as Array<{ nodeId: string }>;
-  if (roots.length !== 1) return null;
-  const row = db
-    .prepare("SELECT session_name FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
-    .get(roots[0]!.nodeId) as { session_name: string } | undefined;
-  return row?.session_name ?? null;
+  return roots.length === 1 ? roots[0]!.nodeId : null;
 }

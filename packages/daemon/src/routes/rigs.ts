@@ -691,6 +691,8 @@ async function renderExplorerRestore(
     snapshotKind: snapshot.kind,
     rigResult: result.result.rigResult,
     nodes: result.result.nodes,
+    // Seats this restore left stopped on purpose (a drained seat pool agent), outside `nodes` and the rig result.
+    keptDown: result.result.keptDown,
     warnings: [...joinedWarning, ...(capturedCurrentState
       ? [staleSnapshot
           ? "Existing restore snapshots named an older occupant; captured current DB state as auto-rehydrate snapshot for reboot recovery."

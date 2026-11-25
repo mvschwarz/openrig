@@ -7,6 +7,8 @@ import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runti
 import { runtimeSwitchCommittedSince, runtimeSwitchSummary } from "../domain/seat-runtime-switch-service.js";
 import type Database from "better-sqlite3";
 import type { OutboxHandler } from "../domain/outbox-handler.js";
+import type { EventBus } from "../domain/event-bus.js";
+import { recordRefusal } from "../domain/refusal-trace.js";
 import type { QueueRepository, QueueDestinationAdvisory } from "../domain/queue-repository.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 
@@ -151,11 +153,17 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
             sessionName: body.session, destinationStatus, outboxIds: [recordId],
             warning: "Message recorded in the sender outbox, not delivered. No forwarding or automatic reassignment was performed." });
         } catch {
+          // Only when no record was written is the refusal itself what the log keeps (#3728); a kept record is read from the outbox.
+          if (!recordId) recordRefusal(c.get("eventBus" as never) as EventBus | undefined, { type: "transport.send_refused", senderSession: derivedActor,
+            session: body.session, reason: "destination_not_found_unrecorded", status: 503 });
           return c.json({ ok: false, outcome: "unconfirmed", sent: false, persisted: null, destinationStatus,
             ...(recordId ? { outboxIds: [recordId] } : {}), error: "Message-record storage is unconfirmed; no delivery was attempted." }, 503);
         }
       }
       const status = resolved.code === "ambiguous" ? 409 : 404;
+      // #3728: nothing was saved for this send (no outbox record), so the refusal itself is what the log keeps.
+      recordRefusal(c.get("eventBus" as never) as EventBus | undefined, { type: "transport.send_refused", senderSession: derivedActor,
+        session: body.session, reason: resolved.code === "ambiguous" ? "ambiguous_destination" : "destination_not_found", status });
       return c.json({ ok: false, error: resolved.error, ...(destinationStatus ? { destinationStatus } : {}) }, status);
     }
 
@@ -429,8 +437,12 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       ...(body.urgent === true ? { urgent: { by: derivedActor ?? "unknown" } } : {}),
       envelopeSender, // the From: is the DERIVED identity (never the body value) — orch ruling (a)
       ...(derivedActor ? { identityProvenance: "transport:v1" } : {}),
-      // Recipients not yet started when the caller goes away are not written; started ones keep their results.
-      signal: c.req.raw.signal,
+      // With waitForIdleMs (a direct API caller; the CLI refuses --wait-for-idle on a fan-out), recipients not
+      // yet started when the caller goes away are not written, as for a single send (#1513): a canceled wait
+      // must not type later. Without it (every `rig broadcast` and `rig send --to/--pod/--rig`), the fan-out runs
+      // to the end after the caller goes away, so a client deadline doesn't drop the recipients it hadn't reached
+      // yet (#3726); each one's outcome is recorded below as usual.
+      ...(body.waitForIdleMs !== undefined ? { signal: c.req.raw.signal } : {}),
     });
 
     // A3b (P22 follow-on, planner-ruled IN scope): auto-record the fan-out — N rows, ONE per RESOLVED

@@ -62,13 +62,16 @@ eventsRoute.get("/", (c) => {
     try {
       // Where the replay starts, read once subscribed: an event stored after it is either replayed or buffered. Without
       // Last-Event-ID, `?replay=<n>` replays the newest n (0: from now on), the whole log when it holds no more.
-      const lastSeq = lastEventId !== null ? (isNaN(lastEventId) ? 0 : lastEventId)
-        : replayCount === null ? 0
-        : eventBus.seqBeforeNewest(replayCount, rigId, OMITTED_TYPES);
-      maxReplayedSeq = lastSeq;
       // Where it ends, read once subscribed too: an event stored after it is buffered, so events arriving while the
       // pages are written can neither keep the replay going nor be sent twice.
       const upTo = eventBus.maxSeq();
+      // A client can reconnect to an older database after a backup is restored. Its old cursor then points past the
+      // log, so keeping it would discard every live event until the new log catches up. Treat that cursor as a fresh
+      // connection and honor its replay preference; replays may repeat events from the old database generation.
+      const lastSeq = lastEventId !== null && (isNaN(lastEventId) || lastEventId <= upTo) ? (isNaN(lastEventId) ? 0 : lastEventId)
+        : replayCount === null ? 0
+        : eventBus.seqBeforeNewest(replayCount, rigId, OMITTED_TYPES);
+      maxReplayedSeq = lastSeq;
 
       // 2. Replay missed events from DB, a page at a time
       for (let page = eventBus.replayPage(lastSeq, upTo, REPLAY_PAGE, rigId, OMITTED_TYPES); page.length > 0 && !stream.aborted;

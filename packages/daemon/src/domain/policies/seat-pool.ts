@@ -2,9 +2,14 @@
 // agents drain and which reserved adds are cancelled.
 //
 // A seat pool clones one model member into extra agents named `<member>-s<n>`. Each agent has a slot on record, in one
-// of four phases: `adding`, `live`, `draining` or `drained`. This file is pure: the same facts and clock always give the
-// same plan. It reads no database, starts, stops or moves nothing, and has no caller yet. The caller reads the facts
-// (the slots, each agent's latest session, its open rows and held messages, the waiting rows) and applies the plan.
+// of four phases: `adding`, `live`, `draining` or `drained`. The planner is pure: the same facts and clock always give
+// the same plan. It reads no database and starts, stops or moves nothing; its caller is the seat-pool executor
+// (seat-pool-executor.ts), which reads the facts (the slots, each agent's latest session, its open rows and held
+// messages, the waiting rows) and applies the plan.
+//
+// The `seat-pool` watchdog policy, at the end of this file, is the job's side. It hands each evaluation to the
+// executor it is given, which reads the pool, applies the holds and moves waiting rows. The watchdog engine does not run
+// it until the activation change arms the job.
 //
 // The rules are the agreed sizing for Piece 1:
 //   L (live)      agents in phase `live` whose session runs;
@@ -26,6 +31,8 @@
 //
 // A plan that would read `steady` while `wanted` is above `max` and movable rows are still unplaced reads
 // `max_reached` instead: the pool is full and work waits. Only the reason changes; the target and the intents stay.
+
+import type { Policy, PolicyEvaluation, PolicyJob } from "./types.js";
 
 /** A slot's phase. Nothing is removed: a drained agent keeps its node, sessions and history. */
 export type SeatPoolPhase = "adding" | "live" | "draining" | "drained";
@@ -269,4 +276,21 @@ export function planSeatPool(spec: SeatPoolPlanSpec, state: SeatPoolPlanState, n
       live: live.length, starting: starting.length, issued: issued.length, occupied: occupied.length, unplaced, wanted,
     },
   };
+}
+
+/** The watchdog policy name of the seat pool job. */
+export const SEAT_POOL_POLICY_NAME = "seat-pool";
+
+/** What the seat pool policy calls, injected by whoever composes it: the executor's cycle. */
+export interface SeatPoolPolicyDeps {
+  cycle(job: Pick<PolicyJob, "jobId" | "context">): Promise<PolicyEvaluation>;
+}
+
+/**
+ * The `seat-pool` job's policy. The job finds its pool through the model node named in its spec (`model_node_id`),
+ * never through a list kept on the job, so a replacement job finds the same agents. Each evaluation is the executor's
+ * cycle: it reads the pool afresh, applies the holds and moves waiting rows to free pool agents.
+ */
+export function makeSeatPoolPolicy(deps: SeatPoolPolicyDeps): Policy {
+  return { name: SEAT_POOL_POLICY_NAME, evaluate: (job) => deps.cycle(job) };
 }

@@ -210,7 +210,7 @@ in `audit_notes_json` (`domain/scope/scope-approve.ts:292`). The audit browse
   `GET /api/mission-control/audit` (`routes/mission-control.ts:441`) with
   filters (including `scope_tier`, `scope_id`, `scope_path` and
   `approval_scope` for scope-approval rows) and `(limit, before_id)`
-  pagination cursored on SQLite `rowid` (`audit-browse.ts:134`); the page size
+  pagination cursored on `(acted_at, rowid)` (`audit-browse.ts:134`); the page size
   defaults to 50 and is capped at 200 (`audit-browse.ts:61–62`).
 
 ## 5. Mission Control events

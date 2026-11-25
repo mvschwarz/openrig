@@ -787,6 +787,13 @@ not have to tear one down to change it, and you rarely have to start from nothin
   seat in the rig is paused or being typed in, and it takes a seat's session name, including an
   adopted seat's raw tmux name; ambiguous names aren't launched, and the other unambiguous
   selections are handled normally.
+- **`keep_alive: true`** (rig spec member, or an AgentSpec's `lifecycle.keep_alive`; off by default)
+  — the daemon relaunches that seat through the same one-seat launch when it falls while the daemon
+  runs, and leaves it down after `rig seat stop` or `rig down`, which record the stop before stopping
+  anything. A daemon stop changes no seat's desired state. Each fall gets 2 attempts, counted durably;
+  when they run out the seat reads `attention_required` (`keepAliveIncident` in
+  `rig ps --nodes --json --full`) until you start it with `rig launch`. Not for seats attached from
+  outside (`docs/reference/rig-spec.md`, "Keep a seat running").
 - **`rig seat launch <seat> --fresh --reason <why>`** — deliberately create a blank occupant for
   exactly one existing seat. It uses no resume, fork, rebuild, snapshot, or restore packet;
   siblings and durable work stay put, and unmanaged ambiguity refuses. With `--stop`, a seat with a
@@ -882,7 +889,8 @@ version, from checking the environment to a useful report to the OpenRig team.
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
   Since 0.7.15 start gives the child it started a 180-second readiness budget, with a progress
   line about every 20 s: let it finish rather than starting again. Synchronous work can run past
-  the budget, and it isn't a cure for a slow start.
+  the budget, and it isn't a cure for a slow start. `rig config set daemon.start_readiness_wait_seconds <seconds>`
+  (whole seconds, or `OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS`) sets that budget for later starts.
   When the daemon stalls, read `$OPENRIG_HOME/logs/slow-operations.jsonl` before guessing: it names
   slow synchronous steps by site, since 0.7.15 including three queue sites and three selected steps
   of an ordinary nodes read (`nodes.inventory.build`, `nodes.inventory.activity_sync`,
@@ -899,8 +907,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   database another live daemon already holds (the default, `warn`, only warns), and
   `rig daemon start --allow-db-conflict` allows one deliberate start. A start still in progress reads
   `Daemon starting: launch reserved by pid N since T; not listening yet` in `rig daemon status`, not stopped.
-  A start reservation left from an earlier boot is archived by the next start; don't clear it by
-  hand.
+  A start reservation left from an earlier boot, or one whose recorded launcher and child are both
+  gone in the same pid namespace, is archived by the next start. One that `rig daemon stop` retained
+  after a shutdown it couldn't verify stays until someone inspects the shutdown receipt and daemon.log
+  and archives it, as the stop and start errors say; otherwise don't clear it by hand.
 - **`rig config set daemon.seat_poll_interval_ms <1000-2000>`** slows how often the daemon reads each seat's
   activity (default 1000), trading activity freshness for daemon CPU on a large fleet. It's read at daemon start,
   so restart the daemon to apply it. Near 2000, a slow tmux read can let a working Codex seat briefly read idle.
@@ -1667,7 +1677,7 @@ your circumstances is configuration, and the ones that are not, another agent ca
   ignored and shown. `rig up --env` leaves both names out. A conversation saved under an earlier home
   doesn't resume in the new one, and live usage refresh still reads only the daemon's own logins.
 - **`rig provider precheck --seat <seat> --to-account <name>`**, then **`rig provider switch --seat
-  <seat> --to-account <name>`** — move one Codex seat (Linux only) to a login saved in its Codex home
+  <seat> --to-account <name>`** — move one Codex seat (Linux or macOS) to a login saved in its Codex home
   (`rig auth save`), on the same conversation: it saves the outgoing login, activates the chosen one,
   restarts the seat in place and prints a restart command for every peer on that home. For a Claude
   seat, `--to-account <label> --token-file <absolute path>` moves it to its own subscription token
