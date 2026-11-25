@@ -142,6 +142,15 @@ export function coreViewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneComm
   return ["/bin/sh", "-c", CORE_WRAPPER, "openrig-viewer", nonce, ...pane.attachArgv];
 }
 
+/** A core-placed viewer's argv with the seat's label where herdr-app names the tab. herdr-app reads
+ *  `sh -c '<script using "$@">' $0 <word> …` as a shell wrapper and names the program, which unnamed tabs show, after
+ *  <word> (herdr-app `programs.rs`). Every viewer argv here is `/bin/sh -c <script> openrig-viewer <nonce> …`, so the
+ *  label goes before the nonce and the script's added first `shift` drops it: the wrapper still reads its own arguments. */
+export function tabLabelledArgv(argv: readonly string[], label: string): string[] {
+  const [sh, flag, script, zero, ...rest] = argv;
+  return [sh!, flag!, `shift; ${script!}`, zero!, label, ...rest];
+}
+
 /** What an open says about interactive cells whose read-only tile couldn't be built. */
 function unshapedNote(labels: string[]): string {
   const one = labels.length === 1;
@@ -519,7 +528,9 @@ export class HerdrAppProvider implements TerminalProvider {
     const notes = await this.reconcileState(state);
     if (!view.pages.length) return fail("nothing_to_open", "No attachable seats in this view; nothing was started.", { absent: view.absent, degraded: view.degraded });
     this.deps.ownWork?.();
-    const name = view.viewDescriptor?.name ?? view.spaceLabel ?? view.id;
+    // The space is named after this, through the view's folder, and it's the only name a person sees for the view: a rig's
+    // view takes the rig's own name, never its id.
+    const name = (view.id.startsWith("rig:") && view.rigName) || (view.viewDescriptor?.name ?? view.spaceLabel ?? view.id);
     const unshaped: string[] = [];
     const created: ViewRecord[] = view.pages.map((page, index) => {
       const id = `rv-${this.nonce()}`;
@@ -530,7 +541,7 @@ export class HerdrAppProvider implements TerminalProvider {
           const nonce = this.nonce();
           if (pane.attachArgv && !pane.readOnly && !readOnlyTile(pane.attachArgv)) unshaped.push(pane.label);
           return { cellId: cellId(id, pane.seat, nonce), seat: pane.seat, label: pane.label, ...(pane.runtime ? { runtime: pane.runtime } : {}),
-            nonce, argv: coreViewerArgv(pane, nonce), readOnly: pane.readOnly,
+            nonce, argv: tabLabelledArgv(coreViewerArgv(pane, nonce), pane.label), readOnly: pane.readOnly,
             attach: pane.attachArgv ? "local" as const : "remote" as const, terminal: null, state: "planned" as const };
         }),
       };

@@ -638,12 +638,29 @@ describe("HerdrAppProvider core placement: no window on this machine, a herdr-co
     expect(world.cwds).toEqual([folder, folder]);
     expect(existsSync(folder)).toBe(true);
     // The interactive tile runs at once (no gate file, no read-only stand-in) beside the headless-size watch.
-    expect(buildT.argv.slice(5)).toEqual(build.attachArgv);
+    expect(buildT.argv.slice(6)).toEqual(build.attachArgv);
     expect(buildT.argv[2]).toContain("refresh-client");
     expect(buildT.argv.join(" ")).not.toContain(".shown");
     expect(journal.viewers.map((v) => [v.state, v.gate])).toEqual([["live", undefined], ["live", undefined]]);
     // A read-only seat is shown as composed.
-    expect(qaT.argv.slice(5)).toEqual(qa.attachArgv);
+    expect(qaT.argv.slice(6)).toEqual(qa.attachArgv);
+    // herdr-app names an unnamed tab after argv[4] of a `sh -c` wrapper: the seat's label, which the script's first shift
+    // drops, then the nonce the ownership check reads.
+    for (const [t, p, v] of [[buildT, build, journal.viewers[0]!], [qaT, qa, journal.viewers[1]!]] as const) {
+      expect(t.argv.slice(2, 6)).toEqual([expect.stringMatching(/^shift; shift;/), "openrig-viewer", p.label, v.nonce]);
+      expect(v.argv).toEqual(t.argv);
+    }
+  });
+
+  it("a rig's view takes the rig's name for its space and result, never the rig's id", async () => {
+    makeProvider({ hostname: "box" });
+    world.statusKind = "unavailable";
+    const panes = [pane("dev.build@jq")];
+    const result = await provider.openView({ id: "rig:01M8A93ATQHXRQA5ZN3706JJHD", rigName: "jq", opened: panes, absent: [], degraded: [],
+      pages: [panes], viewDescriptor: { kind: "following", name: "rig:01M8A93ATQHXRQA5ZN3706JJHD" } });
+    const viewId = result.space!.id;
+    expect(result.space).toEqual({ id: viewId, label: "jq" });
+    expect(world.cwds).toEqual([join(home, "spaces", `jq-${viewId}`)]);
   });
 
   it("status says a view can be placed in core (not that a window is here) only while the core answers and no window is there", async () => {

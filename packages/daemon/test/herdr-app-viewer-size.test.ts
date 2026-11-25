@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { coreViewerArgv, viewerArgv } from "../src/domain/terminal/herdr-app-provider.js";
+import { coreViewerArgv, tabLabelledArgv, viewerArgv } from "../src/domain/terminal/herdr-app-provider.js";
 import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 
 // The generated viewer with real tmux, as in herdr-app-viewer-gate.test.ts: the seat on its own tmux server, and the
@@ -103,7 +103,7 @@ describe.skipIf(!tmuxBin || !flagsAtRuntime)("the generated herdr-app viewer (re
 
   it("a viewer placed in herdr-core attaches at once, with no gate, and at the headless size leaves the person's window size alone", async () => {
     const before = await person();
-    await tmux(view, "-f", "/dev/null", "new-session", "-d", "-s", "v1", "-x", "200", "-y", "120", ...coreViewerArgv(pane(), "c1"));
+    await tmux(view, "-f", "/dev/null", "new-session", "-d", "-s", "v1", "-x", "200", "-y", "120", ...tabLabelledArgv(coreViewerArgv(pane(), "c1"), "dev.a"));
     expect(await until(async () => (await clients()).length === 2)).toBe(true);
     await settle();
     expect(await windowSize()).toBe(before);
