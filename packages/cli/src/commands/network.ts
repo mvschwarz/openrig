@@ -72,6 +72,18 @@ function line(b: Binding): string {
 
 /** `rig network`: connect a selected local seat to a participant of a remote hub (an account's network rig, or
  *  another OpenRig hub), see where each connection stands, and disconnect one. */
+/** The hub's roster for a seat, without that seat: its `rig_team` lists the asking participant too, and a seat can't send
+ *  a request to itself. Only an exact match on the binding's hub seat is left out. */
+function withoutOwnSeat(data: Record<string, unknown>): Record<string, unknown> {
+  const own = data.hubSeat;
+  const team = data.team as Record<string, unknown> | null | undefined;
+  if (typeof own !== "string" || !team || typeof team !== "object") return data;
+  const others = (list: unknown[]) => list.filter((p) => (p as { session?: unknown } | null)?.session !== own);
+  return { ...data, team: { ...team,
+    ...(Array.isArray(team.seats) ? { seats: others(team.seats) } : {}),
+    ...(Array.isArray(team.hostedMembers) ? { hostedMembers: others(team.hostedMembers) } : {}) } };
+}
+
 export function networkCommand(depsOverride?: NetworkDeps): Command {
   const cmd = new Command("network")
     .description("Connect selected local seats to a remote hub, see their status, and disconnect them. Experimental and unsupported: use it only if you choose to, at your own risk");
@@ -189,7 +201,7 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
       const daemon = await client();
       if (!daemon) return;
       const res = await daemon.get<Record<string, unknown>>(`/api/network/bindings/${encodeURIComponent(ref)}/peers`, { timeoutMs: ACCOUNT_WRITE_TIMEOUT_MS });
-      finish(res.status, res.data, opts.json, (d) => {
+      finish(res.status, res.status < 400 ? withoutOwnSeat(res.data) : res.data, opts.json, (d) => {
         const team = (d.team ?? {}) as { seats?: Array<{ session?: string; label?: string | null }>; hostedMembers?: Array<{ session?: string; label?: string | null }> };
         const peers = [...(team.seats ?? []), ...(team.hostedMembers ?? [])].filter((p) => typeof p.session === "string");
         if (!peers.length) return `The hub lists no peers for ${String(d.hubSeat)}.`;
