@@ -32,6 +32,7 @@ import { DONE_CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { setSelfHostId, getSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 import { expectLimitParsing } from "./helpers/limit-query-cases.js";
+import { noticeRosterReady } from "../src/domain/roster-ready-notice.js";
 
 function buildApp(opts: {
   eventBus: EventBus;
@@ -3372,6 +3373,26 @@ describe("queue routes", () => {
       expect(plain.heldAndPendingWork.next).toHaveLength(50);
       expect(plain.heldAndPendingWork.heldTruncated).toBe(false);
       expect(plain.heldAndPendingWork.nextTruncated).toBe(true);
+    });
+
+    // A freshly built rig's roster-ready notice is OpenRig's own row naming no mission: the held and pending lists mark it, so
+    // refocus keeps it listed but doesn't let it stop the seat's real rows settling one mission.
+    it("GET /api/queue/whoami?held=1 marks OpenRig's own mission-less notice, and only that", async () => {
+      const res = await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
+        body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "parked", tags: ["mission:release"] }),
+      });
+      const parked = ((await res.json()) as { qitemId: string }).qitemId;
+      db.prepare("UPDATE queue_items SET state = 'blocked', blocked_on = 'external:gate' WHERE qitem_id = ?").run(parked);
+      expect(await noticeRosterReady(queueRepo, "rig-1", ["bob@r"])).toEqual([]);
+      const plain = (await (await app.request("/api/queue/whoami?session=bob@r&held=1")).json()) as {
+        heldAndPendingWork: { held: Array<Record<string, unknown>>; next: Array<Record<string, unknown>> } };
+      expect(plain.heldAndPendingWork.held).toEqual([expect.not.objectContaining({ openrigNotice: true })]);
+      expect(plain.heldAndPendingWork.next).toEqual([expect.objectContaining({ summary: "Team roster is ready", openrigNotice: true })]);
+      const packet = (await (await app.request("/api/queue/whoami?session=bob@r&candidates=1")).json()) as {
+        workCandidates: { next: Array<Record<string, unknown>> } };
+      expect(packet.workCandidates.next).toEqual([expect.objectContaining({ openrigNotice: true })]);
     });
 
     // With nothing in progress and held=1 (refocus's one lookup asks for it), whoami carries the seat's held and pending

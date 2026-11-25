@@ -44,6 +44,7 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 import { parseFrontmatter } from "./slices/slice-indexer.js";
 import { reanchorBuiltinStartupFile } from "./builtin-startup-files.js";
+import { isOpenRigSender } from "../lib/pane-envelope.js";
 
 export interface RoleOrientation {
   state: "unknown" | "no-record" | "not-declared" | "missing" | "present";
@@ -731,8 +732,11 @@ export interface WorkCandidates {
   candidates: WorkCandidate[];
   /** In-progress rows whose work the queue cannot name. */
   unknown: Array<{ qitemId: string | null; summary: string | null; reason: string }>;
-  next: Array<{ qitemId: string | null; summary: string | null } & RowScope>;
-  held: Array<{ qitemId: string | null; summary: string | null; blockedOn: string | null; continuation: string | null } & RowScope>;
+  /** `openrigNotice` marks a row OpenRig itself sent that names no mission (a freshly built rig's roster-ready notice,
+   *  say): it isn't the seat's work toward any mission, so refocus lists it but sets it aside when deciding whether
+   *  the rows settle one mission. */
+  next: Array<{ qitemId: string | null; summary: string | null; openrigNotice?: true } & RowScope>;
+  held: Array<{ qitemId: string | null; summary: string | null; blockedOn: string | null; continuation: string | null; openrigNotice?: true } & RowScope>;
   /** Mission directories on this host, bounded, so an agent can name one without guessing. */
   missionsOnHost: string[];
   missionsOnHostTruncated: boolean;
@@ -769,6 +773,7 @@ export interface ProjectMissions {
 }
 
 interface CandidateRow extends TaggedRow {
+  sourceSession?: string | null;
   summary?: string | null;
   body?: string | null;
   blockedOn?: string | null;
@@ -927,13 +932,15 @@ export function deriveWorkCandidates(
     const missions = tagValues(tags, MISSION_TAG);
     const qitemId = row.qitemId ?? null;
     const summary = row.summary ?? null;
+    // OpenRig's own row naming no mission is a notice, not the seat's work toward a mission.
+    const notice = missions.length === 0 && isOpenRigSender(row.sourceSession ?? "") ? { openrigNotice: true as const } : {};
     if (row.state === "pending") {
-      next.push({ qitemId, summary: summaryOf(row), ...scopeOf(row, missionsRoot, resolvedScopes) });
+      next.push({ qitemId, summary: summaryOf(row), ...notice, ...scopeOf(row, missionsRoot, resolvedScopes) });
       continue;
     }
     if (row.state === "blocked") {
       held.push({ qitemId, summary: summaryOf(row), blockedOn: row.blockedOn ?? null,
-        continuation: qitemId ? lookups.continuationOf(qitemId) : null, ...scopeOf(row, missionsRoot, resolvedScopes) });
+        continuation: qitemId ? lookups.continuationOf(qitemId) : null, ...notice, ...scopeOf(row, missionsRoot, resolvedScopes) });
       continue;
     }
     if (row.state !== "in-progress") continue;

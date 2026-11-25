@@ -221,6 +221,12 @@ characters, with the row's `rig queue show` pointer when one was shortened:
   root quoted for the shell. Held rows are listed first; that is only the order
   shown.
 - When no held or pending row names a mission, the orientation is as before.
+- A row OpenRig itself sent that names no mission, such as the roster-ready
+  notice a freshly built rig gives each started agent, isn't the seat's work
+  toward any mission. The daemon marks it `openrigNotice`, and the trace sets it
+  aside when deciding whether the other rows settle one mission, counting it in
+  the context line ("1 OpenRig notice set aside"). It stays listed with the
+  pending or held rows.
 
 In every case the held and pending rows follow the work section, labelled as in
 the work packet. `trace-to-root.py --work-basis <basis> --held-work <path|->`
