@@ -15,6 +15,7 @@ import { resolveReadinessTimeoutMs } from "../src/domain/readiness-timeout.js";
 import { claudeCommandSessionToken } from "../src/domain/native-process-lineage.js";
 import { ObservationPass } from "../src/domain/process-observation-pass.js";
 import { CLAUDE_PROCESS_ONLY_RESUME } from "../src/domain/native-resume-probe.js";
+import { assessWindowsFilePermissions } from "../src/domain/windows-owned-text.js";
 import { transportClaudeSettings } from "../src/adapters/claude-settings-transport.js";
 import { parseLiteralLaunchWords, renderWindowsLaunch } from "../src/adapters/windows-launch.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
@@ -92,7 +93,11 @@ it.each(["fresh", "resume", "fork"] as const)("delivers oversized composed Claud
     const file = /--settings'? '([^']+\.json)'/.exec(command)?.[1];
     expect(file).toBeDefined();
     expect(JSON.parse(fs.readFileSync(file!, "utf8")).permissions.deny).toEqual(deny);
-    expect(fs.statSync(file!).mode & 0o777).toBe(0o600);
+    if (process.platform === "win32") {
+      const fd = fs.openSync(file!, "r");
+      try { expect(await assessWindowsFilePermissions(fd)).toMatchObject({ owned: true, privateAcl: true }); }
+      finally { fs.closeSync(fd); }
+    } else expect(fs.statSync(file!).mode & 0o777).toBe(0o600);
     expect(command).not.toContain(deny[0]);
   } finally { fs.rmSync(stateDir, { recursive: true, force: true }); }
 });
@@ -436,8 +441,7 @@ describe("launchHarness — the seat name is one shell argument", () => {
     const calls = (tmux.sendText as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     return (calls[calls.length - 1]?.[1] as string) ?? "";
   };
-  const argvOf = (cmd: string): string[] =>
-    execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${cmd}`], { encoding: "utf8" }).split("\n").slice(0, -1);
+  const argvOf = launchArgv;
   const launch = (kind: string) => kind === "resume" ? { resumeToken: "tok-1" }
     : kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-1" } } : {};
   const kinds = ["fresh", "resume", "fork"];

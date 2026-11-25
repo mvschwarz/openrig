@@ -252,6 +252,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
   };
   let nativePidUnreadable = false;
   const observationTmux = {
+    getPaneCommand: (target: string) => input.tmux.getPaneCommand(target),
     getPanePid: async (target: string) => {
       const observedPid = await input.tmux.getPanePid(target);
       if (observedPid === null) nativePidUnreadable = true;
@@ -260,7 +261,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
   };
   const recheckPane = async () => {
     try {
-      const currentPanes = await input.tmux.listPanes(input.sessionName);
+      const currentPanes = await listNamedSessionPanes(input.tmux, input.sessionName);
       if (currentPanes.length !== 1 || currentPanes[0]?.id !== pane.id) {
         return { ok: true as const, sameProcess: false };
       }
