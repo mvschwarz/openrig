@@ -31,6 +31,7 @@ import { ClaudeManagedLaunch as RealManagedLaunch } from "../src/domain/claude-m
 import type { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 import { SEAT_ENV_KEYS_VAR } from "../src/domain/seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "../src/domain/claude-core-plugin-env.js";
+import { SEAT_LAUNCH_DIR_ENV } from "../src/domain/seat-launch-environment.js";
 import {
   persistedPluginPaths, pluginPathsOf, seatCorePluginDir, vendoredCorePluginDir, withCorePlugin,
 } from "../src/domain/claude-core-plugin-env.js";
@@ -402,7 +403,9 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
   });
 
   function restoreHarness(entries: unknown[], memberEnv?: Record<string, string>, opts: { fresh?: boolean; files?: unknown[]; realFs?: boolean;
-    seatSkillSelection?: RestoreOrchestratorDeps["seatSkillSelection"]; armContinuity?: RestoreOrchestratorDeps["armContinuity"] } = {}) {
+    seatSkillSelection?: RestoreOrchestratorDeps["seatSkillSelection"]; armContinuity?: RestoreOrchestratorDeps["armContinuity"];
+    /** The seat's saved folder, and a restore's `--cwd` for this run. */
+    cwd?: string; cwdOverride?: string } = {}) {
     const { pluginsDir } = vendoredPlugins(root);
     const db = createFullTestDb(); dbs.push(db);
     const rigRepo = new RigRepository(db);
@@ -413,7 +416,8 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     const snapshotCapture = new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore });
     const rig = rigRepo.createRig("restore-test");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("restore-pod", rig.id, "Test");
-    const node = rigRepo.addNode(rig.id, "test.c", { runtime: "claude-code", podId: "restore-pod", ...(memberEnv ? { env: memberEnv } : {}) });
+    const node = rigRepo.addNode(rig.id, "test.c", { runtime: "claude-code", podId: "restore-pod", ...(memberEnv ? { env: memberEnv } : {}),
+      ...(opts.cwd ? { cwd: opts.cwd } : {}) });
     const name = "test-c@restore-test";
     const token = "00000000-0000-4000-8000-000000000006";
     const old = sessionRegistry.registerSession(node.id, name);
@@ -461,7 +465,8 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
         const project = adapter.project.bind(adapter);
         adapter.project = async (plan, b) => { projected.push(...plan.entries.map((e) => e.effectiveId)); return project(plan, b); };
         return await restore.restore(down.snapshotId!, { adapters: { "claude-code": adapter }, ...(opts.fresh ? { freshLogicalIds: ["test.c"] } : {}),
-          ...(opts.realFs ? { fsOps: { exists: (p: string) => existsSync(p) } } : {}) });
+          ...(opts.realFs ? { fsOps: { exists: (p: string) => existsSync(p) } } : {}),
+          ...(opts.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}) });
       },
     };
   }
@@ -475,6 +480,26 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     const own = restoreHarness([{ category: "plugin", absolutePath: vendored }], { [PLUGIN_ENV]: OWN_LIST });
     await own.run();
     expect(own.created[0]).toMatchObject({ [PLUGIN_ENV]: `${OWN_LIST}:${vendored}` });
+  });
+
+  // #3328. This checks the seat terminal's environment (what a classic Claude or Codex launch inherits). A managed Claude
+  // launch cds into the saved folder and exports that itself (seat-launch-dir.test.ts), so a restore's --cwd moves only
+  // the terminal for such a seat; that divergence predates the variable.
+  it("restore: every seat's terminal gets OPENRIG_SEAT_LAUNCH_DIR, the saved folder or this run's --cwd, with or without the plugin", async () => {
+    const { vendored } = vendoredPlugins(root);
+    for (const entries of [[{ category: "plugin", absolutePath: vendored }], []]) {
+      const saved = restoreHarness(entries, undefined, { cwd: "/work/saved seat" });
+      await saved.run();
+      expect(saved.created).toHaveLength(1);
+      expect(saved.created[0]).toMatchObject({ OPENRIG_SEAT_LAUNCH_DIR: "/work/saved seat" });
+      const moved = restoreHarness(entries, undefined, { cwd: "/work/saved seat", cwdOverride: "/work/chosen" });
+      await moved.run();
+      expect(moved.created[0]).toMatchObject({ OPENRIG_SEAT_LAUNCH_DIR: "/work/chosen" });
+    }
+    // A seat with no saved folder gets none: tmux picks its folder, which OpenRig doesn't know.
+    const none = restoreHarness([]);
+    await none.run();
+    expect(none.created[0]).not.toHaveProperty("OPENRIG_SEAT_LAUNCH_DIR");
   });
 
   it("restore (native resume): a seat with kept skills gets its seat plugin, from storage keyed by its rig and logical seat", async () => {
@@ -685,6 +710,7 @@ describe("handover successor, on a real tmux server", () => {
   // A test run from inside a seat that loads the plugin must not hand its own plugin variables to the tmux server under test.
   delete cleanEnv.CLAUDE_CODE_PLUGIN_DIRS;
   delete cleanEnv.OPENRIG_SEAT_PROJECT_DIR;
+  delete cleanEnv.OPENRIG_SEAT_LAUNCH_DIR;
   const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
   const exec = async (cmd: string): Promise<string> => {
     const safe = cmd.startsWith("tmux ") ? `tmux -L ${SOCK} ${cmd.slice(5)}` : cmd;
@@ -714,7 +740,7 @@ describe("handover successor, on a real tmux server", () => {
     return out;
   }
 
-  async function successorEnviron(rigName: string, saved: unknown[], seatSkills = false): Promise<Record<string, string>> {
+  async function successorEnviron(rigName: string, saved: unknown[], seatSkills = false, movedTo?: string): Promise<Record<string, string>> {
     const { pluginsDir, vendored } = vendoredPlugins(scratch);
     const seat = `dev-impl@${rigName}`;
     seats.push(seat);
@@ -737,6 +763,8 @@ describe("handover successor, on a real tmux server", () => {
       await tmux(`send-keys -t ${q(pane)} Enter`);
       await sleep(200);
       sessionRegistry.updateStartupStatus(sessionRegistry.getSessionsForRig(rig.id)[0]!.id, "ready", new Date("2026-08-07T09:00:00Z").toISOString());
+      // `rig seat set-cwd`: the seat's next launch, here its successor, starts in the new folder.
+      if (movedTo) { mkdirSync(movedTo, { recursive: true }); expect(rigRepo.setNodeCwd(node.id, movedTo, scratch)).toBe(true); }
       const runtime = {
         runtime: "claude-code",
         async launchHarness() { return { ok: true, resumeToken: "tok", resumeType: "claude_id" }; },
@@ -765,6 +793,15 @@ describe("handover successor, on a real tmux server", () => {
     const other = await successorEnviron("coreplug-no", [{ category: "plugin", absolutePath: "/elsewhere" }]);
     expect(other).not.toHaveProperty(PLUGIN_ENV);
     expect(other).not.toHaveProperty(SEAT_PROJECT_DIR_ENV);
+    // #3328: the successor's launch folder, whether or not the seat selected the plugin.
+    expect(selecting[SEAT_LAUNCH_DIR_ENV]).toBe(scratch);
+    expect(other[SEAT_LAUNCH_DIR_ENV]).toBe(scratch);
+  }, 90_000);
+
+  it.runIf(available)("#3328: a successor launched after the seat's folder changed carries the new folder, not its predecessor's", async () => {
+    const moved = join(scratch, "moved seat");
+    const env = await successorEnviron("launchdir-moved", [], false, moved);
+    expect(env[SEAT_LAUNCH_DIR_ENV]).toBe(moved);
   }, 90_000);
 
   it.runIf(available)("has the seat's own skill plugin, the same storage as its predecessor's", async () => {

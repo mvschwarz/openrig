@@ -57,7 +57,9 @@ credits). `OPENRIG_REAL_CLAUDE_INTEGRATION=1` enables only a placeholder: it req
 `OPENRIG_REAL_CLAUDE_BIN=<path to claude>` runs `claude-auto-mode-native.test.ts`. It passes a
 seat's composed `--settings` to the real `claude auto-mode config` with a fixture
 `CLAUDE_CONFIG_DIR`. It needs no login and uses no credits. Managed settings on the machine can
-add entries.
+add entries. It also runs `seat-launch-dir-native.test.ts`, which launches seats from the checkout on a private tmux
+server and has the real `claude mcp list` start a stdio MCP server that records `OPENRIG_SEAT_LAUNCH_DIR`, for the
+classic and the managed launch. It needs no login and uses no credits either.
 Without tmux, some tmux tests skip and others (such as `transcript-seat-env-native.test.ts`)
 fail. The CLI's release-tag tests skip without local tags unless `CI=true`, so a green local
 run without tags has skipped them. CI installs tmux and fetches full history.

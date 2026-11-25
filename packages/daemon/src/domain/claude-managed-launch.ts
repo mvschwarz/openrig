@@ -3,7 +3,7 @@ import { accessSync, closeSync, constants, openSync, readSync, realpathSync, sta
 import path from "node:path";
 import type Database from "better-sqlite3";
 import type { RigEvent } from "./types.js";
-import { publicSeatEnvironment, resolveLaunchWrapperArgv } from "./seat-launch-environment.js";
+import { launchDirEnv, publicSeatEnvironment, resolveLaunchWrapperArgv } from "./seat-launch-environment.js";
 import { SEAT_ENV_KEYS_VAR, parseStoredSeatEnv, validateSeatEnvName } from "./seat-env.js";
 import { CLAUDE_PLUGIN_DIRS_ENV, SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCorePluginDir } from "./claude-core-plugin-env.js";
 import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
@@ -359,9 +359,11 @@ export class ClaudeManagedLaunch {
     assertCurrent();
     validateNativePermissionSelection("claude-code", mode, parseClaudePermissionModes(help));
     const generation = target.generation ?? before.generation;
+    // #3328: the launch dir is the absolute folder this command cds into before Claude starts, whatever the pane holds.
     const identity: Record<string, string> = { OPENRIG_NODE_ID: target.nodeId, OPENRIG_RUNTIME: "claude-code",
       ...(before.session ? { OPENRIG_SESSION_NAME: before.session } : {}),
-      ...(generation ? { OPENRIG_OCCUPANT_GENERATION: generation } : {}) };
+      ...(generation ? { OPENRIG_OCCUPANT_GENERATION: generation } : {}),
+      ...launchDirEnv(cwd) };
     const seatKeys = (await this.seatEnvKeys(target.nodeId, before.session ?? undefined)).filter(key => !credentialKeys.includes(key));
     const publicEnv = publicSeatEnvironment(this.sessionEnv);
     const assignments = Object.entries({ ...context.env, ...publicEnv, ...identity }).map(([key, value]) => `export ${shellQuote(`${key}=${value}`)}`);
