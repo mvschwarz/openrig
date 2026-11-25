@@ -162,7 +162,7 @@ import type { ResolutionContext, ResolutionResult } from "./profile-resolver.js"
 import { withNodeConfigResolver } from "./profile-resolution-worker.js";
 import { releaseScanCache } from "./skill-discovery.js";
 import { randomUUID } from "node:crypto";
-import { getOpenRigInstallCwdError, resolveAuthoredCwd, resolveLaunchCwd } from "./cwd-resolution.js";
+import { getOpenRigInstallCwdError, resolveAuthoredCwd, resolveLaunchCwd, type PlannedProjectRoots } from "./cwd-resolution.js";
 import nodePath from "node:path";
 import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
 import { BUILT_IN_RUNTIMES } from "./built-in-runtimes.js";
@@ -190,6 +190,7 @@ export interface RigPreflightInput {
   rigSpecYaml: string;
   rigRoot: string;
   cwdOverride?: string;
+  plannedProjectRoots?: PlannedProjectRoots;
   fsOps: AgentResolverFsOps;
   /** Config-resolved managed skill catalog root. Must match runtime resolution. */
   skillsRoot?: string;
@@ -211,6 +212,7 @@ export interface PreflightSpecContext {
   envOverride?: SeatEnv;
   rigRoot: string;
   cwdOverride?: string;
+  plannedProjectRoots?: PlannedProjectRoots;
   fsOps: AgentResolverFsOps;
   /** Config-resolved managed skill catalog root. Must match runtime resolution. */
   skillsRoot?: string;
@@ -338,6 +340,7 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
     includeModelWarnings: input.includeModelWarnings,
     rigRoot: input.rigRoot,
     cwdOverride: input.cwdOverride,
+    plannedProjectRoots: input.plannedProjectRoots,
     envOverride: input.envOverride,
     fsOps: input.fsOps,
     skillsRoot: input.skillsRoot,
@@ -406,11 +409,13 @@ async function preflightMembers(
         if (!member.cwd) {
           errors.push(`${pod.id}.${member.id}: cwd is required`);
         }
-        const terminalCwd = resolveLaunchCwd(member.cwd, preflightCtx.rigRoot, preflightCtx.cwdOverride);
-        const terminalCwdError = getOpenRigInstallCwdError(terminalCwd, preflightCtx.cwdOverride);
-        if (terminalCwdError) {
-          errors.push(`${pod.id}.${member.id}: ${terminalCwdError}`);
-        }
+        try {
+          const terminalCwd = resolveLaunchCwd(member.cwd, preflightCtx.rigRoot, preflightCtx.cwdOverride, preflightCtx.plannedProjectRoots);
+          const terminalCwdError = getOpenRigInstallCwdError(terminalCwd, preflightCtx.cwdOverride);
+          if (terminalCwdError) {
+            errors.push(`${pod.id}.${member.id}: ${terminalCwdError}`);
+          }
+        } catch (err) { errors.push(`${pod.id}.${member.id}: ${(err as Error).message}`); }
         continue;
       }
 
@@ -446,6 +451,7 @@ async function preflightMembers(
         profileName: member.profile,
         specRoot: preflightCtx.rigRoot,
         cwdOverride: preflightCtx.cwdOverride,
+        plannedProjectRoots: preflightCtx.plannedProjectRoots,
         skillsRoot: preflightCtx.skillsRoot,
         systemSkills: preflightCtx.systemSkills,
         systemWorldError: preflightCtx.systemWorldError,

@@ -476,6 +476,30 @@ differing copy from anywhere else fails launch with `skill_identity_conflict`.
 
 Legacy (schema version 1) bundles keep their old behavior: `--target` is only where packages are installed, and their declared contents are routed after a completed install.
 
+### Member working directories in a carried project
+
+A schema-version-2 bundle can refer to a registered project by ID in a member's `cwd`:
+
+```yaml
+cwd: "${project:demo}/services/api"
+```
+
+`${project:demo}` means the root of project `demo` in the installing instance's workspace catalog.
+An optional `/relative/path` selects a member folder beneath that root; members can select different
+folders or share one. The project ID is explicit: it cannot contain spaces, slashes, braces or a colon.
+Ordinary absolute, relative, home and environment-variable cwd values keep their existing meaning.
+
+When the bundle carries that project, installation uses `workspace.projects_root` and the existing
+project registration rules. Preflight previews the destination without writing the project or catalog;
+actual routing registers the project before the first member launches. Existing project files and
+explicit install targets retain their existing handling. `--cwd <dir>` still overrides every member
+for that run, including project references. The signed or hash-identified archive is not rewritten.
+
+A missing, ambiguous or conflicting named project is reported with the project ID and correction
+advice. A malformed project reference is an error rather than a literal folder name. Register or
+correct the project, or use `--cwd`. The template remains in the installed spec; launches resolve the
+registered root, while restore retains the saved resolved cwd.
+
 ### Launch directly
 
 ```bash
