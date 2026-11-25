@@ -389,6 +389,15 @@ export function withCommunityHarnessResolver<T extends Record<string, RuntimeAda
   return builtIns;
 }
 
+/** The adapter an installed preset defines for `runtime`, whether or not a seat was launched for it yet. A runtime
+ *  switch stages a successor before the seat has ever run on the target, so `seatAdapter` (which requires the retained
+ *  selection to already name the harness) cannot answer for it. */
+export function communityHarnessAdapter(map: Record<string, RuntimeAdapter> | undefined, runtime: string | null | undefined): RuntimeAdapter | undefined {
+  if (!map || !runtime || !isCommunityHarnessRuntime(runtime)) return undefined;
+  const resolve = (map as Record<symbol, ((runtime: string) => RuntimeAdapter | undefined) | undefined>)[COMMUNITY_HARNESS_RESOLVER];
+  return resolve ? resolve(runtime) : undefined;
+}
+
 /** The adapter to relaunch a seat with: its runtime's built-in adapter, or, for a seat launched for a community
  *  harness (`communityHarnessOf`), that harness's adapter while its preset is installed. */
 export function seatAdapter(map: Record<string, RuntimeAdapter> | undefined, runtime: string | null | undefined,

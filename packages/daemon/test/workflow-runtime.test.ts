@@ -31,6 +31,8 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { WorkflowProjectorError } from "../src/domain/workflow-projector.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { Hono } from "hono";
+import { workflowRoutes } from "../src/routes/workflow.js";
 
 const SPEC = `workflow:
   id: fr1-three-step
@@ -108,6 +110,82 @@ describe("WorkflowRuntime facade + FR-1 KEEP-fence pins (OPR.0.4.6.WF1)", () => 
   });
 
   // ── (d) facade coverage ────────────────────────────────────────────
+
+  it("recovers one committed ordinary start after concurrent retry, restart and source removal", async () => {
+    const input = { specPath, rootObjective: "release", createdBySession: "ops@rig", operationKey: `  ${"key".repeat(100)}  ` };
+    const wake = vi.spyOn(queueRepo, "maybeNudge");
+    const [first, retry] = await Promise.all([runtime.instantiate(input), runtime.instantiate(input)]);
+    expect([first.replayed, retry.replayed].sort()).toEqual([false, true]);
+    expect(first.entryQitemId).toBe(retry.entryQitemId);
+    expect(first.instance.instanceId).toBe(retry.instance.instanceId);
+    expect((db.prepare("SELECT count(*) AS n FROM workflow_instances").get() as { n: number }).n).toBe(1);
+    expect((db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number }).n).toBe(1);
+    expect(wake).toHaveBeenCalledTimes(1);
+    for (const changed of [{ rootObjective: "different" }, { specPath: `${specPath}.other` }, { entryOwnerSession: "other@rig" }, { targetRig: "other" }, { scope: { tags: ["different"] } }]) {
+      await expect(runtime.instantiate({ ...input, ...changed })).rejects.toMatchObject({ code: "workflow_start_conflict" });
+    }
+    await expect(runtime.instantiateLifecycle({ missionPath: "/missing", operationKey: input.operationKey, rootObjective: "other", createdBySession: "ops@rig" })).rejects.toMatchObject({ code: "lifecycle_operation_conflict", message: expect.stringContaining("different operation already used this key") });
+    const path = join(tmp, "restart.sqlite");
+    await db.backup(path);
+    db.close();
+    db = createDb(path);
+    bus = new EventBus(db);
+    queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    queueRepo.attachOutbox(new OutboxHandler(db));
+    runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
+    rmSync(specPath);
+    expect(runtime.recoverOperation(input.operationKey)).toMatchObject({ kind: "ordinary-instantiate", receipt: { instanceId: first.instance.instanceId, entryQitemId: first.entryQitemId } });
+    expect(await runtime.instantiate(input)).toMatchObject({ replayed: true, entryQitemId: first.entryQitemId });
+  });
+
+  it("keeps unkeyed starts independent", async () => {
+    const input = { specPath, rootObjective: "same", createdBySession: "ops@rig" };
+    const first = await runtime.instantiate(input);
+    const second = await runtime.instantiate(input);
+    expect(first.instance.instanceId).not.toBe(second.instance.instanceId);
+    expect(first.entryQitemId).not.toBe(second.entryQitemId);
+  });
+
+  it("recovers a lost HTTP start response and refuses a changed keyed request", async () => {
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("workflowRuntime" as never, runtime); c.set("eventBus" as never, bus); await next(); });
+    app.route("/api/workflow", workflowRoutes());
+    const body = { specPath, rootObjective: "release", createdBySession: "ops@rig", operationKey: "lost-response" };
+    const start = (value: typeof body) => app.request("/api/workflow/instantiate-keyed", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) });
+    const lost = await start(body);
+    expect(lost.status).toBe(201); // Deliberately discard the response body, as a disconnected client would.
+    const replay = await start(body);
+    expect(replay.status).toBe(200);
+    const result = await replay.json();
+    expect(result.replayed).toBe(true);
+    const recovery = await app.request("/api/workflow/operations/lost-response");
+    expect(await recovery.json()).toMatchObject({ kind: "ordinary-instantiate", receipt: { instanceId: result.instance.instanceId, entryQitemId: result.entryQitemId } });
+    expect((await start({ ...body, rootObjective: "other" })).status).toBe(409);
+    expect((db.prepare("SELECT count(*) AS n FROM workflow_instances").get() as { n: number }).n).toBe(1);
+    expect((db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number }).n).toBe(1);
+    const legacy = await app.request("/api/workflow/instantiate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    expect(legacy.status).toBe(201);
+    expect((await legacy.json()).instance.instanceId).not.toBe(result.instance.instanceId);
+  });
+
+  it("keeps a titled keyed replay at HTTP 200 when title normalization adds an advisory", async () => {
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("workflowRuntime" as never, runtime); c.set("eventBus" as never, bus); await next(); });
+    app.route("/api/workflow", workflowRoutes());
+    const body = { specPath, rootObjective: "release", createdBySession: "ops@rig", operationKey: "titled-retry", runTitle: "Release\nreadiness" };
+    const start = () => app.request("/api/workflow/instantiate-keyed", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const first = await start();
+    expect(first.status).toBe(201);
+    const created = await first.json();
+    expect(created.instance.runTitle).toBe("Release readiness");
+    const replay = await start();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ replayed: true, instance: { instanceId: created.instance.instanceId, runTitle: "Release readiness" }, entryQitemId: created.entryQitemId,
+      advisories: expect.arrayContaining([expect.stringContaining("title normalized")]) });
+    expect(queueRepo.getById(created.entryQitemId)?.summary).toBe("Release readiness — produce");
+    expect((db.prepare("SELECT count(*) AS n FROM workflow_instances").get() as { n: number }).n).toBe(1);
+    expect((db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number }).n).toBe(1);
+  });
 
   it("persists each run title for ordinary packets across runtime reconstruction", async () => {
     writeFileSync(specPath, SPEC.replace("    - id: review\n      actor_role: reviewer", "    - id: review\n      label: Review results\n      actor_role: reviewer"));

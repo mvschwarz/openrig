@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { WorkflowDeps } from "../src/commands/workflow.js";
 import { createProgram } from "../src/index.js";
 import { renderInstanceShow, renderTraceTree } from "../src/commands/workflow-render.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 // OPR.0.4.6.FAC1 commit 2 — the CLI rig-binding surface (planner2
 // §3.15): `--rig` lands on BOTH instantiate AND run (run instantiates
@@ -99,6 +102,36 @@ describe("FAC-1 C2: --rig on both instantiate verbs + bound-rig rendering", () =
     program.exitOverride();
     await program.parseAsync(["node", "rig", "workflow", "instantiate", "/abs/spec.yaml", "--root-objective", "obj", "--created-by", "ops@rig", "--rig", "factory-b", "--pod", "feature-a", "--json"]);
     expect((calls.find((c) => c.path === "/api/workflow/instantiate")!.body as Record<string, string>).targetPod).toBe("feature-a");
+  });
+
+  it("uses a dedicated endpoint for keyed starts and never falls back on an older daemon", async () => {
+    const { deps, calls } = makeDeps({ routes: { "POST /api/workflow/instantiate-keyed": { status: 404, data: null } } });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", "instantiate", "/abs/spec.yaml", "--root-objective", "obj", "--created-by", "ops@rig", "--operation-key", "release-42", "--json"]);
+    const posts = calls.filter(c => c.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatchObject({ path: "/api/workflow/instantiate-keyed", body: { operationKey: "release-42" } });
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("does not support keyed ordinary workflow starts"));
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("requires an unambiguous local path before creating a keyed start", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "workflow-key-path-"));
+    const previous = process.cwd();
+    try {
+      process.chdir(dir);
+      writeFileSync("flow.yaml", "fixture");
+      const { deps, calls } = makeDeps();
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "instantiate", "flow.yaml", "--root-objective", "obj", "--created-by", "ops@rig", "--operation-key", "key"]);
+      expect(calls.filter(c => c.method === "POST")).toEqual([]);
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining("./flow.yaml"));
+    } finally {
+      process.chdir(previous);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it.each(["instantiate", "run"])("%s sends the optional run title", async verb => {

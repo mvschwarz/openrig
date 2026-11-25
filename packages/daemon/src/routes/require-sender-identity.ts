@@ -241,6 +241,27 @@ export function parseIdentityPrincipal(raw: string | undefined): string | null {
     ...(label !== undefined ? { label } : {}) });
 }
 
+/** The shared roots a scoped MCP caller's grant may read, which the adapter sends beside its principal (JSON list of
+ *  root names). It can only narrow what the Slack connector attaches from that caller's evidence, never widen it. */
+export const FILE_ROOTS_HEADER = "x-openrig-file-roots";
+
+/** The file authority an evidenceRef written by this request carries: the caller's roots when the adapter sent them, and
+ *  none when they're unreadable or when the request came through the adapter (it named a principal) without them. A
+ *  request with neither header is a local writer with no root grant: null, attached as before.
+ *  The adapter sends an explicit JSON null for an owner grant, which may also name a principal. */
+export function evidenceRefRootsFrom(c: Context): string[] | null {
+  const raw = c.req.header(FILE_ROOTS_HEADER);
+  if (raw !== undefined) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return parsed === null ? null : Array.isArray(parsed) ? parsed.filter((root): root is string => typeof root === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+  return c.req.header(IDENTITY_PRINCIPAL_HEADER) !== undefined ? [] : null;
+}
+
 /** Whether the request's TCP peer is this machine. A request without a socket (an in-process call) isn't. */
 function fromLoopbackPeer(c: Context): boolean {
   const address = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming?.socket?.remoteAddress;

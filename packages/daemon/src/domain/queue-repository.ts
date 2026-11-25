@@ -333,6 +333,9 @@ export interface QueueItem {
    *  (convention C3). NULL for all non-human-routed items (BR-1); required
    *  at the domain write path only when the §5 predicate is true. */
   evidenceRef: string | null;
+  /** The shared roots evidenceRef's writer may read, recorded with it (migration 196): a list is a scoped grant's roots
+   *  and limits what the Slack connector attaches; absent is a writer with no root grant, attached as before. */
+  evidenceRefRoots?: string[];
   /** Set only on a row whose content queue erasure removed (queue-erasure.ts): its body and other content are empty
    *  because they were erased, not because the row was written that way. */
   contentErasedAt?: string;
@@ -396,6 +399,7 @@ interface QueueItemRow {
   relayed_answers?: string | null;
   summary: string | null;
   evidence_ref: string | null;
+  evidence_ref_roots?: string | null;
   content_erased_at?: string | null;
   closure_reason: string | null;
   closure_target: string | null;
@@ -504,6 +508,9 @@ export interface QueueCreateInput {
   /** OPR.0.4.4.19 FR-5 — optional durable-artifact pointer. Persisted when
    *  present; required at the domain layer only for human-routed items. */
   evidenceRef?: string | null;
+  /** The shared roots the writer of evidenceRef may read, stored with it: a scoped MCP grant's roots (an empty list for
+   *  none). Absent or null is a writer with no root grant (a local seat or an owner). Ignored without evidenceRef. */
+  evidenceRefRoots?: readonly string[] | null;
   /**
    * R1 fix (PL-004 Phase A revision): Phase A is durable + waking by default.
    * When true (or omitted), the repository nudges the destination after the
@@ -597,6 +604,9 @@ export interface QueueUpdateInput {
    */
   summary?: string | null;
   evidenceRef?: string | null;
+  /** The shared roots the writer of evidenceRef may read, stored with it: a scoped MCP grant's roots (an empty list for
+   *  none). Absent or null is a writer with no root grant (a local seat or an owner). Ignored without evidenceRef. */
+  evidenceRefRoots?: readonly string[] | null;
   /** P21 §4 era-stamp: the route passes `transport:v1` (actorSession derived from the transport
    *  header chokepoint). Threaded onto the transition; absence = claimed-era. */
   identityProvenance?: string | null;
@@ -627,6 +637,9 @@ export interface QueueHandoffInput {
   /** OPR.0.4.4.19 FR-5 — optional durable-artifact pointer for the NEW qitem.
    *  NOT inherited from the source (same authorship semantics as summary). */
   evidenceRef?: string | null;
+  /** The shared roots the writer of evidenceRef may read, stored with it: a scoped MCP grant's roots (an empty list for
+   *  none). Absent or null is a writer with no root grant (a local seat or an owner). Ignored without evidenceRef. */
+  evidenceRefRoots?: readonly string[] | null;
   /** P21 §4 era-stamp: the route passes `transport:v1` (fromSession derived from the transport
    *  header chokepoint). Threaded onto both the source-close and new-item transitions. */
   identityProvenance?: string | null;
@@ -995,6 +1008,17 @@ function detectQueueColumn(db: Database.Database, columnName: string): boolean {
   }
 }
 
+/** A recorded evidence_ref_roots value. One that can't be read is a scoped writer whose roots are unknown: no roots,
+ *  never a writer without a grant. */
+function evidenceRefRootsOf(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((root): root is string => typeof root === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 export function detectTable(db: Database.Database, tableName: string): boolean {
   try {
     return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName);
@@ -1248,6 +1272,7 @@ export class QueueRepository {
   private readonly hasHumanQuestionsColumn: boolean;
   private readonly hasDelegatedDecisionColumn: boolean;
   private readonly hasEvidenceRefColumn: boolean;
+  private readonly hasEvidenceRefRootsColumn: boolean;
   private readonly hasMintingGenColumn: boolean;
   private readonly hasClaimedGenColumn: boolean;
   private readonly hasQueueTransitionsTable: boolean;
@@ -1359,6 +1384,7 @@ export class QueueRepository {
     this.hasHumanQuestionsColumn = detectQueueColumn(db, "human_questions");
     this.hasDelegatedDecisionColumn = detectQueueColumn(db, "delegated_decision");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
+    this.hasEvidenceRefRootsColumn = detectQueueColumn(db, "evidence_ref_roots");
     this.hasQueueTransitionsTable = detectTable(db, "queue_transitions");
     this.hasErasedIdsTable = detectTable(db, "queue_erased_ids");
     const transitionColumns = this.hasQueueTransitionsTable
@@ -3119,7 +3145,7 @@ export class QueueRepository {
         .run(id, ts, ts, input.sourceSession, input.destinationSession, priority, tier, tags, expiresAt, chain, handedOffFrom, input.body);
     }
     this.persistSummary(id, input.summary ?? null);
-    this.persistEvidenceRef(id, input.evidenceRef ?? null);
+    this.persistEvidenceRef(id, input.evidenceRef ?? null, input.evidenceRefRoots);
     if (this.hasHumanIntentColumn) {
       this.db.prepare("UPDATE queue_items SET human_intent = ?, human_detail = ? WHERE qitem_id = ?")
         .run(input.humanIntent ?? null, input.humanDetail ?? null, id);
@@ -3376,7 +3402,7 @@ export class QueueRepository {
       }
 
       this.persistSummary(newId, input.summary ?? null);
-      this.persistEvidenceRef(newId, input.evidenceRef ?? null);
+      this.persistEvidenceRef(newId, input.evidenceRef ?? null, input.evidenceRefRoots);
       // The goal's return route goes with the work, as its body does.
       this.persistReturnRoute(newId, source.returnRoute ?? null, source.returnRouteBasis ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
@@ -3561,7 +3587,7 @@ export class QueueRepository {
       }
 
       this.persistSummary(newId, input.summary ?? null);
-      this.persistEvidenceRef(newId, input.evidenceRef ?? null);
+      this.persistEvidenceRef(newId, input.evidenceRef ?? null, input.evidenceRefRoots);
       // The goal's return route goes with the work, as its body does.
       this.persistReturnRoute(newId, source.returnRoute ?? null, source.returnRouteBasis ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
@@ -4603,7 +4629,7 @@ export class QueueRepository {
     // stored, on a park on a person too: a blank one would erase the row's
     // subject or evidence link, and the route reports it as not stored.
     if (hasValidSummary) this.persistSummary(input.qitemId, input.summary!);
-    if (hasValidEvidenceRef) this.persistEvidenceRef(input.qitemId, input.evidenceRef!);
+    if (hasValidEvidenceRef) this.persistEvidenceRef(input.qitemId, input.evidenceRef!, input.evidenceRefRoots);
 
     const transition = this.transitionLog.append({
       qitemId: input.qitemId,
@@ -6897,10 +6923,16 @@ export class QueueRepository {
   }
 
   /** OPR.0.4.4.19 FR-5 — persist the optional evidence_ref additively, same
-   *  contract as persistSummary (pre-048 fixtures degrade; NULL default). */
-  private persistEvidenceRef(qitemId: string, evidenceRef: string | null): void {
+   *  contract as persistSummary (pre-048 fixtures degrade; NULL default).
+   *  The writer's shared roots are written with the reference, every time it is written, so the authority a later
+   *  attachment reads is always this reference's writer's: a state change, note or alert that leaves the reference
+   *  alone leaves its authority alone, and a writer with no root grant records null. */
+  private persistEvidenceRef(qitemId: string, evidenceRef: string | null, roots?: readonly string[] | null): void {
     if (this.hasEvidenceRefColumn && evidenceRef !== null) {
       this.db.prepare("UPDATE queue_items SET evidence_ref = ? WHERE qitem_id = ?").run(evidenceRef, qitemId);
+      if (this.hasEvidenceRefRootsColumn) {
+        this.db.prepare("UPDATE queue_items SET evidence_ref_roots = ? WHERE qitem_id = ?").run(roots ? JSON.stringify([...roots]) : null, qitemId);
+      }
     }
   }
 
@@ -7184,6 +7216,7 @@ export class QueueRepository {
       // OPR.0.4.4.19 FR-5: evidence_ref present only when migration 048 has
       // applied; legacy fixtures degrade to null.
       evidenceRef: row.evidence_ref ?? null,
+      ...(row.evidence_ref_roots ? { evidenceRefRoots: evidenceRefRootsOf(row.evidence_ref_roots) } : {}),
       humanIntent: row.human_intent ?? null,
       humanDetail: row.human_detail ?? null,
       replyTo: row.reply_to ?? null,
