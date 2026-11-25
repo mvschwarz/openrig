@@ -2062,14 +2062,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (handedOffFrom) params.set("handedOffFrom", handedOffFrom);
         params.set("limit", String(limit ?? 100));
         const res = await hostGet(target, `/api/queue/list?${params.toString()}`);
-        // The daemon's page marker rides beside the items, as limit and truncated, with a line when the page was cut,
-        // as the CLI prints one. A daemon that doesn't send it leaves the result as it was.
+        // Keep pagination metadata beside the items without adding text to the JSON payload read by existing clients.
+        // A daemon that doesn't send a page marker leaves the result as it was.
         const page = res.status < 400 ? queueListPage(res.headers) : null;
         const paged = (result: TextResult): TextResult => !page || result.isError ? result : {
           ...result,
-          content: page.truncated
-            ? [...result.content, { type: "text", text: `This page stops at the limit of ${page.limit} and more items match; pass a larger limit to see the rest.` }]
-            : result.content,
           structuredContent: { ...result.structuredContent, limit: page.limit, truncated: page.truncated },
         };
         const ignored = res.status < 400 ? ignoredFilter(res.data, { since, handedOffFrom, tags }) : null;
