@@ -205,6 +205,14 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
     .requiredOption("--body-file <path>", "A file holding the request: what to do and what to return")
     .option("--summary <text>", "One-line summary")
     .option("--json", "Print JSON")
+    .addHelpText("after", `
+Waiting for the answer: the local item <request-id> belongs to OpenRig, so nothing
+wakes you when it closes. To be woken, park a row of your own on it:
+  rig queue create --id <request-id>-wait --destination <your seat> --summary "Report <request-id>'s answer" --body "..."
+  rig queue claim <request-id>-wait
+  rig queue block <request-id>-wait --on <request-id> --continuation "read <request-id> and report its answer"
+When <request-id> closes, your row returns to pending and you're woken. Then read the
+answer with rig queue show <request-id>. rig whoami names your binding.`)
     .action(async (ref: string, peer: string, opts: { id: string; bodyFile: string; summary?: string; json?: boolean }) => {
       let body: string;
       try { body = readFileSync(opts.bodyFile, "utf8"); } catch (error) {

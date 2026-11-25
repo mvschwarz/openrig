@@ -322,4 +322,29 @@ describe("WhoamiService", () => {
     expect(result!.runtimeContext).not.toBeNull();
     expect(result!.runtimeContext?.runtime).toBe("claude-code");
   });
+
+  // A connected seat is told so: the binding id, its address on the hub and the hub, query hidden; not the peer list.
+  function bind(nodeId: string, id: string, state: "active" | "revoked" | "disconnected", hubUrl = "https://hub.example/mcp?key=secret") {
+    db.prepare(`INSERT INTO network_bindings (id, node_id, local_session, hub_url, hub_seat, state, created_at, updated_at)
+      VALUES (?, ?, 'dev-impl@my-rig', ?, 'alex@team', ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`).run(id, nodeId, hubUrl, state);
+  }
+
+  it("names the seat's active network binding in its identity, with the hub's query hidden", () => {
+    const { nodeA, nodeB } = seedRig();
+    bind(nodeA.id, "netb-00000000000000000001", "disconnected");
+    bind(nodeA.id, "netb-00000000000000000002", "active");
+    expect(svc.resolve({ nodeId: nodeA.id })!.identity.networkBinding).toEqual({
+      id: "netb-00000000000000000002", hubSeat: "alex@team", hubUrl: "https://hub.example/mcp (query hidden)" });
+    // A seat with no binding, or only an ended one, has no networkBinding key at all.
+    expect(svc.resolve({ nodeId: nodeB.id })!.identity).not.toHaveProperty("networkBinding");
+    db.prepare("UPDATE network_bindings SET state = 'revoked' WHERE id = 'netb-00000000000000000002'").run();
+    expect(svc.resolve({ nodeId: nodeA.id })!.identity).not.toHaveProperty("networkBinding");
+  });
+
+  it("reads no binding from a database that predates the network connector", () => {
+    const { nodeA } = seedRig();
+    db.pragma("foreign_keys = OFF");
+    db.exec("DROP TABLE network_bindings");
+    expect(svc.resolve({ nodeId: nodeA.id })!.identity).not.toHaveProperty("networkBinding");
+  });
 });

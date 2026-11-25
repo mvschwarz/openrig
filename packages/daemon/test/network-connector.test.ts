@@ -771,9 +771,12 @@ describe("network connector", () => {
 
     it("the same request id with another request is refused and sends nothing; the same request returns where it stands", async () => {
       const b = bind();
-      expect((await send(b.id, "req-2")).state).toBe("sent");
+      const sent = await send(b.id, "req-2");
+      expect(sent.state).toBe("sent");
+      // The local item is OpenRig's, so its close wakes no seat: both sent outcomes say how to be woken.
+      expect(sent.message).toContain("Nothing wakes you when it closes: to be woken, park a row of your own on it");
       await expect(send(b.id, "req-2", "Something else entirely")).rejects.toMatchObject({ code: "request_id_reused", status: 409 });
-      expect(await send(b.id, "req-2")).toMatchObject({ state: "sent" });
+      expect(await send(b.id, "req-2")).toMatchObject({ state: "sent", message: expect.stringContaining("rig network request --help shows how") });
       expect(hub.creates).toBe(1);
       expect(repo.getById("req-2")!.body).toContain("Review the release notes");
       // An id that already names another local item is refused too.

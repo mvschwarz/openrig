@@ -45,6 +45,7 @@ interface WhoamiIdentity {
   memberId: string;
   sessionName: string | null;
   runtime: string;
+  networkBinding?: { id: string; hubSeat: string; hubUrl: string };
 }
 
 interface WhoamiPeer {
@@ -98,6 +99,8 @@ function projectCompactWhoami(data: Record<string, unknown>, bounded?: BoundedPe
       sessionName: id["sessionName"],
       senderAddress: id["senderAddress"],
       runtime: id["runtime"],
+      // A seat with a network binding is told so in the compact form too: it's how it finds `rig network`.
+      ...(id["networkBinding"] ? { networkBinding: id["networkBinding"] } : {}),
     },
     peers: peers.map((p) => {
       const peer = (p ?? {}) as Record<string, unknown>;
@@ -422,6 +425,10 @@ left out. --all-peers lists every one (today's compact output).`)
       if (id.senderAddress && id.senderAddress !== id.sessionName) console.log(`Sender:     ${id.senderAddress}`);
       console.log(`Runtime:    ${id.runtime}`);
       console.log(`Transport:  ${id.attachmentType === "external_cli" ? "external_cli (outbound only)" : id.attachmentType}`);
+      if (id.networkBinding) {
+        const net = id.networkBinding;
+        console.log(`Network:    ${net.id}, as ${net.hubSeat} at ${net.hubUrl} (experimental). rig network peers ${net.id} lists whom you can ask.`);
+      }
       console.log(`Resolved:   via ${data.resolvedBy.replace(/_/g, " ")}`);
 
       if (data.rosterState === "building") {

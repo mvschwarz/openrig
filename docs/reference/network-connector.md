@@ -189,6 +189,19 @@ A close with no resolution reads "Closed without a stated result." The close's n
 rig queue show <request-id>
 ```
 
+**Waiting for the answer:** the local item belongs to OpenRig, so nothing wakes the seat when it closes. A seat that
+ends its turn and wants to be woken when the answer lands parks a row of its own on the request item. When the item
+closes, OpenRig returns that row to pending and wakes the seat:
+
+```bash
+rig queue create --id <request-id>-wait --destination <your seat> --summary "Report <request-id>'s answer" --body "..."
+rig queue claim <request-id>-wait
+rig queue block <request-id>-wait --on <request-id> --continuation "read <request-id> and report its answer"
+```
+
+`request`'s own output says this too. A seat finds its binding with `rig whoami`, which names it (binding id, the seat's
+address on the hub, and the hub, with any query hidden) while the binding is active.
+
 **A hub item handed on there** (handed off, or closed by a handoff-and-complete): it isn't an answer. The connector
 follows the successor the hub names while the participant can read it.
 One it can't read leaves the local item open, with a note saying the answer isn't visible here. That outcome is unknown,

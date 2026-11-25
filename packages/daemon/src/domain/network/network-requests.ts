@@ -263,7 +263,7 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
       || existing.peer !== peer || existing.body_sha256 !== bodySha) throw reused();
     if (existing.outcome === "refused") return result(existing, "refused", `The hub refused this request earlier: ${existing.last_error ?? "no reason recorded"}. ${requestId} is closed failed.`);
     if (existing.hub_created_at) {
-      return result(existing, "sent", `${requestId} was already sent to ${peer} as hub item ${hubId}. Its answer comes back to ${requestId}: read it with rig queue show ${requestId}.`);
+      return result(existing, "sent", `${requestId} was already sent to ${peer} as hub item ${hubId}. Its answer comes back to ${requestId}: read it with rig queue show ${requestId}.${WAIT_HINT}`);
     }
     if (existing.settled_at) {
       return result(existing, "unknown", `${requestId} was settled (${existing.outcome}) before the hub confirmed hub item ${hubId}, so nothing more is read for it. ${existing.last_error ?? ""}`.trim());
@@ -337,12 +337,16 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
     // A credential refused while reading back a taken id: the hub may already hold this request, even on a first try.
     if (outcome.error.kind === "revoked") return keptOpen(outcome.error);
     deps.db.prepare("UPDATE network_requests SET last_error = ? WHERE local_qitem_id = ?").run(outcome.error.message.slice(0, 500), requestId);
-    return result(receipt, "unknown", `${requestId} is recorded, and whether the hub has it yet is unknown (${outcome.error.message}). The connector checks hub item ${hubId} on its next pass and creates it there under the same id if it's missing. Retry only with the same --id.`);
+    return result(receipt, "unknown", `${requestId} is recorded, and whether the hub has it yet is unknown (${outcome.error.message}). The connector checks hub item ${hubId} on its next pass and creates it there under the same id if it's missing. Retry only with the same --id.${WAIT_HINT}`);
   }
   deps.db.prepare("UPDATE network_requests SET hub_created_at = ?, last_error = NULL WHERE local_qitem_id = ?").run(now().toISOString(), requestId);
   return result(receipt, "sent", `${outcome.kind === "found" ? `${requestId} is already on the hub as hub item ${hubId}` : `Sent to ${peer} as hub item ${hubId}`}. `
-    + `Its answer comes back to ${requestId}: read it with rig queue show ${requestId}.`);
+    + `Its answer comes back to ${requestId}: read it with rig queue show ${requestId}.${WAIT_HINT}`);
 }
+
+/** The local item belongs to OpenRig, so its close wakes no seat (it owes nothing on it): say how to be woken, where the
+ *  sender reads the outcome. Guidance only; nothing is created for the seat. */
+const WAIT_HINT = " Nothing wakes you when it closes: to be woken, park a row of your own on it (rig network request --help shows how).";
 
 function result(receipt: RequestRow, state: NetworkRequestState, message: string): NetworkRequestResult {
   return { localQitemId: receipt.local_qitem_id, hubQitemId: receipt.hub_qitem_id, peer: receipt.peer, state, message };
