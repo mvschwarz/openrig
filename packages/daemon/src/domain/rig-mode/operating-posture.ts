@@ -1,4 +1,6 @@
 import { physicalSessionName } from "../session-registry.js";
+import { sessionRigOf } from "../session-name.js";
+import { RigRepository } from "../rig-repository.js";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -75,6 +77,10 @@ export class OperatingPostureService {
     /** Configured workspace.catalog_path; <workspace>/workspace.yaml when unset. */
     private readonly catalogPath?: () => string | undefined) {}
 
+  private rigRepo?: RigRepository;
+  /** Rig-name reads go through the repository's own lookups, archived rows included or not. */
+  private get rigs(): RigRepository { return this.rigRepo ??= new RigRepository(this.db); }
+
   /** The project a declared former id names now (#3261): the catalogued project that declares it, or, for a workspace
    *  with its own project.yaml and no catalog, that project. Null for any other id. `declaredIn` is the file that says so. */
   private formerIds(): FormerIdLookup {
@@ -95,10 +101,17 @@ export class OperatingPostureService {
 
   context(input: OperatorContextReadContext): OperatingContext {
     const ctx: OperatingContext = { ...input, phase: { value: null, source: null }, sources: [] };
+    // An id resolves exactly. A name resolves as other rig-name reads do (#174): archived rigs of that name count only when
+    // no live one has it. When it still isn't one rig, the candidates are named so one can be chosen by id.
     const rigIdentity = (value: string) => {
-      const rigs = this.db.prepare("SELECT id FROM rigs WHERE id = ? OR name = ?").all(value, value) as Array<{ id: string }>;
-      if (rigs.length !== 1) throw new Error("rig identity missing or ambiguous: " + value);
-      return rigs[0]!.id;
+      const byId = this.db.prepare("SELECT id FROM rigs WHERE id = ?").get(value) as { id: string } | undefined;
+      if (byId) return byId.id;
+      const live = this.rigs.findUnarchivedRigsByName(value);
+      if (live.length === 1) return live[0]!.id;
+      const candidates = live.length ? live : this.rigs.findRigsByName(value);
+      if (!candidates.length) throw new Error("no rig named or with id " + value);
+      throw new Error("rig name " + value + " matches " + candidates.length + (live.length ? " live rigs" : " archived rigs and no live one")
+        + "; name one by id: " + candidates.map(rig => rig.id).join(", "));
     };
     for (const value of Object.values(input)) if (value !== undefined && !value.trim()) throw new Error("empty scope identity");
     if (ctx.rigId) ctx.rigId = rigIdentity(ctx.rigId);
@@ -158,8 +171,10 @@ export class OperatingPostureService {
         merge("rigId", workflow.bound_rig, "workflow:" + workflow.instance_id);
         ctx.phase = { value: workflow.step_id, source: "workflow:" + workflow.instance_id + "/frontier/" + ctx.qitemId };
       }
-      if (row.destination_session.includes("@")) merge("rigId", row.destination_session.slice(row.destination_session.lastIndexOf("@") + 1), "queue:" + ctx.qitemId + "/destination");
-      if (!ctx.projectId && !ctx.missionId) throw new Error("qitem project/mission linkage is missing");
+      // A seat's address names its rig; a person's (<person>@external) names none.
+      const destinationRig = sessionRigOf(row.destination_session);
+      if (destinationRig) merge("rigId", destinationRig, "queue:" + ctx.qitemId + "/destination");
+      if (!ctx.projectId && !ctx.missionId) throw new Error("this item has no project or mission tag, so no work scope says what its operating posture is");
     }
     if (ctx.rigId) {
       ctx.sources.push("rig:" + ctx.rigId);
@@ -266,7 +281,8 @@ export class OperatingPostureService {
       return { posture: b.mode as "human-led" | "delegated", source: "binding", context,
         binding: { id: b.id, scope: resolved.resolvedScope, setAt: b.setAt, evidence: b.record.evidence_citation },
         reason: "Explicit operating posture at the most specific applicable scope.", grantsAuthority: false };
-    } catch (error) { return unknown(String(error), context); }
+    // The reason is shown as a sentence (the Feed, rig mode effective), not as an exception.
+    } catch (error) { return unknown(error instanceof Error ? error.message : String(error), context); }
   }
 
   /** Canonicalize only deliberate operating-posture writes; legacy ergonomic modes keep their contract. */
