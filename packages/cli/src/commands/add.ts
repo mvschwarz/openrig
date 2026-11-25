@@ -48,7 +48,7 @@ Examples:
     .action(async (rigHandle: string, podNamespace: string, fragmentPath: string, opts: { json?: boolean; rigRoot?: string }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
 
       let fileContent: string;
       try {

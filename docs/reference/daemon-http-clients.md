@@ -48,6 +48,7 @@ in the case named:
 | `bind` | The bind plan: `mode` (`explicit` or `default`), `hosts` (the addresses bound), `tailscaleDetected`, and `ignoredRoutingHost` when a routing value was ignored. |
 | `stuckSweep`, `wakeLadder` | The heartbeats of the stuck sweep and the wake ladder, when they run. In `stuckSweep`, `findingsRouted` counts the findings created since the daemon started (an open finding a later pass finds again is not counted again), `findingsOpen` is how many finding rows were still open after the last pass, and `lastOutcome` is `findings` when the last pass created, found again or closed one. |
 | `terminals` | Whether the daemon reaches its tmux server, from what it last observed (healthz doesn't call tmux). `state` is `ok`, `degraded` (a server doesn't answer) or `unknown` (none observed yet, or a server's last reading couldn't be made); each entry of `servers` has `socket`, `state` (`reachable`, `unreachable`, or `unknown` when the return probe couldn't be read: not held, with the loss it was watching in `lastLoss`), `since` (when that state began), `lastCheckedAt`, `transitions`, and in `cause` the tmux diagnostic while unreachable or why the reading is unknown. `status` stays `"ok"`: the daemon is up even when its terminals can't be reached. |
+| `backgroundWork` | Running seats with a positively observed missing pane or session. Each entry has `nodeId`, `rigId`, `sessionName`, `state: "unknown"`, `reason`, `observedAt`, and `processes`: previously sampled descendants still matching their process identity, with PID, start time and executable name only. Arguments and paths are omitted. The list is not exhaustive: sampling gaps, unavailable process information, unobserved descendants, restarts and reparenting can leave it empty even when work remains. No process is stopped. `backgroundWorkUnavailable: true` means the diagnostic itself could not be read. |
 
 ## Bearer tokens
 
@@ -143,6 +144,37 @@ A cycle, limit, missing or erased row, or a handed-to address without a recorded
 
 A node's terminal state is `completion.status: "closed-as-recorded"`; other nodes say `open`. The graph's overall `completion.status` is always `unknown`: a closed record does not establish that the person's goal succeeded.
 
+## Read many stream items' reader actions
+
+A reader action is an agent's recorded response to a stream item: it acted on it as work, declined it, or marked
+it as a duplicate. `GET /api/stream/actions/list` pages these records without a request per item. Each `items`
+entry has `actionId`, `streamItemId`, `readerSession`, `action` (`act`, `decline`, `duplicate`), `workQitemId`,
+`duplicateOf`, `reason` and `actedAt`. Repeated historical acts remain separate records. The existing
+`GET /api/stream/:id/actions` returns one item's records.
+
+- `mode=history` (default) reads all matching retained actions. `mode=current` reads the newest **actionId** per
+  item and reader, selected across the whole history before kind, time and page filters. A later decline cannot
+  cause an older act to reappear just because `action=act` was requested.
+- Repeat `streamItemId` to select particular items. `hintTag` and `sourceSession` filter item metadata;
+  `readerSession` filters the action's actor. `action` selects one of the three kinds. `since` and `until` are
+  inclusive **action-time** bounds, valid ISO timestamps with at most millisecond precision, normalized to UTC.
+- `limit` defaults to 200 and is clamped to 1–500 after the usual integer query parsing. Results sort by
+  ascending `actionId`, a unique tie-breaker even when action timestamps are equal. Follow `nextAfterActionId`
+  as `afterActionId`, keeping the other filters/mode unchanged, until `hasMore` is false. A page is not a total count.
+- Archived items' actions are included. `missingStreamItemIds` lists explicitly requested IDs absent from the
+  item table; a present item with no matching actions is different from a missing item. Actions can still be
+  returned after someone removes their item row. Those actions cannot match a tag or source filter because the
+  item's metadata is gone. `historyScope: "retained"` means the result includes only action records this daemon
+  still stores; it cannot recover deleted records.
+
+Tag matching examines stored JSON values. Items have a source-session index, but filtering or sorting the joined
+action records can still examine more records than a page returns. In current mode, finding each reader's latest
+action can also read more history than the page contains.
+
+Paging has no gaps or repeats on stable data. It is not a snapshot: new action IDs ahead of the cursor can appear
+on later pages, IDs inserted behind it are not revisited, and concurrent corrections can change which records
+are current. A client needing one consistent current view should restart/reconcile by newest actionId. The old
+per-item read, writes and host access behavior are unchanged; this adds no remote forwarding.
 ## Attention from one host
 
 `GET /api/queue/attention-aggregate` returns `{ items, hosts }` for local attention plus enabled Feed
@@ -382,6 +414,16 @@ What reads these declarations:
 
 ## Route details
 
+- **Early Claude compaction acknowledgement:** Send `{"session":"<session>","earlyAck":true}` to
+  `POST /api/compaction/trigger` to receive HTTP 202 with
+  `{"ok":true,"session":"<session>","stage":"preparing","attemptId":"<id>"}` once the daemon admits
+  your attempt. The receipt confirms admission to preparation only. Use the returned session in
+  `GET /api/compaction/state?session=<session>` and match `preparation.attemptId` to follow that attempt
+  and see whether `/compact` was submitted. A concurrent request refused as `409 already_in_progress`
+  receives no attempt ID. If the 202 response is lost, the request may still be running. Inspect state
+  and the seat before taking further action. Do not retry automatically or assume a new ID in seat state
+  belongs to the lost request. Omitting `earlyAck` or sending `false` uses the blocking response.
+  Pi's trigger returns HTTP 422 for `earlyAck:true`.
 - **Every seat's name in one read:** `GET /api/ps?seats=true` adds `seats`, the rig's seat session names, to each
   entry of the usual `/api/ps` body, from the same read. Use it instead of reading each rig's nodes when only the
   names are needed. The default body has no `seats`, and neither does a daemon from before this option.

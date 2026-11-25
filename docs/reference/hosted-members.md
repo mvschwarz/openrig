@@ -276,7 +276,7 @@ Return `{ removalRevision, removedAt }`, `{ removalRevision, alreadyRemoved: tru
 code, not names or credentials. Core echoes the original references in a successful receipt; a mismatched
 revision or ambiguous result is unavailable. The existing `resolverTimeoutMs` budget (default 5,000 ms)
 bounds body reading and this hook, and the signal is canceled on disconnect or timeout. No provider hook
-means the endpoint remains absent. The customer's connector retries pending removals after lost replies;
+means the endpoint remains absent. Your connector retries pending removals after lost replies;
 a superseded receipt never means the newer credential was removed.
 
 ### Supply a caller resolver

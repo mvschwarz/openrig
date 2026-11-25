@@ -243,7 +243,7 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     expect(await response.json()).toMatchObject({ preparation: { delivery: "uncertain", compact: "not_sent" } });
   });
 
-  it("known below-threshold usage permits manual preparation, then /compact follows", async () => {
+  it.each([undefined, false])("keeps the blocking response with earlyAck=%s", async (earlyAck) => {
     const { claudeNodeId } = seed();
     usageStore.persist(claudeNodeId, knownUsage("dev-impl@my-rig", 42));
     const { app, sentTexts } = buildApp();
@@ -251,17 +251,83 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     const res = await app.request("/api/compaction/trigger", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: "dev-impl@my-rig" }),
+      body: JSON.stringify({ session: "dev-impl@my-rig", earlyAck }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual({ ok: true, session: "dev-impl@my-rig", stage: "compact-sent", compact: expect.stringMatching(/^submitted, unconfirmed: /) });
+    expect(await res.text()).toBe(JSON.stringify({ ok: true, session: "dev-impl@my-rig", stage: "compact-sent",
+      compact: "submitted, unconfirmed: OpenRig sent /compact and Enter to the seat; it does not check whether Claude Code then started compacting." }));
     // The manual request does not claim that the threshold was reached.
     expect(sentTexts[0]).toContain("OpenRig manual compaction was requested");
     expect(sentTexts[0]).not.toContain("configured compaction threshold");
     // Phase 2 /compact followed.
     expect(sentTexts[1]).toContain("/compact");
     expect(sentTexts).toHaveLength(2);
+  });
+
+  it("returns only the admitted caller's attempt ID while preparation is blocked", async () => {
+    seed();
+    const preparation = Promise.withResolvers<void>();
+    const enteredPreparation = Promise.withResolvers<void>();
+    const { app, enforcer, sentTexts } = buildApp({ afterPreparationSubmit: () => {
+      if (sentTexts.length !== 1) return;
+      enteredPreparation.resolve();
+      return preparation.promise;
+    } });
+    const session = "dev-impl@my-rig";
+    const trigger = (sender: string) => app.request("/api/compaction/trigger", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": sender },
+      body: JSON.stringify({ session, earlyAck: true }),
+    });
+    const winner = trigger(session);
+    const loser = trigger("dev-qa@my-rig");
+    try {
+      await enteredPreparation.promise;
+      const refused = await loser;
+      expect(refused.status).toBe(409);
+      const refusal = await refused.text();
+      expect(JSON.parse(refusal)).toMatchObject({ ok: false, reason: "already_in_progress" });
+      const response = await Promise.race([winner, Promise.resolve("pending")]);
+      if (typeof response === "string") throw new Error("Expected the admitted response before preparation completes");
+      expect(response.status).toBe(202);
+      const receipt = await response.json();
+      expect(receipt).toEqual({ ok: true, session, stage: "preparing", attemptId: expect.any(String) });
+      expect(refusal).not.toContain(receipt.attemptId);
+      const state = await app.request(`/api/compaction/state?session=${session}`);
+      expect(await state.json()).toMatchObject({ preparation: { attemptId: receipt.attemptId, compact: "not_sent" } });
+      expect(sentTexts).toHaveLength(1);
+    } finally {
+      preparation.resolve();
+      await winner;
+      await loser;
+      await vi.waitFor(() => expect(enforcer.getPreparationState(session)?.status).toBe("compact-sent"));
+    }
+    expect(sentTexts[1]).toContain("/compact");
+    expect(sentTexts).toHaveLength(2);
+  });
+
+  it("does not acknowledge an early request refused by terminal policy", async () => {
+    const { claudeNodeId } = seed();
+    new TerminalPolicyStore(db).write(claudeNodeId, { preset: "no-peer-interventions", helpers: [], exceptions: {} }, "person", "Do not allow peer compaction");
+    const { app, sentTexts } = buildApp();
+    const response = await app.request("/api/compaction/trigger", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dev-qa@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", earlyAck: true }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ ok: false, reason: "terminal_policy_refused" });
+    expect(sentTexts).toEqual([]);
+  });
+
+  it("requires a boolean earlyAck before starting any compaction", async () => {
+    seed();
+    const { app, sentTexts } = buildApp();
+    const response = await app.request("/api/compaction/trigger", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", earlyAck: "true" }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ ok: false, error: "earlyAck must be boolean" });
+    expect(sentTexts).toEqual([]);
   });
 
   it("non-Claude seat → 422 runtime_filter (rejected, not silent no-op)", async () => {

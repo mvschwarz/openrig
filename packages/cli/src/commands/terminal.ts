@@ -2,7 +2,7 @@
 // the operator's terminal-provider-ride entry). The subcommands read
 // the ONE canonical daemon composer (`/api/terminal/...`):
 //
-//   rig terminal open <view> [--provider herdr|cmux|rex] [--json]
+//   rig terminal open <view> [--provider herdr|cmux|rex|orca] [--json]
 //   rig terminal views [--json]
 //   rig terminal status [--provider herdr|cmux|rex] [--json]
 //   rig terminal attach <session> [--read-only]
@@ -23,6 +23,7 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { openAllTerminalWindows, openTerminalWindow, type WindowDeps } from "../terminal-window.js";
+import { openOrcaView } from "../terminal-orca.js";
 import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
 import { attentionLines, checkSeatAttention } from "../seat-attention.js";
 import { existsSync } from "node:fs";
@@ -293,7 +294,8 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .argument("[view]", "a rig name, pod:<rig>/<pod>, seat:<rig>/<logical-id>, mission:<id>, slice:<id>, qitem:<id> (current local obligation owners), or a saved-view id")
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
     .option("--all", "Open one viewer per local rig in sorted rig-name order")
-    .option("--provider <name>", "herdr, herdr-app, cmux or rex: open in the running provider without a desktop window; herdr focuses a workspace that still shows this view with live attachments, otherwise each open adds a new workspace, and herdr-app opens a Rig view in the herdr-app window this runs in, which must be answering; tmux requires --window. Inside Rex, the default opens in Rex")
+    .option("--provider <name>", "herdr, herdr-app, cmux, rex or orca: open in the running provider without a desktop window; herdr focuses a workspace that still shows this view with live attachments, otherwise each open adds a new workspace, and herdr-app opens a Rig view in the herdr-app window this runs in, which must be answering. orca is experimental and macOS-only. tmux requires --window. Inside Rex, the default opens in Rex")
+    .option("--orca-workspace <selector>", "Existing local Orca workspace for --provider orca (defaults to the calling Orca terminal's workspace)")
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted outside herdr-app); inside a herdr-app terminal --window still asks for a desktop window, and plain open reuses herdr-app")
     .option("--app-home <dir>", "herdr-app: the client to open in (default: herdr-app's own home, from HERDR_APP_HOME or ~/.config/herdr-app)")
@@ -309,13 +311,28 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .option("--grace-ms <ms>", "Departure grace, default 4000, at most 60000", Number)
     .option("--focus-retention-ms <ms>", "Extra focused-reading retention, default 12000, at most 300000", Number)
     .option("--json", "JSON output for agents")
-    .action(async (view: string | undefined, opts: { all?: boolean; provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string; appHome?: string;
+    .action(async (view: string | undefined, opts: { all?: boolean; provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string; appHome?: string; orcaWorkspace?: string;
       follow?: boolean; maxTiles?: number; pin?: string[]; unpin?: string[]; suppress?: string[]; unsuppress?: string[];
       suppressionMs?: number; graceMs?: number; focusRetentionMs?: number }) => {
       const deps = getDeps();
       const session = opts.session?.trim();
       const { maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs } = opts;
       const hasControls = [maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs].some(v => v !== undefined);
+      const named = opts.provider?.trim();
+      if (opts.orcaWorkspace !== undefined && named !== "orca") {
+        printResult(opts.json ?? false, { ok: false, code: "invalid_arguments", error: "--orca-workspace requires --provider orca." }, 400);
+        return;
+      }
+      if (named === "orca" && !opts.all) {
+        if (!view || opts.window || session !== undefined || opts.appHome !== undefined || opts.expectedPlan !== undefined || opts.follow !== undefined || hasControls) {
+          printResult(opts.json ?? false, { ok: false, provider: "orca", code: "invalid_arguments", error: "Use <view> --provider orca [--orca-workspace <selector>] without window, session, app-home, expected-plan or following options." }, 400);
+          return;
+        }
+        await withClient(deps, async client => {
+          printOpen(opts.json ?? false, await openOrcaView(client, view, opts.orcaWorkspace, deps.windowDeps), 200);
+        });
+        return;
+      }
       if (opts.all) {
         const failBulk = (code: string, error: string, provider = opts.provider?.trim() ?? "herdr") => {
           printOpenAll(opts.json ?? false, { ok: false, provider, rigs: [], code, error }, 400);
@@ -324,8 +341,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
         if (opts.follow !== undefined || hasControls) { failBulk("invalid_arguments", "--all cannot be combined with --follow or following controls."); return; }
         if (opts.expectedPlan !== undefined) { failBulk("invalid_arguments", "--all cannot be combined with --expected-plan."); return; }
         if (opts.appHome !== undefined) { failBulk("invalid_arguments", "--all cannot be combined with --app-home."); return; }
-        const named = opts.provider?.trim();
-        if (named && ["herdr-app", "cmux", "rex"].includes(named)) {
+        if (named && ["herdr-app", "cmux", "rex", "orca"].includes(named)) {
           failBulk("unsupported_provider", `--all supports herdr or tmux --window; ${named} is unsupported.`, named); return;
         }
         if (named === "tmux" && !opts.window) {

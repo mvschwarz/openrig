@@ -1,7 +1,7 @@
 // #739 round 2, through the real wire of a machine without its own Slack connection: it recovers only the channels the hub
 // has relayed to it, from the first relayed event's arrival, and keeps that across restarts. Fake Slack, fake clock, made-up IDs.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDb } from "../src/db/connection.js";
@@ -10,6 +10,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
+import type { SlackEvent } from "../src/domain/gateway/slack/inbound.js";
 import { DEFAULT_CONFIG, saveConfig, type SlackConnectorConfig } from "../src/domain/gateway/slack/config.js";
 import { slackMicros } from "../src/domain/gateway/slack/state-store.js";
 import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
@@ -22,13 +23,15 @@ const ts = (seconds: number) => `${BASE + seconds}.000001`;
 const at = (seconds: number) => (BASE + seconds) * 1000;
 const message = (channel: string, seconds: number) => ({ type: "message", user: "UADA", text: `message ${seconds}`, ts: ts(seconds), channel });
 const MAP: SlackConnectorConfig["channelMap"] = [{ match: "my-rig", channel: "CRELAY" }];
+const fileShare = (seconds: number): SlackEvent => ({ ...message("CRELAY", seconds), subtype: "file_share",
+  files: [{ id: "FDEMO", name: "clip.ogg", url_private: "https://files.slack.com/clip" }] });
 
 describe("relay recovery through a bot-token-only machine's wire (#739)", () => {
   let home: string;
   let db: ReturnType<typeof createDb>;
   let repo: QueueRepository;
   let wire: ReturnType<typeof buildSlackGatewayWire> | undefined;
-  let history: Record<string, Array<ReturnType<typeof message>>>;
+  let history: Record<string, SlackEvent[]>;
   let historyQueries: string[];
 
   beforeEach(() => {
@@ -47,6 +50,7 @@ describe("relay recovery through a bot-token-only machine's wire (#739)", () => 
 
   const fetchImpl = async (url: string) => {
     const u = new URL(url);
+    if (u.hostname === "files.slack.com") return new Response("fixture media", { headers: { "content-type": "application/octet-stream" } });
     if (u.pathname.endsWith("conversations.history")) {
       const channel = u.searchParams.get("channel")!;
       historyQueries.push(channel);
@@ -86,6 +90,26 @@ describe("relay recovery through a bot-token-only machine's wire (#739)", () => 
 
     expect(delivered()).toHaveLength(2);
     expect(delivered().some(body => body.includes("Recovered after a gap") && body.includes(ts(20)))).toBe(true);
+  });
+
+  it("saves the same origin contract for relayed uploads and channel history recovery", async () => {
+    build();
+    await advanceTo(10);
+    await wire!.acceptForwarded!({ type: "events_api", payload: { event: fileShare(9) } });
+    history.CRELAY = [fileShare(20)];
+    await advanceTo(300);
+
+    const dir = join(home, "state", "slack-inbound-media");
+    const files = readdirSync(dir).filter(file => file.endsWith(".provenance.json"));
+    expect(files).toHaveLength(2);
+    expect(files.map(file => JSON.parse(readFileSync(join(dir, file), "utf8"))).map(v => v.messageTs).sort()).toEqual([ts(9), ts(20)]);
+    for (const file of files) {
+      expect(JSON.parse(readFileSync(join(dir, file), "utf8"))).toMatchObject({
+        version: 1, channelId: "CRELAY", authorId: "UADA", fileId: "FDEMO", ordinal: 1,
+      });
+      expect(readFileSync(join(dir, file.slice(0, -".provenance.json".length)), "utf8")).toBe("fixture media");
+    }
+    expect(delivered()).toHaveLength(2);
   });
 
   it("keeps recovering a relayed channel after a restart, with no new relayed event", async () => {

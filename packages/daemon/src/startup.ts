@@ -229,6 +229,7 @@ import { restoreExistingRigUnattended } from "./domain/existing-rig-restore.js";
 import { lstatLinkInfo } from "./domain/restore-guidance.js";
 import { managedBlockRecords } from "./domain/managed-block-records.js";
 import { noticeHarnessNotStarted } from "./domain/harness-not-started-notice.js";
+import { noticeRosterReady } from "./domain/roster-ready-notice.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -466,6 +467,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const topologyValidateRig = makeTopologyDestinationCheck({
     findRigsByName: (name) => rigRepo.findRigsByName(name),
     loadHumanRegistry: () => loadHumanRegistry(),
+    db,
   });
   // Seat absence in positively known local topology is advice, never admission
   // authority. Keep every typed destination intact, including adopted aliases.
@@ -1395,6 +1397,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const podInstantiator = new PodRigInstantiator({
     db, rigRepo, podRepo,
+    rosterReadyNotice: (rigId, sessions) => noticeRosterReady(queueRepoInstance, rigId, sessions),
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
     adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter, runnerGrants }),
@@ -1915,8 +1918,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           ? (transcriptsPath ?? getCompatibleOpenRigPath("transcripts"))
           : getCompatibleOpenRigPath("transcripts"),
         exec: execDep,
-        chatSearchFn: (rigId: string, pattern: string) =>
-          chatRepoForAsk.searchChat(rigId, pattern).map((m) => ({
+        chatSearchFn: (rigId: string, keywords: string[]) =>
+          chatRepoForAsk.searchChat(rigId, keywords).map((m) => ({
             sender: m.sender,
             body: m.body,
             createdAt: m.createdAt,
@@ -3253,6 +3256,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       home: effectiveOpenRigHome,
       queueRepo: queueRepoInstance,
       resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract, effectiveOpenRigHome),
+      filesAllowlist: () => deps.filesAllowlist ?? [],
       log: (m) => console.log(`[gateway] ${m}`),
     }),
     log: (m) => console.log(`[gateway] ${m}`),
