@@ -238,6 +238,22 @@ or object access. Resources contain the supplied text, not a file path or a load
 resource URIs follow the SDK's existing registration error behavior. Without an introduction, the
 existing initialization instructions remain unchanged.
 
+### Handle provider removal separately from work grants
+
+An embedding can supply `onBindingLeave(request, signal)` to `startMcpHttpServer`. It handles
+`POST /mcp/bindings/leave` independently of ordinary MCP grant resolution. `request` includes the opaque
+removal `token`, `bindingId`, `hubSeat`, `provider` references and `removalRevision`. The provider owns
+checking that removal-only capability and performing idempotent cleanup. It must not accept a work
+credential as a removal capability or grant work access to a removal credential.
+
+Return `{ removalRevision, removedAt }`, `{ removalRevision, alreadyRemoved: true }`, or
+`{ removalRevision, superseded: true }`. To refuse, return `{ refused: true, code }` with a fixed diagnostic
+code, not names or credentials. Core echoes the original references in a successful receipt; a mismatched
+revision or ambiguous result is unavailable. The existing `resolverTimeoutMs` budget (default 5,000 ms)
+bounds body reading and this hook, and the signal is canceled on disconnect or timeout. No provider hook
+means the endpoint remains absent. The customer's connector retries pending removals after lost replies;
+a superseded receipt never means the newer credential was removed.
+
 ### Supply a caller resolver
 
 An embedding can pass `resolver` and `resolverTimeoutMs` to `startMcpHttpServer`. The supported
@@ -281,11 +297,22 @@ A result may also reduce the profile with `readOnly: true`, or set `newWorkRetry
 are offered only read operations and cannot invoke hidden writes. Backoff holds only new creates, returns a
 retryable result with the same request id, and leaves reads, claims, updates and already-landed same-id retries
 available. The existing backoff range is 1–600 seconds for a positive delay; zero means no backoff.
+A delay that isn't a whole number of seconds rounds up to the next whole second. The token-file field
+`newWorkRetryAfterSeconds` feeds the same evaluator: for example, `1001` milliseconds or `1.001` seconds
+returns a two-second delay. The resolver may set its delay on the result or on `access`; the result field
+takes precedence when both are supplied. These fields need no service payload or service-shaped caller id.
+
+If an earlier create with the supplied `qitemId` cannot be read, the retryable result says
+`earlierAttempt: "unknown"` and creates nothing in this call. Read that id before retrying; an unavailable
+read is not evidence that the earlier attempt was absent. A confirmed existing id remains a retry and
+goes through the usual reuse check, so changed content is not silently accepted.
 
 A refusal is `{ ok: false, refusal }`. `unknown`, `revoked`, `expired` and `wrong_instance` return HTTP 401 with a
 Bearer challenge; `malformed` and `unavailable` return 503. A thrown error, unusable result, missing instance or
-unavailable seat is also unavailable. Resolver exceptions are not echoed or logged. No result falls back to the
-token file or the process's seat. A resolver and a grant service cannot both be selected.
+unavailable seat is also unavailable. A negative or non-finite resolver delay makes the whole request unavailable
+(503), including reads and settlement; an invalid token-file delay instead holds new work for 600 seconds with a
+warning. Resolver exceptions are not echoed or logged. No result falls back to the token file or the process's seat.
+A resolver and a grant service cannot both be selected.
 
 The default 5000 ms budget covers reading the body, looking up the instance, calling the resolver and checking
 the seat. The signal aborts on that deadline or a disconnected client. Core bounds its wait even when the returned

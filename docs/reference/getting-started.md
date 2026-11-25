@@ -43,7 +43,10 @@ Setup and launch are separate: declining `rig setup` avoids its `~/.tmux.conf` c
 still write workspace trust and selected MCP/config fragments. `runtime.codex.hooks_enabled=false` controls hooks;
 it isn't a no-global-config option. Setup has no project-only mode. Trusted project `.codex/config.toml` settings
 don't redirect OpenRig's home-config writes. A separate selected `CODEX_HOME` keeps Codex config, login and sessions
-together in that home; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
+together in that home; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`. A new home, such as one
+made inside a project to avoid these writes, has no login, so a team can't start on it until it's signed in. To keep
+your existing login, keep your home (`~/.codex`, or `~/.claude` for Claude Code) and accept these few writes there.
+Don't copy credentials into a project to get around them.
 
 > **What OpenRig changes on your machine**
 > - **Install:** `@openrig/cli` goes in globally with npm.
@@ -410,6 +413,13 @@ once, by rig id when names are shared; it records the stop, and `--last` then
 leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
 (`OPENRIG_NO_KERNEL=1`) the daemon skips the kernel's automatic restore too;
 bring it back with `rig up kernel --existing`.
+
+A rig the daemon has nothing to restore from is left out and named with the
+daemon's reason and, when it sends them, the blockers that kept its saved state
+from standing in. With `--json` these rigs are listed under `leftOut`, each with
+its `code`, `message` and `blockers`; `neverLaunched` marks a rig none of whose
+seats has ever run. A preview that failed outright stays under `previewErrors`.
+Left-out rigs don't change the exit code.
 
 Restore requests run one at a time by default. To keep up to two requests
 outstanding, for example, use `rig start --last --concurrency 2`. A request that
@@ -1186,6 +1196,31 @@ inspect an authored lifecycle with `rig workflow compile` and create its runtime
 with `rig workflow instantiate-lifecycle`. Compilation alone does not start work.
 [OpenRig Software Factory](../../packages/daemon/specs/agents/shared/skills/core/openrig-software-factory/SKILL.md)
 shows a small reviewed example and how to retain custody through a genuine wait.
+
+### Check a workflow start after a lost response
+
+If the connection drops after you request a workflow start, the daemon may have
+already created the instance and its entry packet. Repeating an ordinary
+`rig workflow instantiate` can create another run.
+
+For ordinary starts, choose and save a unique tag for each intended run before
+calling `instantiate`. For example, add `--tags request:review-20261123-01` and
+look for that tag on the same daemon before deciding whether to retry.
+
+```bash
+rig workflow list --name review-flow --tag request:review-20261123-01 --json
+rig queue list --all --all-rigs --tag instance:INSTANCE_ID --json
+```
+
+Use the `instanceId` from the matching run in the second command to list its
+queue packets. The first packet is tagged `entry`, or `gate` if the run starts
+with a gate. Its queue and pickup state tell you what happened after creation.
+A tag helps you find the request's effects. It can match multiple runs if reused, and an
+empty result can still mean a request is in flight, so recheck before retrying.
+
+For `rig workflow instantiate-lifecycle`, keep the original `--operation-key`.
+Run `rig workflow operation <key>` on the same daemon to look up the committed
+instance and entry packet. If you retry the original command, reuse that key.
 
 ## Have your agent configure permissions
 

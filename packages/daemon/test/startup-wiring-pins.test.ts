@@ -370,6 +370,49 @@ describe("the seat-pool executor's composition (#3395)", () => {
   });
 });
 
+describe("the seat-pool add's composition (#3395)", () => {
+  it("Startup composes the seat-pool add with the daemon's export of a member and the member add of `rig add` (convergeOp over the daemon's instantiator), and the executor reserves its operation ids in the daemon's database.", async () => {
+    expect(composed.seatPoolExecutor).toHaveLength(1);
+    const executorDeps = composed.seatPoolExecutor[0]!.deps as SeatPoolExecutorDeps;
+    // without these the executor skips the whole add stage
+    expect(executorDeps.add).toBeDefined();
+    const add = executorDeps.add!;
+    expect(typeof add.exportMember).toBe("function");
+    expect(typeof add.converge).toBe("function");
+    expect(typeof add.makeFolder).toBe("function");
+    expect(executorDeps.rigRepo.getNodeLaunchRecipe).toBeTypeOf("function");
+
+    const rigRepo = new RigRepository(db);
+    const rig = rigRepo.createRig("pin-add");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
+    const model = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: pod.id, cwd: scratch });
+    rigRepo.setNodeStatuslineThrottle(model.id, 30);
+
+    const exported = vi.spyOn(deps.rigSpecExporter, "exportedRawMemberFromNode");
+    const addMember = vi.spyOn(deps.podInstantiator, "addMemberToPod")
+      .mockResolvedValue({ ok: false, code: "rig_not_found", message: "pinned" });
+    try {
+      // the export: the model member in the spec's own keys, from the daemon's exporter
+      const member = add.exportMember(rig.id, model.id);
+      expect(exported).toHaveBeenCalledWith(rig.id, model.id);
+      expect(member).toMatchObject({ id: "impl", runtime: "claude-code", cwd: scratch, statusline_throttle: 30 });
+      // the member add: convergeOp over the daemon's instantiator, with the operation's recordCreated
+      const recordCreated = vi.fn();
+      const converged = await add.converge(rig.id, { kind: "add_member", pod: "dev", member: { ...member, id: "impl-s1" } }, "/rig/root", { recordCreated });
+      expect(converged).toEqual({ kind: "add_member", supported: true, outcome: { ok: false, code: "rig_not_found", message: "pinned" } });
+      expect(addMember).toHaveBeenCalledWith(rig.id, "dev", { ...member, id: "impl-s1" }, "/rig/root", expect.objectContaining({ recordCreated }));
+      // the folder of a cwd_template, created and nothing else
+      const folder = path.join(scratch, "pool-slots", "pin-add", "impl-s1");
+      add.makeFolder(folder);
+      expect(fs.readdirSync(folder)).toEqual([]);
+      // the operation ids go to the daemon's own database: the executor reserves them in its db, the daemon's
+      expect(executorDeps.db).toBe(db);
+    } finally {
+      exported.mockRestore(); addMember.mockRestore();
+    }
+  });
+});
+
 describe("P16 — UNINJECTED-SERVICE findings ledger (routed to desk; todo graduates to a pin when the fix lands)", () => {
   it.todo("FINDING A1: SeatHandoverService.occupantInvalidator UNINJECTED (routes/seat.ts construction) — every handover commits with zero state invalidation; ghost-stage atom-B lane owns the impl");
   it.todo("FINDING A2: projection-planner resolveTargetPath UNINJECTED (rigspec-instantiator.ts:1672) — hash_conflict classification dead; operator-modified files silently overwritten");

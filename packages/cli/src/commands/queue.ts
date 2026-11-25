@@ -1818,6 +1818,28 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
     });
 
   cmd
+    .command("relay-answer <qitemId>")
+    .description("Record a person's verbatim answer given elsewhere and return it when the ask is fully answered")
+    .requiredOption("--attributed-to <person>", "The person who actually answered (a human seat or @external address), e.g. reader@external")
+    .requiredOption("--channel <channel>", "Where the person gave the answer")
+    .requiredOption("--text <text>", "The person's verbatim words")
+    .option("--question-id <id>", "Exact question ID (required for a structured ask)")
+    .option("--option-id <id>", "Exact option ID, when they chose an option")
+    .option("--answered-at <iso>", "When the person answered, only if known")
+    .option("--json", "JSON output for agents")
+    .action(async (qitemId: string, opts: { attributedTo: string; channel: string; text: string; questionId?: string; optionId?: string; answeredAt?: string; json?: boolean }) => {
+      if (!requireSeatSession("actor")) return;
+      const { json, ...submission } = opts;
+      await withClient(getDeps(), async (client) => {
+        const res = await client.post<{ replyQitemId: string | null; unanswered: string[] }>(`/api/queue/${encodeURIComponent(qitemId)}/relayed-answer`, submission);
+        if (res.status >= 400 || !res.data) return printQueueItemResult(client, qitemId, json ?? false, res.data, res.status);
+        if (json) console.log(JSON.stringify(res.data));
+        else if (res.data.replyQitemId) console.log(`RELAYED answer returned as ${res.data.replyQitemId}`);
+        else console.log(`RELAYED answer recorded; still open: ${res.data.unanswered.join(", ")}`);
+      });
+    });
+
+  cmd
     .command("tag <qitemId>")
     .description("Add tags to a qitem in any state, changing nothing else: its existing tags stay, a tag it already has adds nothing, and a closed row stays closed. The tags added are recorded on the row's history with who added them. Tags are never removed or rewritten.")
     .requiredOption("--add <tag>", "A tag to add, exact and case-sensitive; repeat for several (commas are literal)", (value: string, previous: string[] = []) => [...previous, value], [] as string[])
