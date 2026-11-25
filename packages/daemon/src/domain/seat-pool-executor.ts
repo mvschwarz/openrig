@@ -872,6 +872,9 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             };
             return;
           }
+          // The block again first: one that became unreadable while the cycle waited for custody holds the leftovers too,
+          // and they stay as they are. A block stored again with another value, or removed, still lets them settle.
+          if (blockView(deps.rigRepo.getNodePool(modelNodeId)).block === "unusable") { blockChangedNow(); return; }
           // An add attempt no process runs any more (a reservation never issued, or an issued add not in flight in this
           // process: cut off by a daemon restart, or left unknown), settled from its row. One in flight here is left alone.
           for (const slot of deps.slots.forModel(modelNodeId)) {
@@ -879,6 +882,11 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             const entry = settleLeftover(modelNodeId, slot);
             if (entry) reportSettled(modelNodeId, entry);
           }
+          // A leftover settled `not_running` here drains its slot, which starts the cooldown the plan could not see: under
+          // it, this cycle's drains wait (`drain: true` keeps its exemption).
+          const stepNow = lastDrainStep(deps.slots.forModel(modelNodeId));
+          const coolingNow = !spec.drain && stepNow !== null && stepNow !== read.lastStepAt
+            && deps.now().getTime() - Date.parse(stepNow) < spec.cooldownSeconds * 1000;
           // A drain an earlier cycle left unfinished. One whose unconfirmed stop may have had an effect (a kill was
           // attempted) is stopped again below, never captured again. Any other (its capture failed, it ended before the
           // capture, or its stop is known to have had no effect) goes back to `live`: nothing was stopped, and a later plan
@@ -941,6 +949,10 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           for (const [index, d] of drainIntents.entries()) {
             if (held || blockChanged) break;
             if (!active()) { held = JOB_STOPPED; break; }
+            if (coolingNow) {
+              for (const rest of drainIntents.slice(index)) drainSkipped({ slotNumber: rest.slotNumber, session: plannedTo(rest.slotNumber), phase: "live" }, "cooldown");
+              break;
+            }
             if (blockChangedNow()) {
               for (const rest of drainIntents.slice(index)) drainSkipped({ slotNumber: rest.slotNumber, session: plannedTo(rest.slotNumber), phase: "live" }, "pool_block_changed");
               break;
@@ -1365,7 +1377,10 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       };
       // After `pool: {}`: the job ends once every agent is drained (busy agents stay `live` until they are free).
       if (ends) {
-        return { action: "terminal", reason: "seat_pool_removed_drained", notes };
+        // What this cycle (or an earlier one) settled goes in the last report too.
+        const done = settled.get(modelNodeId);
+        settled.delete(modelNodeId);
+        return { action: "terminal", reason: "seat_pool_removed_drained", notes: done?.length ? { ...notes, settled: done } : notes };
       }
       return report(notes);
     },

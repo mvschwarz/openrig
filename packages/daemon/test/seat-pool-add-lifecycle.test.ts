@@ -226,8 +226,9 @@ function lifecycleWorld() {
     rigRepo.setNodePool(m.nodeId, { spec: { ...stored.spec, max, min } });
     reconcileSeatPoolNode(reg, m.nodeId);
   };
-  const notesOf = async (jobId: string) =>
-    (((await proc.engine.evaluate(jobsRepo.getByIdOrThrow(jobId))).outcome) as { notes?: Record<string, unknown> }).notes ?? {};
+  const outcomeOf = async (jobId: string) =>
+    (await proc.engine.evaluate(jobsRepo.getByIdOrThrow(jobId))).outcome as { action: string; reason?: string; notes?: Record<string, unknown> };
+  const notesOf = async (jobId: string) => (await outcomeOf(jobId)).notes ?? {};
   const correlations = () => (db.prepare("SELECT operation_id, rig_id, node_ids_json FROM operation_correlations").all() as
     Array<{ operation_id: string; rig_id: string | null; node_ids_json: string }>);
   const hashes = () => db.prepare("SELECT operation_id, request_hash FROM operation_correlations").all();
@@ -237,7 +238,7 @@ function lifecycleWorld() {
   })).qitemId;
   return {
     root, db, bus, rigRepo, slots, sessions, queue, history, activity, clock, hooks, converge, launchHarness, stopSeat,
-    latestOf, model, setMax, notesOf, correlations, hashes, nodeOf, row, restart,
+    latestOf, model, setMax, outcomeOf, notesOf, correlations, hashes, nodeOf, row, restart,
     deps: () => proc.deps, executor: () => proc.executor,
   };
 }
@@ -627,5 +628,100 @@ describe("seat-pool add: while max drops and across a restart (#3395 Piece 1)", 
     expect(w.converge).toHaveBeenCalledTimes(1);
     expect(w.stopSeat).not.toHaveBeenCalled();
     expect(id).toBe(slot!.attemptId);
+  });
+
+  it("A stored block that becomes unreadable while the cycle waits for custody holds the leftover adds too: the reservation a restart left stays until the block reads again.", async () => {
+    const w = lifecycleWorld();
+    const m = await w.model({ max: 1, min: 1 });
+    const reserve = w.slots.reserveAdd.bind(w.slots);
+    vi.spyOn(w.slots, "reserveAdd").mockImplementationOnce((input) => { reserve(input); throw new Error("daemon exited"); });
+    await expect(w.executor().cycle({ jobId: m.jobId, context: { model_node_id: m.nodeId } })).rejects.toThrow("daemon exited");
+    const [reserved] = w.slots.forModel(m.nodeId);
+    const stored = w.rigRepo.getNodePool(m.nodeId)!;
+
+    w.restart();
+    // the block breaks after the cycle read it and before the custody lease is granted
+    const deps = w.deps();
+    const custody = deps.custody;
+    deps.custody = (ids, fn) => {
+      w.db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(JSON.stringify({ max: 2, min: 5 }), m.nodeId);
+      return custody(ids, fn);
+    };
+    const held = await w.notesOf(m.jobId);
+    expect(held.held).toEqual({ cause: "pool block unreadable", message: "held: pool block unreadable" });
+    expect(held.advisory).toMatch(/^the stored pool block can't be read \(/);
+    expect(held).not.toHaveProperty("settled");
+    expect(w.slots.forModel(m.nodeId)).toEqual([expect.objectContaining({ slotNumber: 1, attemptId: reserved!.attemptId, phase: "adding", attemptState: "reserved" })]);
+
+    // readable again: the next cycle settles it
+    deps.custody = custody;
+    w.rigRepo.setNodePool(m.nodeId, stored);
+    const notes = await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(notes.settled).toEqual([{
+      slotNumber: 1, logicalId: "dev.impl-s1",
+      attempt: { id: reserved!.attemptId, status: "cancelled", message: "cancelled: not issued", code: "interrupted_before_issue" },
+    }]);
+    expect(JSON.stringify([held, notes])).not.toContain('"stop"');
+    expect(w.stopSeat).not.toHaveBeenCalled();
+    expect(w.converge).not.toHaveBeenCalled();
+  });
+
+  it("An add a cycle settles `not_running` from its row starts the cooldown before that cycle's drains: the free agent its plan picked is stopped only once `cooldown_s` has passed.", async () => {
+    const w = lifecycleWorld();
+    const m = await w.model({ max: 2, min: 2, idle_grace_s: 300, cooldown_s: 60 });
+    // the second agent's call returns with its startup not ready: its result is unknown
+    let calls = 0;
+    w.hooks.afterAdd = () => {
+      if (++calls === 2) w.db.prepare("UPDATE sessions SET startup_status = 'pending' WHERE node_id = ?").run(w.nodeOf(m.rigId, "dev.impl-s2")!.id);
+    };
+    const id2 = issuedOf(await w.notesOf(m.jobId))[1]!.attempt.id;
+    await w.executor().idle();
+    const s1 = w.nodeOf(m.rigId, "dev.impl-s1")!, s2 = w.nodeOf(m.rigId, "dev.impl-s2")!;
+    w.activity.set(s1.id, idleState(s1.id));
+    // the cycle that reports the first agent settled running; the second stays unknown
+    await w.notesOf(m.jobId);
+    // the unknown add's session then exits, and `max` drops to 0: the plan picks the free agent, and the same cycle
+    // settles the exited add `not_running`, which drains its slot
+    w.sessions.updateStatus(w.latestOf(s2.id).id, "exited");
+    w.setMax(m, 0, 0);
+    const notes = await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(notes.settled).toEqual([{ slotNumber: 2, logicalId: "dev.impl-s2", nodeId: s2.id, attempt: { id: id2, status: "not_running", observed: "exited" } }]);
+    expect(notes.drains).toEqual([{ slotNumber: 1, session: `dev-impl-s1@${RIG}`, phase: "live", outcome: "skipped", code: "cooldown" }]);
+    expect(w.stopSeat).not.toHaveBeenCalled();
+    expect(w.slots.forModel(m.nodeId).map((s) => [s.slotNumber, s.phase])).toEqual([[1, "live"], [2, "drained"]]);
+
+    // past the cooldown, the free agent is drained
+    w.clock.now = new Date(w.clock.now.getTime() + 61_000);
+    const later = await w.notesOf(m.jobId);
+    expect(later.drains).toEqual([{
+      slotNumber: 1, session: `dev-impl-s1@${RIG}`, phase: "drained", outcome: "drained", snapshotId: expect.any(String),
+      stop: { cause: "drain", result: "stopped" },
+    }]);
+    expect(w.stopSeat).toHaveBeenCalledTimes(1);
+  });
+
+  it("After `pool: {}`, the evaluation that ends the job reports what it settled: a reservation a restart left is in the terminal notes, with its attempt id.", async () => {
+    const w = lifecycleWorld();
+    const m = await w.model({ max: 1, min: 1 });
+    const reserve = w.slots.reserveAdd.bind(w.slots);
+    vi.spyOn(w.slots, "reserveAdd").mockImplementationOnce((input) => { reserve(input); throw new Error("daemon exited"); });
+    await expect(w.executor().cycle({ jobId: m.jobId, context: { model_node_id: m.nodeId } })).rejects.toThrow("daemon exited");
+    const [reserved] = w.slots.forModel(m.nodeId);
+    // `pool: {}` clears the stored block; the job keeps the block it was ensured with
+    w.db.prepare("UPDATE nodes SET pool = NULL WHERE id = ?").run(m.nodeId);
+
+    w.restart();
+    const outcome = await w.outcomeOf(m.jobId);
+    expect(outcome).toMatchObject({ action: "terminal", reason: "seat_pool_removed_drained" });
+    expect(outcome.notes!.settled).toEqual([{
+      slotNumber: 1, logicalId: "dev.impl-s1",
+      attempt: { id: reserved!.attemptId, status: "cancelled", message: "cancelled: not issued", code: "interrupted_before_issue" },
+    }]);
+    expect(w.slots.forModel(m.nodeId)).toEqual([]);
+    expect(JSON.stringify(outcome.notes)).not.toContain('"stop"');
+    expect(w.stopSeat).not.toHaveBeenCalled();
+    expect(w.converge).not.toHaveBeenCalled();
   });
 });

@@ -93,10 +93,10 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
 
     | `attempt.status` | When | The slot |
     | --- | --- | --- |
-    | `running` | The agent's latest session runs (or is idle) with its startup `ready`. | `live`; from there it serves and drains like any other agent, and above `max` it receives no row. |
+    | `running` | The agent's latest session runs (or is idle) with its startup `ready`, and the add's call, if it returned, launched it. | `live`; from there it serves and drains like any other agent, and above `max` it receives no row. |
     | `no_node` | No node was created, with the add's code (for example `preflight_failed`). | Removed, which frees its number. |
     | `not_running` | The node exists but does not run: its latest session `exited`, or its executor is confirmed stopped (`probe_absent`), in `attempt.observed`; with the launch's error when the add's call returned. | `drained`, with a reuse hold (JSON `{ code, observed, error? }`: the launch's status or code, or `not_running` when the call never returned; what was observed; the launch's error, if any): never tried again, and it takes no room under `max`. Reported in `slots` every evaluation. |
-    | `unknown` | Anything else (startup not ready, no session yet), with what was read. | Stays `adding` and issued, read again every evaluation until it settles; never issued again, never stopped, and no other free agent is drained because of it. |
+    | `unknown` | Anything else (startup not ready, no session yet, or a call that returned a failure or a status other than `launched` while the session runs), with what was read. | Stays `adding` and issued, read again every evaluation until it settles; never issued again, never stopped, and no other free agent is drained because of it. |
 
   - after a daemon restart, an attempt that no process runs any more is settled by the next evaluation: a reservation
     that was never issued is cancelled (`cancelled: not issued`), and an issued add is read again by replaying its
@@ -177,5 +177,6 @@ gone, its job moves, drains and adds nothing and reports `held: model node gone`
 
 It does not bring drained agents back, and while a slot is `drained` (an add that settled `not_running` included) it
 adds no new number. An add whose launch failed or needs attention while its session still runs is reported `unknown`
-and stays issued; nothing yet settles it. An add that settles running after `rig down` keeps running: the pool does not
-yet stop an add it issued before the rig went down.
+and stays issued; nothing yet settles it. So does an add whose node was created but has no session when the daemon
+restarts: nothing launches it again, and deleting that node removes its slot row, which frees its number. An add that
+settles running after `rig down` keeps running: the pool does not yet stop an add it issued before the rig went down.
