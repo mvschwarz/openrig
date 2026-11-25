@@ -244,21 +244,39 @@ function outsideASeat() {
 }
 
 // Left out, the binding or seat is the calling seat, which the daemon resolves to that seat's binding.
-it("lists the calling seat's peers when no binding or seat is named, and with no seat names the missing argument", async () => {
+it("lists the calling seat's peers when no binding or seat is named", async () => {
   const out = vi.spyOn(console, "log").mockImplementation(() => {});
-  const err = vi.spyOn(console, "error").mockImplementation(() => {});
   hubPeers([{ session: "lead@team" }]);
   vi.stubEnv("OPENRIG_SESSION_NAME", "dev-impl@lab");
   await cli().parseAsync(["node", "rig", "network", "peers", "--json"]);
   expect(JSON.parse(String(out.mock.calls.at(-1)?.[0])).bindingId).toBe("dev-impl@lab");
   expect(process.exitCode).toBeUndefined();
+});
 
+/** The whole CLI as `rig` runs it, its shared error path included: what the person sees, and the exit code. */
+async function rigAsRun(args: string[]) {
+  vi.stubEnv("OPENRIG_HOME", home);
+  vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+  const { createProgram } = await import("../src/index.js");
+  const { runProgram } = await import("../src/cli-error.js");
+  const out: string[] = [], err: string[] = [];
+  let exited: number | undefined;
+  const code = await runProgram(createProgram(), ["node", "rig", ...args], { out: (l) => out.push(l), err: (l) => err.push(l), exit: (c) => { exited = c; } });
+  return { out, err, code: exited ?? code };
+}
+
+it("with no seat to default to, names the missing argument as a required one did: the plain line, or the JSON error with --json", async () => {
   outsideASeat();
-  out.mockClear();
-  await cli().parseAsync(["node", "rig", "network", "peers"]);
-  expect(err.mock.calls.at(-1)?.[0]).toBe("error: missing required argument 'binding-or-seat'");
-  expect(process.exitCode).toBe(1);
-  expect(out).not.toHaveBeenCalled();
+  const plain = (name: string) => ({ out: [], err: [`error: missing required argument '${name}'`], code: 1 });
+  const json = (name: string) => ({ out: [JSON.stringify({ ok: false, error: { code: "commander.missingArgument", message: `missing required argument '${name}'` } })], err: [], code: 1 });
+  const ask = ["--id", "req-1", "--body-file", join(home, "missing.md")];
+  expect(await rigAsRun(["network", "peers"])).toEqual(plain("binding-or-seat"));
+  expect(await rigAsRun(["network", "peers", "--json"])).toEqual(json("binding-or-seat"));
+  // One argument is the peer, so with no seat the binding or seat is what's missing; with none at all, the peer.
+  expect(await rigAsRun(["network", "request", "lead@team", ...ask])).toEqual(plain("binding-or-seat"));
+  expect(await rigAsRun(["network", "request", "lead@team", ...ask, "--json"])).toEqual(json("binding-or-seat"));
+  expect(await rigAsRun(["network", "request", ...ask])).toEqual(plain("peer"));
+  expect(await rigAsRun(["network", "request", ...ask, "--json"])).toEqual(json("peer"));
 });
 
 it("says the calling seat has no binding when it isn't connected", async () => {
@@ -289,22 +307,6 @@ it("sends a request through the calling seat when only the peer is named, and th
   expect(posts.at(-1)?.url).toBe("/api/network/bindings/netb-fixture/requests");
   expect(JSON.parse(String(out.mock.calls.at(-1)?.[0]))).toMatchObject({ ref: "netb-fixture", peer: "lead@team", requestId: "req-2" });
   expect(process.exitCode).toBeUndefined();
-});
-
-it("names the missing peer, or with only a peer and no seat the missing binding, and sends nothing", async () => {
-  const err = vi.spyOn(console, "error").mockImplementation(() => {});
-  hubRequests();
-  vi.stubEnv("OPENRIG_SESSION_NAME", "dev-impl@lab");
-  await cli().parseAsync(["node", "rig", "network", "request", "--id", "req-1", "--body-file", join(home, "missing.md")]);
-  expect(err.mock.calls.at(-1)?.[0]).toBe("error: missing required argument 'peer'");
-  expect(process.exitCode).toBe(1);
-
-  process.exitCode = undefined;
-  outsideASeat();
-  await cli().parseAsync(["node", "rig", "network", "request", "lead@team", "--id", "req-1", "--body-file", join(home, "missing.md")]);
-  expect(err.mock.calls.at(-1)?.[0]).toBe("error: missing required argument 'binding-or-seat'");
-  expect(process.exitCode).toBe(1);
-  expect(posts).toEqual([]);
 });
 
 it("shows the binding or seat as optional in each verb's usage", () => {

@@ -108,17 +108,13 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
     }
     console.log(json ? JSON.stringify(data, null, 2) : ok(data as Record<string, unknown>));
   };
-  const missingArgument = (name: string) => {
-    console.error(`error: missing required argument '${name}'`);
-    process.exitCode = 1;
-  };
+  /** Commander's own missing-argument error, raised as commander raises it, so the CLI reports it the same way: the
+   *  plain line, or the JSON error object with --json. */
+  const missingArgument = (command: Command, name: string): never =>
+    command.error(`error: missing required argument '${name}'`, { code: "commander.missingArgument", exitCode: 1 });
   /** A left-out binding or seat is the calling seat, resolved as the seat-acting verbs resolve it; the daemon finds a
    *  seat's binding by its address. With no seat to use, the error is the one the required argument gave. */
-  const ownSeat = (): string | undefined => {
-    const seat = resolveSenderSession();
-    if (!seat) missingArgument("binding-or-seat");
-    return seat;
-  };
+  const ownSeat = (command: Command): string => resolveSenderSession() ?? missingArgument(command, "binding-or-seat");
 
   cmd.command("enroll")
     .description("Enroll this daemon in an account with the one-time code its page shows, so seats connect by name")
@@ -212,9 +208,8 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
     .description("List the peers a connected seat can send requests to, as its hub answers")
     .argument("[binding-or-seat]", "The binding id, or the connected seat's address. Left out, your own seat")
     .option("--json", "Print JSON")
-    .action(async (given: string | undefined, opts: { json?: boolean }) => {
-      const ref = given ?? ownSeat();
-      if (!ref) return;
+    .action(async (given: string | undefined, opts: { json?: boolean }, command: Command) => {
+      const ref = given ?? ownSeat(command);
       const daemon = await client();
       if (!daemon) return;
       const res = await daemon.get<Record<string, unknown>>(`/api/network/bindings/${encodeURIComponent(ref)}/peers`, { timeoutMs: ACCOUNT_WRITE_TIMEOUT_MS });
@@ -252,11 +247,10 @@ add --wake-after 4h (your choice) to the block to be woken anyway.
 A request id starting fold:, auth: or external: is read by block as a gate, not as
 this item, so nothing wakes the row for it: give a request you'll wait on another id.
 rig whoami names your binding.`)
-    .action(async (first: string | undefined, second: string | undefined, opts: { id: string; bodyFile: string; summary?: string; json?: boolean }) => {
-      if (first === undefined) return missingArgument("peer");
+    .action(async (first: string | undefined, second: string | undefined, opts: { id: string; bodyFile: string; summary?: string; json?: boolean }, command: Command) => {
+      if (first === undefined) return missingArgument(command, "peer");
       const peer = second ?? first;
-      const ref = second === undefined ? ownSeat() : first;
-      if (!ref) return;
+      const ref = second === undefined ? ownSeat(command) : first;
       let body: string;
       try { body = readFileSync(opts.bodyFile, "utf8"); } catch (error) {
         console.error(`Can't read the body file: ${(error as Error).message}`);
