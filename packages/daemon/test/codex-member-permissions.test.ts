@@ -288,22 +288,26 @@ describe("whether a Codex seat's declared sandbox lets it run rig (a launch warn
     [":root write", list({ ":root": "write" }), {}, null],
     ["a literal / grant", list({ "/": "read" }), {}, null],
     ["a deny under a granted ancestor", list({ ":root": "read", "~/.openrig": "deny" }), {}, { unreadable: [HOME], network: "on" }],
-    ["a closer grant under a denied ancestor", list({ "/home/u": "deny", "/home/u/.openrig": "read", "~/.nvm": "read" }), {}, null],
+    ["a closer read under a denied ancestor stays unverified", list({ "/home/u": "deny", "/home/u/.openrig": "read", "~/.nvm": "read" }), {},
+      { unreadable: [], network: "on", unverified: [HOME, INSTALL, NODE] }],
     [":root deny", list({ ":root": "deny", ":workspace_roots": "write" }), {}, { unreadable: [HOME, INSTALL, NODE], network: "on" }],
     ["a sibling path that only shares a prefix", list({ "/home/u/.open": "read", "~/.nvm": "read" }), {}, { unreadable: [HOME], network: "on" }],
     [":workspace_roots with the folders inside the seat's cwd", list({ ":workspace_roots": "write" }), { cwd: "/home/u" }, null],
     [":project_roots, the same selector", list({ ":project_roots": "read" }), { cwd: "/home/u" }, null],
     [":workspace_roots with the folders outside the seat's cwd", list({ ":workspace_roots": "write" }), {}, { unreadable: [HOME, INSTALL, NODE], network: "on" }],
-    [":workspace_roots with no known cwd", list({ ":workspace_roots": "write" }), { cwd: undefined }, { unreadable: [HOME, INSTALL, NODE], network: "on" }],
+    [":workspace_roots with no known cwd", list({ ":workspace_roots": "write" }), { cwd: undefined }, { unreadable: [], network: "on", unverified: [HOME, INSTALL, NODE] }],
     [":minimal, which doesn't cover /home", list({ ":minimal": "read", ":workspace_roots": "write" }), {}, { unreadable: [HOME, INSTALL, NODE], network: "on" }],
     [":minimal with rig and node in system folders", list({ ":minimal": "read" }),
-      { rigInstall: "/usr/lib/node_modules/@openrig/cli", node: "/usr/bin" }, { unreadable: [HOME], network: "on" }],
+      { rigInstall: "/usr/lib/node_modules/@openrig/cli", node: "/usr/bin" }, { unreadable: [HOME], network: "on",
+        unverified: [{ what: "the rig install", path: "/usr/lib/node_modules/@openrig/cli" }, { what: "node", path: "/usr/bin" }] }],
     [":minimal and a home outside /home", list({ ":minimal": "read" }),
       { openrigHome: "/root/.openrig", home: "/root", rigInstall: "/usr/lib/node_modules/@openrig/cli", node: "/usr/bin" },
-      { unreadable: [{ what: "the OpenRig home", path: "/root/.openrig" }], network: "on" }],
+      { unreadable: [{ what: "the OpenRig home", path: "/root/.openrig" }], network: "on",
+        unverified: [{ what: "the rig install", path: "/usr/lib/node_modules/@openrig/cli" }, { what: "node", path: "/usr/bin" }] }],
     [":minimal and /Users", list({ ":minimal": "read" }, false),
       { openrigHome: "/Users/u/.openrig", home: "/Users/u", rigInstall: "/opt/homebrew/lib/node_modules/@openrig/cli", node: "/opt/homebrew/bin" },
-      { unreadable: [{ what: "the OpenRig home", path: "/Users/u/.openrig" }], network: "off" }],
+      { unreadable: [{ what: "the OpenRig home", path: "/Users/u/.openrig" }], network: "off",
+        unverified: [{ what: "the rig install", path: "/opt/homebrew/lib/node_modules/@openrig/cli" }, { what: "node", path: "/opt/homebrew/bin" }] }],
     [":minimal and an OpenRig home under /tmp", list({ ":minimal": "read", "~/.nvm": "read" }), { openrigHome: "/tmp/rig-home" },
       { unreadable: [{ what: "the OpenRig home", path: "/tmp/rig-home" }], network: "on" }],
     [":slash_tmp with the OpenRig home under /tmp", list({ ":slash_tmp": "read", "~/.nvm": "read" }), { openrigHome: "/tmp/rig-home" }, null],
@@ -320,13 +324,13 @@ describe("whether a Codex seat's declared sandbox lets it run rig (a launch warn
       "dev.impl: this seat's codex_permissions don't let it read the OpenRig home (/home/u/.openrig) or the rig install"
       + " (/home/u/.nvm/versions/node/v22/lib/node_modules/@openrig/cli), and network is off. Inside its sandbox the agent"
       + " can't run rig or reach the OpenRig daemon, so its tasks, questions and messages won't reach it. The launch continues"
-      + " with the permissions as written. To fix it: add those folders with read access and turn network on"
+      + " with the permissions as written. To fix it: add those paths with read access and turn network on"
       + " (network_access: true), then run rig whoami inside the seat.");
     expect(codexRigReachWarning("dev.impl", { unreadable: [HOME, INSTALL, NODE], network: "on" }, "linux")).toBe(
       "dev.impl: this seat's codex_permissions don't let it read the OpenRig home (/home/u/.openrig), the rig install"
       + " (/home/u/.nvm/versions/node/v22/lib/node_modules/@openrig/cli) or node (/home/u/.nvm/versions/node/v22/bin)."
       + " Inside its sandbox the agent can't run rig, so its tasks, questions and messages won't reach it. The launch"
-      + " continues with the permissions as written. To fix it: add those folders with read access, then run rig whoami"
+      + " continues with the permissions as written. To fix it: add those paths with read access, then run rig whoami"
       + " inside the seat.");
     expect(codexRigReachWarning("dev.review", { unreadable: [], network: "read-only" }, "linux")).toBe(
       "dev.review: this seat's codex_permissions use the read-only sandbox, where network is always off. The rig command"
@@ -355,6 +359,15 @@ describe("whether a Codex seat's declared sandbox lets it run rig (a launch warn
     const reaching = await f.service.setPermissions(set({ ...lease, network_access: true }));
     expect(reaching).toMatchObject({ ok: true });
     expect(reaching).not.toHaveProperty("advisories");
+  });
+
+  it("keeps a saved selection successful if the advisory's environment metadata cannot be read", async () => {
+    const f = fixture();
+    vi.spyOn(f.rigRepo, "getEffectiveSeatEnv").mockImplementation(() => { throw new Error("metadata unavailable"); });
+    const result = await f.service.setPermissions(set(lease));
+    expect(result).toMatchObject({ ok: true, to: lease, advisories: [expect.stringContaining("could not be checked")] });
+    expect(readCodexMemberPermissions(f.db, f.a.id)).toEqual(lease);
+    expect(events(f.db, "node.codex_permissions_changed")).toHaveLength(1);
   });
 });
 

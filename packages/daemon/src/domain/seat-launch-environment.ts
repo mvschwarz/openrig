@@ -53,10 +53,19 @@ function pairedCli(): { folder: string; rig: string } {
 /** The folders a seat's rig reads, for the Codex sandbox check (codexRigReach): the OpenRig home holding the seat's
  * rig link, the paired CLI that link resolves to, and the node running this daemon, which the usual install shares.
  * A folder that can't be found is left out. */
-export function seatRigReachPaths(): Omit<CodexRigReachPaths, "cwd"> {
+export function seatRigReachPaths(env: Readonly<Record<string, string | undefined>> = {}): Omit<CodexRigReachPaths, "cwd"> {
   const real = (find: () => string) => { try { return realpathSync(find()); } catch { return undefined; } };
-  return { openrigHome: path.resolve(getOpenRigHome()), rigInstall: real(() => pairedCli().folder),
-    node: real(() => path.dirname(realpathSync(process.execPath))), home: os.homedir() };
+  const openrigHome = path.resolve(getOpenRigHome());
+  const rigEntry = real(() => pairedCli().rig);
+  return { openrigHome, rigInstall: real(() => pairedCli().folder), rigEntry,
+    rigAlias: rigEntry ? path.join(rigAliasDirectory(openrigHome, rigEntry), "rig") : undefined,
+    node: real(() => process.execPath), home: env.HOME ?? os.homedir(),
+    tmpdir: env.TMPDIR ?? process.env.TMPDIR ?? os.tmpdir() };
+}
+
+/** The same alias path is inspected by the advisory and created by the actual launch. */
+function rigAliasDirectory(home: string, cli: string, cwd = process.cwd()): string {
+  return path.resolve(cwd, home, "run", "seat-bin", createHash("sha256").update(cli).digest("hex"));
 }
 
 /** Pin npm Codex's interpreter as well as its entry file to the probe PATH.
@@ -127,7 +136,7 @@ export class SeatLaunchEnvironment {
     if (!statSync(cli).isFile() || !this.sessionEnv.OPENRIG_HOME) throw new Error("Paired CLI or instance home unavailable");
     // Separate aliases for concurrent installed versions; never retarget another
     // daemon's link. Only rig is exposed, not the other tools in a shared bin.
-    const bin = path.resolve(this.daemonCwd, this.sessionEnv.OPENRIG_HOME, "run", "seat-bin", createHash("sha256").update(cli).digest("hex"));
+    const bin = rigAliasDirectory(this.sessionEnv.OPENRIG_HOME, cli, this.daemonCwd);
     mkdirSync(bin, { recursive: true });
     const link = path.join(bin, "rig");
     try { symlinkSync(cli, link); }

@@ -1141,8 +1141,13 @@ export class SeatLifecycleService {
       })();
       if (persisted) this.eventBus.notifySubscribers(persisted);
       // The launch warning a spec preflight gives, so the setter hears now that the seat won't take its tasks.
-      const gap = codexRigReach(to, { ...seatRigReachPaths(), cwd });
-      return gap ? { ...result, advisories: [codexRigReachWarning(seat.logicalId, gap)] } : result;
+      try {
+        const gap = codexRigReach(to, { ...seatRigReachPaths(this.rigRepo.getEffectiveSeatEnv(seat.nodeId)), cwd });
+        return gap ? { ...result, advisories: [codexRigReachWarning(seat.logicalId, gap)] } : result;
+      } catch {
+        // The selection was saved above. Advisory metadata must not turn that successful write into a refusal.
+        return { ...result, advisories: ["Your permission selection was saved. Rig read coverage could not be checked; run rig whoami inside the seat after its next separately selected launch."] };
+      }
     } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
   }
 

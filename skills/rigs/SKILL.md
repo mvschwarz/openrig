@@ -68,8 +68,10 @@ prompt or close its work. Say so before they choose, and include read access to 
 seat as well (the read-only sandbox never has it): `rig` talks to the OpenRig daemon on this computer, and a Codex
 sandbox without network can't reach it (seen on Linux), even with every folder listed. `rig up` and `rig up --plan`
 warn, naming what's missing, when a seat's permissions miss any of these, and the team still starts as written. After
-the team starts, check from inside one such seat that `rig whoami` works before you hand it the goal. If it doesn't, say
-so plainly and let the person choose between more access and a team that can't reach OpenRig.
+the team starts, check from inside one such seat that `rig whoami` returns its full identity from the daemon before you
+hand it the goal. Partial offline identity, even with exit status zero, does not prove contact. If it cannot reach the daemon, say
+so plainly and let the person choose between more access and a team that can't reach OpenRig. A warning that says read
+coverage is unverified is conditional: check `rig whoami` inside the seat before changing a policy that already works.
 
 **Keep their own login:** a team runs on the person's existing login through the home that holds it (`~/.codex` or
 their `CODEX_HOME`; for Claude Code, `~/.claude` or their `CLAUDE_CONFIG_DIR`). Keeping that home and asking once about

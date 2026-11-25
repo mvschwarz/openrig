@@ -461,10 +461,10 @@ async function preflightMembers(
         continue;
       }
 
-      if (member.runtime === "codex") loginTargets.push({ label: `${pod.id}.${member.id}`,
-        env: mergeSeatEnv(rigSpec.env, member.env, preflightCtx.envOverride && withoutRuntimeHomes(preflightCtx.envOverride)) });
+      const seatEnv = mergeSeatEnv(rigSpec.env, member.env, preflightCtx.envOverride && withoutRuntimeHomes(preflightCtx.envOverride));
+      if (member.runtime === "codex") loginTargets.push({ label: `${pod.id}.${member.id}`, env: seatEnv });
       // No session follows a materialize-only preflight, so there's no launch to warn about.
-      if (member.runtime === "codex" && !preflightCtx.materializeOnly) warnRigReach(`${pod.id}.${member.id}`, member.codexPermissions, configResult.config.cwd, warnings);
+      if (member.runtime === "codex" && !preflightCtx.materializeOnly) warnRigReach(`${pod.id}.${member.id}`, member.codexPermissions, configResult.config.cwd, warnings, seatEnv);
 
       // Managed Claude activity-hook delivery preflight (NONFATAL): when a claude-code member
       // selects the claude_activity_hooks resource, verify the daemon can actually deliver
@@ -545,8 +545,8 @@ async function preflightMembers(
 
 /** A Codex seat whose declared sandbox can't read what rig needs, or has network off, can't take its tasks; say so, and
  *  launch as written. */
-function warnRigReach(label: string, permissions: CodexMemberPermissions | undefined, cwd: string | undefined, warnings: string[]): void {
-  const gap = permissions && codexRigReach(permissions, { ...seatRigReachPaths(), cwd });
+function warnRigReach(label: string, permissions: CodexMemberPermissions | undefined, cwd: string | undefined, warnings: string[], env?: SeatEnv): void {
+  const gap = permissions && codexRigReach(permissions, { ...seatRigReachPaths(env), cwd });
   if (gap) warnings.push(codexRigReachWarning(label, gap));
 }
 

@@ -665,7 +665,7 @@ describe("Codex seat sandbox that can't reach rig", () => {
       + " \\(/srv/openrig-reach-test-home\\), the rig install \\(.+\\) or node \\(.+\\), and network is off\\. "));
     expect(reach(result.warnings)[0]).toContain(`the rig install (${rigInstall})`);
     expect(reach(result.warnings)[0]).toContain(`node (${node})`);
-    expect(reach(result.warnings)[0]).toContain("The launch continues with the permissions as written. To fix it: add those folders with read access and turn network on (network_access: true)");
+    expect(reach(result.warnings)[0]).toContain("The launch continues with the permissions as written. To fix it: add those paths with read access and turn network on (network_access: true)");
   });
 
   it("stays quiet when the list covers rig and network is on, or the seat declares no codex_permissions", async () => {
