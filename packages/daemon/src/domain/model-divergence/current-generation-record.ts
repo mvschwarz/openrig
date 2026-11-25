@@ -64,13 +64,42 @@ function tokenBasename(token: string): string {
   return basename(token.replace(/^['"]|['"]$/g, "").replace(/^-/, "")).toLowerCase().replace(/\.exe$/, "");
 }
 
+const JS_RUNTIME_VALUE_FLAGS = new Set([
+  "-r", "--require", "--import", "--loader", "--experimental-loader",
+  "-C", "--conditions", "--preload", "--env-file", "--env-file-if-exists",
+  "-c", "--config", "--cwd", "--tsconfig-override", "--import-map",
+  "--redirect-warnings", "--title", "--input-type", "--diagnostic-dir",
+  "--icu-data-dir", "--openssl-config", "--max-http-header-size",
+]);
+const JS_RUNTIME_INLINE_FLAGS = new Set(["-e", "--eval", "-p", "--print"]);
+
+function jsRuntimeScriptToken(argv0: string, args: string[]): string | undefined {
+  let index = argv0 === "deno" && args[0] === "run" ? 1 : 0;
+  while (index < args.length) {
+    const token = args[index]!;
+    if (token === "--") return args[index + 1];
+    if (JS_RUNTIME_INLINE_FLAGS.has(token) || /^--(?:eval|print)=/.test(token)) return undefined;
+    if (JS_RUNTIME_VALUE_FLAGS.has(token)) { index += 2; continue; }
+    if (token.startsWith("-")) { index += 1; continue; }
+    return token;
+  }
+  return undefined;
+}
+
 function isRuntimeCommand(command: string, runtime: "claude-code" | "codex"): boolean {
   let parts = command.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return false;
   if (tokenBasename(parts[0]!) === "env") {
-    const start = parts.findIndex((token, i) => i > 0 && !token.startsWith("-") && !token.includes("="));
-    if (start < 0) return false;
-    parts = parts.slice(start);
+    let i = 1;
+    while (i < parts.length) {
+      const token = parts[i]!;
+      if (token === "--") { i += 1; break; }
+      if (token === "-u" || token === "--unset" || token === "-C" || token === "--chdir") { i += 2; continue; }
+      if (token.startsWith("-") || token.includes("=")) { i += 1; continue; }
+      break;
+    }
+    if (i >= parts.length) return false;
+    parts = parts.slice(i);
   }
   const argv0 = tokenBasename(parts[0]!);
   if (isShellForeground(argv0)) return false;
@@ -79,11 +108,13 @@ function isRuntimeCommand(command: string, runtime: "claude-code" | "codex"): bo
     : (token: string) => tokenBasename(token) === "codex";
   if (matchesToken(parts[0]!)) return true;
   if (argv0 === "node" || argv0 === "bun" || argv0 === "deno") {
-    const scriptToken = parts.slice(1).find((token) => !token.startsWith("-"));
+    const scriptToken = jsRuntimeScriptToken(argv0, parts.slice(1));
     return scriptToken !== undefined && matchesToken(scriptToken);
   }
   return false;
 }
+
+const isCodexRuntimeCommand = (command: string): boolean => isRuntimeCommand(command, "codex");
 
 function hasClaudeSessionArg(command: string): boolean {
   return /--(?:session-id|resume)[= ][0-9a-f-]{36}/.test(command);
@@ -117,13 +148,6 @@ function findDescendants(processes: ProcessRow[], parentPid: number, matches: (c
     }
   }
   return out;
-}
-
-function commandBasenameIs(name: string): (command: string) => boolean {
-  return (command) => command.trim().split(/\s+/).filter(Boolean).some((token) => {
-    const unquoted = token.replace(/^['"]|['"]$/g, "");
-    return unquoted.split("/").pop() === name;
-  });
 }
 
 /** The pane process's Claude session-id LAUNCH ARGUMENT. It is authoritative only after the caller
@@ -282,7 +306,7 @@ export function verifiedPaneProcessChain(
     ? (command: string) => (pinnedNative
       ? commandNamesClaude(command) && hasClaudeSessionArg(command)
       : isRuntimeCommand(command, "claude-code") || (commandNamesClaude(command) && hasClaudeSessionArg(command)))
-    : (command: string) => isRuntimeCommand(command, "codex");
+    : isCodexRuntimeCommand;
   const leafSet = new Set<number>(findDescendants(processes, panePid, leafMatcher));
   if (pinnedNative) leafSet.add(nativePid);
   const leaves = [...leafSet].sort((a, b) => a - b);
@@ -309,7 +333,7 @@ export async function resolveLiveCodexThreadId(
   const panePid = await deps.getPanePid(sessionTarget);
   if (!panePid) return { ok: false, reason: `no live pane pid for ${sessionTarget}` };
   const processes = await deps.listProcesses();
-  const codexPids = findDescendants(processes, panePid, commandBasenameIs("codex"));
+  const codexPids = findDescendants(processes, panePid, isCodexRuntimeCommand);
   if (codexPids.length === 0) return { ok: false, reason: `no codex process under the live pane of ${sessionTarget}` };
   const ids = new Set<string>();
   const readStarts = new Map<number, string | undefined>();

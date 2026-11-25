@@ -19,8 +19,10 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { resolveExpectedConversation } from "../src/domain/expected-conversation.js";
+import { readProcessTable } from "../src/domain/process-table.js";
 import { sessionAdminRoutes } from "../src/routes/sessions.js";
 import { transportRoutes } from "../src/routes/transport.js";
+import { restoreProc, serveFakeProc } from "./helpers/fake-proc.js";
 
 const A = "11111111-1111-4111-8111-111111111111", B = "22222222-2222-4222-8222-222222222222";
 function lstart(d: Date): string {
@@ -30,7 +32,7 @@ function lstart(d: Date): string {
   return `${days[d.getDay()]} ${months[d.getMonth()]} ${String(d.getDate()).padStart(2, " ")} ${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())} ${d.getFullYear()}`;
 }
 const cleanup: Array<() => unknown> = [];
-afterEach(() => { vi.restoreAllMocks(); syncBuiltinESMExports(); for (const close of cleanup.splice(0).reverse()) close(); });
+afterEach(() => { restoreProc(); vi.restoreAllMocks(); syncBuiltinESMExports(); for (const close of cleanup.splice(0).reverse()) close(); });
 function fixture(runtime: "claude-code" | "codex" = "claude-code", guarded = false) {
   const root = mkdtempSync(join(tmpdir(), "expected-conversation-")); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
@@ -541,4 +543,60 @@ it("keeps a legacy verdict stable when closing census returns matching descendan
     : [root, first, second]);
   const resolved = await resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store);
   expect(resolved.identity).toEqual(f.expected);
+});
+
+it("closing fresh read does not reuse an earlier in-flight readProcessTable() snapshot", async () => {
+  const f = fixture("claude-code");
+  vi.mocked(ProcessCensus.prototype.list).mockRestore();
+  const later = lstart(new Date(Date.parse(f.observedAt) + 5_000));
+  serveFakeProc([
+    { pid: 10, ppid: 1, pgid: 10, tpgid: 20, name: "zsh", startedAt: f.before, command: "zsh" },
+    { pid: 20, ppid: 10, pgid: 20, tpgid: 20, name: "claude", startedAt: f.before, command: `claude --session-id ${A}` },
+  ]);
+  let inFlight: ReturnType<typeof readProcessTable> | undefined;
+  const readSidecar = vi.mocked(f.store.readSidecar).getMockImplementation()!;
+  vi.mocked(f.store.readSidecar).mockImplementation((name) => {
+    inFlight = readProcessTable();
+    serveFakeProc([
+      { pid: 10, ppid: 1, pgid: 10, tpgid: 21, name: "zsh", startedAt: f.before, command: "zsh" },
+      { pid: 21, ppid: 10, pgid: 21, tpgid: 21, name: "claude", startedAt: later, command: `claude --session-id ${A}` },
+    ]);
+    return readSidecar(name);
+  });
+  await expect(resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store)).rejects.toMatchObject({
+    code: "expected_identity_mismatch",
+    message: expect.stringContaining("changed during native resolution"),
+  });
+  expect((await inFlight!).map((row) => row.pid)).toEqual([10, 20]);
+});
+
+it("tracks a preloaded node Codex launcher in both thread selection and closing chain validation while ignoring grep codex", async () => {
+  const f = fixture("codex");
+  f.db.prepare("UPDATE seat_identity_verdicts SET observed_pid=10, observed_pane_pid=NULL WHERE node_id=?").run(f.node.id);
+  const later = lstart(new Date(Date.parse(f.observedAt) + 5_000));
+  const preloaded = `node --require preload.js /path/to/codex resume ${A}`;
+  const base = [
+    { pid: 10, ppid: 1, command: "zsh", startedAt: f.before },
+    { pid: 20, ppid: 10, command: preloaded, startedAt: f.before },
+  ];
+  vi.mocked(ProcessCensus.prototype.list).mockImplementation(async (opts) => opts?.fresh
+    ? [...base, { pid: 30, ppid: 20, command: "grep codex src/app.ts", startedAt: later }]
+    : base);
+  const resolved = await resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store);
+  expect(resolved.identity).toEqual(f.expected);
+
+  let replaced = false;
+  const readPath = vi.mocked(f.store.readCodexTranscriptPath).getMockImplementation()!;
+  vi.mocked(f.store.readCodexTranscriptPath).mockImplementation((...args) => {
+    replaced = true;
+    return readPath(...args);
+  });
+  vi.mocked(ProcessCensus.prototype.list).mockImplementation(async () => [
+    { pid: 10, ppid: 1, command: "zsh", startedAt: f.before },
+    { pid: replaced ? 21 : 20, ppid: 10, command: preloaded, startedAt: replaced ? later : f.before },
+  ]);
+  await expect(resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store)).rejects.toMatchObject({
+    code: "expected_identity_mismatch",
+    message: expect.stringContaining("changed during native resolution"),
+  });
 });

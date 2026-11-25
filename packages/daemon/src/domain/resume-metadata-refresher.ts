@@ -20,7 +20,7 @@ import { runAsyncSite } from "./sync-site-wrap.js";
 import { isClaudeSidecarFromEarlierProcess, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
 import { observeClaudePaneRuntime, listNativeProcessesOrThrow, listNativeProcesses, type NativeProcessLister } from "./native-process-lineage.js";
 import { validateResumeToken } from "./resume-token-validation.js";
-import { readProcessTable } from "./process-table.js";
+import { readProcessTable, readProcessTableCensusNow } from "./process-table.js";
 import type { HomeRuntime } from "./seat-runtime-home.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { ObservationPass } from "./process-observation-pass.js";
@@ -496,11 +496,12 @@ export async function defaultListProcesses(): Promise<Array<{ pid: number; ppid:
  *  empty SUCCESS for the whole freshness window (r2's discriminator: 0 rows
  *  cached while 520 were live). The lenient variant keeps its contract for
  *  the direct per-call consumers that want best-effort. */
-export async function defaultListProcessesStrict(): Promise<Array<{ pid: number; ppid: number; command: string; startedAt: string }>> {
+export async function defaultListProcessesStrict(opts?: { fresh?: boolean }): Promise<Array<{ pid: number; ppid: number; command: string; startedAt: string }>> {
   // startedAt = the process START TIME — the identity half of pid+start-time
   // (r1's pid-reuse remedy): a reused pid changes it, so a consumer
   // holding last cycle's identity can invalidate without any extra spawn.
-  const rows = await runAsyncSite("resume_metadata.list_processes", readProcessTable);
+  const rows = await runAsyncSite("resume_metadata.list_processes",
+    opts?.fresh ? () => readProcessTableCensusNow().then((census) => census.rows) : readProcessTable);
   return rows.map(({ pid, ppid, startedAt, command }) => ({ pid, ppid, startedAt, command }));
 }
 
