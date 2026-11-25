@@ -453,19 +453,81 @@ it.each(["claude-code", "codex"] as const)("refuses %s when an intermediate laun
   });
 });
 
-it.each(["claude-code", "codex"] as const)("ignores a transient tool child under the verified %s native process during lookup", async runtime => {
+it.each<[string, "claude-code" | "codex", boolean]>([
+  ["dual-PID Claude", "claude-code", false],
+  ["legacy Claude", "claude-code", true],
+  ["dual-PID Codex", "codex", false],
+  ["legacy Codex", "codex", true],
+])("ignores a transient shell/tool child under %s during lookup", async (_case, runtime, legacy) => {
   const f = fixture(runtime);
+  if (legacy) f.db.prepare("UPDATE seat_identity_verdicts SET observed_pid=10, observed_pane_pid=NULL WHERE node_id=?").run(f.node.id);
   const later = lstart(new Date(Date.parse(f.observedAt) + 5_000));
   const nativeCmd = runtime === "codex" ? `codex resume ${A}` : `claude --session-id ${A}`;
   const base = [
     { pid: 10, ppid: 1, command: "zsh", startedAt: f.before },
     { pid: 20, ppid: 10, command: nativeCmd, startedAt: f.before },
   ];
-  vi.mocked(ProcessCensus.prototype.list).mockImplementation(async (opts) => opts?.fresh
-    ? [...base, { pid: 30, ppid: 20, command: "sh -c echo claude codex", startedAt: later }]
-    : base);
+  const tools = [
+    { pid: 30, ppid: 20, command: "sh -c echo claude codex", startedAt: later },
+    { pid: 31, ppid: 20, command: "git grep codex", startedAt: later },
+    ...(runtime === "claude-code" && !legacy ? [{ pid: 32, ppid: 20, command: "claude -p summarize", startedAt: later }] : []),
+  ];
+  vi.mocked(ProcessCensus.prototype.list).mockImplementation(async (opts) => opts?.fresh ? [...base, ...tools] : base);
   const resolved = await resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store);
   expect(resolved.identity).toEqual(f.expected);
+});
+
+it.each(["mutated", "spawned"] as const)("refuses dual-PID Claude when a second contributing Claude descendant is %s during sidecar read", async mode => {
+  const f = fixture("claude-code");
+  let changed = false;
+  const readSidecar = vi.mocked(f.store.readSidecar).getMockImplementation()!;
+  vi.mocked(f.store.readSidecar).mockImplementation((name) => { changed = true; return readSidecar(name); });
+  vi.mocked(ProcessCensus.prototype.list).mockImplementation(async () => {
+    const base = [
+      { pid: 10, ppid: 1, command: "zsh", startedAt: f.before },
+      { pid: 20, ppid: 10, command: `claude --session-id ${A}`, startedAt: f.before },
+    ];
+    if (mode === "mutated") {
+      return [...base, { pid: 21, ppid: 10, command: `claude --session-id ${changed ? B : A}`, startedAt: f.before }];
+    }
+    return changed ? [...base, { pid: 21, ppid: 10, command: `claude --session-id ${B}`, startedAt: f.before }] : base;
+  });
+  await expect(resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store)).rejects.toMatchObject({
+    code: "expected_identity_mismatch",
+    message: expect.stringContaining("changed during native resolution"),
+  });
+});
+
+it.each<[string, "claude-code" | "codex", "same-second" | "missing"]>([
+  ["legacy Claude same-second start", "claude-code", "same-second"],
+  ["legacy Claude missing start", "claude-code", "missing"],
+  ["legacy Codex same-second start", "codex", "same-second"],
+  ["legacy Codex missing start", "codex", "missing"],
+])("refuses %s when an unrecorded native chain process cannot be ordered before the opening census", async (_case, runtime, mode) => {
+  const f = fixture(runtime);
+  f.db.prepare("UPDATE seat_identity_verdicts SET observed_pid=10, observed_pane_pid=NULL WHERE node_id=?").run(f.node.id);
+  const nativeCmd = runtime === "codex" ? `codex resume ${A}` : `claude --session-id ${A}`;
+  vi.mocked(ProcessCensus.prototype.list).mockImplementation(async () => [
+    { pid: 10, ppid: 1, command: "zsh", startedAt: f.before },
+    { pid: 20, ppid: 10, command: nativeCmd, ...(mode === "same-second" ? { startedAt: lstart(new Date()) } : {}) },
+  ]);
+  await expect(resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store)).rejects.toMatchObject({
+    code: "expected_identity_mismatch",
+    message: expect.stringContaining("did not start before the opening census"),
+  });
+});
+
+it("refuses when an intermediate launcher in the opening chain started in the opening census second", async () => {
+  const f = fixture("claude-code");
+  vi.mocked(ProcessCensus.prototype.list).mockImplementation(async () => [
+    { pid: 10, ppid: 1, command: "zsh", startedAt: f.before },
+    { pid: 15, ppid: 10, command: "sh wrapper.sh", startedAt: lstart(new Date()) },
+    { pid: 20, ppid: 15, command: `claude --session-id ${A}`, startedAt: f.before },
+  ]);
+  await expect(resolveExpectedConversation(f.expected, f.registry, f.tmux, f.store)).rejects.toMatchObject({
+    code: "expected_identity_mismatch",
+    message: expect.stringContaining("did not start before the opening census"),
+  });
 });
 
 it("keeps a legacy verdict stable when closing census returns matching descendants in another order", async () => {

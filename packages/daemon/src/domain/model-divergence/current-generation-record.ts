@@ -60,6 +60,35 @@ export type ClaudeRecordSelection =
   | { ok: true; id: string; path: string; source: "generation-sidecar" | "verified-pane-argument" }
   | { ok: false; reason: string };
 
+function tokenBasename(token: string): string {
+  return basename(token.replace(/^['"]|['"]$/g, "").replace(/^-/, "")).toLowerCase().replace(/\.exe$/, "");
+}
+
+function isRuntimeCommand(command: string, runtime: "claude-code" | "codex"): boolean {
+  let parts = command.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return false;
+  if (tokenBasename(parts[0]!) === "env") {
+    const start = parts.findIndex((token, i) => i > 0 && !token.startsWith("-") && !token.includes("="));
+    if (start < 0) return false;
+    parts = parts.slice(start);
+  }
+  const argv0 = tokenBasename(parts[0]!);
+  if (isShellForeground(argv0)) return false;
+  const matchesToken = runtime === "claude-code"
+    ? (token: string) => commandNamesClaude(token.replace(/^['"]|['"]$/g, ""))
+    : (token: string) => tokenBasename(token) === "codex";
+  if (matchesToken(parts[0]!)) return true;
+  if (argv0 === "node" || argv0 === "bun" || argv0 === "deno") {
+    const scriptToken = parts.slice(1).find((token) => !token.startsWith("-"));
+    return scriptToken !== undefined && matchesToken(scriptToken);
+  }
+  return false;
+}
+
+function hasClaudeSessionArg(command: string): boolean {
+  return /--(?:session-id|resume)[= ][0-9a-f-]{36}/.test(command);
+}
+
 function matchesRuntimeRoot(row: ProcessRow | undefined, matches: (command: string) => boolean): boolean {
   if (!row) return false;
   const argv0 = basename((row.command.trim().split(/\s+/)[0] ?? "").replace(/^-/, "").replace(/^['"]|['"]$/g, ""));
@@ -239,28 +268,36 @@ export function startedBeforeVerdict(row: ProcessRow | undefined, observedAt: st
   return started !== undefined && started < Math.floor(Date.parse(observedAt) / 1000);
 }
 
-/** Snapshot of the verified runtime chain up to `panePid` (PID, PPID, start time, command); a different closing value means replacement or PID reuse. */
+/** Snapshot of every contributing runtime process chain up to `panePid` (PID, PPID, start time, command) plus the unique rows in it. */
 export function verifiedPaneProcessChain(
   processes: ProcessRow[],
   panePid: number,
   runtime: "claude-code" | "codex",
   nativePid?: number,
-): string {
+): { signature: string; rows: ProcessRow[] } {
   const byPid = new Map(processes.map((row) => [row.pid, row]));
-  const matches = runtime === "claude-code" ? commandNamesClaude : commandBasenameIs("codex");
-  const pinnedNative = nativePid !== undefined && (nativePid !== panePid || matchesRuntimeRoot(byPid.get(panePid), matches));
-  const leaves = pinnedNative
-    ? [nativePid]
-    : findDescendants(processes, panePid, matches).sort((a, b) => a - b);
-  return JSON.stringify(leaves.map((leaf) => {
+  const pinnedNative = nativePid !== undefined
+    && (nativePid !== panePid || matchesRuntimeRoot(byPid.get(panePid), (cmd) => isRuntimeCommand(cmd, runtime)));
+  const leafMatcher = runtime === "claude-code"
+    ? (command: string) => (pinnedNative
+      ? commandNamesClaude(command) && hasClaudeSessionArg(command)
+      : isRuntimeCommand(command, "claude-code") || (commandNamesClaude(command) && hasClaudeSessionArg(command)))
+    : (command: string) => isRuntimeCommand(command, "codex");
+  const leafSet = new Set<number>(findDescendants(processes, panePid, leafMatcher));
+  if (pinnedNative) leafSet.add(nativePid);
+  const leaves = [...leafSet].sort((a, b) => a - b);
+  const rowsByPid = new Map<number, ProcessRow>();
+  const chains = leaves.map((leaf) => {
     const chain: Array<[number, number, string | null, string]> = [];
     const seen = new Set<number>();
     for (let row = byPid.get(leaf); row && !seen.has(row.pid); row = row.pid === panePid ? undefined : byPid.get(row.ppid)) {
       seen.add(row.pid);
+      rowsByPid.set(row.pid, row);
       chain.push([row.pid, row.ppid, row.startedAt ?? null, row.command]);
     }
     return chain;
-  }));
+  });
+  return { signature: JSON.stringify(chains), rows: [...rowsByPid.values()] };
 }
 
 /** The live codex occupant's thread id, via its own pid's log join — bypasses the stored resume
