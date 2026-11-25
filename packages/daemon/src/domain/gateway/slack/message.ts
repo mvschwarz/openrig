@@ -85,11 +85,15 @@ export interface OutboundMessageOpts {
   stateUnconfirmed?: boolean;
   /** A post made although the person's quiet hours couldn't be read says so in the same line, left out the same way. */
   quietUnreadable?: boolean;
+  /** A post whose evidence file won't be attached because it's outside the shared roots its writer may read says so in
+   *  the same line, left out the same way. */
+  evidenceNotAttached?: boolean;
 }
 
 const POSSIBLE_REPEAT_NOTE = "Delivery may repeat after an earlier unconfirmed attempt.";
 const STATE_UNCONFIRMED_NOTE = "OpenRig couldn't check that this ask is still open.";
 const QUIET_UNREADABLE_NOTE = "OpenRig couldn't read your quiet hours.";
+const EVIDENCE_NOT_ATTACHED_NOTE = "The evidence file isn't attached: it's outside the files its sender may share.";
 
 /** A1.2 — the four attribution fields. */
 export interface SeatAttribution {
@@ -640,10 +644,10 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
       const instanceLine = buildGateContextLine(q.tags ?? [], true);
       shownContext = fallback(instanceLine).length <= SLACK_TEXT_CAP ? instanceLine : null;
     }
-    // The repeat, state and quiet-hours notes are supplementary too: left out rather than refusing a message they would push
+    // The repeat, state, quiet-hours and evidence notes are supplementary too: left out rather than refusing a message they would push
     // over a limit.
     const notes = [opts.possibleRepeat ? POSSIBLE_REPEAT_NOTE : null, opts.stateUnconfirmed ? STATE_UNCONFIRMED_NOTE : null,
-      opts.quietUnreadable ? QUIET_UNREADABLE_NOTE : null].filter(Boolean).join(" ");
+      opts.quietUnreadable ? QUIET_UNREADABLE_NOTE : null, opts.evidenceNotAttached ? EVIDENCE_NOT_ATTACHED_NOTE : null].filter(Boolean).join(" ");
     const shownRepeat = notes && fallback(shownContext, notes).length <= SLACK_TEXT_CAP ? notes : null;
     return { attr: attrFor, shownContext, shownRepeat, text: fallback(shownContext, shownRepeat) };
   };

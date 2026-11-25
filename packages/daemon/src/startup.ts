@@ -3256,6 +3256,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       home: effectiveOpenRigHome,
       queueRepo: queueRepoInstance,
       resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract, effectiveOpenRigHome),
+      filesAllowlist: () => deps.filesAllowlist ?? [],
       log: (m) => console.log(`[gateway] ${m}`),
     }),
     log: (m) => console.log(`[gateway] ${m}`),

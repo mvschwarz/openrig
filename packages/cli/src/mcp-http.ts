@@ -398,7 +398,7 @@ export type McpHttpOptions = {
   tokenFile: string;
   /** Builds the daemon client for one request; sessionName is the grant's seat (absent: the env's), and principal the
    *  caller whose grant was checked. */
-  clientFactory?: (daemonUrl: string, sessionName?: string, principal?: McpPrincipal) => DaemonClient;
+  clientFactory?: (daemonUrl: string, sessionName?: string, principal?: McpPrincipal, fileRoots?: readonly string[]) => DaemonClient;
   /** Grants come from an external grant service instead of the token file, which is then never read. */
   grantService?: GrantServiceOptions;
   /** Resolve opaque credentials per request, instead of a grant service or token file. No fallback on failure. */
@@ -483,8 +483,11 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   if (!loopback && !configured) {
     throw new McpHttpConfigError(`Serving on ${opts.host} needs authentication: add a grant with rig mcp token add, then start again. With no grants, the server stays on loopback.`);
   }
-  const makeClient = opts.clientFactory ?? ((url: string, sessionName?: string, principal?: McpPrincipal) =>
-    new DaemonClient(url, sessionName === undefined ? undefined : { sessionName, ...(principal ? { principal } : {}) }));
+  const makeClient = opts.clientFactory ?? ((url: string, sessionName?: string, principal?: McpPrincipal, fileRoots?: readonly string[]) =>
+    new DaemonClient(url, sessionName === undefined ? undefined : { sessionName, ...(principal ? { principal } : {}), ...(fileRoots ? { fileRoots } : {}) }));
+  /** The shared roots a scoped caller's evidence may be attached from: its grant's, for every caller that isn't the owner.
+   *  An owner, or a loopback caller with no grant, has no root grant and attaches as a local seat does. */
+  const evidenceRoots = (access: McpAccess | undefined): readonly string[] | undefined => access && !access.owner ? access.roots : undefined;
   let boundPort = opts.port;
   // A token-file grant's last call, for rig_team's presence. An external caller isn't a team member, so none is kept.
   const presenceFile = nodePath.join(nodePath.dirname(opts.tokenFile), MCP_PRESENCE_FILE);
@@ -528,11 +531,11 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     if (!caller) throw new Error("a request reached the MCP handler without its caller");
     // A grant that names its person gets a client acting as them, which records only their answers to the team.
     const person = caller.access?.external ? caller.access.external.person : caller.access?.person;
-    return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access, principalSource: caller.principal?.source,
+    return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal, evidenceRoots(caller.access)), { seat: caller.seat, access: caller.access, principalSource: caller.principal?.source,
       requestSignal: caller.signal, instructions: opts.instructions,
       taskDestination: opts.taskDestination, presenceFile: () => presenceFile, frontDoor: opts.frontDoor === true,
       unknownSender, ...(opts.unfilledSeat ? { unfilledSeat: opts.unfilledSeat } : {}),
-      ...(person ? { personClient: makeClient(opts.daemonUrl, `${person}@external`, caller.principal) } : {}) });
+      ...(person ? { personClient: makeClient(opts.daemonUrl, `${person}@external`, caller.principal, evidenceRoots(caller.access)) } : {}) });
   });
   const serveMcp = toNodeHandler(mcpHandler);
   const bearer = (req: http.IncomingMessage): string | undefined => /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? "")?.[1];
