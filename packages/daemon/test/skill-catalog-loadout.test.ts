@@ -43,7 +43,7 @@ afterEach(() => {
 });
 
 type GitRead = "root" | "status" | "head" | "show" | "projection-root" | "check-ignore" | "ls-files";
-type GitFixtureMode = "normal" | "missing" | "error" | "hang";
+type GitFixtureMode = "normal" | "missing" | "error" | "hang" | "ignore-term";
 
 function treeBytes(root: string): unknown[] {
   return readdirSync(root).sort().map((name) => {
@@ -70,10 +70,13 @@ const site = command === "rev-parse" ? args[3] === "HEAD" ? "head"
   : args[1] === ${JSON.stringify(f.project)} ? "projection-root" : "root" : command;
 const record = { site, args, pid: process.pid, parentPid: process.ppid };
 appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(record) + "\\n");
-if (site === ${JSON.stringify(site)} && ${JSON.stringify(mode)} === "hang") {
+const mode = ${JSON.stringify(mode)};
+if (site === ${JSON.stringify(site)} && (mode === "hang" || mode === "ignore-term")) {
   writeFileSync(${JSON.stringify(pendingPath)}, JSON.stringify(record));
   // Git's ordinary status 1 means no match at these two sites. On timeout it means the child's TERM handler exited 1.
-  process.on("SIGTERM", () => process.exit(site === "check-ignore" || site === "ls-files" ? 1 : 73));
+  process.on("SIGTERM", () => {
+    if (mode === "hang") process.exit(site === "check-ignore" || site === "ls-files" ? 1 : 73);
+  });
   setInterval(() => {}, 1000);
 } else if (site === ${JSON.stringify(site)} && ${JSON.stringify(mode)} === "error") {
   process.stderr.write("fixture git refused " + site + "\\n");
@@ -116,7 +119,7 @@ console.log(JSON.stringify(${operation}));
         throw new Error("owned Git child identity did not match the supervised resolver");
       }
       // Only the direct fixture child recorded by our fake Git is signalled; its sync parent reaps it normally.
-      process.kill(pending.pid, "SIGTERM");
+      process.kill(pending.pid, "SIGKILL");
     } catch (error) {
       cleanupError = String(error);
     }
@@ -187,7 +190,7 @@ describe.skipIf(process.platform === "win32")("catalog Git read deadlines with o
 });
 
 describe.skipIf(process.platform === "win32")("skill projection Git deadlines", () => {
-  it.each(["projection-root", "check-ignore", "ls-files"] as const)("returns a failed projection without changing the checkout when %s stalls", async (site) => {
+  it.each(["projection-root", "check-ignore", "ls-files"] as const)("returns a failed projection without changing the checkout when %s ignores SIGTERM", async (site) => {
     const f = fixture([]);
     writeSkill(f.catalog, "known");
     writeFileSync(join(f.project, "operator-note"), "keep this exact user content\n", { mode: 0o640 });
@@ -195,7 +198,7 @@ describe.skipIf(process.platform === "win32")("skill projection Git deadlines", 
     const selected = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["known"] });
     if (!selected.ok) throw new Error("expected the fixture catalog to resolve");
     const before = treeBytes(f.project);
-    const observed = await catalogWithSupervisedGit(f, "hang", site, selected.loadout);
+    const observed = await catalogWithSupervisedGit(f, "ignore-term", site, selected.loadout);
     expect(observed.calls.some((call) => call.site === site)).toBe(true);
     expect(observed.cleanupError).toBeNull();
     expect(observed.childrenGone).toBe(true);

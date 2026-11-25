@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, type ExecFileSyncOptions } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -19,7 +19,7 @@ import { memoizeScan, parseSkillFrontmatter, type ScanCache } from "./skill-disc
 
 const CATALOG_SCHEMA = "openrig.skill-catalog/v1";
 const MANIFEST_SCHEMA = "openrig.skill-loadout/v1";
-const CATALOG_GIT_TIMEOUT_MS = 5000;
+const CATALOG_GIT_DEADLINE: Pick<ExecFileSyncOptions, "timeout" | "killSignal"> = { timeout: 5000, killSignal: "SIGKILL" };
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_TOPOLOGY_OWNER = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -251,7 +251,7 @@ export function skillTreeDigest(files: Readonly<Record<string, string>>, modes: 
 function gitState(catalogRoot: string): { revision: string; dirtyDirs: Set<string>; committedName: (dir: string) => string | null } {
   let repoRoot: string;
   try {
-    repoRoot = execFileSync("git", ["-C", catalogRoot, "rev-parse", "--show-toplevel"], { encoding: "utf8", timeout: CATALOG_GIT_TIMEOUT_MS }).trim();
+    repoRoot = execFileSync("git", ["-C", catalogRoot, "rev-parse", "--show-toplevel"], { encoding: "utf8", ...CATALOG_GIT_DEADLINE }).trim();
   } catch {
     throw new Error(`managed skill catalog is not inside a readable Git repository: ${catalogRoot}`);
   }
@@ -259,7 +259,7 @@ function gitState(catalogRoot: string): { revision: string; dirtyDirs: Set<strin
   const status = execFileSync(
     "git",
     ["-C", repoRoot, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", rel || "."],
-    { encoding: "utf8", timeout: CATALOG_GIT_TIMEOUT_MS },
+    { encoding: "utf8", ...CATALOG_GIT_DEADLINE },
   );
   const dirtyDirs = new Set<string>();
   const fields = status.split("\0");
@@ -279,14 +279,14 @@ function gitState(catalogRoot: string): { revision: string; dirtyDirs: Set<strin
       dirtyDirs.add(inCatalog.slice(0, slash));
     }
   }
-  const revision = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8", timeout: CATALOG_GIT_TIMEOUT_MS }).trim();
+  const revision = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8", ...CATALOG_GIT_DEADLINE }).trim();
   // The frontmatter name of `dir`'s SKILL.md at HEAD: null when HEAD has none there, "" when it doesn't parse.
   const committedName = (dir: string): string | null => {
     let text: string;
     try {
       text = execFileSync("git", ["-C", repoRoot, "show", `${revision}:${rel ? `${rel}/` : ""}${dir}/SKILL.md`], {
         encoding: "utf8",
-        timeout: CATALOG_GIT_TIMEOUT_MS,
+        ...CATALOG_GIT_DEADLINE,
         stdio: ["ignore", "pipe", "ignore"],
       });
     } catch {
@@ -703,7 +703,7 @@ function isGitIgnored(repoRoot: string, path: string): boolean {
   try {
     execFileSync("git", ["-C", repoRoot, "check-ignore", "-q", "--no-index", "--", path], {
       stdio: "ignore",
-      timeout: CATALOG_GIT_TIMEOUT_MS,
+      ...CATALOG_GIT_DEADLINE,
     });
     return true;
   } catch (err) {
@@ -718,7 +718,7 @@ function isGitTracked(repoRoot: string, path: string): boolean {
   try {
     execFileSync("git", ["-C", repoRoot, "ls-files", "--error-unmatch", "--", relative], {
       stdio: "ignore",
-      timeout: CATALOG_GIT_TIMEOUT_MS,
+      ...CATALOG_GIT_DEADLINE,
     });
     return true;
   } catch (err) {
@@ -772,7 +772,7 @@ function planGitIgnores(input: {
     repoRoot = execFileSync("git", ["-C", input.cwd, "rev-parse", "--show-toplevel"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-      timeout: CATALOG_GIT_TIMEOUT_MS,
+      ...CATALOG_GIT_DEADLINE,
     }).trim();
   } catch (error) {
     // A timed-out probe leaves Git coverage unknown. Stop before projecting files we may need to ignore.
