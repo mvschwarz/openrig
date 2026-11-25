@@ -427,7 +427,7 @@ left out. --all-peers lists every one (today's compact output).`)
       console.log(`Transport:  ${id.attachmentType === "external_cli" ? "external_cli (outbound only)" : id.attachmentType}`);
       if (id.networkBinding) {
         const net = id.networkBinding;
-        console.log(`Network:    ${net.id}, as ${net.hubSeat} at ${net.hubUrl} (experimental). rig network peers ${net.id} lists whom you can ask.`);
+        console.log(`Network:    ${net.id}, as ${net.hubSeat} at ${net.hubUrl} (experimental and unsupported). rig network peers ${net.id} lists whom you can ask.`);
       }
       console.log(`Resolved:   via ${data.resolvedBy.replace(/_/g, " ")}`);
 

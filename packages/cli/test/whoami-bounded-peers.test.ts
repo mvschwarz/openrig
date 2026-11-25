@@ -282,7 +282,7 @@ describe("rig whoami --json: bounded peers (output.compact, output.whoami_peers)
     const bound = response(SMALL_PEERS);
     served = { ...bound, identity: { ...bound.identity, networkBinding } };
     expect(JSON.parse(await run("--json")).identity.networkBinding).toEqual(networkBinding);
-    expect(await run()).toContain("Network:    netb-00000000000000000002, as alex@team at https://hub.example/mcp (query hidden) (experimental). "
+    expect(await run()).toContain("Network:    netb-00000000000000000002, as alex@team at https://hub.example/mcp (query hidden) (experimental and unsupported). "
       + "rig network peers netb-00000000000000000002 lists whom you can ask.");
     served = response(SMALL_PEERS);
     expect(JSON.parse(await run("--json")).identity).not.toHaveProperty("networkBinding");

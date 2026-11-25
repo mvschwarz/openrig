@@ -126,14 +126,17 @@ export async function listNetworkPeers(deps: Pick<NetworkRequestDeps, "home" | "
 const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 
-/** A hub URL as queue text shows it. A query string can carry a credential the person pasted, so it's hidden there, as
- *  rig network status hides it; the full URL stays only in the binding, the connection and the receipt. */
+/** A hub URL as queue text and whoami show it. A query string or a fragment can carry a credential the person pasted, so
+ *  both are hidden there, as rig network status hides them; the full URL stays only in the binding, the connection and
+ *  the receipt. A URL with only a query reads as it always has, so request items recorded before still match. */
 export function shownHubUrl(hubUrl: string): string {
   try {
     const url = new URL(hubUrl);
-    if (!url.search) return hubUrl;
+    const hidden = [url.search && "query", url.hash && "fragment"].filter(Boolean).join(" and ");
+    if (!hidden) return hubUrl;
     url.search = "";
-    return `${url.toString()} (query hidden)`;
+    url.hash = "";
+    return `${url.toString()} (${hidden} hidden)`;
   } catch {
     return hubUrl;
   }
@@ -263,7 +266,11 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
       || existing.peer !== peer || existing.body_sha256 !== bodySha) throw reused();
     if (existing.outcome === "refused") return result(existing, "refused", `The hub refused this request earlier: ${existing.last_error ?? "no reason recorded"}. ${requestId} is closed failed.`);
     if (existing.hub_created_at) {
-      return result(existing, "sent", `${requestId} was already sent to ${peer} as hub item ${hubId}. Its answer comes back to ${requestId}: read it with rig queue show ${requestId}.${WAIT_HINT}`);
+      // Already closed here: a row parked on it now would never wake, so the wait hint would mislead.
+      const closed = LOCAL_CLOSED.has(deps.queueRepo.getById(requestId)?.state ?? "");
+      return result(existing, "sent", `${requestId} was already sent to ${peer} as hub item ${hubId}. ${closed
+        ? `It has closed, so nothing more will wake you for it: read its outcome with rig queue show ${requestId}.`
+        : `Its answer comes back to ${requestId}: read it with rig queue show ${requestId}.${WAIT_HINT}`}`);
     }
     if (existing.settled_at) {
       return result(existing, "unknown", `${requestId} was settled (${existing.outcome}) before the hub confirmed hub item ${hubId}, so nothing more is read for it. ${existing.last_error ?? ""}`.trim());

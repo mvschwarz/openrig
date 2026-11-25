@@ -341,6 +341,15 @@ describe("WhoamiService", () => {
     expect(svc.resolve({ nodeId: nodeA.id })!.identity).not.toHaveProperty("networkBinding");
   });
 
+  it("hides a hub URL's fragment as well as its query, since whoami lands in transcripts", () => {
+    const { nodeA, nodeB } = seedRig();
+    bind(nodeA.id, "netb-00000000000000000003", "active", "https://hub.example/mcp#key=secret");
+    bind(nodeB.id, "netb-00000000000000000004", "active", "https://hub.example/mcp?key=secret#also=secret");
+    expect(svc.resolve({ nodeId: nodeA.id })!.identity.networkBinding!.hubUrl).toBe("https://hub.example/mcp (fragment hidden)");
+    expect(svc.resolve({ nodeId: nodeB.id })!.identity.networkBinding!.hubUrl).toBe("https://hub.example/mcp (query and fragment hidden)");
+    expect(JSON.stringify([svc.resolve({ nodeId: nodeA.id }), svc.resolve({ nodeId: nodeB.id })])).not.toContain("secret");
+  });
+
   it("reads no binding from a database that predates the network connector", () => {
     const { nodeA } = seedRig();
     db.pragma("foreign_keys = OFF");
