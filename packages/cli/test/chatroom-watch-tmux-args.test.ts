@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { chatroomWatchTmuxArgs } from "../src/commands/chatroom.js";
+import { chatroomAttachHint, chatroomWatchTmuxArgs } from "../src/commands/chatroom.js";
 
 const sessionArg = (rig: string) => { const args = chatroomWatchTmuxArgs(rig); return args[args.indexOf("-s") + 1]; };
 
@@ -44,6 +44,23 @@ const tmuxAvailable = spawnSync("tmux", ["-V"]).status === 0;
 const names = ["my-rig", "my rig", "it's", 'say "hi"', "$(echo pwned)", "`id`", "a;b", "-rig",
   "a#b", "a##b", "a#{b}", "a#[fg=red]b", "a##[b", "a;", ";"];
 
+const hintWord = (session: string) => chatroomAttachHint(session).slice("Attach with: tmux attach -t ".length);
+
+// The attach line is meant to be pasted into a shell, so the shell must hand tmux the session name as tmux reads it: a
+// final `;` keeps the `\` that stops tmux ending its command there.
+describe("chatroom watch --tmux attach hint", () => {
+  it("prints a session that needs no quoting as it is", () => {
+    const plain = sessionArg("my-rig");
+    expect(chatroomAttachHint(plain)).toBe(`Attach with: tmux attach -t ${plain}`);
+  });
+
+  it.each([...names, "release-0_7", "a\\$HOME"].map((rig) => `chatroom@${rig}`))("a shell hands tmux %j as tmux reads it", (session) => {
+    const out = spawnSync("/bin/sh", ["-c", `printf '%s' ${hintWord(session)}`], { encoding: "utf8" });
+    expect(out.status).toBe(0);
+    expect(out.stdout).toBe(session.endsWith(";") ? `${session.slice(0, -1)}\\;` : session);
+  });
+});
+
 describe.runIf(tmuxAvailable)("chatroom watch --tmux against a real tmux server (private socket)", () => {
   let dir = "";
   let recorder = "";
@@ -72,6 +89,15 @@ describe.runIf(tmuxAvailable)("chatroom watch --tmux against a real tmux server 
     const out = path.join(dir, `argv-${i}.json`);
     expect(start(rig, out).name).toBe(`chatroom@${rig}`);
     await vi.waitFor(() => expect(JSON.parse(readFileSync(out, "utf8"))).toEqual(["chatroom", "watch", "--", rig]), { timeout: 5000 });
+  });
+
+  // The pasted hint, through tmux's own parser, names the session tmux made, with a shorter counterpart present.
+  it("the attach hint's target reaches the session tmux reported, not one cut at a final ;", () => {
+    const sessions = ["hint", "hint;"].map((rig, i) => start(rig, path.join(dir, `argv-hint-${i}.json`)));
+    for (const session of sessions) {
+      const listed = execFileSync("/bin/sh", ["-c", `tmux -L ${TMUX_SOCKET} list-panes -F '#{session_name}' -t ${hintWord(session)}`], { encoding: "utf8" });
+      expect(listed.trim()).toBe(session);
+    }
   });
 
   // tmux versions differ in how they normalize dots and literal dollars in session names.

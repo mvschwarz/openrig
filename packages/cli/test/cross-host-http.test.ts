@@ -757,6 +757,65 @@ describe("broadcast --host (net-new, CLI-direct POST)", () => {
     expect(h.calls[0]!.options?.timeoutMs).toBe(30_000);
   });
 
+  it("a --host broadcast that timed out says it may still be running there and not to retry it whole", async () => {
+    const h = mockClient(() => new DaemonTimeoutError("The OpenRig daemon at http://vps-b:7433 did not respond in time: Request to http://vps-b:7433/api/transport/broadcast timed out after 30000ms"));
+    await broadcastCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--rig", "r", "msg"], { from: "user" });
+    const err = captured.stderrLines.join("\n");
+    expect(err).toContain("may still be running on vps-b");
+    expect(err).toContain("Don't retry the whole broadcast");
+    expect(err).toContain("A missing receipt is not proof of non-delivery");
+    expect(err).toContain("relay@my-rig's outbox on vps-b (on that host: rig queue outbox-list relay@my-rig --limit 1000)");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("a --host broadcast whose outcome is unknown names the outbox under the origin triple the request carried", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "dev50@v-rig");
+    const home = mkdtempSync(join(tmpdir(), "origin-broadcast-hint-"));
+    vi.stubEnv("OPENRIG_DB", join(home, "origin.sqlite"));
+    const db = new Database(process.env.OPENRIG_DB!);
+    db.exec("CREATE TABLE self_host_identity (singleton INTEGER PRIMARY KEY, host_id TEXT); INSERT INTO self_host_identity VALUES (1, 'origin-host')");
+    db.close();
+    try {
+      // the connection drops after the request went out: the remote may have recorded rows under the carried sender
+      const realClientFactory = (url: string) => new DaemonClient(url, {
+        fetchImpl: (async () => { throw new Error("other side closed"); }) as unknown as typeof fetch,
+      });
+      const lifecycleDeps = { exists: () => false, fetch: async () => ({ ok: false }) } as never;
+      await broadcastCommand(httpDeps(mockClient(() => ({ status: 200, data: {} })), { clientFactory: realClientFactory, lifecycleDeps }))
+        .parseAsync(["--host", "vps-b", "--rig", "r", "msg"], { from: "user" });
+      expect(captured.stderrLines.join("\n")).toContain(
+        "dev50@v-rig@origin-host's outbox on vps-b (on that host: rig queue outbox-list dev50@v-rig@origin-host --limit 1000)");
+      expect(process.exitCode).toBe(1);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it("a --host --json broadcast that timed out carries the same recovery hint", async () => {
+    const h = mockClient(() => new DaemonTimeoutError("The OpenRig daemon at http://vps-b:7433 did not respond in time: Request to http://vps-b:7433/api/transport/broadcast timed out after 30000ms"));
+    await broadcastCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--rig", "r", "msg", "--json"], { from: "user" });
+    const out = JSON.parse(captured.stdoutLines[0]!);
+    expect(out.result.outcomeUnknown).toBe(true);
+    expect(out.hint).toContain("may still be running on vps-b");
+    expect(out.hint).toContain("Don't retry the whole broadcast");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("a senderless --host broadcast that timed out points to rig capture, not to an outbox it never got", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    const h = mockClient(() => new DaemonTimeoutError("The OpenRig daemon at http://vps-b:7433 did not respond in time: Request to http://vps-b:7433/api/transport/broadcast timed out after 30000ms"));
+    await broadcastCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--rig", "r", "msg"], { from: "user" });
+    const err = captured.stderrLines.join("\n");
+    expect(err).toContain("may still be running on vps-b");
+    expect(err).toContain("rig capture <seat> --host vps-b");
+    expect(err).not.toContain("outbox");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("--timeout <seconds> replaces the 30 s cross-host wait", async () => {
+    const h = mockClient(() => ({ status: 200, data: { results: [], sent: 0, total: 0, failed: 0 } }));
+    await broadcastCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--timeout", "120", "msg"], { from: "user" });
+    expect(h.calls[0]!.options?.timeoutMs).toBe(120_000);
+  });
+
   it("the text positional is NEVER sugar-parsed: a message containing a@b@vps-b broadcasts locally intact when no host is set", async () => {
     // No --host, no selection: the local path runs. lifecycleDeps is a stub,
     // so the local path fails on daemon status — the assertion is that the

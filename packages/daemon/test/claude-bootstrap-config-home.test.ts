@@ -15,6 +15,9 @@ import type { EventBus } from "../src/domain/event-bus.js";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
+import { seatIdentityVerdictsSchema } from "../src/db/migrations/046_seat_identity_verdicts.js";
+import { seatIdentityPanePidSchema } from "../src/db/migrations/119_seat_identity_pane_pid.js";
+import { seatIdentityProcessEvidenceSchema } from "../src/db/migrations/135_seat_identity_process_evidence.js";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
@@ -172,15 +175,22 @@ describe.skipIf(process.platform === "win32")("Claude managed bootstrap selects 
   it.each(["relative", "unset"] as const)("startup with missing binding cwd bootstraps the stored node's %s selection", async selection => {
     const f = fixture(selection, true, true);
     f.db.exec(`CREATE TABLE node_permission_selections(node_id TEXT, runtime TEXT, mode TEXT);
-      CREATE TABLE node_startup_context(node_id TEXT PRIMARY KEY, projection_entries_json TEXT, resolved_files_json TEXT, startup_actions_json TEXT, runtime TEXT);`);
+      CREATE TABLE node_startup_context(node_id TEXT PRIMARY KEY, projection_entries_json TEXT, resolved_files_json TEXT, startup_actions_json TEXT, runtime TEXT);
+      CREATE TABLE sessions(id TEXT, node_id TEXT, session_name TEXT);
+      INSERT INTO sessions VALUES ('session', 'node', 'seat');`);
+    for (const schema of [seatIdentityVerdictsSchema, seatIdentityPanePidSchema, seatIdentityProcessEvidenceSchema]) f.db.exec(schema.sql);
     const statuses: string[] = [];
     // Persistence/readiness boundaries are synthetic; orchestration, projection,
     // bootstrap, prepare and the emitted child command are the production path.
     const registry = { db: f.db, currentOccupantTenure: () => null,
       updateStartupStatus: (_id: string, state: string) => statuses.push(state),
+      getSessionsForRig: () => [{ id: "session", nodeId: "node", status: "running" }],
+      getBindingForNode: () => f.binding, updateBinding: () => f.binding,
       updateResumeToken: () => {} } as unknown as SessionRegistry;
     const eventBus = { db: f.db, emit: () => {} } as unknown as EventBus;
     f.adapter.checkReady = async () => ({ ready: true });
+    f.tmux.listPanes = async () => [{ id: "%1", index: 0, cwd: f.cwd, width: 80, height: 24, active: true }];
+    f.tmux.getPanePid = async () => 4242;
     const orchestrator = new StartupOrchestrator({ db: f.db, sessionRegistry: registry, eventBus, tmuxAdapter: f.tmux });
     const binding = { ...f.binding };
     delete (binding as Partial<NodeBinding>).cwd;

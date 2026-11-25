@@ -104,6 +104,55 @@ describe("rig parked (S19 A7)", () => {
     }
   });
 
+  it("#1933: an event-only external: hold is shown with its blocker and last update, how it ends, and no remedy", async () => {
+    const seat = {
+      ...SEAT_DIAG, parked: false, reason: "stopped with 1 HELD row(s), all healthy: 0 with a live wake, 1 waiting on an external event (shown, not reminded) — not parked",
+      obligations: { ...SEAT_DIAG.obligations, openCount: 0, unhealthyHeldCount: 0, items: [],
+        held: [{ qitemId: "qitem-held", state: "blocked", summary: "waiting", wake: null, healthy: true, eventOnly: true,
+          blockedOn: "external:release-window", updatedAt: "2026-11-22T09:00:00.000Z" }] },
+    };
+    const { server, url } = await stubParkedDaemon({ ok: true, seat });
+    process.env.OPENRIG_URL = url;
+    try {
+      const p = createProgram();
+      p.exitOverride();
+      await p.parseAsync(["node", "rig", "parked", "node-1"]);
+      const out = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(out).toContain("HELD qitem-held — waiting [event-only on external:release-window: shown, not reminded; last updated 2026-11-22T09:00:00.000Z]");
+      expect(out).toContain('rig queue resolve qitem-held --decision "<what happened>"');
+      expect(out).not.toContain("Remedy:");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("#1933: rig-wide output still shows a seat whose only obligation is an event-only hold, read as not parked", async () => {
+    const waiting = {
+      ...SEAT_DIAG, sessionName: "waiting@rig", parked: false,
+      reason: "stopped with 1 HELD row(s), all healthy: 0 with a live wake, 1 waiting on an external event (shown, not reminded) — not parked",
+      obligations: { ...SEAT_DIAG.obligations, openCount: 0, unhealthyHeldCount: 0, items: [],
+        held: [{ qitemId: "qitem-held", state: "blocked", summary: "waiting", wake: null, healthy: true, eventOnly: true,
+          blockedOn: "external:release-window", updatedAt: "2026-11-22T09:00:00.000Z" }] },
+    };
+    const { server, url } = await stubParkedDaemon({
+      ok: true,
+      rig: { parked: false, reason: "no seat is parked", seats: [{ ...SEAT_DIAG, sessionName: "busy@rig", parked: false }, waiting] },
+    });
+    process.env.OPENRIG_URL = url;
+    try {
+      const p = createProgram();
+      p.exitOverride();
+      await p.parseAsync(["node", "rig", "parked"]);
+      const out = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(out).toContain("waiting@rig: not parked");
+      expect(out).toContain("HELD qitem-held — waiting [event-only on external:release-window: shown, not reminded; last updated 2026-11-22T09:00:00.000Z]");
+      expect(out).toContain('rig queue resolve qitem-held --decision "<what happened>"');
+      expect(out).not.toContain("busy@rig:"); // a not-parked seat with no event-only hold stays quiet
+    } finally {
+      server.close();
+    }
+  });
+
   it("Wave-O B2: the CLI carries the rig coordinate — --rig wins, else the shell's own seat identity", async () => {
     const { server, url, urls } = await stubParkedDaemon({ ok: true, rig: { parked: false, reason: "no seat is parked", seats: [], scope: { rig: "other-rig", resolvedFrom: "query-param" } } });
     process.env.OPENRIG_URL = url;

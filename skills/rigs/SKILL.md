@@ -57,9 +57,32 @@ even when setup was skipped or `runtime.codex.hooks_enabled` is false. That sett
 writes. These settings can reach their other sessions using the same Codex home. Reuse a yes that already covered
 these writes; an explicit project-only request doesn't cover them. If they decline, don't launch that same path or
 remove the writes afterwards as a substitute for consent. Explain that setup has no project-only mode. A git worktree
-or project `.codex/config.toml` doesn't redirect these writes. An existing separate `CODEX_HOME` isolates Codex's
-config, login and session state together; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
-Carry the person's scope constraint to the operator.
+or project `.codex/config.toml` doesn't redirect these writes.
+
+**A seat limited to the project still needs OpenRig:** if the person wants the team's own access limited (for Codex, a
+`filesystem` list in place of the default, not `:minimal` alone), each seat sees only what that list names, and
+OpenRig adds nothing to it. The seat still has to run `rig` and reach the OpenRig home (`~/.openrig`, or their
+`OPENRIG_HOME`): without them it reports `rig: command not found` and can't read its task, ask a question, bring up a
+prompt or close its work. Say so before they choose, and include read access to the OpenRig home, the rig install
+(`@openrig/cli` under `npm root -g`) and the folder node runs from (`command -v node`). Keep network access on for the
+seat as well (the read-only sandbox never has it): `rig` talks to the OpenRig daemon on this computer, and a Codex
+sandbox without network can't reach it (seen on Linux), even with every folder listed. `rig up` and `rig up --plan`
+warn, naming what's missing, when a seat's permissions miss any of these, and the team still starts as written. After
+the team starts, check from inside one such seat that `rig whoami` returns its full identity from the daemon before you
+hand it the goal. Partial offline identity, even with exit status zero, does not prove contact. If it cannot reach the daemon, say
+so plainly and let the person choose between more access and a team that can't reach OpenRig. A warning that says read
+coverage is unverified is conditional: check `rig whoami` inside the seat before changing a policy that already works.
+
+**Keep their own login:** a team runs on the person's existing login through the home that holds it (`~/.codex` or
+their `CODEX_HOME`; for Claude Code, `~/.claude` or their `CLAUDE_CONFIG_DIR`). Keeping that home and asking once about
+these writes is how someone who wants changes kept in their project still gets a working team. Don't make a new
+`CODEX_HOME` or `CLAUDE_CONFIG_DIR` to avoid the writes, inside the project or anywhere else: a new home has no login,
+and the team can't start until someone signs it in. Never copy credentials into a new home or the project. A separate
+home helps only if they already have one that is signed in; it keeps that home's config, login and sessions together
+and doesn't relocate `~/.tmux.conf`. If they decline the writes and have no such home, say plainly that the team can't
+start here without their yes to the writes or a sign-in they choose to do, and let them choose. Don't offer a route
+that needs a new sign-in, or a large download such as a local model, without saying so first. Carry the person's scope
+constraint to the operator.
 
 **Codex individual approvals:** explain before installation that even reads may ask repeatedly during setup and
 follow-up, separately from the team's permissions. Use plain, separate commands so each request is readable.
@@ -269,7 +292,9 @@ commands; if the two ever differ, this step is right.
     > clearly pick one choice (a condition the action doesn't plainly meet, say), ask me again before sending anything,
     > and never pick a "don't ask again" choice they didn't pick. Their answer covers only the prompt it answered: a
     > later prompt, even one like it, is a new question to me. Check the effect, and never send again while it's
-    > unknown. If you hand this item on or give this work to another seat, copy this paragraph into the new item. When
+    > unknown. To give this work to another seat, hand this item itself on (`rig queue handoff <this id> --to <seat>`), so
+    > my return address goes with it, and don't close it as a duplicate of a new item. If you hand this item on or give
+    > this work to another seat, copy this paragraph into the new item. When
     > you finish, put the outcome in this item's resolution, with what the latest review found, and any file in its
     > evidence ref.
 
@@ -282,6 +307,16 @@ commands; if the two ever differ, this step is right.
     this work again. If the outcome is unknown, repeat the same command with
     `--id` and the ID from its `Queue create request ID:` line, which it prints before it sends: the same task keeps the
     same address.
+  - **Get woken when a task arrives at your address:** right after the handover, start this wait with your shell tool's
+    background option (in Claude Code versions that wake you when a background command ends), with your address in place
+    of `<address>`:
+
+        until OPENRIG_SESSION_NAME='<address>' rig queue list --owned --state pending --json 2>/dev/null | grep -q '"qitemId"'; do sleep 20; done
+
+    It runs only `rig` and `sleep`, so it spends no model tokens while it waits, and it reads the same in bash and zsh.
+    When it ends, claim each pending task at once (claiming isn't answering: it stays open until the person answers),
+    handle what's waiting (below), then start the wait again, so it ends only on new work. A harness with no background
+    wake (Codex, for one) keeps the check whenever the person talks to you.
   - **When a question arrives at your address as a task,** list the pending work with
     `OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`. Read each in full
     (`rig queue show <id> --full`) and show the person the whole question in the team's words. Record only what they
@@ -305,8 +340,8 @@ commands; if the two ever differ, this step is right.
     rendered in the seat's pane) or `claimed` (picked up); `delivered-ack-pending` (sent, render unconfirmed: not
     proof it was woken); `retained` (the seat's typing guard held the wake, the task is still there to read, and it
     isn't retried automatically: wake the task's destination once its input is free with
-    `rig send <destination> "task <id> is yours"`); `failed` (the wake didn't land, and the task is still
-    owed: wake it the same way); `indeterminate` or `still-pending` (unknown, neither failed nor delivered: check
+    `rig send <destination> "task <id> is yours"`); `failed` (the wake wasn't delivered, and the task still needs
+    doing: wake it the same way); `indeterminate` or `still-pending` (unknown, neither failed nor delivered: check
     before you wake it again). A pending task with no wake isn't lost or done.
   - **Nothing wakes this chat** when the team asks or finishes: while its work is open, start each of your turns by
     listing your address's tasks (above), before anything else, including when the person talks to you and when they

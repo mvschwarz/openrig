@@ -13,6 +13,9 @@ import {
   type LifecycleMissionMember,
 } from "./lifecycle-manifest.js";
 
+// slice.yaml execution keys that readiness reads (sdlc-conventions EC-1) and that alone do not make a step contract.
+const READINESS_ONLY_EXECUTION_KEYS = new Set(["depends_on", "wave"]);
+
 export interface LifecycleSourceDigest {
   kind: "project" | "mission" | "slice";
   path: string;
@@ -193,7 +196,8 @@ export function compileProjectLifecycle(input: {
     }
     if (!member.active) return;
     const execution = asMapping(slice.execution, `${slicePath}: execution`, true);
-    if (!execution) {
+    // An execution block holding only readiness data (depends_on, wave) is not a step contract; any other key is one.
+    if (!execution || Object.keys(execution).every((key) => READINESS_ONLY_EXECUTION_KEYS.has(key))) {
       unknowns.push(`${normalizedRef}: execution contract missing`);
       return;
     }

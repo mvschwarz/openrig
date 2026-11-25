@@ -10,7 +10,8 @@ import type { QueueRepository, QueueItem as RepoQueueItem } from "../../queue-re
 import { loadHumanRegistry, registeredPeople, resolveRegisteredHumanAddress, type LoadResult, type HumanFragment } from "../human-registry.js";
 import { sharedChannelAddresses } from "../participants.js";
 import { SLACK_ATTACHMENTS_HEADINGS, SLACK_ATTACHMENTS_TAG_PREFIX } from "./inbound.js";
-import type { HumanQuestion } from "../../human-questions.js";
+import type { HumanAnswers, HumanQuestion } from "../../human-questions.js";
+import type { RelayAnswerWrite, RelayJournal, RelayedAnswerReceipt } from "../../relayed-answers.js";
 import { ownerNotificationLevelAtLeast, type OwnerNotificationLevel, type QueueTransition } from "../../queue-transition-log.js";
 
 /** The narrow projection the slack path consumes (shape-compatible with the retired bridge's
@@ -26,6 +27,8 @@ export interface QueueItem {
   humanDetail?: string | null;
   replyTo?: string | null;
   humanQuestions?: HumanQuestion[] | null;
+  humanAnswers?: HumanAnswers | null;
+  relayedAnswers?: RelayJournal;
   /** Posted into a registered shared channel (0.7.3): nobody there can answer, so its questions show as text. */
   sharedChannel?: boolean;
   summary?: string | null;
@@ -72,6 +75,7 @@ export interface CreateQitemInput {
 
 /** What the inbound router needs: land a durable qitem, get its id (or throw). */
 export interface InboundQueuePort {
+  answerRelayedAsk?(input: Extract<RelayAnswerWrite, { direct: unknown }>): RelayedAnswerReceipt;
   createQitem(input: CreateQitemInput): Promise<string>;
   getQitem?(qitemId: string): QueueItem | null;
   getHumanAnswer?(qitemId: string, actorSession: string): { qitemId: string; body: string } | null;
@@ -238,6 +242,7 @@ export function makeQueuePorts(
     });
   };
   return {
+    answerRelayedAsk: (input) => queueRepo.writeRelayedAnswer(input),
     getQitem: (qitemId) => queueRepo.getById(qitemId),
     getHumanAnswer: (qitemId, actorSession) => queueRepo.getHumanAnswer(qitemId, actorSession),
     answersPark: (qitemId, actorSession, ts) => {

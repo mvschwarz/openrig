@@ -406,7 +406,8 @@ describe("HerdrAppProvider.openView", () => {
     const result = await provider.openView(composed([pane("dev.build@demo")]));
     expect(result).toMatchObject({ ok: false, code: "herdr_app_unavailable" });
     expect(world.runs).toBe(0);
-    expect(JSON.stringify(result)).not.toMatch(/ssh|tmux attach/);
+    // The message names the test's temp folder, and its random name can contain "ssh"; look for a recipe outside it.
+    expect(JSON.stringify(result).split(home).join("<home>")).not.toMatch(/ssh|tmux attach/);
   });
 
   it("with no window at the app home, says it looked on the daemon's own machine; a window that is there but doesn't answer isn't told that", async () => {

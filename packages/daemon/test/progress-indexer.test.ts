@@ -220,4 +220,15 @@ describe("UI Enhancement Pack v0 — ProgressIndexer", () => {
     expect(expected.rows.length).toBeGreaterThan(0);
     expect(read("crlf")).toEqual(expected);
   });
+
+  it("ignores HTML-commented work and fences without hiding later visible work", () => {
+    const content = ["<!--", "# Hidden title", "## Hidden section", "- [x] Hidden done", "```md", "-->",
+      "# Visible title", "## Rail", "<!-- one-line comment -->", "- [ ] Visible work",
+      "```md", "<!--", "```", "- [~] Visible blocker", "<!--", "- [x] Hidden at EOF"].join("\n");
+    writeFileSync(join(tempDir, "PROGRESS.md"), content);
+    const file = new ProgressIndexer({ roots: [{ name: "ws", canonicalPath: tempDir }] }).scan().files[0]!;
+    expect(file.title).toBe("Visible title");
+    expect(file.rows.map((row) => row.text)).toEqual(["Rail", "Visible work", "Visible blocker"]);
+    expect(file.counts).toEqual({ total: 2, done: 0, blocked: 1, active: 1 });
+  });
 });

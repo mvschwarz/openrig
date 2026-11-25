@@ -174,6 +174,36 @@ composition: { mission: ../../mission.yaml }
     subject.db.close();
   });
 
+  // `rig scope slice create --execution-depends-on` records only execution.depends_on (#3615); that alone is not a step contract.
+  it("keeps an active slice whose execution names only dependencies inspectable but ineligible", () => {
+    writeFileSync(join(missionDir, "slices", "01-build", "slice.yaml"), `schema: openrig.slice/v0alpha1
+kind: slice
+composition: { mission: ../../mission.yaml }
+execution:
+  depends_on: ["OPR.1.0.0.1"]
+  wave: 1
+`);
+    const subject = runtime();
+    const result = subject.runtime.compileLifecycle(missionDir, "release-op");
+    expect(result.eligible).toBe(false);
+    expect(result.workflowSpec).toBeNull();
+    expect(result.unknowns).toContain("slices/01-build/slice.yaml: execution contract missing");
+    subject.db.close();
+  });
+
+  it("names the missing actor_role of an authored step contract", () => {
+    writeFileSync(join(missionDir, "slices", "01-build", "slice.yaml"), `schema: openrig.slice/v0alpha1
+kind: slice
+composition: { mission: ../../mission.yaml }
+execution:
+  preferred_targets: [builder@rig]
+  depends_on: ["OPR.1.0.0.1"]
+`);
+    const subject = runtime();
+    expect(() => subject.runtime.compileLifecycle(missionDir, "release-op")).toThrow(/execution\.actor_role must be a non-empty string/);
+    subject.db.close();
+  });
+
   it("includes a released slice in provenance without requiring an execution contract", () => {
     mkdirSync(join(missionDir, "slices", "00-released"), { recursive: true });
     writeFileSync(join(missionDir, "slices", "00-released", "slice.yaml"), `schema: openrig.slice/v0alpha1

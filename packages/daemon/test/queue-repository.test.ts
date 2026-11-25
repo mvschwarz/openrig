@@ -2185,7 +2185,7 @@ describe("QueueRepository.listOpenObligations: the parked query's lean read", ()
     const ids = repo.list({ destinationSession: "b@r" }).map((r) => r.qitemId);
     repo.claim({ qitemId: ids[0]!, destinationSession: "b@r" });
     const want = repo.list({ destinationSession: "b@r", state: ["pending", "in-progress", "blocked"], limit: 500 })
-      .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null }));
+      .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null, blockedOn: r.blockedOn ?? null, updatedAt: r.tsUpdated }));
     const prepare = vi.spyOn(db, "prepare");
     const got = repo.listOpenObligations("b@r", 500);
     expect(got).toEqual(want);
@@ -2230,7 +2230,7 @@ describe("QueueRepository.listOpenObligations: same rows, order and limit as lis
       for (const seat of [...seats, "nobody@r"]) {
         for (const limit of [1, 3, 500]) {
           const want = repo.list({ destinationSession: seat, state: ["pending", "in-progress", "blocked"], limit })
-            .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null }));
+            .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null, blockedOn: r.blockedOn ?? null, updatedAt: r.tsUpdated }));
           expect(repo.listOpenObligations(seat, limit), `seed ${seed} ${seat} limit ${limit}`).toEqual(want);
         }
       }

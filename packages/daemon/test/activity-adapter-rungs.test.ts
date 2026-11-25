@@ -2,6 +2,9 @@ import { describe, it, expect } from "vitest";
 import { basename, join } from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type Database from "better-sqlite3";
 import {
   CLAUDE_ACTIVITY_RUNG_INVENTORY,
@@ -10,7 +13,7 @@ import {
   PI_ACTIVITY_RUNG_INVENTORY,
   runtimeRungInventory,
 } from "../src/domain/activity-taxonomy.js";
-import { readClaudeSelfReportEvidence, type ClaudeSelfReportRead } from "../src/adapters/claude-code-adapter.js";
+import { readClaudeSelfReportEvidence, verifiedSelfReportPid, type ClaudeSelfReportRead } from "../src/adapters/claude-code-adapter.js";
 import { SeatActivityService } from "../src/domain/seat-activity-service.js";
 
 // OPR.0.5.5.19 A5 — per-harness rung inventories + the Claude self-report rung (r3) +
@@ -101,6 +104,27 @@ describe("S19 A5 — readClaudeSelfReportEvidence: the pid.json rung, undocument
     expect(ev.activity).toBe("working"); // 3.json is fresher than 2.json; 1.json is a different seat
   });
 
+  it("#3604: the verified PID's own file is the seat's after /rename, whatever its title; not another process's, not a stopped one", () => {
+    const renamed = readOf({ "123.json": record({ name: "Some Title", status: "idle" }) });
+    const running = (read: ClaudeSelfReportRead, pids: number[]) => ({ ...read, isAlive: (pid: number) => pids.includes(pid) });
+    expect(readClaudeSelfReportEvidence({ ...input(running(renamed, [123])), pid: 123 })!.activity).toBe("idle-at-prompt");
+    expect(readClaudeSelfReportEvidence(input(running(renamed, [123])))).toBeNull(); // no PID: the title no longer names the seat
+    expect(readClaudeSelfReportEvidence({ ...input(running(renamed, [])), pid: 123 })).toBeNull(); // not running
+    const other = running(readOf({ "124.json": record({ pid: 999, name: "Some Title" }) }), [124]);
+    expect(readClaudeSelfReportEvidence({ ...input(other), pid: 124 })).toBeNull(); // the file names another process
+  });
+
+  it("#3605: the PID comes only from a verified verdict for this same session", () => {
+    const verdict = (over: Record<string, unknown> = {}, evidence: Record<string, unknown> = {}) => ({ nodeId: SEAT, verdict: "verified",
+      evidenceSource: null, reason: null, sessionName: NAME, observedAt: "2026-11-20T07:00:00Z",
+      evidence: { registeredPane: "%1", observedPid: 123, observedCommand: "claude", matchedLayer: 1, ...evidence }, ...over }) as never;
+    expect(verifiedSelfReportPid(verdict(), NAME)).toBe(123);
+    expect(verifiedSelfReportPid(verdict({ verdict: "unverified" }), NAME)).toBeUndefined();
+    expect(verifiedSelfReportPid(verdict({ sessionName: "another-seat" }), NAME)).toBeUndefined();
+    expect(verifiedSelfReportPid(verdict({}, { observedPid: null }), NAME)).toBeUndefined();
+    expect(verifiedSelfReportPid(null, NAME)).toBeUndefined();
+  });
+
   it("unreadable dir, malformed file, unknown status, wrong shape — ALL return null, never throw (fall down the ladder)", () => {
     expect(readClaudeSelfReportEvidence(input(readOf({}, true)))).toBeNull();
     expect(readClaudeSelfReportEvidence(input(readOf({ "1.json": "{not json" })))).toBeNull();
@@ -143,6 +167,98 @@ describe("S19 A5 — production wiring: the sweep auto-declares, consults self-r
     const s = svc.getSeatState(SEAT)!;
     expect(s.activity).toBe("idle-at-prompt");
     expect(s.decidedBy).toBe("window-sampling");
+  });
+
+  it("#3604: after /rename an unread self-report retires on its second unread sweep and the Stop hook decides; the verified PID keeps it read", async () => {
+    for (const bound of [false, true]) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-sessions-"));
+      try {
+        const clock = { now: Date.parse("2026-11-20T07:20:00Z") };
+        const pidFile = (name: string, status: string) =>
+          fs.writeFileSync(path.join(dir, "4242.json"), JSON.stringify({ pid: 4242, name, status, statusUpdatedAt: clock.now }));
+        const read: ClaudeSelfReportRead = { listFiles: (d) => fs.readdirSync(d), readFile: (f) => fs.readFileSync(f, "utf8"), isAlive: () => true };
+        const svc = new SeatActivityService({
+          tmux: { readPaneLastActivity: async () => clock.now / 1000 - 10 }, defaultWindowSeconds: 3, now: () => new Date(clock.now),
+          selfReportReader: (sessionName, seatNodeId) => readClaudeSelfReportEvidence({ sessionsDir: dir, sessionName, seatNodeId, read, ...(bound ? { pid: 4242 } : {}) }),
+        });
+        const db = { prepare: () => ({ all: () => [{ session_name: NAME, node_id: SEAT, runtime: "claude-code", attachment_type: "tmux" }] }) } as unknown as Database.Database;
+        const state = () => { const s = svc.getSeatState(SEAT)!; return [s.activity, s.decidedBy]; };
+        pidFile(NAME, "busy"); await svc.pollAllRunningTmuxSeats(db);
+        expect(state(), `bound=${bound}`).toEqual(["working", "self-report"]);
+        clock.now += 60_000; pidFile("Some Title", "busy"); await svc.pollAllRunningTmuxSeats(db);
+        expect(state(), `bound=${bound}: one unread sweep keeps it`).toEqual(["working", "self-report"]);
+        clock.now += 60_000; pidFile("Some Title", "idle"); await svc.pollAllRunningTmuxSeats(db);
+        svc.reportEvidence({ seatNodeId: SEAT, sessionName: NAME, rung: "lifecycle-hooks", sourceId: "claude:hooks", seq: 2,
+          observedAt: new Date(clock.now).toISOString(), activity: "idle-at-prompt" });
+        expect(state(), `bound=${bound}: the turn is over`).toEqual(["idle-at-prompt", bound ? "self-report" : "lifecycle-hooks"]);
+        clock.now += 30 * 60_000; await svc.pollAllRunningTmuxSeats(db);
+        expect(state()[0], `bound=${bound}: still idle 30 minutes on`).toBe("idle-at-prompt");
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }
+  });
+
+  // A first sweep without a verified PID takes a name-matched file; a later one with it takes the PID's own file, whose
+  // report can be older. That file's report decides from then on; one file's own older record is still dropped.
+  function selfReportFiles() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-sessions-"));
+    const clock = { now: Date.parse("2026-11-20T08:00:00Z") };
+    const write = (file: string, record: Record<string, unknown>) => fs.writeFileSync(path.join(dir, file), JSON.stringify(record));
+    const read: ClaudeSelfReportRead = { listFiles: (d) => fs.readdirSync(d), readFile: (f) => fs.readFileSync(f, "utf8"), isAlive: () => true };
+    const verified = { pid: undefined as number | undefined };
+    const svc = new SeatActivityService({
+      tmux: { readPaneLastActivity: async () => clock.now / 1000 - 10 }, defaultWindowSeconds: 3, now: () => new Date(clock.now),
+      selfReportReader: (sessionName, seatNodeId) => readClaudeSelfReportEvidence({ sessionsDir: dir, sessionName, seatNodeId, read,
+        ...(verified.pid === undefined ? {} : { pid: verified.pid }) }),
+    });
+    const db = { prepare: () => ({ all: () => [{ session_name: NAME, node_id: SEAT, runtime: "claude-code", attachment_type: "tmux" }] }) } as unknown as Database.Database;
+    const sweep = async () => { await svc.pollAllRunningTmuxSeats(db); const s = svc.getSeatState(SEAT)!; return [s.activity, s.decidedBy]; };
+    return { dir, clock, write, verified, sweep };
+  }
+
+  it("#3605: the verified PID's own file decides once it's selected, though its report is older than the name match it replaces", async () => {
+    const { dir, clock, write, verified, sweep } = selfReportFiles();
+    try {
+      const t1 = clock.now - 120_000;
+      write("5000.json", { pid: 5000, name: NAME, status: "busy", statusUpdatedAt: clock.now }); // a name match, at T2
+      write("4242.json", { pid: 4242, name: "Some Title", status: "idle", statusUpdatedAt: t1 }); // the seat's own, at T1 < T2
+      expect(await sweep()).toEqual(["working", "self-report"]);
+      verified.pid = 4242; // the seat's PID is verified now
+      clock.now += 5_000;
+      expect(await sweep()).toEqual(["idle-at-prompt", "self-report"]);
+      clock.now += 60_000;
+      expect(await sweep()).toEqual(["idle-at-prompt", "self-report"]); // unchanged later sweeps stay idle
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("#3605: the same file's older record is still dropped", async () => {
+    const { dir, clock, write, verified, sweep } = selfReportFiles();
+    try {
+      verified.pid = 4242;
+      write("4242.json", { pid: 4242, name: NAME, status: "busy", statusUpdatedAt: clock.now });
+      expect(await sweep()).toEqual(["working", "self-report"]);
+      write("4242.json", { pid: 4242, name: NAME, status: "idle", statusUpdatedAt: clock.now - 1_000 }); // out of order
+      clock.now += 5_000;
+      expect(await sweep()).toEqual(["working", "self-report"]);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("#3605: a pane whose activity can't be read still retires an unread self-report on its second unread sweep", async () => {
+    const clock = { now: 5_000_000 };
+    let readable = true;
+    const svc = new SeatActivityService({
+      tmux: { readPaneLastActivity: async () => null }, defaultWindowSeconds: 3, now: () => new Date(clock.now),
+      selfReportReader: (sessionName, seatNodeId) => readable
+        ? { seatNodeId, sessionName, rung: "self-report", sourceId: "claude:pid-json", seq: clock.now, observedAt: new Date(clock.now).toISOString(), activity: "working" }
+        : null,
+    });
+    const db = { prepare: () => ({ all: () => [{ session_name: NAME, node_id: SEAT, runtime: "claude-code", attachment_type: "tmux" }] }) } as unknown as Database.Database;
+    await svc.pollAllRunningTmuxSeats(db);
+    expect(svc.getSeatState(SEAT)!.decidedBy).toBe("self-report");
+    readable = false; clock.now += 1_000; await svc.pollAllRunningTmuxSeats(db);
+    expect(svc.getSeatState(SEAT)!.decidedBy, "one unread sweep keeps it").toBe("self-report");
+    clock.now += 1_000; await svc.pollAllRunningTmuxSeats(db);
+    expect(svc.getSeatState(SEAT)!.decidedBy).not.toBe("self-report");
+    expect(svc.getSeatState(SEAT)!.activity).not.toBe("working");
   });
 
   it("a codex seat never consults self-report (rung absent by inventory) and shows the honest rung set", async () => {

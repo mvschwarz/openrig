@@ -140,7 +140,7 @@ Root: `rig`; declared option: `-V, --version`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig start` | — | `--last`<br>`--all`<br>`--rigs <names...>`<br>`--fresh <seats...>`<br>`--json` |
+| `rig start` | — | `--last`<br>`--all`<br>`--rigs <names...>`<br>`--concurrency <n>`<br>`--fresh <seats...>`<br>`--json` |
 
 ### daemon
 
@@ -275,6 +275,15 @@ the sections that were not read are `null`.
 | `rig package rollback <installId>` | — | — |
 | `rig package list` | — | — |
 
+`rig package plan` and `rig package install` end with an "Outside the usual folder (installed as named):" list when a
+skill or agent export lands outside its kind's usual folder but still inside the target, such as a name containing `..`
+that doesn't climb above it. The usual folders are `.claude/skills/` and `.claude/agents/` for `claude-code`, and
+`.agents/skills/` and `.agents/` for other runtimes. The export still installs as named; the list only says where it went.
+A name that would climb above the target is still refused. The daemon's `/api/packages/plan` and `/api/packages/install`
+responses carry the same lines as `warnings`, each affected plan entry carries `outsideKindFolder` (`destination` and `kindFolder`,
+relative to the target), and a bootstrap's package step adds the lines to its warnings, prefixed with the package and
+runtime.
+
 ### bootstrap
 
 | Invocation | Aliases | Declared options |
@@ -327,7 +336,7 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig up <source>` | — | `--non-interruptive`<br>`--no-non-interruptive`<br>`--plan`<br>`--yes`<br>`--cwd <path>`<br>`--env <KEY=VALUE>` (repeatable)<br>`--name <rig>`<br>`--target <root>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--existing`<br>`--fresh <seats...>`<br>`--json`<br>`--host <id>` |
+| `rig up <source>` | — | `--non-interruptive`<br>`--no-non-interruptive`<br>`--plan`<br>`--yes`<br>`--timeout <seconds>`<br>`--cwd <path>`<br>`--env <KEY=VALUE>` (repeatable)<br>`--name <rig>`<br>`--target <root>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--existing`<br>`--fresh <seats...>`<br>`--json`<br>`--host <id>` |
 
 ### down
 
@@ -461,7 +470,7 @@ do not establish connectivity to a live peer.
 | `rig mcp` | — | — |
 | `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>`<br>`--front-door`<br>`--task-destination <seat>` |
 | `rig mcp token` | — | — |
-| `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
+| `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner`<br>`--person <entity_id>` |
 | `rig mcp token list` | — | `--json` |
 | `rig mcp token revoke <name>` | — | — |
 
@@ -536,6 +545,17 @@ It opens an intake row for that seat, which wakes it, or adds a note to that sea
 or interrupting item makes the row urgent. `rig config set stream.intake off` keeps emits passive. A runner's
 default-permit record (tag `runner-permission-permit`) opens no row.
 
+When neither the automatic path nor intake has recorded a routing decision for an item, `rig stream show` asks the daemon
+where intake recorded it (`GET /api/stream/<streamItemId>/intake`) and reports one of three stages:
+- `in_intake`: the item opened an intake row, or was added as a note to a pending one. The line names the row and its
+  state. If that row is `done`, `failed`, `denied` or `canceled`, it says the row closed without a recorded decision for
+  this item; a handed-off row isn't counted as closed, since its successor may still decide.
+- `awaiting_intake`: intake has no record of the item.
+- `intake_unknown`: it couldn't be checked, because the daemon doesn't serve that read (an older daemon), the read failed,
+  or only a truncated intake note matches the item's long id, so it cannot identify the item exactly.
+
+As with the other stages that have no automatic work, work a reader linked with `rig stream act --work` decides the stage.
+
 ### queue
 
 | Invocation | Aliases | Declared options |
@@ -549,7 +569,7 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | `rig queue resolve <qitemId>` | — | `--decision <text>` **required**<br>`--actor <session>`<br>`--bearer <token>`<br>`--no-notify`<br>`--json` |
 | `rig queue handoff <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--alert`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
 | `rig queue handoff-and-complete <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--alert`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
-| `rig queue whoami` | — | `--session <session>`<br>`--recent-limit <n>`<br>`--work-candidates`<br>`--json` |
+| `rig queue whoami` | — | `--session <session>`<br>`--recent-limit <n>`<br>`--work-candidates`<br>`--held-work`<br>`--json` |
 | `rig queue fallback <qitemId>` | — | `--destination <session>` **required**<br>`--reason <text>`<br>`--json` |
 | `rig queue show <qitemId>` | — | `--full`<br>`--json`<br>`--host <id>` |
 | `rig queue artifact <qitemId>` | — | `--root <name>`<br>`--json` |
@@ -1171,8 +1191,11 @@ for producer/consumer wiring and launch-scoped state lifetime.
 | `rig seat clean <seat>` | — | `--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-resume-token <session>` | — | `--token-stdin`<br>`--reason <text>` **required**<br>`--json` |
 
-A `rig seat stop` that successfully kills the current session records that it
-was intentionally stopped. With other healthy members running, the rig's `lifecycleState` in
+A `rig seat stop` records its stop request before it stops anything, and a
+successful kill confirms that the seat was intentionally stopped. A stop that
+times out or only partly takes effect keeps the request pending (`stopRequested`
+in `--full` node JSON) instead of reporting the seat as exited; see
+[checked seat stop](../reference/checked-seat-stop.md#the-stop-request). With other healthy members running, the rig's `lifecycleState` in
 `rig ps` and the TUI stays `running`; the stopped member no longer makes it
 `degraded`. Stopping every member
 leaves the rig `stopped`. Node JSON exposes `intentionallyStopped` in compact,
@@ -1183,9 +1206,11 @@ Process counts still reflect reality: stopping one of two members leaves
 resume information, and attention diagnostics remain available. A crash or
 attention condition on another member still affects the rig lifecycle.
 
-Stop intent survives daemon restarts and audit retention. It applies only to the
-latest exited session while the seat has no binding; a subsequent session status
-change clears it, and a new session starts without it. Existing exits are not
+Stop intent survives daemon restarts and audit retention. `intentionallyStopped`
+applies only to the latest exited session while the seat has no binding. A later
+status write or observation doesn't clear the intent; a new session, from an
+explicit start, starts without it. A seat that declares `keep_alive` is never
+relaunched while its latest session carries the intent. Existing exits are not
 backfilled as intentional stops. If the session disappears between the live
 probe and the stop, its unexplained exit still affects rig health. The internal
 stop in `rig seat launch --fresh --stop` does not record final stop intent, so a
@@ -1237,6 +1262,8 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | `rig network connect <seat>` | — | `--as <participant>` **required**<br>`--hub <url>`<br>`--token-file <path>`<br>`--allow-http`<br>`--json` |
 | `rig network status` | — | `--json` |
 | `rig network disconnect <binding-or-seat>` | — | `--reason <text>`<br>`--json` |
+| `rig network peers <binding-or-seat>` | — | `--json` |
+| `rig network request <binding-or-seat> <peer>` | — | `--id <request-id>` **required**<br>`--body-file <path>` **required**<br>`--summary <text>`<br>`--json` |
 
 ### startup-proof
 
@@ -1253,7 +1280,7 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | `rig scope slice` | — | — |
 | `rig scope slice ls` | — | `--mission <name>`<br>`--state <state>`<br>`--json` |
 | `rig scope slice show <slice-path>` | — | `--mission <name>`<br>`--json` |
-| `rig scope slice create <mission> <slug>` | — | `--template <kind>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--readme-only`<br>`--json` |
+| `rig scope slice create <mission> <slug>` | — | `--template <kind>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--execution-depends-on <dot-id...>`<br>`--readme-only`<br>`--json` |
 | `rig scope slice ship <slice-path> <release-mission>` | — | `--mission <name>`<br>`--json` |
 | `rig scope slice close <slice-path>` | — | `--reason <reason>` **required**<br>`--in-place`<br>`--note <text>`<br>`--mission <name>`<br>`--json` |
 | `rig scope slice move <slice-path> <dest-mission>` | — | `--mission <name>`<br>`--json` |

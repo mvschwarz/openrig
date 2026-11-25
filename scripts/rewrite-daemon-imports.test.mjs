@@ -244,3 +244,25 @@ test("still fails the build when executed directly with an unmapped import", () 
     rmSync(parent, { recursive: true, force: true });
   }
 });
+
+// Published declarations must resolve through the staged daemon too, without a workspace alias.
+test("rewrites declaration imports, re-exports and import types using the staged module paths", () => {
+  const f = fixture({ "dist/mcp-surface.d.ts": [
+    'import type { A } from "@openrig/daemon/attention";',
+    'export type { A } from "@openrig/daemon/attention";',
+    'export type Result = import("@openrig/daemon/attention").A;',
+    '',
+  ].join("\n") });
+  try {
+    assert.deepEqual(rewriteDaemonImports({ cliDir: f.cliDir, daemonPackageJsonPath: f.daemonPackageJsonPath }),
+      { rewritten: 3, files: 1 });
+    assert.equal(f.read("dist/mcp-surface.d.ts"), [
+      'import type { A } from "../daemon/dist/attention-surface.js";',
+      'export type { A } from "../daemon/dist/attention-surface.js";',
+      'export type Result = import("../daemon/dist/attention-surface.js").A;',
+      '',
+    ].join("\n"));
+    assert.deepEqual(rewriteDaemonImports({ cliDir: f.cliDir, daemonPackageJsonPath: f.daemonPackageJsonPath }),
+      { rewritten: 0, files: 0 });
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});

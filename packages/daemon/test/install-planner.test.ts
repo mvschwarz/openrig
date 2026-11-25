@@ -753,6 +753,35 @@ describe("InstallPlanner export-name containment", () => {
     }
   });
 
+  it("says when an accepted name lands outside its kind's usual folder, and plans it as before", () => {
+    const flagged: Array<["skill" | "agent", string, "claude-code" | "codex", string, string, string]> = [
+      ["skill", "../../.git/hooks", "claude-code", ".git/hooks/SKILL.md", ".claude/skills", "Skill '../../.git/hooks' installs to .git/hooks/, outside the usual .claude/skills/ folder"],
+      ["skill", "../extra", "codex", ".agents/extra/SKILL.md", ".agents/skills", "Skill '../extra' installs to .agents/extra/, outside the usual .agents/skills/ folder"],
+      ["agent", "../x", "claude-code", ".claude/x.yaml", ".claude/agents", "Agent '../x' installs to .claude/x.yaml, outside the usual .claude/agents/ folder"],
+      ["agent", "../x", "codex", "x.yaml", ".agents", "Agent '../x' installs to x.yaml, outside the usual .agents/ folder"],
+    ];
+    for (const [kind, name, runtime, destination, kindFolder, warning] of flagged) {
+      const { threw, escaped, plan } = planTarget(kind, name, runtime);
+      expect(threw, `${kind} '${name}' (${runtime}) should not be refused`).toBe(false);
+      expect(escaped).toBe(false);
+      expect(plan!.warnings).toEqual([warning]);
+      const entry = plan!.entries.find((e) => e.targetPath.length > 0)!;
+      expect(entry).toMatchObject({ deferred: false, classification: "safe_projection", outsideKindFolder: { destination, kindFolder } });
+      expect(plan!.actionable).toContain(entry);
+    }
+    // Names inside the kind's folder, nested or not, say nothing.
+    const quiet: Array<["skill" | "agent", string, "claude-code" | "codex"]> = [
+      ["skill", "helper", "claude-code"], ["skill", "nested/helper", "claude-code"], ["skill", "nested/helper", "codex"],
+      ["skill", "_helper", "claude-code"], ["skill", ".helper", "codex"], ["agent", "a", "claude-code"], ["agent", "", "codex"],
+    ];
+    for (const [kind, name, runtime] of quiet) {
+      const { threw, plan } = planTarget(kind, name, runtime);
+      expect(threw).toBe(false);
+      expect(plan!.warnings ?? [], `${kind} '${name}' (${runtime})`).toEqual([]);
+      expect(plan!.entries.some((e) => e.outsideKindFolder)).toBe(false);
+    }
+  });
+
   it("accepts names that stay inside the target", () => {
     const cases: Array<["skill" | "agent", string, "claude-code" | "codex"]> = [
       ["skill", "nested/helper", "claude-code"],

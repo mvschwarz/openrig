@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 
@@ -44,14 +45,22 @@ function parseArgs(argv) {
     out: DEFAULT_OUT,
     cwd: process.cwd(),
     json: false,
+    tailBytes: 0,
+    untilByte: null,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--jsonl") args.jsonl = argv[++i];
     else if (arg === "--out") args.out = argv[++i];
+    else if (arg === "--tail-bytes") {
+      args.tailBytes = Number(argv[++i]);
+      if (!Number.isInteger(args.tailBytes) || args.tailBytes <= 0) throw new Error("--tail-bytes needs a whole number of bytes");
+    }
     else if (arg === "--cwd") args.cwd = argv[++i];
     else if (arg === "--json") args.json = true;
+    // Read only the first N bytes: the transcript as it was when the PreCompact hook ran, before compaction appends to it.
+    else if (arg === "--until-byte") args.untilByte = Number(argv[++i]);
     else if (!arg.startsWith("-") && !args.jsonl) args.jsonl = arg;
     else throw new Error(`unknown argument: ${arg}`);
   }
@@ -59,18 +68,54 @@ function parseArgs(argv) {
   return args;
 }
 
-function readJsonLines(file) {
-  const raw = fs.readFileSync(file, "utf8");
-  return raw
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line, index) => {
-      try {
-        return JSON.parse(line);
-      } catch (error) {
-        return { type: "parse-error", line: index + 1, error: String(error), raw: line };
-      }
-    });
+// The transcript is read a line at a time: a long-lived seat's JSONL runs to gigabytes, past the longest string Node can
+// make (about 512 MB), so the whole file is never read into one string.
+// From a byte offset (a tail packet), the stream starts one byte early and drops its first line: that's the rest of the
+// line the cut fell in, or empty when the cut falls at a line start. It ends at the size recorded when the tail was
+// chosen, so lines appended while it reads stay out of the packet and out of the range its coverage line names.
+async function* readJsonLines(file, start = 0, untilByte = null) {
+  if (untilByte === 0) return; // an explicit bound of 0 is an empty prefix; an absent one reads the whole file
+  const bounded = Number.isInteger(untilByte) && untilByte > 0 ? { end: untilByte - 1 } : {};
+  const range = start ? { start: start - 1, ...bounded } : bounded;
+  const lines = createInterface({ input: fs.createReadStream(file, { encoding: "utf8", ...range }), crlfDelay: Infinity });
+  let index = 0;
+  let skip = start > 0;
+  for await (const line of lines) {
+    if (skip) {
+      skip = false;
+      continue;
+    }
+    if (!line) continue;
+    index += 1;
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch (error) {
+      record = { type: "parse-error", line: index, error: String(error), raw: line };
+    }
+    yield record;
+  }
+}
+
+// The reconstructed transcript and narrative go to their files as they're built, joined with newlines as before, so
+// neither becomes one string either. close() returns the text's length, which sizes the read budget. writeFileSync on
+// the descriptor appends at its position and retries until every byte is written; one writeSync can write fewer.
+function createTextSink(file) {
+  const fd = fs.openSync(file, "w");
+  let count = 0;
+  let length = 0;
+  return {
+    push(text) {
+      fs.writeFileSync(fd, count ? `\n${text}` : text);
+      length += text.length + (count ? 1 : 0);
+      count += 1;
+    },
+    close(placeholder) {
+      if (!count) fs.writeFileSync(fd, placeholder);
+      fs.closeSync(fd);
+      return length;
+    },
+  };
 }
 
 function findLatestJsonl(cwd) {
@@ -279,16 +324,19 @@ function discoverDocs(cwd) {
   return [...docs].sort();
 }
 
-function analyze(jsonlPath, cwd) {
-  const records = readJsonLines(jsonlPath);
+async function analyze(jsonlPath, cwd, staging, start = 0, untilByte = null) {
   const registry = createRegistry();
-  const transcript = [];
-  const narrative = []; // R4: message-turns only (assistant/user text), no tool bodies
+  const transcript = createTextSink(path.join(staging, "transcript.txt"));
+  const narrative = createTextSink(path.join(staging, "transcript-narrative.txt")); // R4: message-turns only (assistant/user text), no tool bodies
   const readTargets = new Map(); // R1: tool_use_id -> file_path for Read calls
   const cwdCounts = new Map();
   let sessionId = null;
+  let records = 0;
+  let firstTimestamp = null;
 
-  for (const record of records) {
+  for await (const record of readJsonLines(jsonlPath, start, untilByte)) {
+    records += 1;
+    if (!firstTimestamp && typeof record.timestamp === "string") firstTimestamp = record.timestamp;
     registry.tick();
     if (record.sessionId || record.session_id) sessionId = record.sessionId ?? record.session_id;
     if (record.cwd) {
@@ -361,19 +409,19 @@ function analyze(jsonlPath, cwd) {
   const cwdRanked = [...cwdCounts.entries()].sort((a, b) => b[1] - a[1]);
   const effectiveCwd = cwdRanked[0]?.[0] ?? cwd;
 
-  const transcriptText = transcript.join("\n");
-  const narrativeText = narrative.join("\n");
+  const transcriptLength = transcript.close("(no message transcript reconstructed)\n");
+  const narrativeLength = narrative.close("(no narrative reconstructed)\n");
   return {
     sessionId,
     jsonlPath,
     cwd: effectiveCwd,
-    records: records.length,
-    transcript: transcriptText,
-    narrative: narrativeText,
-    transcriptTokens: Math.round(transcriptText.length / 4),
-    narrativeTokens: Math.round(narrativeText.length / 4),
+    records,
+    transcriptTokens: Math.round(transcriptLength / 4),
+    narrativeTokens: Math.round(narrativeLength / 4),
     files: rankedFiles,
     docs: discoverDocs(effectiveCwd),
+    // Only a tail packet says what it covers, so a whole-session packet's summary is unchanged.
+    ...(start ? { coverage: { fromByte: start, bytes: untilByte - start, firstTimestamp } } : {}),
   };
 }
 
@@ -416,6 +464,10 @@ function restoreInstructions(summary, outputPaths) {
   lines.push(`- Narrative companion (READ THIS FIRST): \`${outputPaths.narrative}\` (~${summary.narrativeTokens ?? "?"} tokens — message turns only, no tool bodies)`);
   lines.push(`- Touched-file triage: \`${outputPaths.touchedFiles}\``);
   lines.push(`- Working directory inferred: \`${summary.cwd}\``);
+  if (summary.coverage) {
+    const { fromByte, bytes, firstTimestamp } = summary.coverage;
+    lines.push(`- **Coverage: this packet is built from the JSONL's last ${bytes} bytes only** (from byte ${fromByte}${firstTimestamp ? `, first timed record at ${firstTimestamp}` : ""}). Earlier history is in the JSONL itself. Touched files and their counts come from this tail, and a Read whose call is before the cut has no file path. For a whole-session packet, run restore-from-jsonl.mjs without --tail-bytes.`);
+  }
   lines.push("");
   lines.push("## Read budget (the restore must leave room for the work)");
   lines.push("");
@@ -460,7 +512,7 @@ function nowIso() {
   return typeof injected === "string" && injected.trim().length > 0 ? injected : new Date().toISOString();
 }
 
-function writeOutputs(summary, outRoot) {
+function writeOutputs(summary, outRoot, staging) {
   const stamp = nowIso().replace(/[:.]/g, "-");
   const base = path.join(outRoot, `${summary.sessionId ?? "unknown-session"}-${stamp}`);
   fs.mkdirSync(base, { recursive: true });
@@ -474,24 +526,49 @@ function writeOutputs(summary, outRoot) {
     summary: path.join(base, "restore-summary.json"),
   };
 
-  fs.writeFileSync(outputPaths.transcript, summary.transcript || "(no message transcript reconstructed)\n");
-  fs.writeFileSync(outputPaths.narrative, summary.narrative || "(no narrative reconstructed)\n");
+  fs.renameSync(path.join(staging, "transcript.txt"), outputPaths.transcript);
+  fs.renameSync(path.join(staging, "transcript-narrative.txt"), outputPaths.narrative);
   fs.writeFileSync(outputPaths.touchedFiles, markdownFileList(summary.files));
   fs.writeFileSync(outputPaths.instructions, restoreInstructions(summary, outputPaths));
-  fs.writeFileSync(outputPaths.summary, JSON.stringify({ ...summary, transcript: undefined, narrative: undefined, outputPaths }, null, 2));
+  fs.writeFileSync(outputPaths.summary, JSON.stringify({ ...summary, outputPaths }, null, 2));
 
   return outputPaths;
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cwd = path.resolve(args.cwd);
   const jsonlPath = args.jsonl ? path.resolve(args.jsonl) : findLatestJsonl(cwd);
   if (!jsonlPath) throw new Error("could not find a Claude JSONL transcript; pass one explicitly");
   if (!fs.existsSync(jsonlPath)) throw new Error(`JSONL transcript not found: ${jsonlPath}`);
 
-  const summary = analyze(jsonlPath, cwd);
-  const outputPaths = writeOutputs(summary, path.resolve(args.out));
+  // The two text files are written while the transcript is read, before the packet's folder is named (its session id
+  // comes from the transcript), so they start in a staging folder beside it. Packet readers match `<session id>-*`.
+  const outRoot = path.resolve(args.out);
+  fs.mkdirSync(outRoot, { recursive: true });
+  // A handled stop part way still removes the staging folder: SIGTERM (the PreCompact hook's time limit) exits 143, and
+  // SIGINT (a person's Ctrl-C on the manual route) exits 130. A stop that can't be handled (SIGKILL) or a failed removal
+  // can still leave it.
+  let staging = null;
+  const removeStagingOn = (signal, code) => process.once(signal, () => {
+    if (staging) fs.rmSync(staging, { recursive: true, force: true });
+    process.exit(code);
+  });
+  removeStagingOn("SIGTERM", 143);
+  removeStagingOn("SIGINT", 130);
+  staging = fs.mkdtempSync(path.join(outRoot, ".partial-"));
+  let summary;
+  let outputPaths;
+  // --tail-bytes N reads only the transcript's last N bytes (the PreCompact hook asks for it on a large transcript),
+  // counted back from --until-byte when one is given.
+  const size = Number.isInteger(args.untilByte) && args.untilByte >= 0 ? args.untilByte : fs.statSync(jsonlPath).size;
+  const start = args.tailBytes && args.tailBytes < size ? size - args.tailBytes : 0;
+  try {
+    summary = await analyze(jsonlPath, cwd, staging, start, start ? size : args.untilByte);
+    outputPaths = writeOutputs(summary, outRoot, staging);
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
+  }
   const result = {
     ok: true,
     jsonlPath,
@@ -516,9 +593,7 @@ function main() {
   }
 }
 
-try {
-  main();
-} catch (error) {
+main().catch((error) => {
   console.error(`claude-compaction-restore failed: ${error.message}`);
   process.exit(1);
-}
+});

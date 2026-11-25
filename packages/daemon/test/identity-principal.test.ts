@@ -72,14 +72,18 @@ describe("principal:v1: the adapter's caller, only on a direct attributed reques
 
   it("accepts only the closed shape and never stores more than it names", () => {
     for (const bad of [
-      "not json", "[]", "null", JSON.stringify({ source: "env", id: "x" }), JSON.stringify({ source: "file", id: "" }),
+      "not json", "[]", "null", JSON.stringify({ source: "", id: "x" }), JSON.stringify({ source: "file", id: "" }),
       JSON.stringify({ source: "file", id: "x", token: "orm_secret" }), JSON.stringify({ source: "grant-service", id: "x", grant: 5 }),
-      // No other name stands in for a source, a retired one included.
-      JSON.stringify({ source: "legacy-service", id: "x" }),
       JSON.stringify({ source: "file", id: "x".repeat(600) }),
     ]) expect(parseIdentityPrincipal(bad)).toBeNull();
     expect(parseIdentityPrincipal(JSON.stringify({ version: 6, grant: "g", id: "cus_x", source: "grant-service" })))
       .toBe(JSON.stringify({ source: "grant-service", id: "cus_x", grant: "g", version: 6 }));
+  });
+
+  it("records an embedding's opaque authority and label in the same bounded principal shape", () => {
+    const principal = { source: "local-authority", id: "user:42", label: "Local caller" };
+    expect(JSON.parse(parseIdentityPrincipal(JSON.stringify(principal))!)).toEqual(principal);
+    expect(parseIdentityPrincipal(JSON.stringify({ ...principal, token: "not attribution" }))).toBeNull();
   });
 
   it("keeps a principal only beside principal:v1, and a principal:v1 without one records the seat's stamp", () => {

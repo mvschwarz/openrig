@@ -102,6 +102,12 @@ describe("network bindings", () => {
     expect(Object.fromEntries(store.list().map((b) => [b.id, b.state]))).toEqual({ [first.id]: "disconnected", [again.id]: "active" });
   });
 
+  it("local disconnect records provider removal before returning", () => {
+    seat("a@lab");
+    const binding = connect("a@lab", { provider: { id: "example", installation: "local", participant: "alex" }, removal: { revision: "r1", token: "remove-only" } });
+    expect(store.disconnect(binding.id)).toMatchObject({ state: "disconnected", providerRemoval: "pending", providerRemovalRevision: "r1" });
+  });
+
   it("a revoked binding is ended the same way, and contact and errors are recorded on the active one", () => {
     seat("a@lab");
     const binding = connect("a@lab");

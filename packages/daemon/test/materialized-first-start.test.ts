@@ -1,7 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp, mockNativeRuntime, mockTmuxAdapter } from "./helpers/test-app.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import nodePath from "node:path";
+import { validateCodexMemberPermissions } from "../src/domain/codex-member-permissions.js";
 const root = "/fixture/materialized";
 const close: Array<() => void> = [];
 afterEach(() => { for (const fn of close.splice(0)) fn(); });
@@ -12,14 +13,17 @@ async function fixture(captureSnapshot = true, memberPatch: Record<string, unkno
     [`${root}/agent/agent.yaml`]: 'name: worker\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []\nstartup:\n  files:\n    - path: role.md\n      required: true\n      delivery_hint: send_text\n',
     [`${root}/agent/role.md`]: "Read your role and work with the team.",
   };
-  const adapter: RuntimeAdapter = { runtime: "pi", listInstalled: vi.fn(async () => []),
+  const runtime = typeof memberPatch.runtime === "string" ? memberPatch.runtime : "pi";
+  const adapter: RuntimeAdapter = { runtime, listInstalled: vi.fn(async () => []),
     project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
     deliverStartup: vi.fn(async () => ({ delivered: 1, failed: [] })),
     launchHarness: vi.fn(async () => ({ ok: true })), checkReady: vi.fn(async () => ({ ready: true })),
   };
-  const tmux = mockTmuxAdapter(); tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+  // A Codex launch checks the pane's process, so its panes run codex.
+  const native = runtime === "codex" ? mockNativeRuntime(() => "codex") : undefined;
+  const tmux = native?.tmux ?? mockTmuxAdapter(); tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
   const fileAt = (file: string) => Object.keys(files).find(key => nodePath.resolve(key) === nodePath.resolve(file));
-  const options = { tmux, adapters: { pi: adapter }, podInstantiatorFsOps: {
+  const options = { tmux, ...(native ? { listProcesses: native.listProcesses } : {}), adapters: { [runtime]: adapter }, podInstantiatorFsOps: {
     exists: (file: string) => fileAt(file) !== undefined, readFile: (file: string) => { const key = fileAt(file); if (key === undefined) throw new Error(`Missing ${file}`); return files[key]!; },
   } };
   const app = createTestApp(db, options);
@@ -112,6 +116,29 @@ it.each(["builtin:locked", "none"])("first launch keeps a subsequently locked pe
   expect(vi.mocked(f.adapter.launchHarness).mock.calls[0]![0]).toMatchObject({ launchPosture: "floor" });
   expect(f.rigRepo.getNodePolicyProvenance(node.id)).toMatchObject({ nodeRef: ref, launchPosture: "floor" });
 });
+// The setter saves a Codex envelope on the node, and the first start launches with that one (NativePermissionStore at
+// startup), so its rig reach warning describes the saved envelope, not the materialized declaration.
+const networkOff = { sandbox: "workspace-write", approval: "never" };
+const networkOn = { ...networkOff, network_access: true };
+it.each<[string, Record<string, unknown> | undefined, Record<string, unknown>, boolean]>([
+  ["saving network on over a declared network off", networkOff, { codexPermissions: networkOn }, false],
+  ["saving network off over a declared network on", networkOn, { codexPermissions: networkOff }, true],
+  ["saving network off over no declared envelope", undefined, { codexPermissions: networkOff }, true],
+  ["choosing a mode, which clears a declared network off", networkOff, { mode: "floor" }, false],
+])("a Codex seat's first start warns from its current saved permissions after %s", async (_case, declared, choice, warns) => {
+  const f = await fixture(false, { runtime: "codex", ...(declared ? { codex_permissions: declared } : {}) });
+  const set = await f.app.request("/api/seat/set-permissions/dev-lead@materialized", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...choice, reason: "Change it before the first start", operator: "human" }) });
+  expect(await set.json()).toMatchObject({ ok: true });
+  const node = f.rigRepo.getRig(f.rigId)!.nodes.find(node => node.logicalId === "dev.lead")!;
+  const result = await f.podInstantiator.launchFirstMaterializedNode(f.rigId, node.id);
+  expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+  const reach = (result!.warnings ?? []).filter(warning => warning.startsWith("dev.lead: network is off in this seat's codex_permissions."));
+  expect(reach, JSON.stringify(result!.warnings)).toHaveLength(warns ? 1 : 0);
+  // The launch used the same saved envelope, or none once a mode replaced it.
+  expect(vi.mocked(f.adapter.launchHarness).mock.calls[0]![0].codexPermissions).toEqual("mode" in choice ? undefined : validateCodexMemberPermissions(choice.codexPermissions));
+});
+
 it("starts an empty tmux server before checking the first target", async () => {
   const f = await fixture(false); let ready = false;
   f.tmux.startServer = vi.fn(async () => { ready = true; });

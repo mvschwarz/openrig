@@ -15,9 +15,12 @@ import { launchStatusRunning } from "./launch.js";
 import type { StartOptions } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import type { RemoteOpResult } from "../remote-host-ops.js";
 import { formatThreePart, type ThreePartRejection } from "./workflow-errors.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
+// Larger delays overflow Node's timer and become a one-millisecond timeout.
+const MAX_UP_TIMEOUT_MS = 2_147_483_647;
 
 /** OPR.0.3.4.2 — default interactive [y/N] prompt for the awaiting-decision
  *  ASK (TTY only; tests inject promptYesNo instead). Default answer: No. */
@@ -132,6 +135,13 @@ resumed, and a fresh seat marked noConversation (a terminal seat) lost nothing.
 A refused request exits 1 for a conflict (HTTP 409, such as a rig still running
 or a restore not attempted) and 2 for any other refusal (400, 404 or 500, such
 as no rig by that name or a failed boot).
+
+The CLI waits ${LONG_RUNNING_UP_TIMEOUT_MS / 1000} seconds for the daemon's answer by default. A restore can wait for
+seats one at a time; choose a budget for the whole operation with --timeout,
+for example: rig up my-rig --existing --timeout 900
+This changes only the caller's wait, including with --host or --plan. It does
+not change per-seat readiness waits, cancel the operation or retry it. If the
+wait expires, check rig ps before deciding what to do next.
 `);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
@@ -141,6 +151,7 @@ as no rig by that name or a failed boot).
     .option("--no-non-interruptive", "Turn off this rig's saved warning-acceptance choice (stop an existing rig with rig down first)")
     .option("--plan", "Plan mode — preview without executing")
     .option("--yes", "Auto-approve trusted actions")
+    .option("--timeout <seconds>", "Positive whole seconds to wait for the daemon's whole launch, restore or plan; timing out does not cancel it", String(LONG_RUNNING_UP_TIMEOUT_MS / 1000))
     .option("--cwd <path>", "Override launch working directory for all members for this run only")
     .option("--env <KEY=VALUE>", "Set a launch environment variable on every seat for this run only; repeatable. Not saved: a later restore uses the spec's env: block. Values are visible to local processes, so never pass secrets", (v: string, all: string[]) => [...all, v], [] as string[])
     .option("--name <rig>", "Launch the spec as a rig with this name instead of its name: field; the rig keeps it for --existing, snapshots and restore. The spec file is not changed")
@@ -151,7 +162,14 @@ as no rig by that name or a failed boot).
     .option("--fresh <seats...>", "Deliberately fresh-prime the named seats (logical ids) instead of resuming their original sessions (operation B; reported as fresh-primed)")
     .option("--json", "JSON output for agents")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
-    .action(async (source: string, opts: { nonInterruptive?: boolean; plan?: boolean; yes?: boolean; cwd?: string; env?: string[]; name?: string; target?: string; existing?: boolean; fresh?: string[]; json?: boolean; host?: string; preset?: string; seat?: string[] }) => {
+    .action(async (source: string, opts: { nonInterruptive?: boolean; plan?: boolean; yes?: boolean; timeout?: string; cwd?: string; env?: string[]; name?: string; target?: string; existing?: boolean; fresh?: string[]; json?: boolean; host?: string; preset?: string; seat?: string[] }) => {
+      const timeoutSeconds = Number(opts.timeout ?? LONG_RUNNING_UP_TIMEOUT_MS / 1000);
+      const timeoutMs = timeoutSeconds * 1000;
+      if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds <= 0 || timeoutMs > MAX_UP_TIMEOUT_MS) {
+        console.error(`--timeout must be positive whole seconds, at most ${Math.floor(MAX_UP_TIMEOUT_MS / 1000)}.`);
+        process.exitCode = 1;
+        return;
+      }
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
       // selection = today exactly. Topology
@@ -216,7 +234,7 @@ as no rig by that name or a failed boot).
               cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
               envOverride: envOverrideBody,
               cliVersion: getCliVersion(),
-            }, { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });
+            }, { timeoutMs });
           } catch {
             throw new Error(`Bundle install outcome is unknown. Archive retained at ${imported.bundlePath}; check rig ps and rig bundle history before retrying.`);
           }
@@ -279,7 +297,7 @@ as no rig by that name or a failed boot).
             const inspected = await runRemoteHttpOp(opts.host!, "POST", "/api/bundles/inspect", { bundlePath: source }, deps, opts);
             return { status: inspected.ok ? 200 : 500, data: (inspected.data ?? { error: inspected.error }) as Record<string, unknown> };
           }) : undefined;
-        const result = await runRemoteHttpOp(opts.host, "POST", "/api/up", body, deps, { ...opts, timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });
+        const result = await runRemoteHttpOp(opts.host, "POST", "/api/up", body, deps, { ...opts, timeoutMs });
         if (result.ok && result.data !== null && typeof result.data === "object" && "status" in result.data
           && ["partial", "failed"].includes(String(result.data.status))) process.exitCode = 1;
         if (behaviour) result.data = { ...(result.data as Record<string, unknown> | undefined), behaviour };
@@ -581,7 +599,7 @@ as no rig by that name or a failed boot).
           targetRoot,
           // OPR.0.3.4.2 — operation B opt-in seats (deliberate fresh-prime).
           freshLogicalIds: opts.fresh,
-        }, { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS }); // #1654: a plan runs an apply's preflight, Codex profile probes included
+        }, { timeoutMs }); // #1654: a plan runs an apply's preflight, Codex profile probes included
       } catch (err) {
         if (err instanceof DaemonConnectionError && !opts.plan) {
           printHonestTimeout(err);
@@ -723,7 +741,7 @@ as no rig by that name or a failed boot).
         }
         console.log(`Rig "${rigName ?? rigId}" restored (ID: ${rigId})`);
         if (rigResult) console.log(`Result: ${rigResult}`);
-        const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string; noConversation?: true; guidanceGaps?: string[]; restoreGaps?: string[] }>) ?? [];
+        const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string; noConversation?: true; noStartupContext?: true; guidanceGaps?: string[]; restoreGaps?: string[] }>) ?? [];
         for (const n of nodes) {
           // OPR.0.3.4.2 — the five-term vocabulary renders distinctly; the
           // awaiting-decision reason is part of the line (not a dead end), and so is a failed seat's (such as a seat held
@@ -766,7 +784,8 @@ as no rig by that name or a failed boot).
         // deliberate fresh-prime (operation B). Headless: the machine status
         // stays awaiting-decision with the explicit --fresh hint. NEVER an
         // auto-substitution.
-        const awaiting = nodes.filter((n) => n.status === "awaiting-decision");
+        // A seat with no saved startup context can't start fresh (its reason says so), so it isn't offered one.
+        const awaiting = nodes.filter((n) => n.status === "awaiting-decision" && !n.noStartupContext);
         if (awaiting.length > 0) {
           const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY) || Boolean(deps.promptYesNo);
           if (interactive) {
@@ -848,8 +867,17 @@ as no rig by that name or a failed boot).
  *  partial error bodies. */
 export function formatRemoteUpFailure(
   hostId: string,
-  result: { error?: string; data?: unknown },
+  result: Pick<RemoteOpResult, "error" | "data" | "outcomeUnknown">,
 ): string[] {
+  if (result.outcomeUnknown) {
+    const lines = [
+      `The outcome of rig up on host ${hostId} is unknown. The daemon may still be processing the request.`,
+      "The missing response gives no evidence of failure or rollback.",
+      `Check the current state with rig ps --host ${hostId} before retrying.`,
+    ];
+    if (result.error) lines.push(result.error);
+    return lines;
+  }
   const lines = [`Error on host ${hostId}${result.error ? `: ${result.error}` : ""}`];
   const payload = result.data !== null && typeof result.data === "object" && !Array.isArray(result.data)
     ? result.data as Record<string, unknown>

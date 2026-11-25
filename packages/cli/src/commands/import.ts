@@ -80,7 +80,7 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       }
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
 
       const client = deps.clientFactory(getDaemonUrl(status));
 

@@ -855,7 +855,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(renderScreen(instanceView.get(), snap, { cols: 160, rows: 60 }).lines.join("\n")).toContain(line);
   });
 
-  it("shows confirmed missing sessions as detached unless lifecycle still requires attention", async () => {
+  it.each(["session_missing", "session_missing_tmux_unavailable"])("shows confirmed missing sessions as detached unless lifecycle still requires attention: %s", async reason => {
     const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
     const nodes = [
       {
@@ -865,7 +865,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
         startupStatus: "failed",
         lifecycleState: "detached",
         terminalActive: false,
-        identityVerdict: { verdict: "pane_missing", reason: "session_missing" },
+        identityVerdict: { verdict: "pane_missing", reason },
       },
       {
         ...base,
@@ -875,7 +875,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
         startupStatus: "attention_required",
         lifecycleState: "attention_required",
         terminalActive: false,
-        identityVerdict: { verdict: "pane_missing", reason: "session_missing" },
+        identityVerdict: { verdict: "pane_missing", reason },
       },
     ];
     const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));

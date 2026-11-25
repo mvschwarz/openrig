@@ -14,8 +14,7 @@ export function yamlObject(file: string): Record<string, any> {
     return value;
   } catch (err) { throw new ProjectReadError("workspace_catalog_invalid", `${file}: ${(err as Error).message}`); }
 }
-/** The existing workspace.yaml catalog, shared by work-install and project reads. */
-export function readProjectCatalog(catalogPath: string): Array<{ id: string; root: string }> | null {
+function readCatalogRows(catalogPath: string): Array<{ id: string; root: string; rigs?: unknown }> | null {
   if (!fs.existsSync(catalogPath)) return null;
   const entries = yamlObject(catalogPath).projects;
   if (!Array.isArray(entries) || entries.some(e => !e || typeof e.id !== "string" || typeof e.root !== "string"))
@@ -23,7 +22,24 @@ export function readProjectCatalog(catalogPath: string): Array<{ id: string; roo
   const ids = entries.map(e => e.id);
   const duplicate = ids.find((id, i) => ids.indexOf(id) !== i);
   if (duplicate) throw new ProjectReadError("project_identity_ambiguous", `project id '${duplicate}' names multiple roots in ${catalogPath}`);
-  return entries.map(e => ({ id: e.id, root: e.root }));
+  return entries;
+}
+/** The existing workspace.yaml catalog, shared by work-install and project reads. */
+export function readProjectCatalog(catalogPath: string): Array<{ id: string; root: string }> | null {
+  const entries = readCatalogRows(catalogPath);
+  return entries ? entries.map(e => ({ id: e.id, root: e.root })) : null;
+}
+
+/** Catalog declarations, independent of whether a named rig is currently running. */
+export function readProjectCatalogWithRigs(catalogPath: string): Array<{ id: string; root: string; rigs: string[] | null; rigsError?: string }> | null {
+  const entries = readCatalogRows(catalogPath);
+  if (!entries) return null;
+  return entries.map(entry => {
+    if (entry.rigs === undefined) return { id: entry.id, root: entry.root, rigs: [] };
+    if (Array.isArray(entry.rigs) && entry.rigs.every((rig: unknown) => typeof rig === "string"))
+      return { id: entry.id, root: entry.root, rigs: entry.rigs as string[] };
+    return { id: entry.id, root: entry.root, rigs: null, rigsError: "Catalog rigs must be a list of rig names." };
+  });
 }
 export function selectCatalogProject(catalogPath: string, selectedId?: string): { id: string; root: string } | null {
   const projects = readProjectCatalog(catalogPath);

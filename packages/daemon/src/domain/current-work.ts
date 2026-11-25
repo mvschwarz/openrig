@@ -152,6 +152,10 @@ export interface CurrentWorkRow {
 export interface MissionsRootResolution {
   root: string | null;
   reason?: string;
+  /** The root stands in for the row's own project root, and another root could hold a mission of the same name: the
+   *  catalogue lists other project roots, or it, or the row's project in it, can't be read. Unset when the configured
+   *  root is the only root a row's mission can live in (no catalogue configured), whatever the reason says. */
+  ambiguous?: boolean;
 }
 
 export type MissionsRootResolver = string | null | ((row: CurrentWorkRow) => string | null | MissionsRootResolution);
@@ -703,7 +707,8 @@ export function deriveCurrentWork(
  *   ancestor's mission tag, as a labelled candidate. A retargeted handoff (new body, no tags)
  *   or an ancestor that is not on this host gives no assumed mission.
  * - Pending rows are possible next work; blocked rows are held work with their blocker and
- *   continuation. No order is implied between them.
+ *   continuation. No order is implied between them. Each carries its own scope, resolved the
+ *   same way, so with nothing in progress the trace can compare resolved directories, not names.
  * - A mission named only in body text is never evidence.
  */
 export interface WorkCandidate {
@@ -726,11 +731,41 @@ export interface WorkCandidates {
   candidates: WorkCandidate[];
   /** In-progress rows whose work the queue cannot name. */
   unknown: Array<{ qitemId: string | null; summary: string | null; reason: string }>;
-  next: Array<{ qitemId: string | null; summary: string | null; missions: string[] }>;
-  held: Array<{ qitemId: string | null; summary: string | null; blockedOn: string | null; continuation: string | null }>;
+  next: Array<{ qitemId: string | null; summary: string | null } & RowScope>;
+  held: Array<{ qitemId: string | null; summary: string | null; blockedOn: string | null; continuation: string | null } & RowScope>;
   /** Mission directories on this host, bounded, so an agent can name one without guessing. */
   missionsOnHost: string[];
   missionsOnHostTruncated: boolean;
+  /** The seat's selected project's missions, under that project's own missions root. The whoami route adds it when it
+   *  selects a healthy catalog project, so a seat whose project lives outside workspace.root can name one there. */
+  projectMissions?: ProjectMissions;
+}
+
+/** A held or pending row's own scope: its tags, and the directories they resolve to through the row's project's
+ *  missions root (resolveTagged, as for an in-progress tag candidate). */
+export interface RowScope {
+  /** The row's `mission:` tag values. Only a single one is resolved. */
+  missions: string[];
+  /** Its `slice:` tag, paired only when the row has exactly one mission and one slice tag. */
+  slice: string | null;
+  /** The resolved mission directory, or null. */
+  missionPath: string | null;
+  /** The resolved slice directory, or null. */
+  slicePath: string | null;
+  /** Why a mission or slice the row names did not resolve here; null when everything it names did. */
+  unresolved: string | null;
+  /** Why the row's tags were resolved under a root that stands in for its project's own while another root could hold
+   *  a mission of the same name (MissionsRootResolution.ambiguous); null otherwise, including when no catalogue is
+   *  configured and the configured root is the only one. Kept even when the mission resolved there. */
+  missionsRootFallback: string | null;
+}
+
+/** One project's mission directories, bounded as missionsOnHost is. */
+export interface ProjectMissions {
+  project: string;
+  missionsRoot: string;
+  names: string[];
+  truncated: boolean;
 }
 
 interface CandidateRow extends TaggedRow {
@@ -826,6 +861,48 @@ function listMissions(missionsRoot: string | null): { names: string[]; truncated
   }
 }
 
+/** A project's missions as the work packet lists them, read from the missions root its catalog entry resolves. */
+export function listProjectMissions(project: string, missionsRoot: string): ProjectMissions {
+  return { project, missionsRoot, ...listMissions(missionsRoot) };
+}
+
+const SUMMARY_FROM_BODY_CHARS = 240;
+
+/** A held or pending row's summary, or when it has none, its body's first line with a word in it (a leading Markdown
+ *  heading, quote or list marker dropped), bounded: the row still gets a label someone can recognise. */
+function summaryOf(row: CandidateRow): string | null {
+  if (row.summary?.trim()) return row.summary;
+  const line = (row.body ?? "").split(/\r?\n/).map((text) => text.replace(/^[\s#>*+-]+/, "").trim())
+    .find((text) => /[\p{L}\p{N}]/u.test(text));
+  if (!line) return null;
+  return line.length > SUMMARY_FROM_BODY_CHARS ? `${line.slice(0, SUMMARY_FROM_BODY_CHARS - 1)}…` : line;
+}
+
+/** A held or pending row's scope, resolved as an in-progress tag candidate is. Rows sharing a scope resolve it once. */
+function scopeOf(row: CandidateRow, missionsRoot: MissionsRootResolver, resolvedScopes: Map<string, RowScope>): RowScope {
+  const tags = row.tags ?? [];
+  const missions = tagValues(tags, MISSION_TAG);
+  const slices = tagValues(tags, SLICE_TAG);
+  const slice = missions.length === 1 && slices.length === 1 ? slices[0]! : null;
+  const scope: RowScope = { missions, slice, missionPath: null, slicePath: null, unresolved: null, missionsRootFallback: null };
+  if (missions.length === 0) return scope;
+  if (missions.length > 1) return { ...scope, unresolved: `${missions.length} mission tags; none is resolved on its own` };
+  const root = resolveMissionsRoot(missionsRoot, row);
+  const key = JSON.stringify([root.root, root.reason, root.ambiguous === true, missions[0], slice]);
+  const known = resolvedScopes.get(key);
+  if (known) return known;
+  const resolved = resolveTagged(root.root, missions[0]!, slice);
+  // resolveTagged names the deepest node it resolved, and a slice's directory is <mission>/slices/<slice>.
+  const slicePath = slice && !resolved.unresolved ? resolved.workNodePath : null;
+  const result: RowScope = { ...scope,
+    missionPath: slicePath ? path.dirname(path.dirname(slicePath)) : resolved.workNodePath,
+    slicePath,
+    unresolved: resolved.unresolved,
+    missionsRootFallback: root.ambiguous ? root.reason ?? "another root could hold a mission of the same name" : null };
+  resolvedScopes.set(key, result);
+  return result;
+}
+
 export function deriveWorkCandidates(
   rows: CandidateRow[],
   missionsRoot: MissionsRootResolver,
@@ -836,6 +913,7 @@ export function deriveWorkCandidates(
   const unknown: WorkCandidates["unknown"] = [];
   const next: WorkCandidates["next"] = [];
   const held: WorkCandidates["held"] = [];
+  const resolvedScopes = new Map<string, RowScope>();
   const seen = new Set<string>();
   const add = (candidate: WorkCandidate) => {
     const key = `${candidate.kind}|${candidate.projects.join(",")}|${candidate.mission}|${candidate.slice ?? ""}|${candidate.workNodePath ?? ""}`;
@@ -850,12 +928,12 @@ export function deriveWorkCandidates(
     const qitemId = row.qitemId ?? null;
     const summary = row.summary ?? null;
     if (row.state === "pending") {
-      next.push({ qitemId, summary, missions });
+      next.push({ qitemId, summary: summaryOf(row), ...scopeOf(row, missionsRoot, resolvedScopes) });
       continue;
     }
     if (row.state === "blocked") {
-      held.push({ qitemId, summary, blockedOn: row.blockedOn ?? null,
-        continuation: qitemId ? lookups.continuationOf(qitemId) : null });
+      held.push({ qitemId, summary: summaryOf(row), blockedOn: row.blockedOn ?? null,
+        continuation: qitemId ? lookups.continuationOf(qitemId) : null, ...scopeOf(row, missionsRoot, resolvedScopes) });
       continue;
     }
     if (row.state !== "in-progress") continue;

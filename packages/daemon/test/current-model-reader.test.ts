@@ -150,8 +150,10 @@ it.each(["stale-record", "missing-record", "missing-time", "future-time", "synth
 });
 
 it("rejects a verified Claude identity from the predecessor tenure", async () => {
-  const f = fixture(); const identity = f.identities.getForNode(f.node.id)!;
-  f.identities.upsert({ ...identity, observedAt: new Date(f.boot - 1_000).toISOString() });
+  const f = fixture();
+  // Seed retained predecessor state directly; an older observation cannot overwrite a newer verdict.
+  f.db.prepare("UPDATE seat_identity_verdicts SET observed_at = ? WHERE node_id = ?")
+    .run(new Date(f.boot - 1_000).toISOString(), f.node.id);
   expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "record-identity-missing-or-ambiguous" });
 });
 
@@ -449,7 +451,8 @@ it.each(["child-replaced", "child-moved", "pane-replaced", "binding-changed", "o
       f.rows[0]!.pid = 99; f.rows[1]!.ppid = 99;
     }
     if (kind === "binding-changed") f.sessions.updateBinding(f.node.id, { tmuxSession: "editor@studio", tmuxPane: "%2" });
-    if (kind === "old-verdict") f.identities.upsert({ ...f.identities.getForNode(f.node.id)!, observedAt: new Date(f.boot - 1_000).toISOString() });
+    if (kind === "old-verdict") f.db.prepare("UPDATE seat_identity_verdicts SET observed_at = ? WHERE node_id = ?")
+      .run(new Date(f.boot - 1_000).toISOString(), f.node.id);
     expect((await f.reader.readEffectiveModel(f.seat)).ok).toBe(false);
   },
 );

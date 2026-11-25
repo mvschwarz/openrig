@@ -2,6 +2,9 @@
 // through the real router and queue with a fake Slack history.
 import { afterEach, expect, it, vi } from "vitest";
 import nodePath from "node:path";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -12,6 +15,7 @@ import { ChannelCoverageStore, ThreadCoverageStore, SeenStore, DeadLetterStore, 
 import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
 import { ThreadSeatMap, formatPostedStamp } from "../src/domain/gateway/slack/thread-seat-map.js";
 import { makeThreadRouteResolver } from "../src/domain/gateway/slack/thread-routing.js";
+import { makeInboundFilePort } from "../src/domain/gateway/slack/slack-subsystem.js";
 
 const closes: (() => void)[] = [];
 afterEach(() => { for (const close of closes.splice(0)) close(); });
@@ -120,6 +124,25 @@ it.each(["open", "closed"])("a missed reply in a %s decision thread lands once a
   expect(f.resolveHumanReply).toHaveBeenCalledTimes(1);
   await r.run();
   expect(f.rows()).toHaveLength(2);
+});
+
+it("saves the recovered thread reply's author and exact timestamp beside its attachment", async () => {
+  const f = fixture();
+  const mediaDir = mkdtempSync(join(tmpdir(), "thread-attachment-"));
+  closes.push(() => rmSync(mediaDir, { recursive: true, force: true }));
+  f.deps.files = makeInboundFilePort({ token: "fixture-token", mediaDir,
+    fetchImpl: async () => new Response("fixture media", { headers: { "content-type": "application/octet-stream" } }) });
+  f.track(ROOT);
+  f.replies[`C1:${ROOT}`] = [f.reply(50, ROOT, { subtype: "file_share",
+    files: [{ id: "FTHREAD", name: "clip.ogg", url_private: "https://files.slack.com/clip" }] })];
+  await f.recovery().run();
+
+  const records = readdirSync(mediaDir).filter(file => file.endsWith(".provenance.json"));
+  expect(records).toHaveLength(1);
+  expect(JSON.parse(readFileSync(join(mediaDir, records[0]!), "utf8"))).toEqual({
+    version: 1, channelId: "C1", messageTs: ts(50), authorId: "U1", fileId: "FTHREAD", ordinal: 1,
+  });
+  expect(f.rows()).toHaveLength(1);
 });
 
 it("a reply that landed live and again in the thread scan lands once; coverage is the scanned interval from the root", async () => {

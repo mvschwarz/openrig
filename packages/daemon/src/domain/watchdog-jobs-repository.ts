@@ -45,12 +45,17 @@ export const PHASE_D_POLICIES = [
   "quiet-release",
   // A person's mode ends at its scheduled end: one job per application.
   "mode-scheduled-end",
+  // Seat pool (#3395): one job per model member with a `pool` block, ensured by the daemon. Accepted here so the
+  // ensure can register it; the watchdog engine does not run it until the activation change arms it.
+  "seat-pool",
 ] as const;
 
 /**
  * Policies daemon start ensures one active-or-stopped row for, keyed by the exact target session
  * (`ensureAutoRegistrationAtStartup`). `idle-gate-qitem` is left out: its key is the seat's whole
- * set of session aliases, and startup only audits it.
+ * set of session aliases, and startup only audits it. `seat-pool` is left out too: it is also keyed by
+ * aliases, and its ensure reports duplicates without picking one, so a hand registration never
+ * replaces (and so never restarts) a job an operator stopped.
  */
 export const AUTO_REGISTERED_POLICIES: readonly string[] = [
   "parked-owner-consumer",
@@ -891,6 +896,22 @@ export class WatchdogJobsRepository {
     this.db
       .prepare(`UPDATE watchdog_jobs SET last_fired_condition = ? WHERE job_id = ?`)
       .run(receipt, jobId);
+  }
+
+  /**
+   * #3634: when the tuple has no active or stopped row and its newest row is terminal with one of `reasons` (a
+   * retirement the caller made and may undo), put that row back to active, keeping its id and history. Returns it,
+   * or null when there is nothing to put back (an ensure then registers as before).
+   */
+  reviveRetired(policy: string, targetSession: string, reasons: readonly string[]): WatchdogJob | null {
+    const rows = this.listExactTuple(policy, targetSession, null);
+    if (rows.some((row) => row.state === "active" || row.state === "stopped")) return null;
+    const newest = rows[rows.length - 1];
+    if (!newest || newest.state !== "terminal" || !reasons.includes(newest.terminalReason ?? "")) return null;
+    this.db
+      .prepare(`UPDATE watchdog_jobs SET state = 'active', terminal_reason = NULL WHERE job_id = ? AND state = 'terminal'`)
+      .run(newest.jobId);
+    return this.getByIdOrThrow(newest.jobId);
   }
 
   markTerminal(jobId: string, reason: string): void {

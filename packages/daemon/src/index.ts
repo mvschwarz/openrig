@@ -1,11 +1,11 @@
 import { beginStartupPhase, recordStartupPhase } from "./domain/startup-phase-timing.js";
 import { makeKernelHookReviewReader } from "./domain/kernel-hook-review.js";
 import { serve, type ServerType } from "@hono/node-server";
-import path from "node:path";
 import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { endProbeGroupsOnStartupSignal, stopRuntimeProbes } from "./adapters/bounded-probe-exec.js";
-import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses, startWindowsDaemonControl } from "./daemon-shutdown.js";
+import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses, startWindowsDaemonControl, DAEMON_LISTEN_FAILED_EXIT_CODE, occupiedPortGuidance } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
@@ -225,7 +225,8 @@ export function startWakeLadderScheduler(deps: {
   usageLimitJitterSeconds?: number;
   seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">
     & Partial<Pick<import("./domain/seat-activity-service.js").SeatActivityService, "codexPermissionState">>;
-  agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">;
+  agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">
+    & Partial<Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "findPermissionPromptStart">>;
   tmuxAdapter?: Pick<import("./adapters/tmux.js").TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen" | "getPanePid">;
   gatewaySubsystem?: { status?: () => { state?: unknown }; dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
 }): WakeLadderScheduler | null {
@@ -256,7 +257,9 @@ export function startWakeLadderScheduler(deps: {
       readPermissionPrompts: makePermissionPromptReader({ db,
         getLatestHook: (sessionName, runtime) => deps.agentActivityStore?.getLatestForNode({ sessionName,
           order: runtime === "claude-code" ? "source" : "arrival" }),
+        getPromptStart: (sessionName, generation) => deps.agentActivityStore?.findPermissionPromptStart?.({ sessionName, generation }),
         getCodexPermissionState: (nodeId, raisedAt) => deps.seatActivityService?.codexPermissionState?.(nodeId, raisedAt),
+        getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId),
       }),
       readPromptState: makePromptStateReader({
         db,
@@ -289,6 +292,23 @@ async function isTrustedLocalOrTailnetBind(host: string): Promise<boolean> {
     if (resolvedIp) return isLoopbackBind(resolvedIp) || isTailscaleBind(resolvedIp);
   }
   return false;
+}
+
+/** A listener that fails to bind ends the process cleanly: one `OPENRIG_LISTEN_FAILED` line and the distinct exit
+ *  code, without the shutdown, so it writes no shutdown receipt and records no stop. In a multi-bind, a listener
+ *  that came up first may have started the monitors; the exit ends them, as the unhandled error did before. Once a
+ *  listener is up, its later server errors keep their usual path. */
+function exitOnListenFailure(server: ServerType, host: string, port: number, portHint: boolean): void {
+  const onError = (error: NodeJS.ErrnoException): void => {
+    const code = error.code ?? "UNKNOWN";
+    const address = host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+    const guidance = code === "EADDRINUSE" && portHint ? occupiedPortGuidance(port) : error.message;
+    // Synchronous: the process exits next, and a supervisor's stderr can be an asynchronous pipe.
+    try { fs.writeSync(2, `OPENRIG_LISTEN_FAILED ${code} ${address} ${guidance}\n`); } catch { /* the exit code still says it */ }
+    process.exit(DAEMON_LISTEN_FAILED_EXIT_CODE);
+  };
+  server.once("error", onError);
+  server.once("listening", () => server.off("error", onError));
 }
 
 export async function startServer(port?: number) {
@@ -389,9 +409,12 @@ export async function startServer(port?: number) {
   if (guestPort !== undefined) {
     const guest = createGuestActivityApp(deps);
     const endGuestBind = beginStartupPhase("bind", "guest");
-    const guestServer = serve({ fetch: guest.fetch, port: guestPort, hostname: process.env.OPENRIG_GUEST_ACTIVITY_HOST ?? "127.0.0.1" }, () => {
+    const guestHost = process.env.OPENRIG_GUEST_ACTIVITY_HOST ?? "127.0.0.1";
+    const guestServer = serve({ fetch: guest.fetch, port: guestPort, hostname: guestHost }, () => {
       recordStartupPhase(deps.slowOpRecorder, endGuestBind());
     });
+    // The --port remedy names the daemon port, not OPENRIG_GUEST_ACTIVITY_PORT: this line carries the errno message.
+    exitOnListenFailure(guestServer, guestHost, guestPort, false);
     trackHttpServerResponses(guestServer);
     servers.push(guestServer);
   }
@@ -409,6 +432,8 @@ export async function startServer(port?: number) {
         // tree post-bind so the HTTP surface is ready before the first
         // tick (matches contextMonitor pattern).
         deps.watchdogScheduler?.start();
+        // #2940: keep_alive seats are watched from here on; boot-time recovery stays with the kernel boot in createDaemon.
+        deps.keepAliveSupervisor?.start();
         deps.networkConnector?.start();
         deps.sessionTransport?.guardedDelivery?.recover();
         // S10 — start the gateway subsystem's NETWORK services (replay, outbound poll,
@@ -455,6 +480,7 @@ export async function startServer(port?: number) {
         }, HEARTBEAT_INTERVAL_MS);
       }
     });
+    exitOnListenFailure(srv, host, p, true);
     injectWebSocket(srv);
     trackHttpServerResponses(srv, deps.requestPhaseObserver?.observeRequest);
     servers.push(srv);
@@ -468,7 +494,10 @@ export async function startServer(port?: number) {
   const shutdown = createDaemonShutdown({
     receiptPath: path.join(OPENRIG_HOME, DAEMON_SHUTDOWN_RECEIPT),
     phases: [
-      // First, while transport still works: let the delivery in flight finish; the rest wait for the next start.
+      // First, so no keep_alive relaunch starts while the daemon goes down; a tick in flight gets a short bounded wait.
+      // Nothing is written to sessions: seats that survive stay as they are.
+      ["keep-alive", () => deps.keepAliveSupervisor?.stop()],
+      // While transport still works: let the delivery in flight finish; the rest wait for the next start.
       ["wake-recovery", () => wakeRecovery.stop()],
       ["terminal-following", () => deps.terminalService?.stop()],
       ["rex-status", () => deps.rexStatusRelay?.stop()],

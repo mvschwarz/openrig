@@ -801,3 +801,42 @@ profiles:
     expect((result.advisories ?? []).some((a) => a.includes("preferences.effort"))).toBe(false);
   });
 });
+
+describe("keep_alive — AgentSpec lifecycle ingress (#2940)", () => {
+  const spec = (defaultsLifecycle: string, profileLifecycle: string) => `
+version: "0.2"
+name: keep-alive-fixture
+defaults:
+  runtime: claude-code
+  lifecycle:
+    execution_mode: interactive_resident
+${defaultsLifecycle}
+profiles:
+  default:
+    lifecycle:
+      execution_mode: interactive_resident
+${profileLifecycle}
+`;
+
+  it("accepts keep_alive in defaults and profiles and keeps each value as written", () => {
+    const raw = parseAgentSpec(spec("    keep_alive: true", "      keep_alive: false"));
+    expect(validateAgentSpec(raw).errors).toEqual([]);
+    const normalized = normalizeAgentSpec(raw);
+    expect(normalized.defaults?.lifecycle?.keepAlive).toBe(true);
+    expect(normalized.profiles["default"]!.lifecycle?.keepAlive).toBe(false);
+  });
+
+  it("preserves absence at both levels: nothing is materialized, so a spec without it reads exactly as before", () => {
+    const normalized = normalizeAgentSpec(parseAgentSpec(spec("", "")));
+    expect("keepAlive" in normalized.defaults!.lifecycle!).toBe(false);
+    expect("keepAlive" in normalized.profiles["default"]!.lifecycle!).toBe(false);
+  });
+
+  it.each([["defaults", spec("    keep_alive: yes-please", ""), "defaults.lifecycle.keep_alive"],
+    ["profiles", spec("", "      keep_alive: 1"), "profiles.default.lifecycle.keep_alive"]])(
+    "refuses a non-boolean keep_alive in %s by name", (_level, text, field) => {
+      const result = validateAgentSpec(parseAgentSpec(text));
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(" ")).toContain(`${field}: must be true or false`);
+    });
+});

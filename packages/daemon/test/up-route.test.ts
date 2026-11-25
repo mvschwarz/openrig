@@ -9,6 +9,8 @@ import type { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { buildAttentionResponse } from "../src/routes/up.js";
+import { rollupRestoreRigResult } from "../src/domain/restore-orchestrator.js";
+import { SeatPoolSlotsRepository } from "../src/domain/seat-pool-slots.js";
 import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
 
 const VALID_SPEC = `
@@ -197,6 +199,37 @@ describe("Up API route", () => {
     expect(body.rigResult).toBe("partially_restored");
   });
 
+  // #3395 (Piece 1): a seat pool agent the pool drained is named apart from the node results.
+  it.each(["cli", "explorer"])("The `rig up` response carries a drained pool agent in `keptDown`, not in `nodeResults`, and a rig whose only other node is the model still rolls up from the model's result (%s).", async (entryPoint) => {
+    const rig = rigRepo.createRig("pool-up");
+    const model = rigRepo.addNode(rig.id, "dev.impl", { role: "worker" });
+    const agent = rigRepo.addNode(rig.id, "dev.impl-s1", { role: "worker" });
+    const sessions = [model, agent].map((node) => {
+      const session = sessionRegistry.registerSession(node.id, `${node.logicalId.replace(/\./g, "-")}@pool-up`);
+      db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+        .run("claude_name", `tok-${node.logicalId}`, "relaunch_fresh", session.id);
+      sessionRegistry.updateStatus(session.id, "running");
+      return session;
+    });
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    for (const session of sessions) sessionRegistry.markIntentionallyStopped(session.id);
+    new SeatPoolSlotsRepository(db).insert({ modelNodeId: model.id, slotNumber: 1, nodeId: agent.id, phase: "drained", at: "2026-11-18T10:00:00.000Z" });
+
+    const res = await app.request(entryPoint === "cli" ? "/api/up" : `/api/rigs/${rig.id}/up`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "pool-up" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("restored");
+    expect(body.keptDown).toEqual([{ nodeId: agent.id, logicalId: "dev.impl-s1", reason: "drained pool agent, not started" }]);
+    expect(body.nodes.map((node: { nodeId: string }) => node.nodeId)).toEqual([model.id]);
+    expect(body.nodes[0].status).not.toBe("failed");
+    expect(body.rigResult).toBe(rollupRestoreRigResult(body.nodes));
+  });
+
   it.each(["cli", "explorer"])("%s up selects the pre-down snapshot for plan and apply after a fresh occupant stops", async (entryPoint) => {
     const rig = rigRepo.createRig("fresh-down-up");
     const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
@@ -245,6 +278,11 @@ describe("Up API route", () => {
     const withOverride = given !== "none";
     const cwdOverride = given === "relative" ? path.relative(process.cwd(), here) : here;
     if (given === "relative") expect(path.isAbsolute(cwdOverride)).toBe(false);
+    // This synthetic shell stays in the requested launch directory; it does not model a fallback to "/".
+    const listPanes = tmuxAdapter.listPanes;
+    tmuxAdapter.listPanes = async session => (await listPanes(session)).map(pane => ({
+      ...pane, cwd: withOverride ? here : moved,
+    }));
     try {
       const rig = rigRepo.createRig("moved-home");
       const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: moved });

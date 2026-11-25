@@ -81,6 +81,13 @@ describe("release-surface parser - extract (unit)", () => {
     expect(normalizeFlag("not-a-flag")).toBeNull();
   });
 
+  it("includes health flags registered with Commander Option builders", () => {
+    const surface = extractSurfaceFromSources([readSource("src/commands/health.ts")]);
+    for (const flag of ["--self", "--seat", "--rig", "--instance", "--severity", "--status"]) {
+      expect(surface.flags.has(`health${FLAG_SEP}${flag}`)).toBe(true);
+    }
+  });
+
   it("captures the new queue create flags", () => {
     const surface = extractSurfaceFromSources([readSource("src/commands/queue.ts")]);
     expect(surface.commands.has("queue create")).toBe(true);

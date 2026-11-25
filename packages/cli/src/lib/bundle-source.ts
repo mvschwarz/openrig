@@ -67,7 +67,8 @@ export function selectGitHubBundleSource(input: string, refs: string): BundleSou
     } else {
       for (let end = refAndFolder.length; end > 0; end--) {
         const ref = refAndFolder.slice(0, end).join("/");
-        const commit = named.get(`refs/heads/${ref}`) ?? named.get(`refs/tags/${ref}^{}`) ?? named.get(`refs/tags/${ref}`);
+        const commit = named.get(`refs/heads/${ref}`) ?? named.get(`refs/tags/${ref}^{}`) ?? named.get(`refs/tags/${ref}`)
+          ?? (ref === "HEAD" ? named.get("HEAD") : undefined);
         if (commit) { requestedRef = ref; resolvedCommit = commit; folderParts = refAndFolder.slice(end); break; }
       }
     }

@@ -145,7 +145,7 @@ the run's log file, not on the row.
 
 ## Running it in the background: `rig exec`
 
-`rig exec` runs the same single turn on a named harness, `claude` or `codex`, through that harness's ACP adapter, in a
+`rig exec` runs the same single turn on a named harness, `claude` or `codex`, or on an explicit ACP command after `--`, in a
 connector that outlives the command:
 
 ```sh

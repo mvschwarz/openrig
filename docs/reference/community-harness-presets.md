@@ -495,8 +495,17 @@ model a resumed session runs stays unknown unless the harness's own evidence say
   `config.yaml.example` already has a config, so set its model there. Hermes v0.22.4 fixes a session's
   launch settings when it creates it (its own source), so a resumed Hermes session runs with what it was created with.
 
-Both example presets ship with `passes_model: false` until that mapping has been checked with the real harness. Presets
-without the field and built-in runtimes are unchanged, and older OpenRig versions reject it as unknown.
+The Cursor example ships with `passes_model: true`: it was checked with OpenRig 0.7.19 and Cursor CLI 2026.10.19-6bbf2c4
+for a new chat only, and resume is not verified. The Hermes example still ships with `passes_model: false` until its
+mapping has been checked with the real harness. Notes from the Cursor check, for that version:
+- Cursor keeps the passed model as its own default: the seat's `cli-config.json` changed to it, so later chats in that
+  config folder start on it even without `--model`.
+- A fresh start in a folder whose `.cursor/mcp.json` lists MCP servers stops at Cursor's approval screen for them before
+  the chat opens. The example launcher's approval flags are unchanged.
+- `rig ps` still reads the effective model as unknown for a community harness. The model passed to the launcher and the
+  one shown on Cursor's screen are separate facts.
+
+Presets without the field and built-in runtimes are unchanged, and older OpenRig versions reject it as unknown.
 
 ## Interactive Pi in a terminal seat: the coordination skills
 

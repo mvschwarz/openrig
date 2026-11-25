@@ -1107,14 +1107,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    *  for a caller that runs it itself (a respawned direct-native pane). Nothing is sent to the pane. */
   async buildResumeCommand(
     binding: NodeBinding,
-    opts: { name: string; resumeToken: string; running?: RunningCodexLaunch; launchShell?: string },
+    opts: { name: string; resumeToken: string; running?: RunningCodexLaunch; launchShell?: string; preview?: boolean },
   ): Promise<{ ok: true; command: string; core: string; appliedLaunch: AppliedLaunchObservation; warnings?: string[] } | { ok: false; error: string }> {
     if (binding.launchWrapper?.length && !this.seatLaunchEnvironment) {
       return { ok: false, error: "launch_wrapper support unavailable; no agent started." };
     }
     if (!binding.tmuxSession) return { ok: false, error: "No tmux session bound — cannot build a Codex resume command" };
-    // Building a resume command (the in-place restart's) never installs the core plugin.
-    const prepared = await this.prepareLaunch(binding, opts.name, opts.running, { installCorePlugin: false });
+    // Building a resume command (the in-place restart's) never installs the core plugin. A preview leaves the Codex config alone.
+    const prepared = await this.prepareLaunch(binding, opts.name, opts.running, { installCorePlugin: false, preview: opts.preview === true });
     if (!prepared.ok) return prepared;
     const core = this.resumeCore(prepared, opts.resumeToken, binding);
     let command: string;
@@ -1174,7 +1174,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
   private async prepareLaunch(binding: NodeBinding, name: string, running: RunningCodexLaunch | undefined,
-    opts: { installCorePlugin: boolean }): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
+    opts: { installCorePlugin: boolean; preview?: boolean }): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
     const checkedBeforeCutover = this.filesystemPreflight.get(binding);
     const decision = checkedBeforeCutover ?? await this.checkFilesystemPolicy(binding);
     this.filesystemPreflight.delete(binding);
@@ -1182,9 +1182,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // The config write and, for a seat that selected openrig-core, its install run as one step under the config lock, so
     // concurrent launches never interleave them. An unselected seat's launch never installs.
     // A seat with its own CODEX_HOME gets OpenRig's managed config (hooks, feature flag) and plugin in that home.
+    // A preview (a restart plan, a switch's precheck) leaves the Codex config alone; the launch it previews converges it.
     const home = this.homeFor(binding);
     const own = this.ownHome(binding);
-    await this.withConfigLock(async () => {
+    if (!opts.preview) await this.withConfigLock(async () => {
       const managed = await this.applyManagedConfig(home);
       if (opts.installCorePlugin && managed?.hooksEnabled && this.resolveCorePluginSelected?.(binding.nodeId)) {
         try { await this.ensureCodexCorePlugin(home); }

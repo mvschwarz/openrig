@@ -4,7 +4,7 @@ import http from "node:http";
 import { Command } from "commander";
 import { allowFetchTarget } from "./fetch-guard.js";
 import { broadcastCommand } from "../src/commands/broadcast.js";
-import { DaemonClient } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -104,6 +104,13 @@ describe("Broadcast CLI", () => {
                 { ok: false, sessionName: "e@phase-rig", sent: true, error: "receipt lost" },
               ],
             }));
+          } else if (parsed.rig === "big-rig") {
+            // The daemon answers after its sequential fan-out: 91 seats at 60 ms each is past the 5 s read default.
+            const results = Array.from({ length: 91 }, (_, i) => ({ ok: true, sessionName: `s${i}@big-rig` }));
+            setTimeout(() => {
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ total: 91, sent: 91, failed: 0, results }));
+            }, 91 * 60);
           } else if (parsed.rig === "warn-rig") {
             // S2 (OPR.0.5.4.3): an unattributed broadcast's response carries the
             // sign-it notice as an additive warning; the renderer must surface it.
@@ -411,5 +418,129 @@ describe("Broadcast CLI", () => {
     expect(output).toContain("0/0 delivered");
     expect(logs).toContainEqual(expect.stringMatching(/^FAILED — No running sessions found/));
     expect(exitCode).toBe(1);
+  });
+
+  it("a local broadcast to 91 seats that answers after 5.5 s prints every recipient's result, not a 5 s timeout", async () => {
+    const { stdout, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "big-rig", "hello"]);
+    });
+    expect(stdout).toContain("s90@big-rig: sent");
+    expect(stdout).toContain("91/91 delivered");
+    expect(exitCode).toBeFalsy();
+  }, 20_000);
+
+  it("a local broadcast waits 300 s by default, and --timeout <seconds> sets the wait", async () => {
+    const post = vi.fn(async () => ({ status: 200, data: { total: 0, sent: 0, failed: 0, results: [] } }));
+    const deps = { ...runningDeps(port), clientFactory: () => ({ post }) as unknown as DaemonClient };
+    await captureLogs(() => makeCmd(deps).parseAsync(["node", "rig", "broadcast", "--rig", "my-rig", "hello"]));
+    await captureLogs(() => makeCmd(deps).parseAsync(["node", "rig", "broadcast", "--rig", "my-rig", "--timeout", "600", "hello"]));
+    expect(post.mock.calls.map((call) => (call as unknown[])[2])).toEqual([{ timeoutMs: 300_000 }, { timeoutMs: 600_000 }]);
+  });
+
+  it("refuses a --timeout that is not a positive number of seconds before posting anything", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "my-rig", "--timeout", "0", "hello"]);
+    });
+    expect(logs.join("\n")).toContain("--timeout must be a positive number of seconds");
+    expect(broadcastPosts).toBe(0);
+    expect(exitCode).toBe(1);
+  });
+
+  it("refuses a --timeout past what a timer holds (2^31 - 1 ms) instead of aborting at once", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "my-rig", "--timeout", "2147484", "hello"]);
+    });
+    expect(logs.join("\n")).toContain("at most 2147483");
+    expect(broadcastPosts).toBe(0);
+    expect(exitCode).toBe(1);
+  });
+
+  describe("when the local broadcast times out", () => {
+    const timedOut = () => ({ post: async () => { throw new DaemonTimeoutError("The OpenRig daemon at http://127.0.0.1:7433 did not respond in time: Request to http://127.0.0.1:7433/api/transport/broadcast timed out after 300000ms"); } }) as unknown as DaemonClient;
+
+    it("points to the sender's per-recipient outbox instead of a bare UNKNOWN, and exits 1", async () => {
+      const { logs, stdout, exitCode } = await captureLogs(async () => {
+        await makeCmd({ ...runningDeps(port), clientFactory: timedOut }).parseAsync(["node", "rig", "broadcast", "--rig", "big-rig", "hello"]);
+      });
+      const output = logs.join("\n");
+      expect(output).toContain("timed out after 300000ms");
+      expect(output).toContain("rig queue outbox-list broadcaster@my-rig --limit 1000");
+      expect(output).toContain("a retained one is held for its seat");
+      expect(output).toContain("may still be running");
+      expect(output).toContain("a missing receipt is not proof of non-delivery");
+      expect(output).toContain("Don't retry the whole broadcast");
+      expect(output).toContain("Resend only to the recipients recorded as failed");
+      expect(output).not.toContain("outcome is UNKNOWN");
+      expect(stdout).toEqual([]);
+      expect(exitCode).toBe(1);
+    });
+
+    it("--json prints one error object that names the outbox command", async () => {
+      const { stdout, exitCode } = await captureLogs(async () => {
+        await makeCmd({ ...runningDeps(port), clientFactory: timedOut }).parseAsync(["node", "rig", "broadcast", "--rig", "big-rig", "hello", "--json"]);
+      });
+      expect(stdout).toHaveLength(1);
+      expect(JSON.parse(stdout[0]!)).toMatchObject({ error: { outboxCommand: "rig queue outbox-list broadcaster@my-rig --limit 1000", fact: expect.stringContaining("timed out") } });
+      expect(exitCode).toBe(1);
+    });
+
+    it("a connection lost after the request may have arrived gets the same guidance", async () => {
+      const dropped = () => ({ post: async () => { throw new DaemonConnectionError("socket hang up", "ECONNRESET"); } }) as unknown as DaemonClient;
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd({ ...runningDeps(port), clientFactory: dropped }).parseAsync(["node", "rig", "broadcast", "--rig", "big-rig", "hello"]);
+      });
+      const output = logs.join("\n");
+      expect(output).toContain("socket hang up");
+      expect(output).toContain("may still be running");
+      expect(output).toContain("rig queue outbox-list broadcaster@my-rig --limit 1000");
+      expect(exitCode).toBe(1);
+    });
+
+    it("an unreadable answer, which comes after the fan-out ended, points to the same per-recipient record", async () => {
+      const garbled = () => ({ post: async () => { throw new DaemonResponseError(200, "{not json"); } }) as unknown as DaemonClient;
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd({ ...runningDeps(port), clientFactory: garbled }).parseAsync(["node", "rig", "broadcast", "--rig", "big-rig", "hello"]);
+      });
+      const output = logs.join("\n");
+      expect(output).toContain("its answer could not be read");
+      expect(output).not.toContain("may still be running");
+      expect(output).toContain("rig queue outbox-list broadcaster@my-rig --limit 1000");
+      expect(output).toContain("Don't retry the whole broadcast");
+      expect(exitCode).toBe(1);
+    });
+
+    it("an unreadable non-2xx answer, which can come from a fan-out that stopped partway, is not rendered as an ended one", async () => {
+      const failed = () => ({ post: async () => { throw new DaemonResponseError(500, "Internal Server Error"); } }) as unknown as DaemonClient;
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd({ ...runningDeps(port), clientFactory: failed }).parseAsync(["node", "rig", "broadcast", "--rig", "big-rig", "hello"]);
+      });
+      const output = logs.join("\n");
+      expect(output).toContain("HTTP 500");
+      expect(output).toContain("possibly from a fan-out that stopped partway");
+      expect(output).toContain("Don't retry the whole broadcast");
+      expect(output).toContain("Check the recipients with rig capture");
+      expect(output).not.toContain("went through the recipients");
+      expect(output).not.toContain("may still be running");
+      expect(exitCode).toBe(1);
+    });
+
+    it("a connection that never reached the daemon is not rendered as a running broadcast", async () => {
+      const refused = () => ({ post: async () => { throw new DaemonConnectionError("connect ECONNREFUSED", "ECONNREFUSED"); } }) as unknown as DaemonClient;
+      await expect(makeCmd({ ...runningDeps(port), clientFactory: refused }).parseAsync(["node", "rig", "broadcast", "--rig", "big-rig", "hello"]))
+        .rejects.toThrow("ECONNREFUSED");
+    });
+
+    it("without a sender identity it says no per-recipient record was kept and to check the recipients", async () => {
+      vi.stubEnv("OPENRIG_SESSION_NAME", "");
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd({ ...runningDeps(port), clientFactory: timedOut }).parseAsync(["node", "rig", "broadcast", "--rig", "big-rig", "hello"]);
+      });
+      const output = logs.join("\n");
+      expect(output).toContain("no per-recipient record");
+      expect(output).toContain("Don't retry the whole broadcast");
+      expect(output).toContain("rig capture");
+      expect(output).not.toContain("outbox-list");
+      expect(exitCode).toBe(1);
+    });
   });
 });

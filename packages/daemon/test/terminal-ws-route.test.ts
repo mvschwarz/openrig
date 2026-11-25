@@ -235,11 +235,16 @@ describe("terminal WebSocket input ordering", () => {
     const app3 = new Hono();
     app3.use("*", async (c, next) => {
       c.set("tmuxAdapter" as never, {
+        humanInput: async (name: string, write: () => Promise<void>) => {
+          if (name === "unknown-target") throw Object.assign(new Error("no managed target"), { code: "guard_target_unknown" });
+          await write();
+        },
         hasSession: async () => true,
         setWindowOption: async () => ({ ok: true }),
         startPipePane: async () => ({ ok: true }),
         stopPipePane: async () => ({ ok: true }),
-        sendKeys: async () => ({ ok: true }),
+        sendKeys: async (name: string) => name === "failed-target"
+          ? { ok: false, code: "guard_target_changed", message: "target changed" } : { ok: true },
         sendText: async (_name: string, text: string) => {
           await new Promise((resolve) => setTimeout(resolve, text === "e" ? 30 : 0));
           textCompletions.push(text);
@@ -258,6 +263,24 @@ describe("terminal WebSocket input ordering", () => {
 
   afterAll(() => {
     orderServer?.close();
+  });
+
+  it.each([
+    ["unknown-target", { type: "text", text: "typed private text" }, "guard_target_unknown"],
+    ["failed-target", { type: "keys", keys: ["Enter"] }, "guard_target_changed"],
+  ])("reports undelivered input to the viewer of %s", async (name, frame, reason) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${ORDER_PORT}/api/terminal/${name}?token=${ORDER_TOKEN}`);
+    try {
+      const response = new Promise<string>((resolve, reject) => {
+        ws.onmessage = event => { if (String(event.data).includes("terminal input was not sent")) resolve(String(event.data)); };
+        ws.onerror = () => reject(new Error("websocket failed"));
+      });
+      await new Promise<void>(resolve => { ws.onopen = () => resolve(); });
+      ws.send(JSON.stringify(frame));
+      const message = await Promise.race([response, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("input failure was silent")), 1000))]);
+      expect(message).toContain(`terminal input was not sent (${reason})`);
+      expect(message).not.toContain("typed private text");
+    } finally { ws.close(); }
   });
 
   it("serializes rapid text messages before calling tmux", async () => {
@@ -634,6 +657,75 @@ describe("terminal WebSocket attach rejection", () => {
     } finally {
       for (const ws of viewers) ws.close();
       localServer.close();
+    }
+  }, 5000);
+});
+
+// `?geometry=1` opts a viewer in to the pane's size as a binary frame; terminal output stays in text frames.
+describe("terminal WebSocket pane size (?geometry=1)", () => {
+  async function serveSized(): Promise<{ port: number; close: () => void }> {
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("tmuxAdapter" as never, {
+        hasSession: async () => true,
+        setWindowOption: async () => ({ ok: true }),
+        resizeWindow: async () => ({ ok: true }),
+        startPipePane: async () => ({ ok: true }),
+        stopPipePane: async () => ({ ok: true }),
+        sendKeys: async () => ({ ok: true }),
+        sendText: async () => ({ ok: true }),
+        capturePaneScreen: async () => "screen",
+        getPaneCursorPosition: async () => ({ x: 0, y: 0, width: 132, height: 41 }),
+      });
+      await next();
+    });
+    const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
+    registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: TOKEN });
+    const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
+    injectWebSocket(server);
+    await new Promise<void>((resolve) => {
+      if (server.listening) resolve();
+      else server.once("listening", resolve);
+    });
+    return { port: (server.address() as { port: number }).port, close: () => server.close() };
+  }
+
+  /** Every frame a viewer receives until the screen has arrived and the socket has settled. */
+  async function framesAt(url: string): Promise<Array<string | ArrayBuffer>> {
+    const ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
+    const got: Array<string | ArrayBuffer> = [];
+    ws.onmessage = (e) => { got.push(e.data as string | ArrayBuffer); };
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve();
+      ws.onerror = () => reject(new Error("ws failed to open"));
+    });
+    await vi.waitFor(() => expect(got.some((f) => typeof f === "string" && f.includes("screen"))).toBe(true), { timeout: 1500 });
+    await new Promise<void>((r) => setTimeout(r, 150));
+    ws.close();
+    return got;
+  }
+
+  it("without the flag the socket carries text frames only, as before", async () => {
+    const s = await serveSized();
+    try {
+      const got = await framesAt(`ws://127.0.0.1:${s.port}/api/terminal/plain@rig?token=${TOKEN}`);
+      expect(got.every((f) => typeof f === "string")).toBe(true);
+    } finally {
+      s.close();
+    }
+  }, 5000);
+
+  it("with the flag the first frame is one binary JSON size frame, before any output", async () => {
+    const s = await serveSized();
+    try {
+      const got = await framesAt(`ws://127.0.0.1:${s.port}/api/terminal/sized@rig?token=${TOKEN}&geometry=1`);
+      const binary = got.filter((f): f is ArrayBuffer => typeof f !== "string");
+      expect(binary).toHaveLength(1);
+      expect(got[0]).toBe(binary[0]);
+      expect(JSON.parse(new TextDecoder().decode(binary[0]))).toEqual({ type: "geometry", cols: 132, rows: 41 });
+    } finally {
+      s.close();
     }
   }, 5000);
 });

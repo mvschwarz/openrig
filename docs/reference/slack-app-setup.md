@@ -537,6 +537,15 @@ The status read calls no Slack API and starts no scan. If the daemon cannot be
 observed, local configuration remains visible and live state is unknown. A
 connected socket or valid configuration alone does not prove end-to-end delivery.
 
+### Origin records for inbound files
+
+The connector saves admitted attachments under `$OPENRIG_HOME/state/slack-inbound-media/`.
+A sibling `<saved-basename>.provenance.json` marks a complete file. Read the record together
+with the matching media file. Version `1` records `channelId`, `messageTs` (Slack's exact
+string), `authorId` (the message author's Slack ID), `fileId` (`null` if absent), and the
+one-based attachment `ordinal`. The same record applies to live, relayed and recovered messages.
+Files saved before this feature and files without a committed record have no recorded origin.
+
 ### Slack rejects a message with `invalid_blocks`
 
 `rig queue show <qitemId> --json` records the failure as

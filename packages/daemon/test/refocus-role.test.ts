@@ -105,7 +105,8 @@ it.each(["claude", "codex"])("%s carries only A's role after PostCompact and reu
   const text = context(run(runtime, "UserPromptSubmit"));
   expect(text).toContain("Your seat's role file:"); expect(text).toContain("/seat/a/role.md");
   expect(text).toContain("Re-read it if your role is unclear"); expect(text).not.toContain("/seat/b");
-  expect(calls().filter(x => x === "queue whoami --json")).toHaveLength(1);
+  // One lookup serves role and work; with the packet off it also asks for held and pending work.
+  expect(calls().filter(x => x === "queue whoami --json --held-work")).toHaveLength(1);
   expect(run(runtime, "UserPromptSubmit").stdout).toBe("");
 });
 it.each(["claude", "codex"])("%s obtains role once with explicit work override even when Python fails", (runtime) => {
@@ -116,7 +117,7 @@ it.each(["claude", "codex"])("%s obtains role once with explicit work override e
 it("keeps role independent of configured content, including context refs", () => {
   const text = context(run("codex", "UserPromptSubmit", { OPENRIG_REFOCUS_NOW: "1", OPENRIG_REFOCUS_CONTENT_REF: "custom/ref" }));
   expect(text).toContain("CUSTOM REF CONTENT"); expect(text).toContain("/seat/a/role.md");
-  expect(calls()).toEqual(["queue whoami --json", "context get custom/ref"]);
+  expect(calls()).toEqual(["queue whoami --json --held-work", "context get custom/ref"]);
 });
 it.each([{ ROLE_STATUS: "1" }, { ANSWER: "broken" }, { ANSWER: "{}" }])("reports failed/unavailable role lookup honestly %j", (overrides) => {
   const text = context(run("codex", "UserPromptSubmit", { ...overrides, OPENRIG_REFOCUS_NOW: "1", OPENRIG_REFOCUS_WORK_NODE: "/explicit" }));

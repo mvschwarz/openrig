@@ -163,12 +163,20 @@ function ledger(dir: string, io: ScopeFsDeps): Judgment[] {
   }
   return receipts;
 }
+/** The nearest existing ancestor of an absolute path (the path itself when it exists), or null when none does. The walk
+ *  stops at the root, whose dirname is itself, so a missing drive or share root ends it instead of looping. */
+export function nearestExistingAncestor(p: string, exists: (p: string) => boolean = fs.existsSync): string | null {
+  for (let at = p; ; at = path.dirname(at)) {
+    if (exists(at)) return at;
+    if (path.dirname(at) === at) return null;
+  }
+}
 function contained(root: string, target: string): string {
   const base = fs.realpathSync(root), requested = path.resolve(root, target);
   // Resolve the nearest existing ancestor so platform aliases and symlink parents
   // are judged at the real boundary, including a not-yet-created receipt leaf.
-  let existing = requested;
-  while (!fs.existsSync(existing)) existing = path.dirname(existing);
+  const existing = nearestExistingAncestor(requested);
+  if (existing === null) throw new JudgmentError("path_escape", `Path escapes ${base}; paths must stay within the selected workspace`);
   const full = path.resolve(fs.realpathSync(existing), path.relative(existing, requested));
   if (full !== base && !full.startsWith(base + path.sep)) throw new JudgmentError("path_escape", `Path escapes ${base}; paths must stay within the selected workspace`);
   return full;

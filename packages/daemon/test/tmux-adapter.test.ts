@@ -850,7 +850,9 @@ describe("TmuxAdapter", () => {
 
       const result = await adapter.killSession("r01-dev1-impl");
 
-      expect(result).toEqual({ ok: false, code: "unknown", message: "permission denied" });
+      // The unguarded stop reports how far it got, so a caller can tell a
+      // no-effect failure from an uncertain one (#2940).
+      expect(result).toEqual({ ok: false, code: "unknown", message: "permission denied", stopPhase: "detach_attempted" });
       expect(exec.mock.calls.map((call) => call[0])).toEqual([
         "tmux detach-client -s '=r01-dev1-impl'",
       ]);

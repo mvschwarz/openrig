@@ -162,16 +162,16 @@ describe("S10 cutover — outbound classes ride the SUBSYSTEM path (slice-11 ite
     expect(good.calls[0]!.url).toBe("https://slack.com/api/chat.postMessage");
   });
 
-  it("outbound IMAGE: an https evidenceRef rides as a Block Kit image on the SAME single path (A5b)", async () => {
+  it("outbound PNG evidence is a link in the single Slack post", async () => {
     const IMG = "https://example.invalid/PROGRAM-BOARD-row.png";
     const { fetchImpl, calls } = capturingFetch(200);
     const { driver } = composeOutbound(home, fakePort([{ ...ALERT, qitemId: "qitem-img", evidenceRef: IMG }]), fetchImpl);
     await driver.sweepOnce();
     await flush();
-    const blocks = (calls[0]!.body.blocks ?? []) as { type?: string; image_url?: string }[];
-    const images = blocks.filter((b) => b.type === "image");
-    expect(images).toHaveLength(1);
-    expect(images[0]!.image_url).toBe(IMG);
+    expect(calls).toHaveLength(1);
+    const blocks = (calls[0]!.body.blocks ?? []) as { type?: string }[];
+    expect(blocks.some((block) => block.type === "image")).toBe(false);
+    expect(JSON.stringify(blocks.filter((block) => block.type === "context"))).toContain(IMG);
   });
 
   it("A5b NEGATIVE CONTROL: a non-https evidenceRef emits NO image block (hygiene rail intact)", async () => {

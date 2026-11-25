@@ -2,10 +2,14 @@ import type { PiRunnerState } from "../adapters/pi-runner-protocol.js";
 import { basename } from "node:path";
 import { readProcessTableCensus } from "./process-table.js";
 import { recordedProcessStillRunning } from "./reconciler.js";
+import { nodeSessionConfirmedMissing } from "./node-inventory.js";
 import { ActivityGrantStore, hasActivityGrantsTable } from "./activity-grants.js";
 import { observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation, type NativeProcessRow } from "./native-process-lineage.js";
 import { isShellForeground, isWindowsShellHost } from "./shell-classifier.js";
 import { claudeResumeRotation } from "./session-registry.js";
+import { SessionRegistry } from "./session-registry.js";
+import { BackgroundProcessEvidence, type BackgroundProcess } from "./background-process-evidence.js";
+import { parseSqliteUtcMs } from "./sqlite-time.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { probeShowsNoServer, type TmuxAdapter } from "../adapters/tmux.js";
@@ -140,9 +144,11 @@ export function classifyPaneRuntimeMatch(
 
 interface RunningSeatRow {
   node_id: string;
+  rig_id: string;
   runtime: string | null;
   session_name: string;
   session_id: string;
+  binding_session: string | null;
   tmux_pane: string | null;
   resume_token?: string | null;
   resume_provenance?: string | null;
@@ -156,7 +162,23 @@ interface RunningSeatRow {
 
 type RunnerProcessCensus = { rows: NativeProcessRow[]; permissionHiddenPids: number[] };
 
-type PaneObservation = { pid: number | null; command: string | null; dead?: boolean };
+type PaneObservation = { pid: number | null; command: string | null; dead?: boolean; observedAt: string };
+type TimedNativeProof = NativeProcessObservation & { observedAt: string };
+
+/** Both completion and periodic checks use the same unavailable-observation mapping. */
+export function tmuxUnavailableIdentity(input: {
+  nodeId: string; runtime: string | null; sessionName: string; registeredPane: string | null; observedAt: string;
+  db?: Database.Database; retainStopped?: boolean;
+}): SeatIdentityVerdict {
+  const stopped = input.db && input.retainStopped !== false && nodeSessionConfirmedMissing(input.db, input.nodeId)
+    ? new SeatIdentityStore(input.db).getForNode(input.nodeId) : null;
+  if (stopped?.sessionName === input.sessionName && stopped.evidence.registeredPane === input.registeredPane) {
+    return { ...stopped, reason: "session_missing_tmux_unavailable", observedAt: input.observedAt };
+  }
+  return { nodeId: input.nodeId, verdict: input.runtime === "codex" ? "mismatch" : "tmux_unavailable",
+    evidenceSource: null, reason: "tmux_unavailable", sessionName: input.sessionName, observedAt: input.observedAt,
+    evidence: { registeredPane: input.registeredPane, observedPid: null, observedCommand: null, matchedLayer: null } };
+}
 
 export interface SeatIdentityReconcilerDeps {
   db: Database.Database;
@@ -186,6 +208,10 @@ export class SeatIdentityReconciler {
   private readonly listProcesses: NativeProcessLister;
   private readonly readPiRunnerState?: SeatIdentityReconcilerDeps["readPiRunnerState"];
   private readonly readRunnerCensus: () => Promise<RunnerProcessCensus>;
+  private readonly canSampleBackground: boolean;
+  private readonly backgroundEvidence = new BackgroundProcessEvidence();
+  private readonly backgroundMatches = new Map<string, { generation: string; sessionId: string; processes: BackgroundProcess[] }>();
+  private backgroundWorkSnapshot: Array<{ nodeId: string; rigId: string; sessionName: string; state: "unknown"; reason: string; observedAt: string; processes: BackgroundProcess[] }> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private reconciling = false;
   private generation = 0;
@@ -197,6 +223,7 @@ export class SeatIdentityReconciler {
     this.store = new SeatIdentityStore(deps.db);
     this.listProcesses = deps.listProcesses ?? listNativeProcesses;
     this.readPiRunnerState = deps.readPiRunnerState;
+    this.canSampleBackground = !deps.listProcesses || !!deps.readProcessTableCensus;
     // Unlike the native best-effort recognizer, absence proof must not turn a census failure into an empty table.
     this.readRunnerCensus = deps.readProcessTableCensus ?? (deps.listProcesses
       ? async () => ({ rows: await deps.listProcesses!(), permissionHiddenPids: [] }) : readProcessTableCensus);
@@ -204,8 +231,8 @@ export class SeatIdentityReconciler {
 
   private runningSeats(): RunningSeatRow[] {
     return this.db.prepare(`
-      SELECT n.id as node_id, n.runtime as runtime,
-             s.id as session_id, s.session_name as session_name, b.tmux_pane as tmux_pane, s.resume_token as resume_token,
+      SELECT n.id as node_id, n.rig_id as rig_id, n.runtime as runtime,
+             s.id as session_id, s.session_name as session_name, b.tmux_session as binding_session, b.tmux_pane as tmux_pane, s.resume_token as resume_token,
              s.resume_provenance as resume_provenance,
              s.resume_rotated_from as resume_rotated_from,
              s.resume_rotated_process as resume_rotated_process,
@@ -220,6 +247,41 @@ export class SeatIdentityReconciler {
         AND s.session_name IS NOT NULL
         AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
     `).all() as RunningSeatRow[];
+  }
+
+  /** A missing pane is not evidence that work it started has ended. These are unknowns, not a process inventory. */
+  backgroundWorkUnknown(): Array<{ nodeId: string; rigId: string; sessionName: string; state: "unknown"; reason: string; observedAt: string; processes: BackgroundProcess[] }> {
+    return this.backgroundWorkSnapshot;
+  }
+
+  private computeBackgroundWorkUnknown(): typeof this.backgroundWorkSnapshot {
+    const registry = new SessionRegistry(this.db);
+    return this.runningSeats().flatMap((seat) => {
+      const verdict = this.store.getForNode(seat.node_id);
+      if (!verdict || verdict.sessionName !== seat.session_name || verdict.verdict !== "pane_missing"
+        || !["session_missing", "pane_pid_gone", "pane_exited"].includes(verdict.reason ?? "")) return [];
+      const match = this.backgroundMatches.get(seat.node_id);
+      const tenure = registry.currentOccupantTenure(seat.node_id);
+      const bootAt = tenure ? parseSqliteUtcMs(tenure.bootAt) : NaN;
+      const verdictAt = Date.parse(verdict.observedAt);
+      // Tenure boot_at has one-second precision; a verdict in that same second may predate a successor.
+      if (tenure && (!Number.isFinite(bootAt) || !Number.isFinite(verdictAt) || verdictAt < bootAt + 1000)) return [];
+      const generation = tenure?.generationUuid;
+      const processes = match && generation && match.generation === generation && match.sessionId === seat.session_id ? match.processes : [];
+      return [{ nodeId: seat.node_id, rigId: seat.rig_id, sessionName: seat.session_name, state: "unknown" as const, reason: verdict.reason!, observedAt: verdict.observedAt, processes }];
+    });
+  }
+
+  /** Awaited pane reads cannot publish a verdict for a superseded selection. */
+  private selectionIsCurrent(seat: RunningSeatRow): boolean {
+    return Boolean(this.db.prepare(`
+      SELECT 1 FROM nodes n JOIN sessions s ON s.node_id = n.id
+      LEFT JOIN bindings b ON b.node_id = n.id
+      WHERE n.id = ? AND s.id = ? AND s.status = 'running' AND s.session_name = ?
+        AND s.id = (SELECT id FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1)
+        AND n.runtime IS ? AND b.tmux_session IS ? AND b.tmux_pane IS ?
+        AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
+    `).get(seat.node_id, seat.session_id, seat.session_name, seat.runtime, seat.binding_session, seat.tmux_pane));
   }
 
   /** Nodes whose latest session `rig unclaim` released (detached, origin claimed). Unclaim leaves the process running,
@@ -244,8 +306,10 @@ export class SeatIdentityReconciler {
     // that could leave subprocesses alive. Normal polling cost is unchanged.
     if (this.reconciling) return;
     this.reconciling = true;
+    const generation = this.generation;
     try {
-      await this.reconcileSweep(this.generation);
+      await this.reconcileSweep(generation);
+      if (generation === this.generation) this.backgroundWorkSnapshot = this.computeBackgroundWorkUnknown();
     } finally {
       this.reconciling = false;
     }
@@ -253,6 +317,12 @@ export class SeatIdentityReconciler {
 
   private async reconcileSweep(generation: number): Promise<void> {
     const seats = this.runningSeats();
+    const registry = new SessionRegistry(this.db);
+    const occupantGenerations = new Map(seats.map(seat => [seat.node_id, registry.currentOccupantTenure(seat.node_id)?.generationUuid ?? null]));
+    const released = this.releasedSeats();
+    const activeNodes = new Set([...seats.map(seat => seat.node_id), ...released]);
+    this.backgroundEvidence.retain(activeNodes);
+    for (const nodeId of this.backgroundMatches.keys()) if (!activeNodes.has(nodeId)) this.backgroundMatches.delete(nodeId);
     // Capture exact issuance before any observation awaits. A delayed verdict cannot revoke a successor.
     const grants = hasActivityGrantsTable(this.db) ? new ActivityGrantStore(this.db) : null;
     const observedGrants = new Map(seats.map(seat => {
@@ -273,10 +343,8 @@ export class SeatIdentityReconciler {
         : null];
     }));
     // Prune verdicts for nodes no longer running (keep the table bounded), except a released seat's.
-    this.store.pruneExcept([...seats.map((s) => s.node_id), ...this.releasedSeats()]);
+    this.store.pruneExcept([...seats.map((s) => s.node_id), ...released]);
     if (seats.length === 0) return;
-
-    const observedAt = this.now().toISOString();
 
     // One tmux availability probe per poll. If tmux is entirely unreachable
     // (throws) OR reports zero live sessions while we have running seats in
@@ -289,6 +357,7 @@ export class SeatIdentityReconciler {
     } catch {
       liveSessions = null;
     }
+    const observedAt = this.now().toISOString();
     if (generation !== this.generation) return;
     if (liveSessions === null || liveSessions.size === 0) {
       // An empty listing can't tell a blip from a server that's gone, but each seat's own probe can: tmux saying no
@@ -296,26 +365,35 @@ export class SeatIdentityReconciler {
       // reads it. A seat whose recorded process still runs is on a server this daemon doesn't see, as the boot
       // reconciler reads it, so it stays unavailable, as does anything else.
       let table: Promise<Array<{ pid: number; ppid: number; command: string; startedAt: string }> | null> | undefined;
-      const processes = () => (table ??= this.readRunnerCensus()
+      let sharedCensus: Promise<RunnerProcessCensus> | undefined;
+      const processes = () => (table ??= (sharedCensus ??= this.readRunnerCensus())
         .then(census => census.rows.flatMap(row => row.startedAt === undefined ? [] : [{ ...row, startedAt: row.startedAt }]))
         .catch(() => null));
       for (const seat of seats) {
         const probe = await this.tmux.probeSession?.(seat.session_name).catch(() => null) ?? null;
+        const probeAt = this.now().toISOString();
         if (generation !== this.generation) return;
         const absent = probe !== null && (probe.state === "absent" || probeShowsNoServer(probe));
-        const elsewhere = absent && await recordedProcessStillRunning(this.db, { nodeId: seat.node_id, sessionName: seat.session_name }, processes);
+        const elsewhere = await recordedProcessStillRunning(this.db, { nodeId: seat.node_id, sessionName: seat.session_name }, processes);
         if (generation !== this.generation) return;
         const gone = absent && !elsewhere;
-        this.store.upsert(gone ? this.sessionMissingVerdict(seat, observedAt) : this.tmuxUnavailableVerdict(seat, observedAt));
+        if (!this.selectionIsCurrent(seat)) continue;
+        const published = this.store.upsert(gone ? this.sessionMissingVerdict(seat, probeAt)
+          : this.tmuxUnavailableVerdict(seat, probeAt, !elsewhere && probe?.state !== "present"));
         // As on the observed path below: the run whose grant was captured before this sweep has ended.
         const observedGrant = observedGrants.get(seat.node_id);
-        if (gone && observedGrant) grants!.revoke({ grantId: observedGrant.grantId }, "runner_exit_observed");
+        if (published && gone && observedGrant) grants!.revoke({ grantId: observedGrant.grantId }, "runner_exit_observed");
       }
+      await this.refreshBackgroundEvidence(seats, null, occupantGenerations, generation, sharedCensus);
       return;
     }
 
     const readPanes = async (): Promise<Map<string, PaneObservation>> => {
-      try { return new Map(await this.tmux.readAllPaneProcesses?.() ?? []); }
+      try {
+        const rows = await this.tmux.readAllPaneProcesses?.() ?? [];
+        const sampledAt = this.now().toISOString();
+        return new Map([...rows].map(([pane, row]) => [pane, { ...row, observedAt: sampledAt }]));
+      }
       catch { return new Map(); }
     };
     let panes = await readPanes();
@@ -326,7 +404,8 @@ export class SeatIdentityReconciler {
       const existing = panes.get(target);
       if (existing) return existing;
       const pid = await this.tmux.getPanePid(target);
-      const observed = { pid, command: pid === null ? null : await this.tmux.getPaneCommand(target) };
+      const command = pid === null ? null : await this.tmux.getPaneCommand(target);
+      const observed = { pid, command, observedAt: this.now().toISOString() };
       panes.set(target, observed);
       return observed;
     };
@@ -369,15 +448,26 @@ export class SeatIdentityReconciler {
         target: seat.tmux_pane!, tmux, expectedToken: seat.resume_token, rotation: claudeResumeRotation(seat),
         ...(seat.runtime === "codex" ? { requireArgv: true } : {}),
         listProcesses: () => snapshot ??= this.listProcesses(),
-      })));
+      }).then(proof => proof && { ...proof, observedAt: this.now().toISOString() })));
     };
+    const firstPanes = panes;
+    // Only sample live work when this pass already needs the two native process observations.
+    // Otherwise keep reporting unknown instead of introducing a new periodic process census.
+    const trackBackground = this.canSampleBackground && nativeSeats.length > 0 && seats.some(seat => occupantGenerations.get(seat.node_id) && seat.tmux_pane);
+    // Share each strict census with the existing native proof's concurrent process read.
+    const firstCensusAt = this.now().getTime();
+    const firstCensusPromise = trackBackground ? this.readRunnerCensus().catch(() => null) : null;
     const first = await sample(panes);
+    const firstCensus = firstCensusPromise ? await firstCensusPromise : null;
     if (generation !== this.generation) return;
-    const second = nativeSeats.length > 0 ? await sample(await readPanes()) : [];
+    const secondPanes = nativeSeats.length > 0 || trackBackground ? await readPanes() : panes;
+    const secondCensusPromise = trackBackground ? this.readRunnerCensus().catch(() => null) : null;
+    const second = nativeSeats.length > 0 ? await sample(secondPanes) : [];
+    const secondCensus = secondCensusPromise ? await secondCensusPromise : null;
     if (generation !== this.generation) return;
     const nativeProofs = new Map(nativeSeats.map((seat, index) => [seat.node_id,
       first[index] && first[index]?.fingerprint === second[index]?.fingerprint ? second[index]! : null]));
-    if (nativeSeats.length > 0) {
+    if (nativeSeats.length > 0 || trackBackground) {
       // Native proof crossed awaits: final verdicts must not reuse the initial
       // command/PID (including a direct seat that became a shell meanwhile).
       panes = await readPanes();
@@ -389,7 +479,8 @@ export class SeatIdentityReconciler {
       try {
         const verdict = await this.computeVerdict(seat, liveSessions, observedAt, nativeProofs.get(seat.node_id) ?? null, panes, readRunnerProcesses);
         if (generation !== this.generation) return;
-        this.store.upsert(verdict);
+        if (!this.selectionIsCurrent(seat)) continue;
+        if (!this.store.upsert(verdict)) continue;
         const observedGrant = observedGrants.get(seat.node_id);
         if (observedGrant && (verdict.verdict === "pane_missing"
           || (verdict.verdict === "mismatch" && verdict.reason === "process_identity_mismatch" && observedGrant.shellExitConfirmed))) {
@@ -397,9 +488,79 @@ export class SeatIdentityReconciler {
         }
       } catch {
         if (generation !== this.generation) return;
+        if (!this.selectionIsCurrent(seat)) continue;
         // A single seat's tmux failure must not crash the loop; record it as
         // unavailable observation (non-green for Codex).
-        this.store.upsert(this.tmuxUnavailableVerdict(seat, observedAt));
+        this.store.upsert(this.tmuxUnavailableVerdict(seat, this.now().toISOString(), !liveSessions.has(seat.session_name)));
+      }
+    }
+    await this.refreshBackgroundEvidence(seats, firstPanes, occupantGenerations, generation, undefined, firstCensus, secondCensus, panes, firstCensusAt);
+  }
+
+  /** Use this existing reconciliation pass; no independent poll or process signalling is introduced. */
+  private async refreshBackgroundEvidence(
+    seats: RunningSeatRow[], panes: Map<string, PaneObservation> | null,
+    occupantGenerations: Map<string, string | null>, sweepGeneration: number,
+    sharedCensus?: Promise<RunnerProcessCensus>,
+    firstSnapshot?: RunnerProcessCensus | null, lastSnapshot?: RunnerProcessCensus | null,
+    finalPaneSnapshot?: Map<string, PaneObservation>,
+    firstCensusAt?: number,
+  ): Promise<void> {
+    const registry = new SessionRegistry(this.db);
+    const eligible = seats.filter(seat => occupantGenerations.get(seat.node_id) && seat.tmux_pane
+      && (firstSnapshot != null || (this.backgroundEvidence.has(seat.node_id)
+        && this.store.getForNode(seat.node_id)?.verdict === "pane_missing")));
+    if (!eligible.length) return;
+    let census: RunnerProcessCensus;
+    try {
+      census = firstSnapshot ?? await (sharedCensus ?? this.readRunnerCensus());
+    }
+    catch { this.backgroundMatches.clear(); return; }
+    if (sweepGeneration !== this.generation) return;
+    // An omitted process may be a parent; never treat an incomplete table as an attribution.
+    if (census.permissionHiddenPids.length) { this.backgroundMatches.clear(); return; }
+    const finalPanes = finalPaneSnapshot ?? null;
+    if (sweepGeneration !== this.generation) return;
+    let finalCensus = census;
+    if (firstSnapshot) {
+      if (!lastSnapshot) { this.backgroundMatches.clear(); return; }
+      finalCensus = lastSnapshot;
+      if (sweepGeneration !== this.generation) return;
+      if (finalCensus.permissionHiddenPids.length) { this.backgroundMatches.clear(); return; }
+    }
+    const finalRows = new Map(finalCensus.rows.map(row => [row.pid, row]));
+    if (finalRows.size !== finalCensus.rows.length) { this.backgroundMatches.clear(); return; }
+    const stableRows = census.rows.filter(row => {
+      const last = finalRows.get(row.pid);
+      return !!last && !!row.startedAt && row.startedAt === last.startedAt && row.ppid === last.ppid
+        && row.command === last.command && last.state !== "Z";
+    });
+    const current = new Map(this.runningSeats().map(seat => [seat.node_id, seat]));
+    for (const seat of eligible) {
+      const gen = occupantGenerations.get(seat.node_id)!;
+      const nowSeat = current.get(seat.node_id);
+      const binding = registry.getBindingForNode(seat.node_id);
+      if (!nowSeat || nowSeat.session_id !== seat.session_id || nowSeat.session_name !== seat.session_name
+        || nowSeat.tmux_pane !== seat.tmux_pane || binding?.tmuxSession !== seat.session_name
+        || binding.tmuxPane !== seat.tmux_pane || registry.currentOccupantTenure(seat.node_id)?.generationUuid !== gen) {
+        this.backgroundEvidence.forget(seat.node_id);
+        this.backgroundMatches.delete(seat.node_id);
+        continue;
+      }
+      const verdict = this.store.getForNode(seat.node_id);
+      const initialPane = panes?.get(seat.tmux_pane!);
+      const finalPane = finalPanes?.get(seat.tmux_pane!);
+      const root = stableRows.find(row => row.pid === initialPane?.pid);
+      if (verdict?.verdict === "verified" && initialPane?.pid && !initialPane.dead
+        && finalPane?.pid === initialPane.pid && !finalPane.dead && root?.startedAt
+        && firstCensusAt !== undefined && firstCensusAt - Date.parse(root.startedAt) >= 2000) {
+        this.backgroundEvidence.capture(seat.node_id, gen, seat.session_id, seat.tmux_pane!, initialPane.pid, stableRows, firstCensusAt, finalCensus.rows);
+        this.backgroundMatches.delete(seat.node_id);
+      } else if (verdict?.verdict === "pane_missing") {
+        const processes = this.backgroundEvidence.afterLoss(seat.node_id, gen, seat.session_id, seat.tmux_pane!, finalCensus.rows);
+        this.backgroundMatches.set(seat.node_id, { generation: gen, sessionId: seat.session_id, processes });
+      } else {
+        this.backgroundMatches.delete(seat.node_id);
       }
     }
   }
@@ -416,23 +577,19 @@ export class SeatIdentityReconciler {
     };
   }
 
-  private tmuxUnavailableVerdict(seat: RunningSeatRow, observedAt: string): SeatIdentityVerdict {
-    return {
-      nodeId: seat.node_id,
-      verdict: seat.runtime === "codex" ? "mismatch" : "tmux_unavailable",
-      evidenceSource: null,
-      reason: "tmux_unavailable",
-      evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
-      sessionName: seat.session_name,
-      observedAt,
-    };
+  private tmuxUnavailableVerdict(seat: RunningSeatRow, observedAt: string, retainStopped = true): SeatIdentityVerdict {
+    // An unreadable sample cannot undo positive absence for this same session, pane and occupant.
+    // A session this sweep listed or probed present, or a positively matched recorded process, undoes it
+    // (retainStopped=false).
+    return tmuxUnavailableIdentity({ nodeId: seat.node_id, runtime: seat.runtime,
+      sessionName: seat.session_name, registeredPane: seat.tmux_pane, observedAt, db: this.db, retainStopped });
   }
 
   private async computeVerdict(
     seat: RunningSeatRow,
     liveSessions: Set<string>,
     observedAt: string,
-    native: NativeProcessObservation | null,
+    native: TimedNativeProof | null,
     panes: Map<string, PaneObservation> | null = null,
     readRunnerProcesses: () => Promise<RunnerProcessCensus>,
   ): Promise<SeatIdentityVerdict> {
@@ -466,25 +623,28 @@ export class SeatIdentityReconciler {
 
     // From the sweep's one batched list-panes when the pane is in it; otherwise read per pane as before.
     const batched = panes?.get(seat.tmux_pane) ?? null;
+    if (batched) base.observedAt = batched.observedAt;
     if (batched?.dead === true) {
       // Pane IDs can outlive their stored association after a move or server restart.
       // Only observed membership in the exact session proves this executor exited.
       const currentPanes = await this.tmux.listPanes?.(seat.session_name, true).catch(() => null);
-      if (!currentPanes?.some(pane => pane.id === seat.tmux_pane)) return this.tmuxUnavailableVerdict(seat, observedAt);
+      if (!currentPanes?.some(pane => pane.id === seat.tmux_pane)) return this.tmuxUnavailableVerdict(seat, this.now().toISOString(), !liveSessions.has(seat.session_name) && !currentPanes?.length);
       return {
         ...base, verdict: "pane_missing", evidenceSource: "pane_process", reason: "pane_exited",
         evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: batched.command, matchedLayer: null },
       };
     }
     const pid = batched ? batched.pid : await this.tmux.getPanePid(seat.tmux_pane);
+    if (!batched) base.observedAt = this.now().toISOString();
     if (pid === null) {
       // getPanePid collapses transport/read failures into null. Only a readable census
       // showing another pane, or a successful session snapshot proving absence, establishes loss.
       const sessionAlive = liveSessions.has(seat.session_name);
       if (sessionAlive) {
         const currentPanes = await this.tmux.listPanes?.(seat.session_name, true).catch(() => null);
+        base.observedAt = this.now().toISOString();
         if (!currentPanes?.length || currentPanes.some(pane => pane.id === seat.tmux_pane)) {
-          return this.tmuxUnavailableVerdict(seat, observedAt);
+          return this.tmuxUnavailableVerdict(seat, base.observedAt, !liveSessions.has(seat.session_name));
         }
       }
       return {
@@ -495,10 +655,23 @@ export class SeatIdentityReconciler {
         evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
       };
     }
+    if (!liveSessions.has(seat.session_name)) {
+      // A live pane under the bound id, while this sweep's readable listing has no such session. tmux numbers panes per
+      // server, so after a server restart the id can be another seat's pane: as for a dead pane above, only membership in
+      // the exact session makes it this seat's. A fresh read that doesn't list the session (tmux's "can't find session"
+      // throws) leaves the listing's absence standing, as when the pane is gone too; one that lists the session without
+      // this pane means it changed since the listing, which is unknown.
+      const currentPanes = await this.tmux.listPanes?.(seat.session_name, true).catch(() => null);
+      const at = this.now().toISOString();
+      if (!currentPanes?.some(pane => pane.id === seat.tmux_pane)) {
+        return currentPanes?.length ? this.tmuxUnavailableVerdict(seat, at, false) : this.sessionMissingVerdict(seat, at);
+      }
+    }
 
     const command = batched ? batched.command : await this.tmux.getPaneCommand(seat.tmux_pane);
+    if (!batched) base.observedAt = this.now().toISOString();
     if (command === null && seat.runtime === "claude-code") {
-      return this.tmuxUnavailableVerdict(seat, observedAt);
+      return this.tmuxUnavailableVerdict(seat, base.observedAt, !liveSessions.has(seat.session_name));
     }
     if (seat.runtime === "codex" || (seat.runtime === "claude-code" && (windowsShellHost(command)
       || ((seat.resume_token != null || native !== null) && claudeHostNeedsNativeProof(command))))) {
@@ -512,6 +685,7 @@ export class SeatIdentityReconciler {
       }
       return {
         ...base, verdict: verified ? "verified" : "mismatch",
+        observedAt: seat.runtime === "codex" && verified && native ? native.observedAt : base.observedAt,
         evidenceSource: "pane_process", reason: verified ? null : "process_identity_ambiguous",
         evidence: { registeredPane: seat.tmux_pane, observedPanePid: pid, observedPid: native?.process.pid ?? pid,
           observedCommand: native?.process.command ?? command, matchedLayer: verified ? 1 : null },
@@ -541,6 +715,7 @@ export class SeatIdentityReconciler {
         this.tmux.getPanePid(seat.tmux_pane), this.tmux.getPaneCommand(seat.tmux_pane),
         this.tmux.listPanes?.(seat.session_name, true).catch(() => null) ?? null,
       ]);
+      unconfirmed.observedAt = this.now().toISOString();
       const selected = this.db.prepare(`SELECT s.id AS session_id,s.startup_status,n.runtime,b.tmux_session,b.tmux_pane FROM sessions s
         JOIN nodes n ON n.id=s.node_id LEFT JOIN bindings b ON b.node_id=n.id WHERE n.id=? ORDER BY s.id DESC LIMIT 1`)
         .get(seat.node_id) as { session_id: string; startup_status: string | null; runtime: string | null; tmux_session: string | null; tmux_pane: string | null } | undefined;

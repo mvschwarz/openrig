@@ -12,7 +12,8 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { reportPreparationFailure, reportRestoreDeliveryFailure } from "../src/domain/compaction-restore-notice.js";
+import { closeNoticesOfRemovedSeats, reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "../src/domain/compaction-restore-notice.js";
+import { deriveCanonicalSessionName } from "../src/domain/session-name.js";
 import type { PreparationFailure, RestoreDeliveryFailure } from "../src/domain/claude-compaction-enforcer.js";
 
 // Keep the host's receiving-agent setting out of these isolated queue fixtures.
@@ -125,7 +126,51 @@ it.each(["target_activity_unknown", "input_box_not_empty"])("a person's notice n
     // A --skip-map compaction has no map to name (owedRestore.mapPath is absent), so the route without one is in words.
     expect(row.body).toContain("If it showed none, because this compaction skipped its map, ask the seat to restore from its restore-pending marker, or from its own transcript if the marker is missing.");
     expect(row.body.includes("inspect the pane and clear or submit that text")).toBe(reason === "input_box_not_empty");
+    // An uptake notice to a person keeps the map on the host too.
+    await reportRestoreUptakeUnknown(db, queue, { sessionName: failure.sessionName, attemptId: "person-uptake", mapPath: failure.mapPath,
+      doneAt: "2026-01-01T00:10:00.000Z", waitedMinutes: 30 });
+    const uptake = queue.getById("qitem-compaction-uptake-person-uptake")!;
+    expect(uptake.destinationSession).toBe(human.address);
+    expect(uptake.evidenceRef).toBeNull();
+    for (const text of [uptake.body, uptake.summary]) {
+      expect(text).not.toContain(sessionId);
+      expect(text).not.toContain("/tmp/claude-compaction-restore");
+    }
+    expect(uptake.body).toContain("ask it to restore from its newest restore map.");
   } finally { selected.mockRestore(); db.close(); }
+});
+
+it("a restore whose uptake is unknown tells the seat's owner once, with its map, and never calls it failed", async () => {
+  const db = createDb();
+  migrate(db, ALL_MIGRATIONS);
+  try {
+    const rigs = new RigRepository(db), sessions = new SessionRegistry(db);
+    const rig = rigs.createRig("uptake-notice");
+    const ownerName = deriveCanonicalSessionName("dev", "owner", "uptake-notice");
+    const seatName = deriveCanonicalSessionName("dev", "writer", "uptake-notice");
+    const owner = rigs.addNode(rig.id, "owner", { runtime: "claude-code" });
+    const seat = rigs.addNode(rig.id, "writer", { runtime: "claude-code" });
+    sessions.registerSession(owner.id, ownerName);
+    sessions.updateBinding(owner.id, { tmuxSession: ownerName });
+    sessions.registerSession(seat.id, seatName);
+    rigs.addEdge(rig.id, owner.id, seat.id, "delegates_to");
+    const send = vi.fn(async () => ({ ok: true, verified: true }));
+    const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }), transport: { send } });
+    const unknown = { sessionName: seatName, attemptId: "attempt-up", mapPath: "/maps/attempt-up/RESTORE-MAP.md", doneAt: "2026-11-21T03:00:00.000Z", waitedMinutes: 30 };
+    await reportRestoreUptakeUnknown(db, queue, unknown);
+    await reportRestoreUptakeUnknown(db, queue, unknown);
+    const row = queue.getById("qitem-compaction-uptake-attempt-up")!;
+    expect(row.destinationSession).toBe(ownerName);
+    expect(row.summary).toBe(`Managed restore for ${seatName}: uptake unknown (no restore note 30 minutes after the audit was sent)`);
+    expect(row.body).toContain("the last at 2026-11-21T03:00:00.000Z");
+    expect(row.body).toContain("whether the seat took up the restore is unknown");
+    expect(row.body).toContain("OpenRig resends nothing.");
+    expect(row.body).toContain("send it a restore request naming this map: /maps/attempt-up/RESTORE-MAP.md.");
+    expect(row.body).not.toMatch(/undeliverable|restore failed/);
+    expect(row.evidenceRef).toBe("/maps/attempt-up/RESTORE-MAP.md");
+    expect(row.tags).toEqual(expect.arrayContaining(["restore-uptake", "attempt:attempt-up"]));
+    expect(send).toHaveBeenCalledTimes(1);
+  } finally { db.close(); }
 });
 
 it("preparation loop finds its owner once across attempts and honors the owner's disposition", async () => {
@@ -411,4 +456,253 @@ it.each(["intermediate", "failed", "owner-closed", "absent"])("preserves a notic
     expect(queue.getById(id)?.state).toBe(kind === "absent" ? undefined : kind === "owner-closed" ? "done" : "pending");
     if (kind === "owner-closed" || kind === "absent") expect(queue.listTransitions(id)).toEqual(before);
   } finally { db.close(); }
+});
+
+// #3688: a notice whose debt ended without a delivery closes with the reason, or says OpenRig can't tell.
+describe("notices whose compaction debt ended without a delivery", () => {
+  const seat = "writer@demo";
+  const preparationId = (session: string, generation: string) =>
+    `qitem-compaction-preparation-${createHash("sha256").update(`${session}\0${generation}`).digest("hex").slice(0, 24)}`;
+  async function fixture() {
+    const db = createDb(); migrate(db, ALL_MIGRATIONS);
+    const send = vi.fn(async () => ({ ok: true, verified: true }));
+    const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true, transport: { send } });
+    // The rows as the reporters open them: their ids and tags.
+    const restore = async (attemptId: string, session = seat) => {
+      const qitemId = `qitem-compaction-restore-${attemptId}`;
+      await queue.create({ qitemId, sourceSession: session, destinationSession: "owner@demo", body: "restore owed", nudge: false,
+        tags: ["compaction", "restore-delivery", `attempt:${attemptId}`] });
+      return qitemId;
+    };
+    const uptake = async (attemptId: string, session = seat) => {
+      const qitemId = `qitem-compaction-uptake-${attemptId}`;
+      await queue.create({ qitemId, sourceSession: session, destinationSession: "owner@demo", body: "uptake unknown", nudge: false,
+        tags: ["compaction", "restore-delivery", "restore-uptake", `attempt:${attemptId}`] });
+      return qitemId;
+    };
+    const preparation = async (generation: string, session = seat) => {
+      const qitemId = preparationId(session, generation);
+      await queue.create({ qitemId, sourceSession: session, destinationSession: "owner@demo", body: "ended attempts", nudge: false,
+        tags: ["compaction", "preparation-delivery", `occupant:${generation}`] });
+      return qitemId;
+    };
+    const closedWith = (qitemId: string, closureReason: string, reason: string) => {
+      expect(queue.getById(qitemId)).toMatchObject({ state: "done", closureReason });
+      const last = queue.listTransitions(qitemId).at(-1)!;
+      expect(last.actorSession).toBe("system:compaction");
+      expect(last.transitionNote).toContain("no longer owed");
+      expect(last.transitionNote).toContain(reason);
+      expect(queue.getById(qitemId)?.resolution).toContain(reason);
+    };
+    return { db, queue, send, restore, uptake, preparation, closedWith };
+  }
+
+  it("a cancel closes the restore and uptake notices of the attempt it ended and leaves the others", async () => {
+    const f = await fixture();
+    try {
+      const restore = await f.restore("one"), uptake = await f.uptake("one"), preparation = await f.preparation("gen-1");
+      const earlier = await f.uptake("zero"), theirs = await f.restore("theirs", "other@demo");
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "compaction_cancelled", attemptId: "one" });
+      f.closedWith(restore, "canceled", "the compaction was cancelled (rig compact --cancel)");
+      f.closedWith(uptake, "canceled", "the compaction was cancelled (rig compact --cancel)");
+      for (const id of [preparation, earlier, theirs]) expect(f.queue.getById(id)?.state).toBe("pending");
+      expect(f.send).not.toHaveBeenCalled();
+    } finally { f.db.close(); }
+  });
+
+  it("a new attempt supersedes the earlier attempts' notices and keeps its own", async () => {
+    const f = await fixture();
+    try {
+      const earlier = await f.restore("one"), earlierUptake = await f.uptake("one"), own = await f.uptake("two");
+      const preparation = await f.preparation("gen-1");
+      const before = f.queue.listTransitions(own);
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "attempt_superseded", attemptId: "two" });
+      f.closedWith(earlier, "superseded", "attempt two replaced attempt one on this seat");
+      f.closedWith(earlierUptake, "superseded", "attempt two replaced attempt one on this seat");
+      // No successor row is named, so no unverified-successor advisory is attached.
+      expect(f.queue.getById(earlier)?.closureTarget ?? null).toBeNull();
+      expect(f.queue.listTransitions(own)).toEqual(before);
+      expect(f.queue.getById(preparation)?.state).toBe("pending");
+    } finally { f.db.close(); }
+  });
+
+  it("a replaced occupant closes the seat's restore and uptake notices and that occupant's preparation notice only", async () => {
+    const f = await fixture();
+    try {
+      const restore = await f.restore("one"), uptake = await f.uptake("one");
+      const retiring = await f.preparation("gen-1"), successor = await f.preparation("gen-2");
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "occupant_replaced", occupantGeneration: "gen-1" });
+      for (const id of [restore, uptake, retiring]) f.closedWith(id, "canceled", "OpenRig invalidated the seat's occupant state (retiring generation gen-1)");
+      expect(f.queue.getById(successor)?.state).toBe("pending");
+    } finally { f.db.close(); }
+  });
+
+  it.each([
+    ["an invalidation", undefined, ["OpenRig invalidated the seat's occupant state (retiring generation gen-1)", "before a handover or runtime-switch rollback"]],
+    ["a generation change after a restart", { live: "gen-2", when: "restart" as const },
+      ["OpenRig found after a restart that the seat's occupant generation changed from gen-1 to gen-2", "a reboot that adopts the same conversation"]],
+    ["a generation change on a poll", { live: "gen-2", when: "poll" as const },
+      ["OpenRig found on a poll that the seat's occupant generation changed from gen-1 to gen-2", "a reboot that adopts the same conversation"]],
+  ])("the closing reason reports what OpenRig observed: %s, and keeps the same-conversation caveat", async (_label, observedGeneration, says) => {
+    const f = await fixture();
+    try {
+      const restore = await f.restore("one");
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "occupant_replaced", occupantGeneration: "gen-1", ...(observedGeneration ? { observedGeneration } : {}) });
+      for (const text of [...says, "doesn't by itself mean", "If the seat resumed the same conversation, check whether it still needs the restore"]) f.closedWith(restore, "canceled", text);
+      expect(f.queue.getById(restore)?.resolution).not.toContain("occupant was replaced");
+    } finally { f.db.close(); }
+  });
+
+  it("says once that it can't tell when the retiring occupant's generation wasn't recorded, and leaves the preparation notice open", async () => {
+    const f = await fixture();
+    try {
+      const preparation = await f.preparation("gen-1"), restore = await f.restore("one"), uptake = await f.uptake("one");
+      for (let i = 0; i < 2; i++) settleCompactionNotices(f.queue, { sessionName: seat, reason: "occupant_replaced", occupantGeneration: null });
+      // The enforcer dropped the seat's restore and uptake by name, whatever the generation.
+      for (const id of [restore, uptake]) f.closedWith(id, "canceled", "OpenRig invalidated the seat's occupant state and dropped this compaction");
+      expect(f.queue.getById(preparation)?.state).toBe("pending");
+      const notes = f.queue.listTransitions(preparation).map(t => t.transitionNote ?? "").filter(n => n.includes("can't tell whether this is still owed"));
+      expect(notes).toHaveLength(1);
+      expect(notes[0]).toContain("the retiring occupant's generation wasn't recorded");
+    } finally { f.db.close(); }
+  });
+
+  it("says once that it can't tell when a restart stops retrying a stranded attempt, and leaves the restore notice open", async () => {
+    const f = await fixture();
+    try {
+      const stranded = await f.restore("one"), other = await f.restore("two");
+      const before = f.queue.listTransitions(other);
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "owed_unknown", attemptId: "one" });
+      // Another transition in between (the owner parks it with a note) doesn't make the next restart say it again.
+      f.queue.update({ qitemId: stranded, actorSession: "owner@demo", transitionNote: "looking at it" });
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "owed_unknown", attemptId: "one" });
+      expect(f.queue.getById(stranded)?.state).toBe("pending");
+      const notes = f.queue.listTransitions(stranded).map(t => t.transitionNote ?? "").filter(n => n.includes("can't tell whether this is still owed"));
+      expect(notes).toHaveLength(1);
+      expect(notes[0]).toContain("no longer retries these steps");
+      expect(f.queue.listTransitions(other)).toEqual(before);
+    } finally { f.db.close(); }
+  });
+
+  it("says once on the preparing occupant's notice that its generation can't be read, and leaves every notice open", async () => {
+    const f = await fixture();
+    try {
+      const preparing = await f.preparation("gen-1"), other = await f.preparation("gen-2"), restore = await f.restore("one");
+      const before = [other, restore].map(id => f.queue.listTransitions(id));
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "owed_unknown", occupantGeneration: "gen-1" });
+      f.queue.update({ qitemId: preparing, actorSession: "owner@demo", transitionNote: "looking at it" });
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "owed_unknown", occupantGeneration: "gen-1" });
+      expect(f.queue.getById(preparing)?.state).toBe("pending");
+      const notes = f.queue.listTransitions(preparing).map(t => t.transitionNote ?? "").filter(n => n.includes("can't tell whether this is still owed"));
+      expect(notes).toEqual([expect.stringContaining("the seat's live occupant generation couldn't be read")]);
+      expect([other, restore].map(id => f.queue.listTransitions(id))).toEqual(before);
+    } finally { f.db.close(); }
+  });
+
+  it.each(["owner-closed", "owner-claimed"])("keeps the owner's disposition: %s", async (kind) => {
+    const f = await fixture();
+    try {
+      const id = await f.restore("one");
+      if (kind === "owner-closed") f.queue.update({ qitemId: id, actorSession: "owner@demo", state: "done", closureReason: "no-follow-on", resolution: "Handled by owner" });
+      else f.queue.update({ qitemId: id, actorSession: "owner@demo", state: "in-progress" });
+      const before = f.queue.listTransitions(id);
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "compaction_cancelled", attemptId: "one" });
+      if (kind === "owner-closed") {
+        expect(f.queue.listTransitions(id)).toEqual(before);
+        expect(f.queue.getById(id)?.closureReason).toBe("no-follow-on");
+      } else f.closedWith(id, "canceled", "the compaction was cancelled");
+    } finally { f.db.close(); }
+  });
+
+  it("a notice closed this way stays closed when a late failure of the same attempt is reported", async () => {
+    const f = await fixture();
+    try {
+      const id = await f.restore("one");
+      settleCompactionNotices(f.queue, { sessionName: seat, reason: "compaction_cancelled", attemptId: "one" });
+      const before = f.queue.listTransitions(id);
+      await reportRestoreDeliveryFailure(f.db, f.queue, { sessionName: seat, attemptId: "one", mapPath: "/maps/restore.md",
+        lastDelivery: { stage: "turn_boundary", at: "2026-01-01T00:02:00Z", ok: false, reason: "target_activity_unknown", failures: 2 } });
+      expect(f.queue.listTransitions(id)).toEqual(before);
+      expect(f.queue.getById(id)?.state).toBe("done");
+    } finally { f.db.close(); }
+  });
+
+  it("at startup, the notices of a seat removed while no daemon ran close", async () => {
+    const f = await fixture();
+    try {
+      const gone = [await f.restore("one"), await f.preparation("gen-1")];
+      const kept = await f.restore("two", "kept@demo");
+      wireCompactionNoticeSeatRemoval({ subscribe: () => () => {} }, f.queue, (name) => name === "kept@demo");
+      await new Promise(resolve => setImmediate(resolve));
+      for (const id of gone) f.closedWith(id, "canceled", "writer@demo no longer exists on this host");
+      expect(f.queue.getById(kept)?.state).toBe("pending");
+    } finally { f.db.close(); }
+  });
+
+  it("past the settle limit, an older removed seat's notice behind newer kept ones stays open, and the warning doesn't promise a later settle reaches it", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = await fixture();
+    try {
+      const older = await f.restore("gone-seat-attempt");
+      for (let i = 0; i < 1000; i++) await f.restore(`kept-${i}`, "kept@demo");
+      for (let pass = 0; pass < 2; pass++) closeNoticesOfRemovedSeats(f.queue, (name) => name === "kept@demo");
+      expect(f.queue.getById(older)?.state).toBe("pending");
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining("aren't checked"), { limit: 1000 });
+      expect(warning.mock.calls.map(([message]) => String(message)).join("\n")).not.toContain("next settle");
+    } finally { warning.mockRestore(); f.db.close(); }
+  });
+
+  it("a deleted rig's seats lose their notices; an archived rig's seats keep theirs", async () => {
+    const f = await fixture();
+    try {
+      const rigs = new RigRepository(f.db), sessions = new SessionRegistry(f.db);
+      const doomed = rigs.createRig("doomed"), archived = rigs.createRig("archived");
+      sessions.registerSession(rigs.addNode(doomed.id, "writer", { runtime: "claude-code" }).id, seat);
+      sessions.registerSession(rigs.addNode(archived.id, "kept", { runtime: "claude-code" }).id, "kept@archived");
+      const gone = [await f.restore("one"), await f.uptake("one")];
+      const stays = await f.restore("two", "kept@archived");
+      let listener: ((event: never) => void) | undefined;
+      wireCompactionNoticeSeatRemoval({ subscribe: (cb) => { listener = cb as never; return () => {}; } }, f.queue, seatNameCarried(f.db));
+      rigs.archiveRig(archived.id);
+      rigs.deleteRig(doomed.id);
+      // A rig deletion records rig.deleted only, not a detach per seat.
+      listener!({ type: "rig.deleted", rigId: doomed.id } as never);
+      await new Promise(resolve => setImmediate(resolve));
+      for (const id of gone) f.closedWith(id, "canceled", "writer@demo no longer exists on this host");
+      // An archived rig can be restored, and a seat still running in it is still monitored.
+      expect(f.queue.getById(stays)?.state).toBe("pending");
+    } finally { f.db.close(); }
+  });
+
+  it("a removed seat's notices close; a seat a node still carries keeps its own", async () => {
+    const f = await fixture();
+    try {
+      const rigs = new RigRepository(f.db), sessions = new SessionRegistry(f.db);
+      const rig = rigs.createRig("demo");
+      const kept = rigs.addNode(rig.id, "kept", { runtime: "claude-code" });
+      sessions.registerSession(kept.id, "kept@demo");
+      const gone = [await f.restore("one"), await f.uptake("one"), await f.preparation("gen-1")];
+      const stays = [await f.restore("two", "kept@demo"), await f.preparation("gen-2", "kept@demo")];
+      // Carried at startup, so the startup settle keeps them.
+      const writer = rigs.addNode(rig.id, "writer", { runtime: "claude-code" });
+      sessions.registerSession(writer.id, seat);
+      let listener: ((event: never) => void) | undefined;
+      wireCompactionNoticeSeatRemoval({ subscribe: (cb) => { listener = cb as never; return () => {}; } }, f.queue,
+        seatNameCarried(f.db));
+      await new Promise(resolve => setImmediate(resolve));
+      for (const id of gone) expect(f.queue.getById(id)?.state).toBe("pending");
+      rigs.deleteNode(writer.id);
+      listener!({ type: "session.status_changed", rigId: rig.id, nodeId: kept.id, status: "running" } as never);
+      await new Promise(resolve => setImmediate(resolve));
+      for (const id of gone) expect(f.queue.getById(id)?.state).toBe("pending");
+      listener!({ type: "session.detached", rigId: rig.id, nodeId: writer.id, sessionName: seat } as never);
+      await new Promise(resolve => setImmediate(resolve));
+      for (const id of gone) f.closedWith(id, "canceled", "writer@demo no longer exists on this host");
+      for (const id of stays) expect(f.queue.getById(id)?.state).toBe("pending");
+      // Another sweep changes nothing.
+      const before = stays.map(id => f.queue.listTransitions(id));
+      closeNoticesOfRemovedSeats(f.queue, seatNameCarried(f.db));
+      expect(stays.map(id => f.queue.listTransitions(id))).toEqual(before);
+    } finally { f.db.close(); }
+  });
 });

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { Worker } from "node:worker_threads";
-import type { MiddlewareHandler } from "hono";
+import type { MiddlewareHandler, Context } from "hono";
 import { windowsPrivateAppendHelper } from "./windows-owned-text.js";
 
 export const SLOW_OPERATION_THRESHOLD_MS = 250;
@@ -61,6 +61,11 @@ export interface SlowOperationInstrumentation {
   close?(): Promise<void>;
 }
 
+/** A successful long-poll response includes intentional idle time, not slow work. */
+export function exemptSlowOpRequest(c: Context): void {
+  c.set("slowOpRequestExempt", true);
+}
+
 // The request-timing MIDDLEWARE, extracted as a wired seam (OPR request-observer). It is
 // MEASUREMENT-ONLY: the observer is invoked in a `finally` and isolated in its own try/catch, so a
 // throwing observer can NEVER replace the route's real status/body. `now` is injectable (default
@@ -77,7 +82,9 @@ export function createSlowOpRequestMiddleware(
       await next();
     } finally {
       try {
-        recorder.recordRequest?.(`${c.req.method} ${c.req.path}`, now() - startedAt);
+        if (c.get("slowOpRequestExempt") !== true || c.res.status >= 400) {
+          recorder.recordRequest?.(`${c.req.method} ${c.req.path}`, now() - startedAt);
+        }
       } catch (error) {
         // A measurement throw must never re-enter Hono control flow (would turn the route into a 500).
         console.error("[slow-operation] request observer failed", error);

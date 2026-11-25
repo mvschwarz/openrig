@@ -201,6 +201,14 @@ describe("Send CLI", () => {
             res.writeHead(failed ? 502 : 200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(failed ? { ok: false, sessionName: parsed.session, error: "paste failed", managedCompaction }
               : { ok: true, sessionName: parsed.session, managedCompaction }));
+          } else if (parsed.session === "limited-seat") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "limited-seat", outcome: "delivered",
+              usageLimit: { asOf: "2026-11-19T19:40:00.000Z", resetsAt: "2026-11-19T23:00:00.000Z", notice: "limited-seat was at its usage limit when this send started." } }));
+          } else if (parsed.session === "request-seat") {
+            const inputRequest = { observedAt: "2026-11-20T03:30:00.000Z", notice: "request-seat's main session made a permission or elicitation request (as recorded). That doesn't establish that a dialog is open." };
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: parsed.session, inputRequest }));
           } else if (parsed.session === "unknown-advisory") {
             // OPR.0.4.3.28 — unknown telemetry now PROCEEDS with a non-blocking advisory (warning).
             res.writeHead(200, { "Content-Type": "application/json" });
@@ -271,6 +279,30 @@ describe("Send CLI", () => {
     expect(result.stdout.join("\n")).not.toContain("Sent to");
     if (json) { expect(result.stdout).toHaveLength(1); const encoded = JSON.parse(result.stdout[0]!); expect(remote ? encoded.result.data : encoded).toEqual(data); }
     else { expect(result.stdout.join("\n")).toContain("Recorded, not delivered"); expect(result.stderr.join("\n")).toContain("No live seat"); }
+  });
+
+  it("a --host text send prints the remote seat's usage-limit notice, as a local send does", async () => {
+    const seat = ["limited", "remote-rig"].join("@");
+    const notice = "The seat was at its usage limit when this send started (OpenRig recorded it at 2026-11-19T19:40:00.000Z; it resets at 2026-11-19T23:00:00.000Z). The message reached its input, or may have; the agent isn't expected to read it before then.";
+    const post = vi.fn(async () => ({ status: 200, data: { ok: true, sessionName: seat, outcome: "delivered",
+      usageLimit: { asOf: "2026-11-19T19:40:00.000Z", resetsAt: "2026-11-19T23:00:00.000Z", notice } } }));
+    const testDeps: SendDeps = { ...runningDeps(port), clientFactory: () => ({ post }) as unknown as DaemonClient,
+      hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "remote-fixture", transport: "http", url: "http://fixture.test:7433" }] } }) };
+    const result = await captureChannels(() => makeCmd(testDeps).parseAsync(["node", "rig", "send", seat, "hello", "--host", "remote-fixture"]));
+    expect(result.stdout.join("\n")).toContain(`Sent to ${seat}`);
+    expect(result.stdout).toContain(`Notice: ${notice}`);
+  });
+
+  it("a --host text send that fails with the usage-limit record (HTTP 502) prints the notice beside the failure", async () => {
+    const seat = ["limited", "remote-rig"].join("@");
+    const notice = "The seat was at its usage limit when this send started (OpenRig recorded it at 2026-11-19T19:40:00.000Z; it resets at 2026-11-19T23:00:00.000Z). The message reached its input, or may have; the agent isn't expected to read it before then.";
+    const post = vi.fn(async () => ({ status: 502, data: { ok: false, sessionName: seat, error: "delivery uncertain: the paste may not have landed",
+      usageLimit: { asOf: "2026-11-19T19:40:00.000Z", resetsAt: "2026-11-19T23:00:00.000Z", notice } } }));
+    const testDeps: SendDeps = { ...runningDeps(port), clientFactory: () => ({ post }) as unknown as DaemonClient,
+      hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "remote-fixture", transport: "http", url: "http://fixture.test:7433" }] } }) };
+    const result = await captureChannels(() => makeCmd(testDeps).parseAsync(["node", "rig", "send", seat, "hello", "--host", "remote-fixture"]));
+    expect(result.stdout.join("\n")).not.toContain("Sent to");
+    expect(result.stderr).toContain(`Notice: ${notice}`);
   });
 
   it.each([false, true])("native pending and unknown receipts bypass every pane check and remedial Enter (json=%s)", async json => {
@@ -818,6 +850,11 @@ describe("Send CLI", () => {
 
   // OPR.0.4.3.28 correction — an unknown-telemetry send PROCEEDS and PRINTS the advisory on
   // human output (not only in --json).
+  it("prints the input-request notice beside the send's own result", async () => {
+    const sent = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "send", "request-seat", "hello"]); });
+    expect(sent.logs.join("\n")).toContain("Sent to request-seat\nNotice: request-seat's main session made a permission or elicitation request (as recorded). That doesn't establish that a dialog is open.");
+  });
+
   it("prints the managed compaction notice beside the send's own result, sent or failed", async () => {
     const sent = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "send", "restoring-seat", "hello"]); });
     expect(sent.logs.join("\n")).toContain("Sent to restoring-seat\nNotice: restoring-seat was mid-restore (as recorded). This doesn't mean the restore has finished.");
@@ -826,6 +863,12 @@ describe("Send CLI", () => {
     expect(failed.logs.join("\n")).toContain("Notice: restoring-seat was mid-restore");
     expect(failed.logs.join("\n")).not.toContain("Sent to");
     expect(failed.exitCode).toBe(2);
+  });
+
+  it("prints the usage-limit record beside a delivered send's own result", async () => {
+    const sent = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "send", "limited-seat", "hello"]); });
+    expect(sent.logs.join("\n")).toContain("Sent to limited-seat\nNotice: limited-seat was at its usage limit when this send started.");
+    expect(sent.exitCode ?? 0).toBe(0);
   });
 
   it("prints the Advisory on an unknown-proceed send (human output)", async () => {

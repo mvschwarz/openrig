@@ -27,7 +27,7 @@ import {
   type LifecycleDeps,
   type DaemonState,
 } from "../src/daemon-lifecycle.js";
-import { archiveSpentReservation } from "../src/daemon-start-lock.js";
+import { acquireDaemonStartLock, archiveSpentReservation, markReservationRetained } from "../src/daemon-start-lock.js";
 
 afterEach(() => vi.useRealTimers());
 
@@ -126,6 +126,73 @@ describe("Daemon Lifecycle", () => {
     const deps = startableDeps({ exists: vi.fn((p: string) => p === STATE_FILE), readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null), processLiveness: vi.fn(() => "dead") });
     await startDaemon({ port: 7433 }, deps);
     expect(deps.spawn).toHaveBeenCalledOnce();
+  });
+
+  describe("start over a stale daemon.json checks the launch port before spawning", () => {
+    const staleState: DaemonState = { pid: 999, port: 7433, db: "fixture.db", startedAt: "2026-01-01T00:00:00Z" };
+    const stale = (state: DaemonState = staleState): Partial<LifecycleDeps> => ({
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null),
+    });
+
+    it("refuses when the recorded PID is dead and the port is held, and releases the reservation", async () => {
+      const recordChild = vi.fn();
+      const release = vi.fn();
+      const deps = startableDeps({ ...stale(), processLiveness: vi.fn(() => "dead"), isPortOccupied: vi.fn(async () => true), acquireStartLock: () => ({ recordChild, release }) });
+      const error = await startDaemon({ port: 7433, host: "127.0.0.2" }, deps).catch((e) => e as Error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toMatch(/EADDRINUSE.*port 7433/);
+      expect(error.message).toContain("--port <unused-port>");
+      expect(deps.isPortOccupied).toHaveBeenCalledWith("127.0.0.2", 7433);
+      expect(deps.spawn).not.toHaveBeenCalled();
+      expect(deps.mkdirp).not.toHaveBeenCalled();
+      expect(deps.openForAppend).not.toHaveBeenCalled();
+      expect(deps.writeFile).not.toHaveBeenCalled();
+      expect(recordChild).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledWith(false);
+    });
+
+    it("refuses when the recorded PID is alive but not an OpenRig daemon (refused probe) and the launch port is held", async () => {
+      // The recorded daemon was on another port; something else now holds the one this start binds.
+      const deps = startableDeps({
+        ...stale({ ...staleState, port: 7999 }),
+        processLiveness: vi.fn(() => "alive"),
+        fetch: vi.fn(async () => { throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" }); }),
+        isPortOccupied: vi.fn(async () => true),
+      });
+      await expect(startDaemon({ port: 7433 }, deps)).rejects.toThrow(/EADDRINUSE.*port 7433/);
+      expect(deps.fetch).toHaveBeenCalledWith("http://127.0.0.1:7999/healthz");
+      expect(deps.isPortOccupied).toHaveBeenCalledWith("127.0.0.1", 7433);
+      expect(deps.spawn).not.toHaveBeenCalled();
+      expect(deps.mkdirp).not.toHaveBeenCalled();
+      expect(deps.openForAppend).not.toHaveBeenCalled();
+    });
+
+    it("refuses on a real held loopback port when the recorded PID is dead", async () => {
+      const listener = createServer();
+      await new Promise<void>((resolve, reject) => {
+        listener.once("error", reject);
+        listener.listen(0, "127.0.0.1", resolve);
+      });
+      try {
+        const port = (listener.address() as { port: number }).port;
+        const deps = startableDeps({ ...stale({ ...staleState, port }), processLiveness: vi.fn(() => "dead"), isPortOccupied: realDeps().isPortOccupied });
+        await expect(startDaemon({ port }, deps)).rejects.toThrow(/EADDRINUSE/);
+        expect(deps.spawn).not.toHaveBeenCalled();
+        expect(deps.mkdirp).not.toHaveBeenCalled();
+        expect(listener.listening).toBe(true);
+      } finally {
+        await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
+      }
+    });
+
+    it("checks the launch address once and starts when the recorded PID is dead and the port is free", async () => {
+      const deps = startableDeps({ ...stale(), processLiveness: vi.fn(() => "dead") });
+      await startDaemon({ port: 7433 }, deps);
+      expect(deps.isPortOccupied).toHaveBeenCalledOnce();
+      expect(deps.isPortOccupied).toHaveBeenCalledWith("127.0.0.1", 7433);
+      expect(deps.spawn).toHaveBeenCalledOnce();
+    });
   });
 
   it("does not signal or remove state when recorded process liveness is unknown", async () => {
@@ -517,6 +584,32 @@ describe("Daemon Lifecycle", () => {
     expect(error.message).toContain("--port <unused-port>");
     expect(deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
     expect(deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("start: a child that exits with the daemon's listen-failure line reports that line", async () => {
+    vi.useFakeTimers();
+    let log = "Earlier daemon log\n";
+    const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null as number | null, signalCode: null, unref: vi.fn() });
+    const deps = mockDeps({
+      fetch: vi.fn().mockRejectedValue(new Error("refused")),
+      readFile: vi.fn((p: string) => p === LOG_FILE ? log : null),
+      spawn: vi.fn(() => {
+        setTimeout(() => {
+          log += "OPENRIG_LISTEN_FAILED EADDRNOTAVAIL 100.64.0.9:7433 listen EADDRNOTAVAIL: address not available 100.64.0.9:7433\n";
+          child.exitCode = 69;
+          child.emit("exit", 69, null);
+        }, 1);
+        return child as unknown as ChildProcess;
+      }),
+    });
+    const pending = startDaemon({ port: 7433 }, deps).catch((error) => error as Error);
+    await vi.runAllTimersAsync();
+    const error = await pending;
+
+    expect(error.message).toMatch(/exited before startup completed \(code 69/);
+    expect(error.message).toContain("OPENRIG_LISTEN_FAILED EADDRNOTAVAIL 100.64.0.9:7433 listen EADDRNOTAVAIL: address not available 100.64.0.9:7433");
+    expect(error.message).not.toContain("See ");
+    expect(deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
   });
 
   it("start reports the current child's database-conflict stop and one-start remedy", async () => {
@@ -2304,6 +2397,7 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
         pid === CHILD && opts.token !== null ? opts.token ?? "linux:777" : undefined),
       pidNamespace: () => (opts.pidNamespace === null ? undefined : opts.pidNamespace ?? "host"),
       releaseStartReservation: vi.fn(archiveSpentReservation),
+      retainStartReservation: vi.fn(markReservationRetained),
       sleep: async () => {},
       kill: vi.fn((pid: number) => {
         signalled = true;
@@ -2345,11 +2439,15 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
     expect(await stop(deps)).toBe("stopped");
     expect(deps.kill).toHaveBeenCalledTimes(1);
     expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
-    expect(deps.releaseStartReservation).toHaveBeenCalledWith(lockFile(), raw);
     expect(fs.existsSync(lockFile())).toBe(false);
     const archived = fs.readdirSync(home).filter((name) => name.startsWith("daemon-start.lock.stopped-"));
     expect(archived).toHaveLength(1);
-    expect(fs.readFileSync(path.join(home, archived[0]!), "utf8")).toBe(raw);
+    // The archive is the reservation stop read, with the mark it set before the signal,
+    // and the release names that same text.
+    const archivedText = fs.readFileSync(path.join(home, archived[0]!), "utf8");
+    expect(archivedText.startsWith(raw)).toBe(true);
+    expect(JSON.parse(archivedText.slice(raw.length))).toMatchObject({ retainedBy: "stop", reason: "stopping" });
+    expect(deps.releaseStartReservation).toHaveBeenCalledWith(lockFile(), archivedText);
   });
 
   it("stops the child when the listener answers with the child's own PID", async () => {
@@ -2540,6 +2638,142 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
     const timedOut = (pid: number) => JSON.stringify({ ...JSON.parse(cleanReceipt(pid)), outcome: "timed-out", phase: "drain" });
     expect((await stop(reservedDeps({ receipt: timedOut })) as Error).message).toMatch(/incomplete shutdown: timed-out/);
     expect(fs.existsSync(lockFile())).toBe(true);
+  });
+
+  it("a reservation stop retained after a shutdown it couldn't verify keeps a later start refused, though both PIDs are gone", async () => {
+    // The start's same-boot check, as realDeps passes it: this boot, this shell's namespace, both PIDs dead.
+    const nextStart = () => acquireDaemonStartLock(home, { bootId: "boot-A", bootedAtMs: Date.parse(STARTED_AT) - 60_000, processLiveness: () => "dead", pidNamespace: "host" });
+    const timedOut = (pid: number) => JSON.stringify({ ...JSON.parse(cleanReceipt(pid)), outcome: "timed-out", phase: "drain" });
+    for (const [receipt, reason] of [[timedOut, "incomplete-shutdown"], [null, "no-receipt"]] as const) {
+      const deps = reservedDeps({ receipt });
+      const raw = validLock();
+      const outcome = (await stop(deps)) as Error;
+      expect(outcome).toBeInstanceOf(Error);
+      expect(outcome.message).toMatch(/start reservation retained/);
+      const kept = fs.readFileSync(lockFile(), "utf8");
+      expect(kept.startsWith(raw)).toBe(true);
+      expect(kept.slice(raw.length).trim().split("\n").map((line) => JSON.parse(line).reason)).toEqual(["stopping", reason]);
+      expect(() => nextStart()).toThrow(/already reserved/);
+      expect(fs.readdirSync(home).filter((name) => name.startsWith("daemon-start.lock."))).toEqual([]);
+      fresh();
+    }
+  });
+
+  it("a start that runs while stop verifies the shutdown refuses, though both PIDs are already gone", async () => {
+    const deps = reservedDeps({ receipt: null });
+    const kill = deps.kill;
+    let during: unknown;
+    deps.kill = vi.fn((pid: number, signal: string) => {
+      const sent = kill(pid, signal);
+      // The child is gone and the launcher is dead; stop hasn't verified anything yet.
+      try { acquireDaemonStartLock(home, { bootId: "boot-A", bootedAtMs: Date.parse(STARTED_AT) - 60_000, processLiveness: () => "dead", pidNamespace: "host" }); } catch (error) { during = error; }
+      return sent;
+    });
+    expect((await stop(deps)) as Error).toBeInstanceOf(Error);
+    expect((during as Error).message).toMatch(/already reserved/);
+    expect(fs.existsSync(lockFile())).toBe(true);
+  });
+
+  describe("the stopping mark that couldn't be written", () => {
+    const startNow = () => acquireDaemonStartLock(home, { bootId: "boot-A", bootedAtMs: Date.parse(STARTED_AT) - 60_000, processLiveness: () => "dead", pidNamespace: "host" });
+    const warned = () => vi.mocked(console.warn).mock.calls.map((call) => String(call[0]));
+
+    it("an ordinary write failure doesn't refuse: the stop goes on, says why, and no start archives it while it verifies", async () => {
+      const deps = reservedDeps();
+      const write = fs.writeSync;
+      const failing = vi.spyOn(fs, "writeSync").mockImplementation(((fd: number, data: unknown, ...rest: unknown[]) => {
+        if (typeof data === "string" && data.includes('"retainedBy"')) throw Object.assign(new Error("EIO: i/o error, write"), { code: "EIO" });
+        return (write as (...args: unknown[]) => number)(fd, data, ...rest);
+      }) as typeof fs.writeSync);
+      // The child is gone and the launcher is dead, and no mark is there: a start tried at the signal and while stop
+      // checks the listener, before it has verified anything.
+      const during: unknown[] = [];
+      const tryStart = () => { try { startNow().release(); during.push("started"); } catch (error) { during.push(error); } };
+      const kill = deps.kill, fetch = deps.fetch;
+      let signalled = false;
+      deps.kill = vi.fn((pid: number, signal: string) => { const sent = kill(pid, signal); signalled = true; tryStart(); return sent; });
+      deps.fetch = vi.fn(async (...args: Parameters<LifecycleDeps["fetch"]>) => {
+        if (signalled) tryStart();
+        return fetch(...args);
+      }) as LifecycleDeps["fetch"];
+      try {
+        expect(await stop(deps)).toBe("stopped");
+      } finally {
+        failing.mockRestore();
+      }
+      expect(deps.kill).toHaveBeenCalledTimes(1);
+      expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+      expect(during.length).toBeGreaterThanOrEqual(2);
+      for (const outcome of during) expect((outcome as Error).message).toMatch(/already reserved/);
+      expect(warned()).toContainEqual(expect.stringMatching(/the "stopping" mark was not written: the write failed \(EIO\); stop checked the child again and goes on/));
+      expect(fs.existsSync(lockFile())).toBe(false);
+      expect(fs.readdirSync(home).filter((name) => name.includes(".claim-"))).toEqual([]);
+    });
+
+    it("a reservation that really changed before the mark still refuses, and says how; no signal", async () => {
+      const deps = reservedDeps();
+      const retain = deps.retainStartReservation!;
+      deps.retainStartReservation = vi.fn((file: string, raw: string, reason: string) => {
+        // The path now names another child.
+        fs.writeFileSync(`${file}.next`, header() + childRecord({ childPid: CHILD + 1 }));
+        fs.renameSync(`${file}.next`, file);
+        return retain(file, raw, reason);
+      });
+      await expectRefused(deps, /the reservation changed while stop was checking it: its content changed; no signal sent\.$/);
+      expect(fs.readFileSync(lockFile(), "utf8")).toBe(header() + childRecord({ childPid: CHILD + 1 }));
+      expect(fs.readdirSync(home).filter((name) => name.includes(".claim-"))).toEqual([]);
+    });
+
+    it("a claim left by an interrupted operation doesn't refuse the stop for good: it goes on and names the claim", async () => {
+      const deps = reservedDeps();
+      const claim = `${lockFile()}.claim-${fs.statSync(lockFile()).ino}`;
+      fs.linkSync(lockFile(), claim);
+      expect(await stop(deps)).toBe("stopped");
+      expect(deps.kill).toHaveBeenCalledTimes(1);
+      expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+      expect(warned()).toContainEqual(expect.stringContaining(`the "stopping" mark was not written: the claim file ${claim} is present`));
+      // The claim isn't this stop's to remove: it stays, so the reservation does too, and stop says it wasn't released.
+      expect(fs.existsSync(claim)).toBe(true);
+      expect(warned()).toContainEqual(expect.stringMatching(/was not released/));
+    });
+
+    it("a claim that can't be taken (a link error other than EEXIST) is an I/O failure: the stop goes on and says what failed", async () => {
+      const deps = reservedDeps();
+      const link = fs.linkSync;
+      const failing = vi.spyOn(fs, "linkSync").mockImplementation(((from: fs.PathLike, to: fs.PathLike) => {
+        if (String(to).includes(".claim-")) throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" });
+        return link(from, to);
+      }) as typeof fs.linkSync);
+      try {
+        expect(await stop(deps)).toBe("stopped");
+      } finally {
+        failing.mockRestore();
+      }
+      expect(deps.kill).toHaveBeenCalledTimes(1);
+      expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+      expect(warned()).toContainEqual(expect.stringMatching(/the "stopping" mark was not written: the claim on it couldn't be taken \(EPERM\); stop checked the child again and goes on/));
+    });
+
+    it("a claim held by a removal in progress, which only follows a dead child, refuses on the second look: no signal", async () => {
+      const liveness: Record<number, "alive" | "dead" | "unknown"> = {};
+      const deps = reservedDeps({ liveness });
+      fs.linkSync(lockFile(), `${lockFile()}.claim-${fs.statSync(lockFile()).ino}`);
+      const retain = deps.retainStartReservation!;
+      deps.retainStartReservation = vi.fn((file: string, raw: string, reason: string) => {
+        const mark = retain(file, raw, reason);
+        liveness[CHILD] = "dead"; // the remover saw the child gone
+        return mark;
+      });
+      await expectRefused(deps, /child PID \d+ is absent after the stopping mark; no signal sent\.$/);
+    });
+  });
+
+  it("a later stop still reads a reservation an earlier stop retained, and releases it after a clean shutdown", async () => {
+    fs.writeFileSync(lockFile(), validLock() + JSON.stringify({ retainedBy: "stop", reason: "no-receipt", at: NOW.toISOString() }) + "\n");
+    const deps = reservedDeps({ lock: null });
+    expect(await stop(deps)).toBe("stopped");
+    expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+    expect(fs.existsSync(lockFile())).toBe(false);
   });
 
   it("stopped, but a reservation that changed before its release is left in place", async () => {

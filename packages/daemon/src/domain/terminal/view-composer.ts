@@ -19,7 +19,7 @@
 // (ssh vs http vs unknown) is resolved through the operator's read-only hosts
 // registry via the injected `resolveHost`.
 
-import { tileAttachArgv } from "./tile-attach.js";
+import { tileAttachArgv, pinnedTileAttachArgv } from "./tile-attach.js";
 import { windowsTileAttachArgv, windowsSshTileAttachArgv } from "./windows-tile-attach.js";
 import { powershellQuote } from "../../adapters/windows-launch.js";
 import { bindNativeSessionName } from "./native-session-name.js";
@@ -84,6 +84,8 @@ export interface ComposeContext {
   /** Effective mode of the viewing instance. Inherit keeps plain remote tmux;
    *  isolated opts SSH tiles into remote instance-aware attachment. */
   localTmuxServerMode?: "inherit" | "isolated";
+  /** The provider's local writable tiles pin their seat instead of sizing it (a Herdr view). Remote tiles are unchanged. */
+  pinWritableSeats?: boolean;
 }
 
 /** POSIX single-quote a string so session names / targets are shell-inert in the composed command. */
@@ -218,8 +220,9 @@ export function composeView(
       });
       continue;
     }
-    const attachArgv = (ctx.localPlatform === "win32" ? windowsTileAttachArgv : tileAttachArgv)(
-      ctx.localTmux ?? "tmux", ctx.localTmuxServer ?? [], m.tmuxSession, m.readOnly);
+    const attachArgv = ctx.pinWritableSeats && !m.readOnly
+      ? pinnedTileAttachArgv(ctx.localTmux ?? "tmux", ctx.localTmuxServer ?? [], m.tmuxSession)
+      : (ctx.localPlatform === "win32" ? windowsTileAttachArgv : tileAttachArgv)(ctx.localTmux ?? "tmux", ctx.localTmuxServer ?? [], m.tmuxSession, m.readOnly);
     opened.push({
       seat: m.seat,
       ...(m.runtime ? { runtime: m.runtime } : {}),

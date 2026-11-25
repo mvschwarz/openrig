@@ -123,6 +123,36 @@ export async function daemonHumanReadiness(entityId: string): Promise<HumanReadi
   }
 }
 
+/** How long add waits for the seat names before registering without the warning. */
+const SEAT_NAMES_TIMEOUT_MS = 2_000;
+
+/** The seats on this daemon whose session names `isPerson` reads as a registered person, for add's warning: a seat
+ *  whose member name is a person's id is treated as that person. One read (`/api/ps?seats=true`), bounded by
+ *  SEAT_NAMES_TIMEOUT_MS. Best effort: none when the daemon can't be read in time, or doesn't list seat names. */
+export async function seatsReadAsPerson(isPerson: (session: string) => boolean): Promise<string[]> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // The request's timer starts after client preflight. Bound the whole optional lookup as well, so a slow owner or
+    // sender-identity probe cannot extend the person's wait; abort prevents a later business request after the bound.
+    return await Promise.race([
+      (async () => {
+        const { DaemonClient } = await import("../client.js");
+        const rigs = await new DaemonClient().get<Array<{ seats?: unknown }>>("/api/ps?seats=true", {
+          timeoutMs: SEAT_NAMES_TIMEOUT_MS, signal: controller.signal,
+        });
+        if (rigs.status !== 200 || !Array.isArray(rigs.data)) return [];
+        return rigs.data.flatMap((rig) => Array.isArray(rig.seats)
+          ? rig.seats.filter((seat): seat is string => typeof seat === "string" && isPerson(seat)) : []);
+      })(),
+      new Promise<string[]>((resolve) => {
+        timer = setTimeout(() => { controller.abort(); resolve([]); }, SEAT_NAMES_TIMEOUT_MS);
+      }),
+    ]);
+  } catch { return []; }
+  finally { clearTimeout(timer); }
+}
+
 /** Default queue-row half of the remove guard: non-terminal rows addressed to the human,
  *  via the daemon. ok:false carries the reason the board COULD NOT BE CHECKED. */
 export async function daemonQueueRows(address: string): ReturnType<HumanRowsLookup> {
@@ -251,6 +281,8 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
         const noConnector = result.value.fragment.connectorBindings.length === 0;
         console.log(JSON.stringify({ ok: !failed, entityId, path: result.value.path, receipt: result.receipt, ...(noConnector ? { delivery: "Feed and Steering only" } : {}), ...followUps }));
         if (noConnector) console.error(`${entityId} has no connector binding, so messages and questions reach them only in the TUI's Feed and Steering until one is added: rerun rig gateway human add ${entityId} --replace with the same options plus --binding <kind:connectorRef:secretsRef:primary[:handle=<id>]> (rig gateway human set's binding.<n> changes only a binding that exists).`);
+        const sharing = await seatsReadAsPerson((session) => registry.resolveRegisteredHumanAddress(session, [result.value.fragment]) !== null);
+        if (sharing.length) console.error(`warning: ${sharing.join(", ")} ${sharing.length === 1 ? "is a seat whose member name is" : "are seats whose member names are"} ${entityId}, so work and messages addressed to ${sharing.length === 1 ? "it" : "them"} are treated as addressed to the person ${entityId}. That's intended for the person's own pane; otherwise rename the seat or choose another id.`);
         if (failed) { console.error(`the person was registered, but part of their placement wasn't saved; fix it with rig gateway human set ${entityId} … or rig gateway default ${entityId}`); process.exitCode = 1; }
       } catch (error) { console.error(`refused: ${(error as Error).message}`); process.exitCode = 1; }
     })

@@ -87,7 +87,9 @@ tracked file under `docs/` must be in `docs/as-built/`, `docs/reference/` or `do
 commands that exist, and they validate the context-pack sources;
 `npm run generate-context-packs` rebuilds the generated packs locally, which aren't committed.
 The UI unit-test suite is separate from `npm test`: run `npm run test:ui`. CI runs it on every pull
-request as `package-tests (ui)`, so a change has to pass it.
+request as `package-tests (ui)`, so a change has to pass it. The macOS `package-tests (daemon)` and
+`package-tests (cli)` checks start when a maintainer approves your pull request's current head, so
+they show as expected until then, and a later push needs a new approval to run them.
 [docs/as-built/test-layers.md](docs/as-built/test-layers.md) lists every test layer, what CI runs,
 and what each layer can and cannot prove.
 

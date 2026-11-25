@@ -574,7 +574,7 @@ isn't verified until the seat completes a tool turn: run the printed rig seat re
 --expect-account. An uncertain restart is reported, never retried.
 
 Codex limits:
-- Process observation: the in-place restart reads /proc on Linux or native process metadata on experimental Windows. If the running process, home or conversation cannot be established, it refuses before changing the login. Other platforms have no default process observer.
+- Process observation: the in-place restart reads /proc on Linux, the launch record and lsof on macOS, or native process metadata on experimental Windows. If the running process, home or conversation cannot be established, it refuses before changing the login. Other platforms have no default process observer.
 - Same home: the login must already be saved in the home the seat runs on; the seat doesn't move to another home.
 
 A Claude seat keeps its config dir and gets its own subscription token: --to-account <your label> --token-file <absolute path

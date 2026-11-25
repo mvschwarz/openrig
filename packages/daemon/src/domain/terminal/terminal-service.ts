@@ -1,5 +1,5 @@
 import type { ScopeViewError } from "./scope-task-terminal-view.js";
-import { tileAttachArgv } from "./tile-attach.js";
+import { pinnedTileAttachArgv, tileAttachArgv } from "./tile-attach.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
 import { parseTmuxViewerProof, TMUX_VIEWER_PROOF_OPTION, tmuxViewerCloseArgs, TMUX_VIEWER_OPTION_SNAPSHOT, TMUX_VIEWER_KEPT } from "./tmux-viewer-guard.js";
 import type { ViewerKey, ViewerResult } from "./herdr-viewer.js";
@@ -157,6 +157,8 @@ export interface OpenAllRequest {
   provider?: string;
   session?: string;
   viewportColumns?: number;
+  /** Focus a workspace that still shows a rig's view live instead of opening a copy. On by default: open all opens
+   *  what's absent and focuses what's there, so a repeat adds no views and no tmux clients. `false` opens copies. */
   reuseLive?: boolean;
   herdrApp?: HerdrAppTarget;
 }
@@ -389,6 +391,7 @@ export const KERNEL_SPACE_LABEL = "openrig kernel";
 
 type ResolvedView = { id: string; rigName?: string; rigViewer?: boolean; members: ViewMemberInput[]; kernelLayout?: string; columns?: number; panesPerPage?: number; task?: TaskMembership } | { code: string; error: string };
 type ComposedTerminalView = ComposedView & { kernelLayout?: string };
+type TileProvider = Pick<TerminalProvider, "panesPerPage" | "pinsWritableSeats">;
 
 export class TerminalService {
   private localTmux?: Promise<string | undefined>;
@@ -416,7 +419,7 @@ export class TerminalService {
     if ("ok" in selected) return selected;
     if (selected.name !== "herdr" || !selected.provider.followView) return errorResult(selected.name, "follow_unsupported", "Follow is supported by the qualified Herdr provider only.");
     if (/^(slice|mission):/.test(req.view) || req.expectedPlan !== undefined) {
-      const composed = await this.resolveComposed(req.view, selected.provider.panesPerPage);
+      const composed = await this.resolveComposed(req.view, selected.provider);
       if ("code" in composed) return errorResult(selected.name, composed.code, composed.error);
       if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(selected.name, composed, selected.session)) return errorResult(selected.name, "preview_changed", "Task membership changed since preview; refresh before enabling following.");
     }
@@ -426,12 +429,12 @@ export class TerminalService {
     if (result.code !== "follow_unsupported" || result.following?.enabled !== false) return result;
     // The selector is durably retired BEFORE a one-shot snapshot is dispatched.
     // A lost reply or restart must not make Core events repeat the open.
-    const composed = await this.resolveComposed(req.view, selected.provider.panesPerPage);
+    const composed = await this.resolveComposed(req.view, selected.provider);
     if ("code" in composed || !composed.task?.complete) return { ...result,
       error: `${result.error ?? "Live following is unsupported."} No snapshot opened: ${"code" in composed ? composed.error : "task membership is incomplete."}` };
     if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(selected.name, composed, selected.session)) return errorResult(selected.name, "preview_changed", "Task membership changed before the snapshot; refresh its preview.");
     const note = `Snapshot: this view will not track later owner changes. ${result.error ?? "Live following is unsupported."}`;
-    const snapshot = await selected.provider.openView({ ...composed, opened: composed.opened.map(p => this.viewerPane(p)), spaceLabel: `Snapshot: ${composed.task.name}` });
+    const snapshot = await selected.provider.openView({ ...composed, opened: composed.opened.map(p => this.viewerPane(p, selected.provider)), spaceLabel: `Snapshot: ${composed.task.name}` });
     return { ...snapshot, following: result.following, task: composed.task, remote: remoteOpened(composed, snapshot.opened),
       ...(selected.session !== undefined ? { session: selected.session } : {}),
       viewDescriptor: { kind: "fixed", name: composed.task.name }, notes: [...(snapshot.notes ?? []), note] };
@@ -444,16 +447,16 @@ export class TerminalService {
     let composed: ComposedView | null = null;
     let membershipError: string | undefined;
     try {
-      const current = await this.resolveComposed(selector.view, selected.provider.panesPerPage);
-      if (!("code" in current)) composed = { ...current, opened: current.opened.map(p => this.viewerPane(p)) };
+      const current = await this.resolveComposed(selector.view, selected.provider);
+      if (!("code" in current)) composed = { ...current, opened: current.opened.map(p => this.viewerPane(p, selected.provider)) };
       else membershipError = `${current.code}: ${current.error}${/^(slice|mission):/.test(selector.view) ? ` Refresh or reopen the ${selector.view.split(":")[0]} under its current unambiguous key.` : ""}`;
     } catch { /* Unreadable membership is supplied as unknown, never empty. */ }
     const plan = composed && this.planId(selected.name, composed, selected.session);
     const stillCurrent = async () => {
       if (!composed?.task?.complete || !plan) return false;
-      const current = await this.resolveComposed(selector.view, selected.provider.panesPerPage);
+      const current = await this.resolveComposed(selector.view, selected.provider);
       return !("code" in current) && current.task?.complete === true && this.planId(selected.name,
-        { ...current, opened: current.opened.map(p => this.viewerPane(p)) }, selected.session) === plan;
+        { ...current, opened: current.opened.map(p => this.viewerPane(p, selected.provider)) }, selected.session) === plan;
     };
     const result = await selected.provider.followView(selector.view, composed, controls, stillCurrent, membershipError);
     // Following resolves local task owners only, so its remote list is empty unless a composed tile says otherwise.
@@ -525,7 +528,7 @@ export class TerminalService {
     if ("ok" in selected) return selected;
     const { provider, session } = selected;
 
-    const composed = await this.resolveComposedWithMeta(req.view, provider.panesPerPage, req.viewportColumns);
+    const composed = await this.resolveComposedWithMeta(req.view, provider, req.viewportColumns);
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
     const { composed: composedView, rigViewer } = composed;
     await this.viewerMappings(provider, composedView);
@@ -603,7 +606,8 @@ export class TerminalService {
     return { result, extraNotes };
   }
 
-  private async composeRigBulk(rig: string, panesPerPage?: number, viewportColumns?: number): Promise<{ composed: ComposedTerminalView; bulkAbsent: AbsentSeat[]; skipped: SkippedSeat[] } | null> {
+  /** Composition for a provider: its page size, and whether its local writable tiles pin their seat. */
+  private async composeRigBulk(rig: string, provider?: TileProvider, viewportColumns?: number): Promise<{ composed: ComposedTerminalView; bulkAbsent: AbsentSeat[]; skipped: SkippedSeat[] } | null> {
     const identity = await this.resolveRigIdentity(rig);
     if (!identity) return null;
     const rows = await this.deps.listRigSeats(identity.id);
@@ -612,10 +616,11 @@ export class TerminalService {
     const derived = deriveViewMembers(tmuxRows, { readOnly: false });
     const composed = composeView(`rig:${identity.id}`, await this.refineLiveness(derived), {
       resolveHost: (id) => this.deps.resolveHost(id),
-      panesPerPage,
+      panesPerPage: provider?.panesPerPage,
       localTmux: await this.resolveLocalTmux(),
       localTmuxServer: this.getTmuxServerArgs(),
       localTmuxServerMode: daemonTmuxServerInfo()?.mode,
+      ...(provider?.pinsWritableSeats ? { pinWritableSeats: true } : {}),
       ...(viewportColumns !== undefined ? { viewportColumns } : {}),
     });
     composed.rigName = identity.name;
@@ -623,18 +628,18 @@ export class TerminalService {
     return { composed, bulkAbsent, skipped };
   }
 
-  private async resolveComposed(viewArg: string, panesPerPage?: number, viewportColumns?: number): Promise<ComposedTerminalView | { code: string; error: string }> {
-    const res = await this.resolveComposedWithMeta(viewArg, panesPerPage, viewportColumns);
+  private async resolveComposed(viewArg: string, provider?: TileProvider, viewportColumns?: number): Promise<ComposedTerminalView | { code: string; error: string }> {
+    const res = await this.resolveComposedWithMeta(viewArg, provider, viewportColumns);
     return "code" in res ? res : res.composed;
   }
 
-  private async resolveComposedWithMeta(viewArg: string, panesPerPage?: number, viewportColumns?: number): Promise<{ composed: ComposedTerminalView; rigViewer: boolean } | { code: string; error: string }> {
+  private async resolveComposedWithMeta(viewArg: string, provider?: TileProvider, viewportColumns?: number): Promise<{ composed: ComposedTerminalView; rigViewer: boolean } | { code: string; error: string }> {
     const view = (viewArg ?? "").trim();
     if (!view) return { code: "view_required", error: "a view argument is required" };
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
     const rigViewer = resolved.rigViewer === true;
-    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: this.getTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode, localPlatform: this.deps.localPlatform ?? process.platform });
+    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? provider?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: this.getTmuxServerArgs(), localPlatform: this.deps.localPlatform ?? process.platform, localTmuxServerMode: daemonTmuxServerInfo()?.mode, ...(provider?.pinsWritableSeats ? { pinWritableSeats: true } : {}) });
     if (resolved.rigName !== undefined) composed.rigName = resolved.rigName;
     const saved = view.startsWith("saved:") ? this.deps.viewsStore.get(view.slice(6))
       : !/^(qitem|mission|slice|pod|seat|rig):/.test(view) ? this.deps.viewsStore.get(view) : null;
@@ -673,7 +678,7 @@ export class TerminalService {
     const { provider, session } = selected;
     if (req.bulk && req.view.startsWith("rig:")) {
       const rigName = req.view.slice("rig:".length);
-      const bulk = await this.composeRigBulk(rigName, provider.panesPerPage, req.viewportColumns);
+      const bulk = await this.composeRigBulk(rigName, provider, req.viewportColumns);
       if (!bulk) return errorResult(providerName, "view_not_found", `unknown rig '${rigName}'`);
       const tmux = daemonTmuxServerInfo();
       const planId = this.planId(providerName, bulk.composed, session);
@@ -686,7 +691,7 @@ export class TerminalService {
         planId, status: await provider.status(),
       };
     }
-    const resolved = await this.resolveComposedWithMeta(req.view, provider.panesPerPage, req.viewportColumns);
+    const resolved = await this.resolveComposedWithMeta(req.view, provider, req.viewportColumns);
     if ("code" in resolved) return errorResult(providerName, resolved.code, resolved.error);
     const { composed, rigViewer } = resolved;
     await this.viewerMappings(provider, composed);
@@ -749,9 +754,10 @@ export class TerminalService {
 
     const identities = await this.rigIdentities();
     const rigs: OpenAllRigResult[] = [];
+    const reuseLive = req.reuseLive !== false;
     for (const rig of identities) {
       try {
-        rigs.push(await this.openSingleRigBulk(rig.id, provider, session, req.viewportColumns, req.reuseLive, rig.name));
+        rigs.push(await this.openSingleRigBulk(rig.id, provider, session, req.viewportColumns, reuseLive, rig.name));
       } catch (err) {
         rigs.push({ rig: rig.name, rigId: rig.id, view: `rig:${rig.id}`, outcome: "failed",
           opened: [], absent: [], degraded: [], skipped: [], error: err instanceof Error ? err.message : String(err) });
@@ -776,7 +782,7 @@ export class TerminalService {
     const view = `rig:${rig}`;
     let bulk: Awaited<ReturnType<TerminalService["composeRigBulk"]>>;
     try {
-      bulk = await this.composeRigBulk(rig, provider.panesPerPage, viewportColumns);
+      bulk = await this.composeRigBulk(rig, provider, viewportColumns);
     } catch (err) {
       // No composed view exists yet, so absent/degraded/skipped details are unknown.
       return {
@@ -1045,10 +1051,11 @@ export class TerminalService {
     }
   }
 
-  private viewerPane(pane: import("./terminal-provider.js").ComposedPane) {
+  private viewerPane(pane: import("./terminal-provider.js").ComposedPane, provider: TileProvider) {
     const original = pane.attachArgv;
     if (!original) return pane;
-    const attachArgv = tileAttachArgv(original[5]!, original.slice(6), original[4]!, false);
+    const attachArgv = provider.pinsWritableSeats ? pinnedTileAttachArgv(original[5]!, original.slice(6), original[4]!)
+      : tileAttachArgv(original[5]!, original.slice(6), original[4]!, false);
     return { ...pane, readOnly: false, attachArgv, paneCommand: attachArgv.map(shellQuote).join(" ") };
   }
 
@@ -1057,7 +1064,7 @@ export class TerminalService {
     for (const member of composed.task.members) {
       const pane = composed.opened.find(p => p.seat === member.seat);
       if (!pane || !member.key.hostId || !member.key.nodeId) continue;
-      const result = await provider.lookupViewer({ hostId: member.key.hostId, nodeId: member.key.nodeId }, this.viewerPane(pane));
+      const result = await provider.lookupViewer({ hostId: member.key.hostId, nodeId: member.key.nodeId }, this.viewerPane(pane, provider));
       if (result.ok) { member.viewerStatus = "verified"; member.viewer = result.viewer; }
       else if (result.code !== "viewer_not_provisioned") member.viewerStatus = "unconfirmed";
     }
@@ -1070,15 +1077,15 @@ export class TerminalService {
     const selected = this.selectProvider({ ...req, provider: req.provider ?? "herdr" });
     if ("ok" in selected) return { ok: false, code: selected.code ?? "unknown_provider", error: selected.error ?? "Provider unavailable." };
     if (!selected.provider.ensureViewer) return { ok: false, code: "viewer_unsupported", error: "This provider has no qualified ensure-viewer operation." };
-    const composed = await this.resolveComposed(req.view, selected.provider.panesPerPage, req.viewportColumns);
+    const composed = await this.resolveComposed(req.view, selected.provider, req.viewportColumns);
     if ("code" in composed) return { ok: false, code: composed.code, error: composed.error };
     if (req.expectedPlan !== this.planId(selected.name, composed, selected.session)) return { ok: false, code: "preview_changed", error: "Task membership or attachment changed; refresh the preview before ensuring a viewer." };
     if (!composed.task?.complete) return { ok: false, code: "viewer_unconfirmed", error: "Task membership is incomplete; no viewer was provisioned." };
     const member = composed.task.members.find(m => m.key.hostId === req.member.hostId && m.key.nodeId === req.member.nodeId);
     const pane = member?.availability === "available" && composed.opened.find(p => p.seat === member.seat);
     if (!pane) return { ok: false, code: "viewer_unavailable", error: "This current task member has no verified local terminal attachment." };
-    return selected.provider.ensureViewer(req.member, this.viewerPane(pane), async () => {
-      const current = await this.resolveComposed(req.view, selected.provider.panesPerPage, req.viewportColumns);
+    return selected.provider.ensureViewer(req.member, this.viewerPane(pane, selected.provider), async () => {
+      const current = await this.resolveComposed(req.view, selected.provider, req.viewportColumns);
       return !("code" in current) && current.task?.complete === true
         && this.planId(selected.name, current, selected.session) === req.expectedPlan;
     });
@@ -1120,8 +1127,8 @@ export class TerminalService {
       const inventory = await this.deps.listRigSeatsBatch?.(result.rigIdentities.map(rig => rig.id));
       for (const entry of entries) {
         const rows = entry.kind === "derived" ? inventory?.get(entry.view.slice(4)) : undefined;
-        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: this.getTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode, localPlatform: this.deps.localPlatform ?? process.platform })
-          : await this.resolveComposed(entry.view, this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage);
+        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: this.getTmuxServerArgs(), localPlatform: this.deps.localPlatform ?? process.platform, localTmuxServerMode: daemonTmuxServerInfo()?.mode })
+          : await this.resolveComposed(entry.view, this.deps.resolveProvider(DEFAULT_PROVIDER) ?? undefined);
         if ("code" in plan) continue;
         result.catalog.push({ ...entry, members: [...plan.opened, ...plan.absent, ...plan.degraded].map((m) => m.seat), ready: plan.opened.length, absent: plan.absent.length, degraded: plan.degraded.length, pages: plan.pages.length });
       }

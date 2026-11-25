@@ -165,6 +165,46 @@ describe("agent network increment A: OAuth-connected assistants work with each o
     expect(followUp.text).toContain(B.seat);
   });
 
+  it("a short name gets the one seat's full address and writes nothing; the create to that address is answered on the same id", async () => {
+    const served = await listen();
+    const a = await connect(served.url, A);
+    const b = await connect(served.url, B);
+    // The name a person reads off B's label is its connection, not its seat.
+    const corrected = await a("rig_queue_create", { destination: "claude", body: "Critique this plan." });
+    expect(corrected).toMatchObject({ isError: true, structured: { code: "destination_not_found", candidates: [B.seat] } });
+    expect(corrected.text).toContain(`No seat here is named 'claude', so nothing was written. Use ${B.seat}: its member name is 'claude'.`);
+    // A name no seat has is said plainly, as before.
+    const none = await a("rig_queue_create", { destination: "nobody", body: "No one" });
+    expect(none.structured).toMatchObject({ code: "destination_not_found" });
+    expect(none.structured).not.toHaveProperty("candidates");
+    expect(none.text).toContain("rig_team lists the seats you can reach and their names.");
+    expect(rows()).toBe(0);
+
+    const qitemId = "qitem-exact-address";
+    expect((await a("rig_queue_create", { qitemId, destination: B.seat, body: "Critique this plan." })).isError).toBe(false);
+    expect((await b("rig_queue_claim", { qitemId })).isError).toBe(false);
+    expect((await b("rig_queue_update", { qitemId, state: "done", resolution: "One risk.", closureReason: "no-follow-on" })).isError).toBe(false);
+    expect((await a("rig_queue_show", { qitemId })).structured.item).toMatchObject({ qitemId, destinationSession: B.seat, state: "done", resolution: "One risk." });
+    expect(rows()).toBe(1);
+  });
+
+  it("names every seat with that member name as ambiguous, and never one this connection can't address", async () => {
+    seat(RIG, "cus-vvmaexample02-claude");
+    const served = await listen();
+    const a = await connect(served.url, A);
+    const ambiguous = await a("rig_queue_create", { destination: "claude", body: "Which one?" });
+    expect(ambiguous.structured).toMatchObject({ code: "destination_not_found" });
+    expect([...ambiguous.structured.candidates].sort()).toEqual([B.seat, `cus-vvmaexample02-claude@${RIG}`]);
+    expect(ambiguous.text).toContain("Several seats here have that member name, so it's ambiguous:");
+    // Without team/list another caller's seat isn't one A may address, so the refusal doesn't name it.
+    grants.set(A.key, V1);
+    const hidden = await (await connect(served.url, A))("rig_queue_create", { destination: "claude", body: "Hidden" });
+    expect(hidden.structured).toMatchObject({ code: "destination_not_found" });
+    expect(hidden.structured).not.toHaveProperty("candidates");
+    expect(hidden.text).not.toContain("cus-vvmaexample");
+    expect(rows()).toBe(0);
+  });
+
   it("a message is an item the receiver reads and closes, and the reply is an item back, read by the first assistant", async () => {
     const served = await listen();
     const a = await connect(served.url, A);
@@ -397,6 +437,42 @@ describe("agent network increment A: OAuth-connected assistants work with each o
       expect(team.isError).toBe(false);
       expect(team.structured.hostedMembers).toMatchObject([{ session: `grok@${RIG}`, presence: { lastWake: { qitemId: fromA, at: "2026-11-02T11:00:00.000Z" } } }]);
       expect(team.text).not.toContain(internal);
+    } finally {
+      if (savedWorkspace === undefined) delete process.env.OPENRIG_WORKSPACE_ROOT; else process.env.OPENRIG_WORKSPACE_ROOT = savedWorkspace;
+    }
+  });
+
+  it("team discovery shows a bound participant as remote with its check-in, never as its hub terminal's state", async () => {
+    const workspace = path.join(home, "workspace");
+    const savedWorkspace = process.env.OPENRIG_WORKSPACE_ROOT;
+    process.env.OPENRIG_WORKSPACE_ROOT = workspace;
+    try {
+      fs.mkdirSync(path.join(workspace, "rosters"), { recursive: true });
+      fs.writeFileSync(path.join(workspace, "rosters", "team.json"), JSON.stringify({
+        version: 1, id: "team", name: "Team", purpose: "Ship the release", curator: { seat: LEAD, host: INSTANCE }, updated_at: "2026-11-21",
+        members: [{ seat: B.seat, host: INSTANCE, capabilities: ["critique"], engagement: ["delegate"], use_when: "A second opinion", why: "Reads plans",
+          hosted: true, app: "claude", kind: "persistent", check_in_minutes: 15 }],
+      }));
+      // The hub's terminal for B's seat has no agent in it, and reads detached.
+      const terminal = db.prepare("SELECT id FROM sessions WHERE session_name = ?").get(B.seat) as { id: string };
+      setup.sessionRegistry.updateStatus(terminal.id, "detached");
+      const served = await listen();
+      const a = await connect(served.url, A);
+      const b = await connect(served.url, B);
+      expect(a.instructions()).toContain("A network participant's status is its presence.checkIn, not sessionStatus.");
+      const seatOf = async (session: string) =>
+        ((await a("rig_team")).structured.seats as Array<Record<string, any>>).find((entry) => entry.session === session)!;
+      // No check-in yet is said as it is: it doesn't make B stopped.
+      expect(await seatOf(B.seat)).toMatchObject({ sessionStatus: "remote", activity: "unknown", participant: { app: "claude", kind: "persistent" },
+        presence: { checkIn: { status: "no-check-in-yet", lastCheckInAt: null, expectedMinutes: 15 } } });
+      // B reads its own inbox: that's its check-in. A pickup would be a claim on a row, and nothing here claims one.
+      expect((await b("rig_queue_list", { owned: true })).isError).toBe(false);
+      expect(await seatOf(B.seat)).toMatchObject({ sessionStatus: "remote", activity: "unknown",
+        presence: { checkIn: { status: "checking-in", lastCheckInAt: expect.any(String), expectedMinutes: 15 } } });
+      // The lead, on no roster, is as the daemon reports it.
+      const lead = await seatOf(LEAD);
+      expect(lead.sessionStatus).not.toBe("remote");
+      expect(lead).not.toHaveProperty("presence");
     } finally {
       if (savedWorkspace === undefined) delete process.env.OPENRIG_WORKSPACE_ROOT; else process.env.OPENRIG_WORKSPACE_ROOT = savedWorkspace;
     }

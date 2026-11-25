@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { assertLocalTmux, isLocalTmuxHost, readTmuxAttachCommand, readTmuxServerArgs } from "../tmux-attachment.js";
 import { bindNativeSessionName, powershellQuote, windowsTileAttachArgv } from "@openrig/daemon/windows-launch";
 import { createTerminalCommandSession } from "@openrig/daemon/terminal-cleanup";
-import { shellQuote } from "../cross-host-executor.js";
+import { shellQuote, shellWord } from "../cross-host-executor.js";
 
 /** Creating a local watcher must address the selected local instance, including inherited servers. */
 export async function chatroomTmuxSelection(client: Pick<DaemonClient, "baseUrl" | "get" | "isLocalInstance">): Promise<{ command: string[]; serverArgs: string[] }> {
@@ -40,6 +40,12 @@ export function chatroomWatchTmuxArgs(rig: string, watcher: readonly string[] = 
     // executable and script paths with spaces. `--` selects its direct argv mode.
     ...(platform === "win32" ? ["--"] : []),
     ...watcher.map(tmuxArg), "chatroom", "watch", "--", tmuxArg(rig)];
+}
+
+/** The printed attach line. The session gets tmux's final-`;` escape, then is quoted for a shell when it needs it, so a
+ *  pasted line attaches to that exact session; a name that needs neither prints as it is. */
+export function chatroomAttachHint(session: string): string {
+  return `Attach with: tmux attach -t ${shellWord(tmuxArg(session))}`;
 }
 
 /** tmux ends a command at an argument that ends in `;`, unless a `\` comes before it, so a final `;` gets that `\`. */

@@ -114,12 +114,19 @@ export class OperatingPostureService {
       return current.id;
     };
     if (ctx.projectId) ctx.projectId = currentProject(ctx.projectId);
+    const workstreamNames: Array<{ value: string; source: string }> = [];
     const merge = (key: keyof OperatorContextReadContext, raw: unknown, source: string) => {
       if (raw === undefined || raw === null) return;
       if (typeof raw !== "string" || !raw.trim()) throw new Error("invalid " + key + " from " + source);
       let value: string = raw;
       if (key === "rigId") value = rigIdentity(value);
       if (key === "projectId") value = currentProject(value);
+      if (key === "workstreamId") {
+        // Spellings of a workstream (directory name, SPEC id) are compared once the slice resolves, not as strings.
+        workstreamNames.push({ value, source });
+        ctx.workstreamId ??= value; ctx.sources.push(source);
+        return;
+      }
       if (ctx[key] && ctx[key] !== value) throw new Error("conflicting " + key + " from " + source);
       ctx[key] = value; ctx.sources.push(source);
     };
@@ -127,8 +134,9 @@ export class OperatingPostureService {
       const parts = ctx.workstreamId.split("/");
       if (parts.length !== 3) throw new Error("use project/mission/slice-id workstream identity");
       merge("projectId", parts[0], "workstream qualifier"); merge("missionId", parts[1], "workstream qualifier");
-      ctx.workstreamId = parts[2];
+      ctx.workstreamId = parts[2] || undefined;
     }
+    if (ctx.workstreamId) workstreamNames.push({ value: ctx.workstreamId, source: "input" });
     let destination: string | null = null;
     if (ctx.qitemId) {
       const row = this.db.prepare("SELECT tags, destination_session FROM queue_items WHERE qitem_id = ?").get(ctx.qitemId) as { tags: string | null; destination_session: string } | undefined;
@@ -203,10 +211,17 @@ export class OperatingPostureService {
         if (!ctx.phase.value) ctx.phase = { value: phase, source: missionPath };
         ctx.sources.push(missionPath);
         if (ctx.workstreamId) {
-          requiredSegment(ctx.workstreamId, "workstream");
           const slices = inside(projectRoot, join(missionRoot, "slices"));
+          // Every spelling must name the same authored slice; a different slice is a conflict.
+          const nodes = new Map<string, string>();
+          for (const name of workstreamNames) {
+            requiredSegment(name.value, "workstream");
+            const named = resolveWorkNodeDirs(slices, name.value);
+            if (named.length !== 1) throw new Error("workstream must resolve to one authored slice");
+            if (!nodes.has(named[0]!.dir)) nodes.set(named[0]!.dir, name.source);
+          }
+          if (nodes.size > 1) throw new Error("conflicting workstreamId from " + [...nodes.values()].join(" and "));
           const matches = resolveWorkNodeDirs(slices, ctx.workstreamId);
-          if (matches.length !== 1) throw new Error("workstream must resolve to one authored slice");
           const specPath = join(inside(projectRoot, join(slices, matches[0]!.dir)), "SPEC.md");
           ctx.paths.workstream = dirname(specPath);
           const spec = readFileSync(specPath, "utf8");
