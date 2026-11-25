@@ -102,7 +102,7 @@ export async function exitPaneRuntime(tmux: RuntimeExitTmux, input: RuntimeExitI
     const term = await tmux.signalPaneRuntime(input.inputTarget, observed.pid, "TERM", still);
     if (!term.ok) {
       if (await gone(listProcesses, observed)) return { state: "exited", path: "graceful", detail: `${name} exited by itself before it was signalled.` };
-      return { state: "not_identified", detail: `${name} wasn't signalled: ${term.message}` };
+      return { state: "not_identified", detail: `${name} wasn't signalled: ${term.message}${forcedBecause === null ? "" : ` /exit couldn't be used: ${forcedBecause}.`}` };
     }
   }
   if (await waitGone(listProcesses, observed, timing)) {

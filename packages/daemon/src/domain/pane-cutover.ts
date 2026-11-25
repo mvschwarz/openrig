@@ -64,7 +64,8 @@ export async function terminatePaneInPlace(
   const term = await tmux.signalPaneProcess(inputTarget, "TERM");
   if (!term.ok) failures.push(`TERM: ${term.message}`);
   if (await waitPaneDead(tmux, paneId, timing)) {
-    return { ok: true, path: "graceful", detail: exited ? `${exited.detail} The pane's process exited on TERM.` : "The pane's process exited on TERM." };
+    // The runtime's own exit wasn't verified. A successful pane-level stop still proceeds, but doesn't prove its shutdown.
+    return { ok: true, path: exited ? "forced" : "graceful", detail: exited ? `${exited.detail} The pane's process exited on TERM.` : "The pane's process exited on TERM." };
   }
   // Graceful window elapsed — force-kill (the pinned degraded path).
   const kill = await tmux.signalPaneProcess(inputTarget, "KILL");
