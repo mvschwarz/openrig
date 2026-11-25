@@ -339,6 +339,7 @@ import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, filterProtectedProjections, type ProjectionPlan } from "./projection-planner.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
+import { NativePermissionStore } from "./native-permission-store.js";
 import { PodRepository } from "./pod-repository.js";
 import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, SkillResource, StartupAction, StartupFile } from "./types.js";
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime-adapter.js";
@@ -975,8 +976,17 @@ export class PodRigInstantiator {
         policy: this.deps.rigRepo.getNodePolicyProvenance(nodeId), rigPolicy: this.deps.rigRepo.getRigPolicyProvenance(rigId) };
     };
     const saved = contract()!;
+    // The launch applies the seat's current saved Codex envelope (NativePermissionStore, at startup), not the declared
+    // one, so the preflight's rig reach advisory reads that one too. A cleared envelope means none; one that can't be
+    // read refuses the launch on its own.
+    let codexPermissions: RigSpecPodMember["codexPermissions"];
+    if (saved.member.runtime === "codex") {
+      try { codexPermissions = new NativePermissionStore(this.db).launchOverride(nodeId, "codex").codexPermissions; }
+      catch { /* see above */ }
+    }
+    const member = saved.member.runtime === "codex" ? { ...saved.member, codexPermissions } : saved.member;
     const selected = { ...source.spec, name: saved.name, env: saved.env ?? undefined, permissionPolicy: undefined,
-      pods: [{ ...context.pod, members: [saved.member], edges: [] }], edges: [] };
+      pods: [{ ...context.pod, members: [member], edges: [] }], edges: [] };
     const inherited = saved.policy ? { ...saved.policy, ref: saved.policy.nodeRef ?? saved.rigPolicy?.rigRef ?? "none",
       resolvedTarget: saved.policy.resolvedTarget ?? undefined, declaringDir: saved.policy.declaringDir ?? undefined }
       : this.inheritedPermissionPolicy(rigId);

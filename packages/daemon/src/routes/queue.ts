@@ -1661,7 +1661,7 @@ export function queueRoutes(): Hono {
   // `state=...`). Composable with destinationSession/sourceSession/
   // targetRepo/limit.
   // OPR.0.4.4.15 FR-1 — the aggregated attention read: ONE payload in the
-  // shared P4 fanout contract ({items, hosts}), local always included,
+  // shared P4 fanout contract ({items, hosts}); absent a host query, local is included,
   // subscribed remote hosts fanned out DAEMON-SIDE (bearer never in the
   // browser). A NEW sibling endpoint by arch ruling 3 — the existing
   // /list?attention=1 wire below stays byte-preserved (the strongest form
@@ -1679,7 +1679,7 @@ export function queueRoutes(): Hono {
       listLocalAttention: () => repo.listAttention({ state: ["pending", "in-progress", "blocked"] }) as unknown as AttentionItem[],
       listSubscriptions: () => (store ? store.listFeedHostSubscriptions() : []),
       loadRegistry: registryLoader,
-    });
+    }, c.req.query("host"));
     return c.json(payload);
   });
 

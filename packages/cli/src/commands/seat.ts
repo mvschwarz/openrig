@@ -1080,6 +1080,7 @@ identity remains unverified; a version number alone cannot clear it.
         if (codexPermissions !== undefined) {
           const replaced = data["replaced"] as { mode?: { mode?: string } } | undefined;
           console.log(`Codex permission envelope ${data["changed"] === false ? "unchanged" : "recorded and audited"}${replaced?.mode?.mode ? `; it replaces the recorded ${replaced.mode.mode} mode` : ""}.`);
+          for (const advisory of (data["advisories"] as string[] | undefined) ?? []) console.log(`Warning: ${advisory}`);
           console.log(String(data["effect"])); return;
         }
         if (opts.codexProfile !== undefined) {

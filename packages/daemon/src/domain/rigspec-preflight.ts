@@ -12,7 +12,8 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { mergeSeatEnv, type SeatEnv } from "./seat-env.js";
 import { withoutRuntimeHomes } from "./seat-runtime-home.js";
 import { isLaunchWrapperRuntime, unsupportedCommunityRunnerLaunchWrapperMessage } from "./launch-wrapper.js";
-import { resolveLaunchWrapperArgv } from "./seat-launch-environment.js";
+import { resolveLaunchWrapperArgv, seatRigReachPaths } from "./seat-launch-environment.js";
+import { codexRigReach, codexRigReachWarning, type CodexMemberPermissions } from "./codex-member-permissions.js";
 
 const RUNTIME_COMMANDS: Record<string, string> = {
   "claude-code": "claude --version",
@@ -128,6 +129,9 @@ export class RigSpecPreflight {
       }
     }
 
+    for (const node of spec.nodes) {
+      if (node.runtime === "codex") warnRigReach(node.id, node.codexPermissions, node.cwd ? resolveAuthoredCwd(node.cwd, null) : undefined, warnings);
+    }
     if (errors.length === 0) {
       await warnRigLoginPath(spec.nodes.filter(node => node.runtime === "codex").map(node => ({ label: node.id, env: {} })), this.exec, warnings);
     }
@@ -458,8 +462,10 @@ async function preflightMembers(
         continue;
       }
 
-      if (member.runtime === "codex") loginTargets.push({ label: `${pod.id}.${member.id}`,
-        env: mergeSeatEnv(rigSpec.env, member.env, preflightCtx.envOverride && withoutRuntimeHomes(preflightCtx.envOverride)) });
+      const seatEnv = mergeSeatEnv(rigSpec.env, member.env, preflightCtx.envOverride && withoutRuntimeHomes(preflightCtx.envOverride));
+      if (member.runtime === "codex") loginTargets.push({ label: `${pod.id}.${member.id}`, env: seatEnv });
+      // No session follows a materialize-only preflight, so there's no launch to warn about.
+      if (member.runtime === "codex" && !preflightCtx.materializeOnly) warnRigReach(`${pod.id}.${member.id}`, member.codexPermissions, configResult.config.cwd, warnings, seatEnv);
 
       // Managed Claude activity-hook delivery preflight (NONFATAL): when a claude-code member
       // selects the claude_activity_hooks resource, verify the daemon can actually deliver
@@ -536,6 +542,19 @@ async function preflightMembers(
   // higher-priority is a FINDING, not an ordering input — the pin freezes presentation, never semantics.
   warnings.push(...permissionPolicyDiscoveryWarnings(rigSpec, preflightCtx));
   return { ready: errors.length === 0, errors, warnings };
+}
+
+/** A Codex seat whose declared sandbox can't read what rig needs, or has network off, can't take its tasks; say so, and
+ *  launch as written. */
+function warnRigReach(label: string, permissions: CodexMemberPermissions | undefined, cwd: string | undefined, warnings: string[], env?: SeatEnv): void {
+  if (!permissions) return;
+  try {
+    const gap = codexRigReach(permissions, { ...seatRigReachPaths(env), cwd });
+    if (gap) warnings.push(codexRigReachWarning(label, gap));
+  } catch {
+    // Advisory only, as in the setter: a lookup that throws must not become a preflight error, nor read as covered.
+    warnings.push(`${label}: rig read coverage for this seat's codex_permissions could not be checked. The launch continues with the permissions as written; run rig whoami inside the seat to check.`);
+  }
 }
 
 /** A Codex login-shell lookup for each distinct declared seat environment, advisory only.
