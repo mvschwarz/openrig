@@ -74,7 +74,7 @@ const JS_RUNTIME_VALUE_FLAGS = new Set([
 const JS_RUNTIME_INLINE_FLAGS = new Set(["-e", "--eval", "-p", "--print"]);
 
 function jsRuntimeScriptToken(argv0: string, args: string[]): string | undefined {
-  let index = argv0 === "deno" && args[0] === "run" ? 1 : 0;
+  let index = (argv0 === "deno" || argv0 === "bun") && args[0] === "run" ? 1 : 0;
   while (index < args.length) {
     const token = args[index]!;
     if (token === "--") return args[index + 1];
