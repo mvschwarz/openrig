@@ -194,6 +194,14 @@ function compare(db: Database.Database, instance: WorkflowInstance): { view: Gra
  * Receipts live in the existing instance binding; prior specs/step/queue history remain. */
 export function recoverGraphOperation(db: Database.Database, key: string): { kind: string; receipt: Record<string, unknown>; instance: WorkflowInstance } | null {
   const store = new WorkflowInstanceStore(db);
+  const hasStarts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workflow_start_operations'").get();
+  if (hasStarts) {
+    const start = db.prepare("SELECT * FROM workflow_start_operations WHERE operation_key = ?").get(key) as { instance_id: string; entry_qitem_id: string; request_digest: string; created_at: string; actor_session: string } | undefined;
+    if (start) return { kind: "ordinary-instantiate", instance: store.getByIdOrThrow(start.instance_id), receipt: {
+      operationKey: key, instanceId: start.instance_id, entryQitemId: start.entry_qitem_id,
+      requestDigest: start.request_digest, createdAt: start.created_at, actorSession: start.actor_session,
+    } };
+  }
   const created = store.getByLifecycleOperationKey(key);
   if (created) return { kind: "instantiate", instance: created, receipt: {
     operationKey: key, instanceId: created.instanceId, entryQitemId: created.lifecycleBinding?.entryQitemId,

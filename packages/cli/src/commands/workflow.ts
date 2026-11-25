@@ -265,7 +265,7 @@ line it prints, then rig workflow show WF01ABC to confirm the adoption.
 
   cmd
     .command("operation <key>")
-    .description("Recover a lifecycle creation or revision effect by its stable key, even after a lost response or source edit")
+    .description("Recover a keyed workflow creation or lifecycle revision, even after a lost response or source edit")
     .option("--json", "Complete original receipt and current instance")
     .action(async (key: string, opts: { json?: boolean }) => {
       await withClient(getDeps(), async client => {
@@ -323,6 +323,7 @@ line it prints, then rig workflow show WF01ABC to confirm the adoption.
     .requiredOption("--root-objective <text>", "Root objective for the run")
     .option("--title <text>", "Short display title for this run's ordinary queue packets")
     .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
+    .option("--operation-key <key>", "Stable key for retry and recovery via workflow operation")
     .option("--entry-owner <session>", "Override default entry-step owner")
     .option("--rig <name>", "Bind the instance to this rig (overrides the spec's target.rig default; roles resolve to seats on this rig)")
     .option("--pod <name>", "Bind role selection and {pod} targets to a pod on the bound rig")
@@ -352,6 +353,7 @@ Examples:
       rootObjective: string;
       title?: string;
       createdBy: string;
+      operationKey?: string;
       entryOwner?: string;
       rig?: string;
       pod?: string;
@@ -362,6 +364,17 @@ Examples:
       json?: boolean;
     }, command: Command) => {
       const scopeBody = workflowScopeBody(opts, command);
+      if (opts.operationKey !== undefined && !isAbsolute(specPath) && !specPath.includes("/") && !specPath.includes("\\")) {
+        try {
+          if (statSync(specPath).isFile()) {
+            console.error(`For a keyed start, write the file path as ./${specPath}; this stays the same if the file later moves.`);
+            process.exitCode = 1;
+            return;
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<{
@@ -369,16 +382,23 @@ Examples:
           entryQitemId?: string;
           entryOwnerSession?: string;
           advisories?: string[];
-        }>("/api/workflow/instantiate", {
+          error?: string;
+        }>(opts.operationKey === undefined ? "/api/workflow/instantiate" : "/api/workflow/instantiate-keyed", {
           specPath: resolveWorkflowSource(specPath),
           rootObjective: opts.rootObjective,
           runTitle: opts.title,
           createdBySession: opts.createdBy,
+          ...(opts.operationKey !== undefined ? { operationKey: opts.operationKey } : {}),
           entryOwnerSession: opts.entryOwner,
           targetRig: opts.rig,
           targetPod: opts.pod,
           ...scopeBody,
         });
+        if (opts.operationKey !== undefined && res.status === 404 && !res.data?.error) {
+          console.error("This daemon does not support keyed ordinary workflow starts. No unkeyed start was sent; upgrade the daemon.");
+          process.exitCode = 1;
+          return;
+        }
         printResult(opts.json ?? false, res.data, res.status);
         printWorkflowAdvisories(res.data?.advisories);
         const body = res.data ?? {};

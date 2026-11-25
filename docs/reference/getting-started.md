@@ -901,6 +901,14 @@ Pi settings, but cross-runtime switches resolve settings afresh for the target.
 Use `--runtime omp` for the OMP RPC runner or `--runtime omp-tui` for the
 native OMP terminal. Both accept a target `--model` and `--effort`.
 
+A runtime listed by `rig community-harness list` can be the target too: pass its
+name, for example `--runtime cursor`. The switch needs that harness's preset
+installed on the daemon, and refuses with `runtime_target_unavailable` when it
+isn't. A community harness places no guidance, skills or startup files, so a
+switch to one doesn't project the seat's skill loadout and says so in its notes.
+Moving the other way works the same: a seat on a community harness can switch to
+a built-in runtime while its own preset is still installed.
+
 A configured `launch_wrapper` carries across runtime switches among Pi, Codex
 and Claude Code. It must support each successor executable and preserve that
 runtime's credential environment. A wrapped Pi seat cannot switch to Claude

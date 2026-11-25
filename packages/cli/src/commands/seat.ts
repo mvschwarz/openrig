@@ -1427,7 +1427,7 @@ resume/successor launch reads it at call time. Examples:
   cmd
     .command("set-runtime")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--runtime <runtime>", "codex, claude-code, pi, omp or omp-tui")
+    .option("--runtime <runtime>", "codex, claude-code, pi, omp, omp-tui, or an installed community harness (rig community-harness list)")
     .option("--reason <text>", "Why the seat moves; recorded with the switch")
     .option("--model <id>", "Target model; otherwise the seat's agent spec for the target, else the target's default")
     .option("--effort <level>", "Target effort, the target runtime's own level (not translated)")
