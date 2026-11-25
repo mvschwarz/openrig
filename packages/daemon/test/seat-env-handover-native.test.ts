@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -93,9 +93,12 @@ describe("a one-off --env value stays with the first launch (real tmux)", () => 
     const incumbent = sessionRegistry.getSessionsForRig(rig.id)[0]!;
     sessionRegistry.updateStartupStatus(incumbent.id, "ready", new Date("2026-08-07T09:00:00Z").toISOString());
     sessionRegistry.updateResumeToken(incumbent.id, "codex_id", "synthetic-parent", "scrape");
-    await tmux(`set-environment -g REMOVED global-must-not-return`);
+    await tmux(`set-environment -g REMOVED ordinary-global`);
     await tmux(`set-environment -g ONLY_THIS_LAUNCH unrelated-global`);
     await adapter.setSessionEnv(SEAT, "AMBIENT", "keep");
+    await adapter.setSessionEnv(SEAT, "ONLY_THIS_LAUNCH", "stale-one-off");
+    const previousMarker = await adapter.getSessionEnv(SEAT, "OPENRIG_SEAT_ENV_KEYS");
+    await adapter.setSessionEnv(SEAT, "OPENRIG_SEAT_ENV_KEYS", `${previousMarker},ONLY_THIS_LAUNCH`);
     rigRepo.setRigEnv(rig.id, { RIG_ONLY: "changed" });
 
     const forkedFrom: string[] = [];
@@ -115,15 +118,16 @@ describe("a one-off --env value stays with the first launch (real tmux)", () => 
       readinessTimeoutMs: 3000, sleep,
     });
 
-    const handover = async (tag: string) => {
+    const handover = async (tag: string, warning?: string) => {
       const result = await service.handover({ seatRef: SEAT, reason: "context ~85%", source: `fork:${SEAT}`, operator: "orch@seat" });
       expect(result.ok).toBe(true);
+      if (warning) expect(result).toMatchObject({ result: { warnings: expect.arrayContaining([expect.stringContaining(warning)]) } });
       expect(await currentPane()).toBe(pane);
       return paneEnviron(tag);
     };
     const checkInherited = (env: Record<string, string>) => {
       expect(env).toMatchObject({ HOME: "/openrig/home", AMBIENT: "keep", ONLY_THIS_LAUNCH: "unrelated-global" });
-      expect(env).not.toHaveProperty("REMOVED");
+      expect(env.REMOVED).toBe("ordinary-global");
     };
     for (const tag of ["successor", "repeat"]) {
       const env = await handover(tag);
@@ -135,12 +139,36 @@ describe("a one-off --env value stays with the first launch (real tmux)", () => 
     }
     rigRepo.setRigEnv(rig.id, null);
     db.prepare("UPDATE nodes SET env_json = NULL WHERE id = ?").run(node.id);
+    const unset = adapter.unsetSessionEnv.bind(adapter);
+    let retireeWasDead = false;
+    const writeFailure = vi.spyOn(adapter, "unsetSessionEnv").mockImplementation(async (target, key, options) => {
+      if (key === "MEMBER_ONLY") {
+        retireeWasDead = await adapter.isPaneDead(pane);
+        throw new Error("fixture session environment write failed");
+      }
+      return unset(target, key, options);
+    });
+    const partial = await handover("partial", "MEMBER_ONLY");
+    expect(retireeWasDead).toBe(true);
+    expect(partial.MEMBER_ONLY).toBe("m");
+    expect(await adapter.getSessionEnv(SEAT, "OPENRIG_SEAT_ENV_KEYS")).toBe("MEMBER_ONLY");
+    writeFailure.mockRestore();
+    await allowGracefulExit();
     const empty = await handover("empty");
     checkInherited(empty);
     expect(empty).not.toHaveProperty("RIG_ONLY");
     expect(empty).not.toHaveProperty("MEMBER_ONLY");
     expect(await adapter.getSessionEnv(SEAT, "OPENRIG_SEAT_ENV_KEYS")).toBe("");
-    expect(forkedFrom).toEqual(["synthetic-parent", "synthetic-next-1", "synthetic-next-2"]);
+    await allowGracefulExit();
+    rigRepo.setRigEnv(rig.id, { REMOVED: "declared-again" });
+    expect((await handover("readded")).REMOVED).toBe("declared-again");
+    expect(await adapter.getSessionEnv(SEAT, "REMOVED")).toBe("declared-again");
+    await tmux(`send-keys -t ${q(pane)} -l -- exit`);
+    await tmux(`send-keys -t ${q(pane)} Enter`);
+    await expect.poll(() => adapter.isPaneDead(pane)).toBe(true);
+    expect(await adapter.respawnPane(pane, "/bin/sh")).toMatchObject({ ok: true });
+    expect((await paneEnviron("bare-restart")).REMOVED).toBe("declared-again");
+    expect(forkedFrom).toEqual(["synthetic-parent", "synthetic-next-1", "synthetic-next-2", "synthetic-next-3", "synthetic-next-4"]);
     db.close();
   }, 60_000);
 });

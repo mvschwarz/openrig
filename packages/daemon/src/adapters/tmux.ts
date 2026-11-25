@@ -9,7 +9,7 @@ import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import type { TerminalServerObservation } from "../domain/terminal-server-reachability.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
-import { SEAT_ENV_KEYS_VAR } from "../domain/seat-env.js";
+import { SEAT_ENV_KEYS_VAR, parseSeatEnvKeys } from "../domain/seat-env.js";
 import { isTmuxCredentialEnvKey } from "./tmux-credential-env.js";
 import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
@@ -96,6 +96,12 @@ export type TmuxResult =
 /** How a launch treats a seat's limit it can't apply (#3253): a fresh launch is not started; a recovery (a handover, a
  *  provider switch, a restart in place) goes ahead without it, with a structured warning. */
 export type ProcessLimitsMode = "fresh" | "recovery";
+
+export interface SeatEnvironmentReconciliation {
+  pendingKeys?: string;
+  set: Readonly<Record<string, string>>;
+  remove: readonly string[];
+}
 
 /** What one launch learned about the seat's scope: the warning of a recovery without it, whether the command was
  *  capped (with its requested limit and the marker its command writes once it runs inside the scope), and (for the
@@ -2724,27 +2730,35 @@ export class TmuxAdapter {
       /** #80: a bare respawn (no `env`) of this seat, which goes beneath its rig's slice when the rig groups its seats. */
       groupSeatOf?: string;
       /** Synchronize only OpenRig-owned names in a retained session before spawning its successor. */
-      seatEnvironment?: { pendingKeys?: string; set: Readonly<Record<string, string>>; remove: readonly string[] } },
+      seatEnvironment?: SeatEnvironmentReconciliation },
   ): Promise<TmuxResult> {
     return this.guardedInput(paneTarget, async (pane, beforeWrite) => {
+      const warnings: string[] = [];
       if (opts?.seatEnvironment) {
-        try {
-          if (opts.seatEnvironment.pendingKeys !== undefined) {
-            // A failed value or final marker write must leave every owned name available for retry.
-            beforeWrite();
-            await this.setSessionEnv(pane, SEAT_ENV_KEYS_VAR, opts.seatEnvironment.pendingKeys);
+        const { pendingKeys, remove, set } = opts.seatEnvironment;
+        const { [SEAT_ENV_KEYS_VAR]: declaredMarker, ...values } = set;
+        const retryKeys = new Set(parseSeatEnvKeys(declaredMarker));
+        const write = async (key: string, effect: () => Promise<void>) => {
+          beforeWrite();
+          try { await effect(); }
+          catch (error) {
+            if (error instanceof DeliveryGuardError) throw error;
+            if (key !== SEAT_ENV_KEYS_VAR) retryKeys.add(key);
+            warnings.push(`Could not reconcile ${key} for ${paneTarget} before respawn.`);
           }
-          for (const key of opts.seatEnvironment.remove) {
-            beforeWrite();
-            await this.unsetSessionEnv(pane, key, { inheritGlobal: false });
-          }
-          for (const [key, value] of Object.entries(opts.seatEnvironment.set)) {
-            beforeWrite();
-            await this.setSessionEnv(pane, key, value);
-          }
-        } catch (error) {
-          return { ok: false, code: "successor_env_reconcile_failed",
-            message: `Could not reconcile the seat's launch environment: ${error instanceof Error ? error.message : String(error)}` };
+        };
+        if (pendingKeys !== undefined) {
+          // A failed final marker write still leaves the names changed below available for a later retry.
+          await write(SEAT_ENV_KEYS_VAR, () => this.setSessionEnv(pane, SEAT_ENV_KEYS_VAR, pendingKeys));
+        }
+        for (const key of remove) {
+          await write(key, () => this.unsetSessionEnv(pane, key, { beforeWrite }));
+        }
+        for (const [key, value] of Object.entries(values)) {
+          await write(key, () => this.setSessionEnv(pane, key, value));
+        }
+        if (declaredMarker !== undefined) {
+          await write(SEAT_ENV_KEYS_VAR, () => this.setSessionEnv(pane, SEAT_ENV_KEYS_VAR, [...retryKeys].join(",")));
         }
       }
       beforeWrite();
@@ -2752,7 +2766,7 @@ export class TmuxAdapter {
       const guard = this.deliveryGuard;
       const target = guard?.maybeTarget(paneTarget);
       if (result.ok && target && guard!.ownsLifecycle(target.nodeId)) guard!.noteFreshLifecyclePane(target.nodeId, pane);
-      return result;
+      return result.ok && warnings.length ? { ...result, warnings: [...warnings, ...(result.warnings ?? [])] } : result;
     }, false, "respawn");
   }
 
@@ -3055,11 +3069,12 @@ export class TmuxAdapter {
   /** Remove one variable from a session's environment. Ordinary names inherit the server's value
    *  afterwards, if any. Credentials and the launching session's own identity are marked removed
    *  instead, so they cannot come back from the server's global environment. */
-  async unsetSessionEnv(session: string, key: string, opts?: { inheritGlobal?: boolean }): Promise<void> {
+  async unsetSessionEnv(session: string, key: string, opts?: { inheritGlobal?: boolean; beforeWrite?: () => void }): Promise<void> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
     const mustNotInherit = opts?.inheritGlobal === false || isTmuxCredentialEnvKey(key) || parentSessionEnvKeys(await this.globalEnvironment()).includes(key);
     const flag = mustNotInherit ? "-r" : "-u";
+    opts?.beforeWrite?.();
     await this.run(["tmux", "set-environment", "-t", target, flag, key],
       `tmux set-environment -t ${shellQuote(target)} ${flag} ${shellQuote(key)}`);
   }

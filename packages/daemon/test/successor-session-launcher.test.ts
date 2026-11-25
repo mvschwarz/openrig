@@ -202,19 +202,19 @@ describe("SuccessorSessionLauncher", () => {
     expect(respawnPane.mock.calls[0]![2].env).toMatchObject({ OPENRIG_NODE: process.execPath });
   });
 
-  it("a seat that declares no env clears its managed list and leaves a cleaned one-off name alone", async () => {
+  it("a seat that declares no env clears its managed list including a tracked one-off key", async () => {
     const values: Record<string, string | undefined> = { OPENRIG_SEAT_ENV_KEYS: "OLD,ADDED,ONE_OFF_ONLY", OLD: "before", ADDED: "from partial write" };
     getSessionEnv.mockImplementation(async (_session, key: string) => values[key]);
     await launcher().createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
-    expect(respawnPane.mock.calls[0]![2].seatEnvironment).toEqual({ set: { OPENRIG_SEAT_ENV_KEYS: "" }, remove: ["OLD", "ADDED"] });
+    expect(respawnPane.mock.calls[0]![2].seatEnvironment).toEqual({ set: { OPENRIG_SEAT_ENV_KEYS: "" }, remove: ["OLD", "ADDED", "ONE_OFF_ONLY"] });
   });
 
-  it("leaves the incumbent running when tmux cannot read its managed launch environment", async () => {
+  it("hands over with a warning and no removals when the managed environment cannot be read", async () => {
     getSessionEnv.mockRejectedValue(new Error("tmux read failed"));
     const res = await launcher().createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
-    expect(res).toMatchObject({ ok: false, code: "successor_env_unreadable", replacementStarted: false });
-    expect(signalPaneProcess).not.toHaveBeenCalled();
-    expect(respawnPane).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ ok: true, warnings: [expect.stringMatching(/dev-impl@rig.*dropped environment keys may remain/)] });
+    expect(signalPaneProcess).toHaveBeenCalled();
+    expect(respawnPane.mock.calls[0]![2].seatEnvironment).toEqual({ set: {}, remove: [] });
   });
 
   it("MONEY PROOF (0.5.2-07): the successor's launch binding carries the SPEC-pinned model, not the runtime default", async () => {
