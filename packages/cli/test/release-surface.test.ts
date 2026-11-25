@@ -193,6 +193,8 @@ describe("release-surface parser - honest failure (AC-5)", () => {
       fs.writeFileSync(join(dir, "sample.ts"), 'export function sample() { return new Command("sample"); }');
       git("add", ".");
       git("commit", "-m", "initial");
+      expect(() => generateSurfaceDiff({ repoRoot })).toThrow(/No release tag/);
+      expect(() => generateSurfaceDiff({ repoRoot, to: "missing" })).toThrow(/at ref "missing"/);
       git("checkout", "-b", "release");
       git("commit", "--allow-empty", "-m", "first release");
       git("tag", "-a", "v1", "-m", "v1");
@@ -203,7 +205,10 @@ describe("release-surface parser - honest failure (AC-5)", () => {
       git("commit", "--allow-empty", "-m", "later release");
       git("tag", "v3");
 
-      expect(() => generateSurfaceDiff({ repoRoot, to: "v1" })).toThrow(/No release tag/);
+      expect(generateSurfaceDiff({ repoRoot, to: "v1" })).toMatchObject({
+        release_from: "v3",
+        release_from_source: "checkout-nearest-release",
+      });
       expect(generateSurfaceDiff({ repoRoot, to: "v2" }).release_from).toBe("v1");
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });

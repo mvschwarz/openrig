@@ -26,6 +26,7 @@ export interface AddedFlagsEntry {
 export interface SurfaceDiff {
   release_from: string;
   release_to: string;
+  release_from_source?: "checkout-nearest-release";
   added_commands: AddedCommand[];
   added_flags: AddedFlagsEntry[];
   removed_or_renamed: string[];
@@ -214,20 +215,21 @@ export function computeDiff(
 }
 
 /** Default `--from`: the latest `v*` tag reachable before `to`. */
-function defaultFrom(repoRoot: string, to: string): string {
-  try {
-    const commit = `${to}^{commit}`;
-    // A release can have multiple tags. Exclude all names on the target itself
-    // so describe can walk every parent of a merge looking for an earlier release.
-    const tags = git(repoRoot, ["tag", "--no-column", "--list", "v*", "--points-at", commit]).split("\n").filter(Boolean);
-    return git(repoRoot, ["describe", "--tags", "--abbrev=0", "--match", "v*", ...tags.map(tag => `--exclude=${tag}`), commit]).trim();
-  } catch {
-    throw new SurfaceParserError({
-      fact: `No release tag could be resolved before "${to}" for the default --from ref.`,
-      consequence: "Without a prior release ref the surface diff cannot be computed.",
-      action: "Pass --from <ref> to choose a comparison base.",
-    });
-  }
+function defaultFrom(repoRoot: string, to: string): Pick<SurfaceDiff, "release_from" | "release_from_source"> {
+  const commit = `${to}^{commit}`;
+  // Exclude all aliases on the target itself, including tags on a merge commit.
+  const tags = git(repoRoot, ["tag", "--no-column", "--list", "v*", "--points-at", commit]).split("\n").filter(Boolean);
+  // --always returns a hexadecimal object name if no matching tag is reachable.
+  const describe = ["describe", "--always", "--tags", "--abbrev=0", "--match", "v*"];
+  const prior = git(repoRoot, [...describe, ...tags.map(tag => `--exclude=${tag}`), commit]).trim();
+  if (prior.startsWith("v")) return { release_from: prior };
+  const checkout = git(repoRoot, [...describe, "HEAD"]).trim();
+  if (checkout.startsWith("v")) return { release_from: checkout, release_from_source: "checkout-nearest-release" };
+  throw new SurfaceParserError({
+    fact: "No release tag could be resolved for the default --from ref.",
+    consequence: "Without a release ref the surface diff cannot be computed.",
+    action: "Pass --from <ref> to choose a comparison base.",
+  });
 }
 
 export function generateSurfaceDiff(opts: {
@@ -238,10 +240,10 @@ export function generateSurfaceDiff(opts: {
 }): SurfaceDiff {
   const repoRoot = opts.repoRoot ?? resolveRepoRoot(opts.cwd ?? process.cwd());
   const to = opts.to ?? "HEAD";
-  const from = opts.from ?? defaultFrom(repoRoot, to);
-  const fromSurface = readSurfaceAtRef(repoRoot, from);
   const toSurface = readSurfaceAtRef(repoRoot, to);
-  return computeDiff(fromSurface, toSurface, from, to);
+  const base = opts.from !== undefined ? { release_from: opts.from } : defaultFrom(repoRoot, to);
+  const fromSurface = readSurfaceAtRef(repoRoot, base.release_from);
+  return { ...computeDiff(fromSurface, toSurface, base.release_from, to), ...base };
 }
 
 /** Deterministic YAML serialization (stable key + element order). */
