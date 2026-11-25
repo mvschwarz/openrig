@@ -50,7 +50,10 @@ import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 // Each unit of an add first brings back the lowest eligible `drained` slot (one with no reuse hold): the comeback. It
 // picks the newest snapshot that is restore-usable, holds the slot's node with its logical id, and recorded exactly one
 // active occupant for it, whatever its kind; with none, the slot stays `drained` with the pool's own reuse hold
-// `no_qualifying_snapshot`, and the unit tries the next eligible slot. A chosen snapshot reserves the comeback on the
+// `no_qualifying_snapshot`, and the unit tries the next eligible slot. A newer usable capture holding the node that
+// recorded two or more live occupants for it stops the search for that slot: it stays `drained` with the reuse hold
+// `conflicting_occupants`, naming the snapshot and the candidates, and the unit tries the next eligible slot; an
+// occupancy the capture can't tell is named (`unknown`) and skipped. A chosen snapshot reserves the comeback on the
 // slot's own row and issues it under the lease; after the lease is released, the executor's `comeback` launches the
 // slot's own node through `launchSingleNode` with that explicit `snapshotId`, never without one, so the agent comes back
 // with its own sessions and stored settings. It settles running (`live`), or, refused before any launch, `drained` with
@@ -514,14 +517,16 @@ interface IssuedAdd {
  *  from the model's carries a warning naming the fields. */
 interface SettledAdd { slotNumber: number; logicalId: string; nodeId?: string; attempt: AttemptView; warning?: string }
 
-/** What a cycle reports for a drained slot it looked at: the comeback issued (with its snapshot and attempt), the
- *  reuse hold it got (no snapshot qualifies), or why nothing was issued (`code`). */
+/** What a cycle reports for a drained slot it looked at: the comeback issued (with its snapshot and attempt, and the
+ *  newer captures skipped because they can't tell the occupant), the reuse hold it got (no snapshot qualifies, or the
+ *  newest usable one recorded conflicting occupants), or why nothing was issued (`code`). */
 interface ComebackNote {
   slotNumber: number;
   logicalId: string;
   nodeId: string;
   snapshotId?: string;
   attempt?: AttemptView;
+  unknownOccupants?: Array<{ snapshotId: string; candidateIds: string[]; detail: string }>;
   hold?: Record<string, unknown>;
   code?: string;
 }
@@ -1073,12 +1078,16 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
               if (!comebackReady) { comebackNotes.push({ ...note, code: "comeback_not_composed" }); break units; }
               const selection = deps.comeback!.select(rigId, nodeId, logicalId);
               if (selection.chosen === null) {
-                // No snapshot qualifies: no call, and the slot keeps `drained` with the pool's own hold.
-                const hold = { code: "no_qualifying_snapshot", nodeId, read: selection.read, failed: selection.failed };
+                // No snapshot qualifies, or the newest usable one recorded conflicting occupants: no call, and the slot
+                // keeps `drained` with the pool's own hold.
+                const hold = selection.conflict !== undefined
+                  ? { code: "conflicting_occupants", nodeId, snapshotId: selection.conflict.snapshotId, candidateIds: selection.conflict.candidateIds, read: selection.read, failed: selection.failed }
+                  : { code: "no_qualifying_snapshot", nodeId, read: selection.read, failed: selection.failed };
                 comebackNotes.push(deps.slots.holdComeback(slot.slotId, JSON.stringify(hold)) ? { ...note, hold } : { ...note, code: "slot_moved_on" });
                 continue;
               }
               const snapshotId = selection.chosen.id;
+              const unknowns = selection.failed.flatMap((f) => (f.unknown ? [{ snapshotId: f.snapshotId, ...f.unknown }] : []));
               // The reservation, on the slot's own row, with the chosen snapshot, and the issue: the job's state and the
               // holds again, then the issued attempt and what it was issued on (the snapshot, the node's latest session and
               // the rig's latest event), in one transaction. A comeback held or not issued is `drained` again in the same
@@ -1106,7 +1115,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
               }
               // The request goes out only once its issue committed.
               comebacks.push({ jobId: job.jobId, modelNodeId, rigId, slotId: slot.slotId, slotNumber: slot.slotNumber, nodeId, logicalId, attemptId, snapshotId, cwdFromModel: spec.cwdTemplate === null });
-              comebackNotes.push({ ...note, snapshotId, attempt: inFlight(attemptId) });
+              comebackNotes.push({ ...note, snapshotId, attempt: inFlight(attemptId), ...(unknowns.length ? { unknownOccupants: unknowns } : {}) });
               continue units;
             }
 

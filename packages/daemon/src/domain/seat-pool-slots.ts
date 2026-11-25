@@ -197,7 +197,8 @@ export class SeatPoolSlotsRepository {
     ).run(input.attemptId, JSON.stringify({ snapshotId: input.snapshotId }), input.slotId).changes === 1;
   }
 
-  /** A `drained` slot no snapshot qualifies for: it stays `drained` with the pool's own reuse hold, and no attempt.
+  /** A `drained` slot no snapshot qualifies for, or whose newest usable snapshot recorded conflicting occupants: it
+   *  stays `drained` with the pool's own reuse hold, and no attempt.
    *  False when the slot is no longer `drained` or already has a hold. */
   holdComeback(slotId: string, hold: string): boolean {
     return this.db.prepare("UPDATE seat_pool_slots SET reuse_hold = ? WHERE slot_id = ? AND phase = 'drained' AND reuse_hold IS NULL")

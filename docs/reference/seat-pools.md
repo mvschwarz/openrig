@@ -140,6 +140,14 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
   - with no qualifying snapshot, nothing is launched and the slot stays `drained` with the reuse hold
     `no_qualifying_snapshot`, the node id, how many snapshots were read and the condition (1: restore-usable, 2: holds
     the node, 3: one active occupant) each one failed. The add then tries the next eligible slot, or a new number;
+  - a newer capture that passes conditions 1 and 2 and whose own occupant map recorded two or more live occupants for
+    the node (candidates whose captured sessions were running) stops the search for that slot: no older snapshot is
+    picked over it, nothing is launched, and the slot stays `drained` with the reuse hold `conflicting_occupants`,
+    naming that snapshot and its candidate session ids, with the snapshots read before it. Only that slot is held: the
+    add tries the next eligible slot, or a new number. A node recorded absent, and an occupancy the metadata can't tell
+    (a legacy relation, or candidates that were not running at capture, as after a reboot), fail condition 3 and the
+    search goes on; an unknown occupancy is named (`unknown` on its failed condition, and `unknownOccupants` on the
+    comeback issued from an older snapshot) and skipped;
   - a launch refused before it starts (`snapshot_not_found`, `snapshot_wrong_rig`, `snapshot_unusable`,
     `no_matching_nodes` or `selection_changed`) is reported `refused` with its code, and the slot goes back to
     `drained` with that code and the snapshot as its reuse hold: the same snapshot is never sent again. A comeback that

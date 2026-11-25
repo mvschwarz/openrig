@@ -42,6 +42,7 @@ import type { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import type { SnapshotData } from "../src/domain/types.js";
 
 // #3395 (Piece 1): the seat pool brings a drained agent back. The next add after a drain picks the newest snapshot
 // that is restore-usable, holds the agent's node and recorded one active occupant for it, and launches the agent's own
@@ -512,6 +513,84 @@ describe("seat-pool comeback: which snapshot it sends (#3395 Piece 1)", () => {
     expect(selection.chosen?.id).toBe(b);
     expect(selection.failed).toEqual([{ snapshotId: c, condition: 3 }]);
     expect(w.launch.mock.calls.map((call) => call[2].snapshotId)).toEqual([b]);
+    expect(settled[0]!.attempt).toMatchObject({ status: "running", snapshotSelection: { snapshotId: b, mode: "explicit" } });
+  });
+});
+
+describe("seat-pool comeback: recorded conflicting occupants (#3395 Piece 1)", () => {
+  /** B's data with a second session row for `w1`, both running at capture, and `w1`'s occupant entry as `edit` leaves
+   *  it (both rows as recorded candidates by default), stored as a newer `manual` capture D. */
+  const conflictingCapture = (w: World, rigId: string, b: string, nodeId: string, edit?: (data: SnapshotData) => void) => {
+    const data = structuredClone(w.snapshotRepo.getSnapshot(b)!.data);
+    const first = data.sessions.find((s) => s.nodeId === nodeId)!;
+    first.status = "running";
+    data.sessions.push({ ...first, id: `${first.id}-b`, sessionName: `${first.sessionName}-b` });
+    data.activeOccupantsByNode = { ...data.activeOccupantsByNode, [nodeId]: { kind: "ambiguous", candidateIds: [first.id, `${first.id}-b`] } };
+    edit?.(data);
+    return { d: w.snapshotRepo.createSnapshot(rigId, "manual", data).id, candidateIds: [first.id, `${first.id}-b`] };
+  };
+
+  it("A newer capture that recorded two live occupants for `w1` holds only that slot `drained` with `conflicting_occupants` naming the snapshot and both candidates, launches nothing, never falls back to the older pool capture B, and the add takes a new number.", async () => {
+    const w = comebackWorld();
+    const { m, w1, b } = await w.drainedAgent();
+    const { d, candidateIds } = conflictingCapture(w, m.rigId, b, w1.nodeId);
+    const sessionsBefore = w.sessionsOf(w1.nodeId);
+    const phaseChangedAt = w.slots.forModel(m.nodeId)[0]!.phaseChangedAt;
+    await w.wantOne(m);
+
+    const notes = await w.notesOf(m.jobId);
+    await w.executor.idle();
+    const hold = { code: "conflicting_occupants", nodeId: w1.nodeId, snapshotId: d, candidateIds, read: 1, failed: [] };
+    expect((notes.add as { comebacks: ComebackEntry[] }).comebacks).toEqual([{ slotNumber: 1, logicalId: "dev.impl-s1", nodeId: w1.nodeId, hold }]);
+    expect(w.launch).not.toHaveBeenCalled();
+    expect(w.slots.forModel(m.nodeId)[0]).toMatchObject({ slotNumber: 1, nodeId: w1.nodeId, phase: "drained", phaseChangedAt, reuseHold: JSON.stringify(hold) });
+    expect((notes.add as { issued: Array<{ logicalId: string }> }).issued.map((i) => i.logicalId)).toEqual(["dev.impl-s2"]);
+
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const again = await w.notesOf(m.jobId);
+      await w.executor.idle();
+      expect((again.slots as Array<Record<string, unknown>>).find((s) => s.slotNumber === 1)).toMatchObject({ phase: "drained", reuseHold: hold });
+    }
+    expect(w.select).toHaveBeenCalledTimes(1);
+    expect(w.launch.mock.calls.map((call) => call[1])).not.toContain("dev.impl-s1");
+    expect(w.sessionsOf(w1.nodeId)).toEqual(sessionsBefore);
+  });
+
+  it.each([
+    ["missing", (nodeId: string) => (data: SnapshotData) => { delete data.activeOccupantsByNode![nodeId]; }],
+    ["a resolved occupant naming no session", (nodeId: string) => (data: SnapshotData) => {
+      data.activeOccupantsByNode![nodeId] = { kind: "resolved", sessionId: "sess-gone" };
+    }],
+  ])("A newer capture whose occupant entry for `w1` is %s fails condition 1, and the comeback still brings `w1` back from B.", async (_label, edit) => {
+    const w = comebackWorld();
+    const { m, w1, b } = await w.drainedAgent();
+    const { d } = conflictingCapture(w, m.rigId, b, w1.nodeId, edit(w1.nodeId));
+    await w.wantOne(m);
+
+    const { notes, settled } = await comeBack(w, m.jobId);
+    const selection = w.select.mock.results[0]!.value as ReturnType<SnapshotRepository["selectComebackSnapshot"]>;
+    expect(selection.conflict).toBeUndefined();
+    expect(selection.failed).toEqual([{ snapshotId: d, condition: 1 }]);
+    expect((notes.add as { comebacks: ComebackEntry[] }).comebacks).toEqual([{ slotNumber: 1, logicalId: "dev.impl-s1", nodeId: w1.nodeId, snapshotId: b, attempt: expect.any(Object) }]);
+    expect(w.launch.mock.calls).toEqual([[m.rigId, "dev.impl-s1", { snapshotId: b }]]);
+    expect(settled[0]!.attempt).toMatchObject({ status: "running", snapshotSelection: { snapshotId: b, mode: "explicit" } });
+  });
+
+  it("A newer capture whose candidates for `w1` were not running at capture, as after a reboot, is named as an unknown occupancy on the comeback, which still brings `w1` back from B.", async () => {
+    const w = comebackWorld();
+    const { m, w1, b } = await w.drainedAgent();
+    const { d, candidateIds } = conflictingCapture(w, m.rigId, b, w1.nodeId, (data) => {
+      for (const s of data.sessions) if (s.nodeId === w1.nodeId) s.status = "detached";
+    });
+    await w.wantOne(m);
+
+    const { notes, settled } = await comeBack(w, m.jobId);
+    const comebacks = (notes.add as { comebacks: Array<ComebackEntry & { unknownOccupants?: unknown }> }).comebacks;
+    expect(comebacks).toEqual([{
+      slotNumber: 1, logicalId: "dev.impl-s1", nodeId: w1.nodeId, snapshotId: b, attempt: expect.any(Object),
+      unknownOccupants: [{ snapshotId: d, candidateIds, detail: expect.stringContaining("multiple live occupant candidates") }],
+    }]);
+    expect(w.launch.mock.calls).toEqual([[m.rigId, "dev.impl-s1", { snapshotId: b }]]);
     expect(settled[0]!.attempt).toMatchObject({ status: "running", snapshotSelection: { snapshotId: b, mode: "explicit" } });
   });
 });
