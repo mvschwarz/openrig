@@ -10,6 +10,7 @@ import { piSeatPaths } from "../../adapters/pi-runner-protocol.js";
 import { canonicalModelPin, modelsMatch } from "./model-divergence-monitor.js";
 import { isShellForeground } from "../shell-classifier.js";
 import { commandNamesClaude } from "../native-process-lineage.js";
+import { lstartToMinTs } from "../codex-thread-id.js";
 
 export interface ProcessRow {
   pid: number;
@@ -59,6 +60,12 @@ export type ClaudeRecordSelection =
   | { ok: true; id: string; path: string; source: "generation-sidecar" | "verified-pane-argument" }
   | { ok: false; reason: string };
 
+function matchesRuntimeRoot(row: ProcessRow | undefined, matches: (command: string) => boolean): boolean {
+  if (!row) return false;
+  const argv0 = basename((row.command.trim().split(/\s+/)[0] ?? "").replace(/^-/, "").replace(/^['"]|['"]$/g, ""));
+  return !isShellForeground(argv0) && matches(row.command);
+}
+
 /** `parentPid` itself and its descendants whose command matches `matches`, breadth-first: a runtime exec'd at launch
  *  IS the pane's process. A shell at the root isn't one, even when its arguments name the runtime: `bash -c` keeps its
  *  whole script in argv while a later command runs. (Deliberately local: the two existing walkers are module-private in
@@ -71,8 +78,7 @@ function findDescendants(processes: ProcessRow[], parentPid: number, matches: (c
     byParent.set(p.ppid, list);
   }
   const root = processes.find((p) => p.pid === parentPid);
-  const rootArgv0 = basename((root?.command.trim().split(/\s+/)[0] ?? "").replace(/^-/, "").replace(/^['"]|['"]$/g, ""));
-  const out: number[] = root && !isShellForeground(rootArgv0) && matches(root.command) ? [root.pid] : [];
+  const out: number[] = root && matchesRuntimeRoot(root, matches) ? [root.pid] : [];
   const queue = [parentPid];
   while (queue.length > 0) {
     const pid = queue.shift()!;
@@ -225,6 +231,36 @@ function cleanString(value: string | undefined): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/** Whether a census row started strictly before a verdict's `observedAt` second (fails closed on missing/unparseable start). */
+export function startedBeforeVerdict(row: ProcessRow | undefined, observedAt: string): boolean {
+  const started = lstartToMinTs(row?.startedAt);
+  return started !== undefined && started < Math.floor(Date.parse(observedAt) / 1000);
+}
+
+/** Snapshot of the verified runtime chain up to `panePid` (PID, PPID, start time, command); a different closing value means replacement or PID reuse. */
+export function verifiedPaneProcessChain(
+  processes: ProcessRow[],
+  panePid: number,
+  runtime: "claude-code" | "codex",
+  nativePid?: number,
+): string {
+  const byPid = new Map(processes.map((row) => [row.pid, row]));
+  const matches = runtime === "claude-code" ? commandNamesClaude : commandBasenameIs("codex");
+  const pinnedNative = nativePid !== undefined && (nativePid !== panePid || matchesRuntimeRoot(byPid.get(panePid), matches));
+  const leaves = pinnedNative
+    ? [nativePid]
+    : findDescendants(processes, panePid, matches).sort((a, b) => a - b);
+  return JSON.stringify(leaves.map((leaf) => {
+    const chain: Array<[number, number, string | null, string]> = [];
+    const seen = new Set<number>();
+    for (let row = byPid.get(leaf); row && !seen.has(row.pid); row = row.pid === panePid ? undefined : byPid.get(row.ppid)) {
+      seen.add(row.pid);
+      chain.push([row.pid, row.ppid, row.startedAt ?? null, row.command]);
+    }
+    return chain;
+  }));
 }
 
 /** The live codex occupant's thread id, via its own pid's log join — bypasses the stored resume
