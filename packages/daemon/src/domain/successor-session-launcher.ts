@@ -1,6 +1,6 @@
 import { ActivityGrantStore } from "./activity-grants.js";
 import { ulid } from "ulid";
-import { seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
+import { SEAT_ENV_KEYS_VAR, seatEnvLaunchVars, validateSeatEnvName, type SeatEnv } from "./seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "./claude-core-plugin-env.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
@@ -222,6 +222,7 @@ export class SuccessorSessionLauncher {
     // proof). The retiree exits in place; its provider session file is the durable wake target, so the
     // new unwind invariant is that a failed successor NEVER destroys that recoverable state.
     const departingSession = input.departingSessionName;
+    const declaredEnv = input.node.seatEnv ?? {};
 
     // OpenRig identity env mirrors NodeLauncher.launchNode's pattern so the successor self-identifies +
     // reports activity like a launched seat. OPENRIG_SESSION_NAME is the PRESERVED canonical name.
@@ -231,7 +232,7 @@ export class SuccessorSessionLauncher {
       OPENRIG_RUNTIME: input.node.runtime ?? undefined,
       ...this.sessionEnv,
       ...(input.node.runtime ? this.runtimeSessionEnv[input.node.runtime] : undefined),
-      ...seatEnvLaunchVars(input.node.seatEnv ?? {}),
+      ...seatEnvLaunchVars(declaredEnv),
       ...(input.node.seatProjectDir ? { [SEAT_PROJECT_DIR_ENV]: input.node.seatProjectDir } : {}),
       // Selected Claude and Codex plugin hooks use this interpreter, as at launch (node-launcher.ts).
       ...(input.node.seatProjectDir && (input.node.runtime === "codex" || input.node.runtime === "claude-code") ? { [SEAT_NODE_ENV]: process.execPath } : {}),
@@ -286,6 +287,26 @@ export class SuccessorSessionLauncher {
       }
     }
 
+    // Capture the previous declaration before the incumbent exits. A failed read cannot tell us which keys to clear.
+    const setEnv: SeatEnv = { ...declaredEnv };
+    const removeEnv: string[] = [];
+    try {
+      const saved = await this.tmuxAdapter.getSessionEnv(departingSession, SEAT_ENV_KEYS_VAR);
+      const previousKeys = new Set((saved ?? "").split(",").filter(key => validateSeatEnvName(key) === null));
+      for (const key of previousKeys) {
+        const value = env[key];
+        if (value !== undefined) setEnv[key] = value;
+        // The list can still name a one-off --env value handed to the first pane. The initial
+        // launch already removed one-off-only entries from the session, so leave those alone.
+        else if (await this.tmuxAdapter.getSessionEnv(departingSession, key) !== undefined) removeEnv.push(key);
+      }
+    } catch {
+      return { ok: false, code: "successor_env_unreadable", step: "create_successor",
+        message: "Could not read the seat's previous launch environment. The incumbent was left running.", replacementStarted: false };
+    }
+    // Write the marker last, so an incomplete reconciliation can still retry using the old list.
+    setEnv[SEAT_ENV_KEYS_VAR] = Object.keys(declaredEnv).join(",");
+
     // #3253: the seat's scope is checked before the retiree is ended, so the respawn after it reuses that check. The
     // respawn runs in recovery mode: a limit never stops the handover after the retiree has ended (a scope failure late
     // in the path ends in a structured warning, logged only once it has gone on). The request stays stored.
@@ -308,7 +329,9 @@ export class SuccessorSessionLauncher {
     // <old-token>`), which is exactly how the 2026-08-22 wave's "fresh" successors booted 14-day-old
     // contexts. An explicit shell also resets the pane's respawn default, self-healing the pane.
     const blankShell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
-    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, blankShell, { cwd, env, processLimitsMode: "recovery" });
+    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, blankShell, {
+      cwd, env, processLimitsMode: "recovery", seatEnvironment: { set: setEnv, remove: removeEnv },
+    });
     if (!respawned.ok) {
       return {
         ok: false,

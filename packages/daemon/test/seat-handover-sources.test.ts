@@ -54,6 +54,7 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
   let rebuildChain: ReturnType<typeof vi.fn>;
   let artifactExists: ReturnType<typeof vi.fn>;
   let service: SeatHandoverService;
+  const getSessionEnv = vi.fn<TmuxAdapter["getSessionEnv"]>();
 
   beforeEach(() => {
     vi.stubEnv("OPENRIG_OUTPUT_REBUILD_RECAPS", "3");
@@ -84,6 +85,7 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     captureCodexThreadId = vi.fn(async () => "codex-discovered-tok");
     getDefaultShell = vi.fn(async () => "/bin/zsh");
     getPaneCommand = vi.fn(async () => "zsh");
+    getSessionEnv.mockReset().mockResolvedValue(undefined);
     rebuildChain = vi.fn(() => ({
       artifacts: [
         { address: "/seats/dev-impl/RECAP.md", label: "authored recap (chain depth 2)" },
@@ -100,7 +102,8 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
   });
 
   function tmux(): TmuxAdapter {
-    return { hasSession, createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, sendText, sendKeys, capturePaneScreen, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    return { hasSession, createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, sendText, sendKeys, capturePaneScreen, getDefaultShell, getPaneCommand,
+      getSessionEnv } as unknown as TmuxAdapter;
   }
 
   function codexAdapter(): RuntimeAdapter {
@@ -201,6 +204,27 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     // the parent's token.
     const successor = sessionRegistry.getBindingForNode(node.id);
     expect(successor?.tmuxSession).toBe("dev-impl@seat-rig");
+  });
+
+  it("fork: drops a removed key from the departing session and carries the saved value to the successor", async () => {
+    const { rig } = seedSeat({ resumeToken: "native-abc" });
+    rigRepo.setRigEnv(rig.id, { MODE: "new" });
+    const departing: Record<string, string | undefined> = {
+      OPENRIG_SEAT_ENV_KEYS: "MODE,RETIRED", MODE: "old", RETIRED: "remove me", AMBIENT: "leave me alone",
+    };
+    getSessionEnv.mockImplementation(async (_session, key) => departing[key]);
+
+    const result = await service.handover({
+      seatRef: "dev-impl@seat-rig", source: "fork:dev-impl@seat-rig", reason: "changed environment",
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(respawnPane).toHaveBeenCalledWith("%9", expect.any(String), expect.objectContaining({
+      seatEnvironment: { set: { MODE: "new", OPENRIG_SEAT_ENV_KEYS: "MODE" }, remove: ["RETIRED"] },
+    }));
+    expect(launchHarness.mock.calls.at(-1)?.[1]).toMatchObject({
+      forkSource: { kind: "native_id", value: "native-abc" },
+    });
   });
 
   it("fork: refuses honestly BEFORE any respawn when no native resume id is discoverable — no successor is created, the seat is untouched", async () => {

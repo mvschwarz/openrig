@@ -97,6 +97,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
       sendKeys: vi.fn(async (...a: unknown[]) => { calls.sendKeys(...a); return { ok: true }; }),
       capturePaneScreen: vi.fn(async () => requested ? freshFrame : `${oldFrame}\n❯ `),
       capturePaneContent: vi.fn(async () => requested ? freshFrame : `${oldFrame}\n❯ `),
+      getSessionEnv: async () => undefined,
       getDefaultShell: vi.fn(async () => "/bin/zsh"),
       getPaneCommand: vi.fn(async () => running() ? "claude" : "zsh"),
       getPanePid: vi.fn(async () => 100),

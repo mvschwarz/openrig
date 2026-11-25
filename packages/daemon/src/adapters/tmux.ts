@@ -2721,9 +2721,26 @@ export class TmuxAdapter {
       /** #3253: a bare respawn (no `env`) of this seat that keeps its limit in a new scope (seatProcessLimitsKeepPlan). */
       keepLimitOf?: string;
       /** #80: a bare respawn (no `env`) of this seat, which goes beneath its rig's slice when the rig groups its seats. */
-      groupSeatOf?: string },
+      groupSeatOf?: string;
+      /** Synchronize only OpenRig-owned names in a retained session before spawning its successor. */
+      seatEnvironment?: { set: Readonly<Record<string, string>>; remove: readonly string[] } },
   ): Promise<TmuxResult> {
     return this.guardedInput(paneTarget, async (pane, beforeWrite) => {
+      if (opts?.seatEnvironment) {
+        try {
+          for (const key of opts.seatEnvironment.remove) {
+            beforeWrite();
+            await this.unsetSessionEnv(pane, key, { inheritGlobal: false });
+          }
+          for (const [key, value] of Object.entries(opts.seatEnvironment.set)) {
+            beforeWrite();
+            await this.setSessionEnv(pane, key, value);
+          }
+        } catch (error) {
+          return { ok: false, code: "successor_env_reconcile_failed",
+            message: `Could not reconcile the seat's launch environment: ${error instanceof Error ? error.message : String(error)}` };
+        }
+      }
       beforeWrite();
       const result = await this.respawnPaneUnchecked(pane, command, opts);
       const guard = this.deliveryGuard;
@@ -3032,10 +3049,10 @@ export class TmuxAdapter {
   /** Remove one variable from a session's environment. Ordinary names inherit the server's value
    *  afterwards, if any. Credentials and the launching session's own identity are marked removed
    *  instead, so they cannot come back from the server's global environment. */
-  async unsetSessionEnv(session: string, key: string): Promise<void> {
+  async unsetSessionEnv(session: string, key: string, opts?: { inheritGlobal?: boolean }): Promise<void> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
-    const mustNotInherit = isTmuxCredentialEnvKey(key) || parentSessionEnvKeys(await this.globalEnvironment()).includes(key);
+    const mustNotInherit = opts?.inheritGlobal === false || isTmuxCredentialEnvKey(key) || parentSessionEnvKeys(await this.globalEnvironment()).includes(key);
     const flag = mustNotInherit ? "-r" : "-u";
     await this.run(["tmux", "set-environment", "-t", target, flag, key],
       `tmux set-environment -t ${shellQuote(target)} ${flag} ${shellQuote(key)}`);
