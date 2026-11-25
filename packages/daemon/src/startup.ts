@@ -1915,8 +1915,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           ? (transcriptsPath ?? getCompatibleOpenRigPath("transcripts"))
           : getCompatibleOpenRigPath("transcripts"),
         exec: execDep,
-        chatSearchFn: (rigId: string, pattern: string) =>
-          chatRepoForAsk.searchChat(rigId, pattern).map((m) => ({
+        chatSearchFn: (rigId: string, keywords: string[]) =>
+          chatRepoForAsk.searchChat(rigId, keywords).map((m) => ({
             sender: m.sender,
             body: m.body,
             createdAt: m.createdAt,

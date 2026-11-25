@@ -138,7 +138,7 @@ export class ChatRepository {
     return rows.map((r) => this.rowToMessage(r));
   }
 
-  /** True when SQLite's date functions parse the value as a timestamp — the
+  /** True when SQLite's date functions parse the value as a timestamp - the
    *  same parse the julianday() comparison in history() applies. An
    *  unparseable value silently matches no rows, so callers can refuse it
    *  up front instead of reporting an empty history. */
@@ -158,9 +158,9 @@ export class ChatRepository {
     return rows.reverse().map((r) => this.rowToMessage(r));
   }
 
-  searchChat(rigId: string, pattern: string): ChatMessage[] {
-    // Split pipe-joined keywords into OR conditions for SQL LIKE
-    const keywords = pattern.split("|").map((k) => k.trim()).filter(Boolean);
+  searchChat(rigId: string, pattern: string | readonly string[]): ChatMessage[] {
+    // Retain the legacy pipe-separated form for direct callers; history questions pass literal keywords.
+    const keywords = (typeof pattern === "string" ? pattern.split("|") : pattern).map((k) => k.trim()).filter(Boolean);
     if (keywords.length === 0) return [];
 
     // Keywords are literal text: escape LIKE's own wildcards and the escape character.
@@ -195,3 +195,5 @@ export class ChatRepository {
     };
   }
 }
+
+

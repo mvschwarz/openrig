@@ -54,6 +54,19 @@ describe("ChatRepository", () => {
     expect(chatRepo.searchChat(rigId, "rate_limit|100%").map((m) => m.body)).toEqual(["rate_limit hit", "quota 100% used"]);
   });
 
+  it("history questions preserve a pipe within a literal keyword", () => {
+    chatRepo.send(rigId, "alice", "using foo|bar in the config");
+    chatRepo.send(rigId, "bob", "foo alone is unrelated");
+    chatRepo.send(rigId, "bob", "bar alone is unrelated");
+    const history = new HistoryQuery({
+      transcriptsRoot: "/unused-chat-only-fixture",
+      exec: async () => { throw new Error("chat search must not invoke a process"); },
+      chatSearchFn: (id, keywords) => chatRepo.searchChat(id, keywords),
+    });
+    expect(history.searchChat(rigId, "foo|bar").map((row) => row.body)).toEqual(["using foo|bar in the config"]);
+    expect(history.searchChat(rigId, "foo|bar unrelated")).toHaveLength(3);
+  });
+
   it("same-day ISO since uses UTC chronology including offsets and fractions", () => {
     const early = chatRepo.send(rigId, "alice", "before cutoff");
     const boundary = chatRepo.send(rigId, "alice", "at cutoff");
@@ -119,7 +132,7 @@ describe("ChatRepository", () => {
     chatRepo.send(rigId, "bob", "deploy message");
     chatRepo.send(rigId, "alice", "another deploy msg");
     chatRepo.sendTopic(rigId, "bob", "standup", "daily standup");
-    chatRepo.send(rigId, "bob", "standup message — should NOT appear");
+    chatRepo.send(rigId, "bob", "standup message - should NOT appear");
 
     const messages = chatRepo.history(rigId, { topic: "deploy" });
     const bodies = messages.map((m) => m.body);
@@ -129,7 +142,7 @@ describe("ChatRepository", () => {
     expect(bodies).toContain("another deploy msg");
     // Should NOT include messages from the next topic
     expect(bodies).not.toContain("daily standup");
-    expect(bodies).not.toContain("standup message — should NOT appear");
+    expect(bodies).not.toContain("standup message - should NOT appear");
   });
 
   it("sendTopic creates topic-kind message", () => {
@@ -226,3 +239,5 @@ describe("ChatRepository", () => {
     expect(result[0]!.body).toBe("alice review msg");
   });
 });
+
+
