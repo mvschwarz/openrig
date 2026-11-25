@@ -4887,8 +4887,10 @@ export class QueueRepository {
    *  attachment still owns them. Standalone operator jobs keep their lifecycle. */
   resolveWatchdogPreDeliveryTerminalReason(jobId: string): string | null {
     const targets = this.wakeRepo.findQitemsByGeneratedTimer(jobId);
-    if (targets.length === 0 || this.wakeRepo.findCurrentQitemsByGeneratedTimer(jobId).length > 0) return null;
-    if (this.wakeRepo.findLiveQitemsByAttachedWatchdog(jobId).length > 0) return null;
+    if (targets.length === 0) return null;
+    if (this.wakeRepo.findCurrentQitemsByGeneratedTimer(jobId).some(({ qitemId }) => !this.transferFence(qitemId))) return null;
+    if (this.wakeRepo.findLiveQitemsByAttachedWatchdog(jobId).some(({ qitemId }) => !this.transferFence(qitemId))
+      && targets.every(({ qitemId }) => !this.transferFence(qitemId))) return null;
     return "park_timer_target_terminal";
   }
 
@@ -4897,7 +4899,7 @@ export class QueueRepository {
    *  such a blocker, its due fire is recorded here, before transport: the blocker resolves once and its dependents are
    *  released. Returns the job's terminal reason, or null to keep the send path. */
   fireUsageLimitTimerWithoutDelivery(jobId: string): string | null {
-    const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true);
+    const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true).filter(({ qitemId }) => !this.transferFence(qitemId));
     if (targets.length === 0
       || !targets.every(({ qitemId }) => this.getById(qitemId)?.tags?.includes(USAGE_LIMIT_BLOCKER_TAG))) return null;
     this.recordWatchdogWakeAttempt(jobId, "no-recipient");
@@ -4944,7 +4946,7 @@ export class QueueRepository {
     const bound = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true);
     if (generated.length !== 1 || bound.length !== 1 || bound[0]!.qitemId !== generated[0]!.qitemId) return null;
     const row = this.getById(generated[0]!.qitemId);
-    if (!row || row.state !== "blocked" || row.tags?.includes(USAGE_LIMIT_BLOCKER_TAG)) return null;
+    if (!row || this.transferFence(row.qitemId) || row.state !== "blocked" || row.tags?.includes(USAGE_LIMIT_BLOCKER_TAG)) return null;
     const job = (this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db)).getById(jobId);
     if (!job || job.policy !== "periodic-reminder" || isQueueWait(job.specYaml)) return null;
     if (message !== defaultParkWakeMessage(row.qitemId)) return null;
@@ -4954,7 +4956,7 @@ export class QueueRepository {
   /** The parked rows of `owner` whose current park this job wakes (QueueWakeRepository.findCurrentParkRowsByWatchdog):
    *  at a queue-only seat the reminder is noted on them, never another row (#3076). */
   parkedRowsOwnedBy(jobId: string, owner: string): string[] {
-    return this.wakeRepo.findCurrentParkRowsByWatchdog(jobId, owner);
+    return this.wakeRepo.findCurrentParkRowsByWatchdog(jobId, owner).filter(id => !this.transferFence(id));
   }
 
   /** Notes a queue-only seat's park wake on each parked row it is about (#3076), in one transaction, each only while
@@ -4965,7 +4967,7 @@ export class QueueRepository {
     const eligible = new Map<string, Set<string>>();
     const parkedBy = (jobId: string): Set<string> => {
       let rows = eligible.get(jobId);
-      if (!rows) eligible.set(jobId, rows = new Set(this.wakeRepo.findCurrentParkRowsByWatchdog(jobId, owner)));
+      if (!rows) eligible.set(jobId, rows = new Set(this.parkedRowsOwnedBy(jobId, owner)));
       return rows;
     };
     const written = this.db.transaction(() => notes.flatMap(({ qitemId, jobId, note }) => {
@@ -5010,7 +5012,7 @@ export class QueueRepository {
     const bindings = this.wakeRepo.findBlockedQitemsByWatchdog(jobId);
     if (bindings.length === 0) return;
     // Both receipt ownership and timer lifecycle follow the current park.
-    const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true);
+    const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true).filter(({ qitemId }) => !this.transferFence(qitemId));
     const queueOnlySeat = !retryAt && isQueueOnlyDeliveryCode(deliveryStatus) ? receipt?.targetSession : undefined;
     const noteOfDelivery = queueOnlySeat === undefined ? null : this.db.prepare(
       `SELECT t.transition_id FROM queue_transitions t
@@ -7079,6 +7081,7 @@ export class QueueRepository {
   attachWorkflowGuidance(reader: (packetId: string) => string[]): void { this.workflowGuidance = reader; }
 
   evaluateWaitReminder(input: { jobId: string }) {
+    if (this.resolveWatchdogPreDeliveryTerminalReason(input.jobId)) return { action: "terminal" as const, reason: "park_timer_target_terminal" };
     const binding = this.wakeRepo.findCurrentQitemsByGeneratedTimer(input.jobId)[0];
     if (!binding && this.wakeRepo.findLiveQitemsByAttachedWatchdog(input.jobId).length > 0) return null;
     const result = evaluateQueueWait(this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db), input.jobId, binding ? this.waitingView(binding.qitemId) : null);

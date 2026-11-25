@@ -2677,6 +2677,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         createQueueRow: (row) => queueRepoInstance.create({ ...row, sourceSession: "watchdog@system", nudge: false, wakeTrigger: "openrig" })
           .then(({ qitemId, state }) => ({ qitemId, state })),
         resolveParkedRows: ({ jobId, targetSession }) => queueRepoInstance.parkedRowsOwnedBy(jobId, targetSession),
+        notificationCurrent: jobId => queueRepoInstance.resolveWatchdogPreDeliveryTerminalReason(jobId) === null,
         noteParkedRows: ({ owner, notes }) => queueRepoInstance.noteParkedRows(owner, notes),
         noteQueuedRow: ({ jobId, destinationSession, note }) => queueRepoInstance.noteOpenWatchdogRow(jobId, destinationSession, note),
       }),
@@ -2713,13 +2714,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       additionalPolicies: [
         makeWorkflowKeepalivePolicy({
           db,
+          isFenced: id => !!queueRepoInstance.transferFence(id),
           // OPR.0.4.6.WF5 FR-2 class (b): detection-time exception items,
           // dedup by occurrence; dial resolved via the runtime's cached
           // spec (registered-human selection inside the helper).
           ensureStuckExceptionItem: workflowExceptionEnsurer,
           reconcileStuckExceptions: (id) => workflowRuntime?.reconcileStuckExceptions(id) ?? 0,
         }),
-        makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService, isQueueOnlySeat: isQueueOnlyGuardSeat }),
+        makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService, isQueueOnlySeat: isQueueOnlyGuardSeat, isFenced: id => !!queueRepoInstance.transferFence(id) }),
         // OPR.0.5.6.24 F-14: the parked-owner consumer — the WHOLE shipped
         // parked diagnosis (diagnoseRigParked over the arbitrated oracle +
         // destination-scoped obligations + wake status; the same derivation

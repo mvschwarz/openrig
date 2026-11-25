@@ -90,6 +90,25 @@ function disposition(jobId: string, qitemId: string) {
 }
 
 describe("due parked-row reminders for one seat", () => {
+  it("terminalizes a fenced park timer and delivers only its unfenced peers", async () => {
+    const owner = seat();
+    const stale = await park(owner, "transferred");
+    const live = await park(owner, "still local");
+    db.exec(`INSERT INTO queue_transfer_ledger (record_id, side, kind, transfer_id, archive_digest, origin_host_id,
+      origin_minted_at, destination_host_id, authorization_digest, mapping_digest, actor, recorded_at)
+      VALUES ('park-rel', 'origin', 'relinquished', 'transfer', 'digest', 'origin', 'minted', 'target', 'auth', 'map', 'operator', '1')`);
+    db.prepare(`INSERT INTO queue_transfer_relinquished (qitem_id, record_id, archive_digest, destination_host_id, source_state)
+      VALUES (?, 'park-rel', 'digest', 'target', 'blocked')`).run(stale.qitemId);
+    due(stale.jobId);
+    due(live.jobId);
+
+    await deps.watchdogScheduler!.runTickNow();
+
+    expect(sends).toEqual([{ session: owner, text: expect.stringContaining(live.qitemId) }]);
+    expect(sends[0]?.text).not.toContain(stale.qitemId);
+    expect(disposition(stale.jobId, stale.qitemId)).toMatchObject({ state: "terminal", terminalReason: "park_timer_target_terminal", wakePhase: "armed" });
+  });
+
   it("arrive as one message per scheduler pass, naming every row", async () => {
     const owner = seat();
     const rows = [await park(owner, "first wait"), await park(owner, "second wait"), await park(owner, "third wait")];
