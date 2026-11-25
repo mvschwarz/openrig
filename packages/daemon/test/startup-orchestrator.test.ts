@@ -169,6 +169,40 @@ describe("StartupOrchestrator", () => {
     };
   }
 
+  it("uses snapshot actions rather than newer live overrides on fresh-primed restore", async () => {
+    const seed = seedSession();
+    const old = makeAction({ type: "send_text", value: "snapshot text" });
+    const recipe = { version: 1, rigRoot: "/tmp", rigSpec: { version: "0.2", name: "test-rig", pods: [] }, startupTextOverrides: [{ before: old, value: "newer text" }] };
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), seed.nodeId);
+    const result = await createOrchestrator().startNode(makeInput(seed, { snapshotStartupActions: true, startupActions: [old] }));
+    expect(result.ok).toBe(true);
+    const sent = vi.mocked(tmux.sendText).mock.calls.map(call => call[1]);
+    expect(sent).toContain("snapshot text");
+    expect(sent).not.toContain("newer text");
+  });
+
+  it("allows an empty replay plan even when a live override exists", async () => {
+    const seed = seedSession();
+    const old = makeAction({ type: "send_text", value: "original" });
+    const recipe = { version: 1, rigRoot: "/tmp", rigSpec: { version: "0.2", name: "test-rig", pods: [] }, startupTextOverrides: [{ before: old, value: "new" }] };
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), seed.nodeId);
+    const result = await createOrchestrator().startNode(makeInput(seed, { startupActions: [] }));
+    expect(result.ok).toBe(true);
+    expect(result.warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining("stale")]));
+  });
+
+  it("starts with source text when an override overlaps resolved actions", async () => {
+    const seed = seedSession();
+    const old = makeAction({ type: "send_text", value: "original" });
+    const other = { ...old, value: "replacement" };
+    const recipe = { version: 1, rigRoot: "/tmp", rigSpec: { version: "0.2", name: "test-rig", pods: [] }, startupTextOverrides: [{ before: old, value: other.value }] };
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), seed.nodeId);
+    const result = await createOrchestrator().startNode(makeInput(seed, { startupActions: [old, other] }));
+    expect(result.ok).toBe(true);
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.stringContaining("stale") ]));
+    expect(vi.mocked(tmux.sendText).mock.calls.map(call => call[1])).toEqual(expect.arrayContaining(["original", "replacement"]));
+  });
+
   it.each([false, true])("revokes its exact run grant on later readiness failure, replacement=%s", async replace => {
     const seed = seedSession();
     db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(seed.nodeId);

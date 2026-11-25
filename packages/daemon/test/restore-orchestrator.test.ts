@@ -4994,6 +4994,31 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("fresh-primed restore replays snapshot text without a later live override", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-snapshot", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-snapshot" });
+    const session = sessionRegistry.registerSession(node.id, "dev-design@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    const action = { type: "send_text", value: "captured text", phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true };
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', ?, 'claude-code')").run(node.id, JSON.stringify([action]));
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    const recipe = { version: 1, rigRoot: "/tmp", rigSpec: { version: "0.2", name: "test-rig", pods: [] }, startupTextOverrides: [{ before: action, value: "later replacement" }] };
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), node.id);
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const tmux = mockTmux();
+    const adapter = { runtime: "claude-code", listInstalled: vi.fn(async () => []), project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })), checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const, resumeToken: "fresh-token", resumeType: "claude_id" })) };
+    const result = await createOrchestrator({ tmux }).restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.design"] });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.result.nodes[0]?.status).toBe("fresh-primed");
+    const sent = vi.mocked(tmux.sendText).mock.calls.map(call => call[1]);
+    expect(sent).toContain("captured text");
+    expect(sent).not.toContain("later replacement");
+  });
+
   it("reports attention_required when a fresh pod-aware launch has no startup context", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-no-startup-context", rig.id, "Dev");

@@ -32,6 +32,7 @@ function getDeps(c: { get: (key: string) => unknown }) {
 function exportWarnings(exporter: RigSpecExporter, rigId: string, podAware: boolean): Record<string, string> {
   const warnings: Array<{ logicalId: string; reason: string }> = [
     ...(podAware ? exporter.memberStartupNotCarried(rigId) : []),
+    ...(podAware ? exporter.seatStartupTextNotCarried(rigId).map(logicalId => ({ logicalId, reason: "seat-specific startup text is not carried" })) : []),
     ...exporter.claudeAutoModeNotCarried(rigId).map((logicalId) => ({ logicalId, reason: "claude_auto_mode can't be read; not carried" })),
     ...exporter.processLimitsNotCarried(rigId).map((logicalId) => ({ logicalId, reason: "process_limits can't be read; not carried" })),
     // #3395: what an export of a pooled rig drops: an unreadable stored pool block, and an edge that touches a pool agent.
@@ -69,6 +70,8 @@ export function handleExportYaml(c: Context): Response {
         "re-applying the spec with a pool block that can be used, or clear it with pool: {}.\n"));
     notCarried.push(...exporter.poolEdgesNotCarried(rigId)
       .map(({ from, to, kind }) => `# Not carried: the ${kind} edge from ${from} to ${to}, because it touches a seat pool agent, which an export leaves out.\n`));
+    if (isPodAware) notCarried.push(...exporter.seatStartupTextNotCarried(rigId)
+      .map(seat => `# Not carried: ${JSON.stringify(seat)}'s seat-specific startup text; inspect it before importing.\n`));
     const memberStartupOmissions = isPodAware ? exporter.memberStartupNotCarried(rigId)
       .map(({ logicalId, reason }) => `# Member startup not carried for ${JSON.stringify(logicalId)} (${reason}); inspect the source before importing.\n`) : [];
     const yaml = notCarried.join("") + memberStartupOmissions.join("") + serialized;
