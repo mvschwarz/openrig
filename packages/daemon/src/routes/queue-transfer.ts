@@ -1,13 +1,12 @@
 import type Database from "better-sqlite3";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { z } from "zod";
 import type { QueueRepository } from "../domain/queue-repository.js";
 import { QueueTransferActivation } from "../domain/queue-transfer-activation.js";
 import { QUEUE_TRANSFER_MAX_BYTES, QueueTransferError } from "../domain/queue-transfer-format.js";
 import { assertTransferSchema, QueueTransferOperationError, type TransferActor } from "../domain/queue-transfer-operation.js";
-import { QueueTransferParseError } from "../domain/queue-transfer-parse.js";
-import { parseActivationResult, parseAuthorization, parseReceipt, QueueTransferRecordError, RECEIPT_KIND } from "../domain/queue-transfer-records.js";
+import { isTransferObject, QueueTransferParseError } from "../domain/queue-transfer-parse.js";
+import { isTransferDigest, parseActivationResult, parseAuthorization, parseReceipt, QueueTransferRecordError, RECEIPT_KIND } from "../domain/queue-transfer-records.js";
 import { replayTransfer, transferStatus } from "../domain/queue-transfer-recovery.js";
 import { QueueTransferSource } from "../domain/queue-transfer-relinquish.js";
 import { QueueTransferStaging } from "../domain/queue-transfer-staging.js";
@@ -15,22 +14,36 @@ import { SelfHostIdentityStore } from "../domain/seat-identity-store.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 
-const writeBody = z.object({ actor: z.string().optional() });
-const archiveText = z.string().min(1);
-const dryRun = z.boolean().optional();
-const relinquishBody = writeBody.extend({ archiveText, authorization: z.json(), intervention: z.string(), limits: z.string().optional(), dryRun });
-const activateBody = writeBody.extend({ importId: z.string().min(1), authorization: z.json(), receipt: z.json(), dryRun });
-const reconcileBody = writeBody.extend({ archiveText, result: z.json() });
-const replayBody = z.object({ record: z.looseObject({ kind: z.string() }) });
-const digest = z.string().regex(/^[0-9a-f]{64}$/).optional();
-
-async function readBody<T>(c: Context, schema: z.ZodType<T>): Promise<T> {
+const invalidBody = () => new QueueTransferOperationError("invalid_body", 400);
+async function readBody(c: Context): Promise<Record<string, unknown>> {
   try {
-    return schema.parse(await c.req.json());
+    const body: unknown = await c.req.json();
+    if (!isTransferObject(body)) throw invalidBody();
+    return body;
   } catch (error) {
-    if (error instanceof SyntaxError || error instanceof z.ZodError) throw new QueueTransferOperationError("invalid_body", 400);
+    if (error instanceof SyntaxError) throw invalidBody();
     throw error;
   }
+}
+
+const writeOptions = ({ actor, dryRun }: Record<string, unknown>) => {
+  if ((actor !== undefined && typeof actor !== "string") || (dryRun !== undefined && typeof dryRun !== "boolean")) throw invalidBody();
+  return { actor, dryRun };
+};
+function relinquishBody(body: Record<string, unknown>) {
+  const { archiveText, authorization, intervention, limits } = body;
+  if (typeof archiveText !== "string" || !archiveText || authorization === undefined || typeof intervention !== "string" ||
+      (limits !== undefined && typeof limits !== "string")) throw invalidBody();
+  return { ...writeOptions(body), archiveText, authorization, intervention, limits };
+}
+function activateBody(body: Record<string, unknown>) {
+  const { importId, authorization, receipt } = body;
+  if (typeof importId !== "string" || !importId || authorization === undefined || receipt === undefined) throw invalidBody();
+  return { ...writeOptions(body), importId, authorization, receipt };
+}
+function reconcileBody({ actor, archiveText, result }: Record<string, unknown>) {
+  if ((actor !== undefined && typeof actor !== "string") || typeof archiveText !== "string" || !archiveText || result === undefined) throw invalidBody();
+  return { actor, archiveText, result };
 }
 
 export function queueTransferRoutes({ db, repo, bearerToken }: {
@@ -58,15 +71,15 @@ export function queueTransferRoutes({ db, repo, bearerToken }: {
     return c.json({ stage, destinationHostId: host.hostId });
   });
   app.get("/status", c => {
-    const parsed = digest.safeParse(c.req.query("archiveDigest"));
-    if (!parsed.success) return c.json({ error: "invalid_archive_digest" }, 400);
-    return c.json(transferStatus(db, parsed.data));
+    const digest = c.req.query("archiveDigest");
+    if (digest !== undefined && !isTransferDigest(digest)) return c.json({ error: "invalid_archive_digest" }, 400);
+    return c.json(transferStatus(db, digest));
   });
 
-  function write<T extends { readonly actor?: string | undefined }>(verb: string, schema: z.ZodType<T>,
+  function write<T extends { readonly actor?: string | undefined }>(verb: string, parseBody: (body: Record<string, unknown>) => T,
     run: (input: T, actor: TransferActor, queue: QueueRepository) => object | undefined) {
     app.post(`/${verb}`, async c => {
-      const body = await readBody(c, schema);
+      const body = parseBody(await readBody(c));
       const identity = requireSenderIdentity(c, { verb: `queue transfer ${verb}`, bodyClaim: body.actor });
       if (!identity.ok) return identity.response;
       if (!repo) return c.json({ error: "queue_repository_unavailable" }, 500);
@@ -83,7 +96,8 @@ export function queueTransferRoutes({ db, repo, bearerToken }: {
     ...body, result: parseActivationResult(body.result), actor,
   }));
   app.post("/replay", async c => {
-    const { record } = await readBody(c, replayBody);
+    const { record } = await readBody(c);
+    if (!isTransferObject(record) || typeof record.kind !== "string") throw invalidBody();
     return c.json(replayTransfer(db, record.kind === RECEIPT_KIND ? parseReceipt(record) : parseActivationResult(record)));
   });
   return app;

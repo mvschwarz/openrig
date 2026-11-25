@@ -1,55 +1,81 @@
 import { createHash } from "node:crypto";
-import { z } from "zod";
 import { canonicalQueueJson, type QueueTransferJson } from "./queue-transfer-format.js";
+import { isTransferObject } from "./queue-transfer-parse.js";
 
 export const AUTHORIZATION_KIND = "openrig.queue-transfer.authorization/v1";
 export const RECEIPT_KIND = "openrig.queue-transfer.receipt/v1";
 export const ACTIVATION_KIND = "openrig.queue-transfer.activation/v1";
 export const RECONCILIATION_KIND = "openrig.queue-transfer.reconciliation/v1";
 
-const text = z.string().refine(value => value.trim().length > 0 && !value.includes("\0"));
-const digest = z.string().regex(/^[0-9a-f]{64}$/);
-const origin = z.object({ hostId: text, mintedAt: text });
-const destination = z.object({ hostId: text, mappingDigest: digest });
-const method = z.enum(["online-handshake", "operator-attestation"]);
-const sourceState = z.enum(["relinquished", "isolated"]);
-const archivedState = z.enum(["pending", "in-progress", "blocked", "done", "failed", "denied", "canceled", "handed-off", "erased"]);
-const selection = z.array(z.object({ qitemId: text, state: archivedState }));
-const count = z.number().int().nonnegative();
-const ids = z.array(text);
-const details = z.array(z.object({ qitemId: text, kind: text, detail: z.string() }));
-const mapping = z.array(z.object({ from: text, to: text }));
+type ReadField<T> = (value: unknown, invalid: (field: string) => never, field: string) => T;
+const isString = (value: unknown): value is string => typeof value === "string";
+export const isTransferDigest = (value: unknown): value is string => isString(value) && /^[0-9a-f]{64}$/.test(value);
+const checked = <T>(guard: (value: unknown) => value is T): ReadField<T> => (value, invalid, field) =>
+  guard(value) ? value : invalid(field);
+const oneOf = <const T extends string>(...choices: T[]): ReadField<T> => (value, invalid, field) =>
+  choices.find(choice => choice === value) ?? invalid(field);
+const object = <T>(fields: { [K in keyof T]: ReadField<T[K]> }): ReadField<T> => (value, invalid, field) => {
+  if (!isTransferObject(value)) return invalid(field);
+  const result: Partial<T> = {};
+  for (const key in fields) {
+    const parsed = fields[key](value[key], invalid, field ? `${field}.${key}` : key);
+    if (parsed !== undefined) result[key] = parsed;
+  }
+  return result as T;
+};
+const array = <T>(read: ReadField<T>): ReadField<T[]> => (value, invalid, field) =>
+  Array.isArray(value) ? value.map((entry: unknown, index) => read(entry, invalid, `${field}.${index}`)) : invalid(field);
+const optional = <T>(read: ReadField<T>): ReadField<T | undefined> => (value, invalid, field) =>
+  value === undefined ? undefined : read(value, invalid, field);
+const nullable = <T>(read: ReadField<T>): ReadField<T | null> => (value, invalid, field) =>
+  value === null ? null : read(value, invalid, field);
+const text = checked((value): value is string => isString(value) && value.trim().length > 0 && !value.includes("\0"));
+const string = checked(isString);
+const digest = checked(isTransferDigest);
+const origin = object({ hostId: text, mintedAt: text });
+const destination = object({ hostId: text, mappingDigest: digest });
+const method = oneOf("online-handshake", "operator-attestation");
+const sourceState = oneOf("relinquished", "isolated");
+const archivedState = oneOf("pending", "in-progress", "blocked", "done", "failed", "denied", "canceled", "handed-off", "erased");
+const selection = array(object({ qitemId: text, state: archivedState }));
+const count = checked((value): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
+const ids = array(text);
+const details = array(object({ qitemId: text, kind: text, detail: string }));
+const mapping = array(object({ from: text, to: text }));
 
-const authorizationSchema = z.object({
-  kind: z.literal(AUTHORIZATION_KIND), operationId: text, archiveDigest: digest, origin,
-  destination: z.object({ hostId: text, authorizedAt: text, seatMapping: mapping }),
-  intervention: z.object({ kind: method, actor: text, recordedAt: text, limits: z.string() }),
-  dispositions: z.array(z.object({ qitemId: text, text })).optional(),
+const authorizationReader = object({
+  kind: oneOf(AUTHORIZATION_KIND), operationId: text, archiveDigest: digest, origin,
+  destination: object({ hostId: text, authorizedAt: text, seatMapping: mapping }),
+  intervention: object({ kind: method, actor: text, recordedAt: text, limits: string }),
+  dispositions: optional(array(object({ qitemId: text, text }))),
 });
-const receiptSchema = z.object({
-  kind: z.literal(RECEIPT_KIND), transferId: text, archiveDigest: digest, authorizationDigest: digest, origin, destination,
-  sourceState, method, intervention: text, limits: z.string(), recordedAt: text, actor: text, rowsDigest: digest,
-  note: z.string(), workflowState: z.array(z.object({ qitemId: text, instanceId: text })).optional(), selection: selection.optional(),
-}).refine(value => (value.sourceState === "relinquished") === (value.method === "online-handshake"));
-const activationSchema = z.object({
-  kind: z.literal(ACTIVATION_KIND), operationId: text, transferId: text, importId: text,
+const receiptReader = object({
+  kind: oneOf(RECEIPT_KIND), transferId: text, archiveDigest: digest, authorizationDigest: digest, origin, destination,
+  sourceState, method, intervention: text, limits: string, recordedAt: text, actor: text, rowsDigest: digest,
+  note: string, workflowState: optional(array(object({ qitemId: text, instanceId: text }))), selection: optional(selection),
+});
+const activationReader = object({
+  kind: oneOf(ACTIVATION_KIND), operationId: text, transferId: text, importId: text,
   archiveDigest: digest, authorizationDigest: digest, mappingDigest: digest, origin, destination,
-  recordedAt: text, actor: text, sourceState, method, status: z.literal("activated"), replayed: z.boolean(),
-  rows: z.object({
+  recordedAt: text, actor: text, sourceState, method, status: oneOf("activated"), replayed: checked((value): value is boolean => typeof value === "boolean"),
+  rows: object({
     total: count, created: count, runnable: ids, terminal: ids, erased: ids,
-    projectedToPending: z.array(z.object({ qitemId: text, previouslyClaimedBy: text })),
-    blocked: z.array(z.object({ qitemId: text, blockedOn: text.nullable(), wait: z.enum(["restored_continuation", "transferred_blocked"]) })),
-    remapped: z.array(z.object({ qitemId: text, field: z.enum(["sourceSession", "destinationSession", "returnRoute", "blockedOn"]), from: text, to: text })),
+    projectedToPending: array(object({ qitemId: text, previouslyClaimedBy: text })),
+    blocked: array(object({ qitemId: text, blockedOn: nullable(text), wait: oneOf("restored_continuation", "transferred_blocked") })),
+    remapped: array(object({ qitemId: text, field: oneOf("sourceSession", "destinationSession", "returnRoute", "blockedOn"), from: text, to: text })),
   }),
-  waits: z.object({ restoredContinuations: ids, transferredBlocked: ids }),
+  waits: object({ restoredContinuations: ids, transferredBlocked: ids }),
   unresolvedContinuations: details, remainingOnSource: details,
-  history: z.object({ transitionsImported: count, wakeEvidenceImportedNotScheduled: count, missionControlActionsImported: count }),
-  warnings: z.array(z.object({ code: text, qitemId: text.optional(), reference: text.optional(), message: z.string().optional() })),
+  history: object({ transitionsImported: count, wakeEvidenceImportedNotScheduled: count, missionControlActionsImported: count }),
+  warnings: array(object({ code: text, qitemId: optional(text), reference: optional(text), message: optional(string) })),
 });
 
-export type TransferAuthorization = z.infer<typeof authorizationSchema>;
-export type TransferReceipt = z.infer<typeof receiptSchema>;
-export type TransferActivation = z.infer<typeof activationSchema>;
+type OptionalFields<T> = { [K in keyof T as undefined extends T[K] ? never : K]: T[K] }
+  & { [K in keyof T as undefined extends T[K] ? K : never]?: T[K] };
+export type TransferAuthorization = OptionalFields<ReturnType<typeof authorizationReader>>;
+export type TransferReceipt = OptionalFields<ReturnType<typeof receiptReader>>;
+type Activation = ReturnType<typeof activationReader>;
+export type TransferActivation = Omit<Activation, "warnings"> & { warnings: OptionalFields<Activation["warnings"][number]>[] };
 
 export class QueueTransferRecordError extends Error {
   constructor(readonly code: "authorization_invalid" | "receipt_invalid" | "activation_result_invalid", detail: string) {
@@ -57,15 +83,19 @@ export class QueueTransferRecordError extends Error {
   }
 }
 
-function parse<T>(schema: z.ZodType<T>, value: unknown, code: QueueTransferRecordError["code"]): T {
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) throw new QueueTransferRecordError(code, parsed.error.issues.map(issue => issue.path.join(".") || "record").join(", "));
-  return parsed.data;
+function parse<T>(read: ReadField<T>, value: unknown, code: QueueTransferRecordError["code"]): T {
+  return read(value, field => { throw new QueueTransferRecordError(code, field || "record"); }, "");
 }
 
-export const parseAuthorization = (value: unknown) => parse(authorizationSchema, value, "authorization_invalid");
-export const parseReceipt = (value: unknown) => parse(receiptSchema, value, "receipt_invalid");
-export const parseActivationResult = (value: unknown) => parse(activationSchema, value, "activation_result_invalid");
+export const parseAuthorization = (value: unknown): TransferAuthorization => parse(authorizationReader, value, "authorization_invalid");
+export function parseReceipt(value: unknown): TransferReceipt {
+  const receipt = parse(receiptReader, value, "receipt_invalid");
+  if ((receipt.sourceState === "relinquished") !== (receipt.method === "online-handshake")) {
+    throw new QueueTransferRecordError("receipt_invalid", "sourceState and method disagree");
+  }
+  return receipt;
+}
+export const parseActivationResult = (value: unknown): TransferActivation => parse(activationReader, value, "activation_result_invalid");
 
 export function recordDigest(value: QueueTransferJson): string {
   return createHash("sha256").update(canonicalQueueJson(value)).digest("hex");

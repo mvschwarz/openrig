@@ -10,8 +10,9 @@ export class QueueTransferParseError extends Error {
 }
 
 const invalid = () => new QueueTransferParseError("archive_invalid", "Malformed queue transfer envelope");
-const object = (value: unknown): value is Record<string, unknown> =>
+export const isTransferObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
+const object = isTransferObject;
 const name = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.trim() === value && !value.includes("\0");
 const names = (value: unknown): value is string[] => Array.isArray(value) && value.every(name);
