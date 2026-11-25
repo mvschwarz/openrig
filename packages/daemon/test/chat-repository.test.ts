@@ -54,6 +54,19 @@ describe("ChatRepository", () => {
     expect(chatRepo.searchChat(rigId, "rate_limit|100%").map((m) => m.body)).toEqual(["rate_limit hit", "quota 100% used"]);
   });
 
+  it("history questions preserve a pipe within a literal keyword", () => {
+    chatRepo.send(rigId, "alice", "using foo|bar in the config");
+    chatRepo.send(rigId, "bob", "foo alone is unrelated");
+    chatRepo.send(rigId, "bob", "bar alone is unrelated");
+    const history = new HistoryQuery({
+      transcriptsRoot: "/unused-chat-only-fixture",
+      exec: async () => { throw new Error("chat search must not invoke a process"); },
+      chatSearchFn: (id, keywords) => chatRepo.searchChat(id, keywords),
+    });
+    expect(history.searchChat(rigId, "foo|bar").map((row) => row.body)).toEqual(["using foo|bar in the config"]);
+    expect(history.searchChat(rigId, "foo|bar unrelated")).toHaveLength(3);
+  });
+
   it("same-day ISO since uses UTC chronology including offsets and fractions", () => {
     const early = chatRepo.send(rigId, "alice", "before cutoff");
     const boundary = chatRepo.send(rigId, "alice", "at cutoff");

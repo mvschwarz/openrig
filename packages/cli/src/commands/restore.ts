@@ -169,7 +169,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
     .action(async (attemptId: string, opts: { rig: string; json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(status));
       const target = await rigIdForHandle(client, opts.rig);
       if (!target.ok) {

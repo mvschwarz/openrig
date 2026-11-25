@@ -171,6 +171,9 @@ interface DaemonClientOptions {
   /** With sessionName: the caller whose grant the MCP adapter checked, sent as X-OpenRig-Principal (JSON of its source,
    *  id and, for a grant-service grant, grant id and version; never a credential). */
   principal?: { source: string; id: string; grant?: string; version?: number | string; label?: string };
+  /** With sessionName: a scoped (non-owner) caller's shared roots, sent as X-OpenRig-File-Roots on every request so an
+   *  evidence file it names is attached only within them. JSON null explicitly identifies an owner grant; absent for local calls without a grant. */
+  fileRoots?: readonly string[] | null;
 }
 
 /** Routing state published by daemon start, not a health check or sibling-home discovery. */
@@ -202,6 +205,7 @@ export class DaemonClient {
   private originUnknown = false;
   private sessionName?: string;
   private readonly principal?: DaemonClientOptions["principal"];
+  private readonly fileRoots?: readonly string[] | null;
 
   /** Isolated terminal tools require this home's durable identity, even on loopback. */
   async isLocalInstance(): Promise<boolean> {
@@ -227,7 +231,11 @@ export class DaemonClient {
   }
 
   private async identityHeaders(): Promise<Record<string, string>> {
-    const { headers, local } = await this.senderHeaders();
+    const { headers: sender, local } = await this.senderHeaders();
+    // A scoped caller's roots go wherever its requests go: they can only narrow what a daemon attaches for it. Root names
+    // are written as JSON with everything past ASCII escaped, as the principal is.
+    const headers = this.fileRoots === undefined || this.sessionName === undefined ? sender
+      : { ...sender, "X-OpenRig-File-Roots": JSON.stringify(this.fileRoots).replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`) };
     // Only beside a seat this client was built for, and only to this host's own daemon: the endpoint itself must answer
     // as this host's instance, whichever way it was chosen (OPENRIG_URL, or an explicit URL such as rig mcp serve --port,
     // which can be a forwarded port). The daemon records it only on a direct, attributed request.
@@ -323,6 +331,7 @@ export class DaemonClient {
     this.timeoutMs = options?.timeoutMs ?? 5_000;
     this.sessionName = options?.sessionName;
     this.principal = options?.principal;
+    this.fileRoots = options?.fileRoots;
   }
 
   /** Shared with raw CLI data readers. Constructor URLs alone do not establish explicit intent. */
