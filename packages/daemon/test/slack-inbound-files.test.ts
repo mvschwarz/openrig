@@ -55,18 +55,30 @@ interface Landed { source: string; destination: string; tags?: string[]; summary
 function harness(opts?: {
   routes?: Record<string, Uint8Array | { status: number } | { html: true }>;
   mapped?: Record<string, string>;
+  failWrite?: (p: string) => boolean;
+  admit?: boolean;
 }) {
   const fs = memFs();
   const rows: Landed[] = [];
   const logs: string[] = [];
   const media = new Map<string, Uint8Array>();
+  const provenance = new Map<string, string>();
   const { fetchImpl, seenAuth } = stubFetch(opts?.routes ?? {});
   const filePort = makeInboundFilePort({
     token: "xoxb-test-token",
     mediaDir: MEDIA_DIR,
     fetchImpl,
     mkdirp: () => {},
-    writeFile: (p: string, bytes: Uint8Array) => { media.set(p, bytes); },
+    writeFile: (p: string, bytes: Uint8Array) => {
+      if (opts?.failWrite?.(p)) throw new Error("fixture write failed");
+      if (p.endsWith(".provenance.json")) provenance.set(p, Buffer.from(bytes).toString("utf8"));
+      else media.set(p, bytes);
+    },
+    committedFileSize: (p, record) => {
+      const saved = provenance.get(`${p}.provenance.json`);
+      if (saved !== undefined && saved !== record) throw new Error("fixture provenance conflict");
+      return saved === record ? media.get(p)?.byteLength : undefined;
+    },
     log: (m: string) => logs.push(m),
   });
   const threadMap = {
@@ -78,7 +90,9 @@ function harness(opts?: {
     seen: new SeenStore("/s.jsonl", fs, clock),
     deadLetter: new DeadLetterStore<SlackEvent>("/d.jsonl", fs, clock),
     destination: "operator-agent@kernel",
-    resolveSender: () => ({ admitted: true, source: "founder@humans" }),
+    resolveSender: () => opts?.admit === false
+      ? { admitted: false, teaching: "register" }
+      : { admitted: true, source: "founder@humans" },
     resolveRoute: makeThreadRouteResolver({
       map: threadMap,
       unroutedDestination: "orch-lead@v-openrig-build",
@@ -87,7 +101,7 @@ function harness(opts?: {
     files: filePort,
     log: (m: string) => logs.push(m),
   } as never);
-  return { router, rows, media, logs, seenAuth };
+  return { router, rows, media, provenance, logs, seenAuth, filePort };
 }
 
 /** The OUTERMOST real entry: Socket envelope -> fast-ack -> ingestDecision ->
@@ -110,6 +124,58 @@ const fileEvent = (over?: Partial<SlackEvent>): SlackEvent => ({
   thread_ts: "400.0",
   files: [F_IMG],
   ...over,
+});
+
+describe("inbound file origin records", () => {
+  it("records the exact live origin of each attachment and separates equal timestamps across channels", async () => {
+    const h = harness({ routes: { [F_IMG.url_private]: PNG_BYTES, [F_PDF.url_private]: PDF_BYTES } });
+    await deliver(h, fileEvent({ ts: "500.000100", files: [F_IMG, F_PDF] }));
+    await deliver(h, fileEvent({ ts: "500.000100", channel: "C2", user: "U2" }));
+    expect(h.media.size).toBe(3);
+    expect([...h.media.keys()].map(p => JSON.parse(h.provenance.get(`${p}.provenance.json`)!))).toEqual([
+      { version: 1, channelId: "C1", messageTs: "500.000100", authorId: "U1", fileId: "F1", ordinal: 1 },
+      { version: 1, channelId: "C1", messageTs: "500.000100", authorId: "U1", fileId: "F2", ordinal: 2 },
+      { version: 1, channelId: "C2", messageTs: "500.000100", authorId: "U2", fileId: "F1", ordinal: 1 },
+    ]);
+  });
+
+  it("reuses an already committed file on replay and refuses conflicting origin", async () => {
+    const h = harness({ routes: { [F_IMG.url_private]: PNG_BYTES } });
+    const origin = { channelId: "C1", messageTs: "500.1", authorId: "U1" };
+    const first = await h.filePort.transfer([F_IMG], origin);
+    expect(first.stored).toHaveLength(1);
+    const priorRecord = [...h.provenance.values()];
+    expect(await h.filePort.transfer([{ ...F_IMG, url_private: undefined }], origin)).toEqual(first);
+    expect((await h.filePort.transfer([F_IMG], { ...origin, authorId: "U2" })).failed).toHaveLength(1);
+    expect(h.seenAuth).toHaveLength(1);
+    expect([...h.provenance.values()]).toEqual(priorRecord);
+  });
+
+  it.each([false, true])("recovers after a failed write of the %s provenance phase without losing the caption", async failRecord => {
+    let fail = true;
+    const h = harness({ routes: { [F_IMG.url_private]: PNG_BYTES },
+      failWrite: p => fail && (p.endsWith(".provenance.json") === failRecord) });
+    await deliver(h, fileEvent({ text: "caption survives" }));
+    expect(h.provenance.size).toBe(0);
+    expect(h.media.size).toBe(failRecord ? 1 : 0);
+    expect(h.rows[0]?.body).toContain("caption survives");
+    expect(h.rows[0]?.body).toContain("fixture write failed");
+    fail = false;
+    const repaired = await h.filePort.transfer([F_IMG], { channelId: "C1", messageTs: "500.1", authorId: "U1" });
+    expect(repaired.stored).toHaveLength(1);
+    expect(h.provenance.size).toBe(1);
+  });
+
+  it("keeps quoted paths and unadmitted uploads out of provenance", async () => {
+    const text = harness();
+    await deliver(text, fileEvent({ subtype: undefined, files: [], text: `look at ${MEDIA_DIR}/voice.ogg` }));
+    expect(text.rows).toHaveLength(1);
+    expect(text.provenance.size).toBe(0);
+    const refused = harness({ admit: false, routes: { [F_IMG.url_private]: PNG_BYTES } });
+    await deliver(refused, fileEvent());
+    expect(refused.seenAuth).toHaveLength(0);
+    expect(refused.provenance.size).toBe(0);
+  });
 });
 
 describe("inbound files: admission (the T1076 seam replaced)", () => {

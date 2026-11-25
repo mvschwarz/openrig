@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
+import { daemonMayAnswer, daemonStatusGuard, getDaemonStatus, getDaemonUrl, printStatusGuard, resolveConfiguredDaemonTarget } from "../daemon-lifecycle.js";
 import { createMcpServer, dropUnfilledSeat, toolForGrantOperation, unfilledSeatText, type UnfilledSeat } from "../mcp-server.js";
 import { addGrant, McpHttpConfigError, mcpTokenFilePath, readGrantServiceHeader, readGrants, revokeGrant, rotateGrant, startMcpHttpServer } from "../mcp-http.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
@@ -88,24 +88,6 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
       const unfilledSeat = dropUnfilledSeat();
       if (unfilledSeat) console.error(`rig mcp serve: ${unfilledSeatText(unfilledSeat)}; serving with no seat until it names this app's address on the team.`);
 
-      let daemonUrl: string;
-      if (opts.port) {
-        const daemonPort = parseInt(opts.port, 10);
-        if (Number.isNaN(daemonPort)) {
-          console.error("Invalid port number");
-          process.exitCode = 1;
-          return;
-        }
-        if (daemonPort < 1 || daemonPort > 65535) {
-          console.error(`Warning: daemon port ${daemonPort} is outside [1, 65535]; MCP will start, but daemon tool calls may fail. Check --port.`);
-        }
-        daemonUrl = `http://127.0.0.1:${daemonPort}`;
-      } else {
-        const status = await getDaemonStatus(deps.lifecycleDeps);
-        if (!daemonStatusGuard(status)) return;
-        daemonUrl = getDaemonUrl(status);
-      }
-
       if (!opts.http && (opts.grantService || opts.grantServiceHeaderFile)) {
         console.error("--grant-service and --grant-service-header-file need --http");
         process.exitCode = 1;
@@ -132,6 +114,36 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
         process.exitCode = 1;
         return;
       }
+
+      let daemonUrl: string;
+      if (opts.port) {
+        const daemonPort = parseInt(opts.port, 10);
+        if (Number.isNaN(daemonPort)) {
+          console.error("Invalid port number");
+          process.exitCode = 1;
+          return;
+        }
+        if (daemonPort < 1 || daemonPort > 65535) {
+          console.error(`Warning: daemon port ${daemonPort} is outside [1, 65535]; MCP will start, but daemon tool calls may fail. Check --port.`);
+        }
+        daemonUrl = `http://127.0.0.1:${daemonPort}`;
+      } else {
+        const status = await getDaemonStatus(deps.lifecycleDeps);
+        if (daemonMayAnswer(status)) {
+          daemonUrl = getDaemonUrl(status);
+        } else if (opts.http || readOpenRigEnv("OPENRIG_URL", "RIGGED_URL") !== undefined) {
+          daemonStatusGuard(status);
+          return;
+        } else {
+          // An app starts its stdio server when the app starts, often before the daemon. Exiting would leave the app
+          // without these tools until it reconnects, so serve anyway: aimed at the endpoint the status names, else this
+          // home's configured one, each call reaches the daemon once it answers there.
+          printStatusGuard(status);
+          daemonUrl = getDaemonUrl(status.port !== undefined ? status : { state: status.state, ...resolveConfiguredDaemonTarget() });
+          console.error(`rig mcp serve: serving anyway. Tool calls go to the daemon at ${daemonUrl} and fail until it answers there.`);
+        }
+      }
+
       if (opts.http) {
         await serveHttp(daemonUrl, opts.bind ?? "127.0.0.1:7437", opts.grantService, opts.grantServiceHeaderFile, oauth, opts.taskDestination, opts.frontDoor === true, unfilledSeat);
         return;

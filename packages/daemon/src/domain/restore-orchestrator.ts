@@ -112,6 +112,8 @@ const SNAPSHOT_SEAT_CHANGED = "A snapshot seat was removed or recreated. Select 
 // usability, and lifecycle projection. Imported and re-exported here so the
 // existing export surface and the execution call sites below are unchanged.
 import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError, freshSeatLaunchCommand, seatStopCommand } from "./active-occupant.js";
+import { shellWord } from "../adapters/shell-quote.js";
+import { resumeTypeForRuntime } from "./resume-token-validation.js";
 import { effectiveRestorePolicy, isOrdinaryTerminalSeat, type RestoreSeatFacts, communityLaunchOnlyRestoreReason } from "./restore-policy.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { communityHarnessStopsRestore } from "./community-harness-presets.js";
@@ -1627,6 +1629,23 @@ export class RestoreOrchestrator {
         const sourceNote = resumeSourceRecorded
           ? `resume source '${snapSession?.resumeType}' recorded but no token available`
           : `no resume token was captured for this seat`;
+        // A fresh launch reads the seat's saved startup context and refuses without one (as restore-check says), so a seat
+        // with neither isn't offered one. `rig seat set-resume-token <name>` records on the newest session under that name,
+        // for a runtime it has a token type for (its route's own lookup and check), so the reason names it only when that
+        // is this seat's session.
+        if (!this.db.prepare("SELECT 1 FROM node_startup_context WHERE node_id = ? LIMIT 1").get(seatNodeId)) {
+          const tokenTarget = this.sessionRegistry.findResumeContextByName(snapSession.sessionName);
+          const recordToken = tokenTarget?.sessionId === snapSession.id && resumeTypeForRuntime(tokenTarget.runtime)
+            ? `; to record its resume token, pipe it to: rig seat set-resume-token ${shellWord(snapSession.sessionName)} --token-stdin --reason "<why>"`
+            : "";
+          return {
+            nodeId,
+            logicalId: node.logicalId,
+            status: "awaiting-decision",
+            noStartupContext: true,
+            error: `Original session unresumable: ${sourceNote}. The seat has no saved startup context either, so it can't be started fresh. No session was started. Restore the original session manually${recordToken}.`,
+          };
+        }
         return {
           nodeId,
           logicalId: node.logicalId,

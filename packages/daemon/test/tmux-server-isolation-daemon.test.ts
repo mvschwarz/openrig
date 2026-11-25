@@ -229,7 +229,7 @@ if(process.argv.includes('--version')){console.log('offline-dsh');process.exit(0
     expect(await status()).toMatchObject({ mode: "inherit", requestedMode: "isolated", socketPath: personal,
       migrationPending: true, blockingSessions: [SEAT] });
     expect((await inventory()).rows.find(row => row.canonicalSessionName === SEAT)!.tmuxServerArgs).toEqual(["-S", personal]);
-    expect((await rig(["capture", SEAT, "--json"])).stdout).toContain("READY");
+    expect((await rig(["capture", SEAT, "--history-plus-pane", "--lines", "200", "--json"])).stdout).toContain("READY");
 
     await rig(["down", "scn-baton", "--json", "--force"]);
     expect(native(personal, ["list-sessions", "-F", "#{session_name}"])).toBe("personal");
