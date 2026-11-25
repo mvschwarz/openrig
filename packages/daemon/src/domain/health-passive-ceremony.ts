@@ -58,7 +58,9 @@ export class PassiveCeremonySource implements HealthObservationSource {
     this.lineageRows = undefined;
     const now = this.now(); const p = this.policy.read().policy;
     const start = new Date(Date.parse(now) - p.observationWindowSeconds * 1000).toISOString();
-    const touched = this.queue.db.prepare("SELECT qitem_id AS id, COUNT(*) AS n FROM queue_transitions WHERE ts >= ? AND ts <= ? GROUP BY qitem_id ORDER BY qitem_id LIMIT 2001").all(start, now) as Array<{ id: string; n: number }>;
+    // Retention moves old transitions to the archive and the deep read counts those too, so discovery and screening
+    // read both: each qitem once, with its live and archived in-window transitions summed.
+    const touched = this.discoverTouched(start, now);
     if (touched.length > 2000) throw new Error("health_passive_queue_window_truncated");
     type Member = { qitemId: string; handedOffFrom: string | null; tags: string[] };
     const roots = new Map<string, Member>();
@@ -91,17 +93,20 @@ export class PassiveCeremonySource implements HealthObservationSource {
         if (!row) throw new Error("health_passive_lineage_parent_unavailable");
       }
     }
-    // Past the limit, evaluate the busiest families instead of none. The ranking counts every
-    // transition in the window, daemon bookkeeping included (then lineage ID, for a stable order).
-    // That raw count bounds the counted transitions a family qualifies by, so a family that could
-    // qualify is left out only when more than the limit reach the threshold on raw traffic.
-    // The rest are reported as omitted: unevaluated, never healthy.
-    const selectedFamilies = new Set([...roots.keys()]
-      .sort((a, b) => activity.get(b)! - activity.get(a)! || (a < b ? -1 : a > b ? 1 : 0))
-      .slice(0, familyLimit));
+    // A family qualifies on counted transitions, and the raw count in the window bounds the counted ones. A family
+    // below the ceremony threshold on raw traffic therefore cannot qualify: it is classified without any per-family
+    // read and is evaluated, not omitted. The limit bounds only the deep evaluation of families that can qualify.
+    // Past it the busiest are evaluated (raw count, then lineage ID) and the rest are reported as omitted:
+    // unevaluated, never healthy.
+    const threshold = p.thresholds.ceremonyTransitions;
+    const candidates = [...roots.keys()].filter((id) => activity.get(id)! >= threshold)
+      .sort((a, b) => activity.get(b)! - activity.get(a)! || (a < b ? -1 : a > b ? 1 : 0));
+    const selectedFamilies = new Set(candidates.slice(0, familyLimit));
+    const screened = roots.size - candidates.length;
     this.lastCoverage = { source: "passive-ceremony", evaluatedAt: now, unit: "handoff families", limit: familyLimit,
-      total: roots.size, evaluated: selectedFamilies.size, omitted: roots.size - selectedFamilies.size, partial: roots.size > familyLimit,
-      order: "most queue transitions in the observation window, then lineage ID" };
+      total: roots.size, evaluated: screened + selectedFamilies.size, omitted: candidates.length - selectedFamilies.size,
+      partial: candidates.length > familyLimit, screened, deepCandidates: candidates.length,
+      order: `limit applies to deep evaluation of families that can qualify (at least ${threshold} queue transitions in the observation window), most transitions first, then lineage ID; families below the ceremony threshold are classified without reads and count as evaluated` };
     // An explicit legacy source already owns this lineage; never route it twice.
     const explicit = new Set(this.checkpoints?.entries().map((x) => x.checkpoint.lineageQitemId) ?? []);
     const observations: HealthDetectorObservation[] = [];
@@ -215,10 +220,22 @@ export class PassiveCeremonySource implements HealthObservationSource {
           productStateChanges: null, boundedAuthority: false, reviewReturns: 0, candidateChanges: 0, newRiskClasses: 0, ceremony,
           sourceDescription: `Passively read ${rows.length} declared handoff members. Normal evidence paths and workflow closure receipts are starting points, not proof counts or acceptance judgments. This source performs no writes or agent calls.`,
           source: boundHealthEvidence(segment.map(adaptQueueTransitionEvidence), { source: "mixed", startedAt: start > episodeStartedAt ? start : episodeStartedAt, endedAt: measuredEnd, limit: 10000, retentionSeconds: p.observationWindowSeconds },
-            deriveHealthSourceFreshness({ evaluatedAt: now, newestSourceAt: latest, maxAgeSeconds: p.freshnessSeconds, available: true })) });
+            // Freshness is the successful read of the queue, not the lineage's last activity: `lastObservedAt` carries
+            // activity and the detector gates confirmation and wake on it. Activity dated after the read stays contradictory.
+            deriveHealthSourceFreshness({ evaluatedAt: now, newestSourceAt: now, maxAgeSeconds: p.freshnessSeconds, available: true, contradictory: Date.parse(latest) > Date.parse(now) })) });
       }
     }
     return observations;
+  }
+
+  /** Every qitem with a transition in the window, live or archived, with its combined count. At most 2001 rows. */
+  private discoverTouched(start: string, end: string): Array<{ id: string; n: number }> {
+    const hasArchive = !!this.queue.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'queue_transitions_archive'").get();
+    // A side with more than 2000 distinct qitems already exceeds the combined limit, so each side stops at 2001.
+    const side = (table: string) => `SELECT qitem_id, COUNT(*) AS n FROM ${table} WHERE ts >= ? AND ts <= ? GROUP BY qitem_id ORDER BY qitem_id LIMIT 2001`;
+    if (!hasArchive) return this.queue.db.prepare(side("queue_transitions").replace("qitem_id,", "qitem_id AS id,").replace("ORDER BY qitem_id", "ORDER BY id")).all(start, end) as Array<{ id: string; n: number }>;
+    return this.queue.db.prepare(`SELECT qitem_id AS id, SUM(n) AS n FROM (SELECT qitem_id, n FROM (${side("queue_transitions")}) UNION ALL SELECT qitem_id, n FROM (${side("queue_transitions_archive")}))
+      GROUP BY qitem_id ORDER BY qitem_id LIMIT 2001`).all(start, end, start, end) as Array<{ id: string; n: number }>;
   }
 
   /** The whole handoff family under a root, dormant members included (the window only knows the touched ones), down

@@ -304,6 +304,10 @@ describe("a level chosen while the seat is busy decides each combined wake's del
     });
 });
 
+/** Whether a sent text lists the row as a woken dependent: its own sentence, or a line of a merged blocker list (#3896). */
+const namesParkedRow = (text: string, id: string): boolean =>
+  text.includes(`parked qitem ${id} is pending`) || text.split("\n").includes(`- ${id}`);
+
 describe("a combined wake's released members are each typed at most once in a drain", () => {
   it("routine, urgent and urgent grouped at off, urgent-only before the lease frees, typed outcomes unconfirmed", async () => {
     const f = fixture({ unconfirmed: true });
@@ -326,8 +330,10 @@ describe("a combined wake's released members are each typed at most once in a dr
     await busy;
     await drain;
     const [routine, ...urgent] = parked;
-    for (const id of urgent) expect(f.typed.filter((t) => t.includes(`parked qitem ${id} is pending`))).toHaveLength(1);
-    expect(f.typed.join("\n")).not.toContain(`parked qitem ${routine} is pending`);
+    // The urgent pair goes as one send naming the blocker once, then each row (#3896).
+    expect(f.typed.filter((t) => t.includes(`2 parked qitems are pending:\n- ${urgent[0]}\n- ${urgent[1]}\n`))).toHaveLength(1);
+    for (const id of urgent) expect(f.typed.filter((t) => namesParkedRow(t, id))).toHaveLength(1);
+    expect(f.typed.join("\n")).not.toContain(routine);
     expect(f.queue.getById(routine!)!.lastNudgeResult).toBe("retained:typing_guard");
   });
 
@@ -360,7 +366,31 @@ describe("a combined wake's released members are each typed at most once in a dr
     await busy;
     await drain;
     expect(relaxed).toBe(true);
-    for (const id of parked) expect(f.typed.filter((t) => t.includes(`parked qitem ${id} is pending`))).toHaveLength(1);
+    for (const id of parked) expect(f.typed.filter((t) => namesParkedRow(t, id))).toHaveLength(1);
+  });
+});
+
+describe("rows parked on one blocker and woken together (#3896)", () => {
+  it("name the blocker once, then each row, in one send; every row keeps its own receipt", async () => {
+    const f = fixture();
+    const blocker = await f.queue.create({ sourceSession: "peer@test", destinationSession: "peer@test", body: "Vendor reply", nudge: false });
+    const parked: string[] = [];
+    for (let i = 0; i < 9; i++) {
+      const row = await f.queue.create({ sourceSession: "peer@test", destinationSession: seat, body: `follow-up ${i}`, nudge: false });
+      await f.queue.update({ qitemId: row.qitemId, actorSession: seat, state: "blocked", blockedOn: blocker.qitemId } as never);
+      parked.push(row.qitemId);
+    }
+    await f.queue.update({ qitemId: blocker.qitemId, actorSession: "peer@test", state: "done", closureReason: "no-follow-on" } as never);
+    await vi.waitFor(() => { for (const id of parked) expect(f.queue.getById(id)!.lastNudgeResult).not.toBeNull(); });
+    expect(f.typed).toHaveLength(1);
+    const text = f.typed[0]!;
+    expect(text.split(`Blocker ${blocker.qitemId} resolved`)).toHaveLength(2);
+    expect(text.split("From: ")).toHaveLength(2);
+    expect(text).toContain(`Blocker ${blocker.qitemId} resolved; 9 parked qitems are pending:\n${parked.map((id) => `- ${id}`).join("\n")}\n`);
+    for (const id of parked) {
+      expect(f.queue.getById(id)!.state).toBe("pending");
+      expect(f.queue.getById(id)!.lastNudgeResult).not.toMatch(/^retained|^failed/);
+    }
   });
 });
 

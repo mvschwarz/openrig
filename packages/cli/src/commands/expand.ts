@@ -30,7 +30,7 @@ export function expandCommand(depsOverride?: StatusDeps): Command {
     .action(async (rigId: string, fragmentPath: string, opts: { json?: boolean; rigRoot?: string }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
 
       // Read and parse YAML fragment
       let fileContent: string;

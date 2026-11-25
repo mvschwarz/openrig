@@ -84,6 +84,46 @@ describe("cursor-bound composer input", () => {
     }
   });
 
+  // Claude's Remote Control indicator on its own row under the footer, below the update banner, in the geometry of a
+  // Claude 2.1.330 seat whose sends held as draft_input_unknown: 80x24, the indicator right-aligned in Claude's error
+  // pink, the cursor on the prompt. The rows above the box are synthetic. The labels are Claude's own.
+  describe("under Claude's Remote Control indicator", () => {
+    const pink = (label: string) => label.split(" ").map(word => `\x1b[38;5;211m${word}\x1b[39m`).join(" ");
+    const right = (label: string, drawn = label) => `${" ".repeat(78 - label.length)}${drawn}`;
+    const remoteControl = (body = "", indicator = "/rc failed", drawn = pink(indicator), modeBar = "  ⏵⏵ bypass permissions on · 1 shell · ↓ to manage"): ComposerSnapshot => {
+      const rows = body.split("\n");
+      const lead = 18 - rows.length;
+      return { screen: [...Array<string>(lead).fill(""), `${"─".repeat(64)} worker@rig ─`, body ? `❯ ${rows[0]}` : "❯\xa0",
+        ...rows.slice(1).map(row => `  ${row}`), "─".repeat(80), modeBar, right("✔ Update installed · /restart to apply"), right(indicator, drawn), "", ""].join("\n"),
+      cursor: { x: 2 + rows.at(-1)!.length, y: lead + rows.length, width: 80, height: 24 }, inMode: false };
+    };
+
+    it.each(["/rc failed", "/rc connecting…", "/rc active", "/rc reconnecting", "/rc"])("reads an empty prompt and a draft above %j", indicator => {
+      expect(inspectComposerInput(remoteControl("", indicator), "claude-code")).toMatchObject({ state: "empty", frame: JSON.stringify(["❯", 2, 80, "claude-composer"]) });
+      expect(inspectComposerInput(remoteControl("preserve this draft", indicator), "claude-code")).toMatchObject({ state: "text", rows: ["preserve this draft"], cursorAtEnd: true });
+    });
+
+    it("keeps a draft that quotes the footer and the indicator as its exact text", () => {
+      const body = "⏵⏵ bypass permissions on · 1 shell · ↓ to manage\n/rc failed";
+      expect(inspectComposerInput(remoteControl(body), "claude-code")).toMatchObject({ state: "text", rows: body.split("\n") });
+    });
+
+    it.each(["/rc failed · Enter to view", "/rc failed now", "rc failed", "/rc Failed", "/rc  failed", "/rcfailed", "/rc connecting...", "/rc disconnected", "/rc failed…"])(
+      "keeps a near miss %j unknown", indicator => {
+        expect(inspectComposerInput(remoteControl("", indicator), "claude-code")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+      });
+
+    it.each(["/rc failed", "/rc"])("keeps %j drawn selected (inverse) unknown: Enter there opens its panel", indicator => {
+      for (const body of ["", "preserve this draft"]) {
+        expect(inspectComposerInput(remoteControl(body, indicator, `\x1b[7m${indicator}\x1b[27m`), "claude-code")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+      }
+    });
+
+    it.each(["", "UNRECOGNIZED-FOOTER"])("does not skip the indicator without the mode footer above it (%j)", modeBar => {
+      expect(inspectComposerInput(remoteControl("", "/rc failed", undefined, modeBar), "claude-code")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+    });
+  });
+
   it.each([
     "✘ Auto-update failed · Run claude doctor",
     "✘ Auto-update failed: no write permission to npm prefix · Run claude doctor",

@@ -126,9 +126,25 @@ export async function listNetworkPeers(deps: Pick<NetworkRequestDeps, "home" | "
 const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 
-/** A hub URL as queue text shows it. A query string can carry a credential the person pasted, so it's hidden there, as
- *  rig network status hides it; the full URL stays only in the binding, the connection and the receipt. */
+/** A hub URL as queue text and whoami show it. A query string or a fragment can carry a credential the person pasted, so
+ *  both are hidden there, as rig network status hides them; the full URL stays only in the binding, the connection and
+ *  the receipt. A URL with only a query reads as it always has, so request items recorded before still match. */
 export function shownHubUrl(hubUrl: string): string {
+  try {
+    const url = new URL(hubUrl);
+    const hidden = [url.search && "query", url.hash && "fragment"].filter(Boolean).join(" and ");
+    if (!hidden) return hubUrl;
+    url.search = "";
+    url.hash = "";
+    return `${url.toString()} (${hidden} hidden)`;
+  } catch {
+    return hubUrl;
+  }
+}
+
+/** How a hub URL was shown before fragments were hidden: the query hidden, a fragment left in. Request items recorded
+ *  then carry it in their head, and still read back; nothing new is written this way. */
+function priorShownHubUrl(hubUrl: string): string {
   try {
     const url = new URL(hubUrl);
     if (!url.search) return hubUrl;
@@ -141,8 +157,8 @@ export function shownHubUrl(hubUrl: string): string {
 
 /** The local item's text around the request, built from the receipt's fields, so the request reads back out of the local
  *  item: the receipt keeps only its hash, and erasing the local item erases the only copy. */
-const requestHead = (r: Pick<RequestRow, "peer" | "hub_url" | "hub_seat" | "hub_qitem_id">): string =>
-  `To ${r.peer} through the network hub ${shownHubUrl(r.hub_url)}, as ${r.hub_seat} (hub item ${r.hub_qitem_id}).\n\n`;
+const requestHead = (r: Pick<RequestRow, "peer" | "hub_url" | "hub_seat" | "hub_qitem_id">, shown = shownHubUrl): string =>
+  `To ${r.peer} through the network hub ${shown(r.hub_url)}, as ${r.hub_seat} (hub item ${r.hub_qitem_id}).\n\n`;
 const requestFoot = (requestId: string): string =>
   `\n\n---\nWhen the hub item closes, OpenRig closes this item with its answer and says who gave it. Read it with rig queue show ${requestId}.`;
 const summaryLead = (peer: string): string => `To ${peer} via network hub`;
@@ -150,8 +166,10 @@ const summaryLead = (peer: string): string => `To ${peer} via network hub`;
 /** What a create sends: the request's body and summary, read from its local item. Null when that text is gone (the item
  *  was erased) or isn't the request the receipt names; such a request is never sent. */
 function requestPayload(local: QueueItem, receipt: RequestRow): { body: string; summary: string | null } | null {
-  const head = requestHead(receipt), foot = requestFoot(receipt.local_qitem_id), all = local.body ?? "";
-  if (all.length < head.length + foot.length || !all.startsWith(head) || !all.endsWith(foot)) return null;
+  const foot = requestFoot(receipt.local_qitem_id), all = local.body ?? "";
+  // Today's head, or the one written before fragments were hidden (the same text for a URL without a fragment).
+  const head = [requestHead(receipt), requestHead(receipt, priorShownHubUrl)].find((h) => all.startsWith(h));
+  if (!head || all.length < head.length + foot.length || !all.endsWith(foot)) return null;
   const body = all.slice(head.length, all.length - foot.length);
   if (sha256(body) !== receipt.body_sha256) return null;
   const lead = `${summaryLead(receipt.peer)}: `;
@@ -263,7 +281,11 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
       || existing.peer !== peer || existing.body_sha256 !== bodySha) throw reused();
     if (existing.outcome === "refused") return result(existing, "refused", `The hub refused this request earlier: ${existing.last_error ?? "no reason recorded"}. ${requestId} is closed failed.`);
     if (existing.hub_created_at) {
-      return result(existing, "sent", `${requestId} was already sent to ${peer} as hub item ${hubId}. Its answer comes back to ${requestId}: read it with rig queue show ${requestId}.`);
+      // Already closed here: a row parked on it now would never wake, so the wait hint would mislead.
+      const closed = LOCAL_CLOSED.has(deps.queueRepo.getById(requestId)?.state ?? "");
+      return result(existing, "sent", `${requestId} was already sent to ${peer} as hub item ${hubId}. ${closed
+        ? `It has closed, so nothing more will wake you for it: read its outcome with rig queue show ${requestId}.`
+        : `Its answer comes back to ${requestId}: read it with rig queue show ${requestId}.${WAIT_HINT}`}`);
     }
     if (existing.settled_at) {
       return result(existing, "unknown", `${requestId} was settled (${existing.outcome}) before the hub confirmed hub item ${hubId}, so nothing more is read for it. ${existing.last_error ?? ""}`.trim());
@@ -337,12 +359,16 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
     // A credential refused while reading back a taken id: the hub may already hold this request, even on a first try.
     if (outcome.error.kind === "revoked") return keptOpen(outcome.error);
     deps.db.prepare("UPDATE network_requests SET last_error = ? WHERE local_qitem_id = ?").run(outcome.error.message.slice(0, 500), requestId);
-    return result(receipt, "unknown", `${requestId} is recorded, and whether the hub has it yet is unknown (${outcome.error.message}). The connector checks hub item ${hubId} on its next pass and creates it there under the same id if it's missing. Retry only with the same --id.`);
+    return result(receipt, "unknown", `${requestId} is recorded, and whether the hub has it yet is unknown (${outcome.error.message}). The connector checks hub item ${hubId} on its next pass and creates it there under the same id if it's missing. Retry only with the same --id.${WAIT_HINT}`);
   }
   deps.db.prepare("UPDATE network_requests SET hub_created_at = ?, last_error = NULL WHERE local_qitem_id = ?").run(now().toISOString(), requestId);
   return result(receipt, "sent", `${outcome.kind === "found" ? `${requestId} is already on the hub as hub item ${hubId}` : `Sent to ${peer} as hub item ${hubId}`}. `
-    + `Its answer comes back to ${requestId}: read it with rig queue show ${requestId}.`);
+    + `Its answer comes back to ${requestId}: read it with rig queue show ${requestId}.${WAIT_HINT}`);
 }
+
+/** The local item belongs to OpenRig, so its close wakes no seat (it owes nothing on it): say how to be woken, where the
+ *  sender reads the outcome. Guidance only; nothing is created for the seat. */
+const WAIT_HINT = " Nothing wakes you when it closes: to be woken, park a row of your own on it (rig network request --help shows how).";
 
 function result(receipt: RequestRow, state: NetworkRequestState, message: string): NetworkRequestResult {
   return { localQitemId: receipt.local_qitem_id, hubQitemId: receipt.hub_qitem_id, peer: receipt.peer, state, message };

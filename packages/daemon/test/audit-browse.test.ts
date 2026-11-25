@@ -108,6 +108,34 @@ describe("MissionControlAuditBrowse (PL-005 Phase B; read-only)", () => {
     expect(page2.nextBeforeId).toBeNull();
   });
 
+  it("pages in timestamp and rowid order without missing or repeating out-of-order actions", () => {
+    // The action timestamp can move backwards relative to insertion order, e.g. after a clock adjustment.
+    const record = (actedAt: string, actorSession = "paging@r") => log.record({
+      actionVerb: "approve", qitemId: "q-1", actorSession, actedAt,
+    });
+    const first = record("2026-05-04T05:02:00.000Z");
+    const newest = record("2026-05-04T05:03:00.000Z");
+    const oldest = record("2026-05-04T05:01:00.000Z");
+    const tied = record("2026-05-04T05:02:00.000Z");
+    record("2026-05-04T05:02:00.000Z", "other@r");
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 5; i++) {
+      const page = audit.query({ actorSession: "paging@r", qitemId: "q-1", limit: 1, beforeId: cursor });
+      seen.push(...page.rows.map((row) => row.actionId));
+      if (!page.hasMore) { expect(page.nextBeforeId).toBeNull(); break; }
+      expect(page.nextBeforeId).toBeTruthy();
+      cursor = page.nextBeforeId!;
+    }
+    expect(seen).toEqual([newest.actionId, tied.actionId, first.actionId, oldest.actionId]);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it("returns no rows for an unknown pagination cursor", () => {
+    expect(audit.query({ beforeId: "not-an-action" }).rows).toEqual([]);
+  });
+
   it("limit clamping: > 200 → 200, < 1 → 1", () => {
     const r1 = audit.query({ limit: 999 });
     expect(r1.rows.length).toBeLessThanOrEqual(200);

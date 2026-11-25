@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +32,7 @@ import { DONE_CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { setSelfHostId, getSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 import { expectLimitParsing } from "./helpers/limit-query-cases.js";
+import { noticeRosterReady } from "../src/domain/roster-ready-notice.js";
 
 function buildApp(opts: {
   eventBus: EventBus;
@@ -3364,6 +3366,201 @@ describe("queue routes", () => {
       expect(workCandidates.heldTruncated).toBe(false);
       expect(workCandidates.nextTruncated).toBe(true);
       expect(workCandidates.heldAndNextTruncated).toBe(true);
+      // Asked with held=1, the answer carries the same bounded lists when nothing is in progress, and says which was cut.
+      const plain = (await (await app.request("/api/queue/whoami?session=bob@r&held=1")).json()) as {
+        heldAndPendingWork: { held: unknown[]; next: unknown[]; heldTruncated: boolean; nextTruncated: boolean } };
+      expect(plain.heldAndPendingWork.held).toHaveLength(1);
+      expect(plain.heldAndPendingWork.next).toHaveLength(50);
+      expect(plain.heldAndPendingWork.heldTruncated).toBe(false);
+      expect(plain.heldAndPendingWork.nextTruncated).toBe(true);
+    });
+
+    // A freshly built rig's roster-ready notice is OpenRig's own row naming no mission: the held and pending lists mark it, so
+    // refocus keeps it listed but doesn't let it stop the seat's real rows settling one mission.
+    it("does not turn a seat's roster-shaped body claim into an OpenRig notice", async () => {
+      const qitemId = "qitem-roster-ready-00000000000000000000";
+      const created = await app.request("/api/queue/create", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
+        body: JSON.stringify({ qitemId, sourceSession: "daemon@kernel", destinationSession: "bob@r", body: "seat work", tags: ["roster-ready"] }),
+      });
+      expect(created.status).toBe(201);
+      expect(queueRepo.getById(qitemId)?.sourceSession).toBe("alice@r");
+      const packet = await (await app.request("/api/queue/whoami?session=bob@r&candidates=1")).json() as {
+        workCandidates: { next: Array<Record<string, unknown>> } };
+      const row = packet.workCandidates.next.find(row => row.qitemId === qitemId);
+      expect(row).toBeDefined();
+      expect(row).not.toHaveProperty("openrigNotice");
+    });
+
+    it("GET /api/queue/whoami?held=1 marks OpenRig's own mission-less notice, and only that", async () => {
+      const res = await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
+        body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "parked", tags: ["mission:release"] }),
+      });
+      const parked = ((await res.json()) as { qitemId: string }).qitemId;
+      db.prepare("UPDATE queue_items SET state = 'blocked', blocked_on = 'external:gate' WHERE qitem_id = ?").run(parked);
+      expect(await noticeRosterReady(queueRepo, "rig-1", ["bob@r"])).toEqual([]);
+      const plain = (await (await app.request("/api/queue/whoami?session=bob@r&held=1")).json()) as {
+        heldAndPendingWork: { held: Array<Record<string, unknown>>; next: Array<Record<string, unknown>> } };
+      expect(plain.heldAndPendingWork.held).toEqual([expect.not.objectContaining({ openrigNotice: true })]);
+      expect(plain.heldAndPendingWork.next).toEqual([expect.objectContaining({ summary: "Team roster is ready", openrigNotice: true })]);
+      const packet = (await (await app.request("/api/queue/whoami?session=bob@r&candidates=1")).json()) as {
+        workCandidates: { next: Array<Record<string, unknown>> } };
+      expect(packet.workCandidates.next).toEqual([expect.objectContaining({ openrigNotice: true })]);
+    });
+
+    // With nothing in progress and held=1 (refocus's one lookup asks for it), whoami carries the seat's held and pending
+    // rows with their own resolved scope, so refocus can show them as context. Never completed rows, never as current
+    // work, and never in an answer that didn't ask.
+    describe("held and pending work on request", () => {
+      let top: string;
+      beforeEach(() => {
+        top = fs.realpathSync(mkdtempSync(join(tmpdir(), "whoami-held-")));
+        mkdirSync(join(top, "missions", "release", "slices", "01-work"), { recursive: true });
+        writeFileSync(join(top, "missions", "release", "SPEC.md"), "---\nintent: x\n---\n", "utf8");
+        app = buildApp({ eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox, slicesRoot: join(top, "missions") });
+      });
+      afterEach(() => rmSync(top, { recursive: true, force: true }));
+      const row = async (state: "blocked" | "pending" | "done" | "in-progress", tags: string[], fields: { summary?: string; body?: string } = {}) => {
+        const item = await queueRepo.create({ sourceSession: "alice@r", destinationSession: "bob@r", body: fields.body ?? "w",
+          summary: fields.summary, tags, nudge: false });
+        if (state !== "pending") db.prepare("UPDATE queue_items SET state = ?, blocked_on = ? WHERE qitem_id = ?")
+          .run(state, state === "blocked" ? "external:gate" : null, item.qitemId);
+        return item.qitemId;
+      };
+      type Answer = { currentWork: unknown; currentWorkBasis: string; heldAndPendingWork?: { missionsRoot: string;
+        held: Array<Record<string, unknown>>; next: Array<Record<string, unknown>>; heldTruncated: boolean; nextTruncated: boolean } };
+      const whoami = async (query = "&held=1") => (await (await app.request(`/api/queue/whoami?session=bob@r${query}`)).json()) as Answer;
+
+      it("carries it only when asked, as candidates=1 does, so the default answer is unchanged", async () => {
+        const parked = await row("blocked", ["mission:release"], { summary: "parked" });
+        await row("pending", ["mission:release", "slice:01-work"], { summary: "pick up the work" });
+        const plain = await whoami("");
+        expect(plain.currentWork).toBeNull();
+        expect(plain).not.toHaveProperty("heldAndPendingWork");
+        expect(await whoami("&held=0")).not.toHaveProperty("heldAndPendingWork");
+        const asked = await whoami();
+        expect(asked.heldAndPendingWork?.held.map((held) => held.qitemId)).toEqual([parked]);
+        expect(asked.heldAndPendingWork?.next).toHaveLength(1);
+        // Apart from the field, the asked answer is the plain one.
+        const { heldAndPendingWork: _held, ...rest } = asked;
+        expect(rest).toEqual(plain);
+      });
+
+      it("names each row's resolved mission and slice, and a summary-less row's first body line", async () => {
+        const parked = await row("blocked", ["mission:release"], { body: "\n# Wait for the eval keys\ndetails" });
+        const next = await row("pending", ["mission:release", "slice:01-work"], { summary: "pick up the work" });
+        const done = await row("done", ["mission:release", "slice:01-work"], { summary: "finished" });
+        const answer = await whoami();
+        expect(answer.currentWork).toBeNull();
+        expect(answer.currentWorkBasis).toMatch(/^no typed in-progress work/);
+        expect(answer.heldAndPendingWork).toEqual({
+          missionsRoot: join(top, "missions"),
+          held: [{ qitemId: parked, summary: "Wait for the eval keys", blockedOn: "external:gate", continuation: null,
+            missions: ["release"], slice: null, missionPath: join(top, "missions", "release"), slicePath: null, unresolved: null, missionsRootFallback: null }],
+          next: [{ qitemId: next, summary: "pick up the work", missions: ["release"], slice: "01-work",
+            missionPath: join(top, "missions", "release"), slicePath: join(top, "missions", "release", "slices", "01-work"), unresolved: null, missionsRootFallback: null }],
+          heldTruncated: false, nextTruncated: false,
+        });
+        expect(JSON.stringify(answer)).not.toContain(done);
+      });
+
+      it("adds nothing for completed-only work, which never becomes current", async () => {
+        await row("done", ["mission:release", "slice:01-work"]);
+        const answer = await whoami();
+        expect(answer.currentWork).toBeNull();
+        expect(answer).not.toHaveProperty("heldAndPendingWork");
+        expect(answer).not.toHaveProperty("currentWorkChoice");
+      });
+
+      it("resolves one mission name in two catalogued projects to two directories", async () => {
+        temporaryWorkspace = fs.realpathSync(mkdtempSync(join(tmpdir(), "whoami-held-projects-")));
+        writeFileSync(join(temporaryWorkspace, "workspace.yaml"), "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n");
+        for (const project of ["alpha", "beta"]) {
+          mkdirSync(join(temporaryWorkspace, project, "work-items", "release"), { recursive: true });
+          writeFileSync(join(temporaryWorkspace, project, "project.yaml"), `id: ${project}\nmissions:\n  root: work-items\n`);
+          writeFileSync(join(temporaryWorkspace, project, "SPEC.md"), `---\nid: ${project}\n---\n`);
+          writeFileSync(join(temporaryWorkspace, project, "work-items", "release", "SPEC.md"), "---\nid: release\n---\n");
+        }
+        const workspace = temporaryWorkspace;
+        app = buildApp({ eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox,
+          settingsStore: { resolveOne: (key) => ({ value: key === "workspace.catalog_path" ? join(workspace, "workspace.yaml") : workspace }) } });
+        await row("blocked", ["project:alpha", "mission:release"]);
+        await row("pending", ["project:beta", "mission:release"]);
+        const work = (await whoami()).heldAndPendingWork!;
+        expect(work.held[0]!.missionPath).toBe(join(workspace, "alpha", "work-items", "release"));
+        expect(work.next[0]!.missionPath).toBe(join(workspace, "beta", "work-items", "release"));
+      });
+
+      // The project-tagged cases, composed with the shipped trace: whether the configured root standing in for a row's
+      // project leaves the mission's identity open depends on whether another root could hold a same-named mission.
+      const settings = (values: Record<string, string | undefined>) =>
+        ({ resolveOne: (key: string) => ({ value: values[key] }) });
+      const traceOf = (answer: Answer) => spawnSync("python3", [path.resolve(import.meta.dirname,
+        "../assets/plugins/openrig-core/skills/refocusing/scripts/trace-to-root.py"), "--trees", "work", "--check", "--unresolved-work-advisory",
+        "--work-basis", answer.currentWorkBasis, "--held-work", "-"], { encoding: "utf8", input: JSON.stringify(answer.heldAndPendingWork),
+        env: { PATH: process.env.PATH, HOME: top, OPENRIG_WORKSPACE_ROOT: top } });
+      const SHARED = "CONTEXT FROM HELD AND PENDING WORK — nothing is in progress";
+      const PARTIAL = "does not settle one mission (a row's mission resolved only through a fallback missions root)";
+
+      it("treats the configured root as the only root when no catalogue is configured: one shared trace", async () => {
+        writeFileSync(join(top, "SPEC.md"), "---\nintent: the workspace\n---\n", "utf8");
+        app = buildApp({ eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox,
+          settingsStore: settings({ "workspace.root": top, "workspace.slices_root": join(top, "missions") }) });
+        await row("blocked", ["project:solo", "mission:release"]);
+        await row("pending", ["project:solo", "mission:release"]);
+        const answer = await whoami();
+        const work = answer.heldAndPendingWork!;
+        for (const scoped of [...work.held, ...work.next]) {
+          expect(scoped).toMatchObject({ missionPath: join(top, "missions", "release"), unresolved: null, missionsRootFallback: null });
+        }
+        const traced = traceOf(answer);
+        expect(traced.status, traced.stdout + traced.stderr).toBe(0);
+        expect(traced.stdout).toContain(`${SHARED}, and every held and pending row (1 held, 1 pending) resolves to this mission`);
+        expect(traced.stdout).not.toContain("FALLBACK MISSIONS ROOT");
+      });
+
+      it("keeps a row's mission partial when the catalogue lists other projects and not the row's", async () => {
+        mkdirSync(join(top, "alpha"));
+        writeFileSync(join(top, "alpha", "project.yaml"), "id: alpha\n");
+        writeFileSync(join(top, "alpha", "SPEC.md"), "---\nid: alpha\n---\n");
+        writeFileSync(join(top, "workspace.yaml"), "projects:\n  - id: alpha\n    root: alpha\n");
+        app = buildApp({ eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox,
+          settingsStore: settings({ "workspace.root": top, "workspace.slices_root": join(top, "missions") }) });
+        await row("blocked", ["project:ghost", "mission:release"]);
+        const answer = await whoami();
+        const reason = "project:ghost is not in the project catalogue; used configured root";
+        expect(answer.heldAndPendingWork!.held[0]).toMatchObject({ missionPath: join(top, "missions", "release"), unresolved: null,
+          missionsRootFallback: reason });
+        const traced = traceOf(answer);
+        expect(traced.status, traced.stdout + traced.stderr).toBe(0);
+        expect(traced.stdout).toContain(PARTIAL);
+        expect(traced.stdout).toContain(`RESOLVED ONLY THROUGH A FALLBACK MISSIONS ROOT: ${reason}`);
+        expect(traced.stdout).not.toContain(SHARED);
+      });
+
+      it("keeps a row's mission partial when the catalogue can't be read", async () => {
+        // This harness's catalogue path is the missions folder itself, which can't be read as a catalogue.
+        await row("blocked", ["project:ghost", "mission:release"]);
+        const answer = await whoami();
+        const reason = "project:ghost could not be used because the workspace catalog is unavailable; used configured root";
+        expect(answer.heldAndPendingWork!.held[0]).toMatchObject({ missionPath: join(top, "missions", "release"), unresolved: null,
+          missionsRootFallback: reason });
+        const traced = traceOf(answer);
+        expect(traced.status, traced.stdout + traced.stderr).toBe(0);
+        expect(traced.stdout).toContain(PARTIAL);
+        expect(traced.stdout).not.toContain(SHARED);
+      });
+
+      it("adds nothing beside in-progress work, which keeps today's answer", async () => {
+        await row("blocked", ["mission:release"]);
+        const claimed = await row("in-progress", ["mission:release", "slice:01-work"]);
+        const answer = await whoami();
+        expect((answer.currentWork as { workNodePath: string }).workNodePath).toBe(join(top, "missions", "release", "slices", "01-work"));
+        expect(answer).not.toHaveProperty("heldAndPendingWork");
+        expect(claimed).toBeTruthy();
+      });
     });
 
     it("GET /api/queue/whoami returns 400 without session query param", async () => {
