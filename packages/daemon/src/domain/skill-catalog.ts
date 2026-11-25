@@ -259,7 +259,7 @@ function gitState(catalogRoot: string): { revision: string; dirtyDirs: Set<strin
   const status = execFileSync(
     "git",
     ["-C", repoRoot, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", rel || "."],
-    { encoding: "utf8", ...CATALOG_GIT_DEADLINE },
+    { encoding: "utf8", ...CATALOG_GIT_DEADLINE, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } },
   );
   const dirtyDirs = new Set<string>();
   const fields = status.split("\0");

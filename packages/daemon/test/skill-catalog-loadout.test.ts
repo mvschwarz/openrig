@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -148,6 +148,18 @@ console.log(JSON.stringify(${operation}));
 }
 
 describe.skipIf(process.platform === "win32")("catalog Git read deadlines with owned local processes", () => {
+  it("reads the catalog without refreshing stale Git index metadata", () => {
+    const f = fixture(["known"]);
+    writeSkill(f.catalog, "known");
+    commit(f.root);
+    const index = join(f.root, ".git", "index");
+    const before = readFileSync(index);
+    utimesSync(join(f.catalog, "known", "SKILL.md"), 1, 1);
+
+    expect(resolveSkillLoadout({ catalogRoot: f.catalog })).toMatchObject({ ok: true, loadout: { entries: [{ id: "known" }] } });
+    expect(readFileSync(index).equals(before)).toBe(true);
+  });
+
   it.each([
     ["normal", "show"], ["missing", "root"],
     ...(["root", "status", "head", "show"] as const).map((site) => ["error", site] as const),
