@@ -30,9 +30,10 @@ import { classifyPaneActivity, inspectComposerInput } from "./session-transport.
  * buffer is loaded; sendKeys' `beforeKeys`): empty with no prompt before the paste, exactly the typed `/exit` with no
  * prompt before Enter. Each check is a read followed by a separate write, so a change in the moment between the last read
  * and the signal or keys isn't caught (the OS offers no way to make them one step), and a pid reused within the same
- * second isn't told apart by its start time. A check that can't be made isn't a refusal to stop the agent: the caller
- * falls back to the pane-level stop, reported as forced. Only a pane seen in another session or on another server is
- * left alone (`terminal_changed`).
+ * second isn't told apart by its start time. A check that can't be made isn't a refusal to stop the agent: the agent's
+ * own exit step isn't sent, and the caller falls back to the pane-level stop, reported as forced. Only a pane seen in
+ * another session or on another server is left alone (`terminal_changed`); a terminal read that comes back unreadable
+ * is never taken for that.
  */
 
 /** How a runtime exits through its own shutdown. Runtimes without an entry keep the pane-level stop (pane-cutover.ts). */
@@ -51,13 +52,19 @@ const READ_BACK_MS = 1_000;
 export type RuntimeExitTmux = Pick<TmuxAdapter, "getPanePid" | "signalPaneRuntime">
   & Partial<Pick<TmuxAdapter, "captureComposerSnapshot" | "sendText" | "sendKeys" | "paneTerminal">>;
 
-/** #3901: the terminal (tmux session and server) a pane was first read in, which each later effect on it is held to. */
+/** What a later read of a pinned pane's terminal shows: still that session on that server (`same`), positively another
+ *  session or server (`changed`), or nothing readable (`unknown`, which is never taken for a change). */
+export type PinReading = "same" | "changed" | "unknown";
+
+/** #3901: the terminal (tmux session and server) a pane was first read in, which each later effect on it is held to. The
+ *  agent's own exit step (its signals, the typed `/exit` and Enter) goes only on `same`; the pane-level stop is held
+ *  back only on `changed` (pane-cutover.ts). */
 export interface TerminalPin {
   readonly terminal: PaneTerminal;
-  /** Set once a check saw the pane in another session or on another server: a positive change, not an unreadable read. */
+  /** Set once a read saw the pane in another session or on another server: a positive change, never an unreadable read. */
   readonly changed: boolean;
-  /** True only while `pane` is still in that session on that server; false too when that can't be read. */
-  holds(pane: string): Promise<boolean>;
+  /** Read `pane`'s terminal again. */
+  read(pane: string): Promise<PinReading>;
 }
 
 /** Hold later effects to the terminal `terminal` names, as killSession holds its detach and kill to the session id and
@@ -67,12 +74,12 @@ export function pinTerminal(tmux: Pick<TmuxAdapter, "paneTerminal">, terminal: P
   return {
     terminal,
     get changed() { return changed; },
-    async holds(pane: string): Promise<boolean> {
+    async read(pane: string): Promise<PinReading> {
       const now = await tmux.paneTerminal(pane);
-      if (!now) return false;
-      if (now.sessionId === terminal.sessionId && now.server.pid === terminal.server.pid && now.server.start === terminal.server.start) return true;
+      if (!now) return "unknown";
+      if (now.sessionId === terminal.sessionId && now.server.pid === terminal.server.pid && now.server.start === terminal.server.start) return "same";
       changed = true;
-      return false;
+      return "changed";
     },
   };
 }
@@ -136,7 +143,21 @@ export async function exitPaneRuntime(tmux: RuntimeExitTmux, input: RuntimeExitI
   }
   const observed: Observed = { pane: input.pane, panePid: verified.panePid, pid: verified.process.pid, startedAt: verified.process.startedAt };
   const pin = input.pin;
-  const still = async (pane: string) => await stillThatProcess(tmux, read, runtime, observed, pane) && (!pin || await pin.holds(pane));
+  // Why the check before an agent effect didn't hold: its process (another one now, or unreadable), its terminal
+  // positively another (which also sets `pin.changed`), or its terminal unreadable. The effect goes only on none.
+  const check = async (pane: string): Promise<CheckFailure | null> => {
+    if (!await stillThatProcess(tmux, read, runtime, observed, pane)) return "process";
+    if (!pin) return null;
+    const reading = await pin.read(pane);
+    return reading === "same" ? null : reading === "changed" ? "terminal_changed" : "terminal_unread";
+  };
+  // The last signal's check, read through a call: it is set inside the adapter's callback.
+  let failure: CheckFailure | null = null;
+  const lastFailure = (): CheckFailure | null => failure;
+  const still = async (pane: string) => { failure = await check(pane); return failure === null; };
+  // A signal the check refused, in words: the adapter's own message names only the process.
+  const notSent = (result: { message: string }) => lastFailure() === "terminal_unread"
+    ? "its terminal (tmux session and server) couldn't be read just before it" : sentence(result.message);
   const changed = (): RuntimeExitOutcome => ({ state: "terminal_changed",
     detail: `${name}'s pane is no longer in the tmux session and server it was first read in (the server may have been replaced), so nothing more was sent to it.` });
   const started = Date.now();
@@ -144,7 +165,7 @@ export async function exitPaneRuntime(tmux: RuntimeExitTmux, input: RuntimeExitI
 
   let forcedBecause: string | null = null;
   if (step === "typed_exit") {
-    const typed = await typeExit(tmux, input, observed, still, timing);
+    const typed = await typeExit(tmux, input, observed, check, timing);
     if (pin?.changed) return changed();
     if (!typed.ok) forcedBecause = typed.why;
   }
@@ -152,11 +173,13 @@ export async function exitPaneRuntime(tmux: RuntimeExitTmux, input: RuntimeExitI
   const sent = step === "term" || forcedBecause !== null ? "TERM" : "/exit";
   const because = forcedBecause === null ? "" : ` /exit couldn't be used: ${forcedBecause}.`;
   if (sent === "TERM") {
+    failure = null;
     const term = await tmux.signalPaneRuntime(input.inputTarget, observed.pid, "TERM", still);
     if (!term.ok) {
       if (pin?.changed) return changed();
       if (await gone(listProcesses, observed) === true) return { state: "exited", path: "graceful", detail: `${name} exited by itself before it was signalled.` };
-      return { state: "not_identified", detail: `${name} wasn't signalled: ${term.message}${because}` };
+      return { state: "not_identified", detail: lastFailure() === "terminal_unread"
+        ? `${name} wasn't signalled: ${notSent(term)}.${because}` : `${name} wasn't signalled: ${term.message}${because}` };
     }
   }
   if (await waitGone(listProcesses, observed, timing) === true) {
@@ -165,6 +188,7 @@ export async function exitPaneRuntime(tmux: RuntimeExitTmux, input: RuntimeExitI
       : { state: "exited", path: "forced", detail: `${name} was ended with TERM, which doesn't run its own shutdown, because /exit couldn't be used: ${forcedBecause}.` };
   }
   const window = `${(timing.timeoutMs / 1000).toFixed(1)} s`;
+  failure = null;
   const kill = await tmux.signalPaneRuntime(input.inputTarget, observed.pid, "KILL", still);
   if (!kill.ok) {
     if (pin?.changed) return changed();
@@ -178,8 +202,8 @@ export async function exitPaneRuntime(tmux: RuntimeExitTmux, input: RuntimeExitI
     }
     // Not seen gone, and not killed: whether it is still running isn't known (unverified), not established.
     return { state: "unverified", detail: now === false
-      ? `${name} didn't exit within ${window} of ${sent}, and KILL wasn't sent (${sentence(kill.message)}), so its end wasn't verified.${because}`
-      : `${name} was sent ${sent}, but its exit couldn't be checked: the process table couldn't be read, and KILL wasn't sent (${sentence(kill.message)}).${because}` };
+      ? `${name} didn't exit within ${window} of ${sent}, and KILL wasn't sent (${notSent(kill)}), so its end wasn't verified.${because}`
+      : `${name} was sent ${sent}, but its exit couldn't be checked: the process table couldn't be read, and KILL wasn't sent (${notSent(kill)}).${because}` };
   }
   const afterKill = await waitGone(listProcesses, observed, timing);
   if (afterKill === true) {
@@ -192,6 +216,9 @@ export async function exitPaneRuntime(tmux: RuntimeExitTmux, input: RuntimeExitI
   }
   return { state: "still_running", detail: `${name} was still running after ${sent} and KILL.${because}` };
 }
+
+/** Why the check before an agent effect didn't hold. */
+type CheckFailure = "process" | "terminal_changed" | "terminal_unread";
 
 /** A message as a clause: without its closing full stop. */
 function sentence(message: string): string {
@@ -248,7 +275,7 @@ async function waitGone(listProcesses: NativeProcessLister, observed: Observed, 
  * couldn't be) submitted; the caller then ends Codex with TERM, reported as forced.
  */
 async function typeExit(tmux: RuntimeExitTmux, input: RuntimeExitInput, observed: Observed,
-  still: (pane: string) => Promise<boolean>, timing: RuntimeExitTiming): Promise<{ ok: true } | { ok: false; why: string }> {
+  check: (pane: string) => Promise<CheckFailure | null>, timing: RuntimeExitTiming): Promise<{ ok: true } | { ok: false; why: string }> {
   const capture = tmux.captureComposerSnapshot?.bind(tmux), sendText = tmux.sendText?.bind(tmux), sendKeys = tmux.sendKeys?.bind(tmux);
   if (!capture || !sendText || !sendKeys) return { ok: false, why: "its input box can't be read here" };
   // An open prompt (an approval, a question) is never typed into. Whether Codex is mid-turn isn't read (its 0.171 welcome
@@ -267,9 +294,16 @@ async function typeExit(tmux: RuntimeExitTmux, input: RuntimeExitInput, observed
   // A check at the boundary refuses the write by throwing (the adapter then sends nothing); `refused` keeps why.
   const refusal: { why: string | null } = { why: null };
   const refuse = (why: string): never => { refusal.why = why; throw new Error(why); };
+  /** The process and its terminal, before `what`. */
+  const recheck = async (pane: string, what: string) => {
+    const failed = await check(pane);
+    if (failed === "process") refuse(`the process changed before ${what}`);
+    else if (failed === "terminal_unread") refuse(`its terminal (tmux session and server) couldn't be read before ${what}`);
+    else if (failed) refuse(`its pane is no longer in the tmux session and server it was first read in, before ${what}`);
+  };
   // Typed as keys (no bracketed paste), as a person types it, so Codex reads a slash command.
   const typed: TmuxResult = await sendText(input.inputTarget, "/exit", undefined, { bracketed: false, beforePaste: async (pane) => {
-    if (!await still(pane)) refuse("the process changed before input");
+    await recheck(pane, "input");
     const why = await unusable(pane);
     if (why) refuse(`${why} just before /exit was typed`);
   } });
@@ -287,7 +321,7 @@ async function typeExit(tmux: RuntimeExitTmux, input: RuntimeExitInput, observed
   let entered: TmuxResult;
   try {
     entered = await sendKeys(input.inputTarget, ["Enter"], undefined, { beforeKeys: async (pane) => {
-      if (!await still(pane)) refuse("the process changed before Enter");
+      await recheck(pane, "Enter");
       const snapshot = await capture(pane);
       if (!snapshot) refuse("its input box couldn't be read just before Enter");
       else if (classifyPaneActivity("", { runtime: "codex", composerSnapshot: snapshot }).state === "attention") refuse("it was showing a prompt just before Enter");

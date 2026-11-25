@@ -2931,13 +2931,14 @@ export class TmuxAdapter {
   /** Seat-handover cutover: signal the pane's ROOT process (`#{pane_pid}`): the retiree only when it is the pane's own
    *  process; in a shell-backed pane it is the shell (#3901: signalPaneRuntime reaches the agent under it). `TERM` and
    *  `KILL` for the pane-level stop, `HUP` to end a shell left at its prompt once its agent has exited. Resolves the pane
-   *  pid then `kill`s it; an unresolvable pid is a structured, non-throwing failure. `stillThatPane` (#3901), when given,
-   *  is awaited after the pid read and before the `kill`: false refuses the signal (guard_target_unknown), as when the pane
-   *  can't be shown to be in the session and on the server the caller read it in.
+   *  pid then `kill`s it; an unresolvable pid is a structured, non-throwing failure. `paneChanged` (#3901), when given,
+   *  is awaited after the pid read and before the `kill`: true refuses the signal (guard_target_changed), for a pane the
+   *  caller positively saw in another session or on another server than it first read it in. A caller that can't tell
+   *  answers false, and the signal goes with this method's own checks.
    *  Stays on the shell-string path deliberately: this is a Unix `kill`,
    *  not a multiplexer command (Windows needs taskkill — named follow-up). */
-  async signalPaneProcess(paneId: string, signal: "TERM" | "HUP" | "KILL", stillThatPane?: (pane: string) => Promise<boolean>): Promise<TmuxResult> {
-    return this.guardedInput(paneId, (pane, beforeWrite) => this.signalPaneProcessUnchecked(pane, signal, beforeWrite, stillThatPane));
+  async signalPaneProcess(paneId: string, signal: "TERM" | "HUP" | "KILL", paneChanged?: (pane: string) => Promise<boolean>): Promise<TmuxResult> {
+    return this.guardedInput(paneId, (pane, beforeWrite) => this.signalPaneProcessUnchecked(pane, signal, beforeWrite, paneChanged));
   }
 
   /** #3901: signal one process in a seat's pane (its agent, which in a shell-backed pane runs under the shell), through
@@ -2956,13 +2957,13 @@ export class TmuxAdapter {
   }
 
   private async signalPaneProcessUnchecked(paneId: string, signal: "TERM" | "HUP" | "KILL", beforeWrite: () => void,
-    stillThatPane?: (pane: string) => Promise<boolean>): Promise<TmuxResult> {
+    paneChanged?: (pane: string) => Promise<boolean>): Promise<TmuxResult> {
     const pid = await this.getPanePid(paneId);
     if (pid == null) {
       return { ok: false, code: "pane_pid_unavailable", message: `Could not resolve the pane pid for "${paneId}".` };
     }
-    if (stillThatPane && !await stillThatPane(paneId)) {
-      return { ok: false, code: "guard_target_unknown", message: `Pane "${paneId}" couldn't be shown to be the one read earlier; nothing was signalled.` };
+    if (paneChanged && await paneChanged(paneId)) {
+      return { ok: false, code: "guard_target_changed", message: `Pane "${paneId}" is no longer in the tmux session and server it was first read in; nothing was signalled.` };
     }
     try {
       beforeWrite();

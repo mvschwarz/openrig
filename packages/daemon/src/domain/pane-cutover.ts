@@ -43,6 +43,8 @@ export interface PaneOccupant {
  * With an occupant, the pane's terminal (its tmux session and server) is read first, and the destructive effects after it
  * (the agent's signals, the typed input, and the pane-level retirement signals) are held to it: a pane seen in another
  * session or on another server is left alone (`guard_target_changed`). Setting remain-on-exit and the later respawn aren't.
+ * A later read that comes back unreadable isn't a change: the agent's own exit step isn't sent then, and the pane-level
+ * signals go on with their own checks (the delivery guard, the pane's pid).
  */
 export async function terminatePaneInPlace(
   tmux: PaneCutoverTmux,
@@ -115,10 +117,11 @@ async function retirePane(tmux: PaneCutoverTmux, paneId: string, inputTarget: st
   return waitPaneDead(tmux, paneId, timing);
 }
 
-/** Signal the pane's root process, held to `pin`'s terminal when there is one (#3901). */
+/** Signal the pane's root process, held back only when the pane is positively seen in another session or on another
+ *  server than `pin`'s (#3901). An unreadable terminal isn't that: the signal goes with signalPaneProcess's own checks. */
 function paneSignal(tmux: PaneCutoverTmux, inputTarget: string, pin: TerminalPin | null | undefined) {
   return (signal: "TERM" | "HUP" | "KILL") => pin
-    ? tmux.signalPaneProcess(inputTarget, signal, (pane) => pin.holds(pane))
+    ? tmux.signalPaneProcess(inputTarget, signal, async (pane) => await pin.read(pane) === "changed")
     : tmux.signalPaneProcess(inputTarget, signal);
 }
 

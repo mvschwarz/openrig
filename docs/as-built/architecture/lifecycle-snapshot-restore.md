@@ -331,15 +331,19 @@ cited here by number with the code that carries them):
   and a runtime switch's retirement), read from the process table. Only then
   is the pane's shell ended (HUP, then KILL), since the respawn needs a dead
   pane. Another runtime, an agent that can't be identified, or an exit that
-  couldn't be checked (an unreadable process table, KILL withheld because its
-  check didn't hold) keeps the pane-level TERM then KILL, reported forced;
+  couldn't be checked (an unreadable process table or terminal, KILL withheld
+  because its check didn't hold) keeps the pane-level TERM then KILL, reported
+  forced;
   the handover fails (`retiree_not_terminated`) only for an agent seen running
   after its KILL, or when the pane's own end can't be established (its dead
   state unreadable). The pane's terminal (session id and tmux server) is read
   as the pane is resolved, and the destructive effects (the agent's signals,
   typed input and the pane-level retirement signals) are held to it, though
   setting remain-on-exit and the later respawn aren't: a pane seen in another session or on another
-  server is left alone (`guard_target_changed`). `sideEffects.departingProcess`
+  server is left alone (`guard_target_changed`). A later terminal read that
+  comes back unreadable isn't that: the agent's own signals and typed input
+  go only on a read that matches, and the pane-level signals go on with their
+  own checks (the delivery guard, the pane's pid). `sideEffects.departingProcess`
   and `departingProcessDetail` say how the occupant ended. The fresh
   source delivers a daemon-built restore packet (`buildRestorePacket`,
   `seat-handover-service.ts:1151`), which is separate from the CLI

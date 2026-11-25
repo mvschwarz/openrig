@@ -670,6 +670,18 @@ describe("RigTeardownOrchestrator", () => {
         + "it was first read in (the server may have been replaced), so nothing more was sent to it." }]);
     });
 
+    it("a terminal unreadable after the marker read: the agent isn't signalled, its entry is unverified, and the stop goes on", async () => {
+      const { rigId, nodeId } = seedSeat("claude-code");
+      const pane = claudePane();
+      const { tmux, td } = teardownWith(pane, nodeId);
+      (tmux.getSessionEnv as ReturnType<typeof vi.fn>).mockImplementation(async () => { pane.server = null; return nodeId; });
+      const result = await td.teardown(rigId);
+      expect(pane.effects).toEqual(["refused TERM 200", "kill-session"]);
+      expect(result.runtimeExits).toEqual([{ session: "r01-dev", path: "unverified",
+        detail: "Claude Code wasn't signalled: its terminal (tmux session and server) couldn't be read just before it." }]);
+      expect(result).toMatchObject({ sessionsKilled: 1, errors: [] });
+    });
+
     it("a session OpenRig didn't launch (claimed) isn't signalled", async () => {
       const { rigId, nodeId } = seedSeat("claude-code", { claimed: true });
       const pane = claudePane();

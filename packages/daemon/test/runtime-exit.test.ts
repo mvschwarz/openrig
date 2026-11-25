@@ -124,6 +124,31 @@ describe("an effect held to the pane's terminal (#3901)", () => {
       + "(the server may have been replaced), so nothing more was sent to it." });
   });
 
+  it("a terminal unreadable just before KILL: KILL isn't sent, and the end is unverified, not a change", async () => {
+    const pane = claudePane();
+    pane.runtimeIgnores.add("TERM");
+    const tmux = pane.tmux();
+    const pin = pinTerminal(tmux, (await tmux.paneTerminal("%1"))!);
+    pane.beforeRuntimeEffect = () => { if (pane.effects.includes("TERM 200")) pane.server = null; };
+    const outcome = await exitPaneRuntime(tmux, { pane: "%1", inputTarget: "%1", runtime: "claude-code", pin }, timing, pane.list);
+    expect(pin.changed).toBe(false);
+    expect(pane.effects).toEqual(["TERM 200", "refused KILL 200"]);
+    expect(outcome).toEqual({ state: "unverified", detail: "Claude Code didn't exit within 0.0 s of TERM, and KILL wasn't sent "
+      + "(its terminal (tmux session and server) couldn't be read just before it), so its end wasn't verified." });
+  });
+
+  it("a terminal unreadable before Codex's /exit: nothing is typed or signalled, and the caller stops the pane", async () => {
+    const pane = codexPane();
+    const tmux = pane.tmux();
+    const pin = pinTerminal(tmux, (await tmux.paneTerminal("%1"))!);
+    pane.server = null;
+    const outcome = await exitPaneRuntime(tmux, { pane: "%1", inputTarget: "%1", runtime: "codex", pin }, timing, pane.list);
+    expect(pin.changed).toBe(false);
+    expect(pane.effects).toEqual(["refused type /exit", "refused TERM 300"]);
+    expect(outcome).toEqual({ state: "not_identified", detail: "Codex wasn't signalled: its terminal (tmux session and server) couldn't be read just "
+      + "before it. /exit couldn't be used: its terminal (tmux session and server) couldn't be read before input." });
+  });
+
   it("a terminal that can't be read is never sent the agent's exit", async () => {
     const pane = claudePane();
     const outcome = await exitPaneRuntime(pane.tmux(), { pane: "%1", inputTarget: "%1", runtime: "claude-code", pin: null }, timing, pane.list);

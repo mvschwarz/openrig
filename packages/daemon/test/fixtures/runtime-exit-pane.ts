@@ -64,10 +64,10 @@ export class Pane {
         if (!this.runtimeIgnores.has(signal)) this.runtimeGone(pid);
         return { ok: true };
       }),
-      signalPaneProcess: vi.fn(async (_target: string, signal: Signal, stillThatPane?: (pane: string) => Promise<boolean>) => {
-        if (stillThatPane && !await stillThatPane("%1")) {
+      signalPaneProcess: vi.fn(async (_target: string, signal: Signal, paneChanged?: (pane: string) => Promise<boolean>) => {
+        if (paneChanged && await paneChanged("%1")) {
           this.effects.push(`refused root ${signal}`);
-          return { ok: false, code: "guard_target_unknown", message: "the pane couldn't be shown to be the one read earlier" };
+          return { ok: false, code: "guard_target_changed", message: "the pane is no longer in the tmux session and server it was first read in" };
         }
         this.effects.push(`root ${signal}`);
         const root = this.rows.find((row) => row.pid === this.panePid);

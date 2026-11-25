@@ -54,6 +54,28 @@ describe("terminatePaneInPlace with the occupant's own exit (#3901)", () => {
     expect(pane.effects).toEqual(["remain-on-exit", "refused TERM 200"]);
   });
 
+  // Root's narrowing: a terminal read that comes back unreadable after a good one is unknown, never a change.
+  it("a terminal unreadable after a good read: the agent isn't signalled, and the pane-level TERM and KILL go, reported forced", async () => {
+    const pane = claudePane();
+    pane.beforeRuntimeEffect = () => { pane.server = null; };
+    const result = await terminatePaneInPlace(pane.tmux(), "%1", timing, "Retiree", "%1", { runtime: "claude-code", listProcesses: pane.list });
+    expect(result).toEqual({ ok: true, path: "forced", detail: "Claude Code wasn't signalled: its terminal (tmux session and server) couldn't be "
+      + "read just before it. The pane's process didn't exit within 0.0 s of TERM and was killed." });
+    expect(pane.effects).toEqual(["remain-on-exit", "refused TERM 200", "root TERM", "root KILL"]);
+  });
+
+  it("a terminal unreadable by the time the shell is retired: the HUP still goes", async () => {
+    const pane = claudePane();
+    const tmux = pane.tmux();
+    (tmux.isPaneDead as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      if (pane.effects.includes("TERM 200")) pane.server = null;
+      return pane.dead;
+    });
+    const result = await terminatePaneInPlace(tmux, "%1", timing, "Retiree", "%1", { runtime: "claude-code", listProcesses: pane.list });
+    expect(result).toMatchObject({ ok: true, path: "graceful", detail: expect.stringMatching(/^Claude Code exited on TERM in /) });
+    expect(pane.effects).toEqual(["remain-on-exit", "TERM 200", "root HUP"]);
+  });
+
   it("a pane that is another server's by the time of the shell's HUP is left alone", async () => {
     const pane = claudePane();
     const tmux = pane.tmux();
