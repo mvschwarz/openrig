@@ -281,6 +281,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   and the advisor gets its own tab. A `kernel` view the person saved still wins.
   `rig terminal open --all` opens one viewer per local rig, and `rig terminal close --all` closes
   the rig viewers OpenRig opened (`--provider herdr` or `tmux` limits it); the seats keep running.
+  A browser client of the terminal WebSocket (`/api/terminal/:sessionName`) can request
+  `?geometry=1` to receive the pane size as a binary UTF-8 JSON frame
+  (`type: "geometry"`, `cols`, `rows`), separate from text output. It grants no resize control.
   Tiles show their seat's screen without attaching, so whole lines show at any tile width; a
   writable tile attaches when someone types or pastes and goes back to showing after 30 seconds
   without a key. Inside herdr it
@@ -455,8 +458,8 @@ your context, your compaction and your replacement — and it is the only thing 
   their exact words back to it. It's always shown as relayed, never as the person's own answer or
   as your decision. A structured ask needs `--question-id`, plus `--option-id` when they chose an
   option; add `--answered-at` only when you know it. A fully answered ask closes and returns to the
-  agent that asked, unanswered parts stay open, and a later direct answer from the person corrects
-  it.
+  agent that asked, and unanswered parts stay open. A later direct answer from the person corrects
+  an identifiable question; an unplaceable reply is forwarded without changing an answer.
 - **`rig queue overdue`** — what was claimed and never closed in time. **Defaults to the current
   rig**; ask for more if you mean more.
 - **`rig queue undelivered`** — pending create-path nudge failures only. For gateway or human
@@ -544,9 +547,10 @@ relay is a reason to inspect the available routing, not to surrender judgment to
   short title, which its ordinary packets show in their summaries beside each step's label or id.
 - **A step's `label`** — a short name a person sees in place of the step's id; display only.
   **`next_owner: same_as_previous`** (on a step or the whole spec; off by default) keeps a
-  `handoff` into an ungated next step of the same role with the seat that just closed the packet,
-  instead of resolving the role again. Without it, resolution is unchanged, and a same-role handoff
-  that would move to another seat advises passing `--next-owner`.
+  `handoff` into an ungated next step of the same role with the seat closing its own packet,
+  instead of resolving the role again. Without it, resolution is unchanged. When that role has
+  `preferred_targets`, a same-role handoff that would move the seat closing its own packet to
+  another seat advises passing `--next-owner`.
 - **`rig workflow status`** — which instances need attention, with reason and next action.
   Inspect the exact exception occurrence and packet: resolved overdue work is reconciled without
   closing an overdue sibling. Registered-human fallback reports missing or ambiguous selection
@@ -929,7 +933,7 @@ version, from checking the environment to a useful report to the OpenRig team.
   `nodes.inventory.terminal_work`). These nodes records are written after a slow call completes; a
   missing record doesn't rule out unfinished work or work outside those steps.
   Starting the daemon with `OPENRIG_MUTATION_TRACE=1` in its environment (off by default; no
-  `rig config` key) also records each state-changing request to its main port there: the method,
+  `rig config` key) also records state-changing requests to its main port there: the method,
   path, the status it prepared and the session header the caller sent, not proof anything changed.
   A daemon that can't bind its port writes one line,
   `OPENRIG_LISTEN_FAILED <errno> <host:port> <guidance>`, and exits 69 without recording a stop:
@@ -1523,8 +1527,9 @@ reaching them is ordinary work rather than an escalation.
   <request-id> --body-file <path>`** — from a connected seat, list the peers its hub lets it ask,
   and send one a request. The answer comes back to a local queue item with your `--id`
   (`rig queue show <request-id>`). The daemon reaches the hub as the seat's participant, so you
-  never hold its token. Retry only with the same `--id`: a hub refusal closes the item failed with
-  the hub's reason, and while the hub can't be reached the item stays open and the daemon tries
+  never hold its token. Retry only with the same `--id`: a definite refusal to create the request
+  closes the item failed with the hub's reason. If creation is unconfirmed or a readback is refused,
+  the item stays open with its outcome unknown; while the hub can't be reached, the daemon tries
   again later. The item belongs to OpenRig, not your seat, so nothing wakes you when it closes:
   block a row of your own on it (`rig queue block <your-row> --on <request-id>`), then check the
   item once, since the answer can arrive first. An id starting `fold:`, `auth:` or `external:` is
@@ -1698,8 +1703,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
   one seat); and `runtime.readiness_timeout_seconds` for seats that start slowly. On a host with
   many Claude seats, a Claude member's `statusline_throttle: <seconds>` (1 to 120), or
   `rig seat set-statusline-throttle <seat> --seconds <n> --reason <why>` from its next launch, runs
-  OpenRig's context collector from the status line at most that often; its context reading can lag
-  that much.
+  a shell check before OpenRig's statusline collector. It skips eligible repeated collections
+  inside that interval; a new conversation or a reading below the last collected one collects at
+  once. A seat that goes idle after a skipped update keeps its earlier reading until another update.
 - **Rig-level choices, both opt-in:** `seat_slice: rig` (Linux/systemd) starts each of the rig's
   seats, at its next launch, beneath the rig's own `openrigseats-<rig>.slice`, so one CPU weight
   you set on that slice covers the whole rig; OpenRig sets no weight.
@@ -1882,7 +1888,13 @@ your circumstances is configuration, and the ones that are not, another agent ca
   actor labels, with `you` true only for this connection). `rig_queue_show` takes `waitSeconds`
   (0 to 50) to wait while an item is pending or in progress; at the bound it reports a timeout, not
   completion. Every server also offers its coordination guidance for the caller as the resource
-  `openrig://reference/coordination`. Unless it declares a webhook
+  `openrig://reference/coordination`. An embedding uses the supported ESM entry
+  `@openrig/cli/mcp.js`, which exports `startMcpHttpServer`; importing it starts nothing, and the
+  embedding owns start and close. Its `instructions` option adds an endpoint introduction and
+  static resources (`uri`, `name`, `mimeType`, `text`) alongside Core's caller-scoped guidance.
+  Its per-request `resolver` can resolve opaque credentials through the embedding's authority
+  instead of a grant service or token file. Core checks the resolved seat against the daemon;
+  a resolver failure does not fall back to another authority. Unless it declares a webhook
   trigger (below), nothing wakes such an agent; it sees new work when it checks. Its tools cover
   the whole delegation loop:
   find its seat, team and lead (`rig_whoami`, `rig_team`), hand work on and follow the handoff's
