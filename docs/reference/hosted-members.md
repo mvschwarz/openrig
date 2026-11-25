@@ -322,6 +322,14 @@ metadata and the configured task destination can also be used with a resolver.
 
 ### Use the same profile in a local token file
 
+Use `--allow` with `rig mcp token add` to limit a grant to specific object actions. Repeat the option to add more actions.
+
+```sh
+rig mcp token add voice --seat voice@team --allow queue:create,show,list --allow team:list
+```
+
+The server offers only the tools that those actions authorize, including in `--front-door` mode. The same scope limits tool calls. This scoped profile takes precedence over `--owner` and `--workspace`. Run `rig mcp token list --json` to inspect the stored action map.
+
 A token-file entry can optionally carry `objects`, `peerSeats`, `readOnly` and `newWorkRetryAfterSeconds`.
 `objects` selects the scoped work profile above; `peerSeats` requires `objects`. An entry without these fields
 keeps its existing rig, workspace and owner behavior. The read-only reduction and new-work delay also work on

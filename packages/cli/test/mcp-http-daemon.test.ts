@@ -602,27 +602,77 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     expect(JSON.parse(fs.readFileSync(tokenFile, "utf8")).principals.map((grant: { name: string }) => grant.name)).toEqual(["bob"]);
   });
 
+  async function runToken(args: string[]): Promise<string> {
+    const cmd = mcpCommand();
+    cmd.commands.find(command => command.name() === "token")?.commands
+      .find(command => command.name() === args[0])?.exitOverride();
+    const out: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...line: unknown[]) => { out.push(line.join(" ")); });
+    try { await cmd.parseAsync(["token", ...args], { from: "user" }); } finally { log.mockRestore(); }
+    return out.join("\n");
+  }
+
   it("rig mcp token add, list and revoke: the token is shown once and only its hash is kept, in a file only its owner reads", async () => {
-    const run = async (args: string[]) => {
-      const out: string[] = [];
-      const log = console.log;
-      console.log = (...line: unknown[]) => { out.push(line.join(" ")); };
-      try { await mcpCommand().parseAsync(["token", ...args], { from: "user" }); } finally { console.log = log; }
-      return out.join("\n");
-    };
-    const added = await run(["add", "dana", "--seat", "dana@team", "--rig", "team", "--root", "proof"]);
+    const added = await runToken(["add", "dana", "--seat", "dana@team", "--rig", "team", "--root", "proof"]);
     const token = added.split("\n")[1]!;
     expect(token).toMatch(/^orm_/);
     const stored = fs.readFileSync(tokenFile, "utf8");
     expect(stored).not.toContain(token);
     expect(JSON.parse(stored).principals[0]).toMatchObject({ name: "dana", seat: "dana@team", rigs: ["team"], roots: ["proof"], owner: false });
+    expect(JSON.parse(stored).principals[0]).not.toHaveProperty("objects");
     expect(fs.statSync(tokenFile).mode & 0o777).toBe(0o600);
-    const listed = await run(["list"]);
+    const listed = await runToken(["list"]);
     expect(listed).toContain("dana: seat dana@team");
     expect(listed).not.toContain(JSON.parse(stored).principals[0].tokenSha256);
-    expect(await run(["revoke", "dana"])).toContain("Revoked dana");
+    expect(await runToken(["revoke", "dana"])).toContain("Revoked dana");
     expect(JSON.parse(fs.readFileSync(tokenFile, "utf8")).principals).toEqual([]);
   });
+
+  it.each([false, true])("uses only the allowed tools from token add with front-door mode %s", async frontDoor => {
+    for (const name of ["limited", "legacy", "lead"]) seat("team", name);
+    const legacyToken = await grant("legacy");
+    const added = await runToken(["add", "limited", "--seat", "limited@team", "--rig", "team",
+      "--allow", "queue:list,show", "--allow", "team:list", "--allow", "queue:show"]);
+    const token = added.split("\n")[1]!;
+    const { grants } = JSON.parse(await runToken(["list", "--json"]));
+    expect(grants).toEqual([expect.objectContaining({ name: "legacy" }),
+      expect.objectContaining({ name: "limited", objects: { queue: ["list", "show"], team: ["list"] } })]);
+    expect(grants[0]).not.toHaveProperty("objects");
+    expect(grants[1]).not.toHaveProperty("tokenSha256");
+
+    const { url } = await listen({ frontDoor });
+    const limited = await connect(url, token);
+    expect((await limited.client.listTools()).tools.map(tool => tool.name).sort())
+      .toEqual(["rig_queue_list", "rig_queue_show", "rig_team"]);
+    expect((await limited("rig_queue_list")).isError).toBe(false);
+    await expect(limited("rig_queue_create", { destination: "lead@team", body: "outside the allowance" }))
+      .rejects.toThrow(/rig_queue_create/);
+    expect(rows()).toBe(0);
+
+    const legacy = await connect(url, legacyToken);
+    expect((await legacy.client.listTools()).tools.map(tool => tool.name)).toContain("rig_queue_create");
+    expect((await legacy("rig_queue_create", { destination: "lead@team", body: "legacy grant" })).isError).toBe(false);
+    expect(rows()).toBe(1);
+  });
+
+  it.each(["queue", "queue:", "queue:list,", "queue:list:show", "queue:missing", "constructor:list"])(
+    "rejects --allow %s before rewriting the grant file", async allowance => {
+      await grant("legacy");
+      const before = fs.readFileSync(tokenFile);
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const priorExit = process.exitCode;
+      try {
+        expect(await runToken(["add", "invalid", "--seat", "invalid@team", "--allow", allowance])).toBe("");
+        expect(process.exitCode).toBe(1);
+        expect(error).toHaveBeenCalledWith(expect.stringContaining("--allow"));
+        expect(fs.readFileSync(tokenFile)).toEqual(before);
+      } finally {
+        process.exitCode = priorExit;
+        error.mockRestore();
+      }
+    },
+  );
+
   describe("a configured caller resolver", () => {
     const credential = "opaque-local-credential";
     const profile = () => ({ ok: true as const, seat: "caller@team",
