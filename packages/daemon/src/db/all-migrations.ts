@@ -8,6 +8,7 @@ import { remoteControlObservationsSchema } from "./migrations/179_remote_control
 import { queueRelayedAnswersSchema } from "./migrations/186_queue_relayed_answers.js";
 import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_staging.js";
 import { workflowRunTitleSchema } from "./migrations/194_workflow_run_title.js";
+import { workflowStartOperationsSchema } from "./migrations/195_workflow_start_operations.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
 import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";
@@ -389,5 +390,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   communityHarnessRuntimeSwitchesSchema,
   networkBindingProvidersSchema,
   workflowRunTitleSchema,
+  workflowStartOperationsSchema,
   networkRequestsSchema,
 ];
