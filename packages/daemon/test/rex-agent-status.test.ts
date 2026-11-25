@@ -12,7 +12,8 @@ import type { AgentActivity, AgentActivityState } from "../src/domain/types.js";
 const activity = (state: AgentActivityState, reason = "hook"): AgentActivity =>
   ({ state, reason, evidenceSource: "hook", sampledAt: "2026-11-11T00:00:00.000Z", evidence: null }) as AgentActivity;
 
-const osc = (fields: string) => `\x1b]7501;${fields}\x1b\\`;
+/** A report on OpenRig's own record. */
+const osc = (fields: string) => `\x1b]7501;id=openrig:${fields}\x1b\\`;
 const REX = "rex 0.0.1793890641-gaf0c20";
 
 type Clients = Record<string, Array<{ tty: string; termtype: string }> | null>;
@@ -60,6 +61,20 @@ describe("rex agent status: mapping", () => {
     expect(rexStatusReport({ state: "blocked", kind: "permission" }, "codex")).toBe(osc("state=blocked:app=codex:kind=permission"));
     expect(rexStatusReport({ state: "clear" }, null)).toBe(osc("state=clear"));
     expect(rexStatusReport({ state: "working" }, null)).toBe(osc("state=clear"));
+  });
+
+  it("writes OpenRig's own record, so the agent's report and its other records stay", () => {
+    expect(rexStatusReport({ state: "working" }, "pi")).toBe("\x1b]7501;id=openrig:state=working:app=pi\x1b\\");
+    expect(rexStatusReport({ state: "clear" }, "pi")).toBe("\x1b]7501;id=openrig:state=clear\x1b\\");
+    expect(rexStatusReport({ state: "idle" }, null)).toBe("\x1b]7501;id=openrig:state=clear\x1b\\");
+  });
+
+  it("never sends a clear without OpenRig's id, which would remove every record on the block", () => {
+    const statuses = [{ state: "working" }, { state: "idle" }, { state: "blocked", kind: "permission" }, { state: "clear" }] as const;
+    for (const status of statuses) for (const runtime of ["claude-code", null]) {
+      const fields = rexStatusReport(status, runtime).slice("\x1b]7501;".length, -2).split(":");
+      expect(fields).toContain("id=openrig");
+    }
   });
 });
 
