@@ -21,7 +21,7 @@
 //   contract's semantic halves (temporal order, derived-values-as-commands)
 //   are not mechanically checkable and are NOT pretended at.
 
-import { closeSync, copyFileSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { closeSync, copyFileSync, linkSync, lstatSync, statSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { validateMarkdownAddressability, parseMarkdownSections } from "../markdown-address.js";
@@ -237,8 +237,22 @@ export function resolveAuthoredRecapPointer(
     return { absentReason: `seat ref '${seatRef}' did not parse as canonical <seat>@<rig> (parse verdict: ${parsed.kind}) — authored recap not resolved, never guessed` };
   }
   const seatDir = join(topologyRoot, "rigs", parsed.rig, "seats", parsed.member);
-  if (!existsSync(join(seatDir, RECAP_FILENAME))) {
-    return { absentReason: `no ${RECAP_FILENAME} on the seat tree (${seatDir}) — the predecessor never wrote one` };
+  try {
+    statSync(join(seatDir, RECAP_FILENAME));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return { absentReason: `could not inspect ${RECAP_FILENAME} at ${seatDir}: ${(error as Error).message}` };
+    }
+    try {
+      const seat = statSync(seatDir);
+      if (!seat.isDirectory()) return { absentReason: `seat path ${seatDir} is not a directory; ${RECAP_FILENAME} could not be resolved` };
+    } catch (seatError) {
+      if ((seatError as NodeJS.ErrnoException).code !== "ENOENT") {
+        return { absentReason: `could not inspect seat tree at ${seatDir}: ${(seatError as Error).message}` };
+      }
+      return { absentReason: `no seat tree at ${seatDir}; no ${RECAP_FILENAME} is available there. You may write a recap with \`rig context recap-write\`, which creates the missing seat folder when permitted` };
+    }
+    return { absentReason: `seat tree exists at ${seatDir}, but no ${RECAP_FILENAME} is available there. You may write a recap with \`rig context recap-write\`` };
   }
   return { address: `seat:${RECAP_FILENAME}`, chainLength: listRecapChain(seatDir).length };
 }

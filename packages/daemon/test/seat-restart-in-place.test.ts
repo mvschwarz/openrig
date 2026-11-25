@@ -18,7 +18,7 @@ import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import type { HarnessLaunchResult, NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import type { InPlaceRestartIo, ProcessFacts } from "../src/domain/seat-restart-in-place.js";
-import { accountLineNames, accountTextMark, defaultInPlaceRestartIo, linesAfterAnchor, parseEffectiveSettings, procCmdlineArgv, shellWords } from "../src/domain/seat-restart-in-place.js";
+import { accountLineNames, accountTextMark, darwinProcessFacts, defaultInPlaceRestartIo, linesAfterAnchor, parseEffectiveSettings, procCmdlineArgv, shellWords } from "../src/domain/seat-restart-in-place.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { CodexThreadIdResolver, type CodexThreadEvidence } from "../src/domain/codex-thread-id.js";
@@ -257,6 +257,8 @@ function world(options: WorldOptions = {}) {
   /** The Codex home each resume proof was asked to read. */
   const proofHomes: Array<string | undefined> = [];
   const builds: Array<{ running?: unknown; launchWrapper?: string[]; launchShell?: string }> = [];
+  /** Whether each resume command was built as a preview (one that may not write the Codex config). */
+  const previews: boolean[] = [];
   const wrapperEnv = options.realResumeBuilder === "env"
     ? (() => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-inplace-wrapper-"));
@@ -290,7 +292,8 @@ function world(options: WorldOptions = {}) {
     : null;
   const codex = {
     runtime: "codex",
-    async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string; running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] }; launchShell?: string }) {
+    async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string; running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] }; launchShell?: string; preview?: boolean }) {
+      previews.push(opts.preview === true);
       builds.push({
         running: opts.running,
         ...(binding.launchWrapper ? { launchWrapper: binding.launchWrapper } : {}),
@@ -302,6 +305,7 @@ function world(options: WorldOptions = {}) {
           resumeToken: opts.resumeToken,
           running: opts.running,
           ...(opts.launchShell !== undefined ? { launchShell: opts.launchShell } : {}),
+          ...(opts.preview ? { preview: true } : {}),
         });
       }
       const running = opts.running;
@@ -368,7 +372,7 @@ function world(options: WorldOptions = {}) {
   });
   const events = () => (db.prepare("SELECT type, payload FROM events WHERE type LIKE 'seat.restart_in_place%' ORDER BY seq").all() as Array<{ type: string; payload: string }>)
     .map((row) => ({ type: row.type, ...JSON.parse(row.payload) }));
-  return { db, service, node, session, calls, launches, proofHomes, builds, events, sessionRegistry, tmux, respawnOpts,
+  return { db, service, node, session, calls, launches, proofHomes, builds, previews, events, sessionRegistry, tmux, respawnOpts,
     wrapperBinDir: wrapperEnv?.binDir,
     replacementYields, get replacementReads() { return replacementReads; }, get relaunched() { return relaunched; },
     setRows: (next: NativeProcessRow[]) => { rows = next; },
@@ -385,6 +389,14 @@ function state(activity: string, needs = 0): ArbitratedSeatState {
 }
 
 describe("rig seat restart --keep-conversation: gates before any signal", () => {
+  it("plan builds its resume command as a preview, which leaves the Codex config alone; the restart itself doesn't", async () => {
+    const w = world({});
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, planOnly: true });
+    expect(w.previews).toEqual([true]);
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "new account" })).toMatchObject({ ok: true });
+    expect(w.previews).toEqual([true, false]);
+  });
+
   it("plan reports activity, child processes and settings, and changes nothing", async () => {
     const w = world({ activity: state("working") });
     w.setRows([shellRow(100, 200), codexRow(200, 100, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`),
@@ -1226,6 +1238,47 @@ describe("#1196 round 1: launch choices come from the running Codex (LOW-1); ver
       expect((await defaultInPlaceRestartIo().readProcess(child.pid!))?.argv).toEqual([process.execPath, ...args]);
     } finally {
       child.kill();
+    }
+  });
+
+  it("macOS facts: the launch record's exact argv and only CODEX_HOME and HOME; lsof's cwd and first executable", async () => {
+    const launch = { argv: ["/opt/codex/bin/codex", "resume", "tok", "--add-dir", "/Users/u/my repo/.git"],
+      env: { CODEX_HOME: "/Users/u/odd home/.codex", HOME: "/Users/u", OPENAI_API_KEY: "sk-never-kept", PATH: "/usr/bin" } };
+    const lsof = "p42\nfcwd\nn/Users/u/my repo\nftxt\nn/opt/codex/bin/codex\nftxt\nn/usr/lib/dyld\n";
+    const facts = await darwinProcessFacts(42, { launch: async () => launch, lsof: async () => lsof, isDirectory: (p) => p === "/Users/u/my repo" });
+    expect(facts).toEqual({ cwd: "/Users/u/my repo", exe: "/opt/codex/bin/codex", env: { CODEX_HOME: "/Users/u/odd home/.codex", HOME: "/Users/u" }, argv: launch.argv });
+  });
+
+  it("macOS facts: no launch record is no facts; a cwd lsof can't give, or gives escaped, is null, never a guess", async () => {
+    const launch = async () => ({ argv: ["codex"], env: { HOME: "/Users/u" } });
+    expect(await darwinProcessFacts(42, { launch: async () => null, lsof: async () => "fcwd\nn/Users/u\n", isDirectory: () => true })).toBeNull();
+    expect(await darwinProcessFacts(42, { launch, lsof: async () => { throw new Error("lsof timed out"); }, isDirectory: () => true }))
+      .toEqual({ cwd: null, exe: null, env: { HOME: "/Users/u" }, argv: ["codex"] });
+    // lsof prints a newline in a name as \n: that isn't the directory, so the restart refuses rather than relaunch elsewhere.
+    expect((await darwinProcessFacts(42, { launch, lsof: async () => "fcwd\nn/Users/u/a\\nb\n", isDirectory: () => false }))?.cwd).toBeNull();
+  });
+
+  it.skipIf(process.platform !== "darwin")("the default reader on macOS takes a real process's exact argv, Codex home and cwd: spaces, quotes and accents included", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "restart facts \"q\" é "));
+    const home = path.join(dir, "odd home", ".codex");
+    const args = ["-e", "setTimeout(() => {}, 30000)", "my repo/.git"];
+    const child = spawn(process.execPath, args, { stdio: "ignore", cwd: dir, env: { HOME: "/Users/nobody here", CODEX_HOME: home, PATH: "/usr/bin:/bin" } });
+    // A daemon with no locale, as on a CI runner or under launchd: lsof would escape the é unless the reader gives it one.
+    const locale = Object.fromEntries(["LC_ALL", "LC_CTYPE", "LANG"].map((key) => [key, process.env[key]]));
+    for (const key of Object.keys(locale)) delete process.env[key];
+    try {
+      let facts: ProcessFacts | null = null;
+      // Until exec completes, the launch record is the parent's; wait for the child's own.
+      for (let tries = 0; tries < 100 && !facts?.argv?.includes("my repo/.git"); tries++) {
+        facts = await defaultInPlaceRestartIo().readProcess(child.pid!);
+        if (!facts?.argv?.includes("my repo/.git")) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(facts).toEqual({ cwd: fs.realpathSync(dir), exe: expect.stringMatching(/node/), env: { CODEX_HOME: home, HOME: "/Users/nobody here" },
+        argv: [process.execPath, ...args] });
+    } finally {
+      for (const [key, value] of Object.entries(locale)) if (value !== undefined) process.env[key] = value;
+      child.kill();
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 

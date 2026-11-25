@@ -29,8 +29,9 @@ const startupIdleMs = argv.includes("--startup-idle") ? Number(argv[argv.indexOf
 const interruptDelayMs = argv.includes("--interrupt-delay") ? Number(argv[argv.indexOf("--interrupt-delay") + 1]) : 0;
 // --beat: the optional working beat (section 4). While a turn is open and nothing waits on a person, post active/liveness
 // every 10 s with livenessSeconds 30; after delivering an answer to an ask OpenRig opened, post active/permission_resolved
-// first. Breaks: beat-after-stop, beat-during-ask, no-resolve, and beat-time-backwards (each beat says it happened 15 s
-// before it did, so its sequence no longer rises with the runner's own time).
+// first. Breaks: beat-after-stop, beat-during-ask, no-resolve, beat-time-backwards (each beat says it happened 15 s
+// before it did, so its sequence no longer rises with the runner's own time), and beat-too-slow (the turn's one beat comes
+// 17 s after the turn starts, later than livenessSeconds 30 ÷ 2 allows).
 const beatMode = argv.includes("--beat");
 let beatTurn = null;
 // With --withdraw-after-stop: the ask a cancelled or ended turn withdraws once its Stop is posted.
@@ -40,7 +41,7 @@ let stoppedEarly = false;
 // The current turn's accepted prompt's occurredAt.
 let acceptedAt = null;
 if (beatMode) setInterval(() => {
-  if (beatTurn !== null && (!attention || breaks.has("beat-during-ask"))) void post("active", "liveness", { turnId: String(beatTurn), livenessSeconds: 30,
+  if (beatTurn !== null && !breaks.has("beat-too-slow") && (!attention || breaks.has("beat-during-ask"))) void post("active", "liveness", { turnId: String(beatTurn), livenessSeconds: 30,
     ...(breaks.has("beat-time-backwards") ? { occurredAt: new Date(Date.now() - 15_000).toISOString() } : {}) });
 }, 10_000).unref();
 const resolved = (ask) => { if (beatMode && !breaks.has("no-resolve")) void post("active", "permission_resolved", { turnId: String(turn), askId: ask.askId }); };
@@ -287,6 +288,10 @@ async function prompt(text) {
   show(`you ▸ ${text.split("\n")[0]}`);
   attention = false;
   acceptedAt = new Date().toISOString();
+  if (beatMode && breaks.has("beat-too-slow")) {
+    const late = turn;
+    setTimeout(() => { if (beatTurn === late && !attention) void post("active", "liveness", { turnId: String(late), livenessSeconds: 30 }); }, 17_000).unref();
+  }
   const accepted = post("UserPromptSubmit", "accepted", { turnId: String(turn), occurredAt: acceptedAt });
   if (startupIdleMs === null) await accepted; // with --startup-idle, the agent doesn't wait on the post, as in dsh's runner
   const res = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] });

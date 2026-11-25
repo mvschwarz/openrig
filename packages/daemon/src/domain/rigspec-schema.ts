@@ -68,13 +68,13 @@ const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string
 
 const RIG_KEYS = new Set([
   "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "docs",
-  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "env",
+  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "seat_slice", "env", "default_onboarding_pack",
 ]);
-const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
+const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges", "cold_start"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "statusline_throttle", "pool", "cwd", "restore_policy",
-  "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
+  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "statusline_throttle", "pool", "cwd", "restore_policy", "keep_alive",
+  "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env", "cold_start",
   "agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
@@ -203,6 +203,15 @@ export class RigSpecSchema {
       errors.push("non_interruptive: must be a boolean");
     }
 
+    // #80: opt-in grouping of the rig's seat scopes beneath its own slice; `rig` is the one value.
+    if (obj["seat_slice"] !== undefined && obj["seat_slice"] !== "rig") {
+      errors.push('seat_slice: must be "rig" (omit it to keep seats ungrouped)');
+    }
+
+    if (obj["default_onboarding_pack"] !== undefined && typeof obj["default_onboarding_pack"] !== "boolean") {
+      errors.push("default_onboarding_pack: must be a boolean");
+    }
+
     // Launch environment for every seat in the rig; a member's own env overrides it.
     if (obj["env"] !== undefined) errors.push(...validateSeatEnv(obj["env"], "env"));
 
@@ -276,6 +285,7 @@ export class RigSpecSchema {
     const docs = Array.isArray(raw["docs"])
       ? (raw["docs"] as Record<string, unknown>[]).map((d) => ({ path: d["path"] as string }))
       : undefined;
+    const defaultOnboardingPack = raw["default_onboarding_pack"];
 
     return {
       version: raw["version"] as string,
@@ -284,8 +294,10 @@ export class RigSpecSchema {
       cultureFile: raw["culture_file"] as string | undefined,
       permissionPolicy: raw["permission_policy"] as string | undefined,
       nonInterruptive: raw["non_interruptive"] as boolean | undefined,
+      ...(raw["seat_slice"] === "rig" ? { seatSlice: "rig" as const } : {}),
       env: normalizeSeatEnv(raw["env"]),
       managedBlocks: raw["managed_blocks"] as RigSpec["managedBlocks"],
+      ...(typeof defaultOnboardingPack === "boolean" ? { defaultOnboardingPack } : {}),
       docs,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
       services: raw["services"] ? normalizeServicesBlock(raw["services"], raw["name"] as string) : undefined,
@@ -484,6 +496,11 @@ function validatePod(pod: Record<string, unknown>, index: number, podIds: Set<st
   // pod startup
   if (pod["startup"] !== undefined) {
     errors.push(...validateStartupBlock(pod["startup"], `${prefix}.startup`));
+  }
+
+  // #2829 slice 1 — opt-in queue-driven cold start for every seat in the pod
+  if (pod["cold_start"] !== undefined && typeof pod["cold_start"] !== "boolean") {
+    errors.push(`${prefix}.cold_start: must be a boolean`);
   }
 
   // members
@@ -686,6 +703,17 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     if (!VALID_RESTORE_POLICIES.has(member["restore_policy"] as string)) {
       errors.push(`${prefix}.restore_policy: must be one of ${[...VALID_RESTORE_POLICIES].join(", ")} (got "${member["restore_policy"]}")`);
     }
+  }
+
+  // #2829 slice 1 — opt-in queue-driven cold start for this seat
+  if (member["cold_start"] !== undefined && typeof member["cold_start"] !== "boolean") {
+    errors.push(`${prefix}.cold_start: must be a boolean`);
+  }
+
+  // #2940: keep_alive is a plain opt-in. Valid on every runtime, terminal included: the one-seat launch that recovers a
+  // seat relaunches a terminal too, and a fresh shell is its whole restore (it has no conversation to lose).
+  if (member["keep_alive"] !== undefined && typeof member["keep_alive"] !== "boolean") {
+    errors.push(`${prefix}.keep_alive: must be true or false (got ${JSON.stringify(member["keep_alive"])})`);
   }
 
   // agent_ref: must be local: or path: with correct shape (skip for terminal sentinel)
@@ -1391,6 +1419,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     env: normalizeSeatEnv(m["env"]),
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
+    ...(typeof m["keep_alive"] === "boolean" ? { keepAlive: m["keep_alive"] } : {}),
     // OPR.0.5.6.20 A5 — aliases normalize at ingestion; absent stays undefined so the
     // resolver's F-6 default remains the one authority for absence.
     compactionStrategy: m["compaction_strategy"] !== undefined
@@ -1406,6 +1435,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     ...(typeof m["append_system_prompt_file"] === "string" ? { appendSystemPromptFile: m["append_system_prompt_file"] } : {}),
     ...(Array.isArray(m["plugin_dirs"]) ? { pluginDirs: m["plugin_dirs"] as string[] } : {}),
     ...(Array.isArray(m["plugin_channels"]) ? { pluginChannels: m["plugin_channels"] as string[] } : {}),
+    ...(m["cold_start"] === undefined ? {} : { coldStart: m["cold_start"] as boolean }),
   }));
 
   const edges = Array.isArray(raw["edges"])
@@ -1436,6 +1466,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
       } : undefined,
     } : undefined,
     startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
+    ...(raw["cold_start"] === undefined ? {} : { coldStart: raw["cold_start"] as boolean }),
     members,
     edges,
   };

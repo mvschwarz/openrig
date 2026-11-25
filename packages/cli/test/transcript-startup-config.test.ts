@@ -52,6 +52,19 @@ it.each(["daemon", "start", "up"])("%s startup leaves file settings live and pre
   expect(resolve()).toEqual({ lines: 60, pollIntervalMs: 5000 });
 });
 
+it.each(["daemon", "start", "up"])("%s startup passes the resolved daemon.start_readiness_wait_seconds as the start's readiness wait", async (entry) => {
+  vi.stubEnv("OPENRIG_DAEMON_START_READINESS_WAIT_SECONDS", undefined);
+  new ConfigStore(join(home, "config.json")).set("daemon.start_readiness_wait_seconds", "420");
+  const deps = { lifecycleDeps: {} as never, clientFactory: vi.fn() as never };
+  const command = entry === "daemon" ? daemonCommand(deps.lifecycleDeps) : entry === "start" ? startCommand(deps) : upCommand(deps);
+  await command.parseAsync(entry === "daemon" ? ["start"] : entry === "start" ? ["--all"] : ["fixture.yaml"], { from: "user" });
+  expect(startDaemon).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(startDaemon).mock.calls[0]![0].readinessWaitSeconds).toBe(420);
+  // Not a child setting: it isn't passed to the daemon process.
+  expect(Object.keys(buildDaemonEnv({}, { ...vi.mocked(startDaemon).mock.calls[0]![0], port: 7433, db: "fixture.sqlite" }))
+    .some((name) => name.includes("READINESS_WAIT"))).toBe(false);
+});
+
 it("daemon start --allow-db-conflict applies to its child only, not a later unflagged start", async () => {
   vi.stubEnv("OPENRIG_ALLOW_DB_CONFLICT", undefined);
   await daemonCommand({} as never).exitOverride().parseAsync(["start", "--allow-db-conflict"], { from: "user" });

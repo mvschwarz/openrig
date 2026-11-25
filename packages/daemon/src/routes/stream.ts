@@ -3,7 +3,8 @@ import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import { StreamCursorExpiredError, type StreamStore } from "../domain/stream-store.js";
 import { listSubscriptions, readPage, subscribe, unsubscribe } from "../domain/stream-subscriptions.js";
-import { ReaderActionError, readerActions, recordReaderAction } from "../domain/stream-reader-actions.js";
+import { ReaderActionError, readerActions, listReaderActions, recordReaderAction, READER_ACTIONS, type ReaderActionKind } from "../domain/stream-reader-actions.js";
+import { streamIntakeRecord } from "../domain/stream-intake.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 import { queryLimit } from "./query-limit.js";
 
@@ -258,9 +259,39 @@ export function streamRoutes(): Hono {
     }
   });
 
+  app.get("/actions/list", (c) => {
+    const parsed = queryLimit(c, { boundIntoSql: false });
+    if (!parsed.ok) return parsed.response;
+    const mode = c.req.query("mode") || "history";
+    if (mode !== "history" && mode !== "current") return c.json({ error: "mode must be history or current" }, 400);
+    const action = c.req.query("action") || undefined;
+    if (action && !READER_ACTIONS.includes(action as ReaderActionKind)) return c.json({ error: "action must be act, decline or duplicate" }, 400);
+    const range: { since?: string; until?: string } = {};
+    for (const key of ["since", "until"] as const) {
+      const raw = c.req.query(key);
+      if (!raw) continue;
+      const value = normalizeIsoTimestamp(raw);
+      if (!value || hasSubMillisecondPrecision(raw)) return c.json({ error: `${key} must be a valid ISO timestamp with at most millisecond precision` }, 400);
+      range[key] = value;
+    }
+    if (range.since && range.until && range.since > range.until) return c.json({ error: "since must not be after until" }, 400);
+    return c.json(listReaderActions(getStore(c).db, { mode, limit: parsed.limit, ...range,
+      action: action as ReaderActionKind | undefined, streamItemIds: c.req.queries("streamItemId"),
+      hintTag: c.req.query("hintTag") || undefined, sourceSession: c.req.query("sourceSession") || undefined,
+      readerSession: c.req.query("readerSession") || undefined, afterActionId: c.req.query("afterActionId") || undefined }));
+  });
+
   app.get("/:streamItemId/actions", (c) => {
     const id = c.req.param("streamItemId");
     return c.json({ streamItemId: id, ...readerActions(getStore(c).db, id) });
+  });
+
+  // Where intake recorded the item, if it did: the row it opened or the pending row it was added to (null for neither).
+  app.get("/:streamItemId/intake", (c) => {
+    const store = getStore(c);
+    const item = store.getById(c.req.param("streamItemId"));
+    if (!item) return c.json({ error: "stream item not found" }, 404);
+    return c.json({ streamItemId: item.streamItemId, intake: streamIntakeRecord(store.db, item) });
   });
 
   // GET /:streamItemId — fetch one

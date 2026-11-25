@@ -56,10 +56,16 @@ export interface RosterMember extends Reference {
   participant?: { app?: string; kind?: string };
   /** Why an authored `app` or `kind` isn't used. Each is dropped on its own, and the roster still loads. */
   participant_problem?: string;
+  /** The team this member is the declared entry point for, as the roster's author recorded it: a plain team name. It's
+   *  context only: no escalation, routing or ownership of other members' work follows from it. */
+  lead_of?: string;
+  /** Why an authored `lead_of` isn't used. It's dropped, and the roster still loads. */
+  lead_of_problem?: string;
 }
 export interface Roster {
   version: 1;
   id: string;
+  /** Empty when the roster's author hasn't named the team. */
   name: string;
   purpose: string;
   curator: Reference;
@@ -87,6 +93,8 @@ function parseWake(value: unknown): RosterWake {
 
 /** The most a member's label, or a team's name as it's shown, may hold. */
 export const MEMBER_LABEL_MAX = 200;
+/** The longest declared `lead_of` team name, in characters. */
+export const LEAD_OF_MAX = 40;
 
 // What changes how the text around it shows: C0 and C1 controls, the line and paragraph separators, and the bidirectional
 // embeddings, overrides and isolates. Also the invisible characters that let two names that look the same differ: the word
@@ -119,8 +127,9 @@ function participantField(field: "app" | "kind", value: unknown): { token?: stri
 /** Select authored fields only: a file cannot supply runtime or observed-model facts. */
 export function parseRoster(value: unknown): Roster {
   if (!object(value) || value.version !== 1 || !reference(value.curator) ||
-      ![value.id, value.name, value.purpose, value.updated_at].every(v => text(v) !== null) || !Array.isArray(value.members)) {
-    throw new Error("Expected a version 1 roster with id, name, purpose, curator, updated_at and members");
+      ![value.id, value.purpose, value.updated_at].every(v => text(v) !== null) ||
+      (value.name !== undefined && value.name !== "" && text(value.name) === null) || !Array.isArray(value.members)) {
+    throw new Error("Expected a version 1 roster with id, purpose, curator, updated_at and members (optional name)");
   }
   const members = value.members.map((m): RosterMember => {
     if (!reference(m) || !object(m) || !strings(m.capabilities) || !strings(m.engagement) ||
@@ -148,6 +157,10 @@ export function parseRoster(value: unknown): Roster {
     const app = participantField("app", m.app), kind = participantField("kind", m.kind);
     const participant = { ...(app.token ? { app: app.token } : {}), ...(kind.token ? { kind: kind.token } : {}) };
     const participantProblem = [app.problem, kind.problem].filter(Boolean).join("; ");
+    // So does a lead_of that isn't a plain team name: absent or empty declares nothing.
+    const leadOf = m.lead_of === undefined || m.lead_of === "" ? undefined : m.lead_of;
+    const leadOfProblem = leadOf === undefined ? null : shownTextProblem("lead_of", leadOf)
+      ?? ([...(leadOf as string).trim()].length > LEAD_OF_MAX ? `lead_of is longer than ${LEAD_OF_MAX} characters` : null);
     return { seat: m.seat, host: m.host, capabilities: m.capabilities, engagement: m.engagement,
       use_when: m.use_when as string, why: m.why as string, ...(m.caveat === undefined ? {} : { caveat: m.caveat as string }),
       ...(m.hosted === true ? { hosted: true } : {}), ...(m.wake === undefined ? {} : { wake: parseWake(m.wake) }),
@@ -158,9 +171,10 @@ export function parseRoster(value: unknown): Roster {
       ...(takes === false && takesNote !== undefined && !takesProblem ? { takes_requests_note: (takesNote as string).trim() } : {}),
       ...(takesProblem ? { takes_requests_problem: takesProblem } : {}),
       ...(Object.keys(participant).length ? { participant } : {}),
-      ...(participantProblem ? { participant_problem: participantProblem } : {}) };
+      ...(participantProblem ? { participant_problem: participantProblem } : {}),
+      ...(leadOf === undefined ? {} : leadOfProblem ? { lead_of_problem: leadOfProblem } : { lead_of: (leadOf as string).trim() }) };
   });
-  return { version: 1, id: value.id as string, name: value.name as string, purpose: value.purpose as string,
+  return { version: 1, id: value.id as string, name: (value.name as string | undefined) ?? "", purpose: value.purpose as string,
     curator: { seat: value.curator.seat, host: value.curator.host }, updated_at: value.updated_at as string, members };
 }
 
@@ -202,7 +216,7 @@ export function rosterTeamName(folder: string, rig: string): { name: string | nu
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { name: null };
     name = readRosters(folder).rosters.find((roster) => roster.id === rig)?.name;
   }
-  if (name === undefined) return { name: null };
+  if (name === undefined || name === "") return { name: null };
   const problem = shownTextProblem("name", name);
   return problem ? { name: null, problem } : { name };
 }

@@ -20,7 +20,8 @@ import type { TopologyActivityVisual } from "../lib/topology-activity.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../lib/token-format.js";
 import { formatRuntimeModel } from "../lib/runtime-brand.js";
 import { postOpenCmux } from "../hooks/useCmuxLaunch.js";
-import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
+import { ToolMark } from "./graphics/RuntimeMark.js";
+import { ContextBar, SeatEngine } from "./SeatEngine.js";
 
 interface RigNodeData {
   logicalId: string;
@@ -119,6 +120,14 @@ export function RigNode({ data }: { data: RigNodeData }) {
   const tokenTotal = sumTokenCounts(data.contextTotalInputTokens, data.contextTotalOutputTokens);
   const tokenLabel = formatCompactTokenCount(tokenTotal);
   const tokenTitle = formatTokenTotalTitle(data.contextTotalInputTokens, data.contextTotalOutputTokens);
+  // Footer: the seat's session name without its "@rig" suffix (this graph shows one rig), the spec,
+  // and the profile unless it is the default one ("default", or "none" on a terminal node).
+  const sessionName = data.canonicalSessionName ?? data.logicalId;
+  const footerText = [
+    sessionName.split("@")[0],
+    data.resolvedSpecName,
+    data.profile && data.profile !== "default" && data.profile !== "none" ? data.profile : null,
+  ].filter(Boolean).join(" · ");
 
   const placementChipLabel = data.placementState === "selected" ? "target" : data.placementState === "available" ? "avail" : null;
 
@@ -237,32 +246,14 @@ export function RigNode({ data }: { data: RigNodeData }) {
 
       {/* Body */}
       <div className="space-y-1 px-2 py-1.5">
-        <div className="truncate font-mono text-[8px] leading-tight text-on-surface-variant">
-          {data.canonicalSessionName ?? data.logicalId}
-        </div>
-
-        <div className="min-w-0">
-          <RuntimeBadge
-            runtime={data.runtime}
-            model={data.model}
-            size="xs"
-            compact
-            variant="inline"
-            className="max-w-full"
-          />
-          {!runtimeTitle && data.profile ? (
-            <span className="ml-1 font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">
-              {data.profile}
-            </span>
-          ) : null}
-        </div>
-
-        {/* Spec hint */}
-        {data.resolvedSpecName && (
-          <div className="font-mono text-[8px] text-on-surface-variant" data-testid="spec-hint">
-            {data.resolvedSpecName}{data.profile ? ` · ${data.profile}` : ""}
-          </div>
-        )}
+        {/* Engine: runtime and provider, then the model on its own line so it is never cut by the runtime name */}
+        <SeatEngine runtime={data.runtime} model={data.model} />
+        <div className="border-t border-dashed border-outline-variant" />
+        <ContextBar
+          percent={data.contextUsedPercentage}
+          availability={data.contextAvailability}
+          fresh={data.contextFresh}
+        />
 
         {/* Context usage — prominent big number */}
         <div className="flex items-end justify-between gap-3 pt-0.5">
@@ -284,12 +275,21 @@ export function RigNode({ data }: { data: RigNodeData }) {
             </div>
           )}
           <div
-            className={`font-mono text-base font-bold leading-none tracking-[0.02em] ${tokenLabel ? "text-on-surface-variant" : "text-on-surface-variant"}`}
+            className="font-mono text-base font-bold leading-none tracking-[0.02em] text-on-surface-variant"
             data-testid="token-total"
             title={tokenTitle ?? "Token sample unavailable"}
           >
             {tokenLabel ?? "--"}
           </div>
+        </div>
+
+        {/* Seat and spec */}
+        <div
+          className="truncate font-mono text-[8px] leading-tight text-on-surface-variant"
+          data-testid="seat-footer"
+          title={sessionName}
+        >
+          {footerText}
         </div>
 
         {/* Restore outcome */}

@@ -37,6 +37,12 @@ Compose aggressively while reading. Use shell tools, the database, source, and e
 to make larger questions answerable. Be deliberate when mutating. Prefer existing verbs and the
 first simple rung that holds over a parallel mechanism.
 
+Your pane is not a machine of your own. Seats share the daemon's tmux server (`rig terminal status`
+names it), and an unnamed `tmux` command in a pane follows its inherited `TMUX` there, whatever
+`TMUX_TMPDIR` says. In tmux experiments, give every command a `-L <name>` or `-S <path>` that isn't
+the live server's, and never run `tmux kill-server` without one: from a seat, it ends every agent on
+that server.
+
 Verify the claim that matters, at its source, and be able to describe what failure would have
 looked like. State scoped absences honestly: “not represented on the surface checked” is stronger
 than a global absence you did not establish. If another seat must act, transfer durable work rather

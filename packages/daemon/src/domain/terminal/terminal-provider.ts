@@ -168,6 +168,8 @@ export interface TerminalProvider {
   readonly name: string;
   /** Panes per page this provider lays out; the composer uses PANES_PER_PAGE when absent. */
   readonly panesPerPage?: number;
+  /** Its local writable tiles pin their seat at the seat's own size instead of sizing it (`pinnedTileAttachArgv`). */
+  readonly pinsWritableSeats?: boolean;
   status(): Promise<ProviderStatus>;
   liveness(): Promise<ProviderLiveness>;
   openView(view: ComposedView, options?: OpenViewOptions): Promise<OpenViewResult>;

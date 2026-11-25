@@ -6,6 +6,7 @@ import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { NetworkBindingStore } from "../../daemon/src/domain/network/network-bindings.js";
 import { networkCommand, shownHubUrl, type NetworkDeps } from "../src/commands/network.js";
 import { STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
@@ -185,4 +186,50 @@ it("status hides a hub URL's query string and leaves a plain URL as it is", () =
   expect(shownHubUrl("https://hub.example.test/rig?token=s3cret")).not.toContain("s3cret");
   expect(shownHubUrl("https://hub.example.test/rig")).toBe("https://hub.example.test/rig");
   expect(shownHubUrl("not a url")).toBe("not a url");
+});
+
+
+it("shows provider removal pending and superseded distinctly without credentials", async () => {
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  const store = new NetworkBindingStore(db, home);
+  const provider = { id: "example", installation: "local", participant: "alex" };
+  const b = store.create({ session: "dev-impl@lab", hubUrl: "https://hub.example/mcp", hubSeat: "alex@team", token: "private-work", provider, removal: { revision: "r1", token: "private-removal" } });
+  store.disconnect(b.id);
+  await cli().parseAsync(["node", "rig", "network", "status"]);
+  expect(String(out.mock.calls.at(-1)?.[0])).toContain("provider removal pending");
+  store.reportProviderRemoval(b.id, { provider, removalRevision: "r1", status: "superseded" });
+  await cli().parseAsync(["node", "rig", "network", "status"]);
+  const text = String(out.mock.calls.at(-1)?.[0]); expect(text).toContain("superseded"); expect(text).toContain("not confirmed removed");
+  expect(text).not.toMatch(/private-work|private-removal/);
+});
+
+// The hub's rig_team lists the asking participant too; `peers` leaves out exactly the binding's own hub seat.
+function hubPeers(seats: Array<{ session: string; label?: string }>, hostedMembers?: Array<{ session: string; label?: string }>) {
+  app = new Hono();
+  app.get("/api/network/bindings/:id/peers", (c) => c.json({ bindingId: c.req.param("id"), hubSeat: "alex@team",
+    team: { rig: { name: "team" }, lead: { session: "lead@team" }, leadNote: "send work here", seats, ...(hostedMembers ? { hostedMembers } : {}) } }));
+}
+
+it("lists the hub's peers without the asking seat itself, in text and JSON", async () => {
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  hubPeers([{ session: "lead@team", label: "the team lead" }, { session: "alex@team", label: "alex (the network owner's agent)" },
+    { session: "alex@team-2" }], [{ session: "alex@team" }, { session: "helper@team", label: "a hosted helper" }]);
+  await cli().parseAsync(["node", "rig", "network", "peers", "netb-fixture"]);
+  expect(String(out.mock.calls.at(-1)?.[0])).toBe(["Peers alex@team can send to:", "  lead@team  the team lead", "  alex@team-2", "  helper@team  a hosted helper"].join("\n"));
+
+  await cli().parseAsync(["node", "rig", "network", "peers", "netb-fixture", "--json"]);
+  const json = JSON.parse(String(out.mock.calls.at(-1)?.[0]));
+  expect(json.team.seats.map((p: { session: string }) => p.session)).toEqual(["lead@team", "alex@team-2"]);
+  expect(json.team.hostedMembers.map((p: { session: string }) => p.session)).toEqual(["helper@team"]);
+  expect(json).toMatchObject({ bindingId: "netb-fixture", hubSeat: "alex@team", team: { rig: { name: "team" }, lead: { session: "lead@team" }, leadNote: "send work here" } });
+  expect(process.exitCode).toBeUndefined();
+});
+
+it("says the hub lists no peers when the only entry is the asking seat", async () => {
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  hubPeers([{ session: "alex@team" }]);
+  await cli().parseAsync(["node", "rig", "network", "peers", "netb-fixture"]);
+  expect(String(out.mock.calls.at(-1)?.[0])).toBe("The hub lists no peers for alex@team.");
+  await cli().parseAsync(["node", "rig", "network", "peers", "netb-fixture", "--json"]);
+  expect(JSON.parse(String(out.mock.calls.at(-1)?.[0])).team).not.toHaveProperty("hostedMembers");
 });

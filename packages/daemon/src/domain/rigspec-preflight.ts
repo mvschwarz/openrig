@@ -12,7 +12,8 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { mergeSeatEnv, type SeatEnv } from "./seat-env.js";
 import { withoutRuntimeHomes } from "./seat-runtime-home.js";
 import { isLaunchWrapperRuntime, unsupportedCommunityRunnerLaunchWrapperMessage } from "./launch-wrapper.js";
-import { resolveLaunchWrapperArgv } from "./seat-launch-environment.js";
+import { resolveLaunchWrapperArgv, seatRigReachPaths } from "./seat-launch-environment.js";
+import { codexRigReach, codexRigReachWarning, type CodexMemberPermissions } from "./codex-member-permissions.js";
 
 const RUNTIME_COMMANDS: Record<string, string> = {
   "claude-code": "claude --version",
@@ -20,6 +21,10 @@ const RUNTIME_COMMANDS: Record<string, string> = {
   "pi": "pi --version",
   "omp": "omp --version",
 };
+
+export function unverifiedModelWarning(seat: string, model: string): string {
+  return `${seat}: configured model '${model}' is unverified. Launch checks do not establish model availability or account entitlement; no model call is made to verify it.`;
+}
 
 interface RigSpecPreflightDeps {
   rigRepo: RigRepository;
@@ -44,7 +49,7 @@ export class RigSpecPreflight {
     this.cmuxExec = deps.cmuxExec;
   }
 
-  async check(spec: RigSpec): Promise<PreflightResult> {
+  async check(spec: RigSpec, includeModelWarnings = true): Promise<PreflightResult> {
     const errors: string[] = [];
     const warnings: string[] = [];
 
@@ -107,6 +112,7 @@ export class RigSpecPreflight {
     // Runtime availability
     const checkedRuntimes = new Set<string>();
     for (const node of spec.nodes) {
+      if (includeModelWarnings && node.model) warnings.push(unverifiedModelWarning(node.id, node.model));
       if (checkedRuntimes.has(node.runtime)) continue;
       checkedRuntimes.add(node.runtime);
 
@@ -122,6 +128,9 @@ export class RigSpecPreflight {
       }
     }
 
+    for (const node of spec.nodes) {
+      if (node.runtime === "codex") warnRigReach(node.id, node.codexPermissions, node.cwd ? resolveAuthoredCwd(node.cwd, null) : undefined, warnings);
+    }
     if (errors.length === 0) {
       await warnRigLoginPath(spec.nodes.filter(node => node.runtime === "codex").map(node => ({ label: node.id, env: {} })), this.exec, warnings);
     }
@@ -175,6 +184,7 @@ const DEFAULT_ACTIVITY_RELAY_PATH = nodePath.resolve(import.meta.dirname, "../..
 const DEFAULT_CLAUDE_HOOKS_MANIFEST_PATH = nodePath.resolve(import.meta.dirname, "../../assets/plugins/openrig-core/hooks/claude.json");
 
 export interface RigPreflightInput {
+  includeModelWarnings?: boolean;
   /** One-off launch environment, merged after the rig and member declarations. */
   envOverride?: SeatEnv;
   rigSpecYaml: string;
@@ -197,6 +207,7 @@ export interface RigPreflightInput {
  * already-parsed+validated spec. (YAML is only the input adapter at the front.)
  */
 export interface PreflightSpecContext {
+  includeModelWarnings?: boolean;
   envOverride?: SeatEnv;
   rigRoot: string;
   cwdOverride?: string;
@@ -324,6 +335,7 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
   // #3395: the pool advisories join the load warnings here, once; the structured core below and the
   // instantiator's own preflight do not add them, so import and bootstrap plan/apply report each one once.
   const result = await preflightValidatedSpec(rigSpec, {
+    includeModelWarnings: input.includeModelWarnings,
     rigRoot: input.rigRoot,
     cwdOverride: input.cwdOverride,
     envOverride: input.envOverride,
@@ -384,6 +396,7 @@ async function preflightMembers(
   // 3. For each pod member: resolve agent_ref + profile, check runtime, check cwd
   for (const pod of rigSpec.pods) {
     for (const member of pod.members) {
+      if (preflightCtx.includeModelWarnings !== false && member.model) warnings.push(unverifiedModelWarning(`${pod.id}.${member.id}`, member.model));
       // Terminal members: skip agent resolution and profile resolution
       if (member.agentRef === "builtin:terminal") {
         // Only validate runtime and cwd for terminal members
@@ -448,8 +461,10 @@ async function preflightMembers(
         continue;
       }
 
-      if (member.runtime === "codex") loginTargets.push({ label: `${pod.id}.${member.id}`,
-        env: mergeSeatEnv(rigSpec.env, member.env, preflightCtx.envOverride && withoutRuntimeHomes(preflightCtx.envOverride)) });
+      const seatEnv = mergeSeatEnv(rigSpec.env, member.env, preflightCtx.envOverride && withoutRuntimeHomes(preflightCtx.envOverride));
+      if (member.runtime === "codex") loginTargets.push({ label: `${pod.id}.${member.id}`, env: seatEnv });
+      // No session follows a materialize-only preflight, so there's no launch to warn about.
+      if (member.runtime === "codex" && !preflightCtx.materializeOnly) warnRigReach(`${pod.id}.${member.id}`, member.codexPermissions, configResult.config.cwd, warnings, seatEnv);
 
       // Managed Claude activity-hook delivery preflight (NONFATAL): when a claude-code member
       // selects the claude_activity_hooks resource, verify the daemon can actually deliver
@@ -526,6 +541,19 @@ async function preflightMembers(
   // higher-priority is a FINDING, not an ordering input — the pin freezes presentation, never semantics.
   warnings.push(...permissionPolicyDiscoveryWarnings(rigSpec, preflightCtx));
   return { ready: errors.length === 0, errors, warnings };
+}
+
+/** A Codex seat whose declared sandbox can't read what rig needs, or has network off, can't take its tasks; say so, and
+ *  launch as written. */
+function warnRigReach(label: string, permissions: CodexMemberPermissions | undefined, cwd: string | undefined, warnings: string[], env?: SeatEnv): void {
+  if (!permissions) return;
+  try {
+    const gap = codexRigReach(permissions, { ...seatRigReachPaths(env), cwd });
+    if (gap) warnings.push(codexRigReachWarning(label, gap));
+  } catch {
+    // Advisory only, as in the setter: a lookup that throws must not become a preflight error, nor read as covered.
+    warnings.push(`${label}: rig read coverage for this seat's codex_permissions could not be checked. The launch continues with the permissions as written; run rig whoami inside the seat to check.`);
+  }
 }
 
 /** A Codex login-shell lookup for each distinct declared seat environment, advisory only.

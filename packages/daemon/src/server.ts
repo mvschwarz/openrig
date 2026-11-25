@@ -142,6 +142,7 @@ import { healthRoutes } from "./routes/health.js";
 import { gatewayRoutes } from "./routes/gateway.js";
 import type { StreamStore } from "./domain/stream-store.js";
 import { createSlowOpRequestMiddleware, type SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
+import { createMutationTraceMiddleware, type MutationTraceSink } from "./domain/mutation-trace.js";
 import type { QueueRepository } from "./domain/queue-repository.js";
 import type { InboxHandler } from "./domain/inbox-handler.js";
 import type { OutboxHandler } from "./domain/outbox-handler.js";
@@ -179,6 +180,8 @@ export interface AppDeps {
   nodeLauncher: NodeLauncher;
   /** Seat-scoped explicit fresh launch composes the same startup owner as rig launch. */
   startupOrchestrator?: import("./domain/startup-orchestrator.js").StartupOrchestrator;
+  /** Arms a seat's continuity notice for the occupant a fresh launch just started (the restore path has its own copy of this dep). */
+  armSeatContinuity?: (rigId: string, nodeId: string) => Promise<string | null>;
   tmuxAdapter: TmuxAdapter;
   /** Shared process census used by startup observations and native lineage checks. */
   listProcesses?: import("./domain/native-process-lineage.js").NativeProcessLister;
@@ -233,6 +236,8 @@ export interface AppDeps {
   streamStore?: StreamStore;
   streamIntakeCoordinator?: import("./domain/stream-intake.js").StreamIntakeCoordinator;
   slowOpRecorder?: SlowOperationInstrumentation;
+  /** Edge trace of state-changing requests through the diagnostics path; absent = off. */
+  mutationTrace?: MutationTraceSink;
   requestPhaseObserver?: import("./domain/request-phase-observer.js").RequestPhaseObserver;
   queueRepo?: QueueRepository;
   /** S02 — the standing stuck sweep's observable heartbeat (ADDITIVE on healthz;
@@ -257,6 +262,8 @@ export interface AppDeps {
   watchdogHistoryLog?: WatchdogHistoryLog;
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
+  /** #2940: relaunches a keep_alive seat that falls while the daemon runs. Started after the listener binds; stopped first. */
+  keepAliveSupervisor?: import("./domain/keep-alive-supervisor.js").KeepAliveSupervisor;
   /** The outbound network connector (`rig network`); started after the listener binds. */
   networkConnector?: import("./domain/network/network-connector.js").NetworkConnectorService;
   /** B8 / slice-07 A3 — the model-divergence monitor (effective-vs-pinned, four-channel proclaim). */
@@ -592,6 +599,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("eventBus" as never, deps.eventBus);
     c.set("nodeLauncher" as never, deps.nodeLauncher);
     c.set("startupOrchestrator" as never, deps.startupOrchestrator);
+    c.set("armSeatContinuity" as never, deps.armSeatContinuity);
     c.set("tmuxAdapter" as never, deps.tmuxAdapter);
     c.set("listProcesses" as never, deps.listProcesses);
     c.set("tmuxOptionDefaults" as never, deps.tmuxOptionDefaults);
@@ -732,6 +740,12 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.slowOpRecorder?.recordRequest) {
     app.use("*", createSlowOpRequestMiddleware(deps.slowOpRecorder));
   }
+  // Mutation trace: same registration seam and isolation contract as the request-timing
+  // observer above — registered only when the trace is turned on (opt-in), and it rides
+  // the recorder's bounded diagnostics path rather than writing on the request thread.
+  if (deps.mutationTrace) {
+    app.use("*", createMutationTraceMiddleware(deps.mutationTrace));
+  }
 
   // Browser boundary: target name and browser Origin, checked once per /api request
   // (WebSocket upgrades included), before the remote read-through and every route.
@@ -799,8 +813,21 @@ export function createApp(deps: AppDeps): Hono {
     // #3315 — the daemon answering (status "ok") is not its terminals answering: `terminals` says whether its tmux
     // server is reachable, from memory, without calling tmux. ADDITIVE; absent = legacy body.
     const terminals = deps.terminalReachability ? { terminals: deps.terminalReachability.snapshot() } : {};
+    // Health is unauthenticated: report only a conservative executable name, never arguments or paths.
+    const backgroundWork = (() => {
+      if (!deps.seatIdentityReconciler) return {};
+      try {
+        return { backgroundWork: deps.seatIdentityReconciler.backgroundWorkUnknown()
+          .map(({ processes, ...item }) => ({ ...item, processes: processes.map(({ pid, startedAt, command }) => {
+            const executable = nodePath.basename(command.trim().split(/\s+/, 1)[0] ?? "");
+            return { pid, startedAt, command: /^[a-zA-Z0-9._+-]{1,128}$/.test(executable) ? executable : "unknown" };
+          }) })) };
+      } catch {
+        return { backgroundWorkUnavailable: true };
+      }
+    })();
     if (!monitor) {
-      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder, ...terminals });
+      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder, ...terminals, ...backgroundWork });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
@@ -814,6 +841,7 @@ export function createApp(deps: AppDeps): Hono {
       ...bind,
       ...stuckSweep,
       ...wakeLadder,
+      ...backgroundWork,
       ...terminals,
     });
   });

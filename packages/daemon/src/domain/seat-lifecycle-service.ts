@@ -2,15 +2,17 @@ import { validateStatuslineThrottle } from "./claude-statusline-throttle.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { claudeAutoModeAdvisories, readClaudeAutoMode, validateClaudeAutoMode } from "./claude-auto-mode.js";
-import { clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
+import { clearCodexMemberPermissions, codexRigReach, codexRigReachWarning, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
+import { seatRigReachPaths } from "./seat-launch-environment.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
 import { verifyPaneEmptyShell, type NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
+import { storedPoolAdvisories } from "./seat-pool-spec.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
-import { problemText, type TmuxAdapter, type SessionProbe, type StopPhase, type SeatProcessLimitsNotice,
+import { probeShowsNoServer, problemText, type TmuxAdapter, type SessionProbe, type StopPhase, type SeatProcessLimitsNotice,
   type SeatProcessLimitsProblem } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { EFFORT_SHAPE, piThinkingValue } from "../adapters/pi-runner-protocol.js";
@@ -27,7 +29,7 @@ import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, withContext
 import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { observeSolePane } from "./pane-binding-observation.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { preferenceHoldsLifecycle } from "./seat-delivery-guard.js";
 import { validateNativePermissionSelection, unresolvedClaudePermissionModes } from "./native-permission-selection.js";
@@ -124,6 +126,9 @@ export interface SeatLifecycleDeps {
   readProcessCensus?: () => Promise<ProcessTableCensus>;
   nodeLauncher?: NodeLauncher;
   startupOrchestrator?: StartupOrchestrator;
+  /** Arms the seat's continuity notice (its `managed-compaction` or `apprentice-handover` jobs) for the occupant a fresh launch just
+   *  started, reconciled by the seat's stable address. Resolves to a warning to report, or null. A failure never fails the launch. */
+  armContinuity?: (rigId: string, nodeId: string) => Promise<string | null>;
   runtimeAdapters?: Record<string, RuntimeAdapter>;
   occupantInvalidator?: OccupantInvalidator;
   activityOracle?: { declareOccupantSwap(nodeId: string, generation: string): void; getSeatState?(nodeId: string): ArbitratedSeatState | null };
@@ -292,7 +297,9 @@ export type SetEffortResult =
   | SeatRefusal;
 
 export type StopSeatResult =
-  | { ok: true; seat: SeatDescriptor; sessionName: string; sessionId: string; paneOnly?: boolean }
+  | { ok: true; seat: SeatDescriptor; sessionName: string; sessionId: string; paneOnly?: boolean;
+    /** #2940: a keep_alive seat whose session was already gone; the stop is recorded so it stays down. */
+    alreadyDown?: true; message?: string }
   | (SeatRefusal & { partialEffect?: boolean; stopPhase?: StopPhase });
 
 /** The narrow identity reviewed before an optional checked stop. */
@@ -386,6 +393,7 @@ export class SeatLifecycleService {
   private readonly readProcessCensus: () => Promise<ProcessTableCensus>;
   private readonly nodeLauncher: NodeLauncher | null;
   private readonly startupOrchestrator: StartupOrchestrator | null;
+  private readonly armContinuity: SeatLifecycleDeps["armContinuity"] | null;
   private readonly runtimeAdapters: Record<string, RuntimeAdapter>;
   private readonly occupantInvalidator: OccupantInvalidator | null;
   private readonly activityOracle: SeatLifecycleDeps["activityOracle"] | null;
@@ -410,6 +418,7 @@ export class SeatLifecycleService {
     this.readProcessCensus = deps.readProcessCensus ?? readProcessTableCensusNow;
     this.nodeLauncher = deps.nodeLauncher ?? null;
     this.startupOrchestrator = deps.startupOrchestrator ?? null;
+    this.armContinuity = deps.armContinuity ?? null;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
     this.occupantInvalidator = deps.occupantInvalidator ?? null;
     this.activityOracle = deps.activityOracle ?? null;
@@ -1002,7 +1011,7 @@ export class SeatLifecycleService {
     const choices = [input.mode, input.rules, input.autoMode, input.codexPermissions, input.codexProfile].filter(value => value !== undefined).length;
     if (choices !== 1) return { ok: false, code: "permission_selection_refused", message: "Choose exactly one of mode, rules, auto mode, codex permissions or codex profile." };
     if (input.autoMode !== undefined) return this.setClaudeAutoMode(seat, runtime, input.autoMode, input.actor.trim(), input.reason.trim());
-    if (input.codexPermissions !== undefined) return this.setCodexPermissions(seat, runtime, input.codexPermissions, input.actor.trim(), input.reason.trim());
+    if (input.codexPermissions !== undefined) return this.setCodexPermissions(seat, runtime, input.codexPermissions, resolved.entry.cwd ?? undefined, input.actor.trim(), input.reason.trim());
     if (input.codexProfile !== undefined) return this.setCodexProfile(seat, runtime, input.codexProfile, resolved.entry.cwd ?? undefined,
       input.actor.trim(), input.reason.trim(), input.nodeId !== undefined);
     if (input.rules !== undefined) {
@@ -1102,8 +1111,8 @@ export class SeatLifecycleService {
   }
 
   /** A Codex seat's envelope: its explicit permission choice, which replaces a recorded mode in the same write. */
-  private setCodexPermissions(seat: SeatDescriptor, runtime: string, value: unknown, actor: string, reason: string):
-    { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; replaced?: unknown } | SeatRefusal {
+  private setCodexPermissions(seat: SeatDescriptor, runtime: string, value: unknown, cwd: string | undefined, actor: string, reason: string):
+    { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; replaced?: unknown; advisories?: string[] } | SeatRefusal {
     if (runtime !== "codex") return { ok: false, code: "permission_selection_refused", message: "codex_permissions is only supported for codex seats." };
     try {
       const to = validateCodexMemberPermissions(value);
@@ -1131,7 +1140,14 @@ export class SeatLifecycleService {
           effect: `The envelope applies at the next separately authorized managed launch or resume, ${"filesystem" in to ? "as explicit permission and approval flags, with native configuration conflicts refused and inconclusive checks reported as policy not verified." : "as explicit sandbox and approval flags that a profile or policy posture doesn't override."}${replaced ? " It replaces the seat's recorded permission mode." : ""} The current process and history are unchanged. Older readers may ignore it; check rollback compatibility and preserve restrictions before downgrading.` };
       })();
       if (persisted) this.eventBus.notifySubscribers(persisted);
-      return result;
+      // The launch warning a spec preflight gives, so the setter hears now that the seat won't take its tasks.
+      try {
+        const gap = codexRigReach(to, { ...seatRigReachPaths(this.rigRepo.getEffectiveSeatEnv(seat.nodeId)), cwd });
+        return gap ? { ...result, advisories: [codexRigReachWarning(seat.logicalId, gap)] } : result;
+      } catch {
+        // The selection was saved above. Advisory metadata must not turn that successful write into a refusal.
+        return { ...result, advisories: ["Your permission selection was saved. Rig read coverage could not be checked; run rig whoami inside the seat after its next separately selected launch."] };
+      }
     } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
   }
 
@@ -1259,8 +1275,11 @@ export class SeatLifecycleService {
     return { contract: "seat-stop.v1", expected: { nodeId: resolved.nodeId, sessionId: this.latestSession(resolved.nodeId)?.id ?? null } };
   }
 
-  /** Stop one managed seat; an explicit expected tuple activates strict identity checks. */
-  async stopSeat(input: { seatRef: string; reason: string; operator?: string | null; expected?: unknown }): Promise<StopSeatResult> {
+  /** Stop one managed seat; an explicit expected tuple activates strict identity checks. `recheck` (in-process only, with
+   *  `expected`) is the caller's own refusal, run at the final step before each effect, after the liveness probe. */
+  async stopSeat(input: {
+    seatRef: string; reason: string; operator?: string | null; expected?: unknown; recheck?: () => SeatRefusal | null;
+  }): Promise<StopSeatResult> {
     const required = this.requireReason(input.reason);
     if (required) return required;
     if ("expected" in input) {
@@ -1294,6 +1313,9 @@ export class SeatLifecycleService {
     const probed = await this.probeLiveness(session.session_name, "stop refuses rather than kill blind");
     if ("code" in probed) return probed;
     if (probed.state === "absent") {
+      if (this.holdsKeepAliveSeatDown(resolved.nodeId, session)) {
+        return this.recordKeepAliveSeatDown(resolved, session, input.reason, input.operator);
+      }
       return {
         ok: false,
         code: "session_not_live",
@@ -1307,7 +1329,7 @@ export class SeatLifecycleService {
 
   /** Hold the existing lifecycle lease from selection validation through terminal and DB effects. */
   private async stopSeatChecked(
-    input: { seatRef: string; reason: string; operator?: string | null }, expected: StopPrecondition,
+    input: { seatRef: string; reason: string; operator?: string | null; recheck?: () => SeatRefusal | null }, expected: StopPrecondition,
   ): Promise<StopSeatResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (!guard) return { ok: false, code: "guard_unavailable", message: "Checked stop requires the delivery guard." };
@@ -1336,8 +1358,15 @@ export class SeatLifecycleService {
         const afterProbe = selection();
         if (afterProbe) return afterProbe;
         guard.checkInput(resolved.nodeId);
-        if (probed.state === "absent") return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to stop.`, guidance: "A dead seat with stale records is returned to launchable with: rig seat clean" };
-        return this.stopManagedTmuxSeat(resolved, session, input.reason, input.operator, true, { selection, guard });
+        if (probed.state === "absent") {
+          if (this.holdsKeepAliveSeatDown(resolved.nodeId, session)) {
+            return this.recordKeepAliveSeatDown(resolved, session, input.reason, input.operator, selection);
+          }
+          return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to stop.`, guidance: "A dead seat with stale records is returned to launchable with: rig seat clean" };
+        }
+        const recheck = input.recheck;
+        return this.stopManagedTmuxSeat(resolved, session, input.reason, input.operator, true,
+          { selection, guard, ...(recheck ? { prove: async () => recheck() } : {}) });
       });
     } catch (error) {
       const code = (error as { code?: string }).code;
@@ -1414,7 +1443,10 @@ export class SeatLifecycleService {
     let persisted: PersistedEvent | null = null;
     const tx = this.db.transaction(() => {
       for (const row of nonTerminal) {
-        this.sessionRegistry.updateStatus(row.id, "exited");
+        // #2940: each row was just proven gone, so a stop still pending on it (a daemon lost mid-stop) is confirmed;
+        // left pending on an exited row, nothing would look at it again.
+        if (this.stopStillRequested(row.id)) this.sessionRegistry.markIntentionallyStopped(row.id);
+        else this.sessionRegistry.updateStatus(row.id, "exited");
         sessionsExited.push(row.session_name);
       }
       this.sessionRegistry.clearBinding(resolved.nodeId);
@@ -1760,10 +1792,14 @@ export class SeatLifecycleService {
     ).all(node.id) as Array<{ id: string }>).map((row) => row.id);
     const retiringGeneration = this.sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? null;
 
-    const viewWarnings: string[] = [];
+    // #3395: a fresh launch of an existing seat starts from its stored settings: a stored pool block that can't be used
+    // is reported once, from the node.
+    const viewWarnings: string[] = [...storedPoolAdvisories(node.logicalId, this.rigRepo.getNodePool(node.id))];
+    const canonicalSeen: { probe?: SessionProbe } = {};
     let canonicalProbe = await this.probeLiveness(
       canonicalSessionName,
       "fresh launch refuses rather than overwrite a possibly-live canonical session",
+      (probe) => { canonicalSeen.probe = probe; },
     );
     // `rig seat stop` persists an exited row after killing its managed session.
     // When that was the last tmux session, tmux exits too, so the next classified
@@ -1785,8 +1821,8 @@ export class SeatLifecycleService {
         && !hasCurrentBinding
         && this.nonTerminalSessions(node.id).length === 0;
       // A host restart ends tmux with every seat in it, and the daemon's boot reconcile marks those managed sessions
-      // detached while keeping their bindings. Nothing was stopped on purpose, so "no server running" alone isn't
-      // absence: the server may only have lost its socket. Reopen an empty server for that row only on positive
+      // detached while keeping their bindings. Nothing was stopped on purpose, so a missing socket file alone isn't
+      // absence: a server may still run after losing it. Reopen an empty server for that row only on positive
       // evidence that the seat's recorded process has ended (recordedProcessEnded: a census; hidden pids, evidence older
       // than this session and evidence that changed while the census ran count as unknown); unknown keeps the refusal. Its binding stays for the stale-row clean
       // below, which proves absence again on the reopened server. Limit: only the last recorded process is proven; a
@@ -1804,19 +1840,24 @@ export class SeatLifecycleService {
       const detachedEnded = detachedUnstopped
         && await recordedProcessEnded(this.db, { ...session, createdAt: latest?.created_at }, readCensus);
       const processes = () => table ?? readCensus().then((read) => read ? read.rows : null);
+      // #3435 follow-up: tmux says "no server running on <socket>" when its socket file is there and nothing listens on
+      // it, as after `tmux kill-server`, exit-empty or a killed server. No seat runs on that server, so a fresh launch
+      // reopens it whatever the row's state, unless the seat's recorded process is known to still run. A missing socket
+      // file ("error connecting to <socket> (No such file or directory)") keeps the checks above.
+      const staleSocket = canonicalSeen.probe !== undefined && probeShowsNoServer(canonicalSeen.probe);
       // Unclaim doesn't end the process. While the released (or detached) session's recorded process still runs, its
       // server may only have lost its socket: a server started there would read the session absent and launch a second
       // occupant beside it. So keep the refusal, as the reconciler keeps such a session (the same evidence).
-      const stillRuns = table || (detachedUnstopped && !detachedEnded)
+      const stillRuns = table || staleSocket || (detachedUnstopped && !detachedEnded)
         ? await recordedProcessStillRunning(this.db, session, processes) : null;
       if (stillRuns) {
         return {
           ...canonicalProbe,
-          guidance: `This seat's ${released ? "released" : "detached"} session last ran as process ${stillRuns.pid}, which is still running, so it may be `
+          guidance: `This seat's ${released ? "released " : detachedManaged ? "detached " : ""}session last ran as process ${stillRuns.pid}, which is still running, so it may be `
             + "on a tmux server this daemon can't reach. End that process, then launch again.",
         };
       }
-      if (detachedUnstopped && !detachedEnded) {
+      if (detachedUnstopped && !detachedEnded && !staleSocket) {
         return {
           ...canonicalProbe,
           guidance: "This seat's detached session has no proof its recorded process ended (no process evidence for it since "
@@ -1826,7 +1867,8 @@ export class SeatLifecycleService {
             + "terminal server once the seat is known to be gone, then launch again.",
         };
       }
-      if (stoppedManagedOccupant || detachedEnded) {
+      if (stoppedManagedOccupant || detachedEnded || staleSocket) {
+        let failed: string | undefined;
         try {
           const restored = await this.tmuxAdapter.startServer();
           if (restored.ok) {
@@ -1834,11 +1876,26 @@ export class SeatLifecycleService {
               canonicalSessionName,
               "fresh launch refuses rather than overwrite a possibly-live canonical session",
             );
+          } else {
+            failed = restored.message;
           }
-        } catch {
+        } catch (error) {
           // Keep the original classified refusal when the transport cannot be
           // restored; never translate a failed start into absence.
+          failed = error instanceof Error ? error.message : String(error);
         }
+        if (failed !== undefined && "code" in canonicalProbe) {
+          return { ...canonicalProbe, guidance: `Reopening the terminal server failed (${failed}), so nothing was launched. `
+            + "Check tmux and its socket, then launch again." };
+        }
+      } else {
+        const missingSocket = canonicalSeen.probe?.state === "transport_unavailable"
+          && /\(No such file or directory\)/.test(canonicalSeen.probe.cause);
+        return { ...canonicalProbe, guidance: "A reopen of the terminal server wasn't tried: " + (missingSocket
+          ? "the socket file is missing, and a server may still run after losing it, while this seat's session wasn't "
+            + "stopped, released, or detached with its recorded process proven ended. Start the terminal server once the "
+            + "seat is known to be gone, then launch again."
+          : "tmux's answer doesn't show that its server is gone.") };
       }
     }
     if ("code" in canonicalProbe) return canonicalProbe;
@@ -2080,6 +2137,17 @@ export class SeatLifecycleService {
     tx();
     if (persisted) this.eventBus.notifySubscribers(persisted);
 
+    // The new occupant is running: its continuity notice is armed the way a first start arms it (one job per seat address).
+    let resultWarnings = warnings;
+    if (this.armContinuity) {
+      try {
+        const problem = await this.armContinuity(seat.rigId, node.id);
+        if (problem) resultWarnings = [...(warnings ?? []), problem];
+      } catch (error) {
+        resultWarnings = [...(warnings ?? []), `continuity policy was not armed for ${seat.logicalId}: ${(error as Error).message}`];
+      }
+    }
+
     if (attentionRequired) {
       return {
         ok: false,
@@ -2091,7 +2159,7 @@ export class SeatLifecycleService {
         sessionName: canonicalSessionName,
         sessionId: launch.session.id,
         generation,
-        warnings,
+        warnings: resultWarnings,
       };
     }
 
@@ -2107,7 +2175,7 @@ export class SeatLifecycleService {
       advisor: node.advisor ?? undefined,
       startupPolicyHash: startup.hash,
       supersededSessionIds,
-      warnings,
+      warnings: resultWarnings,
     };
   }
 
@@ -2248,22 +2316,58 @@ export class SeatLifecycleService {
       if (changed) refuse(changed);
       checked.guard.checkInput(resolved.nodeId);
     });
+    // #2940: a supported stop records its request durably before the first step that stops anything, after the target
+    // was resolved under the lifecycle lease. A daemon lost after this point leaves a pending stop, which the startup
+    // reconcile confirms once the session is gone; it is never read as a fall.
+    let request: { attemptId: string; prev: { flag: number; attempt: string | null } } | null = null;
+    if (recordStopIntent) {
+      const attemptId = randomUUID();
+      const recorded = this.db.transaction((): SeatRefusal | { flag: number; attempt: string | null } | null => {
+        const changed = checked?.selection();
+        if (changed) return changed;
+        return this.sessionRegistry.requestStop(session.id, attemptId);
+      })();
+      if (recorded && "code" in recorded) return recorded;
+      if (recorded) request = { attemptId, prev: recorded };
+    }
+    // Only a failure proven to have had no effect (nothing was detached or killed) puts back this attempt's request. The
+    // revert is refused when the row changed meanwhile (another stop recorded its own attempt, or confirmed one): that
+    // request stays recorded, and the result says so.
+    const undoRequest = () => !request || this.sessionRegistry.revertStopRequest(session.id, request.attemptId, request.prev);
+    const keptNote = " The stop request stays recorded: the row changed meanwhile, so this attempt's request couldn't be put back.";
     const kill = checked
       ? await this.tmuxAdapter.killSession(session.session_name, beforeEffect)
       : await this.tmuxAdapter.killSession(session.session_name);
-    if (checked && !kill.ok) {
+    // #2940: a keep_alive seat whose session ended before the kill reached it is gone either way. Its stop is confirmed,
+    // not undone, so keep-alive leaves it down as the person asked.
+    const goneBeforeKill = !kill.ok && kill.code === "session_not_found" && recordStopIntent && request !== null
+      && this.holdsKeepAliveSeatDown(resolved.nodeId, session);
+    if (checked && !kill.ok && !goneBeforeKill) {
       const partialEffect = kill.stopPhase !== undefined && kill.stopPhase !== "none";
       if (kill.code === "selection_changed" || kill.code === "guard_target_changed" || kill.code === "guard_target_unknown") {
-        return { ok: false, code: "selection_changed", message: kill.message, partialEffect, stopPhase: kill.stopPhase };
+        const kept = !partialEffect && !undoRequest();
+        return { ok: false, code: "selection_changed", message: `${kill.message}${kept ? keptNote : ""}`, partialEffect, stopPhase: kill.stopPhase };
       }
-      if (!partialEffect && kill.code !== "session_not_found") return { ok: false, code: "tmux_probe_failed", message: kill.message };
-      return { ok: false, code: "stop_uncertain", message: `Checked stop did not complete: ${kill.message}`, partialEffect, stopPhase: kill.stopPhase };
+      if (!partialEffect && kill.code !== "session_not_found") {
+        const kept = !undoRequest();
+        return { ok: false, code: "tmux_probe_failed", message: `${kill.message}${kept ? keptNote : ""}` };
+      }
+      return { ok: false, code: "stop_uncertain", message: `Checked stop did not complete: ${kill.message}${request ? " The stop request stays recorded." : ""}`, partialEffect, stopPhase: kill.stopPhase };
     }
+    // The session ended on its own before this stop reached it: the stop had no effect, so its request goes back and
+    // the exit stays an unexplained one.
+    if (kill && !kill.ok && kill.code === "session_not_found" && !goneBeforeKill) undoRequest();
     if (kill && !kill.ok && kill.code !== "session_not_found") {
+      // A timeout or a partial effect is no proof that nothing stopped: the request stays and the result says so.
+      const partialEffect = kill.stopPhase !== undefined && kill.stopPhase !== "none";
+      const kept = !partialEffect && !undoRequest();
       return {
         ok: false,
         code: "tmux_probe_failed",
-        message: `tmux kill-session for "${session.session_name}" failed: ${kill.message ?? kill.code}`,
+        message: `tmux kill-session for "${session.session_name}" failed: ${kill.message ?? kill.code}`
+          + (partialEffect && request ? ` It got as far as ${kill.stopPhase}; the stop request stays recorded.` : "")
+          + (kept ? keptNote : ""),
+        ...(partialEffect ? { partialEffect, stopPhase: kill.stopPhase } : {}),
       };
     }
     let persisted: PersistedEvent | null = null;
@@ -2273,7 +2377,9 @@ export class SeatLifecycleService {
         if (changed) return changed;
         checked.guard.checkInput(resolved.nodeId);
       }
-      if (recordStopIntent && kill?.ok) {
+      if ((recordStopIntent && (kill?.ok || goneBeforeKill))
+        // #2940: a request the row still carries (an earlier stop's) is confirmed once tmux proves the session gone.
+        || ((kill?.ok || (kill && !kill.ok && kill.code === "session_not_found")) && this.stopStillRequested(session.id))) {
         this.sessionRegistry.markIntentionallyStopped(session.id);
       } else {
         // An internal replacement stop or an unconfirmed kill must still affect health.
@@ -2284,6 +2390,7 @@ export class SeatLifecycleService {
         type: "session.stopped",
         rigId: seat.rigId,
         nodeId: seat.nodeId,
+        sessionId: session.id,
         sessionName: session.session_name,
         reason: reason.trim(),
         operator: operator ?? null,
@@ -2307,6 +2414,67 @@ export class SeatLifecycleService {
     }
     return { ok: true, seat, sessionName: session.session_name, sessionId: session.id,
       ...(communityHarnessOf(session.community_harness, (this.db.prepare("SELECT runtime FROM nodes WHERE id=?").get(resolved.nodeId) as { runtime: string | null } | undefined)?.runtime) ? { paneOnly: true } : {}) };
+  }
+
+  /** #2940: whether the session row still carries a stop request. */
+  private stopStillRequested(sessionId: string): boolean {
+    return (this.db.prepare("SELECT intentionally_stopped AS flag FROM sessions WHERE id = ?").get(sessionId) as
+      { flag: number | null } | undefined)?.flag === 1;
+  }
+
+  /** #2940: a seat that declares keep_alive, whose latest session OpenRig launched (not claimed, not attached from
+   *  outside). When its session is already gone, a stop is recorded instead of refused: `rig seat stop` means stay down,
+   *  and without the record the supervisor would bring the seat back. Other seats keep the refusal. */
+  private holdsKeepAliveSeatDown(nodeId: string, session: LatestSessionRow): boolean {
+    if (session.origin === "claimed") return false;
+    const binding = this.sessionRegistry.getBindingForNode(nodeId);
+    if (seatProcessOwner(resolveSeatKind(binding?.attachmentType)) === "external") return false;
+    // Another session of the seat may still be live (an older one under an earlier name), or the binding points
+    // elsewhere: that is not a seat that is simply down, so the refusal and its `rig seat clean` guidance stand.
+    if (binding?.attachmentType === "tmux" && binding.tmuxSession && binding.tmuxSession !== session.session_name) return false;
+    if (this.nonTerminalSessions(nodeId).some((row) => row.id !== session.id)) return false;
+    const hasColumn = this.db.prepare("PRAGMA table_info(nodes)").all().some((row) => (row as { name?: string }).name === "keep_alive");
+    if (!hasColumn) return false;
+    return (this.db.prepare("SELECT keep_alive FROM nodes WHERE id = ?").get(nodeId) as { keep_alive: number | null } | undefined)
+      ?.keep_alive === 1;
+  }
+
+  /** #2940: record the stop of a keep_alive seat whose session tmux already shows absent, under the lifecycle lease. The
+   *  stop is confirmed; a failed relaunch's superseded row keeps its status (restore reads it as occupant history). The
+   *  binding is cleared as on any confirmed stop. */
+  private recordKeepAliveSeatDown(
+    resolved: ResolvedSeat,
+    session: LatestSessionRow,
+    reason: string,
+    operator: string | null | undefined,
+    selection?: () => SeatRefusal | null,
+  ): StopSeatResult {
+    const seat = this.describe(resolved);
+    let persisted: PersistedEvent | null = null;
+    const changed = this.db.transaction((): SeatRefusal | null => {
+      const stale = selection?.();
+      if (stale) return stale;
+      if (session.status === "superseded") this.sessionRegistry.recordStopIntent(session.id);
+      else this.sessionRegistry.markIntentionallyStopped(session.id);
+      this.sessionRegistry.clearBinding(resolved.nodeId);
+      persisted = this.eventBus.persistWithinTransaction({
+        type: "session.stopped",
+        rigId: seat.rigId,
+        nodeId: seat.nodeId,
+        sessionName: session.session_name,
+        reason: reason.trim(),
+        operator: operator ?? null,
+      });
+      return null;
+    })();
+    if (changed) return changed;
+    this.tmuxAdapter.deliveryGuard?.rebindLifecycle(resolved.nodeId);
+    if (persisted) this.eventBus.notifySubscribers(persisted);
+    return {
+      ok: true, seat, sessionName: session.session_name, sessionId: session.id, alreadyDown: true,
+      message: `Session "${session.session_name}" was already gone (checked: tmux has-session, POSITIVE absence evidence). `
+        + "The seat declares keep_alive, so the stop is recorded and the seat is now held down until it is started again.",
+    };
   }
 
   private nonTerminalSessions(nodeId: string): LatestSessionRow[] {
@@ -2543,6 +2711,7 @@ export class SeatLifecycleService {
   private async probeLiveness(
     sessionName: string,
     refusalConsequence: string,
+    seen?: (probe: SessionProbe) => void,
   ): Promise<{ state: "present" | "absent" } | SeatRefusal> {
     let probe: SessionProbe;
     try {
@@ -2554,6 +2723,7 @@ export class SeatLifecycleService {
         message: `tmux liveness probe for "${sessionName}" failed (${err instanceof Error ? err.message : String(err)}) — liveness is INDETERMINATE, so ${refusalConsequence}.`,
       };
     }
+    seen?.(probe);
     if (probe.state === "transport_unavailable") {
       return {
         ok: false,

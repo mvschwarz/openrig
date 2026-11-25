@@ -162,9 +162,14 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     let sent = false;
     const handed = () => ({ ...(firstInput ? { firstInput } : {}),
       ...(model ? { modelInput: { model, dispatch: sent ? "confirmed" as const : "uncertain" as const } } : {}) });
+    // #2940: a caller's last read before native dispatch (a keep_alive relaunch's shutdown check, a restore's selection) is
+    // asked again right before each terminal write, ahead of the marker that says typing began; absent asks nothing.
+    const allowed = opts.beforeNativeDispatch;
+    const markTyped = firstInput || model ? () => { typed = true; } : undefined;
+    const beforeInput = allowed ? () => { if (!allowed()) throw new Error(withdrawnBeforeInput); markTyped?.(); } : markTyped;
     try {
-      const result = await this.launchPreset(binding, session, found.preset, resumeRef, firstInput || model ? () => { typed = true; } : undefined,
-        model ? () => { sent = true; } : undefined, launcherPrefix);
+      const result = await this.launchPreset(binding, session, found.preset, resumeRef, beforeInput,
+        model ? () => { sent = true; } : undefined, launcherPrefix, allowed);
       return { ...result, ...(typed ? handed() : {}) };
     } catch (error) {
       if (!typed) throw error;
@@ -173,8 +178,8 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
   }
 
   private async launchPreset(binding: NodeBinding, session: string, preset: CommunityHarnessPreset, resumeRef: string | undefined, beforeInput?: () => void,
-    onSent?: () => void, launcherPrefix = ""): Promise<HarnessLaunchResult> {
-    if (preset.namesConversation) return this.launchNamed(binding, session, preset.command, resumeRef, beforeInput, onSent, launcherPrefix);
+    onSent?: () => void, launcherPrefix = "", beforeNativeDispatch?: () => boolean): Promise<HarnessLaunchResult> {
+    if (preset.namesConversation) return this.launchNamed(binding, session, preset.command, resumeRef, beforeInput, onSent, launcherPrefix, beforeNativeDispatch);
     let attempt: LaunchAttempt | undefined;
     let authority: RunnerGrantLaunch | undefined;
     let launchSucceeded = false;
@@ -213,6 +218,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       }
       const fallback = command;
       if (authority) command = authority.wrap(command);
+      if (beforeNativeDispatch && !beforeNativeDispatch()) return withdrawn(this.runtime);
       let sent = await this.deps.tmux.sendShellCommand(session, command, beforeInput, { stageIfLong: true, execInScript: true });
       if (!sent.ok && sent.code === "launch_path_too_long" && authority && command !== fallback) {
         // This result proves no input was dispatched. Retry only the same pre-grant command.
@@ -266,7 +272,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
    *  that a process runs: a harness that hasn't yet found a gone conversation reads as ready. Never creating one on a
    *  resume is the launcher's job; OpenRig never asks for a new conversation on a resume. */
   private async launchNamed(binding: NodeBinding, session: string, preset: string, resumeRef: string | undefined, beforeInput?: () => void,
-    onSent?: () => void, launcherPrefix = ""): Promise<HarnessLaunchResult> {
+    onSent?: () => void, launcherPrefix = "", beforeNativeDispatch?: () => boolean): Promise<HarnessLaunchResult> {
     const name = resumeRef ?? conversationName(session);
     launcherPrefix = `/usr/bin/env ${resumeRef ? "OPENRIG_RESUME_REF" : "OPENRIG_CONVERSATION"}=${shellQuote(name)} ${launcherPrefix}`;
     let command: string;
@@ -279,6 +285,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       if (!binding.launchWrapper?.length) throw error;
       return { ok: false, error: "launch_wrapper unavailable; no agent started." };
     }
+    if (beforeNativeDispatch && !beforeNativeDispatch()) return withdrawn(this.runtime);
     const sent = await this.deps.tmux.sendShellCommand(session, command, beforeInput, { stageIfLong: true, execInScript: true });
     if (!sent.ok) return { ok: false, error: `Couldn't start community harness "${this.runtime}": ${sent.message}` };
     onSent?.();
@@ -316,6 +323,13 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     const found = loadCommunityHarnessPreset(this.runtime, this.deps.presetsDir?.() ?? communityHarnessesDir());
     return found.ok && found.preset.startupAssisted;
   }
+}
+
+const withdrawnBeforeInput = "The launch was withdrawn before community harness input";
+
+/** #2940: the caller withdrew the launch while it was prepared (a grant, the seat's command): nothing was typed. */
+function withdrawn(runtime: string): HarnessLaunchResult {
+  return { ok: false, error: `The launch was withdrawn during community harness "${runtime}" preparation; no native command was sent.`, recovery: "attention_required" };
 }
 
 /** A new conversation's name: the seat's session name, made safe, and 8 random hex digits, at most 100 characters. */
@@ -373,6 +387,15 @@ export function withCommunityHarnessResolver<T extends Record<string, RuntimeAda
       ? createCommunityHarnessAdapter(runtime, deps, piAdapter) : undefined,
   });
   return builtIns;
+}
+
+/** The adapter an installed preset defines for `runtime`, whether or not a seat was launched for it yet. A runtime
+ *  switch stages a successor before the seat has ever run on the target, so `seatAdapter` (which requires the retained
+ *  selection to already name the harness) cannot answer for it. */
+export function communityHarnessAdapter(map: Record<string, RuntimeAdapter> | undefined, runtime: string | null | undefined): RuntimeAdapter | undefined {
+  if (!map || !runtime || !isCommunityHarnessRuntime(runtime)) return undefined;
+  const resolve = (map as Record<symbol, ((runtime: string) => RuntimeAdapter | undefined) | undefined>)[COMMUNITY_HARNESS_RESOLVER];
+  return resolve ? resolve(runtime) : undefined;
 }
 
 /** The adapter to relaunch a seat with: its runtime's built-in adapter, or, for a seat launched for a community

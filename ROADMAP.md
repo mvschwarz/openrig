@@ -6,9 +6,9 @@ This isn't a schedule or a promise: we release often, and an item ships when a g
 To see what's being worked on, by release and theme, open the [OpenRig roadmap board](https://github.com/users/mvschwarz/projects/1).
 Issues labelled `good first issue` are also listed on the [contribute page](https://github.com/mvschwarz/openrig/contribute).
 
-## Released in 0.7.19
+## Released in 0.7.23
 
-[0.7.19 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.19): OpenRig 0.7.19 improves how a team brings permission prompts to a person, reports interrupted recovery, and starts again after a failed launch. It also adds optional Claude hook delivery, per-seat Linux memory limits, and a versioned interface for apps answering human questions. See its release notes for what shipped, known limits, upgrade instructions and contributor credits.
+[0.7.23 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.23): OpenRig 0.7.23 is a patch for teams that reach past one computer, and for recovery that says what it did. A seat connected to a hub can send requests to its peers there and get the answers back as local work. Codex seats explain sign-in and restart in place on a Mac. `rig start --last` names any rig it leaves out. See its release notes for what shipped, known limits, upgrade instructions and contributor credits.
 
 ## How to help
 
@@ -29,7 +29,6 @@ tie. Feel free to coordinate on the issue first.
 
 ## Agents and runtimes
 
-- **Operator recovery for Pi and Oh My Pi seats** (#41).
 - **More harnesses:** we're working out one way for any coding-agent CLI to plug into OpenRig. More on this soon
   (design discussion: #43).
 

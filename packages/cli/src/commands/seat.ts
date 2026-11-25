@@ -229,7 +229,9 @@ function display(value: string | null | undefined, empty = "none"): string {
 }
 
 function sessionReason(reason: string | null | undefined): string | null {
-  return reason === "session_missing" ? "tmux session missing; restore or relaunch the seat" : null;
+  return reason === "session_missing_tmux_unavailable"
+    ? "tmux session last observed missing; latest tmux reading unavailable; restore or relaunch the seat"
+    : reason === "session_missing" ? "tmux session missing; restore or relaunch the seat" : null;
 }
 
 const LEVEL_WORDS: Record<string, string> = {
@@ -563,7 +565,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
 
   const guardRequest = async (method: "GET" | "POST", path: string, body: Record<string, unknown> | undefined, json?: boolean) => {
     const deps = getDeps(); const daemon = await getDaemonStatus(deps.lifecycleDeps);
-    if (!daemonStatusGuard(daemon)) return;
+    if (!daemonStatusGuard(daemon, { json })) return;
     const client = deps.clientFactory(getDaemonUrl(daemon));
     const result = method === "GET" ? await client.get<Record<string, unknown>>(path) : await client.post<Record<string, unknown>>(path, body ?? {});
     console.log(JSON.stringify(result.data, null, json ? undefined : 2));
@@ -583,7 +585,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
         return;
       }
       const deps = getDeps(); const daemon = await getDaemonStatus(deps.lifecycleDeps, { cleanupStaleState: false });
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const path = `/api/startup/${encodeURIComponent(opts.rig)}/nodes/${encodeURIComponent(opts.nodeId)}/history`;
       const response = opts.snapshotId && opts.historySessionId
@@ -648,6 +650,12 @@ Between off (always interrupt) and hold (full quiet):
                   as held on the row (the open rows already are the reminder);
                   other notices are held. A cold row wakes nobody: a person or
                   the seat's next turn picks it up.
+
+For a Claude seat you type in, the opt-in hook bridge can deliver ordinary messages
+at a turn boundary without typing into its input box; it takes effect at the next
+launch or restore. See rig seat set-hook-bridge --help and:
+https://github.com/mvschwarz/openrig/blob/main/docs/reference/seat-delivery.md#claude-hook-bridge-opt-in
+
 What openrig-urgent, urgent-only and queue-only let through never types over a draft.
 sends-only types like off: a terminal member's typing isn't protected, as today
 (its shell input can't be read). Everything else is held, the sender is told, and
@@ -725,6 +733,13 @@ Examples:
     });
   cmd.command("retire-held-message").argument("<seat>").argument("<id>").requiredOption("--reason <text>").option("--json")
     .description("Release one held message's active quota, preserving evidence; does not deliver or close work")
+    .addHelpText("after", `
+This works from an ordinary terminal as well as from a seat's shell. From a
+managed seat's shell (OPENRIG_SESSION_NAME set), retirement is recorded under
+that seat. Without a seat identity, it is recorded as "unattributed (no seat identity)".
+The actor comes only from transport identity, never the request body or target.
+Retirement requires a reason; it does not deliver, claim native consumption or close work.
+`)
     .action(async (seat: string, id: string, opts: {reason: string; json?: boolean}) => {
       await guardRequest("POST", `/api/seat/retire-held-message/${encodeURIComponent(seat)}/${encodeURIComponent(id)}`, { reason: opts.reason }, opts.json);
     });
@@ -743,7 +758,7 @@ Examples:
     .action(async (seat: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
 
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.get<SeatStatusResponse | SeatStatusError>(`/api/seat/status/${encodeURIComponent(seat)}`);
@@ -824,7 +839,7 @@ rig seat handover, THEN retarget the view. Examples:
 
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
 
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.post<SeatSwitchClientResponse | SeatStatusError>(
@@ -881,7 +896,7 @@ identity remains unverified; a version number alone cannot clear it.
     .action(async (session: string, opts: { reason?: string; json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(status));
       const res = await client.post<Record<string, unknown>>(
         `/api/sessions/${encodeURIComponent(session)}/clear-attention`,
@@ -1064,6 +1079,7 @@ identity remains unverified; a version number alone cannot clear it.
         if (codexPermissions !== undefined) {
           const replaced = data["replaced"] as { mode?: { mode?: string } } | undefined;
           console.log(`Codex permission envelope ${data["changed"] === false ? "unchanged" : "recorded and audited"}${replaced?.mode?.mode ? `; it replaces the recorded ${replaced.mode.mode} mode` : ""}.`);
+          for (const advisory of (data["advisories"] as string[] | undefined) ?? []) console.log(`Warning: ${advisory}`);
           console.log(String(data["effect"])); return;
         }
         if (opts.codexProfile !== undefined) {
@@ -1275,7 +1291,7 @@ Examples:
     .action(async (seat: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.get<Record<string, unknown>>(`/api/seat/effort/${encodeURIComponent(seat)}`);
       if (opts.json) {
@@ -1307,7 +1323,7 @@ Example:
     .action(async (seat: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.get<Record<string, unknown>>(`/api/seat/runtime-home/${encodeURIComponent(seat)}`);
       if (opts.json) {
@@ -1410,7 +1426,7 @@ resume/successor launch reads it at call time. Examples:
   cmd
     .command("set-runtime")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--runtime <runtime>", "codex, claude-code or pi")
+    .option("--runtime <runtime>", "codex, claude-code, pi, or an installed community harness (rig community-harness list)")
     .option("--reason <text>", "Why the seat moves; recorded with the switch")
     .option("--model <id>", "Target model; otherwise the seat's agent spec for the target, else the target's default")
     .option("--effort <level>", "Target effort, the target runtime's own level (not translated)")
@@ -1735,6 +1751,10 @@ taken from the running Codex's own command line, not probed again. Building the
 command can create OpenRig's own seat-bin link, as every managed launch does.
 A restart that started under an earlier daemon run and never recorded a result is
 shown as staleRestart; it does not block a new restart.
+Linux and macOS: the running Codex's arguments, Codex home and working directory are
+read from /proc on Linux, and on macOS from its launch record (KERN_PROCARGS2) and
+lsof, for a Codex running as the daemon's own user. Elsewhere, or when the OS gives no
+reading, it refuses with settings_unverified before anything is stopped.
 Results: restarted_account_unverified, not_started (the original is still running),
 incomplete (it exited; the resume was not proven; the pane may be held for recovery),
 native_unknown (what happened could not be observed). Only --verify reports moved,
@@ -1814,7 +1834,8 @@ Examples:
     .option("--json", "JSON output for agents")
     .description("Stop exactly one LIVE managed seat (kills only that seat's tmux session; audited)")
     .addHelpText("after", `
-Siblings are untouched. A dead seat is refused (use rig seat clean). An adopted
+Siblings are untouched. A dead seat is refused (use rig seat clean), except a
+seat that declares keep_alive: its stop is recorded, so it stays down. An adopted
 session is refused: to end only it, run rig unclaim <session> (it releases the
 session and leaves its process running), then end that process and the
 underlying tmux session, including any remaining shell. Closing only its
@@ -1836,6 +1857,10 @@ rig stopped. Examples:
     .action(async (seat: string, opts: { reason: string; operator?: string; json?: boolean }) => {
       await runLifecycleVerb("stop", seat, { reason: opts.reason, operator: opts.operator }, opts, (data) => {
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        if (data["alreadyDown"]) {
+          console.log(`${String(data["message"])} (seat ${s?.logicalId}@${s?.rigName})`);
+          return;
+        }
         console.log(`Stopped ${String(data["sessionName"])} (seat ${s?.logicalId}@${s?.rigName}).`);
         console.log("Session marked exited, binding cleared; siblings untouched. Relaunch via the normal launch surface.");
         if (data["paneOnly"]) console.log("Only the community seat viewer was closed. Native execution, storage and compute may remain; inspect the selected environment or harness lifecycle.");
@@ -1894,7 +1919,7 @@ The token is read from STDIN only (never an argument). Examples:
         return;
       }
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(status));
       const res = await client.post<Record<string, unknown>>(
         `/api/sessions/${encodeURIComponent(session)}/resume-token`,

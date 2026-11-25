@@ -7,6 +7,10 @@ OpenRig composes agents into a team. An integration author supplies the pieces t
 
 These are draft author responsibilities. Some use implemented OpenRig interfaces; others describe a proposed integration whose code remains with its author. Including the guide in release documentation does not make every described capability available.
 
+## Trust model
+
+OpenRig coordinates agents on machines and private networks that you control and trust. Agents and their tools cooperate inside that trust domain; OpenRig does not isolate them from one another as hostile tenants. Seat and launch credentials let OpenRig associate reports and operations with the right seat and run. If your setup isolates a worker or connects a service outside that trust domain, its configured boundary and scoped grants still apply. Moving between machines does not by itself make a connection untrusted.
+
 ## Release and support status
 
 This draft was published with **OpenRig 0.7.6** (tag [`v0.7.6`](https://github.com/mvschwarz/openrig/tree/v0.7.6), source `c00c6321`). Its implemented-interface baseline is commit [`b6bd4633`](https://github.com/mvschwarz/openrig/tree/b6bd4633fbd94634a2b4bdef2574a6880f97be63). That base includes the runner declaration and `passes_model` changes. The published 0.7.6 adds release repairs and documentation on top of that base. **OpenRig 0.7.8** adds seat activity grants, OpenRig's side of the answered permission path and the maintained OpenShell reference driver (`rig environment`); the rows below that say 0.7.8 describe it. References below use the immutable base instead of a moving branch, except the community preset reference, which is the in-tree copy.

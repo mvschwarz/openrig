@@ -485,8 +485,11 @@ export class RestoreCheckService {
       const input = this.deps.getRestoreInputs(rig.rigId);
       if ("unavailable" in input) throw new Error(input.unavailable);
       if ("currentStateRehydrate" in input) {
-        const { ok, blockers } = input.currentStateRehydrate;
+        const { ok, blockers, awaitingDecision, noSeatStarts } = input.currentStateRehydrate;
         const recorded = this.deps.getMaterializedRoster?.(rig.rigId) ?? null;
+        const waiting = !awaitingDecision?.length ? ""
+          : noSeatStarts ? ` It would start no seat; every seat would wait for a decision: ${awaitingDecision.join("; ")}.`
+          : ` It would not start every seat: ${awaitingDecision.join("; ")}.`;
         return {
           snapshot: null,
           ...(input.notRestoredNodeIds ? { notRestored: new Set(input.notRestoredNodeIds) } : {}),
@@ -495,7 +498,7 @@ export class RestoreCheckService {
             check,
             status: ok ? "yellow" : "red",
             evidence: ok
-              ? `${input.reason}; restore inputs not inspected. Current-state rehydrate is eligible to attempt: ordinary rig up would capture current state. This does not validate that future snapshot or prove native continuity.`
+              ? `${input.reason}; restore inputs not inspected. Current-state rehydrate is eligible to attempt: ordinary rig up would capture current state. This does not validate that future snapshot or prove native continuity.${waiting}`
               : `${input.reason}; current-state rehydrate is not eligible: ${blockers.join("; ")}`,
             remediation: "Inspect the rig's persisted state before choosing manual recovery",
             remediationSafe: true,
@@ -1314,9 +1317,10 @@ export class RestoreCheckService {
   }
 
   private requiredClaudeActivityHookEvents(): string[] {
-    // PermissionRequest is an optional diagnostic. Older same-version plugin/settings bytes
+    // PermissionRequest and the elicitation pair are optional observations. Older same-version plugin/settings bytes
     // remain authoritative until normal release/projection; retain all prior readiness duties.
-    return (this.deps.getClaudeActivityHookEvents?.() ?? []).filter(event => event !== "PermissionRequest");
+    const optional = new Set(["PermissionRequest", "Elicitation", "ElicitationResult"]);
+    return (this.deps.getClaudeActivityHookEvents?.() ?? []).filter(event => !optional.has(event));
   }
 
   private inspectCorePlugin(entries: StartupContextProjectionEntry[]): { status: "green" | "yellow"; evidence: string } | null {

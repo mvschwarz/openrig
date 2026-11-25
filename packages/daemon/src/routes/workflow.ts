@@ -86,7 +86,8 @@ export function workflowRoutes(): Hono {
         : err.code === "frontier_packet_required" || err.code === "frontier_binding_indeterminate" ? 409
         : err.code === "failure_occurrence_required" || err.code === "failure_occurrence_not_unresolved" || err.code === "failure_occurrence_replay_indeterminate" || err.code === "failure_occurrence_replay_conflict" ? 409
         : err.code === "instance_not_abortable" || err.code === "instance_not_resumable" ? 409
-        : err.code === "lifecycle_operation_conflict" || err.code === "lifecycle_replay_indeterminate" ? 409
+        : err.code === "lifecycle_operation_conflict" || err.code === "lifecycle_replay_indeterminate" || err.code === "workflow_start_conflict" || err.code === "workflow_start_indeterminate" ? 409
+        : err.code === "workflow_start_key_invalid" ? 400
         : err.code === "lifecycle_identity_invalid" || err.code === "lifecycle_not_eligible" || err.code === "lifecycle_receipt_required" ? 400
         : err.code.startsWith("acceptance_") || err.code === "abort_reason_required" ? 400
         : err.code === "spec_not_cached" || err.code === "current_step_unknown" ? 409
@@ -204,11 +205,14 @@ export function workflowRoutes(): Hono {
     catch (err) { return errorResponse(c, err); }
   });
 
-  app.post("/instantiate", async (c) => {
+  app.on("POST", ["/instantiate", "/instantiate-keyed"], async (c) => {
+    const keyed = c.req.path.endsWith("/instantiate-keyed");
     const body = await c.req
       .json<{
         specPath?: string;
         rootObjective?: string;
+        operationKey?: unknown;
+        runTitle?: unknown;
         createdBySession?: string;
         entryOwnerSession?: string;
         /** OPR.0.4.6.FAC1: overrides the spec's target.rig default. */
@@ -222,8 +226,14 @@ export function workflowRoutes(): Hono {
     if (!body.specPath) return c.json({ error: "specPath is required" }, 400);
     if (!body.rootObjective) return c.json({ error: "rootObjective is required" }, 400);
     if (!body.createdBySession) return c.json({ error: "createdBySession is required" }, 400);
+    if (keyed && (typeof body.operationKey !== "string" || !body.operationKey.trim())) return c.json({ error: "operationKey must be a nonempty string" }, 400);
     if (body.targetPod !== undefined && typeof body.targetPod !== "string") return c.json({ error: "targetPod must be a string" }, 400);
     try {
+      const title = typeof body.runTitle === "string"
+        ? Array.from(body.runTitle.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()).slice(0, 120).join("") || undefined
+        : undefined;
+      const titleNote = body.runTitle !== undefined && body.runTitle !== title
+        ? `Workflow run title normalized to ${title === undefined ? "untitled" : JSON.stringify(title)}.` : null;
       // A request can carry scope the route cannot apply: main accepted every such request, ignoring the key and
       // creating one unscoped instance, so this route does too. The instance is created unscoped, nothing the scope
       // named is recorded, and the response advisories say plainly that it was not applied. A scope that can be
@@ -237,7 +247,7 @@ export function workflowRoutes(): Hono {
           }
           scope = normalizeWorkflowScope({ project: body.scope.project, mission: body.scope.mission, slice: body.scope.slice, tags: body.scope.tags });
           // The packets must show up under a project the workspace catalog declares (same lookup as the project reads).
-          if (scope?.project) declaredProject(c, scope.project);
+          if (scope?.project && !(keyed && getRuntime(c).recoverOperation(body.operationKey as string))) declaredProject(c, scope.project);
         } catch (err) {
           if (err instanceof WorkflowScopeError || err instanceof ProjectReadError) {
             scope = null;
@@ -248,9 +258,12 @@ export function workflowRoutes(): Hono {
         }
       }
       const ignoredFields = ["project", "mission", "slice", "tags"].filter((field) => body[field] !== undefined);
+      if (keyed && (scopeFailure || ignoredFields.length)) return c.json({ error: "keyed_scope_invalid", message: scopeFailure ?? `Ignored fields: ${ignoredFields.join(", ")}; send scope as an object.` }, 400);
       const result = await getRuntime(c).instantiate({
         specPath: body.specPath,
         rootObjective: body.rootObjective,
+        ...(keyed ? { operationKey: body.operationKey as string } : {}),
+        runTitle: title,
         createdBySession: body.createdBySession,
         entryOwnerSession: body.entryOwnerSession,
         targetRig: body.targetRig,
@@ -266,12 +279,12 @@ export function workflowRoutes(): Hono {
         notes.push(`Scope not applied (${scopeFailure}). Instance ${result.instance.instanceId} was created unscoped: its packets carry no project, mission, slice or tag scope. `
           + "Correct the scope and instantiate again for a scoped instance; that creates a second instance.");
       }
-      if (notes.length === 0) return c.json(result, 201);
+      if (notes.length === 0 && !titleNote) return c.json(result, result.replayed ? 200 : 201);
       return c.json({
         ...result,
-        advisories: [...(result.advisories ?? []), ...notes],
-        scopeIgnored: { fields: [...ignoredFields, ...(scopeFailure ? ["scope"] : [])], message: notes.join(" ") },
-      }, 201);
+        advisories: [...(result.advisories ?? []), ...notes, ...(titleNote ? [titleNote] : [])],
+        ...(notes.length ? { scopeIgnored: { fields: [...ignoredFields, ...(scopeFailure ? ["scope"] : [])], message: notes.join(" ") } } : {}),
+      }, result.replayed ? 200 : 201);
     } catch (err) {
       return errorResponse(c, err);
     }

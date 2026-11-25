@@ -163,3 +163,27 @@ describe("traceTopologyChain", () => {
     expect(result.levels.find((l) => l.altitude === "instance")!.source).toBe("absent");
   });
 });
+
+
+it("selects the seat before filesystem reads while keeping the same trace provenance", () => {
+  const path = join(ROOT, "rigs", "team", "seats", "worker", "LEARNED.md");
+  const seen: string[] = [];
+  const result = traceTopologyChain({ topologyRoot: ROOT, legacyRigsRoot: LEGACY, rig: "team", seat: "worker", name: "LEARNED.md", altitudes: ["seat"], fs: {
+    exists: (p) => { seen.push(p); if (p !== path) throw new Error("ancestor lookup is unrelated"); return true; },
+    read: (p) => { expect(p).toBe(path); return "whole seat text"; },
+  } });
+  expect(seen).toEqual([path]); expect(result.levels).toEqual([{ altitude: "seat", path, resolvedPath: path, source: "topology.root", content: "whole seat text" }]);
+});
+
+
+it("keeps the CLI's configured legacy-root default when it delegates", () => {
+  const saved = process.env.OPENRIG_SHARED_DOCS_ROOT;
+  process.env.OPENRIG_SHARED_DOCS_ROOT = "/configured-shared";
+  try {
+    const old = join("/configured-shared", "rigs", "team", "seats", "worker", "LEARNED.md");
+    const result = traceTopologyChain({ topologyRoot: ROOT, rig: "team", seat: "worker", name: "LEARNED.md", fs: fsOf({ [old]: "legacy default" }) });
+    expect(result.levels.at(-1)).toMatchObject({ source: "legacy", resolvedPath: old, content: "legacy default" });
+  } finally {
+    if (saved === undefined) delete process.env.OPENRIG_SHARED_DOCS_ROOT; else process.env.OPENRIG_SHARED_DOCS_ROOT = saved;
+  }
+});

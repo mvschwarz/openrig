@@ -48,12 +48,14 @@ function rowToVerdict(row: VerdictRow): SeatIdentityVerdict {
 export class SeatIdentityStore {
   constructor(private readonly db: Database.Database) {}
 
-  /** Upsert one node's verdict (last-writer-wins per node). The current verdict is always replaced, pids included. The
+  /** Upsert one node's verdict by observation time, so an older sweep finishing late cannot replace a new launch's
+   *  completion observation. The current verdict is replaced, pids included. The
    *  last observed process (`evidence_*`, with its own time) is refreshed only by a verdict that carries a pid; one
-   *  without a pid keeps it for the same session and clears it for another. */
-  upsert(v: SeatIdentityVerdict): void {
+   *  without a pid keeps it for the same session and clears it for another.
+   *  Returns whether the observation was accepted. */
+  upsert(v: SeatIdentityVerdict): boolean {
     const observedProcess = v.evidence.observedPid != null || v.evidence.observedPanePid != null;
-    this.db.prepare(`
+    const result = this.db.prepare(`
       INSERT INTO seat_identity_verdicts
         (node_id, verdict, evidence_source, reason, registered_pane, observed_pid, observed_pane_pid, observed_command, matched_layer, session_name, observed_at,
          evidence_pid, evidence_pane_pid, evidence_at)
@@ -76,6 +78,7 @@ export class SeatIdentityStore {
           WHEN excluded.session_name IS seat_identity_verdicts.session_name THEN seat_identity_verdicts.evidence_pane_pid END,
         evidence_at = CASE WHEN excluded.evidence_at IS NOT NULL THEN excluded.evidence_at
           WHEN excluded.session_name IS seat_identity_verdicts.session_name THEN seat_identity_verdicts.evidence_at END
+      WHERE excluded.observed_at >= seat_identity_verdicts.observed_at
     `).run({
       node_id: v.nodeId,
       verdict: v.verdict,
@@ -92,6 +95,7 @@ export class SeatIdentityStore {
       evidence_pane_pid: observedProcess ? v.evidence.observedPanePid ?? null : null,
       evidence_at: observedProcess ? v.observedAt : null,
     });
+    return result.changes > 0;
   }
 
   /** Read all verdicts for the nodes of a rig, keyed by node_id. Defensive. */

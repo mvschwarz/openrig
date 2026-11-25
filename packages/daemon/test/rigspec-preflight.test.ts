@@ -13,7 +13,7 @@ import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.
 import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { RigSpecPreflight } from "../src/domain/rigspec-preflight.js";
-import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
+import { SeatLaunchEnvironment, seatRigReachPaths } from "../src/domain/seat-launch-environment.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { LegacyRigSpec as RigSpec } from "../src/domain/types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -80,6 +80,13 @@ describe("RigSpecPreflight", () => {
     expect(result.ready).toBe(true);
     expect(result.warnings).toEqual([]);
     expect(result.errors).toEqual([]);
+  });
+
+  it.each([true, false])("model warnings are advisory and included only when requested (%s)", async (includeModelWarnings) => {
+    const spec = validSpec({ nodes: [{ id: "worker", runtime: "claude-code", cwd: "/", model: "custom/model" }] });
+    const result = await createPreflight().check(spec, includeModelWarnings);
+    expect(result.ready).toBe(true);
+    expect(result.warnings.filter(w => w.includes("unverified"))).toHaveLength(includeModelWarnings ? 1 : 0);
   });
 
   it("rig name collision -> error", async () => {
@@ -637,6 +644,75 @@ profiles:
   });
 });
 
+
+describe("Codex seat sandbox that can't reach rig", () => {
+  const reach = (warnings: string[]) => warnings.filter(text => text.includes("then run rig whoami inside the seat."));
+  const home = "/srv/openrig-reach-test-home";
+  beforeEach(() => { vi.stubEnv("OPENRIG_HOME", home); });
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const preflight = (codexPermissions?: Record<string, unknown>, extra: Partial<RigPreflightInput> = {}) => rigPreflight({
+    rigSpecYaml: makeRigYaml({ pods: [{ id: "dev", label: "Dev", members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default",
+      runtime: "codex", cwd: ".", ...(codexPermissions ? { codexPermissions: codexPermissions as never } : {}) }], edges: [] }] }),
+    rigRoot: RIG_ROOT, fsOps: mockFs({ [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl") }), ...extra,
+  });
+
+  it("names each folder a filesystem list leaves out, and network off, and the launch continues", async () => {
+    const result = await preflight({ approval: "never", filesystem: { ":workspace_roots": "write" } });
+    expect(result).toMatchObject({ ready: true, errors: [] });
+    expect(reach(result.warnings)).toHaveLength(1);
+    const { rigInstall, node } = seatRigReachPaths();
+    expect(reach(result.warnings)[0]).toMatch(new RegExp("^dev\\.impl: this seat's codex_permissions don't let it read the OpenRig home"
+      + " \\(/srv/openrig-reach-test-home\\) or the rig install \\(.+\\), and network is off\\. "));
+    expect(reach(result.warnings)[0]).toContain(`the rig install (${rigInstall})`);
+    // This daemon's node stays conditional: rig in the seat runs on the first node on the seat's own PATH.
+    expect(reach(result.warnings)[0]).toContain(`The permissions don't show that the seat can read node (${node}), the one this daemon runs on. In the seat, rig runs on`);
+    expect(reach(result.warnings)[0]).toContain("The launch continues with the permissions as written. To fix it: add those paths with read access and turn network on (network_access: true)");
+  });
+
+  it("stays quiet when the list covers rig and network is on, or the seat declares no codex_permissions", async () => {
+    for (const permissions of [{ approval: "never", filesystem: { ":root": "read", ":workspace_roots": "write" }, network_access: true },
+      { sandbox: "workspace-write", approval: "never", network_access: true }, undefined]) {
+      const result = await preflight(permissions);
+      expect(result, JSON.stringify(permissions)).toMatchObject({ ready: true, errors: [] });
+      expect(reach(result.warnings), JSON.stringify(permissions)).toEqual([]);
+    }
+  });
+
+  it("says network is always off with read-only, and off as declared with workspace-write", async () => {
+    const readOnly = await preflight({ sandbox: "read-only", approval: "never" });
+    expect(readOnly).toMatchObject({ ready: true, errors: [] });
+    expect(reach(readOnly.warnings)).toEqual([expect.stringMatching(/^dev\.impl: this seat's codex_permissions use the read-only sandbox, where network is always off\. .*To fix it: use sandbox: workspace-write with network_access: true/)]);
+    const workspace = await preflight({ sandbox: "workspace-write", approval: "never" });
+    expect(reach(workspace.warnings)).toEqual([expect.stringMatching(/^dev\.impl: network is off in this seat's codex_permissions\. /)]);
+  });
+
+  it("keeps a rig reach lookup that throws as a warning, never a preflight error", async () => {
+    vi.spyOn(os, "homedir").mockImplementation(() => { throw new Error("home folder unavailable"); });
+    try {
+      const result = await preflight({ sandbox: "read-only", approval: "never" });
+      expect(result).toMatchObject({ ready: true, errors: [] });
+      expect(result.warnings).toContain("dev.impl: rig read coverage for this seat's codex_permissions could not be checked. The launch"
+        + " continues with the permissions as written; run rig whoami inside the seat to check.");
+    } finally { vi.restoreAllMocks(); }
+  });
+
+  it("doesn't warn for a materialize-only preflight, where no seat launches", async () => {
+    const result = await preflight({ sandbox: "read-only", approval: "never" }, { materializeOnly: true });
+    expect(result).toMatchObject({ ready: true, errors: [] });
+    expect(reach(result.warnings)).toEqual([]);
+  });
+
+  it("warns for a legacy flat Codex node, labelled by its id", async () => {
+    const db = setupDb();
+    try {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("available");
+      const result = await new RigSpecPreflight({ rigRepo: new RigRepository(db), tmuxAdapter: mockTmux(), exec, cmuxExec: exec })
+        .check(validSpec({ nodes: [{ id: "worker", runtime: "codex", cwd: "/", codexPermissions: { sandbox: "read-only", approval: "never" } }] }));
+      expect(result).toMatchObject({ ready: true, errors: [] });
+      expect(reach(result.warnings)).toEqual([expect.stringMatching(/^worker: this seat's codex_permissions use the read-only sandbox/)]);
+    } finally { db.close(); }
+  });
+});
 
 describe("seat login-shell PATH warning", () => {
   const isLookup = (command: string) => command.endsWith(" -lc 'command -v rig'");

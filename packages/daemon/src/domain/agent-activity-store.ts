@@ -4,11 +4,11 @@ import { usableCommunityNativeRef } from "./community-harness-launch-result.js";
 import { validateSessionFileFormat } from "./resume-token-validation.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
-import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
+import { claudeProviderFailureReason, isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity, PersistedEvent, RunnerObservation, RunnerObservations } from "./types.js";
-import { PermissionStopObservations, unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
+import { ELICITATION_DESCRIPTOR, PermissionStopObservations, unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
 
 export const AGENT_ACTIVITY_FRESHNESS_MS = 5 * 60 * 1000;
 
@@ -88,6 +88,7 @@ const SOURCE_ORDER_WINDOW = 200;
 
 export class AgentActivityStore {
   private readonly permissionStops: PermissionStopObservations;
+  private readonly elicitations: PermissionStopObservations;
   readonly db: Database.Database;
   private readonly eventBus: EventBus;
   private readonly now: () => Date;
@@ -102,6 +103,7 @@ export class AgentActivityStore {
     this.eventBus = deps.eventBus;
     this.now = deps.now ?? (() => new Date());
     this.permissionStops = new PermissionStopObservations(this.now);
+    this.elicitations = new PermissionStopObservations(this.now, undefined, new Set([ELICITATION_DESCRIPTOR]));
     this.freshnessMs = deps.freshnessMs ?? AGENT_ACTIVITY_FRESHNESS_MS;
     this.resolveOccupantGeneration = deps.resolveOccupantGeneration;
     this.isRegisteredOccupantGeneration = deps.isRegisteredOccupantGeneration;
@@ -122,18 +124,49 @@ export class AgentActivityStore {
 
   getPermissionStopForNode(nodeId: string, sessionName: string): PermissionStopStatus {
     try {
-      const generation = this.resolveOccupantGeneration?.(nodeId);
-      const session = this._resolveSession({ nodeId, sessionName });
-      const status = this.db.prepare(`SELECT s.status, n.occupant_lifecycle FROM sessions s JOIN nodes n ON n.id = s.node_id
-        WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`).get(nodeId) as { status: string; occupant_lifecycle: string } | undefined;
-      if (!generation || !session || session.node_id !== nodeId || session.session_name !== sessionName
-        || session.runtime !== "claude-code" || status?.status !== "running" || status.occupant_lifecycle === "retired"
-        || this.isRegisteredOccupantGeneration?.(nodeId, generation) !== true) {
+      const generation = this.currentClaudeOccupantGeneration(nodeId, sessionName);
+      if (!generation) {
         this.permissionStops.forget(nodeId);
         return unavailablePermissionStop();
       }
       return this.permissionStops.read(nodeId, generation);
     } catch { return unavailablePermissionStop(); }
+  }
+
+  /** An MCP elicitation reaching the seat's Claude (`completed` for its result or a later tool batch). Only the actor
+   *  and time are kept, with the same occupant checks as a permission request. No event, attention or activity. */
+  observeElicitation(input: { nodeId: string; sessionName: string; generation: string; actor: unknown; at: unknown;
+    completed: boolean }): void {
+    try {
+      if (this.currentClaudeOccupantGeneration(input.nodeId, input.sessionName) !== input.generation) return;
+      this.elicitations.observe({ ...input, command: ELICITATION_DESCRIPTOR });
+    } catch { /* Optional observation failure cannot change hook behavior. */ }
+  }
+
+  /** The newest permission or elicitation request from this occupant's main session that nothing settled yet, as an
+   *  ISO time, else null. Evidence a request reached that path, never that a dialog is open; a subagent's request
+   *  isn't tied to the main pane, so it doesn't count. */
+  getUnsettledInputRequestForNode(nodeId: string, sessionName: string): string | null {
+    try {
+      const generation = this.currentClaudeOccupantGeneration(nodeId, sessionName);
+      if (!generation) return null;
+      const times = [this.permissionStops, this.elicitations]
+        .map(observations => observations.unsettledRequestAt(nodeId, generation, null))
+        .filter((at): at is number => at !== null);
+      return times.length ? new Date(Math.max(...times)).toISOString() : null;
+    } catch { return null; }
+  }
+
+  /** The current registered generation of a running, unretired Claude occupant bound to this session, else null. */
+  private currentClaudeOccupantGeneration(nodeId: string, sessionName: string): string | null {
+    const generation = this.resolveOccupantGeneration?.(nodeId);
+    const session = this._resolveSession({ nodeId, sessionName });
+    const status = this.db.prepare(`SELECT s.status, n.occupant_lifecycle FROM sessions s JOIN nodes n ON n.id = s.node_id
+      WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`).get(nodeId) as { status: string; occupant_lifecycle: string } | undefined;
+    if (!generation || !session || session.node_id !== nodeId || session.session_name !== sessionName
+      || session.runtime !== "claude-code" || status?.status !== "running" || status.occupant_lifecycle === "retired"
+      || this.isRegisteredOccupantGeneration?.(nodeId, generation) !== true) return null;
+    return generation;
   }
 
   /** #99: whether a hook's Claude session id is the seat's own Claude session (its current resume token). A helper
@@ -352,6 +385,40 @@ export class AgentActivityStore {
     return earliest;
   }
 
+  /** When the permission prompt the seat waits at started, read from this occupant's unbroken run of permission hooks that
+   *  ends at its latest hook: the nearest PermissionRequest in that run, or with none, the newest `permission_prompt`
+   *  notification. Claude sends PermissionRequest when it asks and the notification about six seconds later, so every
+   *  notification that follows a request in the run is that request's. A confirmation read from the
+   *  pane joins the run without starting a prompt. Null when another hook, or another occupant's, ends the run before a
+   *  prompt hook: then one prompt can't be told from the next. Read in the emitter's order, as the latest hook is. */
+  findPermissionPromptStart(input: { sessionName: string; generation: string }): string | null {
+    if (!input.generation) return null;
+    const nodeId = this._resolveSession({ sessionName: physicalSessionName(this.db, input.sessionName) })?.node_id;
+    if (!nodeId) return null;
+    const rows = this.db.prepare(`
+      SELECT payload FROM (
+        SELECT payload, seq FROM events
+        WHERE node_id = ? AND type = 'agent.activity'
+        ORDER BY seq DESC LIMIT ${SOURCE_ORDER_WINDOW})
+      ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
+        COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC`).all(nodeId) as EventPayloadRow[];
+    let start: AgentActivity | null = null;
+    for (const row of rows) {
+      const activity = parseActivityPayload(row.payload)?.activity;
+      if (!activity || activity.generation !== input.generation) break;
+      const request = activity.rawEvent === "PermissionRequest";
+      if (!request && !(activity.rawEvent === "Notification" && activity.rawSubtype === "permission_prompt")) {
+        if (activity.rawEvent === "PermissionPromptConfirmed") continue;
+        break;
+      }
+      // The nearest request owns every notification after it in the run, however many; with no request before the run's
+      // boundary, the newest notification stands for the prompt, so notification-only prompts stay apart.
+      if (request) { start = activity; break; }
+      start ??= activity;
+    }
+    return start?.eventAt ?? null;
+  }
+
   getLatestForNode(input: {
     nodeId?: string | null;
     sessionName?: string | null;
@@ -397,49 +464,9 @@ export class AgentActivityStore {
     //      transient; mm2 is unaffected — its daemon carries no occupant_tenures table until 0.5.1).
     //      Ignorance and evidence get DIFFERENT verdicts; the two paths must not collapse.
     // Gate runs only when a resolver is injected (else legacy clock-only, no label).
-    let generationProvenance: "resolved" | "unresolved" | undefined;
-    if (this.resolveOccupantGeneration) {
-      let liveGeneration: string | null;
-      try {
-        liveGeneration = this.resolveOccupantGeneration(nodeId);
-      } catch {
-        // Resolver EXCEPTION (e.g. a transient ledger/db fault) ⇒ DEGRADE to a distinct unknown
-        // branch: never crash the read, never render fresh. Distinct from a clean null (unresolvable).
-        return this.generationDegraded(activity, referenceTime);
-      }
-      const recordedGeneration = activity.generation ?? null;
-      if (liveGeneration !== null && recordedGeneration !== null) {
-        if (this.isRegisteredOccupantGeneration) {
-          let registered: boolean;
-          try {
-            registered = this.isRegisteredOccupantGeneration(nodeId, recordedGeneration);
-          } catch {
-            return this.generationDegraded(activity, referenceTime);
-          }
-          if (!registered) {
-            return this.generationUnresolved(activity, referenceTime, "generation_unresolvable");
-          }
-        }
-        if (recordedGeneration !== liveGeneration) {
-          // A generation followed only by no-launch adoptions is still the live process's (#2796); a launch after it
-          // is what makes it a prior tenure.
-          let continued: boolean;
-          try {
-            continued = this.isOccupantContinuedByAdoption?.(nodeId, recordedGeneration) === true;
-          } catch {
-            return this.generationDegraded(activity, referenceTime);
-          }
-          if (!continued) return this.generationMismatch(activity, referenceTime);
-        }
-        generationProvenance = "resolved";
-      } else {
-        return this.generationUnresolved(
-          activity,
-          referenceTime,
-          liveGeneration === null ? "generation_unresolvable" : "generation_unverifiable",
-        );
-      }
-    }
+    const verdict = this.occupantVerdict(nodeId, activity, referenceTime);
+    if ("demoted" in verdict) return verdict.demoted;
+    const generationProvenance = verdict.provenance;
 
     const eventTime = activity.eventAt ? Date.parse(activity.eventAt) : NaN;
     if (Number.isFinite(eventTime) && referenceTime.getTime() - eventTime > this.freshnessMs) {
@@ -464,6 +491,72 @@ export class AgentActivityStore {
     };
   }
 
+  /** The typed usage limit (Claude's StopFailure/rate_limit, Codex's at_limit) this occupant still held when the daemon
+   *  stopped, read once per seat on a restart, or null. Walks the session's recent records newest first by the emitter's
+   *  order: a newer turn of this occupant (a running record) or Codex's usage_limit_cleared ends the limit first. Each
+   *  record is judged by the occupant rules getLatestForNode uses (`occupantOf`, #2796): a record of another occupant is
+   *  skipped, never deciding this one's hold. Throws when the store can't be read, or when a limit may still be in force
+   *  but a record that would decide it can't be shown to be this occupant's; the caller reads the seat as unknown then. */
+  latestHeldUsageLimit(input: { nodeId: string; sessionName: string; runtime: string }): AgentActivity | null {
+    const rows = this.db.prepare(`
+      SELECT payload FROM (
+        SELECT payload, seq FROM events
+        WHERE node_id = ? AND type = 'agent.activity'
+        ORDER BY seq DESC LIMIT ${SOURCE_ORDER_WINDOW})
+      WHERE json_extract(payload, '$.sessionName') = ?
+      ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
+        COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC`).all(input.nodeId, input.sessionName) as EventPayloadRow[];
+    let live: string | null = null;
+    try { live = this.resolveOccupantGeneration?.(input.nodeId) ?? null; } catch { /* unknown: no record can be shown to be this occupant's */ }
+    let uncertain = false;
+    // A clear ends a limit only when it's strictly later, as live: a limit recorded at the clear's own instant still holds,
+    // whichever of the two the emitter's sequence or the arrival put first.
+    let clearedAt: number | null = null;
+    for (const row of rows) {
+      const activity = parseActivityPayload(row.payload)?.activity;
+      if (!activity) continue;
+      const clears = activity.state === "running" || (activity.rawEvent === "Notification" && activity.rawSubtype === "usage_limit_cleared");
+      const typed = input.runtime === "codex" ? activity.rawEvent === "at_limit"
+        : isClaudeRateLimitHook(input.runtime, activity.rawEvent, activity.rawSubtype);
+      if (!clears && !typed) continue;
+      if (clearedAt !== null && Date.parse(activity.eventAt ?? "") !== clearedAt) return null;
+      const occupant = this.occupantOf(input.nodeId, activity.generation, live);
+      if (occupant === "foreign") continue;
+      // A clear whose occupant can't be shown may or may not have ended this occupant's limit: keep looking, and if a
+      // limit of this occupant is found below it, say unknown rather than claim either way.
+      if (occupant === "unknown") { if (typed) throw new Error("usage limit of an unresolved occupant"); uncertain = true; continue; }
+      if (clears) {
+        const at = Date.parse(activity.eventAt ?? "");
+        if (!Number.isFinite(at)) return null;
+        clearedAt ??= at;
+        continue;
+      }
+      if (uncertain) throw new Error("usage limit behind a clear of an unresolved occupant");
+      return activity;
+    }
+    return null;
+  }
+
+  /** latestHeldUsageLimit for a session name alone (the Codex banner sweep's input), resolved to its node as hook records are. */
+  heldUsageLimitForSession(sessionName: string, runtime: string): AgentActivity | null {
+    const session = this._resolveSession({ sessionName });
+    return session ? this.latestHeldUsageLimit({ nodeId: session.node_id, sessionName: session.session_name, runtime }) : null;
+  }
+
+  /** Which occupant a recorded generation belongs to, by getLatestForNode's rules: "current" for the live generation or one
+   *  continued only by no-launch adoptions (#2796), "foreign" for a registered tenure a launch replaced, and "unknown"
+   *  when either side can't be read or the recorded one isn't registered. */
+  private occupantOf(nodeId: string, recorded: string | null | undefined, live: string | null): "current" | "foreign" | "unknown" {
+    if (live === null || !recorded) return "unknown";
+    try {
+      if (this.isRegisteredOccupantGeneration && !this.isRegisteredOccupantGeneration(nodeId, recorded)) return "unknown";
+      if (recorded === live) return "current";
+      return this.isOccupantContinuedByAdoption?.(nodeId, recorded) === true ? "current" : "foreign";
+    } catch {
+      return "unknown";
+    }
+  }
+
   /** The newest of a node's hook records by the emitter's order (time, then its sequence), for one session when named.
    *  Not by arrival: a runner's posts aren't awaited, so older ones can land after a newer one. Only the node's newest
    *  SOURCE_ORDER_WINDOW records to arrive are ordered, and the session is chosen from those: a runner's heartbeat grows
@@ -480,6 +573,93 @@ export class AgentActivityStore {
         COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC
       LIMIT 1`).get(nodeId, sessionName, sessionName) as EventPayloadRow | undefined;
     return row ? parseActivityPayload(row.payload) : null;
+  }
+
+  /** The occupant verdict getLatestForNode gives a record (W2a-1, above): a demoted row when the record isn't the
+   *  live occupant's or that can't be told, else the provenance it is delivered with. */
+  private occupantVerdict(nodeId: string, activity: AgentActivity, referenceTime: Date):
+    { demoted: AgentActivity } | { provenance: "resolved" | "unresolved" | undefined } {
+    if (this.resolveOccupantGeneration) {
+      let liveGeneration: string | null;
+      try {
+        liveGeneration = this.resolveOccupantGeneration(nodeId);
+      } catch {
+        // Resolver EXCEPTION (e.g. a transient ledger/db fault) ⇒ DEGRADE to a distinct unknown
+        // branch: never crash the read, never render fresh. Distinct from a clean null (unresolvable).
+        return { demoted: this.generationDegraded(activity, referenceTime) };
+      }
+      const recordedGeneration = activity.generation ?? null;
+      if (liveGeneration !== null && recordedGeneration !== null) {
+        if (this.isRegisteredOccupantGeneration) {
+          let registered: boolean;
+          try {
+            registered = this.isRegisteredOccupantGeneration(nodeId, recordedGeneration);
+          } catch {
+            return { demoted: this.generationDegraded(activity, referenceTime) };
+          }
+          if (!registered) {
+            return { demoted: this.generationUnresolved(activity, referenceTime, "generation_unresolvable") };
+          }
+        }
+        if (recordedGeneration !== liveGeneration) {
+          // A generation followed only by no-launch adoptions is still the live process's (#2796); a launch after it
+          // is what makes it a prior tenure.
+          let continued: boolean;
+          try {
+            continued = this.isOccupantContinuedByAdoption?.(nodeId, recordedGeneration) === true;
+          } catch {
+            return { demoted: this.generationDegraded(activity, referenceTime) };
+          }
+          if (!continued) return { demoted: this.generationMismatch(activity, referenceTime) };
+        }
+        return { provenance: "resolved" };
+      } else {
+        return { demoted: this.generationUnresolved(
+          activity,
+          referenceTime,
+          liveGeneration === null ? "generation_unresolvable" : "generation_unverifiable",
+        ) };
+      }
+    }
+    return { provenance: undefined };
+  }
+
+  /** #3571: the current occupant's last typed Claude authentication or billing failure that no newer turn has
+   *  superseded, or null. Walks the session's recent records newest first by the emitter's order, as getLatestForNode
+   *  orders them. Any record that shows a newer turn ends it: a running record, a question to a person (asked only
+   *  inside a turn), a Stop or PostToolBatch, or another StopFailure (Claude sends StopFailure instead of Stop, so each
+   *  ends its own turn). An idle notification, a compaction or session-start record, or another occupant's record that
+   *  shows no turn doesn't. The failure keeps its original event time, typed reason and raw value, and must be the live
+   *  occupant's by getLatestForNode's generation rules: an unknown, unresolvable or replaced occupant reads null. Only
+   *  the node's newest SOURCE_ORDER_WINDOW records are read. It isn't aged by the freshness window: it reports that the
+   *  last failure hasn't been superseded, not a fresh check of the account. */
+  latestUnsupersededProviderFailure(input: { nodeId?: string | null; sessionName: string; now?: Date }): AgentActivity | null {
+    const sessionName = physicalSessionName(this.db, input.sessionName);
+    const nodeId = input.nodeId ?? this._resolveSession({ sessionName })?.node_id;
+    if (!nodeId) return null;
+    const rows = this.db.prepare(`
+      SELECT payload FROM (
+        SELECT payload, seq FROM events
+        WHERE node_id = ? AND type = 'agent.activity'
+        ORDER BY seq DESC LIMIT ${SOURCE_ORDER_WINDOW})
+      WHERE json_extract(payload, '$.sessionName') = ?
+      ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
+        COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC`).iterate(nodeId, sessionName) as IterableIterator<EventPayloadRow>;
+    for (const row of rows) {
+      const activity = parseActivityPayload(row.payload)?.activity;
+      if (!activity) continue;
+      if (activity.state === "running" || activity.state === "needs_input"
+        || activity.rawEvent === "Stop" || activity.rawEvent === "PostToolBatch") return null;
+      if (activity.rawEvent !== "StopFailure") continue;
+      const reason = claudeProviderFailureReason(activity.runtime, activity.rawEvent, activity.rawSubtype);
+      if ((reason !== "provider_auth_error" && reason !== "provider_billing_error") || activity.reason !== reason) return null;
+      const referenceTime = input.now ?? this.now();
+      const verdict = this.occupantVerdict(nodeId, activity, referenceTime);
+      if ("demoted" in verdict) return null;
+      return { ...activity, sampledAt: referenceTime.toISOString(), fallback: false, stale: false,
+        generationProvenance: verdict.provenance };
+    }
+    return null;
   }
 
   /** W2a-1 — the dead-tenure verdict: the claim's occupant generation is REGISTERED FOR THIS NODE and
@@ -676,6 +856,8 @@ function normalizeHookActivity(input: {
   const runtime = input.runtime;
   const state = hookEventState(rawEvent, rawSubtype, input.seatRuntime, input.communityRunner === true, input.piRpc === true);
   let normalizedReason = reason;
+  // Claude's other StopFailure errors keep a typed reason (#3571), on the seat's own runtime as rate_limit does.
+  const providerFailure = runtime === input.seatRuntime ? claudeProviderFailureReason(runtime, rawEvent, rawSubtype) : null;
   if (rawEvent === "PermissionRequest") {
     normalizedReason = input.seatRuntime === "codex" ? "permission_request_pending" : "permission_request";
   } else if (rawEvent === "PermissionPromptConfirmed") {
@@ -685,6 +867,8 @@ function normalizeHookActivity(input: {
   } else if (rawEvent === "at_limit"
     || (runtime === input.seatRuntime && isClaudeRateLimitHook(runtime, rawEvent, rawSubtype))) {
     normalizedReason = "usage_limit";
+  } else if (providerFailure) {
+    normalizedReason = providerFailure;
   } else if (rawEvent === "Notification") {
     if (state === "unknown") normalizedReason = rawSubtype ? reason : "notification";
   } else if (rawEvent === "SessionStart") {

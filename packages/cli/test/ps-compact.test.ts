@@ -7,6 +7,7 @@ import http from "node:http";
 import { Command } from "commander";
 import { psCommand } from "../src/commands/ps.js";
 import { DaemonClient } from "../src/client.js";
+import { allowFetchTarget, resetFetchAllowlist } from "./fetch-guard.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -83,6 +84,7 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
   return {
     rigId,
     rigName,
+    nodeId: `node-${logicalId}`,
     needsAttention: opts?.needsAttention ?? false,
     arbitratedNeedsInput: null,
     needsInputEvidence: null,
@@ -107,7 +109,7 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
     startupStatus: opts?.startupStatus ?? "ready",
     restoreOutcome: "n-a",
     lifecycleState: opts?.lifecycleState ?? "running",
-    identityVerdict: opts?.identityReason ? { reason: opts.identityReason } : null,
+    identityVerdict: opts?.identityReason ? { verdict: "pane_missing", reason: opts.identityReason } : null,
     tmuxAttachCommand: `tmux attach -t ${logicalId.replace(".", "-")}@${rigName}`,
     resumeCommand: `claude --resume /path/to/session/${logicalId}`,
     latestError: opts?.latestError ?? null,
@@ -216,7 +218,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
         const rigId = decodeURIComponent(m[1]!);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(NODES_BY_RIG[rigId] ?? []));
-      } else if (req.url === "/api/ps" && req.method === "GET") {
+      } else if (req.url?.split("?")[0] === "/api/ps" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(PS_DATA));
       } else {
@@ -226,10 +228,12 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
     port = (server.address() as { port: number }).port;
+    allowFetchTarget(`http://127.0.0.1:${port}`);
   });
 
   afterAll(() => {
     server.close();
+    resetFetchAllowlist();
     if (savedSessionName !== undefined) process.env.OPENRIG_SESSION_NAME = savedSessionName;
   });
 
@@ -692,7 +696,71 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
         await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--session", "ops-missing@openrig-build", ...extra]);
       });
       expect(logs.join("\n")).toContain("tmux session missing; restore or relaunch the seat");
+      expect(logs.join("\n")).toContain("Background work (ops-missing@openrig-build): unknown; a missing tmux session does not prove its processes have exited.");
     }
+  });
+
+  it("shows sampled descendant identities from the existing health response", async () => {
+    const options = runningDeps(port);
+    options.lifecycleDeps.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ backgroundWork: [{
+        nodeId: "node-ops.missing", rigId: "rig-a", sessionName: "ops-missing@openrig-build", state: "unknown", reason: "session_missing",
+        observedAt: "2026-07-02T12:00:00Z", processes: [{ pid: 42, command: "node", startedAt: "2026-07-02T11:00:00Z" }],
+      }] }),
+    })) as never;
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(psCommand(options));
+    const { logs } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "ps", "--nodes", "-A", "--session", "ops-missing@openrig-build"]);
+    });
+    expect(logs.join("\n")).toContain("Observed descendant: pid 42, command node, started 2026-07-02T11:00:00Z");
+    const summary = new Command();
+    summary.exitOverride();
+    summary.addCommand(psCommand(options));
+    const summaryOutput = await captureLogs(async () => { await summary.parseAsync(["node", "rig", "ps"]); });
+    expect(summaryOutput.logs.join("\n")).toContain("Background work (ops-missing@openrig-build, node node-ops.missing): unknown");
+    expect(summaryOutput.logs.join("\n")).toContain("Observed descendant: pid 42, command node");
+    for (const args of [["--summary"], ["--limit", "0"]]) {
+      const bounded = new Command();
+      bounded.exitOverride();
+      bounded.addCommand(psCommand(options));
+      const output = await captureLogs(async () => { await bounded.parseAsync(["node", "rig", "ps", ...args]); });
+      expect(output.logs.join("\n")).not.toContain("Background work (");
+      expect(output.logs.join("\n")).not.toContain("Observed descendant:");
+    }
+  });
+
+  it("reports unknown background work for a confirmed lost pane, but not an intentional stop", async () => {
+    const lost = { ...makeFatNode("rig-a", "openrig-build", "ops.lost"), identityVerdict: { verdict: "pane_missing", reason: "pane_pid_gone" } };
+    const stopped = { ...makeFatNode("rig-a", "openrig-build", "ops.stopped"), identityVerdict: { verdict: "pane_missing", reason: "pane_exited" }, intentionallyStopped: true };
+    RIG_A_NODES.push(...([lost, stopped] as unknown as typeof RIG_A_NODES));
+    try {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]);
+      });
+      expect(logs.join("\n")).toContain("Background work (ops-lost@openrig-build): unknown; a missing tmux pane does not prove its processes have exited.");
+      expect(logs.join("\n")).not.toContain("Background work (ops-stopped@openrig-build)");
+    } finally {
+      RIG_A_NODES.splice(RIG_A_NODES.length - 2);
+    }
+  });
+
+  it("shows retained stopped evidence with the later unavailable reading beside it", async () => {
+    const node = { ...makeFatNode("rig-a", "openrig-build", "ops.retained", { sessionStatus: "detached", lifecycleState: "detached" }),
+      storedSessionStatus: "running", identityVerdict: { verdict: "pane_missing", reason: "session_missing_tmux_unavailable" } };
+    RIG_A_NODES.push(node as unknown as typeof RIG_A_NODES[number]);
+    try {
+      for (const extra of [[], ["--full"]]) {
+        const { logs } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-build", ...extra]);
+        });
+        const out = logs.join("\n");
+        expect(out).toContain("tmux session last observed missing; latest tmux reading unavailable; restore or relaunch the seat");
+        expect(out).not.toContain("Liveness (ops-retained@");
+      }
+    } finally { RIG_A_NODES.pop(); }
   });
 
   it("discloses recorded running with tmux unavailable as liveness unconfirmed, and leaves other states alone", async () => {
