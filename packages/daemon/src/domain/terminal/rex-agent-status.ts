@@ -36,11 +36,15 @@ export function rexAgentStatus(activity: AgentActivity | null): RexAgentStatus {
 /** The runtime as Rex names the app; a runtime it doesn't know is passed as OpenRig names it. */
 const rexApp = (runtime: string): string => runtime.replace(/[^A-Za-z0-9_.+-]/g, "-").slice(0, 32);
 
+/** OpenRig's own record on the block: the record without an id belongs to the agent's own report, and a clear without
+ *  an id would remove every record, the agent's included. */
+const REX_RECORD = "id=openrig";
+
 /** The OSC 7501 report for a status; a state with no runtime to name is a `clear`, so no earlier state lingers. */
 export function rexStatusReport(status: RexAgentStatus, runtime: string | null): string {
   const fields = status.state === "clear" || !runtime
-    ? "state=clear"
-    : [`state=${status.state}`, `app=${rexApp(runtime)}`, ...(status.kind ? [`kind=${status.kind}`] : [])].join(":");
+    ? `${REX_RECORD}:state=clear`
+    : [REX_RECORD, `state=${status.state}`, `app=${rexApp(runtime)}`, ...(status.kind ? [`kind=${status.kind}`] : [])].join(":");
   return `\x1b]7501;${fields}\x1b\\`;
 }
 
