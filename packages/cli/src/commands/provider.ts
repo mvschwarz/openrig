@@ -111,10 +111,9 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
           const seats = (an["seats"] as string[]) ?? [];
           const key = `sa:${seats.join(",")}`;
           if (!seen.has(key)) { seen.add(key); flags.push(`  ! same account on ${an["count"]} seats: ${seats.join(", ")}`); }
-        } else if (an["kind"] === "seat_with_no_account") {
-          const key = `sw:${an["seat"]}`;
-          if (!seen.has(key)) { seen.add(key); flags.push(`  ! seat with no bound account: ${an["seat"]}`); }
         }
+        // An older daemon's seat_with_no_account marks every row with no Codex registry placement, which isn't
+        // evidence the seat has no account, so it isn't flagged. The row's null accountId still says it.
       }
     }
     if (flags.length) { console.log("ANOMALIES"); for (const f of flags) console.log(f); }
@@ -177,6 +176,8 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       const c = (r["configured"] ?? {}) as Record<string, unknown>;
       const configured = c["source"] === "registry"
         ? `configured: profile ${c["profileRef"]} (registry, recorded ${c["recordedAt"]}${c["profileSaved"] === false ? "; profile not saved on this host" : c["profileSaved"] === null ? "; whether the profile is saved: unknown" : ""})`
+        : c["source"] === "claude_token"
+          ? `configured: ${c["kind"] === "api-key" ? "API key" : "token"} ${c["label"]} (the seat's own credential file)`
         : c["source"] === "default_login" && c["homeFrom"]
           ? `configured: the seat's own home (${c["home"]}, from its ${c["homeFrom"]} env)`
         : c["source"] === "default_login"
@@ -185,6 +186,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       const allowance = (r["allowance"] ?? {}) as Record<string, unknown>;
       console.log(`  ${r["seatSession"]}  ${r["runtime"]}  ${configured} · allowance not linked`);
       if (c["source"] === "default_login" && c["homeNote"]) console.log(`    ${c["homeNote"]}`);
+      if (c["source"] === "claude_token" && c["note"]) console.log(`    ${c["note"]}`);
       const ignored = r["ignoredHome"] as Record<string, unknown> | undefined;
       if (ignored) console.log(`    ignored: its ${ignored["from"]} env sets ${ignored["variable"]}=${ignored["value"]}, which isn't an absolute path, so it isn't used as this seat's home`);
       for (const note of (r["registryNotes"] as string[] | undefined) ?? []) console.log(`    ${note}`);
@@ -546,7 +548,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
 
   cmd
     .command("switch")
-    .description("Move one seat to subscription or API credentials, keeping its conversation: a Codex seat to a login saved in its Codex home (Linux only), a Claude seat to its own token file")
+    .description("Move one seat to subscription or API credentials, keeping its conversation: a Codex seat to a login saved in its Codex home (Linux and macOS), a Claude seat to its own token file")
     .requiredOption("--seat <s>", "The seat session")
     .option("--to-account <a>", "Codex: the login's saved name in the seat's Codex home (rig auth list --codex-home <home>). Claude: your label for the token")
     .option("--token-file <path>", "Claude: the absolute path of a 0600 file holding the seat's own subscription token; it's read only as Claude starts")
@@ -572,7 +574,8 @@ isn't verified until the seat completes a tool turn: run the printed rig seat re
 --expect-account. An uncertain restart is reported, never retried.
 
 Codex limits:
-- Linux only: the in-place restart reads the running process from /proc, so elsewhere it refuses before anything changes.
+- Linux and macOS only: the in-place restart reads the running Codex from the OS (/proc on Linux; its launch record and lsof
+  on macOS), so elsewhere it refuses before anything changes.
 - Same home: the login must already be saved in the home the seat runs on; the seat doesn't move to another home.
 
 A Claude seat keeps its config dir and gets its own subscription token: --to-account <your label> --token-file <absolute path

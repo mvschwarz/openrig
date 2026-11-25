@@ -6,13 +6,15 @@ import { tmpdir } from "node:os";
 import { join as pathJoin, isAbsolute as pathIsAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
+import type { TerminalServerObservation } from "../domain/terminal-server-reachability.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
 import { isTmuxCredentialEnvKey } from "./tmux-credential-env.js";
 import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 import { tmuxOnDaemonServer } from "./tmux-server.js";
-import { TMUX_SERVER_LIMIT_PREFIX } from "../tmux-server-start.js";
+import { TMUX_SERVER_LIMIT_PREFIX, TMUX_SERVER_NO_SESSION_BUS, TMUX_SERVER_SESSION_BUS } from "../tmux-server-start.js";
+import { SEAT_SCOPE_SLICE, rigSeatSlice } from "./seat-slice.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
@@ -97,8 +99,14 @@ export type ProcessLimitsMode = "fresh" | "recovery";
 /** What one launch learned about the seat's scope: the warning of a recovery without it, whether the command was
  *  capped (with its requested limit and the marker its command writes once it runs inside the scope), and (for the
  *  uncapped retry of a recovery) why the capped start failed. */
-interface ScopeNotices { processLimits?: SeatProcessLimitsNotice; capped?: boolean; tasksMax?: number; marker?: string;
-  failedStart?: SeatProcessLimitsProblem }
+interface ScopeNotices { processLimits?: SeatProcessLimitsNotice; capped?: boolean; requested?: SeatProcessLimits;
+  marker?: string; failedStart?: SeatProcessLimitsProblem;
+  /** The command a failed scope's kept pane must start on retry. An empty command selects a login shell. */
+  replacement?: { command: string; shell: string };
+  /** #80: the rig slice this launch's scope goes beneath (a seat with or without a limit). */
+  groupedSlice?: string;
+  /** #80: why the grouped start failed, for the retry on the ungrouped path. */
+  groupingFailed?: string }
 
 /** How a capped launch sees its seat's scope start: the pane's process is in the seat scope and its command started
  *  there (started), or the pane died first, before the command started (systemd-run could not make the scope, also
@@ -172,6 +180,21 @@ export type SessionProbe =
 /** Positive server absence in this adapter's namespace; match the diagnostic line, never a path or command fragment. */
 export function probeShowsNoServer(probe: { state: string; cause?: string }): boolean {
   return probe.state === "transport_unavailable" && /^no server running on /.test(tmuxDiagnosticStart(probe.cause ?? ""));
+}
+
+/** Only a reported missing server permits starting an empty one (a reboot's /tmp cleanup removes the socket); other
+ *  unreadable/permission results do not. Shared by `rig down` and the keep_alive reconcile (#2940). */
+export function isMissingTmuxServer(probe: SessionProbe): boolean {
+  if (probe.state !== "transport_unavailable" || /permission denied|operation not permitted|EACCES|EPERM/i.test(probe.cause)) return false;
+  return /no server running/i.test(probe.cause)
+    || /(?:error connecting to|tmux-\d+)[^\n]*(?:No such file or directory|Connection refused)/i.test(probe.cause);
+}
+
+/** The first line of tmux's own diagnostic for a lost server, for a log line or a status field. */
+function serverDiagnostic(error: unknown): string {
+  const reported = tmuxReportedError(error);
+  const message = reported instanceof Error ? reported.message : String(reported);
+  return tmuxDiagnosticStart(message).split(/\r?\n/, 1)[0]!.trim();
 }
 
 /** Injected executors may retain exec's one-line command wrapper instead of stderr. */
@@ -298,6 +321,27 @@ function isSubmitKey(key: string): boolean {
   return key === "Enter" || key === "C-m";
 }
 
+/**
+ * A key argument escaped so tmux treats it as one argument, not as a command boundary.
+ *
+ * tmux ends its command at an argument ending in `;` unless the character immediately before that `;`
+ * is a backslash, in which case it drops the `;` and turns that one backslash into a `;`
+ * (`cmd_parse_from_arguments` in tmux's `cmd-parse.y`; see `commandsOf` in tmux-control.ts, pinned
+ * against real tmux in test/tmux-control-native.test.ts). It checks one character, not a run of them:
+ * there is no parity rule and no notion of an already escaped argument.
+ *
+ * So every trailing `;` gets exactly one backslash in front of it, unconditionally, and each key then
+ * arrives byte for byte: `x;` is sent as `x\;` and arrives as `x;`, and `x\;` is sent as `x\\;` and
+ * arrives as `x\;`. Quoting protects the SHELL, not tmux: `send-keys -t X 'x;'` still reaches tmux as
+ * two commands.
+ *
+ * This narrows nothing: a caller may still send any key argument it sent before, and the argument
+ * arrives at the pane as the same bytes. Both transports receive the escaped form, so the spawned
+ * client and the control client read the same argv.
+ */
+export function escapeTmuxCommandSeparator(key: string): string {
+  return key.endsWith(";") ? `${key.slice(0, -1)}\\;` : key;
+}
 /** The launch warning when the parent-session identity cleanup could not finish (#771). */
 function parentSessionEnvWarning(target: string, err: unknown): string {
   const reason = err instanceof Error ? err.message : String(err);
@@ -362,6 +406,8 @@ function execStderrText(error: unknown): string {
 const NO_EXPAND_ENVIRONMENT = /(?:unrecognized|unknown) option[^\n]*--expand-environment/i;
 /** The user manager's refusal of OOMPolicy= for a scope (before 253), read from systemd-run's stderr only. */
 const NO_OOM_POLICY = /Cannot set property OOMPolicy|Unknown (?:property|assignment)[^\n]*OOMPolicy/i;
+/** systemd-run's or the user manager's refusal of MemoryMax= for a scope, read from systemd-run's stderr only. */
+const NO_MEMORY_MAX = /Unknown (?:property|assignment)[^\n]*MemoryMax|Failed to parse MemoryMax/i;
 /** A systemd too old for a seat scope: systemctl without --value (before 230) or systemd-run without --collect (before
  *  236), read from their stderr only. */
 const SYSTEMD_TOO_OLD = /(?:unrecognized|unknown) option[^\n]*--(?:value|collect)\b/i;
@@ -452,13 +498,15 @@ function usableEnvLine(lines: readonly string[], name: string): boolean {
   return lines.some((line) => line.startsWith(prefix) && line.slice(prefix.length).trim().length > 0);
 }
 
-/** A seat's own process limits (rig spec `process_limits`, #3253): today only the task limit. */
-export interface SeatProcessLimits { tasksMax: number }
+/** A seat's own process limits (rig spec `process_limits`, #3253): the task limit, the memory limit (bytes), or both
+ *  (at least one). */
+export interface SeatProcessLimits { tasksMax?: number; memoryMax?: number }
 
-/** Where a seat's task limit stands, read back from the kernel, never from config alone (#3253):
- *  - `applied`: the pane's process is in a seat scope whose pids.max is the requested value;
- *  - `not_applied` ("requested, not applied"): known not to be under it (not running, launched before the limit was
- *    set or by a recovery that went ahead without it, outside a seat scope, or a different pids.max);
+/** Where a seat's limits stand, read back from the kernel, never from config alone (#3253):
+ *  - `applied`: the pane's process is in a seat scope whose pids.max and memory.max are the requested values (each one
+ *    that was requested);
+ *  - `not_applied` ("requested, not applied"): known not to be under them (not running, launched before the limit was
+ *    set or by a recovery that went ahead without it, outside a seat scope, or a different pids.max or memory.max);
  *  - `unsupported`: not under it, and this host or setup positively can't give the seat a scope;
  *  - `unknown`: the readback itself failed (no pane pid, cgroup v1, unreadable files);
  *  - `invalid`: the stored request can't be read; kept as stored, and only this seat is affected. */
@@ -466,11 +514,16 @@ export type SeatProcessLimitsState = "applied" | "not_applied" | "unsupported" |
 export interface SeatProcessLimitsReport {
   state: SeatProcessLimitsState;
   /** The stored request (absent when it is `invalid`). */
-  requested?: { tasksMax: number };
-  /** Why the state is not `applied`. */
+  requested?: SeatProcessLimits;
+  /** Why the state is not `applied`, naming the limit that isn't. */
   reason?: string;
-  /** Only when read: the scope's pids.max, pids.current and how many times a fork hit the limit (pids.events `max`). */
+  /** Only when read, and tasks_max was requested: the scope's pids.max, pids.current and how many times a fork hit the
+   *  limit (pids.events `max`). */
   pidsMax?: string; pidsCurrent?: number; limitHits?: number;
+  /** Only when read, and memory_max was requested: the scope's memory.max and memory.current, how many times its usage
+   *  was about to go over the limit (memory.events `max`), and how many processes in the scope an OOM killer killed
+   *  (memory.events `oom_kill`, any OOM killer: not proof that this limit ended the seat). */
+  memoryMax?: string; memoryCurrent?: number; memoryLimitHits?: number; oomKills?: number;
   /** The seat's scope unit, when the process is in one. */
   scope?: string;
   /** Which process the status read: the seat's own pane, or its session's active pane when no pane is recorded. */
@@ -479,7 +532,8 @@ export interface SeatProcessLimitsReport {
 
 /** Why a seat's limit can't be applied at a launch (#3253):
  *  - `unsupported`: a positive inability of this host (not Linux, no user manager to ask or running, systemd-run
- *    missing, no cgroup v2 or pids controller for the user manager, a throwaway scope whose pids.max is not the limit);
+ *    missing, no cgroup v2, or no pids or memory controller for the user manager, a throwaway scope whose pids.max or
+ *    memory.max is not the limit, MemoryMax= refused);
  *  - `setup`: the host may well make the scope, but this setup or launch path can't use it (terminal.
  *    inherit_tmux_environment on, a daemon with no launch environment, a restart in place that keeps or respawns a
  *    process without the seat's scope), with the way out;
@@ -489,7 +543,10 @@ export interface SeatProcessLimitsReport {
 export interface SeatProcessLimitsProblem {
   kind: "unsupported" | "setup" | "unverified" | "invalid";
   reason: string;
-  requested?: { tasksMax: number };
+  requested?: SeatProcessLimits;
+  /** Which requested limit this host can't give, when one is named (a seat that asks for memory_max): the seat has one
+   *  scope, so either one refuses the whole seat. */
+  limit?: "tasks_max" | "memory_max";
   /** For a cached observation: how old it is. */
   ageSeconds?: number;
   /** A refused fresh launch whose terminal couldn't be removed (or wasn't identified): it may be running, so the
@@ -552,13 +609,19 @@ export function noticeLine(notice: SeatProcessLimitsNotice): string {
     "request stays stored (a fresh launch applies it)";
 }
 
-/** The slice a seat scope goes in: seats with process limits leave the terminal server's scope (and any limit an
- *  operator put on it) for this slice. No dash: systemd reads a dash in a slice name as nesting, which would put the
- *  seats under `openrig.slice` and any limit on it. */
-export const SEAT_SCOPE_SLICE = "openrigseats.slice";
+export { SEAT_SCOPE_SLICE };
+
+/** #80: the warning of a launch whose rig groups its seats but whose scope could not go beneath the rig's slice. The
+ *  launch took today's path instead (with any limit it has), so nothing was refused or dropped. */
+export function groupingNotAppliedLine(reason: string): string {
+  return `seat_slice requested, grouping not applied: ${reason}; the seat started on its ungrouped launch path ` +
+    "(its next launch tries the rig's slice again)";
+}
 /** Why a seat with a limit can't start with the inherited tmux environment, with the way out. */
 const INHERIT_TMUX_ENVIRONMENT_REASON = "terminal.inherit_tmux_environment is on: a seat with a limit needs the scoped " +
   "launch environment (set terminal.inherit_tmux_environment to false)";
+/** #80: why a grouped launch started again on its ungrouped path. */
+const GROUPED_START_FAILED = "the seat's scope beneath the rig's slice did not start: its pane's command exited before entering it";
 /** How long a launch skips asking again after a failed check (it reads as `unverified`, with the observation's age). */
 const SEAT_SCOPE_RETRY_MS = 60_000;
 
@@ -578,15 +641,17 @@ export function restoreEnvArgv(values: Record<string, string | undefined>): stri
 
 /** The systemd-run options of a seat scope, up to (not including) the `--` before the command. `systemdRun` is the
  *  absolute path the check resolved, so the check and the launch run the same binary whatever PATH the seat has. */
-function seatScopeArgv(opts: { literal: boolean; oomPolicy: boolean }, unit: string, description: string, tasksMax: number,
-  systemdRun: string): string[] {
-  return [systemdRun, "--user", "--scope", "--quiet", "--collect", "--slice", SEAT_SCOPE_SLICE, "--unit", unit,
+function seatScopeArgv(opts: { literal: boolean; oomPolicy: boolean }, unit: string, description: string,
+  limits: SeatProcessLimits, systemdRun: string, slice: string = SEAT_SCOPE_SLICE): string[] {
+  return [systemdRun, "--user", "--scope", "--quiet", "--collect", "--slice", slice, "--unit", unit,
     "--description", description,
     // As for the server's scope: the command's arguments must reach /bin/sh exactly as written (254+).
     ...(opts.literal ? ["--expand-environment=no"] : []),
     // As for the server's scope: one OOM kill must not stop every process of the seat (253+).
     ...(opts.oomPolicy ? ["-p", "OOMPolicy=continue"] : []),
-    "-p", `TasksMax=${tasksMax}`];
+    ...(limits.tasksMax !== undefined ? ["-p", `TasksMax=${limits.tasksMax}`] : []),
+    // Bytes, as memory.max reads back: the probe and the status compare the two as written.
+    ...(limits.memoryMax !== undefined ? ["-p", `MemoryMax=${limits.memoryMax}`] : [])];
 }
 
 /** The command that runs first inside a seat scope: it empties the launch's marker file (a builtin and a redirection, no
@@ -634,6 +699,16 @@ function createdIdentity(printed: string): CreatedIdentity | null {
   return m ? { pane: m[1]!, session: m[2]!, server: { pid: m[3]!, start: m[4]! } } : null;
 }
 
+/** How a command that ended by SIGKILL was reported, in words that name only that, or null when it didn't end that way:
+ *  the signal itself (the shell replaced by the command; no exit code) or the exit status 137 (128 + 9, from a shell
+ *  that ran it, or from timeout, which exits that way when the command it ran was killed). */
+function sigkillSeen(error: unknown): string | null {
+  const e = error as { code?: unknown; signal?: unknown };
+  if (e.code === 137) return "exited with status 137 (128 + SIGKILL)";
+  if (e.signal === "SIGKILL") return "was killed by SIGKILL (no exit code)";
+  return null;
+}
+
 /** A check's failure, classified (#3253): `unsupported` only on a positive answer that the facility is not there. */
 function classifyScopeFailure(error: unknown, what: string): SeatProcessLimitsProblem {
   const reason = execFailureReason(error);
@@ -642,6 +717,9 @@ function classifyScopeFailure(error: unknown, what: string): SeatProcessLimitsPr
   // systemd's own refusal of an option it predates, read from its stderr only.
   if (SYSTEMD_TOO_OLD.test(execStderrText(error))) {
     return { kind: "unsupported", reason: `${what}: systemd is too old for seat scopes (it needs 236+ for --collect, 230+ for --value): ${reason}` };
+  }
+  if (NO_MEMORY_MAX.test(execStderrText(error))) {
+    return { kind: "unsupported", limit: "memory_max", reason: `${what}: systemd refused MemoryMax= for the seat's scope: ${reason}` };
   }
   // Only a message that names the tool: an exit status of 127 alone does not say which program was missing.
   if (/(?:systemd-run|systemctl)\S{0,2}: (?:(?:command )?not found|No such file or directory)|No such file or directory[^\n]*(?:systemd-run|systemctl)/i.test(reason)) {
@@ -657,6 +735,51 @@ function classifyScopeFailure(error: unknown, what: string): SeatProcessLimitsPr
   }
   return { kind: "unverified", reason: `${what} failed: ${reason}` };
 }
+/** What a throwaway scope with memory_max printed (proveSeatScope), checked limit by limit against the request: null
+ *  when each requested limit reads back as its value, else the first that doesn't, named. */
+/** A host with no cgroup v2 for the user manager's scopes: no limit can be made, whatever is asked. */
+const NO_CGROUP2 = "the user manager's scopes have no cgroup v2 path (a cgroup v1 host)";
+
+/** The limits a positive inability is about: the one a probe's answer names; from the tasks-only probe, whose answers
+ *  name none, the task limit when it is about the pids controller; any other (no cgroup v2, no systemd tools or user
+ *  manager, a systemd too old) is about the host, so about every limit. */
+function inabilityLimits(problem: SeatProcessLimitsProblem, probed: SeatProcessLimits): Array<"tasks_max" | "memory_max"> {
+  if (problem.limit) return [problem.limit];
+  if (probed.memoryMax === undefined && problem.reason !== NO_CGROUP2 && /\bpids\b/.test(problem.reason)) {
+    return ["tasks_max"];
+  }
+  return ["tasks_max", "memory_max"];
+}
+
+function scopeProbeProblem(got: string, limits: SeatProcessLimits): SeatProcessLimitsProblem | null {
+  if (got === "nocgroup2") return { kind: "unsupported", reason: NO_CGROUP2 };
+  const read = new Map<string, string>();
+  for (const line of got.split("\n")) {
+    const m = /^(memory|pids) (.*)$/.exec(line.trim());
+    if (m) read.set(m[1]!, m[2]!);
+  }
+  const asked: Array<["memory_max" | "tasks_max", "memory" | "pids", string, number | undefined]> = [
+    ["memory_max", "memory", "MemoryMax", limits.memoryMax], ["tasks_max", "pids", "TasksMax", limits.tasksMax]];
+  for (const [limit, controller, property, value] of asked) {
+    if (value === undefined) continue;
+    const file = `${controller}.max`;
+    const seen = read.get(controller);
+    if (seen === undefined) return { kind: "unverified", limit, reason: `a throwaway seat scope read no ${file}` };
+    if (seen === `no${controller}`) {
+      return { kind: "unsupported", limit, reason: `a throwaway seat scope has no ${file}: the ${controller} controller is not delegated to the user manager` };
+    }
+    // Only a readable limit that isn't the one asked for is a positive answer; anything else can't be read.
+    if (!/^(\d+|max)$/.test(seen)) {
+      return { kind: "unverified", limit, reason: `a throwaway seat scope's ${file} read could not be understood ("${seen.slice(0, 80)}")` };
+    }
+    if (seen !== String(value)) {
+      return { kind: "unsupported", limit,
+        reason: `a throwaway seat scope got ${file} "${seen}" for ${property}=${value}: the ${controller} limit is not enforced here (is the ${controller} controller delegated to the user manager?)` };
+    }
+  }
+  return null;
+}
+
 /** The cgroup v2 path of a process, from the `0::` line of /proc/<pid>/cgroup; null on cgroup v1 or no such line. */
 export function cgroupV2Path(procCgroup: string): string | null {
   const line = procCgroup.split(/\r?\n/).find((l) => l.startsWith("0::"));
@@ -671,6 +794,10 @@ export class TmuxAdapter {
    *  for a node: that seat launches exactly as before. It may throw for a malformed stored value: that seat's launch
    *  reads it as `invalid`, and no other seat is affected. */
   seatProcessLimits?: (nodeId: string) => SeatProcessLimits | undefined;
+
+  /** #80: the name of the rig whose slice a seat's new scopes go beneath (rig spec `seat_slice: rig`), read at each
+   *  launch; undefined for a seat whose rig doesn't group its seats, which then launches exactly as before. */
+  seatSliceRig?: (nodeId: string) => string | undefined;
 
   /** Whether a seat runs in an environment guest (its harness is a local viewer of a guest's agent): a scope on this
    *  host would hold only the viewer, so a limit can't be applied (#3253). `session` is the seat's session name, for a
@@ -695,21 +822,23 @@ export class TmuxAdapter {
     try { return statSync(path).isDirectory(); } catch { return false; }
   };
 
-  /** systemd-run's options proven by a throwaway scope, per systemd-run binary and task limit (memoized on success only). */
+  /** systemd-run's options proven by a throwaway scope, per systemd-run binary and pair of limits (memoized on success
+   *  only). */
   private seatScopeProven = new Map<string, { literal: boolean; oomPolicy: boolean }>();
   /** The last check that failed without a positive answer (a timeout, an empty probe, an error not recognized), and when,
-   *  per step ("bus", or the probe of one tasks_max value): a launch within SEAT_SCOPE_RETRY_MS reads it as
-   *  `unverified`, with its age, never as a fresh result; the first launch after that asks again. A positive answer is
+   *  per step ("bus", or the probe of one tasks_max and memory_max pair): a launch within SEAT_SCOPE_RETRY_MS reads it
+   *  as `unverified`, with its age, never as a fresh result; the first launch after that asks again. A positive answer is
    *  not cached: every launch asks again, so a setup fixed since is seen at once. */
   private seatScopeFailedAt = new Map<string, { at: number; problem: SeatProcessLimitsProblem }>();
   /** The last positive inability, for the status only (as `unsupported`, with its age, for SEAT_SCOPE_RETRY_MS). */
-  private seatScopeLastPositive?: { at: number; problem: SeatProcessLimitsProblem };
+  private seatScopeLastPositive?: { at: number; problem: SeatProcessLimitsProblem; probed: SeatProcessLimits };
 
   /** A seat's limits, or the reason its stored value can't be read (kept local to this seat). */
   private seatLimitsLookup(nodeId: string): { limits: SeatProcessLimits } | { invalid: string } | undefined {
     try {
       const limits = this.seatProcessLimits?.(nodeId);
-      return limits ? { limits } : undefined;
+      // A value with neither limit is no request (the stored value's parse refuses it anyway).
+      return limits && (limits.tasksMax !== undefined || limits.memoryMax !== undefined) ? { limits } : undefined;
     } catch (error) {
       return { invalid: (error as Error).message };
     }
@@ -735,7 +864,7 @@ export class TmuxAdapter {
     if ("invalid" in lookup) return notAppliedNotice({ kind: "invalid", reason: lookup.invalid });
     const report = await this.readSeatProcessLimits(paneTarget, lookup.limits, nodeId);
     if (report.state === "applied") return null;
-    const requested = { tasksMax: lookup.limits.tasksMax };
+    const requested = { ...lookup.limits };
     // The restart keeps this process: a readback that failed can't say whether it is under the limit.
     if (report.state === "unknown") {
       return unknownNotice({ kind: "unverified", requested,
@@ -769,7 +898,7 @@ export class TmuxAdapter {
     const lookup = this.seatLimitsLookup(nodeId);
     if (!lookup) return null;
     if ("invalid" in lookup) return { keep: false, notice: notAppliedNotice({ kind: "invalid", reason: lookup.invalid }) };
-    const requested = { tasksMax: lookup.limits.tasksMax };
+    const requested = { ...lookup.limits };
     const report = await this.readSeatProcessLimits(paneTarget, lookup.limits, nodeId);
     if (report.state === "applied") {
       const outcome = await this.seatScope(lookup.limits, { OPENRIG_NODE_ID: nodeId }, this.readLaunchPolicy());
@@ -820,6 +949,52 @@ export class TmuxAdapter {
     return null;
   }
 
+  /** #80: the rig slice a seat's new scope goes beneath, or why its rig's grouping can't be used; undefined when the
+   *  seat's rig doesn't group its seats (it then launches exactly as before). */
+  private seatGrouping(nodeId: string | undefined): { slice: string } | { notApplied: string } | undefined {
+    if (!nodeId || !this.seatSliceRig) return undefined;
+    let rig: string | undefined;
+    try { rig = this.seatSliceRig(nodeId); }
+    catch (error) { return { notApplied: `the rig's seat_slice could not be read (${(error as Error).message})` }; }
+    if (rig === undefined) return undefined;
+    const slice = rigSeatSlice(rig);
+    return slice.kind === "slice" ? { slice: slice.name } : { notApplied: slice.reason };
+  }
+
+  /** #80: one launch's grouping: the rig slice its scope tries first (undefined when the seat's rig doesn't group, or once
+   *  grouping is not applied), and how that launch reports grouping not applied (a warning, and the slice is dropped). A
+   *  retry after a grouped start failed (`notices.groupingFailed`) reports it and takes the ungrouped path. */
+  private launchGrouping(nodeId: string | undefined, notices: ScopeNotices | undefined, warnings: string[]):
+    { slice: string | undefined; notApplied: (reason: string) => void } {
+    const grouping: { slice: string | undefined; notApplied: (reason: string) => void } = {
+      slice: undefined,
+      notApplied: (reason) => {
+        const line = groupingNotAppliedLine(reason);
+        warnings.push(line);
+        console.warn(`[seat launch] ${line}`);
+        grouping.slice = undefined;
+      },
+    };
+    const found = notices?.groupingFailed ? { notApplied: notices.groupingFailed } : this.seatGrouping(nodeId);
+    if (found && "slice" in found) grouping.slice = found.slice;
+    else if (found) grouping.notApplied(found.notApplied);
+    return grouping;
+  }
+
+  /** A limited seat's scope: beneath the rig's slice when its rig groups its seats and that scope can be made, else the
+   *  ungrouped scope, checked exactly as without grouping (#80: grouping adds no refusal and keeps every limit). */
+  private async seatScopeGrouped(limits: SeatProcessLimits, seatEnv: Record<string, string>, policy: SeatLaunchPolicy | Error | undefined,
+    grouping: { slice: string | undefined; notApplied: (reason: string) => void }):
+    Promise<{ ok: true; prefix: string[]; grouped: boolean } | { ok: false; problem: SeatProcessLimitsProblem }> {
+    if (grouping.slice) {
+      const outcome = await this.seatScope(limits, seatEnv, policy, grouping.slice);
+      if (outcome.ok) return { ...outcome, grouped: true };
+      grouping.notApplied(outcome.problem.reason);
+    }
+    const outcome = await this.seatScope(limits, seatEnv, policy);
+    return outcome.ok ? { ...outcome, grouped: false } : outcome;
+  }
+
   /** systemd-run, systemctl and timeout, resolved once from the daemon's PATH, or why they can't be. */
   private seatScopeTools(): SeatScopeTools | { problem: SeatProcessLimitsProblem } {
     const systemdRun = this.resolveExecutable("systemd-run");
@@ -836,16 +1011,19 @@ export class TmuxAdapter {
     return { systemdRun, systemctl, timeout };
   }
 
-  /** The prefix that starts a seat's pane command in a systemd user scope of its own with TasksMax: the tmux server
-   *  stays where it is, and only this seat's processes are under the limit (#3253). systemd-run registers itself in the
-   *  new scope and then execs the command, so the pane's process is the seat's. Or why it can't, classified: never a
-   *  silent start without the limit. */
-  private async seatScope(limits: SeatProcessLimits, seatEnv: Record<string, string>, policy: SeatLaunchPolicy | Error | undefined):
+  /** The prefix that starts a seat's pane command in a systemd user scope of its own with TasksMax and/or MemoryMax:
+   *  the tmux server stays where it is, and only this seat's processes are under the limits (#3253). systemd-run
+   *  registers itself in the new scope and then execs the command, so the pane's process is the seat's. Or why it
+   *  can't, classified: never a silent start without the limit. */
+  private async seatScope(limits: SeatProcessLimits, seatEnv: Record<string, string>, policy: SeatLaunchPolicy | Error | undefined,
+    slice: string = SEAT_SCOPE_SLICE):
     Promise<{ ok: true; prefix: string[] } | { ok: false; problem: SeatProcessLimitsProblem }> {
-    const requested = { tasksMax: limits.tasksMax };
+    const requested = { ...limits };
     const fail = (problem: SeatProcessLimitsProblem) => ({ ok: false as const, problem: { ...problem, requested } });
+    // The status of a seat's limit (readSeatProcessLimits) reads only what the ungrouped scope showed: a rig slice that
+    // can't be used (#80) falls back to that scope and says nothing of the limit.
     const positive = (problem: SeatProcessLimitsProblem) => {
-      if (problem.kind === "unsupported") this.seatScopeLastPositive = { at: Date.now(), problem };
+      if (problem.kind === "unsupported" && slice === SEAT_SCOPE_SLICE) this.seatScopeLastPositive = { at: Date.now(), problem, probed: limits };
       return fail(problem);
     };
     const fixed = this.seatScopeStaticProblem(policy, seatEnv.OPENRIG_NODE_ID, seatEnv.OPENRIG_SESSION_NAME);
@@ -853,8 +1031,9 @@ export class TmuxAdapter {
     const tools = this.seatScopeTools();
     if ("problem" in tools) return positive(tools.problem);
     const runtimeDir = this.scopeRuntimeDir()!;
-    // A systemd-run that changed since (another PATH, an upgrade) is proven again.
-    const provenKey = `${tools.systemdRun}\0${limits.tasksMax}`;
+    // A systemd-run that changed since (another PATH, an upgrade) is proven again, and so is each pair of limits: a
+    // memory limit is never taken as proven by a scope that had only the task limit.
+    const provenKey = `${tools.systemdRun}\0${limits.tasksMax ?? "-"}\0${limits.memoryMax ?? "-"}\0${slice}`;
     const probeKey = `probe:${provenKey}`;
     for (const key of ["bus", probeKey]) {
       const failed = this.seatScopeFailedAt.get(key);
@@ -878,7 +1057,7 @@ export class TmuxAdapter {
     this.seatScopeFailedAt.delete("bus");
     let opts = this.seatScopeProven.get(provenKey);
     if (!opts) {
-      const proven = await this.proveSeatScope(runtimeDir, limits.tasksMax, tools);
+      const proven = await this.proveSeatScope(runtimeDir, limits, tools, slice);
       if (!proven.ok) return remember(probeKey, proven.problem);
       opts = proven.opts;
       this.seatScopeProven.set(provenKey, opts);
@@ -889,35 +1068,76 @@ export class TmuxAdapter {
     // Unit names take ASCII letters, digits and ":-_.\\"; an "@" would read as a template instance.
     const unit = `openrig-seat-${name.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 120)}-${randomUUID().slice(0, 8)}`;
     return { ok: true, prefix: [...seatScopeBusEnv(runtimeDir),
-      ...seatScopeArgv(opts, unit, `OpenRig seat ${name}`, limits.tasksMax, tools.systemdRun), "--"] };
+      ...seatScopeArgv(opts, unit, `OpenRig seat ${name}`, limits, tools.systemdRun, slice), "--"] };
   }
 
-  /** One throwaway scope with the seat's own options, whose command prints the pids.max of its own cgroup: the limit
-   *  counts as supported only when that is the requested value. Options this systemd lacks are dropped from its stderr,
-   *  as for the server's scope. A pids.max that is another value (e.g. "max": TasksMax accepted but the pids controller
-   *  not delegated) is a positive inability; an empty result or an error not recognized is unverified. */
-  private async proveSeatScope(runtimeDir: string, tasksMax: number, tools: SeatScopeTools):
+  /** One throwaway scope with the seat's own options, whose command prints the pids.max of its own cgroup (and, with
+   *  memory_max, its memory.max: one line per limit): the limits count as supported only when each one requested is the
+   *  requested value. Options this systemd lacks are dropped from its stderr, as for the server's scope. A pids.max or
+   *  memory.max that is another value (e.g. "max": TasksMax or MemoryMax= accepted but the controller not delegated) is a
+   *  positive inability; an empty result or an error not recognized is unverified. */
+  private async proveSeatScope(runtimeDir: string, limits: SeatProcessLimits, tools: SeatScopeTools,
+    slice: string = SEAT_SCOPE_SLICE):
     Promise<{ ok: true; opts: { literal: boolean; oomPolicy: boolean } } | { ok: false; problem: SeatProcessLimitsProblem }> {
     const opts = { literal: true, oomPolicy: true };
+    const tasksMax = limits.tasksMax;
+    // #80: a scope with no limit (a grouped seat without process_limits) proves only its placement: its own cgroup path.
+    const unlimited = tasksMax === undefined && limits.memoryMax === undefined;
+    const readOwnCgroup = 'p=; while IFS= read -r l; do case $l in 0::*) p=${l#0::};; esac; done < /proc/self/cgroup; ' +
+      'if [ -z "$p" ]; then printf "nocgroup2\\n"; else printf "%s\\n" "$p"; fi';
     // Shell builtins only: no fork inside the scope, so even TasksMax=1 can be proven (the probe is the scope's one task).
     const readOwnPidsMax = 'p=; while IFS= read -r l; do case $l in 0::*) p=${l#0::};; esac; done < /proc/self/cgroup; ' +
       'if [ -z "$p" ]; then printf "nocgroup2\\n"; elif [ ! -e "/sys/fs/cgroup$p/pids.max" ]; then printf "nopids\\n"; ' +
       'else IFS= read -r m < "/sys/fs/cgroup$p/pids.max" && printf "%s\\n" "$m"; fi';
+    // With memory_max, the same builtins print one line per requested limit: `memory <memory.max|nomemory>`, then
+    // `pids <pids.max|nopids>` when tasks_max is requested too (a seat without tasks_max has its user manager's own
+    // pids.max, which is not judged).
+    const readOwnLimits = 'p=; while IFS= read -r l; do case $l in 0::*) p=${l#0::};; esac; done < /proc/self/cgroup; ' +
+      'if [ -z "$p" ]; then printf "nocgroup2\\n"; else ' +
+      'if [ ! -e "/sys/fs/cgroup$p/memory.max" ]; then printf "memory nomemory\\n"; ' +
+      'else IFS= read -r m < "/sys/fs/cgroup$p/memory.max" && printf "memory %s\\n" "$m"; fi; ' +
+      (tasksMax !== undefined ? 'if [ ! -e "/sys/fs/cgroup$p/pids.max" ]; then printf "pids nopids\\n"; ' +
+        'else IFS= read -r t < "/sys/fs/cgroup$p/pids.max" && printf "pids %s\\n" "$t"; fi; ' : '') +
+      'fi';
     for (;;) {
       let out: string;
+      const probeUnit = `openrig-seat-probe-${randomUUID().slice(0, 8)}`;
       try {
         out = await this.exec(posixJoinArgv([...seatScopeBusEnv(runtimeDir), tools.timeout, "10",
-          ...seatScopeArgv(opts, `openrig-seat-probe-${randomUUID().slice(0, 8)}`, "OpenRig seat scope probe", tasksMax, tools.systemdRun),
-          "--", "/bin/sh", "-c", readOwnPidsMax]));
+          ...seatScopeArgv(opts, probeUnit, "OpenRig seat scope probe", limits, tools.systemdRun, slice),
+          "--", "/bin/sh", "-c", unlimited ? readOwnCgroup : limits.memoryMax === undefined ? readOwnPidsMax : readOwnLimits]));
       } catch (error) {
         const stderr = execStderrText(error);
         if (opts.literal && NO_EXPAND_ENVIRONMENT.test(stderr)) { opts.literal = false; continue; }
         if (opts.oomPolicy && NO_OOM_POLICY.test(stderr)) { opts.oomPolicy = false; continue; }
+        // The probe command ended with SIGKILL (the signal, or exit 137 from timeout or a shell) under a memory limit.
+        // That does not say which process died nor why (the OOM killer at that MemoryMax=, the host's OOM killer,
+        // systemd-oomd, a manual kill, or before the scope was entered), and the scope that could tell (its memory.events
+        // `oom`) is collected with it. So it says only what was seen, names the limit and stays retryable (unverified).
+        const sigkill = sigkillSeen(error);
+        if (limits.memoryMax !== undefined && sigkill !== null) {
+          return { ok: false, problem: { kind: "unverified", limit: "memory_max",
+            reason: `the probe command ${sigkill} under the requested MemoryMax=${limits.memoryMax}; ` +
+              "the process and the cause aren't confirmed; a larger memory_max may help" } };
+        }
         return { ok: false, problem: classifyScopeFailure(error, "a throwaway seat scope") };
       }
       const got = out.trim();
+      if (unlimited) {
+        if (got === "nocgroup2") return { ok: false, problem: { kind: "unsupported", reason: NO_CGROUP2 } };
+        // systemd nests a dashed slice under its parent: the scope is <...>/openrigseats.slice/<slice>/<unit>.scope.
+        const placed = `/${SEAT_SCOPE_SLICE}/${slice}/${probeUnit}.scope`;
+        if (got.endsWith(placed)) return { ok: true, opts };
+        return { ok: false, problem: { kind: got ? "unsupported" : "unverified",
+          reason: got ? `a throwaway seat scope ran in "${got.slice(0, 160)}", not beneath ${slice}`
+            : "a throwaway seat scope read no cgroup path" } };
+      }
+      if (limits.memoryMax !== undefined) {
+        const problem = scopeProbeProblem(got, limits);
+        return problem ? { ok: false, problem } : { ok: true, opts };
+      }
       if (!got) return { ok: false, problem: { kind: "unverified", reason: "a throwaway seat scope read no pids.max" } };
-      if (got === "nocgroup2") return { ok: false, problem: { kind: "unsupported", reason: "the user manager's scopes have no cgroup v2 path (a cgroup v1 host)" } };
+      if (got === "nocgroup2") return { ok: false, problem: { kind: "unsupported", reason: NO_CGROUP2 } };
       if (got === "nopids") {
         return { ok: false, problem: { kind: "unsupported", reason: "a throwaway seat scope has no pids.max: the pids controller is not delegated to the user manager" } };
       }
@@ -990,11 +1210,14 @@ export class TmuxAdapter {
   }
 
   /** The seat scope a pane's process runs in, read from the kernel: unknown when it can't be read, outside a seat scope,
-   *  or in one, with its pids.max, pids.current and how many times a fork hit the limit (pids.events `max`). */
-  private async readPaneScope(paneTarget: string): Promise<
+   *  or in one, with the files of the limits requested only: for tasks_max, its pids.max, pids.current and how many
+   *  times a fork hit the limit (pids.events `max`); for memory_max, its memory.max, memory.current, how many times its
+   *  usage was about to go over the limit (memory.events `max`) and how many of its processes an OOM killer killed (memory.events `oom_kill`). */
+  private async readPaneScope(paneTarget: string, requested: SeatProcessLimits): Promise<
     | { at: "unknown"; reason: string; scope?: string }
     | { at: "outside"; scope: string }
-    | { at: "seat"; scope: string; pidsMax: string; pidsCurrent: number; limitHits: number }> {
+    | { at: "seat"; scope: string; pidsMax?: string; pidsCurrent?: number; limitHits?: number;
+      memoryMax?: string; memoryCurrent?: number; memoryLimitHits?: number; oomKills?: number }> {
     const pid = await this.getPanePid(paneTarget);
     if (pid === null) return { at: "unknown", reason: "the seat's pane process is not readable (not running?)" };
     let path: string | null;
@@ -1005,21 +1228,35 @@ export class TmuxAdapter {
     if (!/^openrig-seat-.+\.scope$/.test(scope)) return { at: "outside", scope };
     try {
       const dir = `/sys/fs/cgroup${path}`;
-      const pidsMax = (await this.procRead(`${dir}/pids.max`)).trim();
-      const pidsCurrent = Number((await this.procRead(`${dir}/pids.current`)).trim());
-      const hits = /^max (\d+)$/m.exec(await this.procRead(`${dir}/pids.events`));
-      return { at: "seat", scope, pidsMax, pidsCurrent, limitHits: hits ? Number(hits[1]) : 0 };
+      let pids = {};
+      if (requested.tasksMax !== undefined) {
+        const pidsMax = (await this.procRead(`${dir}/pids.max`)).trim();
+        const pidsCurrent = Number((await this.procRead(`${dir}/pids.current`)).trim());
+        const hits = /^max (\d+)$/m.exec(await this.procRead(`${dir}/pids.events`));
+        pids = { pidsMax, pidsCurrent, limitHits: hits ? Number(hits[1]) : 0 };
+      }
+      let memory = {};
+      if (requested.memoryMax !== undefined) {
+        const memoryMax = (await this.procRead(`${dir}/memory.max`)).trim();
+        const memoryCurrent = Number((await this.procRead(`${dir}/memory.current`)).trim());
+        const events = await this.procRead(`${dir}/memory.events`);
+        const hits = /^max (\d+)$/m.exec(events);
+        const kills = /^oom_kill (\d+)$/m.exec(events);
+        memory = { memoryMax, memoryCurrent, memoryLimitHits: hits ? Number(hits[1]) : 0, oomKills: kills ? Number(kills[1]) : 0 };
+      }
+      return { at: "seat", scope, ...pids, ...memory };
     } catch (error) {
       return { at: "unknown", scope, reason: `scope files unreadable: ${(error as Error).message}` };
     }
   }
 
-  /** Where a seat's task limit stands, read back from its pane's process (#3253): its cgroup must be a seat scope whose
-   *  pids.max is the requested value. pids.events `max` counts the forks the limit refused. `paneTarget` is the seat's
-   *  pane id (`%N`) when known, else its session (whose active pane is read). With `nodeId`, a seat in an environment
-   *  guest reads `not_applied` (its pane holds only a local viewer). Read only. */
+  /** Where a seat's limits stand, read back from its pane's process (#3253): its cgroup must be a seat scope whose
+   *  pids.max and memory.max are the requested values (each one requested). pids.events `max` counts the forks the
+   *  limit refused; memory.events `max` the times usage was about to go over the memory limit, and `oom_kill` the processes in the scope any OOM killer killed.
+   *  `paneTarget` is the seat's pane id (`%N`) when known, else its session (whose active pane is read). With `nodeId`, a
+   *  seat in an environment guest reads `not_applied` (its pane holds only a local viewer). Read only. */
   async readSeatProcessLimits(paneTarget: string, requested: SeatProcessLimits, nodeId?: string): Promise<SeatProcessLimitsReport> {
-    const base = { requested: { tasksMax: requested.tasksMax } };
+    const base = { requested: { ...requested } };
     const policy = this.readLaunchPolicy();
     // The running process is read first: a seat already under its limit reads `applied` whatever this daemon could
     // create now. A seat not under it reads `unsupported` only on a positive inability (from the environment, or the
@@ -1027,23 +1264,34 @@ export class TmuxAdapter {
     const fixed = this.seatScopeStaticProblem(policy, nodeId);
     // A guest seat's pane holds only a local viewer: its readback says nothing of the agent's processes.
     if (nodeId && this.seatInEnvironmentGuest?.(nodeId)) return { ...base, state: "not_applied", reason: fixed!.reason };
-    const last = this.seatScopeLastPositive && Date.now() - this.seatScopeLastPositive.at < SEAT_SCOPE_RETRY_MS
+    // The last positive answer counts only for a request that asks a limit it was about: a failed memory probe says
+    // nothing of a tasks-only seat (nor a pids answer of a memory-only one); no cgroup v2 is about every limit.
+    const recent = this.seatScopeLastPositive && Date.now() - this.seatScopeLastPositive.at < SEAT_SCOPE_RETRY_MS
       ? this.seatScopeLastPositive : undefined;
+    const last = recent && inabilityLimits(recent.problem, recent.probed)
+      .some((k) => (k === "tasks_max" ? requested.tasksMax : requested.memoryMax) !== undefined) ? recent : undefined;
     const unsupported = fixed?.kind === "unsupported" ? fixed.reason
       : last ? `${last.problem.reason}, observed ${Math.floor((Date.now() - last.at) / 1000)}s ago` : null;
     const notUnder = (reason: string): SeatProcessLimitsReport =>
       unsupported ? { ...base, state: "unsupported", reason: `${reason}; and this host can't make the scope: ${unsupported}` }
         : fixed ? { ...base, state: "not_applied", reason: `${reason}; and this setup can't make the scope: ${fixed.reason}` }
         : { ...base, state: "not_applied", reason };
-    const read = await this.readPaneScope(paneTarget);
+    const read = await this.readPaneScope(paneTarget, requested);
     if (read.at === "unknown") return { ...base, state: "unknown", ...(read.scope ? { scope: read.scope } : {}), reason: read.reason };
     if (read.at === "outside") {
       return notUnder(`the seat's process is not in a seat scope (${read.scope}); the limit applies at its next fresh launch`);
     }
     const { at: _at, ...scopeRead } = read;
-    return read.pidsMax === String(requested.tasksMax)
+    // Applied only when every requested limit reads back as its value; the reason names each one that doesn't.
+    const off = [
+      ...(requested.tasksMax !== undefined && read.pidsMax !== String(requested.tasksMax)
+        ? [`pids.max is ${read.pidsMax}, not ${requested.tasksMax}`] : []),
+      ...(requested.memoryMax !== undefined && read.memoryMax !== String(requested.memoryMax)
+        ? [`memory.max is ${read.memoryMax}, not ${requested.memoryMax}`] : []),
+    ];
+    return off.length === 0
       ? { ...base, state: "applied", ...scopeRead }
-      : { ...base, state: "not_applied", ...scopeRead, reason: `pids.max is ${read.pidsMax}, not ${requested.tasksMax}; the limit applies at its next fresh launch` };
+      : { ...base, state: "not_applied", ...scopeRead, reason: `${off.join("; ")}; the limit applies at its next fresh launch` };
   }
 
   /** Reset before the selected user shell runs, without changing the server or other sessions.
@@ -1068,18 +1316,35 @@ export class TmuxAdapter {
       warnings.push(noticeLine(notice));
       limited = false;
     };
+    // #80: a seat whose rig groups its seats tries a scope beneath the rig's slice first. Where that can't be made, it
+    // takes today's path (the ungrouped scope of a seat with a limit, the plain launch of one without), with a warning:
+    // grouping never refuses a launch, skips a limit check or drops a limit.
+    const grouping = this.launchGrouping(seatEnv.OPENRIG_NODE_ID, notices, warnings);
+    const groupingNotApplied = grouping.notApplied;
+    const recoverWithoutScope = (problem: SeatProcessLimitsProblem) => {
+      notApplied(problem);
+      if (grouping.slice) groupingNotApplied("the seat's limit could not be applied, so the recovery goes on without a scope");
+    };
+    let grouped = false;
     if (lookup) {
-      if ("invalid" in lookup) notApplied({ kind: "invalid", reason: lookup.invalid });
-      else if (notices?.failedStart) notApplied({ ...notices.failedStart, requested: { tasksMax: lookup.limits.tasksMax } });
+      if ("invalid" in lookup) recoverWithoutScope({ kind: "invalid", reason: lookup.invalid });
+      else if (notices?.failedStart) recoverWithoutScope({ ...notices.failedStart, requested: { ...lookup.limits } });
       else {
-        const outcome = await this.seatScope(lookup.limits, seatEnv, policy);
-        if (outcome.ok) { seatScope = outcome.prefix; limited = true; }
+        const outcome = await this.seatScopeGrouped(lookup.limits, seatEnv, policy, grouping);
+        if (outcome.ok) { seatScope = outcome.prefix; limited = true; grouped = outcome.grouped; }
         else notApplied(outcome.problem);
       }
+    } else if (grouping.slice) {
+      // A seat without a limit gets a scope with none, beneath the rig's slice.
+      const outcome = await this.seatScope({}, seatEnv, policy, grouping.slice);
+      if (outcome.ok) { seatScope = outcome.prefix; grouped = true; }
+      else groupingNotApplied(outcome.problem.reason);
     }
+    const groupedSlice = grouped ? grouping.slice : undefined;
     if (!policy || !seatEnv.OPENRIG_NODE_ID) return null;
     if (!(policy instanceof Error) && policy.inheritTmuxEnvironment) {
-      if (limited) notApplied({ kind: "setup", reason: INHERIT_TMUX_ENVIRONMENT_REASON, requested: { tasksMax: (lookup as { limits: SeatProcessLimits }).limits.tasksMax } });
+      if (limited) notApplied({ kind: "setup", reason: INHERIT_TMUX_ENVIRONMENT_REASON, requested: { ...(lookup as { limits: SeatProcessLimits }).limits } });
+      else if (grouped) groupingNotApplied(INHERIT_TMUX_ENVIRONMENT_REASON);
       return null;
     }
     try {
@@ -1126,16 +1391,22 @@ export class TmuxAdapter {
       const restore = seatScope.length ? [...scopeMarkArgv(marker!), ...restoreEnvArgv({
         DBUS_SESSION_BUS_ADDRESS: selected.DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR: selected.XDG_RUNTIME_DIR })] : [];
       if (notices) {
-        notices.capped = seatScope.length > 0;
-        if (marker) { notices.marker = marker; notices.tasksMax = (lookup as { limits: SeatProcessLimits }).limits.tasksMax; }
+        notices.capped = limited && seatScope.length > 0;
+        if (marker) {
+          notices.marker = marker;
+          notices.replacement = { command, shell };
+        }
+        if (limited && marker) notices.requested = { ...(lookup as { limits: SeatProcessLimits }).limits };
+        if (groupedSlice) notices.groupedSlice = groupedSlice;
       }
       return ["/bin/sh", "-c", reset, "sh", file, ...seatScope, ...restore, shell, ...(command ? ["-c", command] : ["-l"])];
     } catch (error) {
+      const reason = `the scoped launch environment failed: ${(error as Error).message}`;
       if (limited) {
-        const tasksMax = (lookup as { limits: SeatProcessLimits }).limits.tasksMax;
-        notApplied({ kind: "unverified", reason: `the scoped launch environment failed: ${(error as Error).message}`,
-          requested: { tasksMax } });
+        notApplied({ kind: "unverified", reason,
+          requested: { ...(lookup as { limits: SeatProcessLimits }).limits } });
       }
+      if (grouped) groupingNotApplied(reason);
       // Keep the working launch, with a diagnostic; this option is not a new admission gate.
       const warning = "Scoped tmux environment unavailable; retaining the previous environment for this launch.";
       warnings.push(warning);
@@ -1144,25 +1415,41 @@ export class TmuxAdapter {
     }
   }
 
-  /** A bare-pane respawn that keeps the seat's limit (a restart in place whose process reads back under it, #3253): the
-   *  command runs as the pane's default shell would run it, inside a new seat scope, with the bus and runtime directory
-   *  the pane would get from tmux. Recovery only: where the scope can't be made, the respawn goes on without it. */
+  /** A bare-pane respawn that keeps the seat's limit (a restart in place whose process reads back under it, #3253), and
+   *  (#80) puts the seat beneath its rig's slice when the rig groups its seats, with or without a limit: the command runs
+   *  as the pane's default shell would run it, inside a new seat scope, with the bus and runtime directory the pane would
+   *  get from tmux. Recovery only: where the scope can't be made, the respawn goes on without it (or ungrouped), with a
+   *  warning. `keepLimit` false: only the grouping (the seat's limit is not kept by this respawn). */
   private async keptScopeCommand(nodeId: string, pane: string, command: string | undefined, warnings: string[],
-    notices: ScopeNotices): Promise<string[] | null> {
-    const lookup = this.seatLimitsLookup(nodeId);
-    if (!lookup) return null;
+    notices: ScopeNotices, keepLimit = true): Promise<string[] | null> {
+    const lookup = keepLimit ? this.seatLimitsLookup(nodeId) : undefined;
+    const grouping = this.launchGrouping(nodeId, notices, warnings);
+    if (!lookup && !grouping.slice) return null;
     const notApplied = (problem: SeatProcessLimitsProblem): null => {
       const notice = notAppliedNotice(problem);
       notices.processLimits = notice;
       notices.capped = false;
       warnings.push(noticeLine(notice));
+      if (grouping.slice) grouping.notApplied("the seat's limit was not kept, so the respawn goes on without a scope");
       return null;
     };
-    if ("invalid" in lookup) return notApplied({ kind: "invalid", reason: lookup.invalid });
-    const requested = { tasksMax: lookup.limits.tasksMax };
-    if (notices.failedStart) return notApplied({ ...notices.failedStart, requested });
-    const outcome = await this.seatScope(lookup.limits, { OPENRIG_NODE_ID: nodeId }, this.readLaunchPolicy());
-    if (!outcome.ok) return notApplied(outcome.problem);
+    if (lookup && "invalid" in lookup) return notApplied({ kind: "invalid", reason: lookup.invalid });
+    const requested = lookup ? { ...lookup.limits } : undefined;
+    if (requested && notices.failedStart) return notApplied({ ...notices.failedStart, requested });
+    const policy = this.readLaunchPolicy();
+    let prefix: string[];
+    let grouped: boolean;
+    if (lookup) {
+      const outcome = await this.seatScopeGrouped(lookup.limits, { OPENRIG_NODE_ID: nodeId }, policy, grouping);
+      if (!outcome.ok) return notApplied(outcome.problem);
+      prefix = outcome.prefix;
+      grouped = outcome.grouped;
+    } else {
+      const outcome = await this.seatScope({}, { OPENRIG_NODE_ID: nodeId }, policy, grouping.slice);
+      if (!outcome.ok) { grouping.notApplied(outcome.problem.reason); return null; }
+      prefix = outcome.prefix;
+      grouped = true;
+    }
     try {
       if (!command) throw new Error("a kept scope needs the respawn's command");
       const shell = await this.getDefaultShell();
@@ -1172,12 +1459,16 @@ export class TmuxAdapter {
         XDG_RUNTIME_DIR: await this.paneStartEnv(pane, "XDG_RUNTIME_DIR"),
       });
       const marker = await this.scopeMarker();
-      notices.capped = true;
+      notices.capped = requested !== undefined;
       notices.marker = marker;
-      notices.tasksMax = requested.tasksMax;
-      return [...outcome.prefix, ...scopeMarkArgv(marker), ...restore, shell, "-c", command];
+      if (requested) notices.requested = requested;
+      if (grouped && grouping.slice) notices.groupedSlice = grouping.slice;
+      return [...prefix, ...scopeMarkArgv(marker), ...restore, shell, "-c", command];
     } catch (error) {
-      return notApplied({ kind: "unverified", reason: `the kept scope's launch could not be prepared: ${(error as Error).message}`, requested });
+      const reason = `the kept scope's launch could not be prepared: ${(error as Error).message}`;
+      if (requested) return notApplied({ kind: "unverified", reason, requested });
+      grouping.notApplied(reason);
+      return null;
     }
   }
 
@@ -1204,12 +1495,16 @@ export class TmuxAdapter {
    *  limit. A recovery runs the command again without the limit only when it failed before the command started; when
    *  the start can't be told, it goes on with an `unknown` notice and runs nothing again. Null: the launch stands. */
   private async scopeStartOutcome(pane: string | null, mode: ProcessLimitsMode | undefined, notices: ScopeNotices,
-    warnings: string[]): Promise<{ refuse: SeatProcessLimitsProblem } | { retryUncapped: SeatProcessLimitsProblem } | null> {
+    warnings: string[]): Promise<{ refuse: SeatProcessLimitsProblem } | { retryUncapped: SeatProcessLimitsProblem }
+      | { retryUngrouped: string } | null> {
     // No pane to watch: whether its command started can't be told.
     const start = pane ? await this.seatScopeStart(pane, notices.marker) : "unknown";
     if (!pane && notices.marker) await this.fileOps.unlink(notices.marker).catch(() => {});
     if (start === "started") return null;
-    const requested = notices.tasksMax !== undefined ? { requested: { tasksMax: notices.tasksMax } } : {};
+    // #80: a scope beneath the rig's slice that systemd-run could not make after the check passed: the launch starts
+    // again in the ungrouped scope, with its limit, checked as without grouping; never refused for the grouping.
+    if (start === "failed_before_command" && notices.groupedSlice) return { retryUngrouped: GROUPED_START_FAILED };
+    const requested = notices.requested ? { requested: { ...notices.requested } } : {};
     const failedBefore = "the seat's scope did not start: its pane's command exited before entering it";
     if (mode !== "recovery") {
       if (start === "ran_and_ended") return null;
@@ -1235,6 +1530,36 @@ export class TmuxAdapter {
     notices.processLimits = notice;
     warnings.push(noticeLine(notice));
     return null;
+  }
+
+  /** #80: after a launch of a seat without a limit made its pane in a scope beneath the rig's slice: the reason to start
+   *  it again on the plain path when systemd-run failed before the seat's command started; else null (the launch
+   *  stands, with a warning when where it runs can't be told; nothing is run again). Never a refusal. */
+  private async groupedStartOutcome(pane: string | null, notices: ScopeNotices, warnings: string[]): Promise<string | null> {
+    const start = pane ? await this.seatScopeStart(pane, notices.marker) : "unknown";
+    if (!pane && notices.marker) await this.fileOps.unlink(notices.marker).catch(() => {});
+    if (start === "started" || start === "ran_and_ended") return null;
+    if (start === "failed_before_command") return GROUPED_START_FAILED;
+    const line = "seat_slice requested; whether the seat runs beneath the rig's slice is unknown (" +
+      (start === "ran_unconfirmed" ? "its command started, but its process was not seen in the scope in time"
+        : "the scope's start was not confirmed in time") + "); the seat was not started again";
+    warnings.push(line);
+    console.warn(`[seat launch] ${line}`);
+    return null;
+  }
+
+  /** #3315: told what each classified probe of this adapter's server showed (reachable, or the no-server/socket
+   *  diagnostic). The daemon records only changes (terminal-server-reachability.ts); an observer error never changes
+   *  the probe's own result. */
+  serverObserver?: (observation: TerminalServerObservation, startedIn?: number) => void;
+  /** #3315: the epoch of this adapter's server record, read when a classified probe starts and handed back with its
+   *  observation, so a probe that finishes after a newer loss or return can't overwrite it. */
+  serverEpoch?: () => number;
+  private readServerEpoch(): number | undefined {
+    try { return this.serverEpoch?.(); } catch { return undefined; }
+  }
+  private noteServer(observation: TerminalServerObservation, startedIn?: number): void {
+    try { this.serverObserver?.(observation, startedIn); } catch { /* reporting only */ }
   }
 
   private inputGuard?: SeatDeliveryGuard;
@@ -1403,6 +1728,12 @@ export class TmuxAdapter {
   private readonly serverArgs: readonly string[];
   /** #2710: the "no scope tried" reason is logged once per adapter, not at every server start. */
   private scopeSkipLogged = false;
+  /** #3253: a server start in progress, so concurrent callers wait for it, the global environment's bus included. */
+  private serverStarting?: Promise<TmuxResult>;
+  /** #3253: the server may still hold the unusable bus in its global environment (this adapter's start ran past its
+   *  wait or failed to give the bus back, or an earlier daemon process stopped before giving it back): the next
+   *  startServer that finds it up gives it back first. True at first on Linux, so a restarted daemon checks once. */
+  private sessionBusRestorePending = process.platform === "linux";
 
   /** Prefix one adapter-owned tmux invocation, including its chained commands.
    * The daemon's explicit server wins over an inherited TMUX or wrapper socket. */
@@ -1431,9 +1762,14 @@ export class TmuxAdapter {
    */
   private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false): Promise<string> {
     const body = (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n";
+    // #3253: on Linux, a launch that may start the server waits for a start under way, which gives the panes the session
+    // bus back before it settles: a pane made before that would keep the unusable address for its whole life. Checked
+    // once the private config is written, right before the client runs, so a start another caller began meanwhile counts.
+    const waitForStart = startServer && process.platform === "linux";
     const source = async (startFirst: boolean): Promise<string> => {
       const file = this.fileOps.tmpName();
       await this.fileOps.writeFile(file, body, { mode: 0o600, flag: "wx" });
+      if (waitForStart && this.serverStarting) await this.serverStarting;
       try {
         const output = await this.run(["tmux", ...(startFirst ? ["start-server", ";"] : []), "source-file", file]);
         await this.fileOps.unlink(file).catch(() => {});
@@ -1444,9 +1780,13 @@ export class TmuxAdapter {
         throw error;
       }
     };
-    if (!startServer || !this.userScopePossible()) return source(startServer);
-    // #2710: `start-server` would start a missing server in the daemon's cgroup. Try on the running server first;
-    // only when there is none, start it as startServer does (in the user scope) and run the command as before.
+    if (!startServer || process.platform !== "linux") return source(startServer);
+    // #2710, #3253: on Linux, `start-server` would start a missing server outside a user scope and with the daemon's
+    // session bus in its own process. Try on the running server first; only when there is none, start it as startServer
+    // does (in the user scope where one can be made, without a session bus) and run the command as before. While the bus
+    // may still be owed (this daemon's first launch, as after a restart, or a give-back that failed), startServer runs
+    // first, once, so the server's global environment is checked before this pane takes it.
+    if (this.sessionBusRestorePending) await this.startServer();
     try {
       return await source(false);
     } catch (error) {
@@ -1463,6 +1803,11 @@ export class TmuxAdapter {
 
   /** Start an empty native terminal server, without inventing a seat/session. */
   async startServer(): Promise<TmuxResult> {
+    this.serverStarting ??= this.startServerOnce().finally(() => { this.serverStarting = undefined; });
+    return this.serverStarting;
+  }
+
+  private async startServerOnce(): Promise<TmuxResult> {
     const probeName = `openrig-startup-${randomUUID()}`;
     const serverUp = async () => (await this.probeSession(probeName)).state !== "transport_unavailable";
     const awaitServer = async () => {
@@ -1473,11 +1818,12 @@ export class TmuxAdapter {
       return false;
     };
     try {
-      if (await serverUp()) return { ok: true };
+      if (await serverUp()) return this.sessionBusRestorePending ? await this.restoreSessionBusForPanes() : { ok: true };
       // #2710: on Linux, the server (and with it every seat) goes into a transient systemd --user scope of its own,
       // so stopping or restarting the daemon's unit no longer takes the seats with it. Any failure keeps the start below.
+      this.sessionBusRestorePending = process.platform === "linux";
       if (await this.startServerInUserScope()) {
-        if (await awaitServer()) return { ok: true };
+        if (await awaitServer()) return await this.restoreSessionBusForPanes();
         console.warn("[tmux] The systemd user scope was made but the seat terminal server did not answer in time; starting it in the daemon's cgroup as before.");
       }
       // tmux -D keeps an empty server alive. Stays on the shell-string path
@@ -1486,11 +1832,37 @@ export class TmuxAdapter {
       // Native socket ownership arbitrates
       // concurrent starts; the readback below, not shell exit, proves availability.
       await this.exec(this.onServer("tmux -D </dev/null >/dev/null 2>&1 &"));
-      if (await awaitServer()) return { ok: true };
+      if (await awaitServer()) return await this.restoreSessionBusForPanes();
       return { ok: false, code: "tmux_unavailable", message: "The terminal server did not become available. Check tmux and its socket permissions." };
     } catch (error) {
       return { ok: false, code: "tmux_unavailable", message: `Terminal server unavailable: ${(error as Error).message}` };
     }
+  }
+
+  /** #3253: the server this start made has no session bus in its own process (TMUX_SERVER_NO_SESSION_BUS), and tmux
+   *  copied that value into its global environment, which panes inherit. This gives the global environment the daemon's
+   *  value back (or unsets it, as before the start), so a pane keeps the real session bus. Only while the global still
+   *  holds OpenRig's own unusable address (TMUX_SERVER_SESSION_BUS), which only OpenRig's own starts set: a server
+   *  another program started, or a value set since, is left as it is. The read and the write are two commands: a
+   *  server-side check (`if-shell -F '#{==:#{DBUS_SESSION_BUS_ADDRESS},…}'`) reads the target
+   *  session's environment before the global one, so on a server that already has a session with its own address (a
+   *  retry) it would compare that one and leave the global as it is. The value goes in argv,
+   *  unlike the seat environment (runEnvironmentCommand): a bus address is not a credential, and it was in the global
+   *  environment before #3253 too. A failure is a warning, never a failed start, and the next startServer tries again.
+   *  Panes and jobs the person's tmux configuration makes while the server starts (before this runs) keep no bus. */
+  private async restoreSessionBusForPanes(): Promise<TmuxResult> {
+    if (process.platform !== "linux") return { ok: true };
+    const key = "DBUS_SESSION_BUS_ADDRESS";
+    const real = process.env[key];
+    try {
+      if ((await this.globalEnvironment())[key] === TMUX_SERVER_SESSION_BUS) {
+        await this.run(real === undefined ? ["tmux", "set-environment", "-gu", key] : ["tmux", "set-environment", "-g", key, real]);
+      }
+      this.sessionBusRestorePending = false;
+    } catch (error) {
+      console.warn(`[tmux] Could not give the new terminal server's panes the session bus back: ${(error as Error).message}`);
+    }
+    return { ok: true };
   }
 
   /** Linux only: run `tmux -D` as the command of a transient `systemd-run --user --scope`. systemd-run exits once the
@@ -1509,7 +1881,9 @@ export class TmuxAdapter {
       this.scopeSkipLogged = true;
       return fallback(unavailable);
     }
-    const server = TMUX_SERVER_LIMIT_PREFIX + posixJoinArgv(["tmux", ...this.serverArgs, "-D"]);
+    // #3253: systemd-run itself needs the session bus (it reaches the manager through it or the runtime directory);
+    // only the server inside the scope goes without.
+    const server = TMUX_SERVER_LIMIT_PREFIX + TMUX_SERVER_NO_SESSION_BUS + posixJoinArgv(["tmux", ...this.serverArgs, "-D"]);
     // systemd-run 254+ expands ${VAR} in the command's arguments (by default from 258, also for --scope): the
     // socket path must reach /bin/sh exactly as given, so expansion is turned off where the option exists.
     const scoped = (oomPolicy: boolean, literal: boolean) => posixJoinArgv(["systemd-run", "--user", "--scope",
@@ -1542,15 +1916,11 @@ export class TmuxAdapter {
     }
   }
 
-  /** Before a command that would start a missing server itself (new-session), start it the way startServer does (#2710),
-   *  so that first start also lands in the systemd user scope. Only where such a scope can exist; the caller's start stays. */
+  /** Before a command that would start a missing server itself (new-session), start it the way startServer does, so that
+   *  first start also lands in the systemd user scope where one can be made (#2710) and its server process gets no
+   *  session bus (#3253). Linux only, with or without a user scope; elsewhere the caller's start stays. */
   private async startServerBeforeImplicitStart(): Promise<void> {
-    if (this.userScopePossible()) await this.startServer();
-  }
-
-  /** Where startServer may put the server in a systemd user scope (#2710). */
-  private userScopePossible(): boolean {
-    return this.userScopeUnavailable() === null;
+    if (process.platform === "linux") await this.startServer();
   }
 
   /** Why no systemd user scope is tried, or null. Only the environment is read. The scope is for a daemon that is itself
@@ -1567,12 +1937,20 @@ export class TmuxAdapter {
   }
 
   async listSessions(): Promise<TmuxSession[]> {
+    const startedIn = this.readServerEpoch();
     try {
       const output = await this.run(["tmux", "list-sessions", "-F", SESSION_FORMAT],
         `tmux list-sessions -F "${SESSION_FORMAT}"`);
+      this.noteServer({ reachable: true }, startedIn);
       return parseLines(output, parseSessionLine);
     } catch (err) {
-      if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
+      // Classified from what tmux reported (its stderr when the exec kept it), as probeSession does: the wrapper's
+      // "Command failed:" line and stdout never decide it. Unknown and permission errors still throw the original.
+      const error = tmuxReportedError(err);
+      if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
+        this.noteServer({ reachable: false, cause: serverDiagnostic(error) }, startedIn);
+        return [];
+      }
       throw err;
     }
   }
@@ -1630,6 +2008,7 @@ export class TmuxAdapter {
    *   fail closed rather than treating a probe failure as an answer.
    */
   async probeSession(name: string): Promise<SessionProbe> {
+    const startedIn = this.readServerEpoch();
     try {
       // Use `tmux has-session` directly for reliable existence check — avoids
       // parsing format-string output from `list-sessions` which can fail when
@@ -1637,13 +2016,16 @@ export class TmuxAdapter {
       const target = `=${name}`; // canonical session name, never a prefix lookup
       await this.run(["tmux", "has-session", "-t", target],
         `tmux has-session -t ${shellQuote(target)}`);
+      this.noteServer({ reachable: true }, startedIn);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       const error = tmuxReportedError(err);
       if (isSessionAbsenceError(error)) {
+        this.noteServer({ reachable: true }, startedIn); // the server answered: the session is what is missing
         return { state: "absent" };
       }
       if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
+        this.noteServer({ reachable: false, cause: serverDiagnostic(error) }, startedIn);
         return { state: "transport_unavailable", cause: (error as Error).message };
       }
       throw err;
@@ -1758,7 +2140,7 @@ export class TmuxAdapter {
   }
 
   private async createSessionUnchecked(name: string, cwd?: string, env?: Record<string, string>,
-    launchOpts?: { processLimitsMode?: ProcessLimitsMode; failedStart?: SeatProcessLimitsProblem }): Promise<TmuxResult> {
+    launchOpts?: { processLimitsMode?: ProcessLimitsMode; failedStart?: SeatProcessLimitsProblem; groupingFailed?: string }): Promise<TmuxResult> {
     // These are the daemon's resolved capture settings, not seat overrides.
     // An empty per-session value prevents the tmux server's inherited values
     // from pinning an old policy over config.json inside a newly launched seat.
@@ -1776,7 +2158,8 @@ export class TmuxAdapter {
     for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", tmuxConfigQuote(`${k}=${v}`));
     const warnings: string[] = [];
     let scopedCommand: string[] | null;
-    const notices: ScopeNotices = launchOpts?.failedStart ? { failedStart: launchOpts.failedStart } : {};
+    const notices: ScopeNotices = { ...(launchOpts?.failedStart ? { failedStart: launchOpts.failedStart } : {}),
+      ...(launchOpts?.groupingFailed ? { groupingFailed: launchOpts.groupingFailed } : {}) };
     try { scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings, launchOpts?.processLimitsMode, notices); }
     catch (error) { if (error instanceof SeatProcessLimitsNotApplied) return processLimitsNotAppliedResult(error); throw error; }
     // The pane new-session itself made: an after-new-session hook may select another window. A capped launch also
@@ -1808,7 +2191,7 @@ export class TmuxAdapter {
       if (unconfirmed?.code === "session_unconfirmed" && notices.capped && launchOpts?.processLimitsMode !== "recovery") {
         if (notices.marker) await this.fileOps.unlink(notices.marker).catch(() => {});
         return processLimitsNotAppliedResult(new SeatProcessLimitsNotApplied({ kind: "unverified", commandStarted: "unknown",
-          ...(notices.tasksMax !== undefined ? { requested: { tasksMax: notices.tasksMax } } : {}),
+          ...(notices.requested ? { requested: { ...notices.requested } } : {}),
           reason: `tmux printed no pane for the launch and its session couldn't be read back (${unconfirmed.message})` }),
           await this.removeRefusedSession(name, null));
       }
@@ -1823,18 +2206,34 @@ export class TmuxAdapter {
     // never stops for the limit: when systemd-run fails after the check passed, the pane's command exits before
     // entering the scope, and the seat starts again without the limit, with the warning (in the same pane when tmux
     // kept it, else in a new session of the same name); when the start can't be told, nothing is run again.
+    const startAgain = async (more: { processLimitsMode?: ProcessLimitsMode; failedStart?: SeatProcessLimitsProblem; groupingFailed?: string }) => {
+      const kept = await this.probeSession(name).catch(() => ({ state: "unknown" as const }));
+      if (kept.state !== "present") return this.createSessionUnchecked(name, cwd, env, more);
+      const replacement = notices.replacement;
+      const retried = await this.respawnPaneUnchecked(created, replacement?.command, {
+        ...(cwd != null ? { cwd } : {}), env: seatEnv, ...more,
+        ...(replacement ? { retryLoginShell: replacement.shell } : {}),
+      });
+      if (!retried.ok && retried.processLimits) {
+        return processLimitsNotAppliedResult(new SeatProcessLimitsNotApplied(retried.processLimits), await this.removeRefusedSession(name, made));
+      }
+      return retried;
+    };
+    const pane = /^%\d+$/.test(created) ? created : null;
     if (notices.capped) {
-      const outcome = await this.scopeStartOutcome(/^%\d+$/.test(created) ? created : null, launchOpts?.processLimitsMode, notices, warnings);
+      const outcome = await this.scopeStartOutcome(pane, launchOpts?.processLimitsMode, notices, warnings);
       if (outcome && "refuse" in outcome) {
         return processLimitsNotAppliedResult(new SeatProcessLimitsNotApplied(outcome.refuse), await this.removeRefusedSession(name, made));
       }
-      if (outcome) {
-        const failedStart = outcome.retryUncapped;
-        const kept = await this.probeSession(name).catch(() => ({ state: "unknown" as const }));
-        return kept.state === "present"
-          ? this.respawnPaneUnchecked(created, undefined, { ...(cwd != null ? { cwd } : {}), env: seatEnv,
-            processLimitsMode: "recovery", failedStart })
-          : this.createSessionUnchecked(name, cwd, env, { processLimitsMode: "recovery", failedStart });
+      // #80: the same launch mode, so the ungrouped scope is checked exactly as without grouping.
+      if (outcome && "retryUngrouped" in outcome) {
+        return startAgain({ ...(launchOpts?.processLimitsMode ? { processLimitsMode: launchOpts.processLimitsMode } : {}), groupingFailed: outcome.retryUngrouped });
+      }
+      if (outcome) return startAgain({ processLimitsMode: "recovery", failedStart: outcome.retryUncapped });
+    } else if (notices.groupedSlice) {
+      const groupingFailed = await this.groupedStartOutcome(pane, notices, warnings);
+      if (groupingFailed) {
+        return startAgain({ ...(launchOpts?.processLimitsMode ? { processLimitsMode: launchOpts.processLimitsMode } : {}), groupingFailed });
       }
     }
     // A tmux server started from a Claude Code session or Herdr pane hands
@@ -1986,6 +2385,30 @@ export class TmuxAdapter {
     return this.guardedInput(target, () => this.sendShellCommandUnchecked(target, command, beforeInput, options));
   }
 
+  /** The script sendShellCommand last staged a launch in, per target, with the line it typed to run it, kept after its
+   *  shell reads it until the next launch sent to that target replaces it (or goes inline and removes it). */
+  private readonly stagedLaunches = new Map<string, { path: string; typed: string; read: boolean }>();
+
+  /** Whether the shell in `target` has yet to read the launch sendShellCommand last staged there. The script removes
+   *  itself as its first step, so while it is still there the shell hasn't started the launch: a new pane's shell can
+   *  still be running its startup files, and its pane reads as an idle shell meanwhile. False when nothing was staged
+   *  for the target, or the script is gone or can't be read. */
+  stagedLaunchUnread(target: string): boolean {
+    const staged = this.stagedLaunches.get(target);
+    if (!staged || staged.read) return false;
+    try { if (statSync(staged.path).isFile()) return true; } catch { /* gone (the shell read it), or unreadable: no evidence */ }
+    staged.read = true;
+    return false;
+  }
+
+  /** The exact line sendShellCommand typed into `target` to run the launch it last staged there: `( . '<script>' )`,
+   *  `/bin/sh '<script>'` or the fish form. It names the script, unique to that launch, so it marks the line the pane's
+   *  shell read: output below the last place it shows came after the launch. Undefined when the last launch sent there
+   *  went inline (nothing staged), or none was sent. */
+  stagedLaunchTypedLine(target: string): string | undefined {
+    return this.stagedLaunches.get(target)?.typed;
+  }
+
   /** Stage or send a launch while leaving a consumed script's cleanup to the receiving shell. */
   private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
     const commandBytes = Buffer.byteLength(command, "utf8");
@@ -2035,6 +2458,7 @@ export class TmuxAdapter {
       }
       // The receiver now owns removal. Unlinking here races shell startup.
       created = false;
+      if (path) this.stagedLaunches.set(target, { path, typed: invocation, read: false }); else this.stagedLaunches.delete(target);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -2071,9 +2495,12 @@ export class TmuxAdapter {
   }
 
   private async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {
+    // Escaped here, at the one place a key argument becomes a tmux argument, so both transports read
+    // the same argv and neither can be the one that splits a key into two commands.
+    const sent = keys.map(escapeTmuxCommandSeparator);
     try {
-      await this.run(["tmux", "send-keys", "-t", target, ...keys],
-        `tmux send-keys -t ${shellQuote(target)} ${keys.map(shellQuote).join(" ")}`);
+      await this.run(["tmux", "send-keys", "-t", target, ...sent],
+        `tmux send-keys -t ${shellQuote(target)} ${sent.map(shellQuote).join(" ")}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -2199,10 +2626,12 @@ export class TmuxAdapter {
         if (this.freshProbes.get(name) === pane && !this.deliveryGuard!.maybeTarget(name) && !this.deliveryGuard!.maybeTarget(pane)) return kill();
         return this.deliveryGuard!.input(this.freshManaged.get(name)?.nodeId ?? name, kill);
       }, true);
-      return beforeEffect ? { ...result, stopPhase } : result;
+      // #2940: a failure always says how far the stop got, so "no effect" can be proven without a checked stop.
+      return beforeEffect || !result.ok ? { ...result, stopPhase } : result;
     }
     if (beforeEffect) return { ok: false, code: "guard_unavailable", message: "Checked stop requires the delivery guard.", stopPhase };
-    return this.killSessionUnchecked(name);
+    const result = await this.killSessionUnchecked(name, undefined, phase => { stopPhase = phase; });
+    return result.ok ? result : { ...result, stopPhase };
   }
 
   /** The session a seat's stop would end is the seat's own: every session OpenRig creates for a seat carries its node's
@@ -2290,7 +2719,9 @@ export class TmuxAdapter {
     command?: string,
     opts?: { cwd?: string; env?: Record<string, string>; processLimitsMode?: ProcessLimitsMode;
       /** #3253: a bare respawn (no `env`) of this seat that keeps its limit in a new scope (seatProcessLimitsKeepPlan). */
-      keepLimitOf?: string },
+      keepLimitOf?: string;
+      /** #80: a bare respawn (no `env`) of this seat, which goes beneath its rig's slice when the rig groups its seats. */
+      groupSeatOf?: string },
   ): Promise<TmuxResult> {
     return this.guardedInput(paneTarget, async (pane, beforeWrite) => {
       beforeWrite();
@@ -2304,28 +2735,31 @@ export class TmuxAdapter {
 
   private async respawnPaneUnchecked(paneTarget: string, command?: string,
     opts?: { cwd?: string; env?: Record<string, string>; processLimitsMode?: ProcessLimitsMode; keepLimitOf?: string;
-      failedStart?: SeatProcessLimitsProblem }): Promise<TmuxResult> {
+      groupSeatOf?: string; failedStart?: SeatProcessLimitsProblem; groupingFailed?: string; retryLoginShell?: string }): Promise<TmuxResult> {
     const exact = exactTarget(paneTarget, "pane");
     const argv = ["tmux", "respawn-pane", "-t", exact];
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) argv.push("-e", `${k}=${v}`);
     const warnings: string[] = [];
     let scopedCommand: string[] | null;
-    const notices: ScopeNotices = opts?.failedStart ? { failedStart: opts.failedStart } : {};
+    const notices: ScopeNotices = { ...(opts?.failedStart ? { failedStart: opts.failedStart } : {}),
+      ...(opts?.groupingFailed ? { groupingFailed: opts.groupingFailed } : {}) };
+    // A bare respawn (no seat environment) keeps a limit with `keepLimitOf`, and joins the rig's slice with either.
+    const bareSeat = opts?.env ? undefined : opts?.keepLimitOf ?? opts?.groupSeatOf;
     try {
-      scopedCommand = opts?.keepLimitOf && !opts.env
-        ? await this.keptScopeCommand(opts.keepLimitOf, exact, command, warnings, notices)
+      scopedCommand = bareSeat
+        ? await this.keptScopeCommand(bareSeat, exact, command, warnings, notices, Boolean(opts?.keepLimitOf))
         : await this.scopedLaunchCommand(opts?.env ?? {}, command, warnings, opts?.processLimitsMode, notices);
     } catch (error) { if (error instanceof SeatProcessLimitsNotApplied) return processLimitsNotAppliedResult(error); throw error; }
-    // Legacy commands remain one argument; the scoped wrapper executes directly before the user shell.
-    if (scopedCommand) argv.push(...scopedCommand);
-    else if (command != null && command.length > 0) argv.push(command);
+    // A configured command remains one argument for tmux's shell. An explicit login shell on retry
+    // replaces the failed wrapper even when the scoped launch environment could not be prepared.
+    const launchArgv = scopedCommand ?? (command ? [command] : opts?.retryLoginShell ? [opts.retryLoginShell, "-l"] : []);
+    argv.push(...launchArgv);
     const quote = opts?.env && Object.keys(opts.env).length ? tmuxConfigQuote : shellQuote;
     const legacyRespawn = ["tmux", "respawn-pane", "-t", quote(exact)];
     if (opts?.cwd != null) legacyRespawn.push("-c", quote(opts.cwd));
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", quote(`${k}=${v}`));
-    if (scopedCommand) legacyRespawn.push(...scopedCommand.map(quote));
-    else if (command != null && command.length > 0) legacyRespawn.push(quote(command));
+    legacyRespawn.push(...launchArgv.map(quote));
     // The successor starts from the session environment: exclude inherited
     // parent-session identity there first (sessions made before this existed).
     // A failure here is a warning; the respawn goes ahead as it did before.
@@ -2345,7 +2779,11 @@ export class TmuxAdapter {
       if (notices.capped) {
         const outcome = await this.scopeStartOutcome(exact, opts?.keepLimitOf ? "recovery" : opts?.processLimitsMode, notices, warnings);
         if (outcome && "refuse" in outcome) return processLimitsNotAppliedResult(new SeatProcessLimitsNotApplied(outcome.refuse));
+        if (outcome && "retryUngrouped" in outcome) return this.respawnPaneUnchecked(paneTarget, command, { ...opts, groupingFailed: outcome.retryUngrouped });
         if (outcome) return this.respawnPaneUnchecked(paneTarget, command, { ...opts, failedStart: outcome.retryUncapped });
+      } else if (notices.groupedSlice) {
+        const groupingFailed = await this.groupedStartOutcome(exact, notices, warnings);
+        if (groupingFailed) return this.respawnPaneUnchecked(paneTarget, command, { ...opts, groupingFailed });
       }
       return this.launched(warnings, notices);
     } catch (err) {

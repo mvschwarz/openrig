@@ -549,14 +549,38 @@ describe("RigRepository process_limits persistence (#3253)", () => {
     expect("processLimits" in repo.getRig(rig.id)!.nodes[0]!).toBe(false);
   });
 
-  it("refuses a limit without tasksMax instead of storing '{}', on a node and at creation", () => {
+  it("round-trips memory_max alone and with tasks_max, stored in bytes in a fixed key order", () => {
+    const rig = repo.createRig("limits-rig");
+    const column = (id: string) => (db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(id) as { process_limits: string })
+      .process_limits;
+    const memory = repo.addNode(rig.id, "memory", { runtime: "codex", processLimits: { memoryMax: 4294967296 } });
+    expect(memory.processLimits).toEqual({ memoryMax: 4294967296 });
+    expect(repo.getNodeProcessLimits(memory.id)).toEqual({ memoryMax: 4294967296 });
+    expect(column(memory.id)).toBe('{"memory_max":4294967296}');
+    const both = repo.addNode(rig.id, "both", { runtime: "codex", processLimits: { memoryMax: 1073741824, tasksMax: 512 } });
+    expect(repo.getNodeProcessLimits(both.id)).toEqual({ tasksMax: 512, memoryMax: 1073741824 });
+    expect(column(both.id)).toBe('{"tasks_max":512,"memory_max":1073741824}');
+  });
+
+  it("replaces only the memory limit, and clears both with null", () => {
+    const rig = repo.createRig("limits-rig");
+    const node = repo.addNode(rig.id, "seat", { runtime: "codex", processLimits: { tasksMax: 512, memoryMax: 1073741824 } });
+    expect(repo.setNodeProcessLimits(node.id, { tasksMax: 512, memoryMax: 2147483648 })).toBe(true);
+    expect(repo.getNodeProcessLimits(node.id)).toEqual({ tasksMax: 512, memoryMax: 2147483648 });
+    expect(repo.getRig(rig.id)!.nodes[0]!.processLimits).toEqual({ tasksMax: 512, memoryMax: 2147483648 });
+    expect(repo.setNodeProcessLimits(node.id, null)).toBe(true);
+    expect(repo.getNodeProcessLimits(node.id)).toBeUndefined();
+    expect(() => repo.setNodeProcessLimits(node.id, { memoryMax: 1000 })).toThrow(/memory_max/);
+  });
+
+  it("refuses a limit with neither key instead of storing '{}', on a node and at creation", () => {
     const rig = repo.createRig("limits-rig");
     const node = repo.addNode(rig.id, "seat", { runtime: "codex", processLimits: { tasksMax: 512 } });
-    const noTasksMax = { tasksMax: undefined } as unknown as { tasksMax: number };
-    expect(() => repo.setNodeProcessLimits(node.id, noTasksMax)).toThrow(/tasks_max is required \(pass null to clear\)/);
+    const noLimit = { tasksMax: undefined, memoryMax: undefined };
+    expect(() => repo.setNodeProcessLimits(node.id, noLimit)).toThrow(/tasks_max or memory_max is required \(pass null to clear\)/);
     expect((db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(node.id) as { process_limits: string })
       .process_limits).toBe('{"tasks_max":512}');
-    expect(() => repo.addNode(rig.id, "partial", { runtime: "codex", processLimits: noTasksMax })).toThrow(/tasks_max is required/);
+    expect(() => repo.addNode(rig.id, "partial", { runtime: "codex", processLimits: noLimit })).toThrow(/tasks_max or memory_max is required/);
     expect(repo.getRig(rig.id)!.nodes.map((n) => n.logicalId)).toEqual(["seat"]);
   });
 
@@ -564,7 +588,8 @@ describe("RigRepository process_limits persistence (#3253)", () => {
     const rig = repo.createRig("limits-rig");
     const node = repo.addNode(rig.id, "seat", { runtime: "codex" });
     expect(() => repo.setNodeProcessLimits(node.id, { tasksMax: 0 })).toThrow(/tasks_max/);
-    for (const raw of ["not json", "{}", '{"tasks_max":0}', '{"memory_max":"1G"}']) {
+    for (const raw of ["not json", "{}", '{"tasks_max":0}', '{"memory_max":0}', '{"memory_max":"lots"}',
+      '{"tasks_max":256,"cpu_quota":"50%"}']) {
       db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run(raw, node.id);
       expect(() => repo.getNodeProcessLimits(node.id), raw).toThrow(/process_limits/);
     }
@@ -584,5 +609,42 @@ describe("RigRepository process_limits persistence (#3253)", () => {
     expect("processLimitsError" in byId(plain.id)).toBe(false);
     expect((db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(bad.id) as { process_limits: string })
       .process_limits).toBe("not json");
+  });
+});
+
+describe("RigRepository keep_alive persistence (#2940)", () => {
+  let db: Database.Database;
+  let repo: RigRepository;
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    repo = new RigRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it.each(["codex", "claude-code", "pi", "terminal"])("stores keep_alive on a %s seat; absent is off and leaves the node unchanged", (runtime) => {
+    const rig = repo.createRig("keep-rig");
+    const kept = repo.addNode(rig.id, "kept", { runtime, keepAlive: true });
+    expect(kept.keepAlive).toBe(true);
+    expect(db.prepare("SELECT keep_alive FROM nodes WHERE id = ?").get(kept.id)).toEqual({ keep_alive: 1 });
+    const plain = repo.addNode(rig.id, "plain", { runtime });
+    const off = repo.addNode(rig.id, "off", { runtime, keepAlive: false });
+    for (const node of [plain, off]) {
+      expect("keepAlive" in node).toBe(false);
+      expect(db.prepare("SELECT keep_alive FROM nodes WHERE id = ?").get(node.id)).toEqual({ keep_alive: 0 });
+    }
+  });
+
+  it("turns keep_alive on and off on an existing seat", () => {
+    const rig = repo.createRig("keep-rig");
+    const node = repo.addNode(rig.id, "seat", { runtime: "codex" });
+    expect(repo.setNodeKeepAlive(node.id, true)).toBe(true);
+    expect(repo.getRig(rig.id)!.nodes[0]!.keepAlive).toBe(true);
+    expect(repo.setNodeKeepAlive(node.id, false)).toBe(true);
+    expect("keepAlive" in repo.getRig(rig.id)!.nodes[0]!).toBe(false);
+    expect(repo.setNodeKeepAlive("no-such-node", true)).toBe(false);
   });
 });

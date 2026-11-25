@@ -23,7 +23,7 @@ import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { DeadLetterStore, InboundReceiptStore, SeenStore } from "../src/domain/gateway/slack/state-store.js";
-import { formatHumanAnswers, unansweredQuestions } from "../src/domain/human-questions.js";
+import { chosenAnswers, formatHumanAnswers, unansweredQuestions } from "../src/domain/human-questions.js";
 
 const human = "human-founder@external";
 const registry = { ok: true as const, entities: [{ entityId: "human-founder", class: "human" as const, displayName: "Founder", address: human, connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFOUNDER" }], prefs: { deliveryClass: "A" as const } }] };
@@ -49,6 +49,100 @@ describe("structured human questions (#193)", () => {
     repo = new QueueRepository(db, bus, { loadHumanRegistry: () => registry });
   });
   afterEach(() => { for (const stop of stops.splice(0)) stop(); db.close(); rmSync(home, { recursive: true, force: true }); });
+
+  async function relayedSlack(extraQuestion = false) {
+    const { qitemId } = await repo.create({ ...request, humanIntent: "decision", humanQuestions: extraQuestion
+      ? [...questions, { ...questions[1]!, id: "third", question: "Third?" }] : questions });
+    repo.writeRelayedAnswer({ qitemId, actorSession: request.sourceSession, nudge: false,
+      relay: { questionId: "db", attributedTo: human, channel: "voice", text: "Postgres." } });
+    const acknowledgeAnswer = vi.fn(async () => true);
+    const makeRouter = (seen: string) => new InboundRouter({
+      queue: makeQueuePorts(repo, { loadHumanRegistry: () => registry }),
+      seen: new SeenStore(join(home, seen)), deadLetter: new DeadLetterStore(join(home, "events.jsonl")),
+      actionDeadLetter: new DeadLetterStore(join(home, "actions.jsonl")),
+      destination: request.sourceSession, resolveSender: () => ({ admitted: true, source: human, entityId: "human-founder" }),
+      resolveRoute: () => ({ destination: request.sourceSession, correlationQitemId: qitemId }), acknowledgeAnswer,
+      files: { transfer: async () => ({ stored: [{ localPath: "/fixture/report.pdf", name: "report.pdf", bytes: 7 }],
+        failed: [{ name: "missing.txt", error: "not available" }] }) },
+    });
+    const reply = (ts: string, text: string) => ({ type: "message", channel: "C-TEST", user: "UFOUNDER", thread_ts: "1.1", ts, text });
+    return { qitemId, makeRouter, acknowledgeAnswer, reply };
+  }
+
+  it("places a typed answer on the only uncovered question of a partial relay", async () => {
+    const f = await relayedSlack();
+    const text = "  Next week, please.\n";
+    await expect(f.makeRouter("seen").route(f.reply("2.1", text))).resolves.toMatchObject({ landed: true });
+    expect(repo.getById(f.qitemId)).toMatchObject({ state: "done", humanAnswers: { ship: typedReply(text, 0) } });
+  });
+
+  it("lands ambiguous replies without placing them, but allows explicit selection", async () => {
+    const f = await relayedSlack(true);
+    const router = f.makeRouter("seen");
+    f.acknowledgeAnswer.mockRejectedValue(new Error("Slack unavailable"));
+    await expect(router.route(f.reply("2.1", "Next week"))).resolves.toMatchObject({ disposition: "accepted" });
+    await expect(router.route(f.reply("2.15", "question:ship\n  "))).resolves.toMatchObject({ disposition: "accepted" });
+    expect(repo.getById(f.qitemId)?.humanAnswers).toBeNull();
+    expect(repo.answersForAsk(f.qitemId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "unplaced-reply", text: "Next week", questionId: null }),
+      expect.objectContaining({ kind: "unplaced-reply", text: "question:ship\n  ", questionId: null }),
+    ]));
+    await expect(router.route(f.reply("2.2", "question:ship\nNext week"))).resolves.toMatchObject({ landed: true });
+    expect(repo.getById(f.qitemId)).toMatchObject({ state: "pending", humanAnswers: { ship: { text: "question:ship\nNext week", placement: "explicit" } } });
+  });
+
+  it("delivers a dead-lettered typed reply without inferring a newly unique question", async () => {
+    const f = await relayedSlack(true);
+    const router = f.makeRouter("seen");
+    db.exec(`CREATE TRIGGER reject_reply BEFORE INSERT ON queue_items BEGIN SELECT RAISE(ABORT, 'injected'); END`);
+    const text = "  Next week.\n";
+    await expect(router.route(f.reply("2.1", text))).resolves.toMatchObject({ disposition: "dead-lettered" });
+    db.exec("DROP TRIGGER reject_reply");
+    repo.writeRelayedAnswer({ qitemId: f.qitemId, actorSession: human, nudge: false, direct: { questionId: "ship", optionId: "no" } });
+    await expect(f.makeRouter("seen").retryDeadLetters()).resolves.toEqual({ retried: 1, landed: 1 });
+    expect(repo.getById(f.qitemId)).toMatchObject({ state: "pending", humanAnswers: { ship: "no" } });
+    expect(repo.answersForAsk(f.qitemId)).toContainEqual(expect.objectContaining({ kind: "unplaced-reply", text }));
+  });
+
+  it("records a typed correction after close and retains one linked attachment row across redelivery", async () => {
+    const f = await relayedSlack();
+    repo.writeRelayedAnswer({ qitemId: f.qitemId, actorSession: human, nudge: false, direct: { questionId: "ship", optionId: "yes" } });
+    const text = "  Actually, SQLite.\n";
+    const event = { ...f.reply("2.1", text), files: [{ name: "report.pdf" }, { name: "missing.txt" }] };
+    await expect(f.makeRouter("seen").route(event)).resolves.toMatchObject({ landed: true });
+    await expect(f.makeRouter("fresh-seen").route(event)).resolves.toMatchObject({ landed: true });
+    expect(repo.answersForAsk(f.qitemId).filter(answer => "kind" in answer && answer.kind === "direct-correction"))
+      .toEqual([expect.objectContaining({ questionId: "db", text, by: human })]);
+    expect(repo.list().filter(row => row.body.includes("/fixture/report.pdf"))).toEqual([
+      expect.objectContaining({ replyTo: f.qitemId, sourceSession: human, body: expect.stringContaining("FILE TRANSFER FAILED: missing.txt") }),
+    ]);
+  });
+
+  it("does not let redelivery of an older click replace a newer choice on an unrelayed question", async () => {
+    const f = await relayedSlack(true);
+    const click = (ts: string, option: string) => ({ type: "block_actions", user: { id: "UFOUNDER" }, channel: { id: "C-TEST" },
+      container: { message_ts: "1.1" }, actions: [{ block_id: "or-q:ship", action_id: `or-opt:${option}`, action_ts: ts }] });
+    const older = click("2.1", "yes");
+    const router = f.makeRouter("seen");
+    await router.routeAction(older);
+    await router.routeAction(click("2.2", "no"));
+    await expect(f.makeRouter("fresh-seen").routeAction(older)).resolves.toMatchObject({ status: "accepted" });
+    expect(repo.getById(f.qitemId)?.humanAnswers).toEqual({ ship: "no" });
+  });
+
+  it("delivers a failed click on retry without replacing a newer choice", async () => {
+    const f = await relayedSlack(true);
+    const router = f.makeRouter("seen");
+    const click = (ts: string, option: string) => ({ type: "block_actions", user: { id: "UFOUNDER" }, channel: { id: "C-TEST" },
+      container: { message_ts: "1.1" }, actions: [{ block_id: "or-q:ship", action_id: `or-opt:${option}`, action_ts: ts }] });
+    db.exec(`CREATE TRIGGER reject_answer BEFORE UPDATE OF human_answers ON queue_items BEGIN SELECT RAISE(ABORT, 'injected'); END`);
+    await expect(router.routeAction(click("2.1", "yes"))).resolves.toMatchObject({ status: "handler-failed" });
+    db.exec("DROP TRIGGER reject_answer");
+    await expect(router.routeAction(click("2.2", "no"))).resolves.toMatchObject({ status: "accepted" });
+    await expect(f.makeRouter("seen").retryDeadLetters()).resolves.toEqual({ retried: 1, landed: 1 });
+    expect(repo.getById(f.qitemId)?.humanAnswers).toEqual({ ship: "no" });
+    expect(repo.answersForAsk(f.qitemId)).toContainEqual(expect.objectContaining({ kind: "unplaced-reply", text: "Yes", optionId: "yes" }));
+  });
 
   describe("create", () => {
     it("records the questions on a decision item", async () => {
@@ -420,6 +514,23 @@ describe("structured human questions (#193)", () => {
         recordedIdentity: { provenance: "gateway:slack:v1", principal: registry.entities[0]!.entityId } })]);
     });
 
+    const closes = () => repo.transitionLog.listForQitem(decisionId).filter((t) => t.ownerNotificationKind === "human-decision-resolved");
+
+    it("answer trail: a typed Slack answer's close records the mapped person", async () => {
+      await typeReply("Use Postgres and ship this week");
+      expect(repo.getById(decisionId)?.state).toBe("done");
+      expect(closes()).toEqual([expect.objectContaining({ actorSession: human,
+        identityProvenance: "gateway:slack:v1", identityPrincipal: registry.entities[0]!.entityId })]);
+    });
+
+    it("answer trail: a completed Slack click set's close records the mapped person", async () => {
+      await click("db", "pg");
+      await click("ship", "yes");
+      expect(repo.getById(decisionId)?.state).toBe("done");
+      expect(closes()).toEqual([expect.objectContaining({ actorSession: human,
+        identityProvenance: "gateway:slack:v1", identityPrincipal: registry.entities[0]!.entityId })]);
+    });
+
     it("posts the buttons, records each click, and resolves back to the seat once every question is answered", async () => {
       expect(JSON.stringify(posts[0]?.blocks)).toContain("or-opt:pg");
 
@@ -787,5 +898,21 @@ describe("a click reply with nothing to post it", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// C8: what a settled card names, in question order: a clicked option's label (its id if the label is gone), null for a
+// typed reply, nothing for an unanswered question or an inherited key.
+describe("chosenAnswers", () => {
+  const asked = [
+    { id: "db", question: "Which database?", options: [{ id: "pg", label: "Postgres" }, { id: "lite", label: "SQLite" }] },
+    { id: "ship", question: "Ship this week?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+    { id: "constructor", question: "Owner?", options: [{ id: "me", label: "Me" }, { id: "you", label: "You" }] },
+  ];
+  it("labels clicks, marks a typed reply, and skips the unanswered", () => {
+    const typed = { kind: "typed-reply" as const, text: "Not yet", placement: "first-unanswered" as const, unansweredCount: 1 };
+    expect(chosenAnswers(asked, { ship: "yes", db: "pg" })).toEqual(["Postgres", "Yes"]);
+    expect(chosenAnswers(asked, { db: "gone", ship: typed })).toEqual(["gone", null]);
+    expect(chosenAnswers(asked, {})).toEqual([]);
   });
 });

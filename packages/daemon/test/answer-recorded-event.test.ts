@@ -68,7 +68,7 @@ async function fixture() {
     return text.split("\n").filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5)) as Record<string, unknown>);
   };
   const recorded = async (watermark: number) => (await eventsAfter(watermark)).filter((event) => event.type === "queue.answer_recorded");
-  return { bus, repo, ask, steering, recorded, eventsAfter };
+  return { db, bus, repo, ask, steering, recorded, eventsAfter };
 }
 
 describe("queue.answer_recorded: a person's click on an ask with questions", () => {
@@ -113,14 +113,27 @@ describe("queue.answer_recorded: a person's click on an ask with questions", () 
     expect(events.filter((event) => event.type === "queue.answer_recorded")).toEqual([]);
   });
 
+  it("an ordinary click that completes the set notifies subscribers after the answer's own commit, outside any transaction", async () => {
+    const f = await fixture();
+    const qitemId = await f.ask();
+    const seen: Array<{ type: string; inTransaction: boolean }> = [];
+    const unsubscribe = f.bus.subscribe((event) => { if (event.type === "queue.answer_recorded") seen.push({ type: event.type, inTransaction: f.db.inTransaction }); });
+    try {
+      expect((await f.steering({ qitemId, questionId: "ship", optionId: "yes" })).status).toBe(200);
+      expect((await f.steering({ qitemId, questionId: "when", optionId: "today" })).status).toBe(200);
+    } finally { unsubscribe(); }
+    expect(seen).toEqual([{ type: "queue.answer_recorded", inTransaction: false }, { type: "queue.answer_recorded", inTransaction: false }]);
+  });
+
   it("fails open: a click whose event can't be recorded is still on the ask, and its answer goes back", async () => {
     const f = await fixture();
     const qitemId = await f.ask();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const emit = f.bus.emit.bind(f.bus);
-    vi.spyOn(f.bus, "emit").mockImplementation((event) => {
+    // The click's event is persisted in the answer's own transaction envelope, so that is the write that fails.
+    const persist = f.bus.persistWithinTransaction.bind(f.bus);
+    vi.spyOn(f.bus, "persistWithinTransaction").mockImplementation((event) => {
       if (event.type === "queue.answer_recorded") throw new Error("events table unavailable");
-      return emit(event);
+      return persist(event);
     });
 
     const partial = await f.steering({ qitemId, questionId: "ship", optionId: "no" });

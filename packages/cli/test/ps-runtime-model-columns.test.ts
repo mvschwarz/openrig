@@ -70,8 +70,8 @@ describe("rig ps — runtime + declared model", () => {
   });
 
   it("padNodeRow keeps every column apart when each cell fills its width", () => {
-    const cells = filledCells([30, 10, 14, 34, 12, 17, 10, 10, 9, 11, 9, 6, 17, 6, 10]);
-    const row = (padNodeRow as (...cells: string[]) => string)(...cells, "error");
+    const cells = filledCells([30, 10, 14, 34, 12, 17, 10, 10, 9, 11, 9, 6, 17, 6, 10, 12]);
+    const row = (padNodeRow as (...cells: string[]) => string)(...cells.slice(0, 15), "error", cells[15]!);
     expect(row.split(" ")).toEqual([...cells, "error"]);
   });
 
@@ -92,6 +92,11 @@ describe("rig ps — runtime + declared model", () => {
     expect(compact.model).toBe("gpt-5.6-sol");
   });
 
+  it("keeps configured account out of compact JSON", () => {
+    const [compact] = compactNodeProjection([node({ configuredAccount: "account-with-a-long-label" })] as never);
+    expect(compact).not.toHaveProperty("configuredAccount");
+  });
+
   it("RED: a claude-code seat with no declared model still projects its runtime", () => {
     const [compact] = compactNodeProjection([node()] as never);
     expect(compact.runtime).toBe("claude-code");
@@ -109,4 +114,17 @@ it("r2: preserves last model observation and provenance in a labelled compact tu
 it("r2: keeps explicit UNKNOWN reasons compact without fabricating an observed model", () => {
   const [row] = compactNodeProjection([{ sessionStatus: "running", modelObservation: { status: "unknown", model: null, source: null, observedAt: null, generation: "current", reason: "model-record-unavailable" } }] as never);
   expect(row?.modelObservation).toEqual({ status: "unknown", reason: "model-record-unavailable" });
+});
+
+it("#3513: keeps a served Remote Control observation in the compact read and leaves it out when none applies", () => {
+  const observation = { sessionId: "session_01AbCdEf", observedAt: "2026-11-19T01:00:00.000Z" };
+  const absent = { sessionId: null, observedAt: "2026-11-19T01:10:00.000Z" };
+  const [seen, gone, none, missing] = compactNodeProjection([
+    { sessionStatus: "running", remoteControl: observation }, { sessionStatus: "running", remoteControl: absent },
+    { sessionStatus: "running", remoteControl: null }, { sessionStatus: "running" },
+  ] as never);
+  expect(seen?.remoteControl).toEqual(observation);
+  expect(gone?.remoteControl).toEqual(absent);
+  expect(none).not.toHaveProperty("remoteControl");
+  expect(missing).not.toHaveProperty("remoteControl");
 });

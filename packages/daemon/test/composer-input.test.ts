@@ -84,6 +84,46 @@ describe("cursor-bound composer input", () => {
     }
   });
 
+  // Claude's Remote Control indicator on its own row under the footer, below the update banner, in the geometry of a
+  // Claude 2.1.330 seat whose sends held as draft_input_unknown: 80x24, the indicator right-aligned in Claude's error
+  // pink, the cursor on the prompt. The rows above the box are synthetic. The labels are Claude's own.
+  describe("under Claude's Remote Control indicator", () => {
+    const pink = (label: string) => label.split(" ").map(word => `\x1b[38;5;211m${word}\x1b[39m`).join(" ");
+    const right = (label: string, drawn = label) => `${" ".repeat(78 - label.length)}${drawn}`;
+    const remoteControl = (body = "", indicator = "/rc failed", drawn = pink(indicator), modeBar = "  ⏵⏵ bypass permissions on · 1 shell · ↓ to manage"): ComposerSnapshot => {
+      const rows = body.split("\n");
+      const lead = 18 - rows.length;
+      return { screen: [...Array<string>(lead).fill(""), `${"─".repeat(64)} worker@rig ─`, body ? `❯ ${rows[0]}` : "❯\xa0",
+        ...rows.slice(1).map(row => `  ${row}`), "─".repeat(80), modeBar, right("✔ Update installed · /restart to apply"), right(indicator, drawn), "", ""].join("\n"),
+      cursor: { x: 2 + rows.at(-1)!.length, y: lead + rows.length, width: 80, height: 24 }, inMode: false };
+    };
+
+    it.each(["/rc failed", "/rc connecting…", "/rc active", "/rc reconnecting", "/rc"])("reads an empty prompt and a draft above %j", indicator => {
+      expect(inspectComposerInput(remoteControl("", indicator), "claude-code")).toMatchObject({ state: "empty", frame: JSON.stringify(["❯", 2, 80, "claude-composer"]) });
+      expect(inspectComposerInput(remoteControl("preserve this draft", indicator), "claude-code")).toMatchObject({ state: "text", rows: ["preserve this draft"], cursorAtEnd: true });
+    });
+
+    it("keeps a draft that quotes the footer and the indicator as its exact text", () => {
+      const body = "⏵⏵ bypass permissions on · 1 shell · ↓ to manage\n/rc failed";
+      expect(inspectComposerInput(remoteControl(body), "claude-code")).toMatchObject({ state: "text", rows: body.split("\n") });
+    });
+
+    it.each(["/rc failed · Enter to view", "/rc failed now", "rc failed", "/rc Failed", "/rc  failed", "/rcfailed", "/rc connecting...", "/rc disconnected", "/rc failed…"])(
+      "keeps a near miss %j unknown", indicator => {
+        expect(inspectComposerInput(remoteControl("", indicator), "claude-code")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+      });
+
+    it.each(["/rc failed", "/rc"])("keeps %j drawn selected (inverse) unknown: Enter there opens its panel", indicator => {
+      for (const body of ["", "preserve this draft"]) {
+        expect(inspectComposerInput(remoteControl(body, indicator, `\x1b[7m${indicator}\x1b[27m`), "claude-code")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+      }
+    });
+
+    it.each(["", "UNRECOGNIZED-FOOTER"])("does not skip the indicator without the mode footer above it (%j)", modeBar => {
+      expect(inspectComposerInput(remoteControl("", "/rc failed", undefined, modeBar), "claude-code")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+    });
+  });
+
   it.each([
     "✘ Auto-update failed · Run claude doctor",
     "✘ Auto-update failed: no write permission to npm prefix · Run claude doctor",
@@ -308,5 +348,23 @@ describe("cursor-bound composer input", () => {
     expect(ownCollapsedPaste(opaque, "one\ntwo")).toBeNull();
     expect(composerContainsOwnedText(opaque, "one\ntwo\nthree")).toBe(false);
     expect(ownCollapsedPaste(inspectComposerInput(claude("[Pasted text #4 +2 lines] foreign")), "one\ntwo\nthree")).toBeNull();
+  });
+
+  it("does not own a count-less label drawn beside the expected head unless the text spells it out (#2429)", () => {
+    const head = `reminder: ${"x".repeat(24)}`;
+    const quoting = `see [Pasted text #2] in ${head}`;
+    const matched = (drawn: string) => ({ ...inspectComposerInput(claude(drawn.replace("\n", ""))), collapsedPaste: drawn, pasteMatchesExpected: true });
+    // The base reads are the ones the transport would trust: text with the cursor at its end.
+    for (const drawn of [`[Pasted text #2] ${head}`, `[Pasted text #2] ${quoting}`]) expect(matched(drawn)).toMatchObject({ state: "text", cursorAtEnd: true });
+    expect(ownCollapsedPaste(matched(`[Pasted text #2] ${head}`), head)).toBeNull();
+    expect(ownCollapsedPaste(matched(`${head} [Pasted text #2]`), head)).toBeNull();
+    // A wrap may split the label.
+    expect(ownCollapsedPaste(matched(`[Pasted te\nxt #2] ${head}`), head)).toBeNull();
+    // A label our own text spells out is ours, but only as many times as it does.
+    expect(ownCollapsedPaste(matched(quoting), quoting)).toBe(quoting);
+    expect(ownCollapsedPaste(matched(`[Pasted text #2] ${quoting}`), quoting)).toBeNull();
+    // The bare label is still read by its count, and a counted label keeps the transport's identity check.
+    expect(ownCollapsedPaste(inspectComposerInput(claude("[Pasted text #1]")), `reminder: ${"x".repeat(1190)}`)).toBe("[Pasted text #1]");
+    expect(ownCollapsedPaste(matched(`[Pasted text #2 +3 lines] ${head}`), head)).toBe(`[Pasted text #2 +3 lines] ${head}`);
   });
 });

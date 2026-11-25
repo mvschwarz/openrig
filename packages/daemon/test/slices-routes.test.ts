@@ -129,7 +129,7 @@ import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { missionControlActionsSchema } from "../src/db/migrations/037_mission_control_actions.js";
-import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
+import { SliceIndexer, type QueueCountRow } from "../src/domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../src/domain/slices/slice-detail-projector.js";
 import { slicesRoutes } from "../src/routes/slices.js";
 import * as slicesRoutesModule from "../src/routes/slices.js";
@@ -227,6 +227,25 @@ describe("PL-slice-story-view-v0 slices routes", () => {
   });
 
   describe("GET /api/slices (list)", () => {
+    it("exposes child missions on their indexed parent slice", async () => {
+      writeSlice(slicesRoot, "parent", { "SPEC.md": "---\nid: M.1\n---\n# Parent\n" });
+      writeSlice(slicesRoot, "parent/slices/01-work", { "SPEC.md": "---\nid: M.1.1\nstatus: active\n---\n# Work\n" });
+      writeSlice(slicesRoot, "child", { "SPEC.md": "---\nid: M.2\n---\n# Child\n", "mission.yaml": "metadata:\n  parent: M.1.1\n" });
+      const res = await app.request("/api/slices?filter=all");
+      const body = await res.json() as { slices: Array<{ name: string; childMissions: Array<{ id: string }> }> };
+      expect(body.slices.find((slice) => slice.name === "01-work")?.childMissions).toMatchObject([{ id: "M.2" }]);
+    });
+    it("reports scan gaps alongside partial child missions", async () => {
+      writeSlice(slicesRoot, "parent", { "SPEC.md": "---\nid: M.1\n---\n" });
+      writeSlice(slicesRoot, "parent/slices/01-work", { "SPEC.md": "---\nid: M.1.1\nstatus: active\n---\n" });
+      writeSlice(slicesRoot, "child", { "SPEC.md": "---\nid: M.2\nparent: M.1.1\n---\n" });
+      writeSlice(slicesRoot, "broken", { "SPEC.md": "---\nid: [bad\n---\n" });
+      const res = await app.request("/api/slices?filter=all");
+      expect(res.status).toBe(200);
+      const body = await res.json() as { parentWarnings: string[]; slices: Array<{ name: string; childMissions: Array<{ id: string }> }> };
+      expect(body.parentWarnings.join(" ")).toContain("broken");
+      expect(body.slices.find((slice) => slice.name === "01-work")?.childMissions).toMatchObject([{ id: "M.2" }]);
+    });
     it("returns 503 with config-hint when slicesRoot is not configured", async () => {
       const emptyIndexer = new SliceIndexer({ slicesRoot: "", dogfoodEvidenceRoot: null, db });
       const emptyProjector = new SliceDetailProjector({ db, indexer: emptyIndexer });
@@ -1749,6 +1768,49 @@ describe("GET /api/slices observed queue counts", () => {
     expect((await list(app, "?filter=done")).map((s) => s.name)).toEqual(["delivered"]);
     expect((await list(app, "?filter=active")).map((s) => s.name)).toEqual(["live"]);
     expect((await list(app, "?filter=closed")).map((s) => s.name).sort()).toEqual(["deferred", "superseded"]);
+  });
+
+  it("on a WAL file, reads the count rows before the batch, off the main handle, with the same counts", async () => {
+    db.close();
+    db = createDb(path.join(root, "openrig.sqlite"));
+    migrate(db, ALL_MIGRATIONS);
+    addSlice("alpha", "shipping", "shared");
+    const states = ["pending", "in-progress", "done", "blocked", "failed", "denied", "canceled", "handed-off"];
+    for (const state of states) row("selected-" + state, state, ["project:alpha", "mission:shipping", "slice:shared"]);
+    row("other-project", "failed", ["project:beta", "mission:shipping", "slice:shared"]);
+    // Several windows' worth of rows the count doesn't take.
+    for (let i = 0; i < 600; i++) row(`noise-${i}`, "done", null, "x".repeat(200));
+    const sql: string[] = [];
+    const original = db.prepare;
+    (db as unknown as { prepare: (s: string) => unknown }).prepare = (s: string) => { sql.push(s); return original.call(db, s); };
+    let entries: Entry[];
+    try { entries = await list(route("alpha").app); } finally { (db as unknown as { prepare: typeof original }).prepare = original; }
+    expect(entries[0]!.queueCounts).toEqual({ pending: 1, "in-progress": 1, done: 1, blocked: 1, failed: 1, denied: 1, canceled: 1, "handed-off": 1 });
+    expect(sql.filter((statement) => statement.startsWith("SELECT state, tags FROM queue_items"))).toEqual([]);
+  });
+
+  it("counts the prefetched rows in chunks the event loop runs between, with the statement's counts", async () => {
+    db.close();
+    db = createDb(path.join(root, "openrig.sqlite"));
+    migrate(db, ALL_MIGRATIONS);
+    addSlice("alpha", "shipping", "shared");
+    addSlice("alpha", "shipping", "other");
+    const states = ["pending", "in-progress", "done", "blocked", "failed", "denied", "canceled", "handed-off"];
+    for (let i = 0; i < 400; i++) row(`tagged-${i}`, states[i % 8]!, ["project:alpha", "mission:shipping", `slice:${i % 3 ? "shared" : "other"}`]);
+    const { indexer } = route("alpha", true);
+    const entries = indexer.list();
+    const statement = indexer.observedQueueCounts(entries);
+    let countRow: ((row: QueueCountRow) => void) | undefined;
+    const deferred = indexer.observedQueueCounts(entries, undefined, { deferRows: (count) => { countRow = count; } });
+    const rows = await indexer.readQueueCountRowsCooperatively();
+    let turns = 0, stopped = false;
+    const spin = () => { if (stopped) return; turns++; setImmediate(spin); };
+    setImmediate(spin);
+    await indexer.countQueueRowsCooperatively(rows!, countRow!, 0);
+    stopped = true;
+    expect(turns).toBeGreaterThan(1);
+    expect([...deferred]).toEqual([...statement]);
+    expect([...statement.values()].some((counts) => (counts?.done ?? 0) > 0)).toBe(true);
   });
 
   it.each([false, true])("counts all eight states only in the exact project/mission (explicit projectId=%s)", async explicit => {

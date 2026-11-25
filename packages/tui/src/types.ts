@@ -12,6 +12,7 @@ export interface AgentRow {
   nodeId?: string;
   name: string;
   runtime: string;
+  configuredAccount?: string | null;
   /** effective served model; separate from runtime, null when not served */
   model?: string | null;
   /** Configured launch effort: the seat's explicit choice, else the authored value.

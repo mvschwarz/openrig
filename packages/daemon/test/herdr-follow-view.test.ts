@@ -12,6 +12,7 @@ import { inspectComposerInput } from "../src/domain/session-transport.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { codexTwoRowComposer } from "./fixtures/codex-two-row-composer.js";
 import { tileAttachArgv078, tileAttachArgv079, tileAttachArgv0710 } from "../src/domain/terminal/earlier-tile-attach.js";
+import { pinnedTileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 
 const roots: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -26,7 +27,8 @@ export function task(seats: string[], complete = true): ComposedView {
 function fixture(platform: NodeJS.Platform = "linux", status = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "following-test-")); roots.push(root);
   const panes = new Map<string, ViewerPane & { argv: string[] }>();
-  const calls: string[][] = [], rpc: Array<{ method: string; params: unknown }> = [];
+  const calls: string[][] = [], rpc: Array<{ method: string; params: unknown }> = [], reports: Array<{ method: string; params: Record<string, unknown> }> = [];
+  let notAccepted = 0;
   const inputs = new Map<string, "empty" | "text" | "unknown">();
   const frames = new Map<string, ComposerSnapshot | null>();
   let transform = (view: ComposedView) => view;
@@ -34,6 +36,7 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
   let changedCreateCwd = false, stripReadyAt = 0;
   let lateFocus: { seat: string; reads: number } | undefined;
   let clock = 100, lostCreate = false, lostClose = false, readsFailed = false, hideViewers = false, failedViewerRun = false, failedProcessRead = false;
+  const failedGets = new Set<string>();
   const run = async (args: string[]) => {
     calls.push(args);
     const command = args.slice(0, 2).join(" ");
@@ -54,6 +57,7 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
     }
     if (command === "pane list") return JSON.stringify({ result: { panes: [...panes.values()].filter(p => !hideViewers || !p.cwd.includes("/viewers/")) } });
     if (command === "pane get") {
+      if (failedGets.has(args[2]!)) throw new Error("pane read failed");
       const selected = panes.get(args[2]!); if (!selected) throw new Error("missing pane");
       return JSON.stringify({ result: { pane: { ...selected, cwd: reportedCwd === null ? undefined : reportedCwd ?? selected.cwd } } });
     }
@@ -92,7 +96,14 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
       return inputs.get(target.seat) ?? "empty";
     },
     inspect: async argv => ({ sessionId: `$${argv[4]}`, nodeId: argv[4]! }),
+    sleep: async () => {},
     transport: { probe: async () => ({ alive: true, version: "0.9.5", protocol: 22 }), request: async (method, params) => {
+      // A tile's restart-command report is Herdr state, not focus: kept apart from the focus requests below.
+      if (method === "pane.report_agent" || method === "pane.report_agent_session") {
+        reports.push({ method, params });
+        if (method === "pane.report_agent_session" && notAccepted > 0) { notAccepted--; throw new Error("resume_not_accepted: resume_argv requires the reporter to hold the pane"); }
+        return {};
+      }
       rpc.push({ method, params });
       const id = (params as { pane_id: string }).pane_id;
       for (const selected of panes.values()) selected.focused = selected.pane_id === id;
@@ -105,7 +116,9 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
     return path.join(directory, readdirSync(directory).find(name => name.endsWith(".json"))!);
   };
   const exitViewer = (seat: string) => { [...panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!.argv = ["/bin/bash"]; };
-  return { root, follow, create, panes, calls, rpc, inputs, frames, exitViewer, journal,
+  return { root, follow, create, panes, calls, rpc, reports, inputs, frames, exitViewer, journal,
+    refuseResume: (times: number) => { notAccepted = times; },
+    setTransform: (next: (view: ComposedView) => ComposedView) => { transform = next; },
     reportCwd: (cwd: string | null) => { reportedCwd = cwd; },
     changeCreateCwd: () => { changedCreateCwd = true; },
     delayStrip: (ms: number) => { stripReadyAt = Date.now() + ms; },
@@ -114,6 +127,7 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
     confirmViewer: (seat: string) => { const entry = JSON.parse(readFileSync(journal(), "utf8")).entries[JSON.stringify(["self", seat])]; panes.get(entry.pane.pane_id)!.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`]; },
     hideViewers: () => { hideViewers = true; }, advance: (ms: number) => { clock += ms; },
     loseCreate: () => { lostCreate = true; }, loseClose: () => { lostClose = true; }, failReads: () => { readsFailed = true; },
+    failGet: (paneId: string) => { failedGets.add(paneId); },
     changeTarget: () => { transform = view => ({ ...view, opened: view.opened.map(target => target.seat === "a"
       ? { ...target, paneCommand: `${target.paneCommand} --changed`, attachArgv: [...target.attachArgv!.slice(0, 4), "replacement-a", ...target.attachArgv!.slice(5)] } : target) }); },
     focusAfterPlanning: (seat: string) => { lateFocus = { seat, reads: 0 }; },
@@ -219,10 +233,6 @@ describe("stable task-following workspace", () => {
     expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
     expect([strip.workspace_id, strip.pane_id, strip.terminal_id]).toEqual(identity);
     expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(1);
-    const effects = f.calls.filter(c => ["run", "split", "close"].includes(c[1]!)).length;
-    strip.terminal_id = "replacement-generation";
-    expect(await f.follow(["a", "b", "c"])).toMatchObject({ ok: false, code: "follow_unconfirmed" });
-    expect(f.calls.filter(c => ["run", "split", "close"].includes(c[1]!))).toHaveLength(effects);
   });
   it("resumes a join paused before attach dispatch through its existing journal without changing drafts or focus", async () => {
     const f = fixture(); await f.follow(); f.inputs.set("b", "text"); f.focusSeat("b");
@@ -467,6 +477,123 @@ describe("stable task-following workspace", () => {
 });
 
 
+describe("after a Herdr restart", () => {
+  // Herdr 0.9.5 restores a workspace's panes as bare shells in new terminals, or the panes are simply gone. Either way
+  // the canvas's strip isn't the one it recorded, and a re-follow must recover the view rather than keep the old one.
+  it.each(["gone", "restored as new terminals"] as const)("a canvas whose strip Herdr no longer has (%s) yields to a fresh workspace, and a later member joins it", async how => {
+    const f = fixture();
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+    const canvas = readdirSync(f.root)[0]!;
+    const before = readFileSync(path.join(f.root, canvas, "canvas.json"), "utf8");
+    if (how === "gone") f.panes.clear();
+    else for (const restored of f.panes.values()) { restored.terminal_id = `restarted-${restored.pane_id}`; restored.argv = ["/bin/bash"]; }
+
+    const recovered = await f.follow(["a", "b"]);
+    expect(recovered).toMatchObject({ ok: true, opened: ["a", "b"], following: { state: "following" } });
+    expect(recovered.following!.events[0]).toContain("Herdr no longer has the previous workspace");
+    expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(2);
+    // The old canvas is kept aside as it was, and nothing of the old workspace is closed.
+    const kept = readdirSync(f.root).filter(name => name.startsWith(`${canvas}.replaced-`));
+    expect(kept).toHaveLength(1);
+    expect(readFileSync(path.join(f.root, kept[0]!, "canvas.json"), "utf8")).toBe(before);
+    expect(f.calls.some(c => c[1] === "close")).toBe(false);
+    // A member who arrives later (a handoff) joins the new workspace.
+    expect(await f.follow(["a", "b", "c"])).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
+    expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(2);
+  });
+
+  it("a tile reports its own attach script as its restart command when it opens: held for a terminal seat, the runtime's session report for an agent", async () => {
+    const f = fixture();
+    // b runs Claude Code: its script carries Herdr's detection hint, and Herdr refuses its report twice before detecting it.
+    f.setTransform(view => ({ ...view, opened: view.opened.map(target => target.seat === "b" ? { ...target, runtime: "claude-code" } : target) }));
+    f.refuseResume(2);
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+    const tileOf = (seat: string) => [...f.panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!;
+    const scriptOf = (seat: string) => path.join(tileOf(seat).cwd, "attach.sh");
+    expect(f.reports.filter(r => r.params.pane_id === tileOf("a").pane_id)).toEqual([{ method: "pane.report_agent", params: {
+      pane_id: tileOf("a").pane_id, source: "openrig-tile", agent: "openrig-tile", state: "idle", seq: expect.any(Number), resume_argv: ["sh", scriptOf("a")] } }]);
+    expect(readFileSync(scriptOf("a"), "utf8")).not.toContain("HERDR_AGENT");
+    const session = { method: "pane.report_agent_session", params: { pane_id: tileOf("b").pane_id, source: "openrig", agent: "claude", resume_argv: ["sh", scriptOf("b")] } };
+    expect(f.reports.filter(r => r.params.pane_id === tileOf("b").pane_id)).toEqual([session, session, session]);
+    expect(readFileSync(scriptOf("b"), "utf8")).toMatch(/^exec env HERDR_AGENT=claude /);
+    // Reports aren't focus requests, and a tile that's already open isn't reported again.
+    expect(f.rpc).toEqual([]);
+    const count = f.reports.length;
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true });
+    expect(f.reports).toHaveLength(count);
+  });
+
+  const tileIn = (f: ReturnType<typeof fixture>, seat: string) => [...f.panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!;
+  const held = (f: ReturnType<typeof fixture>, seat: string) => ({ method: "pane.report_agent", params: { pane_id: tileIn(f, seat).pane_id,
+    source: "openrig-tile", agent: "openrig-tile", state: "idle", seq: expect.any(Number), resume_argv: ["sh", path.join(tileIn(f, seat).cwd, "attach.sh")] } });
+  const savedResume = (f: ReturnType<typeof fixture>) => (JSON.parse(readFileSync(path.join(f.root, readdirSync(f.root)[0]!, "canvas.json"), "utf8")) as
+    { tiles: Array<{ seat: string; resume?: boolean }> }).tiles.map(tile => [tile.seat, tile.resume ?? false]);
+
+  it("a join an interrupted follow left half-open reports its restart command once when it's resumed, so a Herdr restart re-binds it", async () => {
+    const f = fixture(); await f.follow(); let reads = 0;
+    // d's viewer pane is created and saved, then the follow stops before its attach is dispatched.
+    expect((await f.follow(["a", "b", "c", "d"], {}, true, async () => ++reads !== 4)).opened).toEqual(["a", "b", "c"]);
+    const count = f.reports.length;
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
+    // Only d is reported (a, b and c were reported when they opened), and its viewer was still created and run once.
+    expect(f.reports.slice(count)).toEqual([held(f, "d")]);
+    expect(savedResume(f)).toEqual([["a", true], ["b", true], ["c", true], ["d", true]]);
+    expect(f.calls.filter(c => c[1] === "split")).toHaveLength(4);
+    expect(f.calls.filter(c => c[1] === "run" && !c[3]?.includes("/usr/bin/tail"))).toHaveLength(4);
+    // Herdr restarts and restores every tile from its restart command: the workspace is re-bound, not replaced.
+    for (const restored of f.panes.values()) {
+      restored.terminal_id = `restarted-${restored.pane_id}`;
+      if (restored.argv[0] === "/usr/bin/tail") restored.argv = ["/bin/bash"];
+    }
+    const recovered = await f.follow(["a", "b", "c", "d"]);
+    expect(recovered).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"], workspaceId: "w1" });
+    expect(recovered.following!.events).toContain("Herdr restarted; this workspace and its tiles were found again and re-attached.");
+    expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(1);
+  });
+
+  it("a join confirmed by its lookup after a failed first inspection reports its restart command once", async () => {
+    const f = fixture(); f.failProcessRead();
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+    expect(f.reports).toEqual([held(f, "a"), held(f, "b")]);
+    expect(savedResume(f)).toEqual([["a", true], ["b", true]]);
+    expect(f.calls.filter(c => c[1] === "split")).toHaveLength(2);
+    expect(f.calls.filter(c => c[1] === "run" && !c[3]?.includes("/usr/bin/tail"))).toHaveLength(2);
+    const count = f.reports.length;
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true });
+    expect(f.reports).toHaveLength(count);
+  });
+
+  it("a workspace Herdr restores with every tile resumed is re-bound: one workspace, its strip restarted, and a later member joins it", async () => {
+    const f = fixture();
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+    // The restart: the same workspace and pane ids in new terminals; the strip a bare shell, each tile rerun from its
+    // restart command and attached to its seat again.
+    for (const restored of f.panes.values()) {
+      restored.terminal_id = `restarted-${restored.pane_id}`;
+      if (restored.argv[0] === "/usr/bin/tail") restored.argv = ["/bin/bash"];
+    }
+    const recovered = await f.follow(["a", "b"]);
+    expect(recovered).toMatchObject({ ok: true, opened: ["a", "b"], workspaceId: "w1", following: { state: "following" } });
+    expect(recovered.following!.events).toContain("Herdr restarted; this workspace and its tiles were found again and re-attached.");
+    expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(1);
+    expect(f.calls.filter(c => c[1] === "run" && c[3]?.includes("/usr/bin/tail"))).toHaveLength(2);
+    expect(readdirSync(f.root).some(name => name.includes(".replaced-"))).toBe(false);
+    expect(await f.follow(["a", "b", "c"])).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
+    expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(1);
+    expect(f.calls.some(c => c[1] === "close")).toBe(false);
+  });
+
+  it("a strip read that fails while Herdr still lists the strip keeps the previous view", async () => {
+    const f = fixture();
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true });
+    const strip = [...f.panes.values()].find(p => p.cwd.endsWith("/strip"))!;
+    f.failGet(strip.pane_id); const count = f.calls.length;
+    expect(await f.follow(["a", "b", "c"])).toMatchObject({ ok: false, opened: ["a", "b"], following: { state: "retained" } });
+    expect(f.calls.slice(count).some(c => ["create", "run", "split", "close"].includes(c[1]!))).toBe(false);
+    expect(readdirSync(f.root)).toHaveLength(1);
+  });
+});
+
 describe("slice follower policy", () => {
   it("defaults a new scoped workspace to four tiles, allows an override, and keeps qitem eight", async () => {
     const f = fixture();
@@ -599,6 +726,28 @@ describe("follow views kept from an earlier release", () => {
       expect(JSON.parse(readFileSync(canvasFile, "utf8")).tiles.map((t: { target: { paneCommand: string } }) => t.target.paneCommand))
         .toEqual(current.map(t => t.paneCommand));
     });
+
+  it("with Herdr's pinned tiles, a kept 0.7.10 sizing follow view is kept and names the explicit reopen step", async () => {
+    const f = fixture();
+    f.setTransform(view => ({ ...view, opened: view.opened.map(p => {
+      const attachArgv = pinnedTileAttachArgv(p.attachArgv![5]!, p.attachArgv!.slice(6), p.attachArgv![4]!);
+      return { ...p, attachArgv, paneCommand: attachArgv.map(quote).join(" ") };
+    }) }));
+    expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
+    const earlier = (seat: string) => tileAttachArgv0710("/usr/bin/tmux", ["-S", "/tmp/follow-seats.sock"], seat, false);
+    const canvasFile = path.join(path.dirname(path.dirname(f.journal())), "canvas.json");
+    const canvas = JSON.parse(readFileSync(canvasFile, "utf8"));
+    for (const tile of canvas.tiles) { tile.target.attachArgv = earlier(tile.seat); tile.target.paneCommand = tile.target.attachArgv.map(quote).join(" "); }
+    writeFileSync(canvasFile, JSON.stringify(canvas));
+    const journal = JSON.parse(readFileSync(f.journal(), "utf8"));
+    for (const [id, entry] of Object.entries<{ argv: string[]; command: string }>(journal.entries)) {
+      entry.argv = earlier(JSON.parse(id)[1]); entry.command = entry.argv.map(quote).join(" ");
+    }
+    writeFileSync(f.journal(), JSON.stringify(journal));
+    const before = f.calls.length;
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, following: { state: "retained" }, error: expect.stringContaining("Close only the owned Herdr viewer pane") });
+    expect(f.calls.slice(before).some(c => ["create", "split", "run", "close"].includes(c[1]!))).toBe(false);
+  });
 
   it("holds a kept follow view whose tile script only shares a tile script's opening, and leaves its saved tiles", async () => {
     const f = fixture(); expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });

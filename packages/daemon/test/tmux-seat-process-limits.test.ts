@@ -1,5 +1,6 @@
-// Seat process limits (#3253): a seat whose rig spec sets `process_limits.tasks_max` launches its pane command in a
-// transient `systemd-run --user --scope` of its own with TasksMax as its only limit, under the shared tmux server; the
+// Seat process limits (#3253): a seat whose rig spec sets `process_limits.tasks_max` and/or `memory_max` launches its pane
+// command in a transient `systemd-run --user --scope` of its own with TasksMax and/or MemoryMax as its only limits, under
+// the shared tmux server; the
 // other seats, the server and the daemon stay where they are. Without the option nothing changes. Where the limit can't
 // be applied, a fresh launch is not started and says why: `process_limits_unsupported` only for a positive inability,
 // `process_limits_unverified` (retryable, with a cached observation's age) when it is not known; a recovery (a
@@ -10,6 +11,7 @@
 // nothing here touches the host's systemd, cgroups or tmux.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TmuxAdapter, SEAT_SCOPE_SLICE, cgroupV2Path, noticeLine, restoreEnvArgv } from "../src/adapters/tmux.js";
+import { parseStoredProcessLimits } from "../src/domain/process-limits.js";
 
 type Plan = string[] | null;
 type Answer = string | Error;
@@ -26,7 +28,7 @@ const SERVER_CG = "0::/user.slice/user@1000.service/openrig-tmux-1234abcd.scope\
 /** The synthetic temp files (launch environment files and scope markers). */
 const SYNTHETIC = /^\/tmp\/synthetic-seat-env-\d+$/;
 
-function makeAdapter(opts: { limits?: Record<string, number | "invalid">; inherit?: boolean; probe?: Probe; noLaunchEnvironment?: boolean;
+function makeAdapter(opts: { limits?: Record<string, number | "invalid" | { tasksMax?: number; memoryMax?: number }>; inherit?: boolean; probe?: Probe; noLaunchEnvironment?: boolean;
   /** Executables missing from the daemon's PATH (the rest resolve under /usr/bin). */
   missing?: string[];
   /** Whether /run/user/<uid> exists. */
@@ -48,8 +50,12 @@ function makeAdapter(opts: { limits?: Record<string, number | "invalid">; inheri
   const exec = async (command: string) => {
     shellCalls.push(command);
     if (command.includes("openrig-seat-probe-")) {
-      // The probe prints its own pids.max: by default, the TasksMax it was given.
-      return answer(get("scope", `${/TasksMax=(\d+)/.exec(command)?.[1] ?? "max"}\n`));
+      // The probe prints its own pids.max: by default, the TasksMax it was given. With MemoryMax, one line per limit:
+      // its memory.max, then its pids.max when TasksMax was given too.
+      const memory = /MemoryMax=(\d+)/.exec(command)?.[1];
+      const tasks = /TasksMax=(\d+)/.exec(command)?.[1];
+      if (memory !== undefined) return answer(get("scope", `memory ${memory}\n${tasks !== undefined ? `pids ${tasks}\n` : ""}`));
+      return answer(get("scope", `${tasks ?? "max"}\n`));
     }
     if (command.includes("systemctl --user show")) return answer(get("bus", "255\n"));
     return "";
@@ -73,6 +79,9 @@ function makeAdapter(opts: { limits?: Record<string, number | "invalid">; inheri
   const files = { writeFile: async (_p: string, content: string) => { writes.push(content); }, unlink: async () => {},
     tmpName: () => `/tmp/synthetic-seat-env-${++n}`, bufferName: () => "unused" };
   const adapter = new TmuxAdapter(exec, files, argvExec);
+  // #3253: the calls pinned here are a daemon's that has already checked its server's bus once (on Linux, a daemon's
+  // first launch runs startServer first; tmux-server-systemd-scope.test.ts covers that).
+  (adapter as unknown as { sessionBusRestorePending: boolean }).sessionBusRestorePending = false;
   adapter.resolveExecutable = (name) => (opts.missing?.includes(name) ? null : `/usr/bin/${name}`);
   adapter.dirExists = () => opts.runDir === true;
   // By default a capped start is seen at once: its marker emptied (its command ran in the scope) and the pane's process
@@ -91,7 +100,7 @@ function makeAdapter(opts: { limits?: Record<string, number | "invalid">; inheri
     adapter.seatProcessLimits = (nodeId) => {
       const v = limits[nodeId];
       if (v === "invalid") throw new Error(`Seat ${nodeId} process_limits: stored value is not valid JSON`);
-      return v !== undefined ? { tasksMax: v } : undefined;
+      return v === undefined ? undefined : typeof v === "number" ? { tasksMax: v } : v;
     };
   }
   const plan = (env: Record<string, string>, command = "/bin/sh") =>
@@ -1018,6 +1027,222 @@ describe("a bare respawn that keeps the seat's limit (a restart in place of a se
   it("reads the cgroup v2 path only from the 0:: line", () => {
     expect(cgroupV2Path("0::/a/b.scope\n")).toBe("/a/b.scope");
     expect(cgroupV2Path("1:name=systemd:/x\n")).toBeNull();
+  });
+});
+
+describe("a seat with memory_max (alone or beside tasks_max)", () => {
+  const G = 1073741824;
+  const props = (plan: Plan) => {
+    const a = plan!;
+    const scope = a.slice(5, a.indexOf("--"));
+    return scope.flatMap((x, i, all) => (all[i - 1] === "-p" ? [x] : []));
+  };
+
+  it("only memory: MemoryMax in bytes is the seat scope's only limit, with no TasksMax", async () => {
+    const h = makeAdapter({ limits: { "node-a": { memoryMax: G } } });
+    expect(props(await h.plan(A))).toEqual(["OOMPolicy=continue", `MemoryMax=${G}`]);
+  });
+
+  it("both: one scope with TasksMax and MemoryMax, in that order", async () => {
+    const h = makeAdapter({ limits: { "node-a": { tasksMax: 256, memoryMax: G } } });
+    expect(props(await h.plan(A))).toEqual(["OOMPolicy=continue", "TasksMax=256", `MemoryMax=${G}`]);
+  });
+
+  it("proves once per pair of limits: a memory limit is never taken as proven by a scope that had only the task limit", async () => {
+    const limits: Record<string, { tasksMax?: number; memoryMax?: number }> = { "node-a": { tasksMax: 256 } };
+    const h = makeAdapter({ limits });
+    const probes = () => h.shellCalls.filter(c => c.includes("openrig-seat-probe-"));
+    await h.plan(A); await h.plan(A);
+    expect(probes()).toHaveLength(1);
+    limits["node-a"] = { tasksMax: 256, memoryMax: G };
+    await h.plan(A); await h.plan(A);
+    expect(probes()).toHaveLength(2);
+    expect(probes()[1]).toContain(`-p TasksMax=256 -p MemoryMax=${G} --`);
+    limits["node-a"] = { tasksMax: 256, memoryMax: 2 * G };
+    await h.plan(A);
+    expect(probes()).toHaveLength(3);
+  });
+
+  it("the memory probe reads memory.max (and pids.max only with tasks_max) with shell builtins only", async () => {
+    const memory = makeAdapter({ limits: { "node-a": { memoryMax: G } } });
+    await memory.plan(A);
+    const probe = memory.shellCalls.find(c => c.includes("openrig-seat-probe-"))!;
+    expect(probe).toContain("memory.max");
+    expect(probe).not.toContain("pids.max");
+    expect(probe).not.toMatch(/\$\(|\bsed\b|\bcat\b/);
+    const both = makeAdapter({ limits: { "node-a": { tasksMax: 1, memoryMax: G } } });
+    await both.plan(A);
+    const bothProbe = both.shellCalls.find(c => c.includes("openrig-seat-probe-"))!;
+    expect(bothProbe).toContain("memory.max");
+    expect(bothProbe).toContain("pids.max");
+    expect(bothProbe).not.toMatch(/\$\(|\bsed\b|\bcat\b/);
+  });
+
+  it("a seat with only memory_max doesn't judge the scope's pids.max", async () => {
+    const h = makeAdapter({ limits: { "node-a": { memoryMax: G } }, probe: { scope: `memory ${G}\npids max\n` } });
+    expect(await h.adapter.createSession("impl-a@demo", "/work", A)).toEqual({ ok: true });
+  });
+
+  it("a respawn with the seat's environment carries MemoryMax", async () => {
+    const h = makeAdapter({ limits: { "node-a": { memoryMax: G } } });
+    expect(await h.adapter.respawnPane("%1", "/bin/bash", { env: A })).toEqual({ ok: true });
+    const respawn = h.tmuxCalls("respawn-pane")[0]!;
+    expect(respawn).toContain(`MemoryMax=${G}`);
+    expect(respawn).not.toContain("TasksMax=");
+  });
+
+  const unsupported: Array<[string, Probe, RegExp, "memory_max" | "tasks_max", { tasksMax?: number; memoryMax?: number }]> = [
+    ["no memory.max (the memory controller is not delegated)", { scope: "memory nomemory\n" }, /memory controller is not delegated/, "memory_max", { memoryMax: G }],
+    ["memory.max reads max", { scope: "memory max\n" }, new RegExp(`memory\\.max "max" for MemoryMax=${G}: the memory limit is not enforced`), "memory_max", { memoryMax: G }],
+    ["systemd refuses MemoryMax=", { scope: fail(`Unknown assignment: MemoryMax=${G}`) }, /systemd refused MemoryMax=/, "memory_max", { memoryMax: G }],
+    ["both asked, the memory limit not enforced", { scope: "memory max\npids 256\n" }, /memory limit is not enforced/, "memory_max", { tasksMax: 256, memoryMax: G }],
+    ["both asked, the task limit not enforced", { scope: `memory ${G}\npids max\n` }, /pids limit is not enforced/, "tasks_max", { tasksMax: 256, memoryMax: G }],
+  ];
+  for (const [name, probe, reason, limit, requested] of unsupported) {
+    it(`unsupported, naming the limit, and the whole seat refused: ${name}`, async () => {
+      const r = await freshRefused(makeAdapter({ limits: { "node-a": requested }, probe }), "process_limits_unsupported");
+      expect(r.message).toMatch(reason);
+      expect(r).toMatchObject({ retryable: false, processLimits: { kind: "unsupported", limit, requested } });
+    });
+  }
+
+  it("a memory.max the probe can't read, or can't understand, is unverified", async () => {
+    for (const [scope, reason] of [["\n", /read no memory\.max/], ["memory lots\n", /memory\.max read could not be understood/]] as const) {
+      const r = await freshRefused(makeAdapter({ limits: { "node-a": { memoryMax: G } }, probe: { scope } }), "process_limits_unverified");
+      expect(r.message).toMatch(reason);
+      expect(r).toMatchObject({ retryable: true, processLimits: { kind: "unverified", requested: { memoryMax: G } } });
+    }
+  });
+
+  it("a probe ended by SIGKILL under memory_max (the limit's OOM kill or any other) says only what was seen, retryable", async () => {
+    const M = 1048576;
+    // Each wording names only what was reported: the signal alone (no exit code) or the exit status 137.
+    const killed = [
+      [Object.assign(new Error("Command failed"), { signal: "SIGKILL", code: null }), "was killed by SIGKILL \\(no exit code\\)"],
+      [Object.assign(new Error("Command failed"), { code: 137 }), "exited with status 137 \\(128 \\+ SIGKILL\\)"],
+    ] as const;
+    for (const [scope, seen] of killed) {
+      const h = makeAdapter({ limits: { "node-a": { memoryMax: M } }, probe: { scope } });
+      const r = await freshRefused(h, "process_limits_unverified");
+      expect(r.message).toMatch(new RegExp(`the probe command ${seen} under the requested ` +
+        `MemoryMax=${M}; the process and the cause aren't confirmed; a larger memory_max may help`));
+      if (scope.code === null) expect(r.message).not.toMatch(/137/);
+      else expect(r.message).not.toMatch(/no exit code/);
+      expect(r.processLimits?.reason ?? "").not.toMatch(/OOM|\/bin\/sh was killed|too small/);
+      expect(r).toMatchObject({ retryable: true, processLimits: { kind: "unverified", limit: "memory_max", requested: { memoryMax: M } } });
+    }
+    // A tasks-only probe killed the same way says nothing of a memory value: unverified, with no limit named.
+    const tasks = makeAdapter({ limits: { "node-a": 256 }, probe: { scope: killed[1][0] } });
+    const t = await freshRefused(tasks, "process_limits_unverified");
+    expect(t.processLimits).toMatchObject({ kind: "unverified" });
+    expect(t.processLimits).not.toHaveProperty("limit");
+  });
+
+  it("a memory_max probe that dies another way (not SIGKILL) is the plain unverified failure, with no OOM claim", async () => {
+    for (const scope of [Object.assign(new Error("Command failed"), { signal: "SIGTERM", code: null }),
+      Object.assign(new Error("Command failed"), { code: 143 }), fail("sh: 1: something broke", 2)]) {
+      const r = await freshRefused(makeAdapter({ limits: { "node-a": { memoryMax: G } }, probe: { scope } }), "process_limits_unverified");
+      expect(r.message).toMatch(/a throwaway seat scope failed/);
+      expect(r.message).not.toMatch(/OOM|SIGKILL|larger memory_max/);
+      expect(r).toMatchObject({ retryable: true, processLimits: { kind: "unverified", requested: { memoryMax: G } } });
+      expect(r.processLimits).not.toHaveProperty("limit");
+    }
+  });
+
+  it("a recovery without the scope goes on, its warning naming memory_max", async () => {
+    const h = makeAdapter({ limits: { "node-a": { memoryMax: G } }, probe: { scope: "memory nomemory\n" } });
+    expect(await h.adapter.seatProcessLimitsRecoveryPlan("node-a")).toMatchObject({ state: "not_applied", kind: "unsupported",
+      limit: "memory_max", requested: { memoryMax: G }, retryable: false });
+    const result = await h.adapter.respawnPane("%1", "/bin/bash", { env: A, processLimitsMode: "recovery" });
+    expect(result).toMatchObject({ ok: true, processLimits: { state: "not_applied", limit: "memory_max", requested: { memoryMax: G } } });
+    expect(h.tmuxCalls("respawn-pane")[0]).not.toContain("systemd-run");
+  });
+
+  it("a stored memory_max of 0 is that seat's invalid; another seat launches", async () => {
+    const h = makeAdapter();
+    h.adapter.seatProcessLimits = (nodeId) =>
+      parseStoredProcessLimits(nodeId === "node-a" ? '{"memory_max":0}' : null, `Seat ${nodeId} process_limits`);
+    const r = await freshRefused(h, "process_limits_invalid");
+    expect(r.message).toMatch(/process_limits\.memory_max/);
+  });
+
+  describe("readback", () => {
+    const SCOPE = "/user.slice/user-1000.slice/user@1000.service/openrigseats.slice/openrig-seat-impl-a_demo-1a2b3c4d.scope";
+    const reader = (files: Record<string, string>) => async (path: string) => {
+      if (!(path in files)) throw new Error(`ENOENT: ${path}`);
+      return files[path]!;
+    };
+    const memoryFiles = (memoryMax: string, events = "low 0\nhigh 0\nmax 4\noom 1\noom_kill 1\noom_group_kill 0\n") => ({
+      "/proc/4321/cgroup": `0::${SCOPE}\n`,
+      [`/sys/fs/cgroup${SCOPE}/memory.max`]: `${memoryMax}\n`,
+      [`/sys/fs/cgroup${SCOPE}/memory.current`]: "52428800\n",
+      [`/sys/fs/cgroup${SCOPE}/memory.events`]: events,
+    });
+    const pidsFiles = (pidsMax: string) => ({
+      [`/sys/fs/cgroup${SCOPE}/pids.max`]: `${pidsMax}\n`,
+      [`/sys/fs/cgroup${SCOPE}/pids.current`]: "37\n",
+      [`/sys/fs/cgroup${SCOPE}/pids.events`]: "max 2\n",
+    });
+
+    const OUTSIDE_M = { "/proc/4321/cgroup": "0::/user.slice/user@1000.service/openrig-tmux-1234abcd.scope\n" };
+
+    it("a failed memory probe makes only a memory request's status unsupported, not a tasks-only seat's; a host-wide one, both", async () => {
+      const h = makeAdapter({ limits: { "node-a": { memoryMax: G } }, probe: { scope: "memory nomemory\n" } });
+      await h.adapter.createSession("impl-a@demo", "/work", A);
+      h.adapter.procRead = reader(OUTSIDE_M);
+      expect(await h.adapter.readSeatProcessLimits("impl-a@demo", { memoryMax: G }))
+        .toMatchObject({ state: "unsupported", reason: expect.stringMatching(/memory controller is not delegated.*observed \d+s ago/) });
+      expect(await h.adapter.readSeatProcessLimits("impl-a@demo", { tasksMax: 256 })).toMatchObject({ state: "not_applied" });
+      const noPids = makeAdapter({ limits: { "node-a": 256 }, probe: { scope: "max\n" } });
+      await noPids.adapter.createSession("impl-a@demo", "/work", A);
+      noPids.adapter.procRead = reader(OUTSIDE_M);
+      expect(await noPids.adapter.readSeatProcessLimits("impl-a@demo", { memoryMax: G })).toMatchObject({ state: "not_applied" });
+      // a host-wide inability seen on a tasks-only launch (no user manager) is about every limit
+      const noBus = makeAdapter({ limits: { "node-a": 256 }, probe: { bus: fail("Failed to connect to bus: No such file or directory") } });
+      await noBus.adapter.createSession("impl-a@demo", "/work", A);
+      noBus.adapter.procRead = reader(OUTSIDE_M);
+      expect(await noBus.adapter.readSeatProcessLimits("impl-a@demo", { memoryMax: G }))
+        .toMatchObject({ state: "unsupported", reason: expect.stringMatching(/no systemd user manager is running.*observed \d+s ago/) });
+    });
+
+    it("applied: memory.max is the limit; the limit hits and the OOM kills are counted apart, and pids aren't read", async () => {
+      const h = makeAdapter({ limits: { "node-a": { memoryMax: G } } });
+      h.adapter.procRead = reader(memoryFiles(String(G)));
+      expect(await h.adapter.readSeatProcessLimits("impl-a@demo", { memoryMax: G })).toEqual({
+        state: "applied", requested: { memoryMax: G }, scope: "openrig-seat-impl-a_demo-1a2b3c4d.scope",
+        memoryMax: String(G), memoryCurrent: 52428800, memoryLimitHits: 4, oomKills: 1,
+      });
+    });
+
+    it("both: applied only when each reads its value; a memory.max of max is not applied, the reason naming it", async () => {
+      const h = makeAdapter({ limits: { "node-a": { tasksMax: 256, memoryMax: G } } });
+      h.adapter.procRead = reader({ ...memoryFiles(String(G)), ...pidsFiles("256") });
+      expect(await h.adapter.readSeatProcessLimits("impl-a@demo", { tasksMax: 256, memoryMax: G })).toEqual({
+        state: "applied", requested: { tasksMax: 256, memoryMax: G }, scope: "openrig-seat-impl-a_demo-1a2b3c4d.scope",
+        pidsMax: "256", pidsCurrent: 37, limitHits: 2, memoryMax: String(G), memoryCurrent: 52428800, memoryLimitHits: 4, oomKills: 1,
+      });
+      h.adapter.procRead = reader({ ...memoryFiles("max"), ...pidsFiles("256") });
+      const report = await h.adapter.readSeatProcessLimits("impl-a@demo", { tasksMax: 256, memoryMax: G });
+      expect(report).toMatchObject({ state: "not_applied", pidsMax: "256", memoryMax: "max" });
+      expect(report.reason).toBe(`memory.max is max, not ${G}; the limit applies at its next fresh launch`);
+    });
+
+    it("unknown: an unreadable memory.events", async () => {
+      const h = makeAdapter({ limits: { "node-a": { memoryMax: G } } });
+      const { [`/sys/fs/cgroup${SCOPE}/memory.events`]: _events, ...files } = memoryFiles(String(G));
+      h.adapter.procRead = reader(files);
+      expect(await h.adapter.readSeatProcessLimits("impl-a@demo", { memoryMax: G })).toMatchObject({ state: "unknown" });
+    });
+
+    it("a bare respawn's keep plan keeps the scope only when both limits read back as applied", async () => {
+      const h = makeAdapter({ limits: { "node-a": { tasksMax: 256, memoryMax: G } } });
+      h.adapter.procRead = reader({ ...memoryFiles(String(G)), ...pidsFiles("256") });
+      expect(await h.adapter.seatProcessLimitsKeepPlan("node-a", "%1")).toEqual({ keep: true });
+      h.adapter.procRead = reader({ ...memoryFiles("max"), ...pidsFiles("256") });
+      expect(await h.adapter.seatProcessLimitsKeepPlan("node-a", "%1")).toMatchObject({ keep: false,
+        notice: { state: "not_applied", kind: "setup", requested: { tasksMax: 256, memoryMax: G },
+          reason: expect.stringMatching(/memory\.max is max/) } });
+    });
   });
 });
 

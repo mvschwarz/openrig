@@ -1,5 +1,9 @@
 import { hookBridgeRoutes } from "./routes/hook-bridge.js";
 import type { RunnerChannel } from "./domain/runner-channel.js";
+import { CoreAppJob } from "./domain/core-app-job.js";
+import { MissionControlActionLog } from "./domain/mission-control/mission-control-action-log.js";
+import { coreAppRoutes } from "./routes/core-app.js";
+import { CoreAppAccess } from "./domain/core-app-access.js";
 import { EnvironmentLifecycle } from "./domain/environment-lifecycle.js";
 import { EnvironmentPlatform, type EnvironmentDriver } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
@@ -138,6 +142,7 @@ import { healthRoutes } from "./routes/health.js";
 import { gatewayRoutes } from "./routes/gateway.js";
 import type { StreamStore } from "./domain/stream-store.js";
 import { createSlowOpRequestMiddleware, type SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
+import { createMutationTraceMiddleware, type MutationTraceSink } from "./domain/mutation-trace.js";
 import type { QueueRepository } from "./domain/queue-repository.js";
 import type { InboxHandler } from "./domain/inbox-handler.js";
 import type { OutboxHandler } from "./domain/outbox-handler.js";
@@ -175,6 +180,8 @@ export interface AppDeps {
   nodeLauncher: NodeLauncher;
   /** Seat-scoped explicit fresh launch composes the same startup owner as rig launch. */
   startupOrchestrator?: import("./domain/startup-orchestrator.js").StartupOrchestrator;
+  /** Arms a seat's continuity notice for the occupant a fresh launch just started (the restore path has its own copy of this dep). */
+  armSeatContinuity?: (rigId: string, nodeId: string) => Promise<string | null>;
   tmuxAdapter: TmuxAdapter;
   /** Shared process census used by startup observations and native lineage checks. */
   listProcesses?: import("./domain/native-process-lineage.js").NativeProcessLister;
@@ -229,6 +236,8 @@ export interface AppDeps {
   streamStore?: StreamStore;
   streamIntakeCoordinator?: import("./domain/stream-intake.js").StreamIntakeCoordinator;
   slowOpRecorder?: SlowOperationInstrumentation;
+  /** Edge trace of state-changing requests through the diagnostics path; absent = off. */
+  mutationTrace?: MutationTraceSink;
   requestPhaseObserver?: import("./domain/request-phase-observer.js").RequestPhaseObserver;
   queueRepo?: QueueRepository;
   /** S02 — the standing stuck sweep's observable heartbeat (ADDITIVE on healthz;
@@ -237,6 +246,9 @@ export interface AppDeps {
   /** S01 — the wake-or-escalate ladder's heartbeat + open-escalations count (ADDITIVE on
    *  healthz; absent = legacy body). Part of the operator rung's stated delivery floor. */
   wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
+  /** #3315 — whether the daemon reaches its tmux server(s), a separate axis from the daemon being up: healthz keeps
+   *  `status: "ok"` and adds `terminals` (ADDITIVE; absent = legacy body). */
+  terminalReachability?: import("./domain/terminal-server-reachability.js").TerminalServerReachability;
   inboxHandler?: InboxHandler;
   outboxHandler?: OutboxHandler;
   shadowCapture?: import("./domain/shadow-capture.js").ShadowCapture;
@@ -250,6 +262,8 @@ export interface AppDeps {
   watchdogHistoryLog?: WatchdogHistoryLog;
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
+  /** #2940: relaunches a keep_alive seat that falls while the daemon runs. Started after the listener binds; stopped first. */
+  keepAliveSupervisor?: import("./domain/keep-alive-supervisor.js").KeepAliveSupervisor;
   /** The outbound network connector (`rig network`); started after the listener binds. */
   networkConnector?: import("./domain/network/network-connector.js").NetworkConnectorService;
   /** B8 / slice-07 A3 — the model-divergence monitor (effective-vs-pinned, four-channel proclaim). */
@@ -585,6 +599,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("eventBus" as never, deps.eventBus);
     c.set("nodeLauncher" as never, deps.nodeLauncher);
     c.set("startupOrchestrator" as never, deps.startupOrchestrator);
+    c.set("armSeatContinuity" as never, deps.armSeatContinuity);
     c.set("tmuxAdapter" as never, deps.tmuxAdapter);
     c.set("listProcesses" as never, deps.listProcesses);
     c.set("tmuxOptionDefaults" as never, deps.tmuxOptionDefaults);
@@ -725,6 +740,12 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.slowOpRecorder?.recordRequest) {
     app.use("*", createSlowOpRequestMiddleware(deps.slowOpRecorder));
   }
+  // Mutation trace: same registration seam and isolation contract as the request-timing
+  // observer above — registered only when the trace is turned on (opt-in), and it rides
+  // the recorder's bounded diagnostics path rather than writing on the request thread.
+  if (deps.mutationTrace) {
+    app.use("*", createMutationTraceMiddleware(deps.mutationTrace));
+  }
 
   // Browser boundary: target name and browser Origin, checked once per /api request
   // (WebSocket upgrades included), before the remote read-through and every route.
@@ -789,8 +810,11 @@ export function createApp(deps: AppDeps): Hono {
     // S01 — the wake ladder's heartbeat is half of the operator rung's honest delivery
     // floor (escalation view + daemon-health); same additive contract.
     const wakeLadder = deps.wakeLadderStatus ? { wakeLadder: deps.wakeLadderStatus.snapshot() } : {};
+    // #3315 — the daemon answering (status "ok") is not its terminals answering: `terminals` says whether its tmux
+    // server is reachable, from memory, without calling tmux. ADDITIVE; absent = legacy body.
+    const terminals = deps.terminalReachability ? { terminals: deps.terminalReachability.snapshot() } : {};
     if (!monitor) {
-      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder });
+      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder, ...terminals });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
@@ -804,6 +828,7 @@ export function createApp(deps: AppDeps): Hono {
       ...bind,
       ...stuckSweep,
       ...wakeLadder,
+      ...terminals,
     });
   });
 
@@ -888,6 +913,10 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/views", viewsRoutes());
   app.route("/api/watchdog", watchdogRoutes());
   app.route("/api/workflow", workflowRoutes());
+  const coreAppAccess = deps.queueRepo ? new CoreAppAccess(deps.queueRepo.db, deps.queueRepo) : undefined;
+  app.route("/api/apps", coreAppRoutes({ access: coreAppAccess, operatorToken: deps.missionControlBearerToken,
+    job: coreAppAccess && deps.queueRepo && deps.missionControlWriteContract
+      ? new CoreAppJob(coreAppAccess, deps.queueRepo, deps.eventBus, deps.missionControlWriteContract, new MissionControlActionLog(deps.queueRepo.db)) : undefined }));
   app.route(
     "/api/mission-control",
     missionControlRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),

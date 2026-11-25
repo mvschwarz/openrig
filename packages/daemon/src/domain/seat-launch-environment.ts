@@ -2,9 +2,12 @@ import { ACCOUNT_HOME_PROVIDER_ENV, PI_ACCOUNT_HOME_PROVIDER_ENV, RUNTIME_HOME_V
 import { isLaunchWrapperRuntime, validateLaunchWrapper } from "./launch-wrapper.js";
 import { accessSync, closeSync, constants, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, statSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { getOpenRigHome } from "../openrig-compat.js";
+import type { CodexRigReachPaths } from "./codex-member-permissions.js";
 
 // Explicit public launch metadata, not a prefix/denylist over credential names.
 // Provider keys and OPENRIG_ACTIVITY_HOOK_TOKEN keep their non-typed channel.
@@ -31,20 +34,39 @@ export function publicSeatEnvironment(env: Readonly<Record<string, string | unde
   return result;
 }
 
-/** Locate the CLI paired with this daemon, never a PATH-first global install.
+/** Locate the CLI paired with this daemon, never a PATH-first global install: its package folder and rig file.
  * The first layout is the bundled CLI; the second is the workspace build.
  */
-function pairedCli(): string {
+function pairedCli(): { folder: string; rig: string } {
   for (const relative of ["../../../package.json", "../../../cli/package.json"]) {
     const manifest = path.resolve(import.meta.dirname, relative);
     try {
       const pkg = JSON.parse(readFileSync(manifest, "utf8"));
       if (pkg.name === "@openrig/cli" && typeof pkg.bin?.rig === "string") {
-        return path.resolve(path.dirname(manifest), pkg.bin.rig);
+        return { folder: path.dirname(manifest), rig: path.resolve(path.dirname(manifest), pkg.bin.rig) };
       }
     } catch { /* try the other supported layout */ }
   }
   throw new Error("Paired CLI unavailable");
+}
+
+/** The folders a seat's rig reads, for the Codex sandbox check (codexRigReach): the OpenRig home holding the seat's
+ * rig link, the paired CLI that link resolves to, and the node running this daemon. rig in the seat runs on the first
+ * node on the pane's PATH, which may be another one, so that node is a hint, never a definite gap. A folder that can't
+ * be found is left out. */
+export function seatRigReachPaths(env: Readonly<Record<string, string | undefined>> = {}): Omit<CodexRigReachPaths, "cwd"> {
+  const real = (find: () => string) => { try { return realpathSync(find()); } catch { return undefined; } };
+  const openrigHome = path.resolve(getOpenRigHome());
+  const rigEntry = real(() => pairedCli().rig);
+  return { openrigHome, rigInstall: real(() => pairedCli().folder), rigEntry,
+    rigAlias: rigEntry ? path.join(rigAliasDirectory(openrigHome, rigEntry), "rig") : undefined,
+    node: real(() => process.execPath), home: env.HOME ?? os.homedir(),
+    tmpdir: env.TMPDIR ?? process.env.TMPDIR ?? os.tmpdir() };
+}
+
+/** The same alias path is inspected by the advisory and created by the actual launch. */
+function rigAliasDirectory(home: string, cli: string, cwd = process.cwd()): string {
+  return path.resolve(cwd, home, "run", "seat-bin", createHash("sha256").update(cli).digest("hex"));
 }
 
 /** Pin npm Codex's interpreter as well as its entry file to the probe PATH.
@@ -88,6 +110,10 @@ export function resolveLaunchWrapperArgv(wrapper: readonly string[], searchPath:
  * Credentials stay in the inherited channel. An explicitly selected Codex home
  * is reasserted for Codex only; an unset selection retains the pane's defaults.
  */
+/** #3746: what a wrapped classic Claude launch prints when `claude` in the pane's shell is a function or alias, not a file. */
+export const WRAPPED_CLAUDE_LOOKUP_REFUSAL = (kind: "function" | "alias"): string =>
+  `OpenRig: claude is a shell ${kind} here, and a launch_wrapper needs claude to be an executable file; no agent started.`;
+
 export class SeatLaunchEnvironment {
   constructor(private readonly tmux: TmuxAdapter,
     private readonly sessionEnv: Readonly<Record<string, string | undefined>>,
@@ -106,12 +132,12 @@ export class SeatLaunchEnvironment {
   }
 
   private rigBin(): string {
-    const cli = realpathSync(this.cliPath ?? pairedCli());
+    const cli = realpathSync(this.cliPath ?? pairedCli().rig);
     accessSync(cli, constants.X_OK);
     if (!statSync(cli).isFile() || !this.sessionEnv.OPENRIG_HOME) throw new Error("Paired CLI or instance home unavailable");
     // Separate aliases for concurrent installed versions; never retarget another
     // daemon's link. Only rig is exposed, not the other tools in a shared bin.
-    const bin = path.resolve(this.daemonCwd, this.sessionEnv.OPENRIG_HOME, "run", "seat-bin", createHash("sha256").update(cli).digest("hex"));
+    const bin = rigAliasDirectory(this.sessionEnv.OPENRIG_HOME, cli, this.daemonCwd);
     mkdirSync(bin, { recursive: true });
     const link = path.join(bin, "rig");
     try { symlinkSync(cli, link); }
@@ -228,7 +254,13 @@ export class SeatLaunchEnvironment {
           ...(wrapped ? [`    */*) eval ${shellQuote(`claude() { exec ${prefix}"$_openrig_claude_executable" "$@"; }`)} ;;`]
             : ['    */*) eval \'claude() { exec "$_openrig_claude_executable" "$@"; }\' ;;']),
           '  esac',
-          ...(wrapped ? [...token, launch, 'else', "  printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false", 'fi']
+          // A launch_wrapper needs claude's executable file. A function or alias named claude may carry the person's settings,
+          // so it isn't looked past; the refusal names which it is, by the shape of `command -v`'s answer, never its text.
+          ...(wrapped ? [...token, launch, 'else', '  case "$_openrig_claude_executable" in',
+            `    'alias '*) printf '%s\\n' '${WRAPPED_CLAUDE_LOOKUP_REFUSAL("alias")}' >&2 ;;`,
+            "    */*|'') printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2 ;;",
+            `    *) printf '%s\\n' '${WRAPPED_CLAUDE_LOOKUP_REFUSAL("function")}' >&2 ;;`,
+            '  esac', '  false', 'fi']
             : ['fi', ...token, launch]),
         ].join("\n");
       }

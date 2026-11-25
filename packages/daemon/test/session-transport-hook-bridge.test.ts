@@ -139,6 +139,26 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     expect(result.warning).toMatch(/hook bridge isn't available .*delivered by typing instead/);
   });
 
+  // #3270 follow-up: a message sent after its seat's waiter expired is typed, and the expiry reached only the sender's
+  // warning. Its own delivery record, persisted, now says why it was typed; a send the bridge wasn't in the way of doesn't.
+  it("names the expiry on the delivery record of a message typed because its waiter expired", async () => {
+    const s = await seat({ withEvents: true });
+    const records = () => (s.db.prepare("SELECT payload FROM events WHERE type = 'transport.delivery_evidence' ORDER BY seq").all() as Array<{ payload: string }>)
+      .map((r) => JSON.parse(r.payload) as Record<string, unknown>);
+    await s.transport.send(s.sessionName, "From: peer@team\n---\nbefore opting in\n---", { actorSession: "peer@team" });
+    const { armId } = s.optInAndArm();
+    s.bridge.expired(s.nodeId, s.sessionName, armId);
+    const result = await s.transport.send(s.sessionName, "From: peer@team\n---\nfresh after expiry\n---", { actorSession: "peer@team" });
+    expect(s.writes).toEqual(["paste", "keys", "paste", "keys"]);
+    const reason = "its waiter expired at 2026-11-14T18:00:00.000Z and no turn has re-armed it";
+    expect(result.warning).toContain(reason);
+    const [before, fresh] = records();
+    expect(records()).toHaveLength(2);
+    expect(before).not.toHaveProperty("hookBridgeUnavailable");
+    expect(fresh).toMatchObject({ messageId: s.evidence[1]!.messageId, written: "submitted", hookBridgeUnavailable: reason });
+    expect(fresh!.wireSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it("lets the typing guard's hold decide first: held, not queued for the bridge", async () => {
     const s = await seat();
     s.optInAndArm();

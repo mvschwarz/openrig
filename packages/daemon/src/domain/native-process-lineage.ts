@@ -18,6 +18,8 @@ export interface NativeProcessRow {
   /** OS executable path, not argv[0], for otherwise unresolved Claude rows. */
   executablePath?: string;
   startedAt?: string;
+  /** The run state's letter, where it was read (Linux /proc); `Z` is a zombie. */
+  state?: string;
 }
 
 export type NativeRuntime = "claude-code" | "codex";
@@ -689,6 +691,9 @@ function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: 
   for (const row of rows) {
     const osExecutable = runtime === "claude-code" ? executableName(row.executableName ?? "") : row.executableName;
     if (row.pgid !== root.tpgid || row.tpgid !== root.tpgid) continue;
+    // A zombie (an exited child nobody reaped) can't take input or run anything, and its argv is gone. Only a state read
+    // as `Z` excludes it: an unread state is no evidence.
+    if (row.state === "Z") continue;
     if (runtime === "claude-code" ? !claudeRow(row) : osExecutable !== executable) continue;
     // OS-named Codex with unreadable argv still competes for the foreground.
     // A readable argv[0] naming a different executable is positive contrary evidence.
@@ -1003,6 +1008,13 @@ function idleShellRoot(rows: NativeProcessRow[], pid: number): NativeProcessRow 
     && !rows.some(row => row.pid !== pid && row.pgid === root.tpgid) ? root : null;
 }
 
+/** An idle shell's identity, for comparing two samples: the row without its run state, which changes as the shell
+ *  wakes and sleeps (S, R) while it stays the same process. */
+function shellFingerprint(root: NativeProcessRow): string {
+  const { state: _state, ...identity } = root;
+  return JSON.stringify(identity);
+}
+
 /** Whether the bound pane is a stable idle shell: in two samples the pane's own shell owns the foreground with
  * nothing else in its group, and it is the same shell both times. A missing, failed or changing listing is not idle:
  * a launch script still starting the runtime holds the foreground the same way a shell label would suggest. */
@@ -1018,7 +1030,7 @@ export async function verifyPaneIdleShell(input: {
       // Idle proof needs the complete table, but no executable-path or argv enrichment.
       const rows = await (input.listProcesses ?? (() => runAsyncSite("codex.runtime.list_processes", readProcessTable)))();
       const root = idleShellRoot(rows, pid);
-      return root ? JSON.stringify(root) : null;
+      return root ? shellFingerprint(root) : null;
     } catch { return null; }
   };
   const first = await sample();
@@ -1052,7 +1064,7 @@ export async function verifyPaneEmptyShell(input: {
           return census.rows;
         });
       const root = idleShellRoot(rows, pid);
-      return root && !rows.some(row => row.ppid === pid) ? JSON.stringify(root) : null;
+      return root && !rows.some(row => row.ppid === pid) ? shellFingerprint(root) : null;
     } catch { return null; }
   };
   const first = await sample();
@@ -1120,7 +1132,7 @@ export async function observeClaudeDelivery(
       if (other) return { state: "conflict", detail: "A different native runtime occupies the bound foreground", fingerprint: other.fingerprint };
       const root = idleShellRoot(rows, pid);
       if (root) {
-        return { state: "idle_shell", detail: "The bound foreground is an idle shell with no receiving child", fingerprint: JSON.stringify(root) };
+        return { state: "idle_shell", detail: "The bound foreground is an idle shell with no receiving child", fingerprint: shellFingerprint(root) };
       }
       return unknown;
     } catch { return unknown; }

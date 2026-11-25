@@ -1,5 +1,5 @@
 import { physicalSessionName } from "../session-registry.js";
-import { readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type Database from "better-sqlite3";
@@ -9,7 +9,7 @@ import type { HealthRecord } from "../health-projection.js";
 import type { RigModeStore } from "./rig-mode-store.js";
 import { missionModeQualifier, type OperatorContextReadContext, type OperatorContextScope } from "./rig-mode-types.js";
 import { validateModeName, validateRecord } from "./rig-mode-validator.js";
-import { inferCatalogProject, rigFromSession, selectCatalogProject, ProjectReadError } from "../workspace/project-catalog.js";
+import { inferCatalogProject, readCatalogAliases, readProjectCatalog, rigFromSession, selectCatalogProject, workspaceAliases, ProjectReadError } from "../workspace/project-catalog.js";
 import type { SettingsStore } from "../user-settings/settings-store.js";
 
 /** Production wiring for the catalogPath callback: an explicitly configured
@@ -66,11 +66,32 @@ function unknown(reason: string, context: OperatingContext | null = null): Opera
 
 /** One reader over existing mode bindings, queue/workflow identities, and authored work nodes.
  * Preferences never create authorization, rewrite phase, or modify health policy. */
+/** Maps a declared former project id to the project it names now, with the file that declares it; null for any other id. */
+type FormerIdLookup = (id: string) => { id: string; declaredIn: string } | null;
+
 export class OperatingPostureService {
   constructor(private readonly db: Database.Database, private readonly modes: RigModeStore,
     private readonly workspaceRoot: () => string,
     /** Configured workspace.catalog_path; <workspace>/workspace.yaml when unset. */
     private readonly catalogPath?: () => string | undefined) {}
+
+  /** The project a declared former id names now (#3261): the catalogued project that declares it, or, for a workspace
+   *  with its own project.yaml and no catalog, that project. Null for any other id. `declaredIn` is the file that says so. */
+  private formerIds(): FormerIdLookup {
+    const workspace = realpathSync(this.workspaceRoot());
+    const catalogPath = this.catalogPath?.() || join(workspace, "workspace.yaml");
+    if (existsSync(catalogPath)) {
+      const ids = new Set((readProjectCatalog(catalogPath) ?? []).map(entry => entry.id));
+      const aliases = readCatalogAliases(catalogPath);
+      return id => !ids.has(id) && aliases.has(id) ? { id: aliases.get(id)!, declaredIn: catalogPath } : null;
+    }
+    const manifestPath = join(workspace, "project.yaml");
+    const manifest = yamlFile(manifestPath, true);
+    const own = manifest?.metadata?.id ?? manifest?.metadata?.name ?? manifest?.project;
+    if (typeof own !== "string" || !own) return () => null;
+    const former = workspaceAliases(workspace, own);
+    return id => former.includes(id) ? { id: own, declaredIn: manifestPath } : null;
+  }
 
   context(input: OperatorContextReadContext): OperatingContext {
     const ctx: OperatingContext = { ...input, phase: { value: null, source: null }, sources: [] };
@@ -81,19 +102,41 @@ export class OperatingPostureService {
     };
     for (const value of Object.values(input)) if (value !== undefined && !value.trim()) throw new Error("empty scope identity");
     if (ctx.rigId) ctx.rigId = rigIdentity(ctx.rigId);
-    const merge = (key: keyof OperatorContextReadContext, value: unknown, source: string) => {
-      if (value === undefined || value === null) return;
-      if (typeof value !== "string" || !value.trim()) throw new Error("invalid " + key + " from " + source);
+    // Every project id is normalized before the consistency check: a current id and a row tagged with its declared former
+    // id name one project, and two different projects still conflict. The mapping stays in the sources.
+    let formerIds: FormerIdLookup | null | undefined;
+    const currentProject = (id: string): string => {
+      if (formerIds === undefined) { try { formerIds = this.formerIds(); } catch { formerIds = null; } }
+      const current = formerIds?.(id);
+      if (!current) return id;
+      const provenance = current.declaredIn + "#former-id=" + id;
+      if (!ctx.sources.includes(provenance)) ctx.sources.push(provenance);
+      return current.id;
+    };
+    if (ctx.projectId) ctx.projectId = currentProject(ctx.projectId);
+    const workstreamNames: Array<{ value: string; source: string }> = [];
+    const merge = (key: keyof OperatorContextReadContext, raw: unknown, source: string) => {
+      if (raw === undefined || raw === null) return;
+      if (typeof raw !== "string" || !raw.trim()) throw new Error("invalid " + key + " from " + source);
+      let value: string = raw;
       if (key === "rigId") value = rigIdentity(value);
+      if (key === "projectId") value = currentProject(value);
+      if (key === "workstreamId") {
+        // Spellings of a workstream (directory name, SPEC id) are compared once the slice resolves, not as strings.
+        workstreamNames.push({ value, source });
+        ctx.workstreamId ??= value; ctx.sources.push(source);
+        return;
+      }
       if (ctx[key] && ctx[key] !== value) throw new Error("conflicting " + key + " from " + source);
-      ctx[key] = value as string; ctx.sources.push(source);
+      ctx[key] = value; ctx.sources.push(source);
     };
     if (ctx.workstreamId?.includes("/")) {
       const parts = ctx.workstreamId.split("/");
       if (parts.length !== 3) throw new Error("use project/mission/slice-id workstream identity");
       merge("projectId", parts[0], "workstream qualifier"); merge("missionId", parts[1], "workstream qualifier");
-      ctx.workstreamId = parts[2];
+      ctx.workstreamId = parts[2] || undefined;
     }
+    if (ctx.workstreamId) workstreamNames.push({ value: ctx.workstreamId, source: "input" });
     let destination: string | null = null;
     if (ctx.qitemId) {
       const row = this.db.prepare("SELECT tags, destination_session FROM queue_items WHERE qitem_id = ?").get(ctx.qitemId) as { tags: string | null; destination_session: string } | undefined;
@@ -168,10 +211,17 @@ export class OperatingPostureService {
         if (!ctx.phase.value) ctx.phase = { value: phase, source: missionPath };
         ctx.sources.push(missionPath);
         if (ctx.workstreamId) {
-          requiredSegment(ctx.workstreamId, "workstream");
           const slices = inside(projectRoot, join(missionRoot, "slices"));
+          // Every spelling must name the same authored slice; a different slice is a conflict.
+          const nodes = new Map<string, string>();
+          for (const name of workstreamNames) {
+            requiredSegment(name.value, "workstream");
+            const named = resolveWorkNodeDirs(slices, name.value);
+            if (named.length !== 1) throw new Error("workstream must resolve to one authored slice");
+            if (!nodes.has(named[0]!.dir)) nodes.set(named[0]!.dir, name.source);
+          }
+          if (nodes.size > 1) throw new Error("conflicting workstreamId from " + [...nodes.values()].join(" and "));
           const matches = resolveWorkNodeDirs(slices, ctx.workstreamId);
-          if (matches.length !== 1) throw new Error("workstream must resolve to one authored slice");
           const specPath = join(inside(projectRoot, join(slices, matches[0]!.dir)), "SPEC.md");
           ctx.paths.workstream = dirname(specPath);
           const spec = readFileSync(specPath, "utf8");

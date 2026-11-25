@@ -86,6 +86,17 @@ describe("workflow-render (WF3 FR-2)", () => {
     expect(noBranch).not.toContain("branch:");
   });
 
+  it("a resume line shows the redrive owner and whether it was named or resolved", () => {
+    const resume = (ownerSource: string) => ({
+      stepId: "build", closedAt: "2026-07-06T21:09:00.000Z", closureReason: "resumed", actorSession: "orch@rig",
+      closureEvidence: { resume: { ownerSession: "builder-slot-2@rig", ownerSource } }, nextQitemId: "Q4", priorQitemId: "Q3",
+    });
+    const named = renderTraceTree(INSTANCE, [...TRAIL, resume("named")], NOW).join("\n");
+    expect(named).toContain("↻ build");
+    expect(named).toContain("↳ owner: builder-slot-2@rig (named)");
+    expect(renderTraceTree(INSTANCE, [...TRAIL, resume("resolved")], NOW).join("\n")).toContain("↳ owner: builder-slot-2@rig (resolved)");
+  });
+
   it("failed steps carry the ✖ glyph", () => {
     const lines = renderTraceTree(
       { ...INSTANCE, status: "failed", currentStepId: null },

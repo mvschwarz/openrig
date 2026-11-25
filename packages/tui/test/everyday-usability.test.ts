@@ -48,6 +48,17 @@ describe("registry-backed command completion", () => {
     expect(completeCommand("scroll d", ctx).line).toBe("scroll down");
     expect(completeCommand("style braille-", ctx).line).toBe("style braille-fallback");
   });
+  it.each([
+    ["  hel", "  help"],
+    ["  scroll  d", "  scroll  down"],
+    ["  :  sc", "  :  scopes"],
+  ])("completes %j with grammar-compatible whitespace", (input, expected) => {
+    const { snapshot, view } = fixture();
+    const ctx = { snapshot, state: view.get() };
+    expect(completeCommand(input, ctx).line).toBe(expected);
+    expect(parseCommand(expected, ctx.state.sections).type).not.toBe("error");
+  });
+
   it("offers only valid tabs and only workflows in the selected mission", () => {
     const { snapshot, view } = fixture();
     view.dispatch(parseCommand(":connections"));

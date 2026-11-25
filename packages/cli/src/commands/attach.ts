@@ -145,6 +145,8 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
 
       if (res.status >= 400) {
         console.error(res.data["error"] ?? `Attach failed (HTTP ${res.status})`);
+        console.error("Not joined. To keep the team's questions coming back to this conversation, hand the goal over with "
+          + "rig queue create --destination <seat> --return-route auto --summary \"<the goal>\" --body-file <file>");
         process.exitCode = 1;
         return;
       }

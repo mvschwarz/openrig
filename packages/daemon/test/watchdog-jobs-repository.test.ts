@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -110,6 +110,13 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
     const job = repo.register(validInput({ policy: "workflow-keepalive" }));
     expect(job.policy).toBe("workflow-keepalive");
     expect(job.state).toBe("active");
+  });
+
+  it("register accepts seat-pool, the job the daemon ensures for each pool model member", () => {
+    const job = repo.register(validInput({ policy: "seat-pool", targetSession: "dev-impl@pool-rig", registeredBySession: "daemon@kernel" }));
+    expect(job.policy).toBe("seat-pool");
+    expect(job.state).toBe("active");
+    expect(repo.getById(job.jobId)?.policy).toBe("seat-pool");
   });
 
   it("register rejects unknown policy with policy_unknown", () => {
@@ -548,5 +555,131 @@ describe("WatchdogJobsRepository — W2c exact-tuple auto-registration", () => {
         rows: [{ jobId: invalid.jobId, state: "paused" }],
       });
     }
+  });
+});
+
+// #3437 — stop-then-register left two nonterminal rows for an auto-registered tuple, and the next
+// daemon start threw auto_registration_ambiguous and exited.
+describe("WatchdogJobsRepository — duplicate auto-registration rows (#3437)", () => {
+  let db: Database.Database;
+  let repo: WatchdogJobsRepository;
+  let clock: number;
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    clock = Date.parse("2026-11-01T00:00:00.000Z");
+    repo = new WatchdogJobsRepository(db, () => new Date((clock += 1000)));
+  });
+  afterEach(() => db.close());
+
+  const job = (registeredBySession: string) => ({
+    policy: "parked-owner-consumer",
+    targetSession: "parked-owner-consumer@demo",
+    registeredBySession,
+    intervalSeconds: 120,
+    activeWakeIntervalSeconds: null,
+    scanIntervalSeconds: null,
+    specYaml: "policy: parked-owner-consumer\ntarget:\n  session: parked-owner-consumer@demo\ncontext:\n  rig: demo\n",
+  });
+  const nonterminal = () => repo.listAll().filter((row) => row.state !== "terminal");
+
+  it("register over a stopped auto-registered row replaces it, so the next start finds one row", () => {
+    const first = repo.ensureAutoRegistration(job("daemon@kernel"));
+    repo.stop(first.jobId);
+    const { job: again, replaced } = repo.registerReplacing(job("operator@demo"));
+    expect(replaced).toEqual([{ jobId: first.jobId, state: "stopped" }]);
+    expect(repo.getById(first.jobId)).toMatchObject({ state: "terminal", terminalReason: expect.stringContaining(again.jobId) });
+    expect(repo.ensureAutoRegistration(job("daemon@kernel")).jobId).toBe(again.jobId);
+    expect(nonterminal()).toHaveLength(1);
+  });
+
+  it("register leaves other policies' rows for the same target alone", () => {
+    const reminder = { ...job("operator@demo"), policy: "periodic-reminder", specYaml: "policy: periodic-reminder\n" };
+    const first = repo.register(reminder);
+    const { replaced } = repo.registerReplacing(reminder);
+    expect(replaced).toEqual([]);
+    expect(repo.getById(first.jobId)?.state).toBe("active");
+    expect(nonterminal()).toHaveLength(2);
+  });
+
+  it("startup keeps the newest stopped row, retires the rest, warns, and does not throw", () => {
+    const stoppedOld = repo.register(job("daemon@kernel"));
+    repo.stop(stoppedOld.jobId);
+    const stoppedNew = repo.register(job("operator@demo"));
+    repo.stop(stoppedNew.jobId);
+    const active = repo.register(job("operator@demo"));
+    const warnings: string[] = [];
+    const kept = repo.ensureAutoRegistrationResolvingDuplicates(job("daemon@kernel"), (m) => warnings.push(m));
+    expect(kept).toMatchObject({ jobId: stoppedNew.jobId, state: "stopped" });
+    expect(repo.getById(stoppedOld.jobId)?.state).toBe("terminal");
+    expect(repo.getById(active.jobId)?.state).toBe("terminal");
+    expect(nonterminal()).toHaveLength(1);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(stoppedNew.jobId);
+    expect(warnings[0]).toContain(stoppedOld.jobId);
+    expect(warnings[0]).toContain(active.jobId);
+    expect(warnings[0]).toContain("rig watchdog register");
+  });
+
+  it("startup keeps the newest row when none is stopped", () => {
+    const older = repo.register(job("daemon@kernel"));
+    const newer = repo.register(job("operator@demo"));
+    const warnings: string[] = [];
+    const kept = repo.ensureAutoRegistrationResolvingDuplicates(job("daemon@kernel"), (m) => warnings.push(m));
+    expect(kept).toMatchObject({ jobId: newer.jobId, state: "active" });
+    expect(repo.getById(older.jobId)?.state).toBe("terminal");
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("startup warns on a target with a row in an unknown state, leaves it, and still ensures the next target", () => {
+    const bad = repo.register(job("daemon@kernel"));
+    db.prepare("UPDATE watchdog_jobs SET state = 'paused' WHERE job_id = ?").run(bad.jobId);
+    const healthy = { ...job("daemon@kernel"), targetSession: "parked-owner-consumer@other" };
+    const warnings: string[] = [];
+    expect(repo.ensureAutoRegistrationAtStartup(job("daemon@kernel"), (m) => warnings.push(m))).toBeNull();
+    expect(repo.ensureAutoRegistrationAtStartup(healthy, (m) => warnings.push(m))).toMatchObject({
+      targetSession: "parked-owner-consumer@other",
+      state: "active",
+    });
+    expect(db.prepare("SELECT state FROM watchdog_jobs WHERE job_id = ?").get(bad.jobId)).toEqual({ state: "paused" });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("parked-owner-consumer/parked-owner-consumer@demo");
+    expect(warnings[0]).toContain("auto_registration_state_invalid");
+    expect(warnings[0]).toContain(bad.jobId);
+  });
+
+  it("startup failing after the duplicates were retired keeps the retirement and claims no unchanged state", () => {
+    const older = repo.register(job("daemon@kernel"));
+    const newer = repo.register(job("operator@demo"));
+    const original = repo.ensureAutoRegistration.bind(repo);
+    let calls = 0;
+    vi.spyOn(repo, "ensureAutoRegistration").mockImplementation((input, historical) => {
+      calls += 1;
+      if (calls === 2) throw new Error("second ensure failed");
+      return original(input, historical);
+    });
+    const warnings: string[] = [];
+    expect(repo.ensureAutoRegistrationAtStartup(job("daemon@kernel"), (m) => warnings.push(m))).toBeNull();
+    expect(calls).toBe(2);
+    expect(repo.getById(older.jobId)?.state).toBe("terminal");
+    expect(repo.getById(newer.jobId)?.state).toBe("active");
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toContain(`retired ${older.jobId}`);
+    expect(warnings[1]).toContain("could not finish ensuring parked-owner-consumer/parked-owner-consumer@demo and continued: second ensure failed");
+    expect(warnings[1]).not.toMatch(/as they are|unchanged/);
+  });
+
+  it("register does not replace idle-gate-qitem rows, whose key is the seat's alias set", () => {
+    const idle = { ...job("operator@demo"), policy: "idle-gate-qitem", specYaml: "policy: idle-gate-qitem\n" };
+    const first = repo.register(idle);
+    expect(repo.registerReplacing(idle).replaced).toEqual([]);
+    expect(repo.getById(first.jobId)?.state).toBe("active");
+  });
+
+  it("startup with one row does not warn", () => {
+    const first = repo.register(job("daemon@kernel"));
+    const warnings: string[] = [];
+    expect(repo.ensureAutoRegistrationResolvingDuplicates(job("daemon@kernel"), (m) => warnings.push(m)).jobId).toBe(first.jobId);
+    expect(warnings).toEqual([]);
   });
 });

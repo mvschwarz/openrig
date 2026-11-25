@@ -357,6 +357,42 @@ describe("rig seat set-model", () => {
   });
 });
 
+describe("rig seat set-statusline-throttle (#3416 item 3)", () => {
+  const seat = { logicalId: "dev.impl", rigName: "seat-rig" };
+
+  it("posts the seconds and reason to /api/seat/set-statusline-throttle/<seat> and prints the saved throttle", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, seat, from: null, to: 30, changed: true,
+      effect: "Saved: the seat's status line runs the context collector at most once every 30 s from its next launch, resume or restore." } }, calls);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-statusline-throttle", "dev-impl@seat-rig", "--seconds", "30", "--reason", "many seats"]);
+    });
+    expect(calls[0]!.path).toBe("/api/seat/set-statusline-throttle/dev-impl%40seat-rig");
+    expect(calls[0]!.body).toEqual({ seconds: 30, reason: "many seats" });
+    expect(exitCode).toBeUndefined();
+    expect(logs.join("\n")).toContain("Status line throttle for dev.impl@seat-rig: at most once every 30 s.");
+  });
+
+  it("--clear posts clear; a value that isn't whole digits goes to the daemon as invalid; one of the two is required", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, seat, from: 30, to: null, changed: true, effect: "Cleared." } }, calls);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-statusline-throttle", "dev.impl", "--clear", "--reason", "back"]);
+    });
+    expect(calls[0]!.body).toEqual({ clear: true, reason: "back" });
+    expect(logs.join("\n")).toContain("no throttle");
+    await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-statusline-throttle", "dev.impl", "--seconds", "3e1", "--reason", "x"]);
+    });
+    expect(calls[1]!.body).toEqual({ seconds: Number.NaN, reason: "x" }); // sent as JSON null, which the daemon refuses
+    const neither = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-statusline-throttle", "dev.impl", "--reason", "x"]);
+    });
+    expect(neither.exitCode).toBe(1);
+    expect(calls).toHaveLength(2);
+  });
+});
+
 describe("rig seat set-effort", () => {
   const seat = { logicalId: "dev.impl", rigName: "seat-rig" };
 
@@ -607,6 +643,8 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
       "Process limits: tasks_max 256: unknown (unverified: the scope start was not confirmed; this may be temporary); whether the restarted " +
       "seat runs under the limit can't be told, and nothing was run a second time.");
     expect(await restart(report("restarted_account_unverified"))).not.toContain("Process limits");
+    expect(await restart({ ...report("restarted_account_unverified"), processLimits: { ...notApplied, requested: { memoryMax: 1073741824 } } }))
+      .toContain("Process limits: memory_max 1G: requested, not applied; the restart went on without it (setup:");
   });
 
   it("requires a reason before contacting the daemon, and refuses --plan with --verify", async () => {

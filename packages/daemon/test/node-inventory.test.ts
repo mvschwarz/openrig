@@ -98,6 +98,23 @@ describe("Node Inventory Projection", () => {
     db.close();
   });
 
+  it("projects only a configured Claude account label, preserving unknowns", () => {
+    seedPodAwareRig(db);
+    const read = () => getNodeInventory(db, "rig-1");
+    expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBe("login");
+    db.prepare("UPDATE nodes SET account_home = ? WHERE id = ?").run("/private/account-home", "node-1");
+    expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBeNull();
+    expect(JSON.stringify(read())).not.toContain("/private/account-home");
+    expect(read().find((n) => n.nodeId === "node-2")?.configuredAccount).toBeNull();
+    db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?")
+      .run(JSON.stringify({ label: "team-1", tokenFile: "/private/token" }), "node-1");
+    expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBe("team-1");
+    expect(JSON.stringify(read())).not.toContain("/private/token");
+    expect(getNodeDetail(db, "rig-1", "dev.impl")?.configuredAccount).toBe("team-1");
+    db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?").run("invalid", "node-1");
+    expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBeNull();
+  });
+
   // Test 1: Inventory includes all nodes for a pod-aware rig
   it("includes all nodes for a pod-aware rig", () => {
     seedPodAwareRig(db);
@@ -109,6 +126,33 @@ describe("Node Inventory Projection", () => {
     expect(entries.find((e) => e.logicalId === "dev.impl")?.nodeId).toBe("node-1");
     expect(entries.map((e) => e.logicalId).sort()).toEqual(["dev.impl", "infra.server"]);
     expect(entries.every((e) => e.podNamespace === "dev")).toBe(true);
+  });
+
+  it("#2940: reports keepAlive only for a seat that declares it, in the list and the detail", () => {
+    seedPodAwareRig(db);
+    seedSession(db, "node-1", "dev-impl@test-rig");
+    db.prepare("UPDATE nodes SET keep_alive = 1 WHERE id = ?").run("node-1");
+    const entries = getNodeInventory(db, "rig-1");
+    expect(entries.find((e) => e.nodeId === "node-1")?.keepAlive).toBe(true);
+    expect("keepAlive" in entries.find((e) => e.nodeId === "node-2")!).toBe(false);
+    expect(getNodeDetail(db, "rig-1", "dev.impl")?.keepAlive).toBe(true);
+  });
+
+  it("#2940: an exhausted keep_alive incident asks for attention only until the seat is stopped", () => {
+    seedPodAwareRig(db);
+    seedSession(db, "node-1", "dev-impl@test-rig", { id: "sess-fell", status: "detached" });
+    db.prepare("UPDATE nodes SET keep_alive = 1 WHERE id = ?").run("node-1");
+    db.prepare(`INSERT INTO node_keep_alive_budget (node_id, incident_id, fallen_session_id, attempts, last_error, exhausted_at)
+      VALUES ('node-1', 'incident-1', 'sess-fell', 2, 'no harness', '2026-11-17 00:00:00')`).run();
+    const entry = () => getNodeInventory(db, "rig-1").find((e) => e.nodeId === "node-1")!;
+    expect(entry()).toMatchObject({ lifecycleState: "attention_required", keepAliveIncident: { attempts: 2, exhausted: true } });
+
+    // The person stops the seat; the supervisor hasn't ended the incident yet (or never will: an archived rig).
+    db.prepare("UPDATE sessions SET status = 'exited', intentionally_stopped = 1 WHERE id = 'sess-fell'").run();
+    db.prepare("DELETE FROM bindings WHERE node_id = 'node-1'").run();
+    expect(entry().lifecycleState).not.toBe("attention_required");
+    expect(entry().intentionallyStopped).toBe(true);
+    expect("keepAliveIncident" in entry()).toBe(false);
   });
 
   // Test 2: Inventory includes correct canonical session names

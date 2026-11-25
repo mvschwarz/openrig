@@ -846,30 +846,96 @@ describe("Up CLI", () => {
     }
   });
 
-  it("up apply uses a long-running daemon timeout budget", async () => {
-    let timeoutMs: number | undefined;
-    const post = vi.fn(async (_path: string, _body: unknown, options?: { timeoutMs?: number }) => {
-      timeoutMs = options?.timeoutMs;
-      return {
+  it.each([
+    { flags: [], timeoutMs: 120_000 },
+    { flags: ["--timeout", "900"], timeoutMs: 900_000 },
+    { flags: ["--plan", "--timeout", "600"], timeoutMs: 600_000 },
+  ])("up uses the requested daemon wait budget: $timeoutMs ms", async ({ flags, timeoutMs }) => {
+    const client = new DaemonClient(`http://127.0.0.1:${port}`);
+    const post = vi.spyOn(client, "post").mockResolvedValue({
         status: 201,
         data: { status: "completed", runId: "r", rigId: "g", stages: [], errors: [], warnings: [] },
-      };
     });
 
     const deps: StatusDeps = {
       lifecycleDeps: runningDeps(port).lifecycleDeps,
-      clientFactory: () => ({ post } as unknown as DaemonClient),
+      clientFactory: () => client,
     };
 
     const prog = new Command();
     prog.exitOverride();
     prog.addCommand(upCommand({ ...deps, preflightExec: healthyPreflightExec }));
 
-    await captureLogs(async () => {
-      await prog.parseAsync(["node", "rig", "up", "/tmp/rig.yaml"]);
-    });
+    await prog.parseAsync(["node", "rig", "up", "/tmp/rig.yaml", ...flags]);
 
-    expect(timeoutMs).toBe(120_000);
+    expect(post).toHaveBeenCalledExactlyOnceWith("/api/up", expect.any(Object), { timeoutMs });
+  });
+
+  it.each(["0", "-1", "NaN", "Infinity", "2147484", "1.5"])("rejects invalid --timeout %s before contacting a daemon", async (timeout) => {
+    const clientFactory = vi.fn(() => new DaemonClient(`http://127.0.0.1:${port}`));
+    const deps = { ...runningDeps(port), clientFactory };
+    const prog = new Command().exitOverride().addCommand(upCommand(deps));
+    const previousExitCode = process.exitCode;
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.exitCode = undefined;
+    try {
+      await prog.parseAsync(["node", "rig", "up", "restore-me", "--existing", "--timeout", timeout]);
+      expect(process.exitCode).toBe(1);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("--timeout"));
+      expect(clientFactory).not.toHaveBeenCalled();
+    } finally {
+      process.exitCode = previousExitCode;
+      error.mockRestore();
+    }
+  });
+
+  it.each([
+    { timeout: "5", expires: false },
+    { timeout: "1", expires: true },
+  ])("waits for the whole HTTP restore or reports an unknown outcome without retry: $timeout seconds", async ({ timeout, expires }) => {
+    let requests = 0;
+    let restoredSeats = 0;
+    let markComplete = () => {};
+    const completed = new Promise<void>(resolve => { markComplete = resolve; });
+    const daemon = http.createServer(async (req, res) => {
+      if (req.url !== "/api/up") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+        return;
+      }
+      requests++;
+      for await (const _chunk of req) { /* consume the one request */ }
+      for (let seat = 0; seat < 2; seat++) {
+        await new Promise(resolve => setTimeout(resolve, 750));
+        restoredSeats++;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "restored", rigId: "g", rigName: "restore-me", rigResult: "fully_restored", nodes: [], warnings: [] }));
+      markComplete();
+    });
+    await new Promise<void>(resolve => { daemon.listen(0, "127.0.0.1", resolve); });
+    try {
+      const address = daemon.address();
+      if (address === null || typeof address === "string") throw new Error("fixture daemon has no TCP port");
+      const program = new Command().addCommand(upCommand(runningDeps(address.port)));
+      const result = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "up", "restore-me", "--existing", "--timeout", timeout]);
+      });
+      await completed;
+      expect(requests).toBe(1);
+      expect(restoredSeats).toBe(2);
+      if (expires) {
+        expect(result.exitCode).toBe(1);
+        expect(result.logs.join("\n")).toContain("STILL BE IN PROGRESS");
+        expect(result.logs.join("\n")).toContain("Verify the actual state with: rig ps");
+      } else {
+        expect(result.exitCode).toBeUndefined();
+        expect(result.logs.join("\n")).toContain("fully_restored");
+      }
+    } finally {
+      daemon.closeAllConnections();
+      await new Promise<void>((resolve, reject) => { daemon.close(err => err ? reject(err) : resolve()); });
+    }
   });
 
   // NS-T14: fresh boot handoff includes dashboard URL + attach command

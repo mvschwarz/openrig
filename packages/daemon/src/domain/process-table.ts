@@ -18,6 +18,9 @@ export interface ProcessTableRow {
   command: string;
   /** Linux Codex's exact argv from this same /proc cmdline sample; null when unreadable or malformed. */
   argv?: string[] | null;
+  /** The run state's letter from the same /proc stat line (`Z` is a zombie, proc_pid_stat(5) field 3). Absent where it
+   *  wasn't read: `ps` on other platforms isn't asked for it. */
+  state?: string;
 }
 
 /** Permission-hidden Linux processes make absence unprovable, without changing the rows a listing exposes. */
@@ -270,6 +273,7 @@ function procRow(pid: string, stat: ProcFile, cmdlineFile: ProcFile | null, boot
     tpgid: Number(fields[5]),
     // The kernel may give a worker thread a longer name; ucomm is the task name's 15 bytes.
     executableName: printable(comm.slice(0, 15)),
+    state: fields[0],
     startedAt: lstart(bootTime + Math.floor(Number(fields[19]) / TICKS_PER_SECOND)),
     command,
     ...(name === "codex" ? { argv: typeof cmdlineFile === "string"

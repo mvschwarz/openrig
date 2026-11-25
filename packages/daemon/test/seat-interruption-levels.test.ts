@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
-import { SeatDeliveryGuard, type AdmissionInput, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { SeatDeliveryGuard, levelAdmits, type AdmissionInput, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
 
 function fixture() {
   const db = new Database(":memory:");
@@ -32,6 +32,7 @@ describe("the level table at the guard", () => {
     ["off", { openrig: "typed", agent: "typed", urgent: "typed" }],
     ["openrig-urgent", { openrig: "typed", agent: "held", urgent: "typed" }],
     ["urgent-only", { openrig: "held", agent: "held", urgent: "typed" }],
+    ["queue-only", { openrig: "held", agent: "typed", urgent: "typed" }],
     ["hold", { openrig: "held", agent: "held", urgent: "held" }],
   ] as const)("at %s: an OpenRig message, an agent's, and an agent's marked urgent", async (mode, expected) => {
     const f = fixture();
@@ -67,5 +68,32 @@ describe("the level table at the guard", () => {
     expect(row.desired).toBe(1); // a daemon without modes reads the legacy bit: hold
     // Lifecycle work at a middle level is refused, as at hold.
     await expect(f.guard.operation("agent", async () => "restarted")).rejects.toMatchObject({ code: "typing_guard_enabled" });
+    await expect(f.guard.lifecycle(["agent"], async () => "restarted")).rejects.toMatchObject({ code: "typing_guard_enabled" });
+  });
+});
+
+describe("the queue-only level (#3076)", () => {
+  it("never lets OpenRig's own notice type, urgent ones included; a deliberate send, urgent or not, types", async () => {
+    const f = fixture();
+    await f.guard.set("agent", { mode: "queue-only" }, "person", "I type in this terminal");
+    expect(await f.deliver("agent", { source: "openrig", urgent: true })).toBe("held");
+    expect(await f.deliver("agent", openrig)).toBe("held");
+    expect([await f.deliver("agent", agent), await f.deliver("agent", urgentAgent)]).toEqual(["typed", "typed"]);
+    expect(levelAdmits("queue-only", { source: "openrig", urgent: true })).toBe(false);
+    expect(levelAdmits("queue-only", { source: "agent", urgent: true })).toBe(true);
+  });
+
+  it("is stored with the coarse mode hold, so an older daemon holds everything there; a direct write is refused, while lifecycle work goes ahead", async () => {
+    const f = fixture();
+    expect(await f.guard.set("agent", { mode: "queue-only" }, "person", "focus"))
+      .toMatchObject({ desired: true, desiredMode: "hold", desiredLevel: "queue-only" });
+    const row = f.db.prepare("SELECT desired, desired_config FROM seat_delivery_guards WHERE node_id='agent'").get() as { desired: number; desired_config: string };
+    expect(JSON.parse(row.desired_config)).toMatchObject({ mode: "hold", level: "queue-only" });
+    expect(row.desired).toBe(1);
+    await expect(f.guard.operation("agent", async () => "restarted")).rejects.toMatchObject({ code: "typing_guard_enabled" });
+    expect(await f.guard.lifecycle(["agent"], async () => "restarted")).toBe("restarted");
+    expect(f.guard.queueOnly("agent")).toBe(true);
+    await f.guard.set("agent", { mode: "sends-only" }, "person", "back");
+    expect(f.guard.queueOnly("agent")).toBe(false);
   });
 });

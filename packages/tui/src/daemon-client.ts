@@ -511,8 +511,8 @@ export class DaemonClient {
 
   // --- drive-structure writes (BR-8: EXISTING contracts only; the ONLY two) ---
   /** the web's TerminalLauncher contract: POST /api/terminal/open {view} */
-  async terminalViews(): Promise<{ saved: Array<{ id: string; name: string; members: Array<{ seat: string }> }>; rigs: string[] }> {
-    return await this.get("/api/terminal/views") as { saved: Array<{ id: string; name: string; members: Array<{ seat: string }> }>; rigs: string[] };
+  async terminalViews(): Promise<{ saved: Array<{ id: string; name: string; members: Array<{ seat: string }> }>; rigs: string[]; rigIdentities?: Array<{ id: string; name: string }> }> {
+    return await this.get("/api/terminal/views") as { saved: Array<{ id: string; name: string; members: Array<{ seat: string }> }>; rigs: string[]; rigIdentities?: Array<{ id: string; name: string }> };
   }
   /** The preview behind "Open terminals". That action opens through `rig terminal open --window`, which composes with
    *  Rex's layout from inside Rex and otherwise Herdr's (falling back to plain tmux), or, from inside cmux, through

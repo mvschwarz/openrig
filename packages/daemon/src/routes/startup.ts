@@ -24,7 +24,7 @@ import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
 import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-eligibility.js";
 import { currentRestoreSnapshot } from "../domain/current-restore-snapshot.js";
-import { latestRuntimeHomeRecord, observeRuntimeHome, readRuntimeHomeState, selectedHomePlan, type RuntimeHomeRecordRef } from "../domain/seat-runtime-home-record.js";
+import { currentOriginal, latestRuntimeHomeRecord, observeRuntimeHome, readRuntimeHomeState, selectedHomePlan, type RuntimeHomeRecordRef } from "../domain/seat-runtime-home-record.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import { HISTORY_REF_RE, listSharedHistories } from "../domain/shared-history-selection.js";
 import { deriveCanonicalSessionName, deriveSessionName } from "../domain/session-name.js";
@@ -225,7 +225,9 @@ async function observeSeat(c: Context, rig: RigWithRelations, node: Node) {
       return { state: "attention_required", sessionName: name,
         detail: `The pane shows a shell that is not a proven idle shell; a launch script may still be starting ${node.runtime === "claude-code" ? "Claude" : "Codex"}.` };
     }
-    return { state: probe.status === "resumed" ? "running" : "attention_required", detail: probe.detail, sessionName: name };
+    // A shell that got here was proved idle above: no agent is present.
+    return { state: probe.status === "resumed" ? "running" : "attention_required", detail: probe.detail, sessionName: name,
+      ...(probe.code === "returned_to_shell" ? { idleShell: true as const } : {}) };
   } catch (error) {
     return { state: "unverified", detail: error instanceof Error ? error.message : String(error), sessionName: name };
   }
@@ -236,7 +238,18 @@ async function refreshNativeMetadata(c: Context, rigId: string) {
   if (refresher) await refresher.refresh(sessions(c).getLatestLiveSessions(rigId), { fillNullOnly: true });
 }
 
-startupRoutes.get("/prerequisites", async (c) => c.json(await defaultProbeRuntimes()));
+/** Plain reads share one in-flight probe; nothing is kept once it settles. Writes that act on the answer
+ *  (kernel setup, resume, the start choice) call `defaultProbeRuntimes` themselves for a probe of their own. */
+let readProbe: ReturnType<typeof defaultProbeRuntimes> | null = null;
+function probeRuntimesForRead(): ReturnType<typeof defaultProbeRuntimes> {
+  if (!readProbe) readProbe = defaultProbeRuntimes().finally(() => { readProbe = null; });
+  return readProbe;
+}
+
+/** Seats observed at once on a read, so a large rig doesn't fire a burst of tmux calls. */
+export const STARTUP_OBSERVE_CONCURRENCY = 4;
+
+startupRoutes.get("/prerequisites", async (c) => c.json(await probeRuntimesForRead()));
 startupRoutes.post("/terminal", (c) => exclusive(c, "terminal", async () => {
   const result = await tmux(c).startServer();
   return c.json(result, result.ok ? 200 : 409);
@@ -266,14 +279,22 @@ startupRoutes.get("/:rigId", async (c) => {
   if (!rig) return c.json({ ok: false, message: "Rig is no longer available." }, 404);
   const snapshot = currentSnapshot(c, rig);
   const plan = buildRestorePlanPreview(rig, snapshot, collectPreviewSessionRows(repo(c).db, rig, snapshot), undefined, Date.now(), readFreshOccupantRelations(repo(c).db, rig.rig.id));
-  const auth = await defaultProbeRuntimes();
+  const observations = new Array<Awaited<ReturnType<typeof observeSeat>>>(rig.nodes.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(STARTUP_OBSERVE_CONCURRENCY, rig.nodes.length) }, async () => {
+    while (next < rig.nodes.length) {
+      const i = next++;
+      observations[i] = await observeSeat(c, rig, rig.nodes[i]!);
+    }
+  });
+  const [auth] = await Promise.all([probeRuntimesForRead(), ...workers]);
   const history = sessions(c).getSessionsForRig(rig.rig.id);
   const seats = [];
-  for (const node of rig.nodes) {
+  for (const [i, node] of rig.nodes.entries()) {
     const forecast = plan.nodes.find((entry) => entry.logicalId === node.logicalId)!;
     const hasHistory = history.some((session) => session.nodeId === node.id);
     const available = node.runtime === "codex" ? auth.codex === "ok" : node.runtime === "claude-code" ? auth.claudeCode === "ok" : true;
-    const observed = await observeSeat(c, rig, node);
+    const observed = observations[i]!;
     seats.push({ ...forecast, hasHistory, nodeId: node.id, runtime: node.runtime, model: node.model,
       revision: startupRevision(repo(c).db, node), observed,
       contextPending: history.some((session) => session.nodeId === node.id && dep<import("../domain/startup-orchestrator.js").StartupOrchestrator>(c, "startupOrchestrator")?.canContinueStartup(node.id, session.id)),
@@ -324,6 +345,50 @@ function redactDiagnostic(value: string | null | undefined, tokens: readonly str
   return tokens.reduce((text, token) => text.replaceAll(token, "[redacted]"), value);
 }
 
+/** What the original-only preview reports about the seat's current conversation beside the banked one. */
+type CurrentConversation = { state: "same"; basis: "record" | "running_agent" }
+  | { state: "changed"; message: string; identityEvidence?: { code: string; detail: string } }
+  | { state: "unknown"; reason: string; identityEvidence?: { code: string; detail: string } };
+
+// Native conversation ids are UUIDs, and the reused resolver's reasons can name ids other than the banked one.
+const NATIVE_ID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const idFree = (text: string, banked: string) => (redactDiagnostic(text, [banked]) ?? text).replace(NATIVE_ID_RE, "[redacted]");
+
+/** For the original-only preview: whether the seat's current conversation is still the banked one. The selected history
+ *  row can keep its token while the seat has moved on, so it isn't enough by itself. The seat's record is read as its
+ *  runtime home's original is (the live occupant's row, or a stopped seat's newest row that a rolled-back launch didn't
+ *  leave), and a present agent, behind a gate or not, is compared by its proved native identity. Only another
+ *  conversation is `changed`; one that can't be established is `unknown`, reported, and never read as the banked one. */
+async function currentConversation(c: Context, rigName: string, node: Node, refs: HistoryRefs, snapshot: Snapshot,
+  observed: { state: string; sessionName: string; idleShell?: true }): Promise<CurrentConversation> {
+  const banked = snapshot.data.sessions.find(row => row.nodeId === node.id && row.id === refs.historySessionId)?.resumeToken ?? null;
+  const recorded = currentOriginal(repo(c).db, node.id);
+  if (recorded.original && recorded.original !== banked) return { state: "changed", message: recordChanged(rigName) };
+  // No agent is present in a stopped seat or a proved-idle shell: the record decides there.
+  if (observed.state === "stopped" || observed.idleShell) return recorded.original && recorded.original === banked
+    ? { state: "same", basis: "record" }
+    : { state: "unknown", reason: recorded.candidates
+      ? "This seat's record names more than one current session, so which conversation it holds isn't established."
+      : "This seat's record doesn't name a current conversation, so whether it's still the saved one isn't established." };
+  const unknownPresent = "An agent may be running in this seat, and its current conversation couldn't be established, so whether it's still the saved one isn't known.";
+  if ((node.runtime !== "claude-code" && node.runtime !== "codex") || !banked) return { state: "unknown", reason: unknownPresent };
+  try {
+    await resolveExpectedConversation({ nodeId: node.id, sessionName: observed.sessionName, runtime: node.runtime, nativeId: banked },
+      sessions(c), tmux(c), dep<ContextUsageStore | undefined>(c, "contextUsageStore"));
+    return { state: "same", basis: "running_agent" };
+  } catch (error) {
+    const code = (error as { code?: string }).code ?? "expected_identity_unavailable";
+    const identityEvidence = { code, detail: idFree(error instanceof Error ? error.message : String(error), banked) };
+    return code === "expected_identity_mismatch"
+      ? { state: "changed", identityEvidence, message: `This seat is running a different conversation from the saved one, or its occupant changed while it was read, so the saved conversation can't be resumed from here. Refresh the review; to save the current conversation, run rig snapshot ${rigName}.` }
+      : { state: "unknown", identityEvidence, reason: unknownPresent };
+  }
+}
+
+function recordChanged(rigName: string): string {
+  return `This seat's record changed since it was saved (most often a /clear, /resume or new conversation; also a changed resume type or restore policy), so the saved conversation can't be resumed from here. To save the current one, run rig snapshot ${rigName}; to start the seat blank, run rig seat launch <seat> --fresh --reason <why>.`;
+}
+
 // The list/validate contract supplies both references. This review adds the
 // consent revision for precisely one captured row, without native preparation.
 async function reviewSelectedHistory(c: Context, retained = false) {
@@ -341,12 +406,15 @@ async function reviewSelectedHistory(c: Context, retained = false) {
   if (!facts) return c.json({ ok: false, code: "selection_changed", message: "The selected source changed. Refresh the history list." }, 409);
   // The saved snapshot still stands, but the seat's own record no longer matches it, most often because a /clear,
   // /resume or new conversation recorded a different conversation; refreshing would show the same saved one again.
-  if (!state) return c.json({ ok: false, code: "selection_changed",
-    message: `This seat's record changed since it was saved (most often a /clear, /resume or new conversation; also a changed runtime, resume type or restore policy), so the saved conversation can't be resumed from here. To save the current one, run rig snapshot ${facts.rig.rig.name}; to start the seat blank, run rig seat launch <seat> --fresh --reason <why>.` }, 409);
+  if (!state) return c.json({ ok: false, code: "selection_changed", message: recordChanged(facts.rig.rig.name) }, 409);
   const forecast = buildRestorePlanPreview({ ...facts.rig, nodes: [facts.node] }, facts.snapshot,
     collectPreviewSessionRows(repo(c).db, { ...facts.rig, nodes: [facts.node] }, facts.snapshot), undefined, Date.now(), {},
     { nodeId, historySessionId: refs.historySessionId }).nodes[0]!;
   const observed = await observeSeat(c, facts.rig, facts.node);
+  // Only positive evidence of another conversation refuses; an unknown one is reported beside the saved forecast.
+  const current = retained ? await currentConversation(c, facts.rig.rig.name, facts.node, refs, facts.snapshot, observed) : undefined;
+  if (current?.state === "changed") return c.json({ ok: false, code: "selection_changed", message: current.message,
+    ...(current.identityEvidence ? { identityEvidence: current.identityEvidence } : {}) }, 409);
   const checked = selectedState(c, rigId, nodeId, refs, facts.snapshot);
   if (checked && "permissionUnavailable" in checked) return c.json({ ok: false, code: "permission_unavailable",
     message: "The selected seat's saved permission choice needs repair before launch." }, 409);
@@ -374,6 +442,7 @@ async function reviewSelectedHistory(c: Context, retained = false) {
       permission,
       codexProfile: { value: facts.node.codexConfigProfile ?? null, source: "current_node" },
       ...(runtimeHome ? { runtimeHome } : {}) },
+    ...(current ? { currentConversation: current } : {}),
     revision: state.review, mutated: false });
  }
 startupRoutes.get("/:rigId/nodes/:nodeId", c => reviewSelectedHistory(c));
@@ -614,7 +683,8 @@ startupRoutes.post("/:rigId/:logicalId", async (c) => {
       const member = pod?.members.find((entry) => `${pod.id}.${entry.id}` === node.logicalId);
       if (!pod || !member || member.agentRef !== node.agentRef || member.runtime !== node.runtime) return c.json({ ok: false, message: "This kernel seat differs from the installed definition; its owner must repair the startup source." }, 409);
       const result = await dep<PodRigInstantiator>(c, "podInstantiator").launchBinding({ rigId: rig.rig.id, rigSpec: spec, rigRoot: root, pod,
-        member: { ...member, ...(node.model ? { model: node.model } : {}) }, qualifiedId: node.logicalId, nodeId: node.id, cwdOverride: node.cwd ?? undefined });
+        member: { ...member, ...(node.model ? { model: node.model } : {}) }, qualifiedId: node.logicalId, nodeId: node.id, cwdOverride: node.cwd ?? undefined,
+        createCwd: true }); // a never-occupied kernel seat starts from its installed definition, a spec entry point
       await refreshNativeMetadata(c, rig.rig.id);
       dep<SnapshotCapture>(c, "snapshotCapture").captureSnapshot(rig.rig.id, "auto-rehydrate");
       const after = await observeSeat(c, rig, node);

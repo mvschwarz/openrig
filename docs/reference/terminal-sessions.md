@@ -82,7 +82,17 @@ doesn't follow a replaced session or a restarted tmux server; reopen the view.
 
 Writable tiles attach immediately, as in 0.7.10. Their visible terminal sizes
 the agent's PTY under tmux's normal client sizing policy, and resizing the
-terminal reflows new output. Read-only tiles remain observers: they neither
+terminal reflows new output. A Herdr view's local writable tiles
+(`--provider herdr`, `rig terminal open --all`, and Herdr's following views and
+viewers) pin the seat at its own size instead, so watching never resizes an
+agent. Before each attach, including a re-attach after the seat's session is
+replaced and after a Herdr restart, the tile pins the seat at the size it has
+then. A tile sizes the agent only while it has keyboard focus (Herdr passes
+focus in and out to the tile), and the agent goes back to its own size when the
+focus or the tile leaves. Focus reaches tmux
+only with its server option `focus-events` on (`tmux set -s focus-events on`,
+which OpenRig doesn't change); without it the agent simply keeps its size, and a
+tile smaller than it shows the part around the cursor. Read-only tiles remain observers: they neither
 resize nor type into another seat. An ordinary tmux detach ends the writable
 tile without stopping the agent. A replacement with a different managed seat
 identity is not followed. If no replacement returns in time, or a
@@ -99,6 +109,35 @@ Once attached, keys and paste use native tmux input handling.
 Use tmux's inherited `window-size latest` policy for the terminal most recently
 used to control sizing. OpenRig does not change a person's global tmux policy.
 A deliberate `window-size manual` setting remains an explicit fixed-size choice.
+`rig capture --readable` reads such a window as it is and names the command that
+drops the window's own setting (`tmux set-window-option -t <window> -u window-size`
+with the daemon's server flags, to run on the daemon's host), for when you want it
+to follow its inherited sizing again.
+A Herdr tile's pin is OpenRig's own: the window is `manual` with the seat's size
+recorded in its `@openrig-pin-width` and `@openrig-pin-height` options, and
+hooks on the seat's session fit it to a focused client and give that size back on blur or
+detach. The pin stays after the view closes, since a Herdr restart brings tiles
+back without a new open. To unpin a seat, drop the window's setting and
+OpenRig's record together (with the daemon's server flags):
+`tmux set-window-option -t <window> -u window-size \; set-window-option -t <window> -u @openrig-pin-width \; set-window-option -t <window> -u @openrig-pin-height`.
+The hooks then do nothing, also while a browser terminal or a readable capture
+pins the window for a while, or after you fix its size yourself, and the seat
+follows its clients until a Herdr tile next attaches to it, which pins it again
+at its size then. Unsetting `window-size` alone leaves the record, so a size you
+fix later would be taken for OpenRig's pin. A seat an
+older tile had already shrunk is pinned at that size; to pin it at another
+size, set the record and the size together:
+`tmux set-window-option -t <window> @openrig-pin-width 160 \; set-window-option -t <window> @openrig-pin-height 50 \; resize-window -t <window> -x 160 -y 50`.
+A Herdr tile leaves a window someone else made `manual` (no `@openrig-pin-width`)
+as it is, hooks included. While a seat is pinned, a readable capture reads it as
+it is instead of resizing it for the read (and names the command that drops
+`window-size`; unpin with the command above), and a
+browser terminal's `terminal.fixed_geometry` doesn't fix its size: both treat a
+`manual` window they didn't pin as a fixed size. Unpin the seat to get them
+back. cmux, `--window`, herdr-app cells and SSH tiles don't pin, and they size
+a seat no Herdr tile has pinned as before. A pinned seat stays pinned for every
+client, so their tiles, and a person's own `tmux attach`, fit it only while
+focused, until it's unpinned.
 OpenRig's temporary layout and readable-capture pins release by unsetting the
 window's local `window-size` option; they do not restore an old local override.
 With the last pin released, the window inherits the global policy again.
@@ -112,15 +151,21 @@ native Herdr tiles. A temporary readable capture uses
 when the capture finishes. It does not unset a manually fixed window it did not
 pin.
 
-Kept writable 0.7.8/0.7.9 viewers can retain an old `ignore-size` attach, and
-pre-reflow 0.7.11 viewers can retain the old mirrored display. Changing saved
-argv cannot change that running client. Close only the owned Herdr viewer pane
+A browser terminal that connects with `?geometry=1` learns the pane's columns
+and rows, and the pinned 90 by 27 when `terminal.fixed_geometry` is on; see
+[Writing a daemon client](daemon-http-clients.md#route-details).
+
+Kept writable 0.7.8/0.7.9 viewers can retain an old `ignore-size` attach, kept
+writable 0.7.10 viewers (every writable Herdr viewer from before the pin) size
+their seat instead of pinning it, and pre-reflow 0.7.11 viewers can retain the
+old mirrored display. Changing saved argv cannot change that running client, so
+a following canvas or ensure-viewer that finds one keeps it and asks for this
+step. Close only the owned Herdr viewer pane
 and open a fresh view with `rig terminal open <view> --provider herdr`; the
 agent's tmux session and conversation keep running. For a retained `--follow`
 canvas, first select `--no-follow`, then close its owned viewer panes and open
 a fresh ordinary view. Continuing that old following canvas is not an automatic
-live-client migration. Existing 0.7.10 sizing clients and read-only viewers do
-not need this step.
+live-client migration. Read-only viewers do not need this step.
 
 ## Desktop windows and previews
 
@@ -209,10 +254,75 @@ before retrying. `rig terminal status` gives Rex about a second to answer.
 
 `--provider herdr-app` opens the view in the herdr-app window you run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same when that window is answering (finding the socket file is how OpenRig guesses you are in a herdr-app window, and whether the window is reachable is checked by asking it). `--window` always asks for a new desktop window. See [OpenRig views in herdr-app](herdr-app.md).
 
+## Orca (experimental)
+
+```sh
+# From within an Orca terminal, use that terminal's workspace:
+rig terminal open saved:kernel --provider orca
+
+# From another macOS shell, select an existing workspace explicitly:
+rig terminal open future-rig --provider orca --orca-workspace 'path:/path/to/worktree' --json
+```
+
+This experimental provider is macOS-only and was tested with **Orca 1.4.263**.
+Run it on the same Mac and under the same account as the running OpenRig daemon
+and Orca desktop. Register the [Orca CLI](https://orca.dev/docs/cli/reference)
+in Orca's settings if needed, and use `orca worktree ps --json` to find workspace
+selectors. The OpenRig for Orca plugin and Herdr are not required.
+
+By default, the view opens in the calling Orca terminal's workspace, even if
+its shell has changed directories. Pass `--orca-workspace` to choose another
+existing local workspace, or to run the command from outside Orca.
+
+It never creates a worktree or launches an agent. It opens one Orca tab per
+view page and splits it into panes for the existing local seats, preserving
+read-only views. Closing the Orca tab does not stop the seats. The provider is
+CLI-only: it does not change setup, provider selection defaults, or the daemon
+API. Remote seats and remote Orca workspaces are not supported.
+
+OpenRig does not pass `--focus` when creating a tab, but Orca may activate the
+tab when it splits a multi-seat page. A connected Orca pane confirms placement,
+not a working tmux view; check the tab in Orca. If the CLI, required commands,
+or workspace cannot be confirmed during preflight, no tab is opened. If a tab
+or split is unconfirmed after opening starts, inspect Orca before retrying.
+The CLI never retries a create or split automatically. `--window`, `--all`,
+`--follow`, named sessions, `--expected-plan`, and provider-specific
+`terminal status` or `close` are not supported for Orca yet.
+
+### Orca CLI compatibility
+
+The public CLI reference documents the worktree and terminal commands. The
+following details come from Orca **1.4.263**'s CLI help, bundled guide
+(`orca skills get orca-cli`), and runtime JSON replies. Recheck them when
+updating this integration:
+
+- **Local runtime:** The tested commands use `--environment local` to override
+  paired-runtime settings. The public reference shows `--host local` for host
+  selection, but Orca 1.4.263 rejects it on `status` and `worktree show`, and
+  `terminal create`, `split`, and `show` advertise `--environment`, not
+  `--host`. If the required local selector is unavailable or rejected,
+  OpenRig reports a CLI compatibility problem and does not try an unpinned
+  runtime.
+- **Workspace identity:** For the default lookup, OpenRig uses
+  `ORCA_WORKSPACE_ID` (or `ORCA_WORKTREE_ID` if unset) and passes the exact
+  `folder:<id>` or `id:<worktree-id>` selector to `worktree show`. Orca's
+  `current` and `active` selectors follow the shell's current directory, so
+  OpenRig does not use them for this default. `worktree show` supplies `id`,
+  `hostId`, and, for Git worktrees when available, `identity.key` and
+  `identity.executionHostId`. Tab creation uses the resolved `folder:`,
+  `identity:`, or `id:` selector.
+- **Reply metadata:** `_meta.runtimeId` keeps all calls on the same Orca
+  runtime. `status` supplies `app.running`, `app.desktopWindowStatus` and
+  `runtime.reachable`. The terminal replies supply `handle`, `tabId` and
+  `worktreeId`, plus `executionHostId` and `hostPlatform` where available;
+  `terminal show` supplies `connected` and `orphaned` for pane confirmation.
+
 ## HTTP API
 
 - `POST /api/terminal/open`: `{ view, provider?: "herdr", session?: string, expectedPlan?: string }`.
-- `GET /api/terminal/preview?view=<view>&provider=herdr&session=<name>`.
+- `POST /api/terminal/open-all` (bearer auth): `{ provider?: "herdr", session?: string, viewportColumns?: number, reuseLive?: boolean }`. `reuseLive` defaults to true: a rig whose view is still open with live tiles is focused, not opened again; `false` opens a copy.
+- `POST /api/terminal/close-all` (bearer auth): `{ provider?: "herdr" | "tmux", session?: string }`. Maps a corrupt ownership ledger (`corrupt_ledger`) to HTTP 500 without overwriting ledger files.
+- `GET /api/terminal/preview?view=<view>&provider=herdr&session=<name>` (optional `&bulk=1` for `rig:<id>` bulk partitioning).
 - `GET /api/terminal/status?provider=herdr&session=<name>`.
 - The alias `POST /api/rigs/:rigId/terminal/open` accepts the same session and
   preview binding, with the rig determining the view.
@@ -223,6 +333,102 @@ session keeps the normal HTTP 200 provider result with `ok: false`, its selected
 `session`, an error code and direct-attach guidance.
 The `kernel_seats_unavailable` result also keeps the selected session, so the CLI
 reports that known failure instead of replacing it with an unconfirmed-session error.
+
+## Bulk rig viewers (--all)
+
+`rig terminal open --all` opens one viewer per non-empty local rig in sorted
+rig-name order (`rig:kernel` once as a rig view; never `openrig kernel` or
+`saved:kernel`). Supported providers are `herdr` (which uses `reuseLive` on `--all`
+to reuse an intact live workspace without rewriting an existing ownership record),
+desktop `--window` with Herdr installed (opening one Herdr window once Herdr is
+preflighted, then applying per-rig workspaces), or `--provider tmux --window`
+(opening one tagged `openrig-view-<id>` tmux session per non-empty rig with an
+`@openrig_rig_viewer` nonce). `herdr-app`, `cmux`, `rex`, and `orca` return
+`unsupported_provider`; plain `tmux` without `--window` returns
+`tmux_requires_window`. Seats on remote hosts (`host != null`) are reported under
+`skipped` when `TerminalService` receives hosted rows (the current single-host
+daemon inventory projection in `toLiveSeatRow` does not populate `host`), and
+stopped/unbound/external seats become `absent`.
+
+Repeated bulk opens through the tmux fallback create another viewer session per
+non-empty rig. That path does not confirm or reuse an earlier viewer's current plan.
+
+Bulk open uses each rig's ID. Names are display text. The views response keeps
+its existing name list and adds `rigIdentities` for clients that need stable IDs.
+The bulk tmux window client requires that identity list. Individual named views
+remain supported; an exact ID takes precedence in lookup.
+
+Herdr rig workspaces show the human rig name. Their tab plan markers and live
+reuse keys use the canonical rig ID. Name and ID aliases for the same current
+rig resolve to that identity before composition. Two rigs with the same name
+retain separate reuse identities, even when their attachments match. Kernel and
+saved named views keep their existing label and reuse rules. Legacy workspaces
+with name-based tab markers are not renamed or closed. They may not match a new
+ID-based reuse request.
+
+For Herdr, a new rig viewer with complete workspace, tab, tab-label and pane
+identity has an ownership entry per endpoint under `private/terminal-rig-viewers`.
+Reused or incomplete Herdr workspaces get no new entry. Both single and bulk rig
+opens report incomplete ownership or a failed record write.
+During close, a viewer's failed journal removal returns a failed viewer result.
+Earlier results remain and later viewers and endpoints continue. An endpoint
+failure after iteration preserves gathered results and reports unresolved
+viewers. A failed removal does not establish that the journal entry is gone.
+Corrupt-ledger preflight still refuses before viewer iteration.
+
+For tmux, the proof lives in session options. `@openrig_rig_viewer_proof` contains
+the original session ID/name, window/pane IDs, view, endpoint and nonce in a
+versioned base64url JSON value. `@openrig_rig_viewer` publishes the nonce last.
+Close requires both values. A failed option write leaves the viewer open with
+an ownership warning. It does not grant close authority from a partial proof.
+There is no separate tmux ledger or registration/retirement HTTP route. Old tmux
+ledger entries remain on disk but grant no close authority. Old or unqualified
+viewers need manual inspection. No external closing-phase record is needed:
+the proof disappears with the session, and a failed close can inspect the same
+remaining session options again.
+
+Saved (including `saved:rig:...`), pod, seat and task viewers get no tmux ownership
+options. Pre-existing viewers without complete options are left untouched.
+If a bulk CLI `tmux
+--window` launch fails after creating a rig viewer, OpenRig verifies matching
+nonce, window/pane inventory, and zero attached clients before killing the
+session (`cleanup: "closed"`, or `"already_gone"` if the viewer
+session had already disappeared); modified, attached, permission-denied, or
+unconfirmed viewers are retained with their session options preserved and reported as
+`cleanup: "unknown"`.
+
+`rig terminal close --all [--provider herdr|tmux] [--session <name>]` reads the
+Herdr ownership ledger and the selected tmux server's session options. It refreshes live inventory before
+inspecting each target. Existing Herdr viewers are kept. Herdr has no qualified
+compare-and-close operation, so bulk close never sends `workspace.close`, including
+for a record left in the `closing` phase. An intact viewer returns
+`conditional_close_unavailable` and a manual inspection/close command bound to its
+recorded socket and workspace. Run that command only after inspecting the workspace.
+If the exact endpoint or workspace cannot be qualified, the result asks for manual
+inspection instead of supplying an ambiguous command. Records remain until confirmed
+absence. This does not change the separate single-view `herdr-app` close path.
+
+Unmodified tmux `rig:` viewers are closed (`closed`) while their underlying agent
+sessions continue running. A server-side `if-shell -F` compares session identity,
+nonce, complete proof option and original window/pane inventory before it selects the close action. Failed
+desktop-launch cleanup also requires zero attached clients in that same condition.
+Viewer IDs must have tmux's numeric `$`, `@` and `%` forms. Session names and nonces
+must contain only ASCII letters, digits, underscore, period, colon or hyphen for
+this command path. Other stored values are retained with `ownership_unconfirmed`
+(or `cleanup: "unknown"`) instead of being interpolated into tmux syntax. No UUID
+shape is required for a nonce. Viewers
+with foreign, modified, or mismatched tabs/labels/panes/nonce (including reused
+short Herdr IDs after restart) are kept whole (`kept`: `not_separable` or
+`ownership_unconfirmed` for Herdr, `ownership_unconfirmed` for tmux). Records
+belonging to a different Herdr endpoint, or tmux proof that names a different
+endpoint, return `outcome: "kept"` with `code: "different_endpoint"`. Other tmux
+servers are not searched. Missing Herdr targets clear their stale records.
+Tmux targets that disappear during a close check report `already_gone`; a later
+call has no option record to enumerate for an absent session. A missing socket
+is an absent server. Permission errors remain unsafe. Unreachable providers or
+unconfirmed close results report `provider_unreachable` or `close_pending`. A
+corrupt ledger file under `private/terminal-rig-viewers` fails closed
+(`corrupt_ledger`, HTTP 500) without overwriting the file.
 
 ## Task terminal views
 
@@ -390,7 +596,8 @@ writable tile attaches with plain tmux when it opens (see
 [Replacing a seat's session](#replacing-a-seats-session)): keys and paste go
 through tmux as in any attached client, tmux's prefix works (prefix then `[` to
 scroll back, for example), and the tile sizes the window while it's the active
-client. If the seat's tmux server restarts, a tile shows the seat again only
+client (in a Herdr view, while it has keyboard focus; see
+[Replacing a seat's session](#replacing-a-seats-session)). If the seat's tmux server restarts, a tile shows the seat again only
 when the same managed seat returns. The printed manual attach commands are
 `tmux attach -t` for a writable tile and `tmux attach -r -t` for a read-only
 one, with a local seat's tmux server (`-L <name>` or `-S <path>`) when it
@@ -487,7 +694,11 @@ with a coalesced scope invalidation event. There is no repeating membership
 poll. Structural edits under additional legacy roots, or a filesystem where
 watching is unavailable, require `rig`'s existing slice refresh endpoint
 `POST /api/slices/refresh` or reopening the view. Missing or unreadable sources
-keep prior viewers; they never certify that the work disappeared.
+keep prior viewers; they never certify that the work disappeared. That includes
+the project catalog: a catalogued project whose own read fails (an unreadable root,
+a `project.yaml` or root work source that doesn't parse), or a catalog that can't
+be read, is named in a `scope_unavailable` for a scope that isn't found elsewhere.
+A project whose root is missing, or whose missions root escapes it, holds no scopes.
 
 
 Scope identity reads are bounded to 4,096 directory entries, 16 KiB per selected
@@ -498,8 +709,8 @@ or a qitem view. This is separate from unreadable or malformed sources.
 Queue membership reads are bounded to 50,000 active rows plus one lookahead,
 16 KiB of encoded tags per row and 8 MiB of aggregate encoded tags. They remain
 fresh on each render. Identities are reused within a scope-source generation
-only while the primary-root watcher is live and existing additional roots are
-covered by that root. A source event or explicit refresh invalidates them;
+only while the primary-root watcher is live, existing additional roots are
+covered by that root and no catalogued project is unreadable. A source event or explicit refresh invalidates them;
 errors discard the cache. Unavailable watching or an existing unwatched legacy
 root uses fresh bounded identity reads instead. Missing legacy roots are checked
 on each call so an appearing root cannot reuse an older cached identity set.

@@ -25,7 +25,7 @@ import { OPENRIG_HOME } from "../openrig-compat.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import type { SessionTransport } from "../domain/session-transport.js";
-import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
+import { DeliveryGuardError, UNATTRIBUTED_GUARD_ACTOR } from "../domain/seat-delivery-guard.js";
 import { PERMISSIONS_DENY } from "../domain/runner-permissions.js";
 
 export const seatRoutes = new Hono();
@@ -165,8 +165,9 @@ seatRoutes.post("/retire-held-message/:seatRef/:id", async c => {
   const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter).deliveryGuard;
   if (!guard) return c.json({ error: "Delivery guard unavailable" }, 503);
   const body = await c.req.json<Record<string, unknown>>();
-  const actor = transportSenderSession(c);
-  if (!actor || typeof body.reason !== "string" || !body.reason.trim()) return c.json({ error: "Sender identity and reason required" }, 400);
+  // The transport alone names the actor; an ordinary terminal has no seat identity (#3587).
+  const actor = transportSenderSession(c) ?? UNATTRIBUTED_GUARD_ACTOR;
+  if (typeof body.reason !== "string" || !body.reason.trim()) return c.json({ error: "Reason required" }, 400);
   try {
     const target = guard.target(c.req.param("seatRef"));
     const outbox = new OutboxHandler(guard.db); const id = c.req.param("id");
@@ -208,8 +209,8 @@ seatRoutes.get("/status/:seatRef", async (c) => {
           ? tmux ? { ...(await tmux.readSeatProcessLimits(readTarget, limits, nodeId)),
             // A guest seat's report is not read from its pane at all.
             ...(nodeId && tmux.seatInEnvironmentGuest?.(nodeId) ? {} : { readFrom }) }
-            : { state: "unknown", requested: { tasksMax: limits.tasksMax }, reason: "this daemon has no terminal adapter to read the seat's process" }
-          : { state: "not_applied", requested: { tasksMax: limits.tasksMax }, reason: "the seat is not running; the limit applies at its next fresh launch" }
+            : { state: "unknown", requested: { ...limits }, reason: "this daemon has no terminal adapter to read the seat's process" }
+          : { state: "not_applied", requested: { ...limits }, reason: "the seat is not running; the limit applies at its next fresh launch" }
         // No limit stored: nothing is read, so a seat without process_limits is unchanged.
         : null;
     const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
@@ -483,6 +484,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
     tmuxAdapter: c.get("tmuxAdapter" as never) as TmuxAdapter,
     nodeLauncher: c.get("nodeLauncher" as never) as import("../domain/node-launcher.js").NodeLauncher,
     startupOrchestrator: (c.get("startupOrchestrator" as never) as import("../domain/startup-orchestrator.js").StartupOrchestrator | undefined) ?? undefined,
+    armContinuity: (c.get("armSeatContinuity" as never) as import("../domain/seat-lifecycle-service.js").SeatLifecycleDeps["armContinuity"]) ?? undefined,
     runtimeAdapters: (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? undefined,
     occupantInvalidator: (c.get("occupantInvalidator" as never) as import("../domain/occupant-invalidator.js").OccupantInvalidator | undefined) ?? undefined,
     activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
@@ -494,7 +496,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
 
 function seatLifecycleStatus(code: string): 400 | 404 | 409 | 422 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
-    || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy"
+    || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy" || code === "invalid_statusline_throttle"
     || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition"
     || code === "missing_permissions_to" || code === "permissions_to_not_a_person"
     || code === "missing_home" || code === "invalid_home" || code === "missing_expectation" || code === "invalid_operation_id") return 400;
@@ -503,7 +505,7 @@ function seatLifecycleStatus(code: string): 400 | 404 | 409 | 422 | 500 | 502 {
   // #3253: a seat whose process limit can't be applied; only an unverified check may pass on retry (409).
   if (code === "process_limits_unsupported" || code === "process_limits_setup" || code === "process_limits_invalid") return 422;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
-    || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
+    || code === "effort_unavailable" || code === "statusline_throttle_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
     || code === "permissions_to_unavailable" || code === "runtime_home_unavailable") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
@@ -630,6 +632,28 @@ const setEffortHandler = async (c: Context) => {
 seatRoutes.post("/set-effort/:seatRef", setEffortHandler);
 seatRoutes.post("/set-effort/node/:nodeId", setEffortHandler);
 
+// #3416 (3): save (or, with clear: true, remove) a Claude seat's status line throttle for its next launch.
+const setStatuslineThrottleHandler = async (c: Context) => {
+  // A body that isn't a JSON object (null, an array, a number) reads as an empty one: the check below answers 400.
+  const parsed: unknown = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown> : {};
+  const clear = body["clear"] === true;
+  if (clear === (body["seconds"] !== undefined)) {
+    return c.json({ ok: false, code: "invalid_statusline_throttle", message: "Pass seconds or clear, exactly one." }, 400);
+  }
+  const result = seatLifecycleService(c).setStatuslineThrottle({
+    ...settingTarget(c),
+    seconds: clear ? null : typeof body["seconds"] === "number" ? body["seconds"] : Number.NaN,
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"] : null),
+  });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
+};
+seatRoutes.post("/set-statusline-throttle/:seatRef", setStatuslineThrottleHandler);
+seatRoutes.post("/set-statusline-throttle/node/:nodeId", setStatuslineThrottleHandler);
+
 // Choose (or, with clear: true, remove) the registered person who answers this seat's runner permission requests.
 // Audited; like set-permissions, the actor is required.
 seatRoutes.post("/set-permissions-to/:seatRef", async (c) => {
@@ -719,10 +743,15 @@ seatRoutes.get("/stop-precondition/:seatRef", c => {
 
 seatRoutes.post("/stop/:seatRef", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  // Record the transport sender, else the body's --operator (the CLI's documented contract).
+  // Neither source may name an internal daemon actor, so a caller cannot forge reaper attribution.
+  const sender = transportSenderSession(c);
+  const claimed = sender ?? (typeof body["operator"] === "string" ? body["operator"] : null);
+  const operator = claimed?.startsWith("daemon:") ? null : claimed;
   const result = await seatLifecycleService(c).stopSeat({
     seatRef: c.req.param("seatRef")!,
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
-    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+    operator,
     ...(Object.prototype.hasOwnProperty.call(body, "expected") ? { expected: body["expected"] } : {}),
   });
   if (result.ok) return c.json(result);

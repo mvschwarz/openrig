@@ -119,7 +119,7 @@ export function workflowRoutes(): Hono {
         // instantiate (spec/rig mismatch → 400); bound_rig_not_found = a
         // persisted bound rig vanished mid-run (live state-vs-instance
         // conflict → 409, the harness_pin/instance_version_conflict class).
-        : err.code === "bound_rig_unknown" || err.code === "bound_rig_role_uncovered" ? 400
+        : err.code === "bound_rig_unknown" || err.code === "bound_rig_role_uncovered" || err.code === "bound_pod_unknown" || err.code === "bound_pod_invalid" ? 400
         : err.code === "bound_rig_not_found" ? 409
         : err.code === "packet_not_found" ? 404
         : 500;
@@ -127,7 +127,7 @@ export function workflowRoutes(): Hono {
     }
     if (err instanceof QueueRepositoryError) {
       const status =
-        err.code === "unknown_destination_rig" ? 400
+        err.code === "unknown_destination_rig" || err.code === "unbound_destination_pod" ? 400
         : err.code === "qitem_not_found" ? 404
         : err.code === "workflow_frontier_packet" ? 400
         : 500;
@@ -209,10 +209,12 @@ export function workflowRoutes(): Hono {
       .json<{
         specPath?: string;
         rootObjective?: string;
+        runTitle?: unknown;
         createdBySession?: string;
         entryOwnerSession?: string;
         /** OPR.0.4.6.FAC1: overrides the spec's target.rig default. */
         targetRig?: string;
+        targetPod?: string;
         /** Scope stamped on every packet the instance creates (migration 110). One that cannot be applied is
          *  ignored with an advisory; bare project/mission/slice/tags fields keep their old meaning: ignored. */
         scope?: { project?: unknown; mission?: unknown; slice?: unknown; tags?: unknown };
@@ -221,7 +223,13 @@ export function workflowRoutes(): Hono {
     if (!body.specPath) return c.json({ error: "specPath is required" }, 400);
     if (!body.rootObjective) return c.json({ error: "rootObjective is required" }, 400);
     if (!body.createdBySession) return c.json({ error: "createdBySession is required" }, 400);
+    if (body.targetPod !== undefined && typeof body.targetPod !== "string") return c.json({ error: "targetPod must be a string" }, 400);
     try {
+      const title = typeof body.runTitle === "string"
+        ? Array.from(body.runTitle.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()).slice(0, 120).join("") || undefined
+        : undefined;
+      const titleNote = body.runTitle !== undefined && body.runTitle !== title
+        ? `Workflow run title normalized to ${title === undefined ? "untitled" : JSON.stringify(title)}.` : null;
       // A request can carry scope the route cannot apply: main accepted every such request, ignoring the key and
       // creating one unscoped instance, so this route does too. The instance is created unscoped, nothing the scope
       // named is recorded, and the response advisories say plainly that it was not applied. A scope that can be
@@ -249,9 +257,11 @@ export function workflowRoutes(): Hono {
       const result = await getRuntime(c).instantiate({
         specPath: body.specPath,
         rootObjective: body.rootObjective,
+        runTitle: title,
         createdBySession: body.createdBySession,
         entryOwnerSession: body.entryOwnerSession,
         targetRig: body.targetRig,
+        targetPod: body.targetPod,
         ...(scope ? { scope } : {}),
       });
       const notes: string[] = [];
@@ -263,11 +273,11 @@ export function workflowRoutes(): Hono {
         notes.push(`Scope not applied (${scopeFailure}). Instance ${result.instance.instanceId} was created unscoped: its packets carry no project, mission, slice or tag scope. `
           + "Correct the scope and instantiate again for a scoped instance; that creates a second instance.");
       }
-      if (notes.length === 0) return c.json(result, 201);
+      if (notes.length === 0 && !titleNote) return c.json(result, 201);
       return c.json({
         ...result,
-        advisories: [...(result.advisories ?? []), ...notes],
-        scopeIgnored: { fields: [...ignoredFields, ...(scopeFailure ? ["scope"] : [])], message: notes.join(" ") },
+        advisories: [...(result.advisories ?? []), ...notes, ...(titleNote ? [titleNote] : [])],
+        ...(notes.length ? { scopeIgnored: { fields: [...ignoredFields, ...(scopeFailure ? ["scope"] : [])], message: notes.join(" ") } } : {}),
       }, 201);
     } catch (err) {
       return errorResponse(c, err);
@@ -438,8 +448,12 @@ export function workflowRoutes(): Hono {
   app.post("/:instance_id/resume", async (c) => {
     const instanceId = c.req.param("instance_id");
     const body = await c.req
-      .json<{ occurrenceId?: string; decision?: string; actorSession?: string }>()
+      .json<{ occurrenceId?: string; decision?: string; ownerSession?: string; actorSession?: string }>()
       .catch(() => ({}) as never);
+    // An empty ownerSession is not refused: the runtime resolves the owner and says why in ownerNote.
+    if (body.ownerSession !== undefined && typeof body.ownerSession !== "string") {
+      return c.json({ error: "ownerSession must be a string when given" }, 400);
+    }
     const actor = requireSenderIdentity(c, { verb: "workflow resume", bodyClaim: body.actorSession });
     if (!actor.ok) return actor.response;
     try {
@@ -447,6 +461,7 @@ export function workflowRoutes(): Hono {
         instanceId,
         occurrenceId: body.occurrenceId,
         decision: body.decision,
+        ownerSession: body.ownerSession,
         actorSession: actor.session,
         identityProvenance: resolveRecordedProvenance(c, actor),
       });

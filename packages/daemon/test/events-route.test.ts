@@ -118,6 +118,43 @@ describe("SSE events route", () => {
     expect(events[0]!.id).toBe(String(e2.seq));
   });
 
+  it("a reconnect cursor from a newer database falls back to bounded replay and then receives live events", async () => {
+    const rig = rigRepo.createRig("r01");
+    const first = eventBus.emit({ type: "rig.created", rigId: rig.id });
+    const second = eventBus.emit({ type: "node.added", rigId: rig.id, nodeId: "n1", logicalId: "worker" });
+    // A browser that saw seq 100 before a database restore reconnects to this older event log.
+    const res = await app.request(`/api/events?rigId=${rig.id}&replay=1`, { headers: { "Last-Event-ID": "100" } });
+    let liveSeq = 0;
+    setTimeout(() => { liveSeq = eventBus.emit({ type: "rig.created", rigId: rig.id }).seq; }, 10);
+    const events = await readSSEEvents(res, 2);
+    expect(events.map((event) => Number(event.id))).toEqual([second.seq, liveSeq]);
+    expect(first.seq).toBeLessThan(second.seq);
+  });
+
+  it("a future reconnect cursor with replay=0 receives new events even when the restored log is empty", async () => {
+    const res = await app.request("/api/events?replay=0", { headers: { "Last-Event-ID": "100" } });
+    let liveSeq = 0;
+    setTimeout(() => { liveSeq = eventBus.emit({ type: "rig.created", rigId: "r1" }).seq; }, 10);
+    const events = await readSSEEvents(res, 1);
+    expect(events.map((event) => Number(event.id))).toEqual([liveSeq]);
+    expect(liveSeq).toBeGreaterThan(0);
+  });
+
+  it("delivers an event arriving during stale-cursor replay once after the restored history", async () => {
+    const rig = rigRepo.createRig("r01");
+    const original = eventBus.emit({ type: "rig.created", rigId: rig.id });
+    const replayPage = eventBus.replayPage.bind(eventBus);
+    let liveSeq = 0;
+    vi.spyOn(eventBus, "replayPage").mockImplementation((...args) => {
+      if (!liveSeq) liveSeq = eventBus.emit({ type: "rig.created", rigId: rig.id }).seq;
+      return replayPage(...args);
+    });
+    const res = await app.request(`/api/events?rigId=${rig.id}&replay=10`, { headers: { "Last-Event-ID": "100" } });
+    const events = await readSSEEvents(res, 2);
+    expect(events.map((event) => Number(event.id))).toEqual([original.seq, liveSeq]);
+    expect(liveSeq).toBeGreaterThan(original.seq);
+  });
+
   it("no gap: event emitted during replay window delivered exactly once", async () => {
     const rig = rigRepo.createRig("r01");
 

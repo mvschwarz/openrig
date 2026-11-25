@@ -327,6 +327,64 @@ edges: []
     const defaultYaml = RigSpecCodec.serialize(VALID_RIG);
     expect(defaultYaml).not.toContain("launch_wrapper");
   });
+
+  it("A codec round trip keeps a valid block, and `normalize` drops a malformed one without throwing.", () => {
+    const yamlWith = (pool: string) => [
+      "version: \"0.2\"", "name: pool-rig", "pods:", "  - id: dev", "    label: Dev", "    members:",
+      "      - id: impl", "        agent_ref: local:agents/impl", "        profile: default", "        runtime: claude-code",
+      "        cwd: .", `        pool: ${pool}`, "    edges: []", "edges: []", "",
+    ].join("\n");
+
+    const valid = RigSpecSchema.normalize(RigSpecCodec.parse(yamlWith("{ max: 3, dispatch_tag: \"role:impl\", cwd_template: \"/work/{rig}/{slot}\" }")) as Record<string, unknown>);
+    const pool = valid.pods[0]!.members[0]!.pool;
+    expect(pool).toEqual({ max: 3, min: 0, dispatchAfterSeconds: 60, idleGraceSeconds: 300, cooldownSeconds: 60,
+      dispatchTag: "role:impl", cwdTemplate: "/work/{rig}/{slot}", drain: false });
+    const again = RigSpecCodec.parse(RigSpecCodec.serialize(valid));
+    expect(RigSpecSchema.validate(again)).toEqual({ valid: true, errors: [] });
+    expect(RigSpecSchema.normalize(again as Record<string, unknown>).pods[0]!.members[0]!.pool).toEqual(pool);
+
+    // every field away from its default, and dispatch_after_s != cooldown_s, so a swapped or fixed field shows
+    const full = RigSpecSchema.normalize(RigSpecCodec.parse(yamlWith(
+      "{ max: 5, min: 2, dispatch_after_s: 45, idle_grace_s: 120, cooldown_s: 90, dispatch_tag: \"role:qa\", cwd_template: \"/work/{slot}\", drain: true }",
+    )) as Record<string, unknown>);
+    const fullPool = full.pods[0]!.members[0]!.pool;
+    expect(fullPool).toEqual({ max: 5, min: 2, dispatchAfterSeconds: 45, idleGraceSeconds: 120, cooldownSeconds: 90,
+      dispatchTag: "role:qa", cwdTemplate: "/work/{slot}", drain: true });
+    const fullAgain = RigSpecCodec.parse(RigSpecCodec.serialize(full));
+    expect(RigSpecSchema.normalize(fullAgain as Record<string, unknown>).pods[0]!.members[0]!.pool).toEqual(fullPool);
+
+    const malformed = RigSpecCodec.parse(yamlWith("{ max: 3, min: 5 }")) as Record<string, unknown>;
+    let normalized!: RigSpec;
+    expect(() => { normalized = RigSpecSchema.normalize(malformed); }).not.toThrow();
+    expect(normalized.pods[0]!.members[0]!.pool).toBeUndefined();
+    const written = RigSpecCodec.serialize(normalized);
+    expect(written).not.toMatch(/^\s*pool:/m);
+    expect(RigSpecSchema.validate(RigSpecCodec.parse(written))).toEqual({ valid: true, errors: [] });
+  });
+
+  it("A malformed block that refers to itself through a YAML alias is dropped without throwing, and what is kept for its node can be stored.", () => {
+    const yaml = [
+      "version: \"0.2\"", "name: alias-rig", "pods:", "  - id: dev", "    label: Dev", "    members:",
+      "      - id: impl", "        agent_ref: local:agents/impl", "        profile: default", "        runtime: claude-code",
+      "        cwd: .", "        pool: &loop", "          max: 1", "          again: *loop", "    edges: []", "edges: []", "",
+    ].join("\n");
+    const parsed = RigSpecCodec.parse(yaml) as Record<string, unknown>;
+    expect(() => JSON.stringify(parsed)).toThrow(/circular/i);
+    expect(RigSpecSchema.validate(parsed).valid).toBe(true);
+    const member = RigSpecSchema.normalize(parsed).pods[0]!.members[0]!;
+    expect(member.pool).toBeUndefined();
+    expect(() => JSON.stringify(member)).not.toThrow();
+  });
+
+  it("`pool: {}` round-trips as the explicit clear, and a member without the key writes none.", () => {
+    const withClear: RigSpec = { ...VALID_RIG, pods: [{ ...VALID_RIG.pods[0]!, members: [
+      { id: "impl", agentRef: "local:agents/impl", profile: "tdd", runtime: "claude-code", cwd: ".", pool: null },
+    ], edges: [] }] };
+    const yaml = RigSpecCodec.serialize(withClear);
+    expect(yaml).toContain("pool: {}");
+    expect(RigSpecSchema.normalize(RigSpecCodec.parse(yaml) as Record<string, unknown>).pods[0]!.members[0]!.pool).toBeNull();
+    expect(RigSpecCodec.serialize(VALID_RIG)).not.toMatch(/^\s*pool:/m);
+  });
 });
 
 describe("LegacyRigSpecCodec", () => {

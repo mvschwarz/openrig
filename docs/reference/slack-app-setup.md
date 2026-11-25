@@ -422,7 +422,11 @@ Quiet hours hold a person's routine asks while they're on, and post them once th
 ## Reconnect recovery and status
 
 When a posted ask is answered, closed, canceled or replaced elsewhere, the connector edits its
-original primary message with the status, time, actor and closure note. Buttons become option
+original primary message with the status, time, actor and closure note. An answered ask's status
+names the chosen option (**Answered: Hold**); for a typed reply it says **Answered with a typed
+reply**, and the words stay in the thread's confirmation. When a decision is parked on the person
+again, each park's message names only what that park recorded, so an earlier park's message says
+**Answered**. Buttons become option
 text and the answer hint disappears; the remaining content and reconciliation marker stay as
 posted. Supplemental messages are unchanged. This adds no post or reaction and needs no agent
 turn. Separate resolution notices retain their existing behavior.
@@ -532,6 +536,15 @@ Human-readable coverage and pending bounds use ISO timestamps; JSON keeps Slack 
 The status read calls no Slack API and starts no scan. If the daemon cannot be
 observed, local configuration remains visible and live state is unknown. A
 connected socket or valid configuration alone does not prove end-to-end delivery.
+
+### Origin records for inbound files
+
+The connector saves admitted attachments under `$OPENRIG_HOME/state/slack-inbound-media/`.
+A sibling `<saved-basename>.provenance.json` marks a complete file. Read the record together
+with the matching media file. Version `1` records `channelId`, `messageTs` (Slack's exact
+string), `authorId` (the message author's Slack ID), `fileId` (`null` if absent), and the
+one-based attachment `ordinal`. The same record applies to live, relayed and recovered messages.
+Files saved before this feature and files without a committed record have no recorded origin.
 
 ### Slack rejects a message with `invalid_blocks`
 

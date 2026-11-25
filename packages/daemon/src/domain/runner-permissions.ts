@@ -277,32 +277,39 @@ export class RunnerPermissions {
   }
 
   /** A grant's seat carries its launch generation: it reads only its own launch's requests. Only the current
-   *  occupant's request can read pending or answered; an earlier occupant's reads stale, whatever answer it holds. */
-  read(seat: { nodeId: string; generation?: string } | null, askId: string): ReadResult {
+   *  occupant's request can read pending or answered; an earlier occupant's reads stale, whatever answer it holds.
+   *  `authority` is a caller's own check of the ask's seat, used in place of a second one. */
+  read(seat: { nodeId: string; generation?: string } | null, askId: string, authority?: { current: boolean; unknown: boolean }): ReadResult {
     const asked = this.deps.queueRepo.getById(askId);
     const origin = asked ? runnerPermissionOrigin(asked) : null;
     if (!asked || !origin || (seat && origin.nodeId !== seat.nodeId)) return { ok: false, code: "not_found", message: `No permission request ${askId} for this seat.` };
     if (this.turnFenced(origin.nodeId, { runId: tagValue(asked, RUN_TAG) ?? undefined, nativeTurnId: tagValue(asked, NATIVE_TURN_TAG) ?? undefined }))
       return { ok: true, state: "withdrawn" };
     const item = this.liveEnd(asked);
-    const askIsCurrent = this.deps.currentGeneration(origin.nodeId) === origin.generation;
+    const { current: askIsCurrent, unknown } = authority ?? this.seatAuthority(origin);
     const callerMatches = !seat?.generation || seat.generation === origin.generation;
+    // Unknown authority proves neither that this ask is current nor that a successor replaced it: it waits, unclosed and
+    // ungranted, until the seat's generation is proven (current: as usual; replaced or gone: stale). A caller of another
+    // generation never gets this wait.
+    const unproven = unknown && callerMatches;
     // Handed to someone this host can't follow (another host, or no row that carries the ask): still no answer, and the
     // handoff itself never permits.
-    if (!item) return askIsCurrent && callerMatches ? { ok: true, state: "pending" } : { ok: true, state: "stale" };
+    if (!item) return (askIsCurrent && callerMatches) || unproven ? { ok: true, state: "pending" } : { ok: true, state: "stale" };
     // Still open (pending, or claimed or parked by the person): no answer yet.
     if (item.state === "pending" || item.state === "in-progress" || item.state === "blocked") {
-      if (askIsCurrent && callerMatches) return { ok: true, state: "pending" };
-      if (!askIsCurrent) this.close(item, STALE_NOTE, "relaunched: a later occupant holds this seat");
+      if ((askIsCurrent && callerMatches) || unproven) return { ok: true, state: "pending" };
+      if (!askIsCurrent && !unknown) this.close(item, STALE_NOTE, "relaunched: a later occupant holds this seat");
       return { ok: true, state: "stale" };
     }
     if (item.state === "canceled") {
       const withdrawn = this.deps.queueRepo.listTransitions(item.qitemId).some((transition) => transition.transitionNote?.startsWith(WITHDRAWN_NOTE));
       return { ok: true, state: withdrawn ? "withdrawn" : "stale" };
     }
-    if (!askIsCurrent || !callerMatches) return { ok: true, state: "stale" };
-    // A request withdrawn after its row closed without a decision: it ended, so nothing decides it now.
+    if (!callerMatches || (!askIsCurrent && !unknown)) return { ok: true, state: "stale" };
+    // A request withdrawn after its row closed without a decision: it ended, so nothing decides it now. That holds whether or
+    // not the seat can be read; only then does unknown authority leave the rest waiting.
     if (this.withdrawnAfterClose(item)) return { ok: true, state: "withdrawn" };
+    if (unproven) return { ok: true, state: "pending" };
     // The person's answer, from the live row or back along the rows the request was handed through.
     const answer = this.personAnswer(item);
     // The options travel with the ask: a row handed to an agent to decide carries none of its own.
@@ -329,6 +336,17 @@ export class RunnerPermissions {
     if (!allowId) return { ok: true, state: "refused", reason: "no_allow_offered" };
     this.recordClosedAsk(asked, item, origin.nodeId, allowId);
     return { ok: true, state: "permitted", optionId: allowId };
+  }
+
+  /** Whether the ask's seat still holds its generation. The `currentGeneration` callback is asked once, and a throw or null
+   *  from it is no answer: the one authority helper decides whether that is positive replacement or absence (not current,
+   *  not unknown) or unknown (the callback alone never makes the ask current, even if the helper then reads it as current). */
+  private seatAuthority(origin: { nodeId: string; generation: string }): { current: boolean; unknown: boolean } {
+    let generation: string | null;
+    try { generation = this.deps.currentGeneration(origin.nodeId); } catch { generation = null; }
+    if (generation !== null) return { current: generation === origin.generation, unknown: false };
+    const authority = this.deps.queueRepo.runnerPermissionAuthority(origin);
+    return { current: false, unknown: authority !== "replaced" && authority !== "absent" };
   }
 
   /** The record of a permit after an ask closed without a choice: one per ask, however often the runner reads it. */
@@ -394,11 +412,25 @@ export class RunnerPermissions {
    *  offered, recorded on the row that holds the request now, with who decided and why. A request that's no longer
    *  pending (decided, withdrawn or stale) returns as it is and nothing is written, so deciding twice changes nothing. */
   decide(askId: string, optionId: string, decider: string, reason: string): ReadResult | { ok: false; code: "invalid_option" | "not_recorded"; message: string } {
-    const now = this.read(null, askId);
+    // One authority check for the whole decision, shared with its read. A second check could prove the seat current after
+    // the read waited on unknown authority, and record a decision on a row already closed as denied or with no answer.
+    const requested = this.deps.queueRepo.getById(askId);
+    const origin = requested ? runnerPermissionOrigin(requested) : null;
+    const authority = origin ? this.seatAuthority(origin) : null;
+    const now = this.read(null, askId, authority ?? undefined);
     if (!now.ok || now.state !== "pending") return now;
     const asked = this.deps.queueRepo.getById(askId)!;
     const live = this.liveEnd(asked);
     if (!live) return now; // handed somewhere this host can't follow: nothing here to decide on
+    // An explicit decision on a closed row is final: a read that waited on unproven authority must not let a later,
+    // luckier authority check overwrite it.
+    if ((live.state === "done" || live.state === "failed") && this.explicitlyDecided(live)) return now;
+    // A decision isn't recorded on authority that can't be proven: it would wait as an unread decision. Decide again once the seat reads.
+    if (authority?.unknown) {
+      return { ok: false, code: "not_recorded", message: `${askId}'s seat can't be read right now, so its request can't be confirmed current. Nothing was decided. Decide again shortly.` };
+    }
+    // The same check proved a successor holds the seat: the ask is stale, and nothing is written.
+    if (authority && !authority.current) return { ok: true, state: "stale" };
     const question = this.deps.queueRepo.permissionQuestionsFor(live)?.find((q) => q.id === QUESTION_ID);
     if (!question?.options.some((option) => option.id === optionId)) {
       return { ok: false, code: "invalid_option", message: `${optionId} isn't one of the options the agent offered: ${(question?.options ?? []).map((o) => o.id).join(", ") || "none recorded"}. Nothing was decided.` };

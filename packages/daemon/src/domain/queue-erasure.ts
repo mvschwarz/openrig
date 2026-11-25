@@ -1,4 +1,5 @@
 import { OutboxHandler } from "./outbox-handler.js";
+import { redactCoreAppSubmissions } from "./core-app-access.js";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, openSync, readSync, statSync } from "node:fs";
 import type Database from "better-sqlite3";
@@ -49,7 +50,7 @@ const QITEM_SHAPE = /^qitem-[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?$/;
 
 /** A scrub keeps a closure target only when it names a successor: closure writes don't constrain the target, so text
  *  under a successor reason is cleared like any other note. */
-function keepsClosureTarget(reason: unknown, target: unknown): boolean {
+export function keepsClosureTarget(reason: unknown, target: unknown): boolean {
   return ID_CLOSURE_REASONS.includes(reason as (typeof ID_CLOSURE_REASONS)[number]) && typeof target === "string"
     && target.length <= 256 && (ADDRESS_SHAPE.test(target) || QITEM_SHAPE.test(target));
 }
@@ -270,7 +271,7 @@ function scrubRows(st: Statements, ids: string[], nowIso: string): void {
     }
   }
   st.get(`UPDATE queue_items SET body = '', summary = NULL, resolution = NULL, tags = NULL, blocked_on = NULL,
-      chain_of_record = NULL, evidence_ref = NULL, human_detail = NULL, human_questions = NULL, human_answers = NULL,
+      chain_of_record = NULL, evidence_ref = NULL, human_detail = NULL, human_questions = NULL, human_answers = NULL, relayed_answers = NULL,
       delegated_decision = NULL, last_nudge_input_box = NULL, content_erased_at = @now WHERE qitem_id IN ${IDS}`).run({ ...params, now: nowIso });
   for (const table of ["queue_transitions", "queue_transitions_archive"]) {
     st.get(`UPDATE ${table} SET transition_note = NULL, identity_principal = NULL WHERE qitem_id IN ${IDS}`).run(params);
@@ -946,6 +947,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
         eraseCopies(st, planned.owned.delete, "delete", erasureOutbox, opts.nowIso);
         const scrub = planned.rows.filter((row) => row.action === "scrub").map((row) => row.qitemId);
         const remove = [...planned.rows.filter((row) => row.action === "delete").map((row) => row.qitemId), ...planned.absent];
+        if (scrub.length > 0 || remove.length > 0) redactCoreAppSubmissions(db, [...scrub, ...remove], opts.nowIso);
         if (scrub.length > 0) scrubRows(st, scrub, opts.nowIso);
         if (remove.length > 0) deleteRows(st, remove, opts.nowIso, reason);
         return planned;

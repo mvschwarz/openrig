@@ -47,10 +47,14 @@ describe("rig proof --project (#132)", () => {
   it("judge pins the project root its prepared read returned (projectRoot), and sends none for a workspace read", async () => {
     readExtra = { project: { id: "alpha", root: "/work/alpha" } };
     await run(["judge", "alpha:m0/slices/01-t001#i1", "--verdict", "accept", "--reason", "seen"]);
-    expect(calls[1]!.body).toMatchObject({ scope: "alpha:m0/slices/01-t001", projectRoot: "/work/alpha" });
+    expect(calls[1]!.body).toMatchObject({ scope: "alpha:m0/slices/01-t001", projectRoot: "/work/alpha", expectedProject: "alpha" });
     readExtra = {};
     await run(["judge", "m0/slices/01-t001#i1", "--verdict", "accept", "--reason", "seen"]);
     expect(calls[3]!.body).not.toHaveProperty("projectRoot");
+    readExtra = { selection: { selectedBy: "workspace", missionsRoot: "/work/shared/missions" } };
+    await run(["judge", "m0/slices/01-t001#i1", "--verdict", "accept", "--reason", "seen"]);
+    expect(calls[5]!.body).toMatchObject({ expectedProject: null, expectedMissionsRoot: "/work/shared/missions" });
+    expect(calls[5]!.body).not.toHaveProperty("projectRoot");
   });
 });
 

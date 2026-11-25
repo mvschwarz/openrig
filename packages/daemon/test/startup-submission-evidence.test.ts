@@ -18,7 +18,9 @@ describe("Claude transient startup composer", () => {
     expect(inspectStartupStagedText(composer("Press up to edit queued messages"), expected)).toBe("clear");
   });
 
-  it.each(["? for shortcuts", "paste again to expand", "paste again to expand  ◐ medium · /effort", "paste again to expand                                     ● high · /effort"])("keeps an exact expected placeholder staged under %s", footer => {
+  it.each(["? for shortcuts", "paste again to expand", "paste again to expand  ◐ medium · /effort", "paste again to expand                                     ● high · /effort",
+    "paste again to expand  Update available! Run: brew upgrade claude-code",
+    "paste again to expand  current: 2.1.326 · latest: 2.1.330 ✔ Update installed · Restart to update"])("keeps an exact expected placeholder staged under %s", footer => {
     const placeholder = "Press up to edit queued messages";
     expect(inspectStartupStagedText(composer(placeholder, footer), placeholder)).toBe("staged");
     expect(inspectStartupStagedText(composer("Press up\nto edit queued messages", footer), ` ${placeholder} `)).toBe("staged");
@@ -33,6 +35,7 @@ describe("Claude transient startup composer", () => {
     "paste again to expand  ordinary text · /effort", "paste again to expand  ❯ unfinished draft · /effort",
     "paste again to expand  medium · /effort", "paste again to expand  ◐ unknown · /effort",
     "paste again to expand  ◐ medium extra · /effort", "paste again to expand  ◐ medium · /effort trailing",
+    "paste again to expand  Update available!", "paste again to expand  ordinary text · Update available! Run: brew upgrade",
   ])("does not accept an approximate hint: %s", footer => {
     expect(inspectStartupStagedText(composer("", footer), expected)).toBe("unverified");
   });
@@ -62,6 +65,14 @@ describe("our own collapsed startup paste", () => {
     ["the mode bar", composer("[Pasted text #3 +95 lines]", "\u23f5\u23f5 bypass permissions on (shift+tab to cycle)")],
   ])("recognizes the label for a paste with the prompt's newline count (%s)", (_name, pane) => {
     expect(startupOwnCollapsedPaste(pane, prompt)).toBe(true);
+  });
+
+  // Claude Code 2.1.326 leaves the count off a paste with no newline (#2429).
+  it("recognizes a single-line paste's label without a count, and only for a single-line prompt", () => {
+    const line = `a single-line prompt ${"x".repeat(900)}`;
+    expect(startupOwnCollapsedPaste(composer("[Pasted text #1]"), line)).toBe(true);
+    expect(startupOwnCollapsedPaste(composer("[Pasted text #1]", "paste again to expand  12% until auto-compact"), line)).toBe(true);
+    expect(startupOwnCollapsedPaste(composer("[Pasted text #1 +1 lines]"), line)).toBe(false);
   });
 
   it("counts a trailing newline, as Claude does", () => {

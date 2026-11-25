@@ -34,6 +34,9 @@ function exportWarnings(exporter: RigSpecExporter, rigId: string, podAware: bool
     ...(podAware ? exporter.memberStartupNotCarried(rigId) : []),
     ...exporter.claudeAutoModeNotCarried(rigId).map((logicalId) => ({ logicalId, reason: "claude_auto_mode can't be read; not carried" })),
     ...exporter.processLimitsNotCarried(rigId).map((logicalId) => ({ logicalId, reason: "process_limits can't be read; not carried" })),
+    // #3395: what an export of a pooled rig drops: an unreadable stored pool block, and an edge that touches a pool agent.
+    ...exporter.poolNotCarried(rigId).map((logicalId) => ({ logicalId, reason: "pool can't be read; not carried" })),
+    ...exporter.poolEdgesNotCarried(rigId).map(({ from, to, kind }) => ({ logicalId: from, reason: `${kind} edge to ${to} touches a seat pool agent; not carried` })),
   ];
   return warnings.length ? { "X-OpenRig-Export-Warnings": encodeURIComponent(JSON.stringify(warnings)) } : {};
 }
@@ -59,8 +62,13 @@ export function handleExportYaml(c: Context): Response {
       .map((seat) => `# Not carried: ${seat}'s claude_auto_mode, because the saved block can't be read; set it again with rig seat set-permissions --auto-mode.\n`));
     notCarried.push(...exporter.processLimitsNotCarried(rigId)
       .map((seat) => `# Not carried: ${seat}'s process_limits, because the saved value can't be read; it stays stored as it is. Fix it by ` +
-        "re-applying the spec with process_limits: { tasks_max: <N> }, or clear it with process_limits: {} (an ordinary re-apply: a " +
+        "re-applying the spec with process_limits: { tasks_max: <N>, memory_max: <size> }, or clear it with process_limits: {} (an ordinary re-apply: a " +
         "first-start retry keeps an unreadable value as stored).\n"));
+    notCarried.push(...exporter.poolNotCarried(rigId)
+      .map((seat) => `# Not carried: ${seat}'s pool, because the saved block can't be read; it stays stored as it is. Fix it by ` +
+        "re-applying the spec with a pool block that can be used, or clear it with pool: {}.\n"));
+    notCarried.push(...exporter.poolEdgesNotCarried(rigId)
+      .map(({ from, to, kind }) => `# Not carried: the ${kind} edge from ${from} to ${to}, because it touches a seat pool agent, which an export leaves out.\n`));
     const memberStartupOmissions = isPodAware ? exporter.memberStartupNotCarried(rigId)
       .map(({ logicalId, reason }) => `# Member startup not carried for ${JSON.stringify(logicalId)} (${reason}); inspect the source before importing.\n`) : [];
     const yaml = notCarried.join("") + memberStartupOmissions.join("") + serialized;

@@ -494,4 +494,86 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     expect(calls.find((call) => call.path === "/api/workflow/wf-1/resume")?.body).toMatchObject({ occurrenceId: "q-failed" });
     expect(calls.find((call) => call.path === "/api/workflow/wf-1/abort")?.body).toEqual({ reason: "operator stopped", actorSession: "orch@rig" });
   });
+
+  it("resume --owner sends the named redrive owner", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "workflow", "resume", "wf-1", "--owner", "qa-slot-2@rig", "--actor-session", "orch@rig", "--json",
+    ]);
+    expect(calls.find((call) => call.path === "/api/workflow/wf-1/resume")?.body).toMatchObject({ ownerSession: "qa-slot-2@rig" });
+  });
+
+  it("resume in human mode says the owner was resolved because --owner was empty", async () => {
+    const { deps } = makeDeps({
+      routes: {
+        "POST /api/workflow/wf-1/resume": {
+          status: 200,
+          data: { stepId: "qa", newPacketId: "q-2", ownerSession: "qa@rig", ownerSource: "resolved", ownerNote: "--owner was empty; the owner was resolved", resumeCount: 1, exceptionItemsClosed: 0 },
+        },
+      },
+    });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "resume", "wf-1", "--owner", " ", "--actor-session", "orch@rig"]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(logs.join("\n")).toContain("packet q-2 → qa@rig (resolved); 0 exception item(s) resolved); --owner was empty; the owner was resolved");
+  });
+
+  it("resume in human mode does not report a redrive when the replay was absorbed", async () => {
+    const { deps } = makeDeps({
+      routes: {
+        "POST /api/workflow/wf-1/resume": {
+          status: 200,
+          data: { stepId: "qa", newPacketId: "q-2", ownerSession: "qa-slot-2@rig", ownerNote: "--owner was empty; replay absorbed, already resumed to qa-slot-2@rig", resumeCount: 1, exceptionItemsClosed: 0, absorbedReplay: true },
+        },
+      },
+    });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "resume", "wf-1", "--occurrence", "q-1", "--owner", " ", "--actor-session", "orch@rig"]);
+    } finally {
+      spy.mockRestore();
+    }
+    const out = logs.join("\n");
+    expect(out).toContain("Replay absorbed, nothing redriven: instance wf-1");
+    expect(out).toContain("--owner was empty; replay absorbed, already resumed to qa-slot-2@rig");
+    expect(out).not.toContain("Redrove");
+    expect(out).not.toContain("the owner was resolved");
+  });
+
+  it("resume in human mode prints replay-only state and next step for a replay after the occurrence completed", async () => {
+    const { deps } = makeDeps({
+      routes: {
+        "POST /api/workflow/wf-1/resume": {
+          status: 200,
+          data: { stepId: "qa", newPacketId: "q-2", ownerSession: "qa-slot-2@rig", currentOwnerSession: "qa-slot-2@rig", resumeCount: 1, exceptionItemsClosed: 0, absorbedReplay: true },
+        },
+      },
+    });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "resume", "wf-1", "--occurrence", "q-1", "--actor-session", "orch@rig"]);
+    } finally {
+      spy.mockRestore();
+    }
+    const out = logs.join("\n");
+    expect(out).toContain("unchanged by this replay; this failure occurrence was already resumed (packet q-2)");
+    expect(out).toContain("rig workflow show wf-1");
+    expect(out).not.toContain("= active, rebound");
+    expect(out).not.toContain("fresh max_hops window");
+    expect(out).not.toContain("rig workflow project");
+  });
 });

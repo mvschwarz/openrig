@@ -5,7 +5,7 @@ import stringWidth from "string-width";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { sessionRigOf } from "../session-name.js";
 import { DaemonClient, remoteDaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, resolveOriginSelfHostId, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, resolveOriginSelfHostId, type LifecycleDeps , daemonStatusGuard, terminalsDegradedLine} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { loadHostRegistry, resolveHost, hostDisplayTarget, resolveRemoteBearer, classifyHttpFailedStep, classifyHttpError, type HttpHostEntry } from "../host-registry.js";
@@ -61,8 +61,12 @@ export interface NodeEntry {
   canonicalSessionName: string | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  configuredAccount?: string | null;
   model: string | null;
   modelObservation?: ModelObservation;
+  /** #3513: the Remote Control session the seat's own hooks last reported (null sessionId: seen absent); null or absent
+   *  when no observation applies. A last-seen observation, not proof of a live connection. */
+  remoteControl?: { sessionId: string | null; observedAt: string } | null;
   sessionStatus: string | null;
   intentionallyStopped?: boolean;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
@@ -117,6 +121,7 @@ export interface NodeEntry {
     sampledAt: string;
     evidence: string | null;
     rawEvent?: string | null;
+    rawSubtype?: string | null;
     stale?: boolean;
     fallback?: boolean;
   };
@@ -226,10 +231,12 @@ const ALLOWED_NODE_FIELDS = new Set([
   "canonicalSessionName",
   "nodeKind",
   "runtime",
+  "configuredAccount",
   "communityHarness",
   "launchWrapper",
   "model",
   "modelObservation",
+  "remoteControl",
   "sessionStatus",
   "intentionallyStopped",
   "startupStatus",
@@ -652,9 +659,9 @@ export function formatCommunityHarnessLine(seat: string, app: NonNullable<NodeEn
 }
 
 function missingSessionGuidance(node: NodeEntry): string | null {
-  return node.identityVerdict?.reason === "session_missing"
-    ? "tmux session missing; restore or relaunch the seat"
-    : null;
+  return node.identityVerdict?.reason === "session_missing_tmux_unavailable"
+    ? "tmux session last observed missing; latest tmux reading unavailable; restore or relaunch the seat"
+    : node.identityVerdict?.reason === "session_missing" ? "tmux session missing; restore or relaunch the seat" : null;
 }
 
 /** A recorded-running seat whose applicable identity check could not reach tmux: its liveness is
@@ -726,12 +733,23 @@ function startedWithoutLine(files: string[]): string {
   return `missing required ${files.map((file) => file.split("/").pop()).join(", ")}`;
 }
 
+/** #3571: a current Claude authentication or billing failure the daemon serves as the seat's activity, with Claude's
+ *  own error value when it is a plain identifier. Null for anything else, a generic provider error included. */
+export function providerFailureReason(n: NodeEntry): string | null {
+  const activity = n.agentActivity;
+  if (activity?.rawEvent !== "StopFailure" || activity.stale === true
+    || (activity.reason !== "provider_auth_error" && activity.reason !== "provider_billing_error")) return null;
+  const raw = activity.rawSubtype;
+  return raw && /^[a-z0-9_]{1,64}$/.test(raw) ? `${activity.reason} (${raw})` : activity.reason;
+}
+
 /** Why a seat that needs attention does, from what the daemon recorded: a missing session, a startup error, a held
- *  message, a missing required file, or the served needs-input reason. Otherwise "reason unavailable". */
+ *  message, a missing required file, the served needs-input reason, or a provider authentication or billing failure.
+ *  Otherwise "reason unavailable". */
 export function attentionReason(n: NodeEntry): string {
   return missingSessionGuidance(n) ?? n.latestError ?? (n.heldReason ? `held: ${n.heldReason}` : null)
     ?? (n.startedWithoutRequired?.length ? startedWithoutLine(n.startedWithoutRequired) : null)
-    ?? questionReason(n) ?? "reason unavailable";
+    ?? questionReason(n) ?? providerFailureReason(n) ?? "reason unavailable";
 }
 
 /** Whether the daemon serves a live question for the seat, with its own precedence: the arbitrated needs-input answer,
@@ -800,6 +818,8 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       lastActivity: n.agentActivity?.sampledAt ?? n.startupCompletedAt ?? null,
     };
     if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
+    // #3513: only a served observation; its time says when it was last seen.
+    if (n.remoteControl) compact.remoteControl = { sessionId: n.remoteControl.sessionId, observedAt: n.remoteControl.observedAt };
     // The served identity evidence (verdict, reason, observation time) and the registry's recorded
     // status, without the raw evidence; recorded running is not a check that the process is alive.
     if (n.storedSessionStatus !== undefined) compact.storedSessionStatus = n.storedSessionStatus;
@@ -1026,7 +1046,7 @@ contextUsage.percent, contextUsage.state (with --nodes). Other keys are rejected
 activeCount, hasWorkCount, attentionCount, status, lifecycleState, uptime,
 latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
-podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarness, launchWrapper, model, sessionStatus,
+podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, configuredAccount, communityHarness, launchWrapper, model, sessionStatus,
 intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, resumeCommandLabel, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
@@ -1143,6 +1163,10 @@ Exit codes:
 
       const status = await getDaemonStatus(deps.lifecycleDeps, { cleanupStaleState: opts.cleanup });
       if (!daemonStatusGuard(status)) return;
+      // #3315: a seat listed as running sits on a tmux server the daemon cannot reach. Said once, on stderr, so the
+      // listing (and its JSON on stdout) is unchanged and the reader still learns the seats can't be reached.
+      const terminalsLine = terminalsDegradedLine(status.terminals);
+      if (terminalsLine) console.error(terminalsLine);
 
       const client = deps.clientFactory(getDaemonUrl(status));
 
@@ -1155,10 +1179,14 @@ Exit codes:
         return;
       }
 
-      // OPR.0.4.4.21 FR-1: ONE O(rigs) fetch including archived so the
-      // count line can be computed; visibility is split client-side below
+      // OPR.0.4.4.21 FR-1: the count line needs the archived count. #3636: the daemon sends it beside the default
+      // (active-only) list as a header, so the archived rigs aren't folded just to be counted. A daemon without the
+      // header gets the earlier single fetch, archived included; visibility is split client-side below either way
       // (JSON keeps today's default of excluding archived — parity).
-      const res = await client.get<PsEntry[]>("/api/ps?includeArchived=true");
+      let res = await client.get<PsEntry[]>(opts.includeArchived ? "/api/ps?includeArchived=true" : "/api/ps");
+      const countHeader = opts.includeArchived ? null : res.headers?.get("x-openrig-archived-count") ?? null;
+      const headerCount = countHeader !== null && /^\d+$/.test(countHeader) ? Number(countHeader) : null;
+      if (!opts.includeArchived && res.status < 400 && headerCount === null) res = await client.get<PsEntry[]>("/api/ps?includeArchived=true");
 
       if (res.status >= 400) {
         const reason = (res.data as unknown as { error?: unknown } | null)?.error;
@@ -1175,7 +1203,7 @@ Exit codes:
       // --include-archived they are dropped from BOTH renders here, exactly
       // as the daemon default used to do. archivedCount feeds the FR-1
       // count line only.
-      const archivedCount = all.filter((e) => e.isArchived === true).length;
+      const archivedCount = headerCount ?? all.filter((e) => e.isArchived === true).length;
       const visible = opts.includeArchived ? all : all.filter((e) => e.isArchived !== true);
 
       const rigScoped = opts.rig
@@ -1185,7 +1213,20 @@ Exit codes:
       // A --rig that names no rig is a lookup that missed, not an empty fleet: say so (as rig chatroom,
       // env and parked do) instead of "No rigs" or a zero summary. --json keeps its empty result.
       if (!opts.json && opts.rig && rigScoped.length === 0) {
-        if (all.some((e) => (e.rigName ?? e.name) === opts.rig)) {
+        const named = (entries: unknown) => Array.isArray(entries) && entries.some((e: PsEntry) => (e.rigName ?? e.name) === opts.rig);
+        // From the header path the list holds no archived rig: look at the archived ones on this miss only.
+        let archivedRig = named(all);
+        if (!archivedRig && headerCount !== null && headerCount > 0) {
+          const archived = await client.get<PsEntry[]>("/api/ps?archived=only");
+          // A failed lookup hasn't shown the rig is missing: report it as the first rig-list read does.
+          if (archived.status >= 400) {
+            console.error(`Failed to fetch rig list from daemon (HTTP ${archived.status}). Check daemon status with: rig status`);
+            process.exitCode = 2;
+            return;
+          }
+          archivedRig = named(archived.data);
+        }
+        if (archivedRig) {
           console.error(`Rig '${opts.rig}' is archived. Show it with: rig ps --rig ${opts.rig} --include-archived`);
         } else {
           console.error(`Rig '${opts.rig}' not found. List rigs with: rig ps`);
@@ -1527,7 +1568,7 @@ async function handleNodes(
       ));
     }
   } else {
-    const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "MODEL(DECLARED)", "STATUS", "STARTUP", "ORIENTED", "LIFECYCLE", "TERMINAL", "WORK", "ACTIVITY", "CTX", "RESTORE", "ERROR");
+    const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "MODEL(DECLARED)", "STATUS", "STARTUP", "ORIENTED", "LIFECYCLE", "TERMINAL", "WORK", "ACTIVITY", "CTX", "RESTORE", "ERROR", "ACCT");
     console.log(header);
     for (const n of humanList as NodeEntry[]) {
       const parts = n.logicalId.split(".");
@@ -1553,8 +1594,12 @@ async function handleNodes(
         missingSessionGuidance(n) ?? (n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}`
           : n.startedWithoutRequired?.length ? truncate(startedWithoutLine(n.startedWithoutRequired), 30)
           : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—"),
+        n.runtime === "claude-code" ? n.configuredAccount ?? "unknown" : "—",
       ));
     }
+  }
+  if (!useCompact && (humanList as NodeEntry[]).some((n) => n.runtime === "claude-code")) {
+    console.log("ACCT is configured, not verified sign-in; full labels: --full --json.");
   }
   for (const line of modelLines(humanList as NodeEntry[])) console.log(line);
   for (const n of humanList as NodeEntry[]) {
@@ -1589,19 +1634,15 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 
-function fitCell(value: string, width: number): string {
-  return truncate(value, width).padEnd(width);
-}
-
 const RIG_COLUMN_SEPARATOR = "  ";
-const rigCellSegmenter = new Intl.Segmenter();
+const cellSegmenter = new Intl.Segmenter();
 
-function fitRigCell(value: string, width: number): string {
+function fitCell(value: string, width: number): string {
   if (stringWidth(value) > width) {
     const limit = width - 1;
     let prefix = "";
     let used = 0;
-    for (const { segment } of rigCellSegmenter.segment(value)) {
+    for (const { segment } of cellSegmenter.segment(value)) {
       const segmentWidth = stringWidth(segment);
       if (used + segmentWidth > limit) break;
       prefix += segment;
@@ -1613,13 +1654,13 @@ function fitRigCell(value: string, width: number): string {
 }
 
 function padRigRow(cells: string[], widths: number[]): string {
-  return cells.map((cell, i) => i < widths.length ? fitRigCell(cell, widths[i]!) : cell).join(RIG_COLUMN_SEPARATOR);
+  return cells.map((cell, i) => i < widths.length ? fitCell(cell, widths[i]!) : cell).join(RIG_COLUMN_SEPARATOR);
 }
 
 // A cell filled to its width, or cut to it, still ends before the next column begins.
 const NODE_COLUMN_SEPARATOR = " ";
 
-export function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, model: string, status: string, startup: string, oriented: string, lifecycle: string, terminal: string, work: string, activity: string, ctx: string, restore: string, error: string): string {
+export function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, model: string, status: string, startup: string, oriented: string, lifecycle: string, terminal: string, work: string, activity: string, ctx: string, restore: string, error: string, account = "—"): string {
   return [
     fitCell(rig, 30),
     fitCell(pod, 10),
@@ -1639,6 +1680,7 @@ export function padNodeRow(rig: string, pod: string, member: string, session: st
     fitCell(activity, 17),
     fitCell(ctx, 6),
     fitCell(restore, 10),
+    fitCell(account, 12),
     error,
   ].join(NODE_COLUMN_SEPARATOR);
 }

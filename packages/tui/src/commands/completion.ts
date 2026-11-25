@@ -2,15 +2,18 @@ import { COMMAND_REGISTRY, evaluateAvailability, VERB_TABLE, type CompletionCont
 
 /** Completion proposes text; execution still goes through parseCommand and dispatch. */
 export function completeCommand(line: string, ctx: CompletionContext, context = "standard") {
+  const input = line.trimStart();
+  const leading = line.slice(0, line.length - input.length);
   let head = "";
-  let prefix = line;
+  let prefix = input;
   let choices: string[];
-  if (line.startsWith(":")) {
-    head = ":";
-    prefix = line.slice(1);
+  if (input.startsWith(":")) {
+    const section = input.slice(1);
+    prefix = section.trimStart();
+    head = input.slice(0, input.length - prefix.length);
     choices = ctx.state.sections.map((s) => s.name);
   } else {
-    const match = /^(\S+)(\s+)(.*)$/.exec(line);
+    const match = /^(\S+)(\s+)(.*)$/.exec(input);
     if (match) {
       const entry = VERB_TABLE.get(match[1]!);
       head = match[1]! + match[2]!;
@@ -25,7 +28,7 @@ export function completeCommand(line: string, ctx: CompletionContext, context = 
   if (!candidates.length) return { line, candidates, message: "No completion match; edit the text or use ? for help" };
   let common = candidates[0]!;
   for (const candidate of candidates) while (!candidate.startsWith(common)) common = common.slice(0, -1);
-  let completed = head + common;
+  let completed = leading + head + common;
   if (!head && candidates.length === 1 && VERB_TABLE.get(common)?.args) completed += " ";
   return { line: completed, candidates, message: candidates.length === 1 ? "Completed · Enter runs · Esc clears" : `${candidates.length} matches · keep typing, then Tab` };
 }

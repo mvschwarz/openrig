@@ -19,7 +19,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Policy, PolicyJob, PolicyEvaluation } from "./types.js";
 import { BACKGROUND_SHELL_GRACE_MINUTES } from "../queue-pickup.js";
-import type { WatchdogHistoryEntry } from "../watchdog-history-log.js";
+import { deliveryReachedSeat, type WatchdogHistoryEntry } from "../watchdog-history-log.js";
 
 /** Structural view of the shipped SeatParkedDiagnosis (parked-query.ts). */
 export interface ParkedSeatDiagnosisView {
@@ -74,18 +74,30 @@ export interface ParkedOwnerConsumerDeps {
   hasPendingPostCompactStage?: (sessionName: string) => boolean;
   /** Existing bound-terminal authority; only a positive result excludes automated reminders. */
   isTerminalSeat?: (sessionName: string) => boolean;
+  /** The seat's typing guard is at queue-only (#3076): a person types there, so nothing is typed; its open rows already
+   *  are the reminder in its queue. */
+  isQueueOnlySeat?: (sessionName: string) => boolean;
+  /** #3315: the seat's tmux server does not answer (the queue's delivery hold). Nothing is reserved or attempted until
+   *  it answers again; the reminder stays owed. */
+  terminalServerUnreachable?: (sessionName: string) => boolean;
   /** Opaque current node/guard revision/retained quota inputs, not a parked-state oracle. */
   retentionState?: (sessionName: string) => string | null;
   /** The clock the waiting grace is measured on; the wall clock when absent. */
   now?: () => number;
   /** #2661 (b): how long a live background shell defers the reminder; BACKGROUND_SHELL_GRACE_MINUTES when absent. */
   backgroundShellGraceMs?: number;
+  /** A delivered reminder whose rows are still pending and unclaimed past PARKED_OWNER_ESCALATE_AFTER_MS: tell someone who can
+   *  act, once per episode. Returns who was told; nothing is held, refused or re-sent to the seat. */
+  escalateUnclaimed?: (input: { seat: string; qitemIds: string[]; deliveredAt: string; episodeKey: string }) => Promise<string[]>;
 }
 
 export const PARKED_OWNER_POLICY_NAME = "parked-owner-consumer";
 /** A seat that just handed work off or asked a person has only started waiting (#1933): its first reminder waits
  *  until its arbitrated waiting state has been unchanged this long. A seat at a prompt gets no grace. */
 export const PARKED_OWNER_IDLE_GRACE_MS = 5 * 60_000;
+/** How long a delivered reminder's rows may stay pending and unclaimed, with the seat idle and nothing changed, before
+ *  someone who can act is told. */
+export const PARKED_OWNER_ESCALATE_AFTER_MS = 15 * 60_000;
 
 /** Stable per-rig registration anchor: member@rig shape, policy name as slug. */
 export function makeRigAnchor(rigName: string): string {
@@ -107,6 +119,11 @@ export const FAILED_PREFIX = "parked-owner wake delivery failed:";
 /** A recorded ok wake to the same known occupant waits for a change to its obligations. */
 export const DELIVERED_PREFIX = "parked-owner wake delivered:";
 export const NUDGE_FAIL_PREFIX = "failed: parked-owner wake delivery";
+/** A queue-only seat's reminder, held on purpose (#3076): neither a delivery nor a failure. */
+export const HELD_PREFIX = "parked-owner wake held:";
+/** The once-per-episode notice that a delivered reminder's rows are still unclaimed. */
+export const ESCALATED_PREFIX = "parked-owner escalated:";
+const QUEUE_ONLY_NO_INPUT = "; code queue_only_seat; input not_reached;";
 const QUOTA_NO_INPUT = "; code retained_quota_full; input not_reached;";
 const TERMINAL_NO_INPUT = "; code terminal_seat; input not_reached;";
 export const PARKED_OWNER_COMPACTION_PENDING = "[managed-compaction-pending] Parked-owner reminder deferred until the existing post-compact stages clear.";
@@ -145,6 +162,8 @@ export function currentParkedOwnerNoInputFailure(transitions: RowTransitionView[
   const key = reserve?.transitionNote && keyOfNote(reserve.transitionNote);
   if (!key || !openKeysOnRow(transitions).includes(key)) return null;
   for (const t of [...transitions].reverse()) {
+    // A later held note (the seat turned queue-only, #3076) supersedes an earlier refusal: input there stops by the level.
+    if (t.transitionNote?.startsWith(HELD_PREFIX)) return null;
     if (t.transitionNote?.startsWith(`${FAILED_PREFIX} ${key}${QUOTA_NO_INPUT}`)) return { code: "retained_quota_full", ts: t.ts, transitionId: t.transitionId };
     if (t.transitionNote?.startsWith(`${FAILED_PREFIX} ${key}${TERMINAL_NO_INPUT}`)) return { code: "terminal_seat", ts: t.ts, transitionId: t.transitionId };
   }
@@ -217,7 +236,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         const primary = typeof n["primaryRow"] === "string" ? n["primaryRow"] : null;
         if (!key || !primary || latestRows.has(primary)) continue;
         latestRows.add(primary);
-        if (e.deliveryStatus === "ok") {
+        if (deliveryReachedSeat(e.deliveryStatus)) {
           try {
             if (!deps.rows.listTransitions(primary).some(t => t.transitionNote === `${DELIVERED_PREFIX} ${key}`))
               deps.rows.appendNote(primary, `${DELIVERED_PREFIX} ${key}`);
@@ -245,7 +264,8 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
       }
 
       const closures: string[] = [];
-      const skipped: Array<{ seat: string; why: string; primaryRow?: string; obligations?: string[]; episodeKey?: string; refusalReason?: string }> = [];
+      const skipped: Array<{ seat: string; why: string; primaryRow?: string; obligations?: string[]; episodeKey?: string; refusalReason?: string;
+        escalationFailure?: { episodeKey: string; failure: string } }> = [];
       // Rotate after the latest physical delivery selection, including retained input. A single
       // cursor from history cannot lose an owner's turn just because a bounded window filled.
       const lastTarget = recent.find(e => e.deliveryStatus && e.deliveryTargetSession)?.deliveryTargetSession;
@@ -254,6 +274,13 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
       const seats = [...ordered.slice(next), ...ordered.slice(0, next)];
 
       for (const seat of seats) {
+        // #3315: first, so it holds whatever else the seat reads as (a seat on a lost server often reads indeterminate):
+        // no reservation and no transition per scan for a seat whose terminal server does not answer; the first scan
+        // after it answers again sends the reminder.
+        if (deps.terminalServerUnreachable?.(seat.sessionName)) {
+          skipped.push({ seat: seat.sessionName, why: "terminal-server-unreachable" });
+          continue;
+        }
         if (seat.parked === "indeterminate") {
           skipped.push({ seat: seat.sessionName, why: "indeterminate-not-parked" });
           continue;
@@ -337,6 +364,21 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         try { transitions = deps.rows.listTransitions(primaryRow); } catch { /* missing history cannot prove success or refusal */ }
         const matches = (key: string) => key.startsWith(`${seat.sessionName}|${idsHash}#`);
         const generationOf = (t: RowTransitionView | undefined) => t?.transitionNote?.match(/; generation ([^;\s]+);/)?.[1] ?? null;
+        // A queue-only seat: nothing is typed, its open rows are the reminder. Held once per obligation set and occupant,
+        // with no nudge result (each row keeps its own) and no failure code the no-input recovery would read. Once held,
+        // the unchanged hold is quiet (below), not a history row every scan.
+        if (deps.isQueueOnlySeat?.(seat.sessionName) === true && deps.isTerminalSeat?.(seat.sessionName) !== true) {
+          const held = `${HELD_PREFIX} ${seat.sessionName}|${idsHash}${generation === null ? "" : `; generation ${generation}`}${QUEUE_ONLY_NO_INPUT}`;
+          if (transitions.some(t => t.transitionNote?.startsWith(held))) {
+            skipped.push({ seat: seat.sessionName, why: "queue-only-seat-unchanged" });
+            continue;
+          }
+          try {
+            deps.rows.appendNote(primaryRow, `${held} The seat takes OpenRig's reminders only in its queue (typing guard queue-only); its open rows are the reminder. No input was written.`);
+          } catch { /* the rows stay open and listed */ }
+          skipped.push({ seat: seat.sessionName, why: "queue-only-seat" });
+          continue;
+        }
         const reserve = [...transitions].reverse().find(t => t.transitionNote?.startsWith(RESERVE_PREFIX) && matches(keyOfNote(t.transitionNote) ?? ""));
         const refused = openPromptRefusals(transitions).find(({ key }) => {
           const prior = generationOf(transitions.find(t => t.transitionNote?.startsWith(RESERVE_PREFIX) && keyOfNote(t.transitionNote) === key));
@@ -352,7 +394,23 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           && transitions.some(t => t.transitionNote === `${DELIVERED_PREFIX} ${lastKey}`)
           && !transitions.some(t => (t.transitionNote?.startsWith(FAILED_PREFIX) || t.transitionNote?.startsWith(REFUSED_PREFIX)) && keyOfNote(t.transitionNote!) === lastKey);
         if (delivered && !changedSince(deps.rows.listTransitions, namedIds, seat.sessionName, reserve)) {
-          skipped.push({ seat: seat.sessionName, why: "unchanged-since-last-wake" });
+          // Delivered, the seat idle and nothing changed: the reminder doesn't repeat. Rows still unclaimed past the bound
+          // go to someone who can act, once for this episode.
+          const deliveredAt = transitions.find(t => t.transitionNote === `${DELIVERED_PREFIX} ${lastKey}`)?.ts;
+          let escalationFailure: { episodeKey: string; failure: string } | undefined;
+          const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && namedIds.includes(r.qitemId)).map(r => r.qitemId);
+          if (deps.escalateUnclaimed && deliveredAt && unclaimed.length > 0
+            && (deps.now?.() ?? Date.now()) - Date.parse(deliveredAt) >= PARKED_OWNER_ESCALATE_AFTER_MS
+            && !transitions.some(t => t.transitionNote?.startsWith(`${ESCALATED_PREFIX} ${lastKey} `))) {
+            try {
+              const told = await deps.escalateUnclaimed({ seat: seat.sessionName, qitemIds: unclaimed, deliveredAt, episodeKey: lastKey! });
+              if (told.length > 0) deps.rows.appendNote(primaryRow, `${ESCALATED_PREFIX} ${lastKey} to ${told.join(", ")}`);
+            } catch (error) {
+              // Nothing is marked escalated, so a later pass tries again; this pass's notes say why it didn't land.
+              escalationFailure = { episodeKey: lastKey!, failure: (error as { code?: string }).code ?? (error instanceof Error ? error.name : typeof error) };
+            }
+          }
+          skipped.push({ seat: seat.sessionName, why: "unchanged-since-last-wake", ...(escalationFailure ? { escalationFailure } : {}) });
           continue;
         }
         let retentionState: string | null = null;
@@ -421,6 +479,15 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
 
       if (closures.length > 0) {
         return { action: "skip", reason: "episode-ended", notes: { episodeClosures: closures, skippedSeats: skipped } };
+      }
+      // Only queue-only seats already held, and nothing else: nothing new to record (#3076).
+      if (skipped.length > 0 && skipped.every(({ why }) => why === "queue-only-seat-unchanged")) {
+        return { action: "skip", reason: "queue_only_seat_unchanged", notes: { skippedSeats: skipped } };
+      }
+      // #3315: deferred only because the terminal server is gone: quiet, like the clean scan, so a long loss writes no
+      // history per scan; the loss itself is recorded once (tmux.server_gone).
+      if (skipped.length > 0 && skipped.every(entry => entry.why === "terminal-server-unreachable")) {
+        return { action: "skip", reason: "terminal-server-unreachable", notes: { skippedSeats: skipped } };
       }
       if (skipped.length > 0) {
         return { action: "skip", reason: "all-parked-owners-deferred", notes: { skippedSeats: skipped } };

@@ -1266,6 +1266,26 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     });
   });
 
+  it("current-park boundary: execution view drops an old arm after leaving blocked and reparking without a wake", async () => {
+    db.prepare(`INSERT INTO queue_transitions (qitem_id, ts, state, actor_session)
+      VALUES ('qitem-parked-33', ?, ?, 'lead@exec-fixture')`).run("2026-08-29T22:00:00.000Z", "in-progress");
+    db.prepare(`INSERT INTO queue_transitions (qitem_id, ts, state, actor_session)
+      VALUES ('qitem-parked-33', ?, ?, 'lead@exec-fixture')`).run("2026-08-29T22:01:00.000Z", "blocked");
+    const park = ((await show()).q5_park as Record<string, unknown>[]).find(r => r.qitem_id === "qitem-parked-33");
+    expect(park).toMatchObject({ pickup_state: "parked", park_kind: "indeterminate", wake_target: null });
+  });
+
+  it("current-park boundary: execution view chooses the newest arm and keeps it across blocked notes", async () => {
+    const arm = db.prepare(`INSERT INTO queue_transitions (qitem_id, ts, state, actor_session)
+      VALUES ('qitem-parked-33', ?, 'blocked', 'lead@exec-fixture')`).run("2026-08-29T22:00:00.000Z");
+    db.prepare(`INSERT INTO queue_transition_wakes (transition_id, qitem_id, phase, wake_kind, wake_ref)
+      VALUES (?, 'qitem-parked-33', 'armed', 'timer', 'wake-timer-new')`).run(arm.lastInsertRowid);
+    db.prepare(`INSERT INTO queue_transitions (qitem_id, ts, state, actor_session)
+      VALUES ('qitem-parked-33', ?, 'blocked', 'lead@exec-fixture')`).run("2026-08-29T22:01:00.000Z");
+    const park = ((await show()).q5_park as Record<string, unknown>[]).find(r => r.qitem_id === "qitem-parked-33");
+    expect(park).toMatchObject({ park_kind: "deliberate-with-wake", wake_target: "wake-timer-new" });
+  });
+
   it("park honesty: armed wake => deliberate-with-wake; removing the wake flips park_kind to INDETERMINATE, never idle/dead", async () => {
     const before = await show();
     const parkedBefore = (before.q5_park as Record<string, unknown>[]).find((p) => p.qitem_id === "qitem-parked-33")!;

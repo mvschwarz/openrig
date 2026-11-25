@@ -950,7 +950,7 @@ describe("RestoreCheckService", () => {
     expect(hookChecks).toHaveLength(0);
   });
 
-  it.each([undefined, "*", "startup|resume", "startup, resume", "^(startup|resume)$"].flatMap(matcher => ["node", "'/runtime/node'"].map(executable => ({ matcher, executable }))))("checks usable selected activity-hook matcher $matcher / $executable", ({ matcher, executable }) => {
+  it.each([undefined, "*", "startup|resume", "startup, resume", "^(startup|resume)$"].flatMap(matcher => ["node", "'/runtime/node'", "exec node", "exec '/runtime/node'"].map(executable => ({ matcher, executable }))))("checks usable selected activity-hook matcher $matcher / $executable", ({ matcher, executable }) => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
     const relayPath = RELAY_PATH;
@@ -1046,7 +1046,7 @@ describe("RestoreCheckService", () => {
     expect(hook?.evidence).toContain("UserPromptSubmit");
   });
 
-  it.each(["managed", "plugin", "both"])("keeps old equal-version %s delivery ready without the optional diagnostic", channel => {
+  it.each(["managed", "plugin", "both"])("keeps old equal-version %s delivery ready without the optional diagnostic or elicitation hooks", channel => {
     const cwd = "/fixture-project", pluginDir = "/custom-instance/plugins/openrig-core";
     const settingsPath = path.join(cwd, ".claude/settings.local.json");
     const oldEvents = ["SessionStart", "UserPromptSubmit", "PostToolBatch", "Stop", "StopFailure", "Notification"];
@@ -1068,7 +1068,8 @@ describe("RestoreCheckService", () => {
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [claudeNode({ cwd })],
       getStartupContext: () => startupContextProbe({ projectionEntries }),
-      getClaudeActivityHookEvents: () => ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolBatch", "Stop", "StopFailure", "Notification"],
+      getClaudeActivityHookEvents: () => ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Elicitation", "ElicitationResult",
+        "PostToolBatch", "Stop", "StopFailure", "Notification"],
       exists: file => files.has(file) || file.endsWith("host-infra.json"),
       readFile: file => files.get(file) ?? VALID_HOST_INFRA_DECLARATION,
     }));

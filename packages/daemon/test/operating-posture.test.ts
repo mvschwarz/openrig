@@ -110,6 +110,50 @@ it("refuses missing, conflicting, ambiguous, unreadable and corrupt sources inst
   expect(t.service.resolve({ rigId: "demo" })).toMatchObject({ posture: "unknown", source: "unknown" });
 });
 
+it("reads one authored slice named by its directory and by its SPEC id as one workstream, and still refuses a different node, project or mission", async () => {
+  const t = await setup();
+  const tagged = (id: string, tags: string[]) => t.queue.create({ qitemId: id, sourceSession: "author@demo", destinationSession: "owner@demo", body: "Scoped work", tags, nudge: false });
+  t.write("alpha/missions/release/slices/02-other/slice.yaml", "kind: slice\ncomposition: {mission: ../../mission.yaml}\n");
+  t.write("alpha/missions/release/slices/02-other/SPEC.md", "---\nid: other-2\nmission: release\nstage: planning\n---\n# Other\n");
+  t.write("alpha/missions/other/SPEC.md", "---\nid: other\n---\n# Other mission\n");
+  t.write("alpha/missions/other/mission.yaml", "kind: mission\nmetadata: {name: other, status: active}\nrelease: {phase: planning}\n");
+  await tagged("alias-tags", ["project:alpha", "mission:release", "slice:work-1", "slice:01-work"]);
+  await tagged("alias-mixed", ["project:alpha", "mission:release", "slice:01-work", "workstream:work-1"]);
+  await tagged("other-node", ["project:alpha", "mission:release", "slice:work-1", "slice:other-2"]);
+  await tagged("other-mission", ["project:alpha", "mission:other", "slice:work-1"]);
+  await tagged("other-project", ["project:beta", "mission:release", "slice:work-1", "workstream:alpha/release/work-1"]);
+  for (const id of ["alias-tags", "alias-mixed"]) {
+    expect(t.service.resolve({ qitemId: id })).toMatchObject({ context: { projectId: "alpha", missionId: "release", workstreamId: "alpha/release/work-1" } });
+  }
+  // The qualified input form and a row tagged with the slice's directory name are the same node.
+  expect(t.service.resolve({ qitemId: "alpha", workstreamId: "alpha/release/01-work" })).toMatchObject({ context: { workstreamId: "alpha/release/work-1" } });
+  // Canonical resolution adds no authority: default stays human-led, and only a binding on the canonical node delegates.
+  expect(t.service.resolve({ qitemId: "alias-tags" })).toMatchObject({ posture: "human-led", source: "product-default", binding: null, grantsAuthority: false });
+  expect((await t.put("delegated", "workstream", "alpha/release/work-1")).status).toBe(200);
+  expect(t.service.resolve({ qitemId: "alias-tags" })).toMatchObject({ posture: "delegated", binding: { id: "workstream:alpha/release/work-1" }, grantsAuthority: false });
+  expect(t.service.resolve({ qitemId: "other-node" }).posture).toBe("unknown");
+  for (const id of ["other-node", "other-mission", "other-project"]) {
+    expect(t.service.resolve({ qitemId: id })).toMatchObject({ posture: "unknown", source: "unknown" });
+  }
+  expect(t.service.resolve({ qitemId: "other-node" })).toMatchObject({ reason: expect.stringContaining("conflicting workstreamId") });
+  expect(t.service.resolve({ qitemId: "alpha", workstreamId: "other-2" })).toMatchObject({ posture: "unknown", reason: expect.stringContaining("conflicting workstreamId") });
+});
+
+it("treats a trailing-empty qualified workstream as absent, so the row's slice tag selects the workstream binding", async () => {
+  const t = await setup();
+  await t.queue.create({ qitemId: "tagged-slice", sourceSession: "author@demo", destinationSession: "owner@demo", body: "Scoped work", tags: ["project:alpha", "mission:release", "slice:work-1"], nudge: false });
+  expect((await t.put("delegated", "mission", "alpha/release")).status).toBe(200);
+  expect((await t.put("human-led", "workstream", "alpha/release/work-1")).status).toBe(200);
+  expect(t.service.resolve({ qitemId: "tagged-slice", workstreamId: "alpha/release/" })).toMatchObject({
+    posture: "human-led",
+    binding: { id: "workstream:alpha/release/work-1" },
+    grantsAuthority: false,
+    context: { projectId: "alpha", missionId: "release", workstreamId: "alpha/release/work-1" },
+  });
+  // A real mismatch behind a trailing-empty qualifier is still refused.
+  expect(t.service.resolve({ qitemId: "tagged-slice", workstreamId: "alpha/other/" })).toMatchObject({ posture: "unknown" });
+});
+
 it("preserves legacy binding bytes through migration and never infers delegation from an ergonomic mode", async () => {
   const db = createDb(); cleanup.push(() => db.close()); migrate(db, ALL_MIGRATIONS.slice(0, -1));
   const store = new RigModeStore(db); store.setBinding("global_host", null, "focus", record("focus", "global_host"));
@@ -356,4 +400,35 @@ it("leaves explicit projects alone and stays unknown when no single project is i
   const unclaimedPair = await inferenceSetup("projects: [{id: bundle, root: bundle}, {id: mine, root: mine}]\n");
   await unclaimedPair.row("pair", unclaimedPair.seat("user-rig", join(unclaimedPair.home, "elsewhere")), ["mission:release"]);
   expect(unclaimedPair.service.resolve({ qitemId: "pair" })).toMatchObject({ posture: "unknown", reason: expect.stringContaining("multiple projects are declared") });
+});
+
+it("resolves a row tagged with a project's former id as that project, and records the mapping (#3261)", async () => {
+  const t = await setup();
+  t.write("alpha/project.yaml", "metadata: {id: alpha}\naliases: [old-alpha]\n");
+  await t.queue.create({ qitemId: "renamed", sourceSession: "author@demo", destinationSession: "owner@demo", body: "Tagged before the rename", tags: ["project:old-alpha", "mission:release", "slice:work-1"], nudge: false });
+  expect((await t.put("delegated", "project", "alpha")).status).toBe(200);
+  const result = t.service.resolve({ qitemId: "renamed" });
+  expect(result).toMatchObject({ posture: "delegated", binding: { id: "project:alpha" }, context: { projectId: "alpha", workstreamId: "alpha/release/work-1" } });
+  expect(result.context!.sources).toContain(join(realpathSync(t.home), "workspace.yaml") + "#former-id=old-alpha");
+});
+
+it("reads a current project and a row tagged with its former id as one project, and keeps a real conflict (#3261)", async () => {
+  const t = await setup();
+  t.write("alpha/project.yaml", "metadata: {id: alpha}\naliases: [old-alpha]\n");
+  await t.queue.create({ qitemId: "renamed", sourceSession: "author@demo", destinationSession: "owner@demo", body: "Tagged before the rename", tags: ["project:old-alpha", "mission:release", "slice:work-1"], nudge: false });
+  expect((await t.put("delegated", "project", "alpha")).status).toBe(200);
+  expect(t.service.resolve({ projectId: "alpha", qitemId: "renamed" })).toMatchObject({ posture: "delegated", binding: { id: "project:alpha" }, context: { projectId: "alpha" } });
+  expect(t.service.resolve({ projectId: "beta", qitemId: "renamed" })).toMatchObject({ posture: "unknown", reason: expect.stringContaining("conflicting projectId") });
+});
+
+it("resolves a workspace's former id from its own project.yaml when there's no catalog, without changing stored tags (#3261)", async () => {
+  const t = await setup();
+  rmSync(join(t.home, "workspace.yaml"));
+  t.write("project.yaml", "metadata: {id: alpha}\naliases: [old-alpha]\nmissions: {root: alpha/missions}\n");
+  await t.queue.create({ qitemId: "renamed", sourceSession: "author@demo", destinationSession: "owner@demo", body: "Tagged before the rename", tags: ["project:old-alpha", "mission:release", "slice:work-1"], nudge: false });
+  expect((await t.put("delegated", "project", "alpha")).status).toBe(200);
+  const result = t.service.resolve({ qitemId: "renamed" });
+  expect(result).toMatchObject({ posture: "delegated", binding: { id: "project:alpha" }, context: { projectId: "alpha", workstreamId: "alpha/release/work-1" } });
+  expect(result.context!.sources).toContain(join(realpathSync(t.home), "project.yaml") + "#former-id=old-alpha");
+  expect(JSON.parse((t.db.prepare("SELECT tags FROM queue_items WHERE qitem_id = 'renamed'").get() as { tags: string }).tags)).toContain("project:old-alpha");
 });

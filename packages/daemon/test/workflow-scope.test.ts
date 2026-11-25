@@ -101,6 +101,13 @@ describe("workflow scope tags", () => {
   const instantiate = (path: string, scope?: Parameters<typeof normalizeWorkflowScope>[0]) =>
     runtime.instantiate({ specPath: path, rootObjective: "scope", createdBySession: "ops@rig", ...(scope ? { scope } : {}) });
 
+  it("titles each ordinary successor of a parallel run", async () => {
+    const created = await runtime.instantiate({ specPath: spec(PARALLEL), rootObjective: "parallel", runTitle: "Release", createdBySession: "ops@rig" });
+    await runtime.project({ instanceId: created.instance.instanceId, currentPacketId: created.entryQitemId, exit: "done", actorSession: "root@rig" });
+    const frontier = runtime.inspect(created.instance.instanceId).frontier;
+    expect(frontier.map(row => queueRepo.getById(row.packetId)?.summary).sort()).toEqual(["Release — left", "Release — right"]);
+  });
+
   // The slice tag on the packet each step of a lifecycle chain produces, in order.
   const sliceTagsAlong = async (missionDir: string, key: string, length: number) => {
     const created = await runtime.instantiateLifecycle({ missionPath: missionDir, operationKey: key, rootObjective: "lifecycle", createdBySession: "ops@rig" });

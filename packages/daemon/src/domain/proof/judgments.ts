@@ -15,6 +15,8 @@ export interface Evidence { ref: string; sha256: string }
 export interface Judgment {
   version: 1; sequence: number; scope: string; id: string; operationId: string;
   itemId: string; itemRevision: string; policyRevision: string; policySource: string;
+  /** The policy's everyJudge when recorded (#3621). Receipts without it stay bound to the whole policy revision. */
+  policyEveryJudge?: boolean;
   previous: string | null; actor: string; provenance: string; at: string;
   verdict: JudgmentVerdict; reason: string; evidence: Evidence[];
   subject: { kind: "artifact" | "commit" | "patch-equivalent"; ref: string; comparison?: string };
@@ -48,6 +50,9 @@ export interface MissionReadiness {
    *  edges. */
   slices: Array<{ scope: string; id: string; readiness: ScopeReadiness; dependsOn: string[]; dependsOnBasis: DependsOnBasis; eligible: boolean | null }>;
   historicalStatus: string | null;
+  /** How many composition members are active. `not-ready` with 0 means the mission has no active work (#3614), not work
+   *  that isn't ready; `unknown` and `legacy` keep their own readings. */
+  activeSlices: number;
 }
 export class JudgmentError extends Error {
   constructor(public code: string, message: string, public status = 400) { super(message); }
@@ -149,6 +154,7 @@ function ledger(dir: string, io: ScopeFsDeps): Judgment[] {
     if (id !== hash(payload) || obj.version !== 1 || obj.sequence !== receipts.length + 1 || typeof obj.itemId !== "string" || typeof obj.itemRevision !== "string" || typeof obj.policyRevision !== "string" || typeof obj.actor !== "string" || typeof obj.operationId !== "string" || typeof obj.intent !== "string" || !["accept", "reject", "withdraw"].includes(String(obj.verdict)) || !Array.isArray(obj.evidence)) throw new JudgmentError("journal_invalid", `${home}/${name}: malformed or changed judgment; inspect history`);
     const subject = mapping(obj.subject, name);
     if ([obj.scope, obj.itemId, obj.itemRevision, obj.policyRevision, obj.policySource, obj.actor, obj.operationId, obj.intent, obj.reason, obj.provenance, obj.at].some(v => typeof v !== "string" || !v.trim()) || !Number.isFinite(Date.parse(String(obj.at))) || !["artifact", "commit", "patch-equivalent"].includes(String(subject.kind)) || typeof subject.ref !== "string" || !subject.ref.trim() || (subject.comparison !== undefined && typeof subject.comparison !== "string") || obj.evidence.some(e => !e || typeof e !== "object" || typeof e.ref !== "string" || !e.ref || typeof e.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(e.sha256))) throw new JudgmentError("journal_invalid", `${home}/${name}: malformed judgment fields`);
+    if (obj.policyEveryJudge !== undefined && typeof obj.policyEveryJudge !== "boolean") throw new JudgmentError("journal_invalid", `${home}/${name}: malformed judgment fields`);
     if (receipts.some(r => r.operationId === obj.operationId)) throw new JudgmentError("journal_conflict", `${home}/${name}: repeated operation identity`);
     const prior = receipts.filter(r => r.itemId === obj.itemId).at(-1);
     if (obj.previous !== (prior?.id ?? null)) throw new JudgmentError("journal_conflict", `${home}/${name}: conflicting correction lineage`);
@@ -156,12 +162,20 @@ function ledger(dir: string, io: ScopeFsDeps): Judgment[] {
   }
   return receipts;
 }
+/** The nearest existing ancestor of an absolute path (the path itself when it exists), or null when none does. The walk
+ *  stops at the root, whose dirname is itself, so a missing drive or share root ends it instead of looping. */
+export function nearestExistingAncestor(p: string, exists: (p: string) => boolean = fs.existsSync): string | null {
+  for (let at = p; ; at = path.dirname(at)) {
+    if (exists(at)) return at;
+    if (path.dirname(at) === at) return null;
+  }
+}
 function contained(root: string, target: string): string {
   const base = fs.realpathSync(root), requested = path.resolve(root, target);
   // Resolve the nearest existing ancestor so platform aliases and symlink parents
   // are judged at the real boundary, including a not-yet-created receipt leaf.
-  let existing = requested;
-  while (!fs.existsSync(existing)) existing = path.dirname(existing);
+  const existing = nearestExistingAncestor(requested);
+  if (existing === null) throw new JudgmentError("path_escape", `Path escapes ${base}; paths must stay within the selected workspace`);
   const full = path.resolve(fs.realpathSync(existing), path.relative(existing, requested));
   if (full !== base && !full.startsWith(base + path.sep)) throw new JudgmentError("path_escape", `Path escapes ${base}; paths must stay within the selected workspace`);
   return full;
@@ -199,9 +213,13 @@ export function readSliceReadiness(dir: string, io: ScopeFsDeps = proofFs, readP
       // `judgment` stays the item's latest receipt from any judge: corrections chain on it.
       const judgment = receipts.filter(r => r.itemId === p.id).at(-1) ?? null;
       const evaluate = (j: Judgment): [ItemReadiness["state"], string] => {
-        if (!policy || j.scope !== scope || j.itemRevision !== revision || j.policyRevision !== policy.revision) return ["unknown", "Scope, item or policy changed; record a judgment on the current revision"];
-        if (j.verdict !== "accept") return [j.verdict === "reject" ? "rejected" : "withdrawn", j.reason];
+        // #3621: the item binds to the policy revision it was judged under, so a policy edit that keeps the actor listed and
+        // everyJudge as it was (adding a judge, say) leaves it current. Receipts that don't record everyJudge need the
+        // whole revision unchanged, as before.
+        const policyBound = !!policy && (j.policyRevision === policy.revision || j.policyEveryJudge === policy.everyJudge);
+        if (!policy || !policyBound || j.scope !== scope || j.itemRevision !== hash([scope, p.id, p.text, j.policyRevision])) return ["unknown", "Scope, item or policy changed; record a judgment on the current revision"];
         if (!policy.judges.includes(j.actor)) return ["unknown", "Judgment actor is outside the selected policy"];
+        if (j.verdict !== "accept") return [j.verdict === "reject" ? "rejected" : "withdrawn", j.reason];
         const valid = j.evidence.length > 0 && j.evidence.every(e => {
           if (!e || typeof e.ref !== "string" || typeof e.sha256 !== "string") return false;
           try {
@@ -299,7 +317,7 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
   }
   const latest = receipts.filter(r => r.itemId === item.id).at(-1);
   if (input.expectedRevision !== item.revision || input.expectedPrevious !== (latest?.id ?? null)) throw new JudgmentError("revision_conflict", "Item or correction changed; inspect rig proof show and judge the current evidence", 409);
-  const payload = { version: 1 as const, scope: path.relative(root, dir).split(path.sep).join("/"), sequence: receipts.length + 1, operationId, itemId: item.id, itemRevision: item.revision, policyRevision: current.policy.revision, policySource: path.relative(root, current.policy.source), previous: latest?.id ?? null, actor, provenance, at: new Date().toISOString(), verdict: input.verdict, reason: input.reason, evidence, subject, intent };
+  const payload = { version: 1 as const, scope: path.relative(root, dir).split(path.sep).join("/"), sequence: receipts.length + 1, operationId, itemId: item.id, itemRevision: item.revision, policyRevision: current.policy.revision, policySource: path.relative(root, current.policy.source), policyEveryJudge: current.policy.everyJudge, previous: latest?.id ?? null, actor, provenance, at: new Date().toISOString(), verdict: input.verdict, reason: input.reason, evidence, subject, intent };
   const judgment: Judgment = { ...payload, id: hash(payload) };
   const home = contained(root, path.join(dir, "proof", "judgments"));
   fs.mkdirSync(home, { recursive: true });
@@ -310,8 +328,13 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
   try {
     try { fs.writeFileSync(fd, `---\n${YAML.stringify(judgment)}---\n\n${input.reason}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.linkSync(temporary, target);
-    const directory = fs.openSync(home, "r");
-    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    // Node cannot fsync an opened directory on Windows (EPERM). The receipt's
+    // contents are already synced before exclusive publication; Windows does
+    // not provide the directory durability guarantee used on POSIX here.
+    if (process.platform !== "win32") {
+      const directory = fs.openSync(home, "r");
+      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new JudgmentError("revision_conflict", "Another writer committed first; inspect current readiness", 409);
     throw e;
@@ -330,13 +353,14 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
   const issues: string[] = [], slices: MissionReadiness["slices"] = [];
   // #1280: each member's directory, for reading its declared node identity only when a dependency needs it.
   const dirs = new Map<MissionReadiness["slices"][number], string>();
-  let historicalStatus: string | null = null;
+  let historicalStatus: string | null = null, activeSlices = 0;
   try {
     const doc = manifest(io, path.join(missionDir, "mission.yaml"));
-    if (!doc) return { revision: hash("legacy"), state: "legacy", slices, issues, historicalStatus };
+    if (!doc) return { revision: hash("legacy"), state: "legacy", slices, issues, historicalStatus, activeSlices };
     const metadata = doc.metadata != null ? mapping(doc.metadata, "mission metadata") : {};
     historicalStatus = typeof metadata.status === "string" ? metadata.status : null;
     const members = validateMissionComposition(doc, path.join(missionDir, "mission.yaml")).filter(m => m.active);
+    activeSlices = members.length;
     for (const member of members) {
       const dir = path.dirname(member.path), data = manifest(io, member.path);
       const execution = data?.execution as { depends_on?: unknown } | undefined;
@@ -380,7 +404,7 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
     for (const s of slices) s.eligible = visit(s);
   } catch (e) { issues.push(e instanceof Error ? e.message : String(e)); for (const s of slices) s.eligible = null; }
   const state = issues.length || slices.some(s => ["unknown", "legacy"].includes(s.readiness.state)) ? "unknown" : slices.length && slices.every(s => s.readiness.state === "ready") ? "ready" : "not-ready";
-  return { revision: hash([slices, issues, historicalStatus]), state, slices, issues, historicalStatus };
+  return { revision: hash([slices, issues, historicalStatus]), state, slices, issues, historicalStatus, activeSlices };
 }
 
 /** How a work node's authored file lists `depends_on:`: as EC-1's inline JSON array (`[]` included), in another form (a
@@ -432,5 +456,8 @@ export async function readProjectReadinessAsync(missionsRoot: string, readPolicy
 
 function projectReadiness(missions: Array<MissionReadiness & { name: string }>) {
   const active = missions.filter(m => ["active", "release-candidate"].includes(m.historicalStatus ?? ""));
-  return { revision: hash(active), state: active.length && active.every(m => m.state === "ready") ? "ready" : active.some(m => m.state === "unknown") ? "unknown" : "not-ready", missions, basis: "Active mission readiness; distinct outcome judgment and publication remain separate" };
+  // `activeSlices` derives from `slices`, so the revision hashes each mission without it, as before (#3614).
+  const revision = hash(active.map(({ activeSlices, ...mission }) => mission));
+  // `not-ready` with `activeMissions: 0` means no mission is active or a release candidate, not work that isn't ready.
+  return { revision, state: active.length && active.every(m => m.state === "ready") ? "ready" : active.some(m => m.state === "unknown") ? "unknown" : "not-ready", missions, activeMissions: active.length, basis: "Active mission readiness; distinct outcome judgment and publication remain separate" };
 }

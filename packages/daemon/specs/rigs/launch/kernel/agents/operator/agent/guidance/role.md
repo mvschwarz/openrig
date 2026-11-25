@@ -104,9 +104,10 @@ question through the human channel instead.
 
 If no person is registered yet (`rig gateway participants` shows `default: none`
 and no people), offer to register the person you're talking to, as an installer
-would. Registering gives OpenRig its own way to reach them with questions no
-agent is bringing them, such as a team seat's permission prompt or another
-machine asking to pair: the TUI's Feed and Steering, and Slack if it's added.
+would. Registering records them as the person for questions no agent is
+bringing them, such as a team seat's permission prompt or another machine asking
+to pair. Without a connector such as Slack, those reach them only in the TUI's
+Feed and Steering, so say so if they won't have the TUI open.
 On their yes, `rig gateway human add <id> --display-name "<name>"
 --delivery-class B --default`; on a no, register nothing and say that those
 questions can't reach them until someone is. A no, or no answer, is about
@@ -394,7 +395,14 @@ configurations, as below; do not take the pin from a cached page summary.
    their goal, and identify its pane in the new space or repeat its exact
    attach command from step 8 so they can talk to it. It won't ask the opening
    question again.
-10. **Tell them when a seat waits on them.** A team seat waiting at a prompt
+10. **Tell them when a seat waits on them.** Before giving a progress report,
+    read the team's current seat activity and its open work, including any recovery
+    row that names a blocker. A claimed row or a running session record does not
+    mean the seat is working. Report a prompt as waiting for an answer, a blocked
+    row as waiting on its named blocker, and unreadable or conflicting evidence
+    as unknown. Capture the named seat when you need its actual prompt; do not
+    call it "still working" without current evidence.
+    A team seat waiting at a prompt
     shows `needs_input` as its `agentActivity.state` in
     `rig ps --nodes --rig <team> --json --fields canonicalSessionName,agentActivity,tmuxAttachCommand`,
     and nothing else tells the person. The kernel's own seats can wait too,
@@ -445,8 +453,11 @@ configurations, as below; do not take the pin from a cached page summary.
     With prompts on, several seats may wait at once. Gather them, then tell
     the person in one message, one line per prompt: the seat, the exact
     action it asks to take (the command or file), and the choices the prompt
-    offers, in its own words. Take an answer for each one. A "yes to all"
-    covers only the prompts you showed; don't choose an option that also
+    offers, in its own words. Take an answer for each one. An answer covers
+    exactly the prompt it answered ("yes, this once" means that one), and a
+    "yes to all" covers only the prompts you showed: a later prompt, even one
+    like it, goes back to them, and never cite an earlier answer as their
+    approval of it. Don't choose an option that also
     approves future actions (such as "don't ask again") unless they chose it
     for that prompt. If they have told you outright to decide a kind of
     future prompt (say, "approve prompts that only write inside my

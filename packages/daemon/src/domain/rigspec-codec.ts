@@ -1,5 +1,6 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { processLimitsToSpec } from "./process-limits.js";
+import { serializePoolBlock } from "./seat-pool-spec.js";
 import type {
   RigSpec,
   LegacyRigSpec,
@@ -104,8 +105,10 @@ export class RigSpecCodec {
     // OPR.0.4.8.3 Seam B: rig-level permission_policy ref round-trips through serialization.
     if (spec.permissionPolicy) doc["permission_policy"] = spec.permissionPolicy;
     if (spec.nonInterruptive !== undefined) doc["non_interruptive"] = spec.nonInterruptive;
+    if (spec.seatSlice) doc["seat_slice"] = spec.seatSlice;
     if (spec.env) doc["env"] = { ...spec.env };
     if (spec.managedBlocks) doc["managed_blocks"] = { ...spec.managedBlocks };
+    if (spec.defaultOnboardingPack !== undefined) doc["default_onboarding_pack"] = spec.defaultOnboardingPack;
     if (spec.docs && spec.docs.length > 0) doc["docs"] = spec.docs.map((d) => ({ path: d.path }));
     if (spec.startup) doc["startup"] = serializeStartupBlock(spec.startup);
     if (spec.services) doc["services"] = serializeServices(spec.services);
@@ -148,6 +151,8 @@ export class RigSpecCodec {
         p["continuity_policy"] = cp;
       }
       if (pod.startup) p["startup"] = serializeStartupBlock(pod.startup);
+      // #2829 slice 1: the pod-level cold-start default round-trips too.
+      if (pod.coldStart !== undefined) p["cold_start"] = pod.coldStart;
 
       p["members"] = pod.members.map((m) => {
         const member: Record<string, unknown> = {
@@ -173,12 +178,16 @@ export class RigSpecCodec {
         if (m.codexPermissions !== undefined) member["codex_permissions"] = m.codexPermissions;
         if (m.launchWrapper !== undefined) member["launch_wrapper"] = [...m.launchWrapper];
         if (m.processLimits !== undefined) member["process_limits"] = processLimitsToSpec(m.processLimits);
+        if (m.statuslineThrottle !== undefined) member["statusline_throttle"] = m.statuslineThrottle;
+        // #3395: a usable block, or `{}` (the clear); a block that can't be used is never written back.
+        if (m.pool !== undefined) member["pool"] = m.pool === null ? {} : serializePoolBlock(m.pool);
         if (m.agentFile) member["agent_file"] = m.agentFile;
         if (m.appendSystemPromptFile) member["append_system_prompt_file"] = m.appendSystemPromptFile;
         if (m.pluginDirs?.length) member["plugin_dirs"] = m.pluginDirs;
         if (m.pluginChannels?.length) member["plugin_channels"] = m.pluginChannels;
         if (m.env) member["env"] = { ...m.env };
         if (m.restorePolicy) member["restore_policy"] = m.restorePolicy;
+        if (m.keepAlive !== undefined) member["keep_alive"] = m.keepAlive;
         if (m.startup) member["startup"] = serializeStartupBlock(m.startup);
         // OPR.0.5.6.20 field, OPR.0.5.6.23 fix: parse carries it (schema
         // normalize), so serialize must too — same silent-erasure class.
@@ -193,6 +202,8 @@ export class RigSpecCodec {
         if (m.starterRef) {
           member["starter_ref"] = { name: m.starterRef.name };
         }
+        // #2829 slice 1: the cold-start opt-in round-trips with the rest of the member.
+        if (m.coldStart !== undefined) member["cold_start"] = m.coldStart;
         return member;
       });
 
@@ -260,6 +271,7 @@ export class LegacyRigSpecCodec {
         if (node.codexPermissions !== undefined) n["codex_permissions"] = node.codexPermissions;
         if (node.launchWrapper !== undefined) n["launch_wrapper"] = [...node.launchWrapper];
         if (node.processLimits !== undefined) n["process_limits"] = processLimitsToSpec(node.processLimits);
+        if (node.statuslineThrottle !== undefined) n["statusline_throttle"] = node.statuslineThrottle;
         if (node.cwd != null) n["cwd"] = node.cwd;
         if (node.surfaceHint != null) n["surface_hint"] = node.surfaceHint;
         if (node.workspace != null) n["workspace"] = node.workspace;

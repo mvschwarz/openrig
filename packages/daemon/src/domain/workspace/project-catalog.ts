@@ -12,8 +12,7 @@ export function yamlObject(file: string): Record<string, any> {
     return value;
   } catch (err) { throw new ProjectReadError("workspace_catalog_invalid", `${file}: ${(err as Error).message}`); }
 }
-/** The existing workspace.yaml catalog, shared by work-install and project reads. */
-export function readProjectCatalog(catalogPath: string): Array<{ id: string; root: string }> | null {
+function readCatalogRows(catalogPath: string): Array<{ id: string; root: string; rigs?: unknown }> | null {
   if (!fs.existsSync(catalogPath)) return null;
   const entries = yamlObject(catalogPath).projects;
   if (!Array.isArray(entries) || entries.some(e => !e || typeof e.id !== "string" || typeof e.root !== "string"))
@@ -21,7 +20,24 @@ export function readProjectCatalog(catalogPath: string): Array<{ id: string; roo
   const ids = entries.map(e => e.id);
   const duplicate = ids.find((id, i) => ids.indexOf(id) !== i);
   if (duplicate) throw new ProjectReadError("project_identity_ambiguous", `project id '${duplicate}' names multiple roots in ${catalogPath}`);
-  return entries.map(e => ({ id: e.id, root: e.root }));
+  return entries;
+}
+/** The existing workspace.yaml catalog, shared by work-install and project reads. */
+export function readProjectCatalog(catalogPath: string): Array<{ id: string; root: string }> | null {
+  const entries = readCatalogRows(catalogPath);
+  return entries ? entries.map(e => ({ id: e.id, root: e.root })) : null;
+}
+
+/** Catalog declarations, independent of whether a named rig is currently running. */
+export function readProjectCatalogWithRigs(catalogPath: string): Array<{ id: string; root: string; rigs: string[] | null; rigsError?: string }> | null {
+  const entries = readCatalogRows(catalogPath);
+  if (!entries) return null;
+  return entries.map(entry => {
+    if (entry.rigs === undefined) return { id: entry.id, root: entry.root, rigs: [] };
+    if (Array.isArray(entry.rigs) && entry.rigs.every((rig: unknown) => typeof rig === "string"))
+      return { id: entry.id, root: entry.root, rigs: entry.rigs as string[] };
+    return { id: entry.id, root: entry.root, rigs: null, rigsError: "Catalog rigs must be a list of rig names." };
+  });
 }
 export function selectCatalogProject(catalogPath: string, selectedId?: string): { id: string; root: string } | null {
   const projects = readProjectCatalog(catalogPath);
@@ -40,6 +56,20 @@ export function selectCatalogProject(catalogPath: string, selectedId?: string): 
 export function rigFromSession(sessionName: string | null | undefined): string | null {
   const at = sessionName?.indexOf("@") ?? -1;
   return at > 0 && at < sessionName!.length - 1 ? sessionName!.slice(at + 1) : null;
+}
+
+/** Only an explicit, unique rigs association is a rig default; cwd and unclaimed projects are not bindings. */
+export function selectRigProject(catalogPath: string, rigName: string | null): { id: string; root: string } | null {
+  if (!rigName) return null;
+  const projects = readProjectCatalog(catalogPath);
+  if (!projects) return null;
+  const entries = yamlObject(catalogPath).projects as Array<{ id: string; rigs?: unknown }>;
+  const malformed = entries.filter((entry) => entry.rigs !== undefined
+    && (!Array.isArray(entry.rigs) || !entry.rigs.every((rig: unknown) => typeof rig === "string")));
+  if (malformed.length) throw new ProjectReadError("workspace_catalog_invalid", `${catalogPath}: project rigs must be lists of rig names`);
+  const matches = entries.filter((entry) => Array.isArray(entry.rigs) && entry.rigs.includes(rigName));
+  if (matches.length > 1) throw new ProjectReadError("project_required", `rig '${rigName}' is listed under several projects; choose a target explicitly`, matches.map((entry) => entry.id));
+  return matches.length ? selectCatalogProject(catalogPath, matches[0]!.id) : null;
 }
 
 export type CatalogInferenceBasis = "rig" | "cwd" | "unclaimed";
@@ -129,10 +159,67 @@ export function inferCatalogProject(
   throw required;
 }
 
-/** Exact project membership; unscoped historical rows are not assigned to a selected project. */
-export function belongsToProject(raw: string | null | undefined, id: string): boolean {
+/** The former ids a project's own project.yaml lists under `aliases:`. Unreadable or malformed entries add none. */
+function manifestAliases(root: string): string[] {
+  try {
+    const realRoot = fs.realpathSync(root);
+    const manifest = fs.realpathSync(path.join(realRoot, "project.yaml"));
+    if (!inside(realRoot, manifest)) return [];
+    const aliases: unknown = parse(fs.readFileSync(manifest, "utf8"))?.aliases;
+    return Array.isArray(aliases) ? aliases.filter((a): a is string => typeof a === "string" && a.trim() !== "").map(a => a.trim()) : [];
+  } catch { return []; }
+}
+
+/** A declared former id the catalog doesn't use, and why: it's another project's current id (which keeps its rows), or
+ *  several projects declare it (so its rows belong to none). Reported, never refused. */
+export interface IgnoredAlias { alias: string; declaredBy: string[]; currentOwner: string | null }
+
+/** Former project ids, each mapped to the catalogued project that declares it, so rows tagged before a rename stay that
+ *  project's, plus the declarations that can't apply. A former id that is a current catalog id stays that project's, and
+ *  one several projects declare stays unclaimed. History is never rewritten. */
+export function readCatalogAliasReport(catalogPath: string): { aliases: Map<string, string>; ignored: IgnoredAlias[] } {
+  let entries: Array<{ id: string; root: string }>;
+  try { entries = readProjectCatalog(catalogPath) ?? []; } catch { return { aliases: new Map(), ignored: [] }; }
+  const ids = new Set(entries.map(e => e.id));
+  const owners = new Map<string, Set<string>>();
+  for (const entry of entries) {
+    for (const alias of manifestAliases(path.resolve(path.dirname(catalogPath), entry.root))) {
+      if (alias === entry.id) continue;
+      const claimed = owners.get(alias) ?? new Set<string>();
+      owners.set(alias, claimed.add(entry.id));
+    }
+  }
+  const aliases = new Map<string, string>();
+  const ignored: IgnoredAlias[] = [];
+  for (const [alias, claimed] of owners) {
+    if (!ids.has(alias) && claimed.size === 1) aliases.set(alias, [...claimed][0]!);
+    else ignored.push({ alias, declaredBy: [...claimed].sort(), currentOwner: ids.has(alias) ? alias : null });
+  }
+  return { aliases, ignored };
+}
+export function readCatalogAliases(catalogPath: string): Map<string, string> { return readCatalogAliasReport(catalogPath).aliases; }
+
+/** The former ids one project declares, for a workspace with no catalog (its own project.yaml). */
+export function workspaceAliases(root: string, id: string): string[] {
+  return [...new Set(manifestAliases(root))].filter(alias => alias !== id);
+}
+
+/** Project membership by exact `project:<id>` tag, for the project's id or any former id it declares. Unscoped historical
+ *  rows are not assigned to a selected project. */
+export function belongsToProject(raw: string | null | undefined, ids: string | readonly string[]): boolean {
+  const wanted = new Set((typeof ids === "string" ? [ids] : ids).map(id => `project:${id}`));
   try {
     const tags: unknown = JSON.parse(raw ?? "null");
-    return Array.isArray(tags) && tags.flatMap(t => typeof t === "string" ? t.split(",").map(s => s.trim()) : []).includes(`project:${id}`);
+    return Array.isArray(tags) && tags.flatMap(t => typeof t === "string" ? t.split(",").map(s => s.trim()) : []).some(t => wanted.has(t));
   } catch { return false; }
+}
+
+/** The project ids a row's tags name, comma-split as membership reads them. */
+export function projectTagIds(raw: string | null | undefined): string[] {
+  try {
+    const tags: unknown = JSON.parse(raw ?? "null");
+    if (!Array.isArray(tags)) return [];
+    return [...new Set(tags.flatMap(t => typeof t === "string" ? t.split(",").map(s => s.trim()) : [])
+      .filter(t => t.startsWith("project:") && t.length > "project:".length).map(t => t.slice("project:".length)))];
+  } catch { return []; }
 }

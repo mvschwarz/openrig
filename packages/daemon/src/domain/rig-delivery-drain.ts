@@ -53,7 +53,31 @@ export class RigDeliveryDrainStore {
   hasActive(): boolean {
     return this.admissionRead(() => this.available && !!this.db.prepare("SELECT 1 FROM rig_delivery_drains WHERE ended_at IS NULL LIMIT 1").get());
   }
+  /** #3315: seats on a tmux server the daemon cannot reach are held like a drained rig's: owed work stays owed and
+   *  no attempt is spent, until the server answers again (terminal-server-reachability.ts). Wired by the daemon:
+   *  `hold` says whether a seat is on an unreachable server, `active` whether any server is unreachable at all. */
+  private terminalHold?: { hold: (session: string) => boolean; active: () => boolean };
+  attachTerminalHold(hold: (session: string) => boolean, active: () => boolean = () => true): void {
+    this.terminalHold = { hold, active };
+  }
+  /** Held by a terminal server the daemon cannot reach, not by a maintenance drain. Fails open, as admission does. */
+  heldByTerminalServer(session: string): boolean {
+    const terminal = this.terminalHold;
+    return !!terminal && this.admissionRead(() => terminal.active() && terminal.hold(session));
+  }
+  /** Any hold in force, a maintenance drain or an unreachable terminal server: the cheap check before a per-row one. */
+  anyHeld(): boolean {
+    const terminal = this.terminalHold;
+    return (!!terminal && this.admissionRead(() => terminal.active())) || this.hasActive();
+  }
   holds(session: string, jobId?: string): boolean {
+    // Every job is held here, the drain's review job too: nothing typed into the terminal could reach the seat.
+    if (this.heldByTerminalServer(session)) return true;
+    return this.drainHolds(session, jobId);
+  }
+  /** Only the maintenance drain's hold. For a path that reaches the seat without its terminal (the hook bridge's poll),
+   *  which an unreachable tmux server doesn't stop. */
+  drainHolds(session: string, jobId?: string): boolean {
     return this.admissionRead(() => {
       if (!this.hasActive()) return false;
       // The owner's stored review job remains usable even when its seat belongs to another drained rig.

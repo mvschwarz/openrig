@@ -32,7 +32,18 @@ export interface NativeResumeProbeResult {
   code: string;
   detail: string;
   loginRefusal?: { message: ClaudeLoginRefusal; row: "response" | "result" };
+  /** Claude is the pane's foreground process, with nothing else seen. That shows a process is running, not that its
+   *  conversation resumed: a resume of a missing conversation is in the foreground until it reports "No conversation
+   *  found" and exits. A resume check keeps polling on it, and accepts it only when its wait ends. */
+  foregroundOnly?: true;
 }
+
+/** The note a resume's result carries when its wait ended on a `foregroundOnly` verdict. */
+export const CLAUDE_PROCESS_ONLY_RESUME = "Claude was running when the resume's wait ended, but nothing on its screen was recognized "
+  + "yet (no prompt, reply or dialog), so this resume rests on the process alone.";
+
+// Claude's auto-mode footer row, which Claude draws under its composer.
+const CLAUDE_AUTO_MODE_FOOTER = /^[ \t]*⏵⏵ auto mode on \(shift\+tab to cycle\)(?:[ \t]+·[^\r\n]*)?[ \t]*$/m;
 
 export interface ProbeShellReadyInput {
   paneCommand: string | null;
@@ -353,6 +364,33 @@ export function buildCodexResumeCore(
   return `codex${daemonArg}${profileOrPosture}${modelArg}${effortArg} resume ${tokenArg}${suffix}`;
 }
 
+/** Whose "No conversation found" a resume's pane shows. A launch sent as a staged script (TmuxAdapter.sendShellCommand)
+ *  is run by one typed line naming its script (TmuxAdapter.stagedLaunchTypedLine), and that script is unique to the launch:
+ *  - while the pane's shell hasn't read the launch, Claude hasn't run, so no report is this launch's: "earlier";
+ *  - once it has, only a report below the last place that whole typed line shows is this launch's: "this". One above it
+ *    is an earlier launch's: "earlier", with `since`, the pane text below that line, which is what this launch has drawn.
+ *    The script's name alone (in a later message, say) is output, not the typed line, and places nothing;
+ *  - a typed line that doesn't show (scrolled out of the capture) can't place the report: "unknown".
+ *  A launch typed inline (no typed line recorded) keeps any report as this launch's. A long typed line wraps in a narrow
+ *  pane and the capture splits it into rows, which a joined capture (-J) doesn't rejoin when the shell's line editor did
+ *  the wrapping, and a row that ends at a space loses it. So the line is matched with row breaks ignored and its spaces
+ *  optional; every other character must match in order. */
+export function noConversationFoundOwner(paneContent: string, launch: { typedLine?: string; unread: boolean }):
+  { owner: "this" } | { owner: "earlier"; since?: string } | { owner: "unknown" } {
+  if (launch.unread) return { owner: "earlier" };
+  if (!launch.typedLine?.trim()) return { owner: "this" };
+  const rows = paneContent.split("\n");
+  const rowEnds: number[] = [];
+  let joined = "";
+  for (const row of rows) rowEnds.push((joined += row).length);
+  const line = new RegExp(launch.typedLine.trim().split(/\s+/).map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s*"), "g");
+  let lineEnd = -1;
+  for (const match of joined.matchAll(line)) lineEnd = match.index + match[0].length;
+  if (lineEnd < 0) return { owner: "unknown" };
+  const since = rows.slice(rowEnds.findIndex((end) => end >= lineEnd) + 1).join("\n");
+  return since.includes("No conversation found") ? { owner: "this" } : { owner: "earlier", since };
+}
+
 export function assessNativeResumeProbe(
   input: NativeResumeProbeInput
 ): NativeResumeProbeResult {
@@ -437,15 +475,17 @@ export function assessNativeResumeProbe(
         detail: "Claude is at its interactive prompt and the exact managed resume process was verified.",
       };
     }
+    const autoModeScreen = /(^|\n)\s*❯/.test(paneContent) && CLAUDE_AUTO_MODE_FOOTER.test(paneContent);
     if (paneCommand === "claude" && input.claudeResumeIdentityVerified !== false) {
       return {
         status: "resumed",
         code: "active_runtime",
         detail: "Claude is the active foreground process in the probe pane.",
+        // An auto-mode composer whose header scrolled out is Claude's drawn screen, not the process alone.
+        ...(autoModeScreen ? {} : { foregroundOnly: true as const }),
       };
     }
-    if (/(^|\n)\s*❯/.test(paneContent)
-      && /^[ \t]*⏵⏵ auto mode on \(shift\+tab to cycle\)(?:[ \t]+·[^\r\n]*)?[ \t]*$/m.test(paneContent)) {
+    if (autoModeScreen) {
       return input.claudeAutoIdentityVerified
         ? { status: "resumed", code: "active_runtime", detail: "Claude auto-mode TUI and the exact managed native identity were verified." }
         : { status: "inconclusive", code: "claude_auto_identity_required", detail: "Auto-mode screen text requires proof of the launched Claude identity." };
@@ -480,7 +520,7 @@ export function assessNativeResumeProbe(
       return {
         status: "attention_required",
         code: "login_required",
-        detail: "Codex is waiting for you to sign in or configure provider credentials before the session can become interactive.",
+        detail: "Codex needs you to sign in or configure provider credentials. Open this seat's terminal and complete Codex's sign-in prompt.",
       };
     }
     if (/requires a newer version of Codex/i.test(paneContent.replace(/\s+/g, " "))) {
@@ -650,10 +690,16 @@ function hasClaudeGatedGrantsMark(rows: string[]): boolean {
  *  Text above a session that started (a scrollback, a reply quoting a prompt's words) never decides what is current,
  *  and neither does a draft in the input box: an input frame ends at its closing rule. */
 function claudeCurrentRows(paneContent: string): string[] {
+  return claudeCurrentScreen(paneContent).rows;
+}
+
+/** claudeCurrentRows, and whether they start right under a reply's ● row rather than under a header or an input frame. */
+function claudeCurrentScreen(paneContent: string): { rows: string[]; afterReply: boolean } {
   const rows = claudeWithoutDrafts(paneContent.trimEnd().split(/\r?\n/));
   // A header-like row inside a trust dialog's content is the dialog's text, not Claude's header: it never ends the dialog.
   const scan = rows.map((row, at) => isClaudeVersionHeader(row) && insideClaudeTrustDialog(rows, at) ? "" : row);
   let current = rows;
+  let afterReply = false;
   // Walking up, the first row whose suffix has Claude's own UI (claudeDrawnAfter(scan.slice(at))) is the row where that
   // UI starts: a header, a reply, or the opening rule of an input frame whose closing rule is below. Testing only that
   // row keeps the walk linear on a tall screen.
@@ -666,11 +712,23 @@ function claudeCurrentRows(paneContent: string): string[] {
     const framed = CLAUDE_INPUT_RULE.test(rows[at]!) && /^\s*❯/.test(rows[at + 1] ?? "");
     const closing = framed ? rows.findIndex((row, index) => index > at + 1 && CLAUDE_INPUT_RULE.test(row)) : -1;
     current = rows.slice((closing >= 0 ? closing : at) + 1);
+    afterReply = !framed && /^[●⏺]/.test(scan[at]!);
     break;
   }
   // An input frame still being drawn (its opening rule and the ❯ row, no closing rule yet) holds a draft, not a dialog.
   const opening = current.findIndex((row, index) => CLAUDE_INPUT_RULE.test(row) && /^\s*❯/.test(current[index + 1] ?? ""));
-  return opening >= 0 ? current.slice(0, opening) : current;
+  return { rows: opening >= 0 ? current.slice(0, opening) : current, afterReply };
+}
+
+/** The current rows Claude's trust dialog can be on. Rows that start right under a reply begin with that reply's own
+ *  continuation (blank rows and rows indented two columns or more), which is its text even when it quotes the dialog;
+ *  the dialog starts under its own full-width rule, one column in. A dialog drawn straight under a reply, with no rule
+ *  between and a reply's indentation, can't be told apart from a quote by this shape. */
+function claudeTrustRows(paneContent: string): string[] {
+  const { rows, afterReply } = claudeCurrentScreen(paneContent);
+  if (!afterReply) return rows;
+  const own = rows.findIndex(row => row.trim() !== "" && !/^ {2,}\S/.test(row));
+  return own < 0 ? [] : rows.slice(own);
 }
 
 /** These rows with the text of every draft in Claude's input frames blanked (the ❯ kept), so a rule, a reply or a
@@ -703,13 +761,17 @@ function claudeFocusedOption(paneContent: string): string | null {
   return focused.at(-1)?.[2] ?? null;
 }
 
-/** The focus of Claude's plain workspace trust prompt (#2820 item 2), read from its last 12 drawn rows. An allowlist:
+/** The focus of Claude's plain workspace trust prompt (#2820 item 2), read from the rows after the current screen's last
+ *  trust heading, so options an earlier prompt left above it never count. An allowlist:
  *  "yes" or "no" only when the prompt's options are exactly "No, exit" and "Yes, I trust this folder" (in either
  *  order, numbered or not) and one of them carries the cursor (❯ or ›): "yes" on "Yes, I trust this folder", "no" on
- *  "No, exit" (Claude Code 2.1.322 opens the plain prompt there). Anything else is "unknown": another option set (the
- *  gated-grants backstop's "No, continue without these permissions" included), no cursor, or more than one. */
+ *  "No, exit" (Claude Code 2.1.322 opens the plain prompt there). Anything else is "unknown": no current heading, another
+ *  option set (the gated-grants backstop's "No, continue without these permissions" included), no cursor, or more than one. */
 export function claudeTrustPromptFocus(paneContent: string): "yes" | "no" | "unknown" {
-  const rows = paneContent.trimEnd().split(/\r?\n/).filter(row => row.trim()).slice(-12);
+  const current = claudeTrustRows(paneContent);
+  const heading = current.map(isClaudeTrustHeading).lastIndexOf(true);
+  if (heading < 0) return "unknown";
+  const rows = current.slice(heading + 1).filter(row => row.trim());
   const options = rows.map(row => CLAUDE_TRUST_OPTION_ROW.exec(row)).filter(match => match !== null);
   const labels = options.map(match => match[2]);
   if (labels.length !== 2 || !labels.includes(CLAUDE_TRUST_YES) || !labels.includes(CLAUDE_TRUST_EXIT)) return "unknown";
@@ -720,12 +782,20 @@ export function claudeTrustPromptFocus(paneContent: string): "yes" | "no" | "unk
 
 function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
   // #2820 item 2: read on Claude's current screen only, and a screen with the backstop's marks is never the plain
-  // trust prompt, even still drawn: pressing Enter on it would decline the folder's grants or exit.
-  const current = claudeCurrentRows(paneContent);
-  const text = current.join("\n");
-  return text.includes("Accessing workspace:")
-    && text.includes("Yes, I trust this folder")
-    && !hasClaudeGatedGrantsMark(current);
+  // trust prompt, even still drawn: pressing Enter on it would decline the folder's grants or exit. The heading alone
+  // counts: Claude draws it before the options. A reply quoting it isn't it.
+  const current = claudeTrustRows(paneContent);
+  return current.some(isClaudeTrustHeading) && !hasClaudeGatedGrantsMark(current);
+}
+
+const isClaudeTrustHeading = (row: string) => row.trim().startsWith("Accessing workspace:");
+
+/** Whether Claude is still drawing its plain workspace trust prompt: the heading is on its current screen and fewer than
+ *  its two options are drawn below it, so claudeTrustPromptFocus can't read the focus yet. */
+export function claudeTrustPromptDrawing(paneContent: string): boolean {
+  const current = claudeTrustRows(paneContent);
+  const heading = current.map(isClaudeTrustHeading).lastIndexOf(true);
+  return heading >= 0 && current.slice(heading + 1).filter(row => CLAUDE_TRUST_OPTION_ROW.test(row)).length < 2;
 }
 
 // Claude's resume-selection prompt appears when `claude --resume` finds multiple
@@ -976,8 +1046,10 @@ function looksLikeCodexTui(paneContent: string, codexProcessVerified: boolean): 
 // revoked. Please log out and sign in again."), all starting the same way.
 //
 // The message starts its own row: printed by the CLI, perhaps after `Error:`, or drawn as a TUI error cell (`■`). A row
-// that starts any other way (a reply, a prompt, an indented quote) or sits in a fenced block isn't Codex's message. Its
-// opening words must fit on that first row; the sign-in instruction may wrap onto any number of rows after it.
+// that starts any other way (a reply, a prompt, an indented quote) isn't Codex's message. Inside a fenced block the pane
+// leaves open, an unmarked row stays a quote and is excluded; a row carrying Codex's mark (CODEX_MARKED_REFUSAL_ROW) is
+// eligible, subject to the instruction and tail checks, and may still be quoted text. The message's opening words must
+// fit on its first row; the sign-in instruction may wrap onto any number of rows after it.
 const CODEX_AUTH_REFUSAL_ROW = /^(?:■ |Error: |ERROR: )?Your access token could not be refreshed\b/;
 const CODEX_AUTH_INSTRUCTIONS = ["Please sign in again", "Please log out and sign in again"];
 const CODEX_INPUT_ROW = /^\s*[›»](?:\s|$)/;
@@ -1069,7 +1141,7 @@ function looksLikeCodexLoginPrompt(paneContent: string): boolean {
     });
     const labels = legacyChooser
       ? ["Sign in with ChatGPT", "Sign in with Device Code", "Provide your own API key"]
-      : ["Sign in with ChatGPT", "Sign in with Device Code", "Use an OpenAI API key", "Use Amazon Bedrock"];
+      : ["Sign in with ChatGPT", "Sign in with Device Code", "Use an OpenAI API key", "Use Amazon Bedrock", "Sign in another way"];
     return choices.length >= 2 && (!legacyChooser || choices.length === labels.length)
       && choices.filter(choice => choice.selected).length === 1
       && choices.every((choice, index) => choice.number === index + 1

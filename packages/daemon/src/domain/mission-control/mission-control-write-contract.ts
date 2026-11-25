@@ -39,10 +39,12 @@
 //                closure_target+handed_off_to=<destination>;
 //                creates new qitem at destination (4-step canonical)
 
+import { ulid } from "ulid";
+import type { NotifyRegister } from "../event-bus.js";
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
-import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, type QueueRepository, type QueueItem } from "../queue-repository.js";
+import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, QueueRepositoryError, type QueueRepository, type QueueItem } from "../queue-repository.js";
 import { askBackRoute, terminalAnswerMeaning } from "../receiver-context.js";
 import type { PersistedEvent } from "../types.js";
 import {
@@ -105,6 +107,13 @@ export interface MissionControlActionInput {
   /** #2446, opt-in: the `decisionRevision` the caller read. A settling act then runs only on that decision; omitted, the
    *  act and its result are exactly as before. An `operationId` in `auditNotes` lets a retry be answered from the record. */
   expectedRevision?: string;
+  /** In-process app submission composition, including reconciliation across later actions. Never accepted from legacy
+   * route input. Hooks run synchronously inside the owning mutation transaction; the immutable audit retains the receipt. */
+  appSubmission?: {
+    checkpoint: (item: QueueItem) => void;
+    verify: () => void;
+    finalize: (result: MissionControlActionResult) => Record<string, unknown>;
+  };
   /**
    * For handoff: opt-in best-effort wake. Default true (PL-004 Phase A R1
    * pattern: durable + waking by default; operators opt out for cold queues).
@@ -173,7 +182,11 @@ export class MissionControlWriteContract {
     const item = this.queueRepo.getById(input.qitemId);
     const current = item ? this.queueRepo.decisionRevision(item) : null;
     if (item && current !== input.expectedRevision) {
-      const last = this.actionLog.listForQitem(input.qitemId, 1)[0];
+      // Stable app submissions own historical receipts. Legacy callers reconcile only the latest action: a later
+      // person's answer must still invalidate an old partial submission, even when its operation remains in history.
+      const last = input.appSubmission && operation
+        ? this.actionLog.findOperation(input.qitemId, operation)
+        : this.actionLog.listForQitem(input.qitemId, 1)[0];
       // The caller's own committed operation retried after an uncertain result: answered from its record, nothing written.
       if (operation && last?.auditNotes?.operation === operation) {
         return { actionId: last.actionId, verb: input.verb, qitemId: input.qitemId, closedQitem: item, createdQitemId: null,
@@ -612,6 +625,33 @@ export class MissionControlWriteContract {
         `qitem ${input.qitemId} isn't an ask to ${input.actorSession}, so ${input.actorSession} can't answer it.`, { qitemId: input.qitemId });
     }
     const before = snapshotQitem(ask);
+    if (ask.relayedAnswers) {
+      const afterCommit: Array<() => void> = [];
+      let result;
+      try {
+        result = this.eventBus.withNotifyEnvelope(register => {
+          input.appSubmission?.verify();
+          const receipt = this.queueRepo.writeRelayedAnswer({ qitemId: ask.qitemId, actorSession: input.actorSession,
+            identityProvenance: input.identityProvenance ?? undefined, nudge: input.notify,
+            direct: { questionId: input.questionId, optionId: input.optionId, text: input.decision, primaryUser } },
+          { register, afterCommit: wake => { afterCommit.push(wake); } });
+          input.appSubmission?.checkpoint(receipt.item);
+          return this.recordAnswer(input, before, input.decision ?? input.optionId ?? "", {
+            outcome: receipt.unplaced || receipt.unanswered.length ? "recorded" : "answered",
+            unanswered: (ask.humanQuestions ?? []).filter(q => receipt.unanswered.includes(q.id)).map(q => q.question),
+            ...(receipt.unplaced ? { message: `Reply returned to ${ask.sourceSession} as ${receipt.replyQitemId} without changing any answer.` }
+              : receipt.corrected ? { message: `Direct correction returned to ${ask.sourceSession} as ${receipt.replyQitemId}. The relay remains in history.` } : {}),
+          }, receipt.replyQitemId, undefined, register);
+        });
+      } catch (err) {
+        if (err instanceof QueueRepositoryError && err.code === "relayed_answer_refused") {
+          throw new MissionControlWriteContractError("answer_not_recorded", err.message);
+        }
+        throw err;
+      }
+      for (const wake of afterCommit) wake();
+      return result;
+    }
     const questions = ask.humanQuestions ?? [];
     const existing = this.queueRepo.getHumanAnswer(input.qitemId, input.actorSession, { primaryUser });
     if (existing && (ask.state === "pending" || ask.state === "done")) {
@@ -659,8 +699,32 @@ export class MissionControlWriteContract {
     let reply: string;
     let wrote = false; // whether this call changed the ask before the return below awaits
     if (chose) {
-      const recorded = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
-        questionId: input.questionId ?? "", optionId: input.optionId ?? "", primaryUser });
+      // A partial app choice has no asynchronous return seam: choice + immutable receipt + audit + events commit
+      // under the same envelope. An injected audit failure rolls back the choice too.
+      if (input.appSubmission && unansweredQuestions(questions, { ...(ask.humanAnswers ?? {}), [input.questionId ?? ""]: input.optionId ?? "" }).length > 0) {
+        return this.eventBus.withNotifyEnvelope(register => {
+          input.appSubmission!.verify();
+          const recorded = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
+            questionId: input.questionId ?? "", optionId: input.optionId ?? "", primaryUser });
+          if (recorded.status !== "recorded") throw new MissionControlWriteContractError("answer_not_recorded", `The answer wasn't recorded: ${recorded.reason}.`);
+          const [just] = formatHumanAnswers(recorded.questions.filter(q => q.id === input.questionId), recorded.answers);
+          return this.recordAnswer(input, before, just ?? `answered ${input.questionId}`, {
+            outcome: "recorded", unanswered: unansweredQuestions(recorded.questions, recorded.answers).map(q => q.question),
+          }, null, undefined, register);
+        });
+      }
+      // Only an app submission verifies, checkpoints and commits under one transaction and envelope; the ordinary
+      // path records directly, so the queue notifies after its own commit, as before.
+      const recorded = input.appSubmission
+        ? this.eventBus.withNotifyEnvelope(this.db.transaction(() => {
+          input.appSubmission!.verify();
+          const result = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
+            questionId: input.questionId ?? "", optionId: input.optionId ?? "", primaryUser });
+          if (result.status === "recorded") input.appSubmission!.checkpoint(this.queueRepo.getById(input.qitemId)!);
+          return result;
+        }))
+        : this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
+          questionId: input.questionId ?? "", optionId: input.optionId ?? "", primaryUser });
       if (recorded.status !== "recorded") {
         throw new MissionControlWriteContractError("answer_not_recorded", `The answer wasn't recorded: ${recorded.reason}.`,
           { qitemId: input.qitemId, reason: recorded.reason });
@@ -704,6 +768,7 @@ export class MissionControlWriteContract {
           ...(ask.tags ?? []).filter((t) => /^(project|mission|slice):/.test(t)),
           ...(operation ? [mcOperationTag(operation)] : []),
         ],
+        ...(input.appSubmission ? { verifyBeforeCreate: () => input.appSubmission!.verify() } : {}),
         inboundReplyTo: input.qitemId, ...(input.notify === false ? { nudge: false } : {}),
       });
     } catch (error) {
@@ -713,6 +778,7 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId });
     }
     const replyId = returned.qitemId;
+    input.appSubmission?.verify();
     // Two people answering at once: one answer returns, and the other is told whose it was.
     if (replyId !== input.qitemId && returned.sourceSession !== input.actorSession) this.answeredByAnother(input, returned, primaryUser);
     // A runner's permission ask is its own answer record (no reply row comes back), so typed words are the person's own.
@@ -771,6 +837,7 @@ export class MissionControlWriteContract {
       allowAlreadyDone: boolean;
       onUnclosed: () => MissionControlWriteContractError;
     },
+    outerRegister?: NotifyRegister,
   ): MissionControlActionResult {
     const evaluatedAt = this.now().toISOString();
     // A runner's permission ask approved or denied from the Feed or Steering goes through the answer path, and the
@@ -779,8 +846,13 @@ export class MissionControlWriteContract {
     const auditReason = actionVerb !== "answer" && input.reason ? input.reason : reason;
     let after: QueueItem | null = null;
     let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
+    let appResult: MissionControlActionResult | null = null;
+    // The owner's final answer and message, computed once before the receipt is finalized: the immutable app receipt and the
+    // ordinary return carry the same words, handoff or kept alike.
+    let finalAnswer = answer;
     try {
-      this.eventBus.withNotifyEnvelope((register) => {
+      const persist = (register: NotifyRegister) => {
+        if (!outerRegister) input.appSubmission?.verify();
         if (closePending) {
           const closed = this.queueRepo.resolveDirectHumanReply({
             qitemId: input.qitemId,
@@ -793,7 +865,18 @@ export class MissionControlWriteContract {
           }
         }
         after = this.queueRepo.getById(input.qitemId);
+        // A runner's permission request isn't closed by an answer: it's handed to the receiving agent, or kept. Say which.
+        const runnerNotice = !answer.message && after && runnerPermissionOrigin(after) ? runnerAnswerNotice(after) : undefined;
+        if (runnerNotice) finalAnswer = { ...answer, message: runnerNotice };
+        const actionId = ulid();
+        appResult = {
+          actionId, verb: actionVerb, qitemId: input.qitemId, closedQitem: after, createdQitemId,
+          notifyAttempted: false, notifyResult: null, auditedAt: evaluatedAt, answer: finalAnswer,
+          ...(input.expectedRevision && after ? { decisionRevision: this.queueRepo.decisionRevision(after) } : {}),
+        };
+        const appReceipt = input.appSubmission?.finalize(appResult);
         actionEntry = this.actionLog.record({
+          actionId,
           actionVerb,
           qitemId: input.qitemId,
           actorSession: input.actorSession,
@@ -801,7 +884,7 @@ export class MissionControlWriteContract {
           beforeState: before,
           afterState: after ? snapshotQitem(after) : null,
           reason: auditReason,
-          auditNotes: input.auditNotes ?? null,
+          auditNotes: appReceipt ? { ...input.auditNotes, appReceipt } : input.auditNotes ?? null,
           identityProvenance: input.identityProvenance ?? null,
         });
         register(
@@ -813,16 +896,14 @@ export class MissionControlWriteContract {
             actorSession: input.actorSession,
           }),
         );
-      });
+      };
+      if (outerRegister) persist(outerRegister); else this.eventBus.withNotifyEnvelope(persist);
     } catch (err) {
       if (err instanceof MissionControlActionLogError) {
         throw new MissionControlWriteContractError(err.code, err.message, err.details);
       }
       throw err;
     }
-    // A runner's permission request isn't closed by an answer: it's handed to the receiving agent, or kept. Say which.
-    const final = after as QueueItem | null;
-    const runnerNotice = !answer.message && final && runnerPermissionOrigin(final) ? runnerAnswerNotice(final) : undefined;
     return {
       actionId: actionEntry!.actionId,
       verb: actionVerb,
@@ -832,7 +913,7 @@ export class MissionControlWriteContract {
       notifyAttempted: false,
       notifyResult: null,
       auditedAt: evaluatedAt,
-      answer: runnerNotice ? { ...answer, message: runnerNotice } : answer,
+      answer: finalAnswer,
     };
   }
 
@@ -896,7 +977,7 @@ interface ClosureMapping {
 
 /** One logical operation (#2446): the caller's operationId with the verb, who sent it and what it carries, so a retry
  *  matches only itself, never another verb or payload sent under the same ID. */
-function operationFingerprint(input: MissionControlActionInput): string {
+export function operationFingerprint(input: MissionControlActionInput): string {
   const sent = [input.auditNotes?.operationId, input.verb, input.actorSession, input.authority ?? null, input.questionId ?? null,
     input.optionId ?? null, input.decision ?? null, input.reason ?? null, input.destinationSession ?? null, input.body ?? null, input.annotation ?? null];
   return createHash("sha256").update(JSON.stringify(sent)).digest("hex").slice(0, 24);

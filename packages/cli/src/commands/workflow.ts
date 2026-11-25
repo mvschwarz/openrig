@@ -102,6 +102,11 @@ export function printOutcomeSummary(json: boolean, status: number, summary: Outc
   console.log(`  next:  ${summary.next}`);
 }
 
+/** After a route or resume, the packet's close may need --evidence-ref or acceptance flags; workflow show prints its exact command. */
+function ownerAdvancesLine(who: string, instanceId: string, packetId: string | undefined): string {
+  return `${who} advances with the action rig workflow show ${instanceId} prints for packet ${packetId ?? "<packet>"} (it carries any --evidence-ref or acceptance flags the step needs)`;
+}
+
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
@@ -316,9 +321,11 @@ line it prints, then rig workflow show WF01ABC to confirm the adoption.
     .command("instantiate <specPath>")
     .description("Create a workflow instance + entry-step qitem from a spec")
     .requiredOption("--root-objective <text>", "Root objective for the run")
+    .option("--title <text>", "Short display title for this run's ordinary queue packets")
     .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
     .option("--entry-owner <session>", "Override default entry-step owner")
     .option("--rig <name>", "Bind the instance to this rig (overrides the spec's target.rig default; roles resolve to seats on this rig)")
+    .option("--pod <name>", "Bind role selection and {pod} targets to a pod on the bound rig")
     .option("--project <id>", "Catalogued project this run works for; stamped as project:<id> on every packet it creates. A project the daemon does not know creates the instance UNSCOPED, with an advisory naming it")
     .option("--mission <id>", "Mission this run works for; stamped as mission:<id> on every packet")
     .option("--slice <id>", "Slice this run works for; stamped as slice:<id> on every packet. They show on the slice's Queue tab when the Projects view is scoped to the same project, so pass --project too")
@@ -343,9 +350,11 @@ Examples:
 `)
     .action(async (specPath: string, opts: {
       rootObjective: string;
+      title?: string;
       createdBy: string;
       entryOwner?: string;
       rig?: string;
+      pod?: string;
       project?: string;
       mission?: string;
       slice?: string;
@@ -363,9 +372,11 @@ Examples:
         }>("/api/workflow/instantiate", {
           specPath: resolveWorkflowSource(specPath),
           rootObjective: opts.rootObjective,
+          runTitle: opts.title,
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
           targetRig: opts.rig,
+          targetPod: opts.pod,
           ...scopeBody,
         });
         printResult(opts.json ?? false, res.data, res.status);
@@ -832,9 +843,11 @@ Examples:
     .command("run <specPath>")
     .description("Instantiate a workflow AND follow it live to a terminal state (exit 0 completed / 3 failed or aborted)")
     .requiredOption("--root-objective <text>", "Root objective for the run")
+    .option("--title <text>", "Short display title for this run's ordinary queue packets")
     .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
     .option("--entry-owner <session>", "Override default entry-step owner")
     .option("--rig <name>", "Bind the instance to this rig (overrides the spec's target.rig default; roles resolve to seats on this rig)")
+    .option("--pod <name>", "Bind role selection and {pod} targets to a pod on the bound rig")
     .option("--project <id>", "Catalogued project this run works for; stamped as project:<id> on every packet it creates. A project the daemon does not know creates the instance UNSCOPED, with an advisory naming it")
     .option("--mission <id>", "Mission this run works for; stamped as mission:<id> on every packet")
     .option("--slice <id>", "Slice this run works for; stamped as slice:<id> on every packet. They show on the slice's Queue tab when the Projects view is scoped to the same project, so pass --project too")
@@ -854,9 +867,11 @@ Examples:
 `)
     .action(async (specPath: string, opts: {
       rootObjective: string;
+      title?: string;
       createdBy: string;
       entryOwner?: string;
       rig?: string;
+      pod?: string;
       project?: string;
       mission?: string;
       slice?: string;
@@ -873,9 +888,11 @@ Examples:
         }>("/api/workflow/instantiate", {
           specPath: resolveWorkflowSource(specPath),
           rootObjective: opts.rootObjective,
+          runTitle: opts.title,
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
           targetRig: opts.rig,
+          targetPod: opts.pod,
           ...scopeBody,
         });
         printWorkflowAdvisories(res.data?.advisories);
@@ -977,14 +994,14 @@ Examples:
             state: `instance ${instanceId} = ${body.instanceStatus ?? "active"}; same step; no queue row closed or created; no step advanced`,
             next: !["pending", "in-progress", "blocked"].includes(state)
               ? `The successor is already ${state}; its outcome is on rig queue show ${body.newPacketId ?? "<packet>"}, and the step's exit is the workflow owner's to project`
-              : `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
+              : ownerAdvancesLine("The owner", instanceId, body.newPacketId),
           });
           return;
         }
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `Re-routed step ${body.stepId ?? "?"} from ${body.fromSession ?? "?"} to ${body.toSession ?? opts.to} (packet ${body.closedPacketId ?? "?"} → ${body.newPacketId ?? "?"})`,
           state: `instance ${instanceId} = ${body.instanceStatus ?? "active"}; same step, new owner; no step advanced`,
-          next: `The new owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
+          next: ownerAdvancesLine("The new owner", instanceId, body.newPacketId),
         });
       });
     });
@@ -999,11 +1016,13 @@ Examples:
     .option("--actor-session <session>", "Your session, only when it can't be derived from the caller (a managed seat's is): recorded as claimed")
     .option("--occurrence <failed-qitem-id>", "Failure occurrence to redrive (required when more than one is unresolved)")
     .option("--decision <text>", "Durable instruction for the step owner (lands in the redrive packet)")
+    .option("--owner <session>", "Send the redrive to this seat instead of re-resolving the step's owner from its role")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Use after diagnosing an exception item: the instance returns to active,
 REBOUND to the step that failed, with a fresh packet routed to that
-step's re-resolved owner. The trail is preserved and extended; the
+step's re-resolved owner, or to --owner when you name one (recorded as
+named). The trail is preserved and extended; the
 resolved exception occurrence closes; a NEW failure of the same step
 raises a NEW occurrence honestly.
 
@@ -1015,6 +1034,7 @@ Examples:
       actorSession?: string;
       occurrence?: string;
       decision?: string;
+      owner?: string;
       json?: boolean;
     }) => {
       const deps = getDeps();
@@ -1023,19 +1043,31 @@ Examples:
           stepId?: string;
           newPacketId?: string;
           ownerSession?: string;
+          ownerSource?: "named" | "resolved";
+          ownerNote?: string;
+          currentOwnerSession?: string;
           resumeCount?: number;
           exceptionItemsClosed?: number;
+          absorbedReplay?: boolean;
         }>(`/api/workflow/${encodeURIComponent(instanceId)}/resume`, {
           actorSession: opts.actorSession,
           occurrenceId: opts.occurrence,
           decision: opts.decision,
+          ownerSession: opts.owner,
         });
         printResult(opts.json ?? false, res.data, res.status);
         const body = res.data ?? {};
+        const owner = `${body.ownerSession ?? "?"}${body.ownerSource ? ` (${body.ownerSource})` : ""}`
+          + (body.currentOwnerSession && body.currentOwnerSession !== body.ownerSession ? `, now owned by ${body.currentOwnerSession}` : "");
         printOutcomeSummary(opts.json ?? false, res.status, {
-          what: `Redrove instance ${instanceId} from step ${body.stepId ?? "?"} (redrive #${body.resumeCount ?? "?"}; packet ${body.newPacketId ?? "?"} → ${body.ownerSession ?? "?"}; ${body.exceptionItemsClosed ?? 0} exception item(s) resolved)`,
-          state: `instance ${instanceId} = active, rebound to ${body.stepId ?? "?"}; completed steps untouched; fresh max_hops window`,
-          next: `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
+          what: `${body.absorbedReplay ? "Replay absorbed, nothing redriven: instance" : "Redrove instance"} ${instanceId} from step ${body.stepId ?? "?"} (redrive #${body.resumeCount ?? "?"}; packet ${body.newPacketId ?? "?"} → ${owner}; ${body.exceptionItemsClosed ?? 0} exception item(s) resolved)${body.ownerNote ? `; ${body.ownerNote}` : ""}`,
+          // An absorbed replay changed nothing, and the redrive it points at may already be closed.
+          state: body.absorbedReplay
+            ? `unchanged by this replay; this failure occurrence was already resumed (packet ${body.newPacketId ?? "?"})`
+            : `instance ${instanceId} = active, rebound to ${body.stepId ?? "?"}; completed steps untouched; fresh max_hops window`,
+          next: body.absorbedReplay
+            ? `Check where the instance stands: rig workflow show ${instanceId}`
+            : ownerAdvancesLine("The owner", instanceId, body.newPacketId),
         });
       });
     });
@@ -1049,14 +1081,17 @@ Examples:
     .action(async (instanceId: string, opts: { reason: string; actorSession?: string; json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.post<{ closedPacketIds?: string[]; status?: string }>(
+        const res = await client.post<{ closedPacketIds?: string[]; alreadyClosedPacketIds?: string[]; advisories?: string[]; status?: string }>(
           `/api/workflow/${encodeURIComponent(instanceId)}/abort`,
           { reason: opts.reason, actorSession: opts.actorSession },
         );
         printResult(opts.json ?? false, res.data, res.status);
+        printWorkflowAdvisories(res.data?.advisories);
+        const alreadyClosed = res.data?.alreadyClosedPacketIds?.length ?? 0;
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `Aborted workflow ${instanceId}`,
-          state: `${res.data?.status ?? "unknown"}; closed ${res.data?.closedPacketIds?.length ?? 0} live packet(s)`,
+          state: `${res.data?.status ?? "unknown"}; closed ${res.data?.closedPacketIds?.length ?? 0} live packet(s)`
+            + (alreadyClosed > 0 ? `; ${alreadyClosed} already closed by the queue (see the advisory)` : ""),
           next: `Inspect: rig workflow trace ${instanceId}`,
         });
       });

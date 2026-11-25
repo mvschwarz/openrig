@@ -6,9 +6,18 @@ import datetime
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+TRACE_STARTED = time.monotonic()
+try:
+    PARENT_TRACE_BUDGET = max(0, float(os.environ.get("OPENRIG_REFOCUS_PARENT_BUDGET_MS", "1650")) / 1000)
+except ValueError:
+    PARENT_TRACE_BUDGET = 1.65
 
 SHELVES = {"rigs", "pods", "seats", "missions", "slices"}
 # The daemon's exact current-work refusal meaning "this seat holds no in-progress typed baton"
@@ -26,10 +35,10 @@ SESSION_CHARS = re.compile(r"[A-Za-z0-9\-_.@]+")
 HUMAN_CLASS_SESSION = re.compile(r"human(?:-[A-Za-z0-9._-]+)?@(?:kernel|host)|[A-Za-z0-9._:-]+@external")
 
 
-def rig_output(*args):
+def rig_output(*args, timeout=10):
     try:
         result = subprocess.run(
-            ["rig", *args], capture_output=True, text=True, timeout=10, check=False
+            ["rig", *args], capture_output=True, text=True, timeout=timeout, check=False
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -92,6 +101,44 @@ def read(path):
         return path.read_text(encoding="utf8", errors="replace")
     except OSError:
         return None
+
+
+def may_have_parent(node, spec_text, timeout):
+    # Avoid a parser process for ordinary documents without any possible key.
+    # For possible links, use the same YAML parser as the CLI before querying.
+    manifest = read(node / "mission.yaml")
+    if manifest is None and (node / "mission.yaml").exists():
+        return None
+    frontmatter = re.match(r"\A---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)", spec_text)
+    text = manifest if manifest is not None else (frontmatter.group(1) if frontmatter else "")
+    if not re.search(r"parent|\\|\*|<<|\?", text, re.IGNORECASE):
+        return False
+    if timeout <= 0:
+        return None
+    rig = shutil.which("rig")
+    paths = [str(Path(__file__).resolve().parent), str(node), str(Path.cwd())]
+    if rig:
+        paths.append(str(Path(rig).resolve().parent))
+    script = """
+const fs = require('node:fs');
+const path = require('node:path');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+let yamlPath;
+try { yamlPath = require.resolve('yaml', { paths: input.paths }); }
+catch {
+  const cli = require.resolve('@openrig/cli', { paths: input.paths });
+  yamlPath = require.resolve('yaml', { paths: [path.dirname(cli)] });
+}
+const YAML = require(yamlPath);
+const doc = YAML.parse(input.text);
+const value = input.manifest ? doc?.metadata?.parent : doc?.parent;
+process.stdout.write(typeof value === 'string' && value.trim() ? 'yes' : 'no');
+"""
+    try:
+        result = subprocess.run(["node", "-e", script], input=json.dumps({"text": text, "manifest": manifest is not None, "paths": paths}), capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {"yes": True, "no": False}.get(result.stdout) if result.returncode == 0 else None
 
 
 # Contract twin of CLI scope-fs.ts and daemon scope/node-file.ts; parity is tested.
@@ -245,6 +292,94 @@ def age_cue(path, text):
     return f"OLD NOTES — {path}, {age:.0f} days old, source {source}, threshold {threshold:g} days"
 
 
+def parsed_frontmatters(texts):
+    """Parse all trace frontmatter in one batch; unknown documents stay unknown."""
+    def simple_fallback(block):
+        # Installed plugins may have neither PyYAML nor Node's yaml package.
+        # Recognise only unambiguous single-line scalar fields; do not guess
+        # flow mappings, complex values, or duplicate keys.
+        if block is None:
+            return None
+        fields, seen = {}, set()
+        pattern = re.compile(r'''^(?:(?P<quote>["'])(?P<quoted>progress_rail|current_state_updated)(?P=quote)|(?P<plain>progress_rail|current_state_updated))[ \t]*:[ \t]*(?P<value>[^\r\n#]*?)(?:[ \t]+\#.*)?[ \t]*$''')
+        lines = block.splitlines()
+        for index, line in enumerate(lines):
+            match = pattern.match(line)
+            if not match:
+                continue
+            key = match.group("quoted") or match.group("plain")
+            if key in seen:
+                return None
+            seen.add(key)
+            following = next((line for line in lines[index + 1:]
+                              if line.strip() and not line.lstrip().startswith("#")), "")
+            if following and following[0] in " \t":
+                # A continued scalar is not an unambiguous single-line value.
+                continue
+            value = match.group("value").strip()
+            if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+                value = value[1:-1]
+            if key == "progress_rail" and value == "readme-only":
+                fields[key] = value
+            elif key == "current_state_updated" and re.fullmatch(r"[0-9TtZz:+.\-]+", value):
+                fields[key] = value
+        return fields
+
+    blocks = []
+    for text in texts:
+        match = re.match(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", text or "", re.S)
+        blocks.append(match.group(1) if match else None)
+    try:
+        import yaml
+        def parse(block):
+            if block is None:
+                return None
+            try:
+                value = yaml.load(block, Loader=yaml.BaseLoader)
+                return value if isinstance(value, dict) else None
+            except yaml.YAMLError:
+                return None
+        return [parse(block) for block in blocks]
+    except ImportError:
+        # OpenRig ships Node and the same YAML parser used by its scope writer.
+        program = r'''const fs = require("fs"), path = require("path");
+const rig = process.argv[2];
+const roots = [path.dirname(process.argv[1])];
+if (rig) {
+  roots.push(path.dirname(fs.realpathSync(rig)));
+  roots.push(path.join(path.dirname(rig), "node_modules", "@openrig", "cli"));
+}
+const yaml = require(require.resolve("yaml", {paths: roots}));
+const blocks = JSON.parse(fs.readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify(blocks.map(block => {
+  if (block === null) return null;
+  try { const doc = yaml.parseDocument(block); const value = doc.toJS();
+    return !doc.errors.length && value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch { return null; }
+})));'''
+        try:
+            result = subprocess.run(["node", "-e", program, str(Path(__file__).resolve()), shutil.which("rig") or ""],
+                                    input=json.dumps(blocks), capture_output=True, encoding="utf-8", timeout=1, check=True)
+            values = json.loads(result.stdout)
+            return values if isinstance(values, list) and len(values) == len(blocks) else [None] * len(blocks)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return [simple_fallback(block) for block in blocks]
+
+
+def current_state_cue(text, metadata):
+    """Use the state stamp, never the file mtime (other edits change it)."""
+    stamp = metadata.get("current_state_updated") if isinstance(metadata, dict) else None
+    if isinstance(stamp, str):
+        try:
+            updated = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if updated.tzinfo is not None:
+                hours = (datetime.datetime.now(datetime.timezone.utc) - updated).total_seconds() / 3600
+                return f"CURRENT STATE — written {stamp} ({hours:.1f} hours ago)"
+        except ValueError:
+            pass
+    return "CURRENT STATE — write time unknown"
+
+
 def render_topology(start, root, depth, failures, packet=False):
     output = ["## TOPOLOGY TRACE", f"root: {root}", f"start: {start}"]
     nodes, error = ascent(start, root)
@@ -280,6 +415,15 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
     if error:
         failures.append(error)
         return "\n".join(output + [f"TRACE GAP — {error}"])
+    texts = []
+    if packet:
+        for node in nodes:
+            spec_file = next((candidate for candidate in (node / "SPEC.md", node / "README.md") if candidate.is_file()), None)
+            for candidate in (spec_file, node / "PROGRESS.md"):
+                value = read(candidate) if candidate is not None else None
+                if value is not None and value not in texts:
+                    texts.append(value)
+    metadata_by_text = dict(zip(texts, parsed_frontmatters(texts))) if texts else {}
     for node in nodes:
         label = node.relative_to(root) or Path(".")
         spec = next((candidate for candidate in (node / "SPEC.md", node / "README.md") if candidate.is_file()), None)
@@ -293,6 +437,28 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
                 value = intent(text)
                 body = f"intent: {value}" if value else "MISSING INTENT — no readable intent: field"
             output.append(f"\n### {label} · {spec.name}\n{body}")
+
+            # Parent links are logical edges, not filesystem ancestors. Ask the
+            # scope reader to resolve IDs so tracing uses the same rules as CLI.
+            remaining = PARENT_TRACE_BUDGET - (time.monotonic() - TRACE_STARTED)
+            has_parent = may_have_parent(node, text, remaining)
+            if has_parent is None:
+                failures.append(f"parent link unavailable or timed out: {node}")
+                output.append(f"PARENT TRACE GAP — unable to read parent link within budget at {node}")
+            elif has_parent:
+                remaining = PARENT_TRACE_BUDGET - (time.monotonic() - TRACE_STARTED)
+                workspace = next((ancestor for ancestor in node.parents if under_root(ancestor, root) and (ancestor / "project.yaml").is_file()), node.parent)
+                raw = rig_output("scope", "mission", "show", str(node), "--workspace", str(workspace), "--json", timeout=remaining) if remaining > 0 else None
+                try:
+                    mission = json.loads(raw)["mission"]
+                    for parent in mission["parentChain"]:
+                        output.append(f"PARENT · {parent['id']} · {parent['path']}\nintent: {parent.get('intent') or 'MISSING INTENT'}")
+                    if mission.get("parentGap"):
+                        failures.append(mission["parentGap"])
+                        output.append(f"PARENT TRACE GAP — {mission['parentGap']}")
+                except (TypeError, ValueError, KeyError):
+                    failures.append(f"parent link unavailable or timed out: {node}")
+                    output.append(f"PARENT TRACE GAP — unable to read parent link within budget at {node}")
 
         notes, resolution_error = resolve_notes(node)
         if resolution_error:
@@ -335,9 +501,17 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
         # as text when present. Its absence is not a gap: many nodes have no PROGRESS.md.
         progress_path = node / "PROGRESS.md"
         progress_text = read(progress_path) if packet else None
+        if packet and progress_text is None and spec is not None:
+            frontmatter = metadata_by_text.get(text)
+            if isinstance(frontmatter, dict) and frontmatter.get("progress_rail") == "readme-only":
+                progress_path, progress_text = spec, text
         if progress_text is not None:
             progress_body = progress_text.strip() if depth == "full" else by_section(progress_text, NOTES_STATE_HEADINGS, progress_path)
-            output.append(f"\nPROGRESS · PROGRESS.md\n{progress_body}")
+            output.append(f"\nPROGRESS · {progress_path.name}\n{progress_body}")
+            metadata = metadata_by_text.get(progress_text)
+            has_state = any((match := HEADING.match(line)) and match.group(1) == "##" and match.group(2).strip().lower() == "current state" for line in progress_text.splitlines())
+            if has_state or (isinstance(metadata, dict) and "current_state_updated" in metadata):
+                output.append(current_state_cue(progress_text, metadata))
             cue = age_cue(progress_path, progress_text)
             if cue:
                 output.append(cue)
@@ -404,6 +578,20 @@ def render_held_and_next(evidence):
     return "\n".join(output)
 
 
+def selected_project_missions(entry, project):
+    """The daemon's listing of the selected project's missions, used only when its missions root is inside that project."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("missionsRoot"), str) or not entry["missionsRoot"]:
+        return None
+    names = entry.get("names")
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        return None
+    missions_root = Path(entry["missionsRoot"]).expanduser().resolve()
+    if not under_root(missions_root, Path(project).expanduser().resolve()):
+        return None
+    return {"project": str(entry.get("project") or Path(project).name), "missionsRoot": str(missions_root),
+            "names": names, "truncated": bool(entry.get("truncated"))}
+
+
 def render_candidates(evidence, root, depth, failures, extra_roots=(), project=None, project_unknown=None):
     """The work section from labelled queue evidence. One direct, resolved tag is shown as the
     work with its source; anything less certain lists every candidate and asks the agent."""
@@ -421,6 +609,20 @@ def render_candidates(evidence, root, depth, failures, extra_roots=(), project=N
         return "\n".join([head, *notes, rest])
 
     missions_root = evidence.get("missionsRoot") or str(root / "missions")
+    names = evidence.get("missionsOnHost") or []
+    names_cut = evidence.get("missionsOnHostTruncated")
+    listing = "Missions on this host"
+    start_root, extra_root = missions_root, ""
+    # Orienting from the selected project, name its missions under its own root, not workspace.root's. A daemon that
+    # predates the field, or an entry whose root isn't inside this project, keeps workspace.root's listing.
+    selected = (selected_project_missions(evidence.get("projectMissions"), project)
+                if not candidates and not unknown and project else None)
+    if selected:
+        missions_root, names, names_cut = selected["missionsRoot"], selected["names"], selected["truncated"]
+        listing = f"Missions in the selected project ({selected['project']})"
+        # The next call is the agent's own, with none of this run's --work-root: name the project root so it can ascend.
+        start_root = shlex.quote(missions_root)
+        extra_root = f" --work-root {shlex.quote(str(Path(project).expanduser().resolve()))}"
     output = ["## WORK — name it"]
     if not candidates and not unknown:
         output.append("No in-progress queue row names your work. If you are working from messages, "
@@ -437,13 +639,10 @@ def render_candidates(evidence, root, depth, failures, extra_roots=(), project=N
         for row in unknown:
             (summary,), pointer = row_fields(row, ("summary", "no summary"))
             output.append(f"- {row.get('qitemId') or 'a row'} — {summary}: {row.get('reason')}{pointer}")
-    if not candidates:
-        names = evidence.get("missionsOnHost") or []
-        if names:
-            listing = ", ".join(names) + (", …" if evidence.get("missionsOnHostTruncated") else "")
-            output.append(f"Missions on this host: {listing}")
+    if not candidates and names:
+        output.append(f"{listing}: " + ", ".join(names) + (", …" if names_cut else ""))
     output.append("Then read that mission's current intent as text:")
-    output.append(f"  python3 {Path(__file__).resolve()} --trees work --packet --work-start {missions_root}/<mission>")
+    output.append(f"  python3 {Path(__file__).resolve()} --trees work --packet{extra_root} --work-start {start_root}/<mission>")
     # Nothing in progress: orient from the seat's selected project, which may live outside
     # workspace.root (#3320), or say why none was selected. Held and next work stay evidence only.
     orient_root = root

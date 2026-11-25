@@ -26,7 +26,7 @@ This plugin ships dual-manifest packaging — both `.claude-plugin/` and `.codex
   A seat that has OpenRig's activity relay in its own `settings.local.json` (the `claude-activity-hooks` runtime resource)
   already reports activity from there, so the plugin's `activity-relay.cjs` (which the manifest starts with `--from-plugin`)
   exits for an event the seat's settings register it for. It does so only when the entry is exactly the one OpenRig writes
-  (legacy `node` or a quoted absolute Node executable, then one quoted path to
+  (legacy `node` or a quoted absolute Node executable, optionally after one plain leading `exec`, then one quoted path to
   `state/claude-activity-hooks/activity-relay.cjs`), the interpreter is executable, and the script at that path is this same
   script. A missing interpreter/script, a different script, or a wrapper around it never silences the plugin. A seat without
   that resource, and a plugin installed outside OpenRig, report through the plugin's relay, so each event is reported once.

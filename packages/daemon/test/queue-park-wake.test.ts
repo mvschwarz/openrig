@@ -16,12 +16,14 @@ import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository, type QueueNudgeTransport } from "../src/domain/queue-repository.js";
-import { USAGE_LIMIT_BLOCKER_TAG } from "../src/domain/queue-wake-repository.js";
+import { QueueWakeRepository, USAGE_LIMIT_BLOCKER_TAG } from "../src/domain/queue-wake-repository.js";
+import { NO_TIMED_BACKSTOP, readWaitingView } from "../src/domain/queue-waiting.js";
 import { isDue, WatchdogScheduler } from "../src/domain/watchdog-scheduler.js";
 import type { PersistedEvent } from "../src/domain/types.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
+import { withWatchdogReceipts } from "../src/domain/watchdog-delivery-receipts.js";
 import { diagnoseSeatParked } from "../src/domain/parked-query.js";
 
 // S03 R25 RED-FIRST fixture: this is the contract shape migration 073 will ship.
@@ -87,6 +89,97 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
   async function item(destinationSession = "worker@rig") {
     return repo.create({ sourceSession: "orch@rig", destinationSession, body: "work", nudge: false });
   }
+
+  it.each(["waiting view", "swap timers"])("unavailable park history preserves the prior %s selection", async (reader) => {
+    const row = await item();
+    const read = () => reader === "waiting view" ? readWaitingView(db, row.qitemId)?.nextBackstop.mechanism
+      : new QueueWakeRepository(db).currentParkTimerIds();
+    const prepare = db.prepare.bind(db);
+    let failReads = false, failures = 0;
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql) => {
+      const statement = prepare(sql);
+      if (!sql.includes("FROM queue_transitions t") || !sql.includes("t.transition_id > w.transition_id")) return statement;
+      // The waiting view caches statements: fail their execution, not just preparation.
+      return new Proxy(statement, { get(target, key) {
+        const value = Reflect.get(target, key);
+        if (key === "get" || key === "all") return (...args: unknown[]) => {
+          if (failReads) { failures++; throw new Error("park history unavailable"); }
+          return value.apply(target, args);
+        };
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    });
+    try {
+      repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+        blockedOn: "external:window", wakeAfterSeconds: 90, transitionNote: "wait" });
+      const before = read();
+      failReads = true;
+      expect(read()).toEqual(before);
+      expect(failures).toBeGreaterThan(0);
+    } finally { spy.mockRestore(); }
+  });
+
+  it("unavailable park history does not hide an original wake selection failure", () => {
+    const prepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql) => {
+      if (sql.includes("FROM queue_transition_wakes w")) throw new Error("wake selection unavailable");
+      return prepare(sql);
+    });
+    try { expect(() => new QueueWakeRepository(db).currentParkTimerIds()).toThrow("wake selection unavailable"); }
+    finally { spy.mockRestore(); }
+  });
+
+  it.each(["status", "receipt targets", "live attachments", "generated timers", "owed one-shot", "swap timers", "waiting view"])(
+    "current-park boundary: %s drops a wake after leaving blocked and reparking without an arm", async (reader) => {
+      const row = await item();
+      repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+        blockedOn: "external:first", wakeAfterSeconds: 90, transitionNote: "first park" });
+      const first = wakes(row.qitemId)[0]!;
+      const jobId = first.wake_ref as string;
+      // A real attachment keeps the generated job active after its original park ends.
+      const keeper = await item();
+      repo.update({ qitemId: keeper.qitemId, actorSession: "worker@rig", state: "blocked",
+        blockedOn: "external:keeper", wakeWatchdogId: jobId, transitionNote: "shared timer" });
+      const wakeRepo = new QueueWakeRepository(db);
+      const readsOldArm = () => {
+        switch (reader) {
+          case "status": return wakeRepo.getStatus(row.qitemId)?.ref === jobId;
+          case "receipt targets": return wakeRepo.findBlockedQitemsByWatchdog(jobId, true).some(r => r.qitemId === row.qitemId);
+          case "live attachments": return wakeRepo.findLiveQitemsByAttachedWatchdog(jobId).some(r => r.qitemId === keeper.qitemId);
+          case "generated timers": return wakeRepo.findCurrentQitemsByGeneratedTimer(jobId).some(r => r.qitemId === row.qitemId);
+          case "owed one-shot": return wakeRepo.hasOwedOneShotParkWake(jobId);
+          case "swap timers": return wakeRepo.currentParkTimerIds().includes(jobId);
+          default: return readWaitingView(db, row.qitemId)?.nextBackstop.mechanism === `watchdog:${jobId}`;
+        }
+      };
+      expect(readsOldArm()).toBe(true);
+      // Leave both parks before reparking without a new arm. Keep the operator-owned
+      // attachment's job active to model the retained historical job, not a dead timer.
+      for (const parked of [row, keeper]) {
+        repo.update({ qitemId: parked.qitemId, actorSession: "worker@rig", state: "in-progress" });
+        repo.update({ qitemId: parked.qitemId, actorSession: "worker@rig", state: "blocked",
+          blockedOn: "fold:release", transitionNote: "new park, no timer" });
+      }
+      db.prepare("UPDATE watchdog_jobs SET state = 'active' WHERE job_id = ?").run(jobId);
+      expect(readsOldArm()).toBe(false);
+      // These are intentionally historical reads, including the raw retirement lookup.
+      expect(wakeRepo.getForTransition(first.transition_id as number)?.ref).toBe(jobId);
+      expect(wakeRepo.findQitemsByGeneratedTimer(jobId).some(r => r.qitemId === row.qitemId)).toBe(true);
+      expect(wakeRepo.findBlockedQitemsByWatchdog(jobId).some(r => r.qitemId === row.qitemId)).toBe(true);
+    },
+  );
+
+  it("current-park boundary: the waiting view never falls back past a newer inactive arm", async () => {
+    const row = await item();
+    const register = () => jobs.register({ policy: "periodic-reminder", specYaml: "policy: periodic-reminder\nmessage: resume\n",
+      targetSession: "worker@rig", intervalSeconds: 60, registeredBySession: "orch@rig" });
+    const old = register(), current = register();
+    for (const job of [old, current]) repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:window", wakeWatchdogId: job.jobId, transitionNote: "replace wake" });
+    db.prepare("UPDATE watchdog_jobs SET state = 'active' WHERE job_id = ?").run(old.jobId);
+    db.prepare("UPDATE watchdog_jobs SET state = 'canceled' WHERE job_id = ?").run(current.jobId);
+    expect(readWaitingView(db, row.qitemId)?.nextBackstop.mechanism).toBe(NO_TIMED_BACKSTOP);
+  });
 
   function wakes(qitemId: string): Array<Record<string, unknown>> {
     return db.prepare(
@@ -1348,6 +1441,65 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(sent).toHaveLength(3);
   });
 
+  it("#3704 — a due provider-limit timer resolves its blocker on the first evaluation, with no input attempt", async () => {
+    repo.attachWatchdogJobsRepository(jobs);
+    const blocker = await repo.create({
+      sourceSession: "wake-ladder@system",
+      destinationSession: "wake-ladder@rig",
+      body: "provider limit for one account pool",
+      tags: [USAGE_LIMIT_BLOCKER_TAG, "usage-limit-pool:claude%3Alocal"],
+      nudge: false,
+    });
+    repo.update({
+      qitemId: blocker.qitemId, actorSession: "wake-ladder@system", state: "blocked",
+      blockedOn: "external:provider-limit:claude:local",
+      transitionNote: "usage-limit park until stated reset", wakeAfterSeconds: 60,
+    } as never);
+    const timer = repo.getParkWakeStatus(blocker.qitemId)!;
+    const dependent = await item("worker-1@rig");
+    repo.update({
+      qitemId: dependent.qitemId, actorSession: "wake-ladder@system", state: "blocked",
+      blockedOn: blocker.qitemId, transitionNote: "usage-limit park on the shared provider/account timer",
+    });
+
+    // `wake-ladder@rig` is no seat: the delivery guard refuses it before any input is written.
+    const send = vi.fn(async () => ({ status: "failed" as const, inputPhase: "not_reached" as const,
+      error: "Cannot establish managed input target wake-ladder@rig; no input written." }));
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo: jobs, historyLog: new WatchdogHistoryLog(db), eventBus: bus,
+      deliver: withWatchdogReceipts(send, { outbox: new OutboxHandler(db), retryIntervalSeconds: 300, retryCap: 3 }),
+      resolvePreDeliveryTerminalReason: ({ jobId }) => repo.resolveWatchdogPreDeliveryTerminalReason(jobId),
+      fireWithoutDelivery: ({ jobId }) => repo.fireUsageLimitTimerWithoutDelivery(jobId),
+      onWakeAttempt: ({ jobId, deliveryStatus, retryAt }) => repo.recordWatchdogWakeAttempt(jobId, deliveryStatus, retryAt),
+    });
+
+    const result = await engine.evaluate(jobs.getByIdOrThrow(timer.ref));
+    await repo.drainPendingWakeIntents();
+
+    expect(send).not.toHaveBeenCalled();
+    expect(result.outcome).toEqual({ action: "terminal", reason: "usage_limit_expiry_fired" });
+    expect(jobs.getById(timer.ref)).toMatchObject({ state: "terminal", terminalReason: "usage_limit_expiry_fired" });
+    expect(repo.getById(blocker.qitemId)?.state).toBe("done");
+    expect(repo.getById(dependent.qitemId)?.state).toBe("pending");
+  });
+
+  it("#3704 — a provider-limit timer that also wakes a row that isn't a blocker keeps its send path", async () => {
+    const blocker = await repo.create({
+      sourceSession: "wake-ladder@system", destinationSession: "wake-ladder@rig", body: "provider limit",
+      tags: [USAGE_LIMIT_BLOCKER_TAG, "usage-limit-pool:claude%3Alocal"], nudge: false,
+    });
+    repo.update({ qitemId: blocker.qitemId, actorSession: "wake-ladder@system", state: "blocked",
+      blockedOn: "external:provider-limit:claude:local", transitionNote: "usage-limit park", wakeAfterSeconds: 60 } as never);
+    const ref = repo.getParkWakeStatus(blocker.qitemId)!.ref;
+    const attached = await item("wake-ladder@rig");
+    repo.update({ qitemId: attached.qitemId, actorSession: "wake-ladder@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "shared park", wakeWatchdogId: ref } as never);
+
+    expect(repo.fireUsageLimitTimerWithoutDelivery(ref)).toBeNull();
+    expect(jobs.getById(ref)?.state).toBe("active");
+    expect(repo.getById(blocker.qitemId)?.state).toBe("blocked");
+  });
+
   it("S16 initializes its timer baseline so it becomes due at the projected expiry, never immediately", async () => {
     const blocker = await repo.create({
       sourceSession: "wake-ladder@system",
@@ -1425,6 +1577,31 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(repo.getParkWakeStatus(row.qitemId)).toBeNull();
     repo.update({ qitemId: blocker.qitemId, actorSession: "peer@rig", state: "done", closureReason: "no-follow-on", transitionNote: "complete" });
     expect(repo.getById(row.qitemId)).toMatchObject({ state: "blocked", blockedOn: "fold:release" });
+  });
+
+  it("does not report an earlier park's wake after the row left blocked and was blocked again without a wake", async () => {
+    // An attached operator watchdog outlives the park that armed it, so its old arm
+    // would read as a live wake for the new, wakeless park.
+    const job = jobs.register({ policy: "periodic-reminder", specYaml: "policy: periodic-reminder\nmessage: resume\n",
+      targetSession: "worker@rig", intervalSeconds: 600, registeredBySession: "operator@rig" });
+    const row = await item();
+    const held = () => diagnoseSeatParked({
+      getSeatState: () => ({ activity: "idle-at-prompt", needsInput: { count: 0, reason: null }, decidedBy: "test", changedAt: null }) as never,
+      listOpenObligations: () => ({ rows: [{ qitemId: row.qitemId, state: "blocked" }], limit: 500 }),
+      getParkWake: (id) => repo.getParkWakeStatus(id),
+    }, { seatNodeId: "seat", sessionName: "worker@rig" }).obligations.held[0];
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", wakeWatchdogId: job.jobId, transitionNote: "first park" });
+    expect(repo.getParkWakeStatus(row.qitemId)).toMatchObject({ kind: "watchdog", ref: job.jobId, phase: "armed", live: true });
+    expect(held()?.healthy).toBe(true);
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "in-progress", transitionNote: "resumed" });
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:vendor", transitionNote: "parked again with no wake" });
+    expect(wakes(row.qitemId)).toEqual([expect.objectContaining({ phase: "armed", wake_kind: "watchdog", wake_ref: job.jobId })]);
+    expect(jobs.getById(job.jobId)!.state).toBe("active");
+    expect(repo.getParkWakeStatus(row.qitemId)).toBeNull();
+    // What a person sees: the new, wakeless park is not reported as healthy.
+    expect(held()).toMatchObject({ wake: null, healthy: false });
   });
 
   it("uses the current live blocker when a repark has no wake receipt", async () => {

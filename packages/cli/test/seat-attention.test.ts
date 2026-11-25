@@ -148,3 +148,27 @@ it("a seat waiting on a person names its question, not an older recorded error; 
   ]);
   expect(attentionLines(check, "tile")[0]).toBe("asked@r is waiting on a person: permission_prompt. Answer it in its tile, or read it with: rig capture asked@r");
 });
+
+it("#3571: names a Claude authentication or billing failure the daemon counted, never as a question", async () => {
+  const failure = (seat: string, reason: string, rawSubtype: string | null, over: Record<string, unknown> = {}) => ({
+    canonicalSessionName: seat, needsAttention: true, arbitratedNeedsInput: false, startupStatus: "ready", latestError: null,
+    agentActivity: { state: "unknown", reason, rawEvent: "StopFailure", rawSubtype, stale: false, ...over } });
+  const seats = [
+    failure("auth@r", "provider_auth_error", "authentication_failed"),
+    failure("billing@r", "provider_billing_error", "account_on_hold"),
+    // A value that isn't a plain identifier is left out of the line; the typed reason stands alone.
+    failure("odd@r", "provider_auth_error", "bad\u001b[31mvalue"),
+    // Anything else, a generic provider error or a stale report included, isn't named as one.
+    failure("generic@r", "provider_error", "server_error"),
+    failure("stale@r", "provider_auth_error", "authentication_failed", { stale: true }),
+  ];
+  const { client: c } = client({ "/api/ps": { status: 200, data: [{ rigId: "r1", rigName: "r" }] }, "/api/rigs/r1/nodes": { status: 200, data: seats } });
+  const check = await checkSeatAttention(c, ["auth@r", "billing@r", "odd@r", "generic@r", "stale@r"]);
+  expect(check.attention).toEqual([
+    { seat: "auth@r", reason: "provider_auth_error (authentication_failed)", waitingOnPerson: false },
+    { seat: "billing@r", reason: "provider_billing_error (account_on_hold)", waitingOnPerson: false },
+    { seat: "odd@r", reason: "provider_auth_error", waitingOnPerson: false },
+    { seat: "generic@r", reason: "reason unavailable", waitingOnPerson: false },
+    { seat: "stale@r", reason: "reason unavailable", waitingOnPerson: false },
+  ]);
+});

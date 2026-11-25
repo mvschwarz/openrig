@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
@@ -65,6 +66,9 @@ interface LaunchOpts {
   /** #3253: how the new session treats the seat's process limit it can't apply (default "fresh": refused). A restore or
    *  resume passes "recovery": it goes ahead without the limit, with a structured warning. */
   processLimitsMode?: import("../adapters/tmux.js").ProcessLimitsMode;
+  /** A launch from a spec: create the member's declared working folder when it isn't there yet, before the terminal
+   *  starts in it. A restore or relaunch leaves this unset, so a saved folder missing on this machine isn't recreated. */
+  createCwd?: boolean;
 }
 
 interface NodeLauncherDeps {
@@ -95,6 +99,8 @@ interface NodeLauncherDeps {
   tmuxOptionDefaults?: TmuxOptionDefaultsApplier;
   /** How long a kept pane's process gets to exit, per signal (default: polled every 100 ms, 3 s each). */
   paneExit?: PaneCutoverTiming;
+  /** Creates a folder and its parents, for `createCwd`. When omitted (most unit tests), a launch creates no folder. */
+  createFolder?: (path: string) => void;
 }
 
 /** For a kept pane: the failures that come before its takeover sent any signal, so this attempt stopped nothing. Every
@@ -127,6 +133,7 @@ export class NodeLauncher {
   private pluginsDir: string | undefined;
   private defaultSilenceWindowSeconds: number;
   private tmuxOptionDefaults: TmuxOptionDefaultsApplier | null;
+  private createFolder: ((path: string) => void) | null;
   private paneExit: PaneCutoverTiming;
 
   constructor(deps: NodeLauncherDeps) {
@@ -153,6 +160,7 @@ export class NodeLauncher {
     this.pluginsDir = deps.pluginsDir;
     this.defaultSilenceWindowSeconds = deps.defaultSilenceWindowSeconds ?? 3;
     this.tmuxOptionDefaults = deps.tmuxOptionDefaults ?? null;
+    this.createFolder = deps.createFolder ?? null;
     this.paneExit = deps.paneExit ?? { pollMs: 100, timeoutMs: 3_000, sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) };
   }
 
@@ -232,6 +240,13 @@ export class NodeLauncher {
     const additionPluginDirs = seatLaunchAdditionsForLaunch(this.db, node.id).additions?.pluginDirs ?? [];
     const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, opts?.pluginPaths, this.pluginsDir);
     const sessionCwd = opts?.cwd ?? node.cwd ?? undefined;
+    // A spec's member starts in the folder it declares: one that isn't there yet is created before the terminal starts,
+    // as the kernel creates its own. A failure is named and the launch goes on, in tmux's fallback folder.
+    const cwdNotes: string[] = [];
+    if (opts?.createCwd && sessionCwd && isAbsolute(sessionCwd) && this.createFolder) {
+      try { this.createFolder(sessionCwd); }
+      catch (err) { cwdNotes.push(`${logicalId}'s working directory ${sessionCwd} couldn't be created: ${(err as Error).message}`); }
+    }
     const launchEnv = (oneOff?: SeatEnv) => compactEnv({
       OPENRIG_NODE_ID: node.id,
       OPENRIG_SESSION_NAME: sessionName,
@@ -272,7 +287,7 @@ export class NodeLauncher {
     if (opts?.keepPane) coreCopyNotes.push(...retireCoreCopies());
 
     // The session's own non-fatal warnings (#771: the parent-session identity cleanup).
-    const launchWarnings: string[] = [...coreCopyNotes, ...(tmuxResult.warnings ?? [])];
+    const launchWarnings: string[] = [...coreCopyNotes, ...cwdNotes, ...(tmuxResult.warnings ?? [])];
 
     // A one-off `rig up --env` value is on the first pane's command line and, because that is how
     // `new-session -e` works, in the session environment, which a respawned pane (a handover

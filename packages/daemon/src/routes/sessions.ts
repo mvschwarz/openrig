@@ -2,6 +2,7 @@ import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
 import type { Context } from "hono";
 import { expectedConversation, resolveExpectedConversation, type ExpectedConversation } from "../domain/expected-conversation.js";
 import { unknownModelObservation, type CurrentModelReader } from "../domain/model-divergence/current-model-reader.js";
+import { RemoteControlObservationStore } from "../domain/remote-control-observations.js";
 import { inventoryCaptureOptions, type ShadowCapture } from "../domain/shadow-capture.js";
 import { Hono } from "hono";
 import { observeInventoryHandler } from "../domain/request-phase-observer.js";
@@ -42,13 +43,14 @@ import { validateResumeToken } from "../domain/resume-token-validation.js";
 import type { PermissionDriftReader } from "../domain/permission-drift-observer.js";
 import { ProcessCensus } from "../domain/process-census.js";
 import { CodexThreadIdResolver } from "../domain/codex-thread-id.js";
+import { effectiveRuntimeHome } from "../domain/seat-runtime-home.js";
 import { resolveLiveCodexThreadId } from "../domain/model-divergence/current-generation-record.js";
 import { SeatIdentityStore } from "../domain/seat-identity-store.js";
 import { parseSqliteUtcMs } from "../domain/sqlite-time.js";
 import { runSyncSiteWhenSlow } from "../domain/sync-site-wrap.js";
 
 const generationCensus = new ProcessCensus({ freshnessMs: 0 }); // coalesce concurrent receipts; recheck each later read
-const generationThreadIds = new CodexThreadIdResolver({ codexHome: process.env.CODEX_HOME || undefined });
+const generationThreadIds = new CodexThreadIdResolver();
 
 /** The node inventory's synchronous steps run one at a time, each after a turn of the event loop. They're SQLite work
  *  that can't yield, so concurrent requests ran their whole builds back to back and a read queued behind a burst (a
@@ -228,8 +230,20 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   const hostSelfId = getSelfHostId();
   const modelReader = c.get("currentModelReader" as never) as CurrentModelReader | undefined;
   const observations = modelReader ? await modelReader.observeInventory(withTerminalAndWork) : null;
+  // #3513: the Remote Control session the seat's own hooks last reported, for its current occupant and conversation;
+  // null when none applies. An observation with its time ("last seen"), not proof of a live connection.
+  const remoteControlStore = new RemoteControlObservationStore(deps.rigRepo.db);
+  const remoteControlOf = (nodeId: string) => {
+    try {
+      return remoteControlStore.current({ nodeId,
+        isCurrentOccupant: (generation) => deps.sessionRegistry.isOccupantContinuedByAdoption(nodeId, generation) });
+    } catch {
+      return null;
+    }
+  };
   const nodes = withTerminalAndWork.map((n, i) => ({ ...n, hostSelfId,
     modelObservation: observations?.[i] ?? unknownModelObservation("observer-unavailable"),
+    remoteControl: remoteControlOf(n.nodeId),
   }));
   return c.json(nodes);
 });
@@ -852,24 +866,35 @@ const generationRecord = async (c: Context) => {
       if (!pid || pid !== verifiedPanePid) {
         return c.json({ error: "record_identity_unverified", message: `The bound pane for '${sessionName}' no longer matches its verified occupant.` }, 409);
       }
-      let verifiedNativeThreadId: string | undefined;
+      // Match the expected-identity reader: select this seat's home, then carry the
+      // positive PID/start-time lookup's home into the transcript lookup as well.
+      const codexHome = effectiveRuntimeHome(registry.db, context!.nodeId, "codex", process.env.CODEX_HOME || undefined);
+      const threads = codexHome ? new CodexThreadIdResolver({ codexHome }) : generationThreadIds;
+      let verifiedNativeThreadId: string | undefined, verifiedHome: string | undefined;
+      const homes = new Set<string>();
       const live = await resolveLiveCodexThreadId(binding.tmuxPane, {
         getPanePid: async () => pid,
-        listProcesses: () => generationCensus.list(),
+        listProcesses: (opts) => generationCensus.list(opts),
         readThreadIdByPid: async (nativePid, startedAt) => {
-          const threadId = startedAt ? await generationThreadIds.resolve(nativePid, startedAt) : undefined;
-          if (nativePid === identity.evidence.observedPid) verifiedNativeThreadId = threadId;
-          return threadId;
+          if (!startedAt) return undefined;
+          const read = await threads.resolveWithHome(nativePid, startedAt, nativePid === identity.evidence.observedPid);
+          if (read.thread && read.codexHome) homes.add(read.codexHome);
+          if (nativePid === identity.evidence.observedPid) { verifiedNativeThreadId = read.thread; verifiedHome = read.codexHome; }
+          return read.thread;
         },
       });
       if (!live.ok) return c.json({ error: "record_identity_unverified", message: live.reason }, 409);
       sessionId = live.id;
-      transcriptPath = store.readCodexTranscriptPath(sessionId);
       // Dual-PID verdicts must name the process whose thread was selected; legacy verdicts only identify the root. A different
       // conversation under a surviving wrapper isn't a binding change, so it says what it is.
       if (identity.evidence.observedPanePid != null && verifiedNativeThreadId !== sessionId) {
         return c.json({ error: "record_identity_unverified", message: `The Codex conversation in the pane for '${sessionName}' isn't the one its verified process owned, so no generation record is served.` }, 409);
       }
+      const recordHome = verifiedHome ?? (homes.size === 1 ? [...homes][0] : undefined);
+      if (!recordHome) {
+        return c.json({ error: "record_identity_unverified", message: `The current native process's record home for '${sessionName}' could not be established.` }, 409);
+      }
+      transcriptPath = store.readCodexTranscriptPath(sessionId, recordHome);
       if (registry.currentOccupantTenure(context!.nodeId)?.generationUuid !== occupant.generationUuid
         || registry.getBindingForNode(context!.nodeId)?.tmuxPane !== binding.tmuxPane
         || await tmuxAdapter.getPanePid?.(binding.tmuxPane) !== pid) {

@@ -145,13 +145,14 @@ the run's log file, not on the row.
 
 ## Running it in the background: `rig exec`
 
-`rig exec` runs the same single turn on a named harness, `claude` or `codex`, through that harness's ACP adapter, in a
+`rig exec` runs the same single turn on a named harness, `claude` or `codex`, or on an explicit ACP command after `--`, in a
 connector that outlives the command:
 
 ```sh
 rig exec harnesses                               # the adapter and native versions installed here, and how each differs
 rig exec run <row> --harness claude --plan       # what would run, with versions; starts nothing
 rig exec run <row> --harness claude [--wait]     # start it; --wait waits here for the outcome
+rig exec run <row> --cwd /workspace -- cursor-agent acp
 rig exec status <runId|row>                      # state, outcome, usage and cost, and what still runs
 rig exec cancel <runId>
 ```

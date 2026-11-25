@@ -19,7 +19,7 @@ export interface HumanQuestion {
 export interface TypedHumanReply {
   kind: "typed-reply";
   text: string;
-  placement: "first-unanswered";
+  placement: "first-unanswered" | "explicit";
   /** Other question slots still empty immediately after this reply's placement. */
   unansweredCount: number;
 }
@@ -92,6 +92,7 @@ function ownAnswer(answers: HumanAnswers, questionId: string): string | TypedHum
 }
 
 export function describeTypedReplyPlacement(question: HumanQuestion, reply: TypedHumanReply): string {
+  if (reply.placement === "explicit") return `Typed reply to ${JSON.stringify(question.question)}`;
   return `Whole typed reply, automatically placed under first unanswered question ${JSON.stringify(question.question)}; ${reply.unansweredCount} question${reply.unansweredCount === 1 ? "" : "s"} left unanswered`;
 }
 
@@ -102,6 +103,16 @@ export function formatHumanAnswers(questions: readonly HumanQuestion[], answers:
     if (answer == null) return [];
     if (typeof answer !== "string") return [`${describeTypedReplyPlacement(q, answer)}: ${answer.text}`];
     return [`${q.question}: ${q.options.find((o) => o.id === answer)?.label ?? answer}`];
+  });
+}
+
+/** What was chosen, in question order: a button choice's option label, or null for a typed reply (a settled card names
+ *  the choice; the typed words stay in the thread). Empty when nothing is recorded. */
+export function chosenAnswers(questions: readonly HumanQuestion[], answers: HumanAnswers): Array<string | null> {
+  return questions.flatMap((q) => {
+    const answer = ownAnswer(answers, q.id);
+    if (answer == null) return [];
+    return [typeof answer === "string" ? q.options.find((o) => o.id === answer)?.label ?? answer : null];
   });
 }
 

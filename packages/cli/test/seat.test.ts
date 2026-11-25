@@ -94,6 +94,39 @@ const STATUS = {
 };
 
 describe("seat typing guard commands", () => {
+  it.each([undefined, "lead@test"])("retirement uses transport identity %s and sends only the required reason", async session => {
+    const previous = process.env.OPENRIG_SESSION_NAME;
+    try {
+      if (session === undefined) delete process.env.OPENRIG_SESSION_NAME;
+      else process.env.OPENRIG_SESSION_NAME = session;
+      const requests: Array<{ path: string; actor: string | null; body: unknown }> = [];
+      const deps: StatusDeps = { lifecycleDeps: mockLifecycleDeps(), clientFactory: url => new DaemonClient(url, {
+        fetchImpl: async (url, init) => {
+          requests.push({ path: new URL(String(url)).pathname, actor: new Headers(init?.headers).get("X-OpenRig-Session"), body: JSON.parse(String(init?.body)) });
+          return new Response(JSON.stringify({ entry: { deliveryState: "retired" } }), { status: 200 });
+        },
+      }) };
+      await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "retire-held-message", "worker@test", "held-1",
+        "--reason", "read outside the terminal", "--json"]).then(() => undefined));
+      expect(requests).toEqual([{ path: "/api/seat/retire-held-message/worker%40test/held-1", actor: session ?? null, body: { reason: "read outside the terminal" } }]);
+    } finally {
+      if (previous === undefined) delete process.env.OPENRIG_SESSION_NAME;
+      else process.env.OPENRIG_SESSION_NAME = previous;
+    }
+  });
+
+  it("retirement help explains attribution for both terminal paths and preserves the required reason", () => {
+    const cmd = seatCommand(makeDeps({ status: 200, data: {} }, [])).commands.find(c => c.name() === "retire-held-message")!;
+    let help = "";
+    cmd.configureOutput({ writeOut: text => { help += text; } });
+    cmd.outputHelp();
+    expect(help).toContain("OPENRIG_SESSION_NAME");
+    expect(help).toContain("unattributed (no seat identity)");
+    expect(help).toContain("--reason <text>");
+    expect(cmd.options.find(o => o.long === "--reason")?.required).toBe(true);
+    expect(cmd.options.find(o => o.long === "--reason")?.mandatory).toBe(true);
+  });
+
   it("shows body-free current and historical native recovery evidence in human and JSON seat status", async () => {
     const nativeInput = { input: true, wake: true, cancel: false, target: null,
       unresolved: [{ requestId: "uncertain", runId: "old", inCurrentRun: false, kind: "cancel", stage: "completed", outcome: "requested", destination: "dev@rig" }],
@@ -228,6 +261,21 @@ describe("seat typing guard commands", () => {
     expect(result3.logs.join("\n")).not.toContain("Process limits");
   });
 
+  it("#3253: prints a memory_max request as a size and its readback apart from the pids one", async () => {
+    const status = async (processLimits: Record<string, unknown>) => (await captureLogs(() => makeCommand(makeDeps({ status: 200,
+      data: { ...STATUS, processLimits } }, [])).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined))).logs;
+    expect(await status({ state: "applied", requested: { memoryMax: 4294967296 }, memoryMax: "4294967296", memoryCurrent: 52428800,
+      memoryLimitHits: 4, oomKills: 1, scope: "openrig-seat-worker_test-1a2b3c4d.scope" }))
+      .toContain("Process limits: memory_max 4G: applied (memory.max 4294967296, current 52428800, at the limit 4 times, OOM kills 1)");
+    expect(await status({ state: "applied", requested: { tasksMax: 512, memoryMax: 1610612736 }, pidsMax: "512", pidsCurrent: 37,
+      limitHits: 2, memoryMax: "1610612736", memoryCurrent: 1048576, memoryLimitHits: 0, oomKills: 0 }))
+      .toContain("Process limits: tasks_max 512, memory_max 1536M: applied (pids.max 512, current 37, limit hit 2 times) " +
+        "(memory.max 1610612736, current 1048576, at the limit 0 times, OOM kills 0)");
+    expect(await status({ state: "not_applied", requested: { memoryMax: 16777216 + 2 ** 30 },
+      reason: "the seat is not running; the limit applies at its next fresh launch" }))
+      .toContain("Process limits: memory_max 1040M: requested, not applied; the seat is not running; the limit applies at its next fresh launch");
+  });
+
   it("prints the daemon's managed restore delivery failure", async () => {
     const detail = "OpenRig owes its turn boundary. Last delivery: target_activity_unknown; no_activity_signal.";
     const deps = makeDeps({ status: 200, data: { ...STATUS, compaction: { stage: "compacting", detail } } }, []);
@@ -251,6 +299,19 @@ describe("seat typing guard commands", () => {
     const deps = makeDeps({ status: 200, data: { ...STATUS, typingGuard: { desired: true, effective: true, effectiveMode: "hold", effectiveLevel: "urgent-only", pending: false, heldCount: 2 } } }, []);
     const status = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
     expect(status.logs.join("\n")).toContain("Typing guard: urgent-only; 2 retained\nOnly messages marked urgent type. Other automatic input is held, readable with rig seat held-messages dev-impl@seat-rig.");
+  });
+
+  it("sets queue-only through the same control, and status says deliberate sends type and OpenRig's reminders queue (#3076)", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const set = makeDeps({ status: 200, data: { effectiveMode: "hold", effectiveLevel: "queue-only", pending: false } }, paths, bodies);
+    const result = await captureLogs(() => makeCommand(set).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
+      "--mode", "queue-only", "--reason", "I type in this terminal", "--json"]).then(() => undefined));
+    expect(result.exitCode).toBeUndefined();
+    expect(bodies).toEqual([{ mode: "queue-only", reason: "I type in this terminal" }]);
+    const deps = makeDeps({ status: 200, data: { ...STATUS, typingGuard: { desired: true, effective: true, effectiveMode: "hold", effectiveLevel: "queue-only", pending: false, heldCount: 0 } } }, []);
+    const status = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(status.logs.join("\n")).toContain("Typing guard: queue-only");
+    expect(status.logs.join("\n")).toContain("Deliberate sends type, never over a draft; OpenRig's reminders arrive as queue rows, never typed.");
   });
 
   it("sends draft-aware mode through the existing control", async () => {
@@ -541,17 +602,33 @@ describe("rig seat status", () => {
     expect(lines[summaryAt + 1]).toBe(`  ${advisory}`);
   });
 
-  it("explains a confirmed missing tmux session", async () => {
+  it.each([
+    ["session_missing", "tmux session missing; restore or relaunch the seat"],
+    ["session_missing_tmux_unavailable", "tmux session last observed missing; latest tmux reading unavailable; restore or relaunch the seat"],
+  ])("explains a confirmed missing tmux session: %s", async (reason, explanation) => {
     const deps = makeDeps({
       status: 200,
-      data: { ...STATUS, session_status: "detached", session_reason: "session_missing" },
+      data: { ...STATUS, session_status: "detached", session_reason: reason },
     }, []);
 
     const { logs } = await captureLogs(async () => {
       await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
     });
 
-    expect(logs.join("\n")).toContain("Reason: tmux session missing; restore or relaunch the seat");
+    expect(logs.join("\n")).toContain(`Reason: ${explanation}`);
+  });
+
+  // #3185 (C14 native): a bare shell's session record stayed running, so seat status said running while rig ps said att.
+  it.each([
+    [{ lifecycle_state: "attention_required" }, "Session: needs attention (its session record is running; rig ps shows it as att)"],
+    [{ lifecycle_state: "running" }, "Session: running"],
+    [{}, "Session: running"],
+  ])("says a seat rig ps shows as att needs attention, never running (case %#)", async (extra, expected) => {
+    const deps = makeDeps({ status: 200, data: { ...STATUS, ...extra } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    expect(logs).toContain(expected);
   });
 
   it("returns a nonzero status for an unknown seat", async () => {
@@ -861,6 +938,25 @@ describe("rig seat status", () => {
     expect(out).toContain("Handover failed at step");
     expect(out).toContain("Process limits: tasks_max 256: requested, not applied");
     expect(out).toContain("unverified: the user manager timed out");
+  });
+
+  it("#3253: a handover failure names a memory_max request in the process-limit notice", async () => {
+    const deps = makeDeps({
+      status: 500,
+      data: {
+        ok: false,
+        code: "successor_create_failed",
+        message: "Handover failed at step \"create-successor\": harness not interactive",
+        guidance: "The seat's registry binding is unchanged.",
+        processLimits: { state: "not_applied", kind: "unsupported", limit: "memory_max", retryable: false,
+          reason: "a throwaway seat scope has no memory.max: the memory controller is not delegated to the user manager",
+          requested: { tasksMax: 256, memoryMax: 4294967296 } },
+      },
+    }, []);
+    const { errors } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "impl@seat-rig", "--reason", "context-wall"]);
+    });
+    expect(errors.join("\n")).toContain("Process limits: tasks_max 256, memory_max 4G: requested, not applied");
   });
 
   it("handover non-dry-run JSON prints mutation result for discovered source", async () => {

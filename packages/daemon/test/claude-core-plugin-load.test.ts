@@ -70,7 +70,9 @@ function fakeTmux(created: Array<{ name: string; env: Record<string, string> | u
     createSession: async (name: string, _c?: string, env?: Record<string, string>) => { created.push({ name, env }); return { ok: true as const }; },
     setSessionEnv: async (_s: string, key: string, value: string) => { sessionEnvCalls.push(`set ${key}=${value}`); },
     unsetSessionEnv: async (_s: string, key: string) => { sessionEnvCalls.push(`unset ${key}`); },
-    killSession: async () => ({ ok: true as const }), listPanes: async () => [], listSessions: async () => [], listWindows: async () => [],
+    killSession: async () => ({ ok: true as const }), listSessions: async () => [], listWindows: async () => [],
+    listPanes: async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }],
+    getPanePid: async () => 4242, getPaneCommand: async () => "claude",
     hasSession: async () => false, sendText: async () => ({ ok: true as const }), sendKeys: async () => ({ ok: true as const }),
   } as unknown as TmuxAdapterType;
 }
@@ -400,7 +402,7 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
   });
 
   function restoreHarness(entries: unknown[], memberEnv?: Record<string, string>, opts: { fresh?: boolean; files?: unknown[]; realFs?: boolean;
-    seatSkillSelection?: RestoreOrchestratorDeps["seatSkillSelection"] } = {}) {
+    seatSkillSelection?: RestoreOrchestratorDeps["seatSkillSelection"]; armContinuity?: RestoreOrchestratorDeps["armContinuity"] } = {}) {
     const { pluginsDir } = vendoredPlugins(root);
     const db = createFullTestDb(); dbs.push(db);
     const rigRepo = new RigRepository(db);
@@ -454,7 +456,8 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
         const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, sessionEnv: { OPENRIG_HOME: "/state" }, pluginsDir });
         const restore = new RestoreOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
           checkpointStore, nodeLauncher, tmuxAdapter: tmux, claudeResume: new ClaudeResumeAdapter(tmux),
-          codexResume: new CodexResumeAdapter(tmux), listProcesses, ...(opts.seatSkillSelection ? { seatSkillSelection: opts.seatSkillSelection } : {}) });
+          codexResume: new CodexResumeAdapter(tmux), listProcesses, ...(opts.seatSkillSelection ? { seatSkillSelection: opts.seatSkillSelection } : {}),
+          ...(opts.armContinuity ? { armContinuity: opts.armContinuity } : {}) });
         const project = adapter.project.bind(adapter);
         adapter.project = async (plan, b) => { projected.push(...plan.entries.map((e) => e.effectiveId)); return project(plan, b); };
         return await restore.restore(down.snapshotId!, { adapters: { "claude-code": adapter }, ...(opts.fresh ? { freshLogicalIds: ["test.c"] } : {}),
@@ -524,6 +527,27 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     expect(seen).toBe("v2\n");
     expect(JSON.stringify(result)).toContain("Restore: test.c follows its skills' sources (on_restore: follow_source): refreshed infra-review");
     expect(JSON.stringify(result)).not.toContain("not substituted");
+  });
+
+  it("restore (fresh-primed): a seat started fresh by `rig up --existing --fresh` gets its continuity notice armed too (#3579)", async () => {
+    const armed: string[] = [];
+    const h = restoreHarness([], undefined, { fresh: true, realFs: true, armContinuity: async (_rig, nodeId) => { armed.push(nodeId); return null; } });
+    const out = await h.run();
+    expect(out.ok, JSON.stringify(out)).toBe(true);
+    const nodes = out.ok ? out.result.nodes : [];
+    expect(nodes[0]!.status).toBe("fresh-primed");
+    expect(armed).toEqual([nodes[0]!.nodeId]);
+  });
+
+  it("restore: a continuity notice that can't be armed is a warning on the restore, never a failure of the seat (#3579)", async () => {
+    const h = restoreHarness([], undefined, { fresh: true, realFs: true, armContinuity: async () => "continuity policy was not re-armed: spec unreadable" });
+    const out = await h.run();
+    expect(out.ok && out.result.nodes[0]!.status).toBe("fresh-primed");
+    expect(JSON.stringify(out)).toContain("continuity policy was not re-armed: spec unreadable");
+    const thrown = restoreHarness([], undefined, { fresh: true, realFs: true, armContinuity: async () => { throw new Error("boom"); } });
+    const second = await thrown.run();
+    expect(second.ok && second.result.nodes[0]!.status).toBe("fresh-primed");
+    expect(JSON.stringify(second)).toContain("continuity policy was not armed for test.c: boom");
   });
 
   it("restore (native resume): when today's selection can't be read, the seat keeps its saved skills and the restore says why", async () => {
@@ -914,10 +938,11 @@ describe("the plugin's activity relay", () => {
     expect(posts.map((p) => p.url)).toEqual(["/api/activity/hooks"]);
   });
 
-  it("deduplicates a pinned settings interpreter with no Node on PATH", async () => {
+  // #3416: the settings relay OpenRig writes now starts with `exec`; one written by an earlier version doesn't.
+  it.each(["", "exec "])("deduplicates a pinned settings interpreter with no Node on PATH (prefix %j)", async prefix => {
     const quote = (value: string) => "'" + value.replace(/'/g, `'"'"'`) + "'";
     writeFileSync(join(project, ".claude", "settings.local.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{
-      type: "command", command: `${quote(process.execPath)} ${quote(settingsRelay)}`,
+      type: "command", command: `${prefix}${quote(process.execPath)} ${quote(settingsRelay)}`,
     }] }] } }));
     await run({ hook_event_name: "Stop" }, ["--from-plugin"], { PATH: "" });
     expect(posts).toEqual([]);

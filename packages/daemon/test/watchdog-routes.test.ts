@@ -11,17 +11,20 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { watchdogRoutes } from "../src/routes/watchdog.js";
+import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
 
 function buildApp(opts: {
   eventBus: EventBus;
   jobsRepo: WatchdogJobsRepository;
   historyLog: WatchdogHistoryLog;
+  policyEngine?: WatchdogPolicyEngine;
 }): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("eventBus" as never, opts.eventBus);
     c.set("watchdogJobsRepo" as never, opts.jobsRepo);
     c.set("watchdogHistoryLog" as never, opts.historyLog);
+    c.set("watchdogPolicyEngine" as never, opts.policyEngine);
     await next();
   });
   app.route("/api/watchdog", watchdogRoutes());
@@ -95,6 +98,28 @@ describe("watchdog routes (PL-004 Phase C)", () => {
     expect(res.status).toBe(201);
     const job = (await res.json()) as { registeredBySession: string };
     expect(job.registeredBySession).toBe("seat@rig");
+  });
+
+  it("POST /register over a stopped parked-owner-consumer job replaces it and names it (#3437)", async () => {
+    const body = {
+      policy: "parked-owner-consumer",
+      specYaml: "policy: parked-owner-consumer\ntarget:\n  session: parked-owner-consumer@demo\ncontext:\n  rig: demo\n",
+      targetSession: "parked-owner-consumer@demo",
+      intervalSeconds: 120,
+      registeredBySession: "ops@kernel",
+    };
+    const stopped = jobsRepo.ensureAutoRegistration({ ...body, registeredBySession: "daemon@kernel" });
+    jobsRepo.stop(stopped.jobId);
+    const res = await app.request("/api/watchdog/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(201);
+    const job = (await res.json()) as { jobId: string; state: string; replaced: unknown };
+    expect(job).toMatchObject({ state: "active", replaced: [{ jobId: stopped.jobId, state: "stopped" }] });
+    expect(jobsRepo.getById(stopped.jobId)?.state).toBe("terminal");
+    expect(jobsRepo.ensureAutoRegistration({ ...body, registeredBySession: "daemon@kernel" }).jobId).toBe(job.jobId);
   });
 
   it("POST /register without a wire header keeps the body's registeredBySession", async () => {
@@ -247,6 +272,28 @@ describe("watchdog routes (PL-004 Phase C)", () => {
     expect(body.job.jobId).toBe(job.jobId);
     expect(body.recentHistory).toHaveLength(1);
     expect(body.recentHistory[0]?.outcome).toBe("sent");
+  });
+
+  it("GET /:job_id/status carries the job's quiet count: zero before any quiet decision, then the engine's count", async () => {
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo, historyLog: log, eventBus: bus, deliver: async () => ({ status: "ok" as const }),
+      now: () => new Date("2026-11-21T00:00:00.000Z"),
+      additionalPolicies: [{ name: "parked-owner-consumer", evaluate: async () => ({ action: "skip" as const, reason: "not_due" }) }],
+    } as never);
+    const withEngine = buildApp({ eventBus: bus, jobsRepo, historyLog: log, policyEngine: engine });
+    const job = jobsRepo.register({ ...validRegisterBody, policy: "parked-owner-consumer", specYaml: "policy: parked-owner-consumer\ntarget: alice@rig\n" });
+    const read = async () => (await (await withEngine.request(`/api/watchdog/${job.jobId}/status`)).json()) as {
+      quiet?: unknown; recentHistory: unknown[];
+    };
+    expect((await read()).quiet).toEqual({ since: "2026-11-21T00:00:00.000Z", total: 0, byReason: {}, lastReason: null });
+    await engine.evaluate(job);
+    await engine.evaluate(jobsRepo.getByIdOrThrow(job.jobId));
+    const body = await read();
+    expect(body.quiet).toEqual({ since: "2026-11-21T00:00:00.000Z", total: 2, byReason: { not_due: 2 }, lastReason: "not_due" });
+    expect(body.recentHistory).toEqual([]);
+    // Without an engine nothing is counted, and the response says so by leaving the field out.
+    const without = (await (await app.request(`/api/watchdog/${job.jobId}/status`)).json()) as Record<string, unknown>;
+    expect(without).not.toHaveProperty("quiet");
   });
 
   it("POST /:job_id/stop stops job + emits watchdog.job_stopped", async () => {

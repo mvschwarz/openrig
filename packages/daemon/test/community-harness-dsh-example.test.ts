@@ -120,8 +120,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 type Permissions = "uncorrelated" | "turn_withdrawn" | "runner_turn_unbound" | "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost" | "late" | "two" | "twoslow";
 interface Hook { auth: string | undefined; body: Record<string, unknown>; at: number }
 
-const cleanups: Array<() => void> = [];
-afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
+const cleanups: Array<() => void | Promise<unknown>> = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 async function fakeOpenRig(permissions: Permissions, turnReportingUnavailable = false) {
   const hooks: Hook[] = [];
@@ -213,7 +213,13 @@ function start(openrig: { url: string }, env: Record<string, string> = {}, binVa
   child.stdout!.on("data", (data: Buffer) => { out += data.toString(); });
   child.stderr!.on("data", (data: Buffer) => { out += data.toString(); });
   const exited = new Promise<number | null>((done) => child.on("exit", (code) => done(code)));
-  cleanups.push(() => { child.kill("SIGKILL"); rmSync(dir, { recursive: true, force: true }); });
+  cleanups.push(async () => {
+    child.kill("SIGKILL");
+    // The runner's own child (the fake harness) can still be writing in the folder: wait for the runner, then retry
+    // the removal, as macOS can report ENOTEMPTY while the last write lands.
+    await Promise.race([exited, new Promise((done) => setTimeout(done, 2_000))]);
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
   return {
     dir, exited,
     out: () => out,
@@ -841,8 +847,11 @@ describe("the actual dsh runner native channel", () => {
       expect(frame).not.toHaveProperty("memberIds");
       expect(JSON.stringify(frame).length).toBeGreaterThan(6 * 1024 * 1024 + 64 * 1024);
     }
-    await waitFor(() => channel.posts.some(post => post.type === "ack" && post.requestId === "GROUP"), "native input acknowledged", 5000);
-    await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "GROUP"), "native input completion", 5000);
+    // These waits measure acceptance, not runner speed: 1 s per escaped MiB, at least waitFor's 10 s. On slow CI runners
+    // the 9-source case (about 18 MiB escaped) has run up to about 6 s, so a flat 5 s ack wait failed unrelated PRs.
+    const budget = Math.max(10_000, Math.ceil(JSON.stringify(frame).length / (1024 * 1024)) * 1_000);
+    await waitFor(() => channel.posts.some(post => post.type === "ack" && post.requestId === "GROUP"), "native input acknowledged", budget);
+    await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "GROUP"), "native input completion", budget);
     channel.reconnect(); await new Promise(resolve => setTimeout(resolve, 350));
     const prompts = requests(runner.log(), "session/prompt");
     expect(prompts).toHaveLength(1);
@@ -851,7 +860,7 @@ describe("the actual dsh runner native channel", () => {
     await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "WAKE:AFTER-GROUP"), "unhinted successor");
     expect(requests(runner.log(), "session/prompt")).toHaveLength(2);
     expect(runner.log()[0]).toMatchObject({ start: { token: false } });
-  });
+  }, 60_000); // the 9-source frame's two 19 s waits, plus the hello and successor waits
 
   it.each([
     { status: 409, code: "runner_receipt_erased", later: true },

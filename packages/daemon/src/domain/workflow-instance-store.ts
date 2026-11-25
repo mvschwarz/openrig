@@ -41,6 +41,7 @@ interface InstanceRow {
   /** OPR.0.4.6.FAC1 (migration 052) — optional at the row layer like
    *  version: legacy fixtures map to null (unbound). */
   bound_rig?: string | null;
+  bound_pod?: string | null;
   lifecycle_operation_key?: string | null;
   compiled_input_digest?: string | null;
   lifecycle_binding_json?: string | null;
@@ -51,6 +52,7 @@ interface InstanceRow {
   spec_json?: string | null;
   /** Migration 154 (#2730): the root objective it was started with; null for older instances. */
   root_objective?: string | null;
+  run_title?: string | null;
 }
 
 /** Defensive column probe (the detectQueueColumn house pattern) —
@@ -83,6 +85,7 @@ export interface CreateWorkflowInstanceInput {
    * null/absent = unbound (today's behavior byte-identical).
    */
   boundRig?: string | null;
+  boundPod?: string | null;
   /** Already-normalized scope (workflow-scope.ts); null/absent = unscoped. */
   scope?: WorkflowScope | null;
   /** #2607: the spec this instance runs and its file, kept with it so another file's expansion of the same id and
@@ -90,6 +93,7 @@ export interface CreateWorkflowInstanceInput {
   startedSpec?: StartedWorkflowSpec;
   /** #2730: what the run is for, as `--root-objective` gave it. */
   rootObjective?: string;
+  runTitle?: string;
   lifecycle?: {
     operationKey: string;
     compiledInputDigest: string;
@@ -114,8 +118,10 @@ export class WorkflowInstanceStore {
   private readonly hasBoundRigColumn: boolean;
   private readonly hasLifecycleColumns: boolean;
   private readonly hasScopeColumn: boolean;
+  private readonly hasBoundPodColumn: boolean;
   private readonly hasSpecColumn: boolean;
   private readonly hasRootObjectiveColumn: boolean;
+  private readonly hasRunTitleColumn: boolean;
   private readonly hasFrontierBindingsTable: boolean;
   private readonly hasFailureOccurrencesTable: boolean;
 
@@ -126,10 +132,12 @@ export class WorkflowInstanceStore {
     this.hasVersionColumn = detectInstanceColumn(db, "version");
     this.hasResumeColumns = detectInstanceColumn(db, "resume_count");
     this.hasBoundRigColumn = detectInstanceColumn(db, "bound_rig");
+    this.hasBoundPodColumn = detectInstanceColumn(db, "bound_pod");
     this.hasLifecycleColumns = detectInstanceColumn(db, "lifecycle_operation_key");
     this.hasScopeColumn = detectInstanceColumn(db, "scope_json");
     this.hasSpecColumn = detectInstanceColumn(db, "spec_json");
     this.hasRootObjectiveColumn = detectInstanceColumn(db, "root_objective");
+    this.hasRunTitleColumn = detectInstanceColumn(db, "run_title");
     this.hasFrontierBindingsTable = tableExists(db, "workflow_frontier_bindings");
     this.hasFailureOccurrencesTable = tableExists(db, "workflow_failure_occurrences");
   }
@@ -143,6 +151,9 @@ export class WorkflowInstanceStore {
     // legacy INSERT; production always migrates).
     const boundRigCol = this.hasBoundRigColumn ? ", bound_rig" : "";
     const boundRigVal = this.hasBoundRigColumn ? ", ?" : "";
+    if (input.boundPod && !this.hasBoundPodColumn) throw new WorkflowInstanceError("bound_pod_unavailable", "workflow pod binding requires migration 177");
+    const podCol = this.hasBoundPodColumn ? ", bound_pod" : "";
+    const podVal = this.hasBoundPodColumn ? ", ?" : "";
     const lifecycleCols = this.hasLifecycleColumns
       ? ", lifecycle_operation_key, compiled_input_digest, lifecycle_binding_json"
       : "";
@@ -156,6 +167,9 @@ export class WorkflowInstanceStore {
     const specVal = this.hasSpecColumn ? ", ?, ?" : "";
     const objectiveCol = this.hasRootObjectiveColumn ? ", root_objective" : "";
     const objectiveVal = this.hasRootObjectiveColumn ? ", ?" : "";
+    if (input.runTitle && !this.hasRunTitleColumn) throw new WorkflowInstanceError("run_title_unavailable", "workflow run title requires migration 194");
+    const titleCol = this.hasRunTitleColumn ? ", run_title" : "";
+    const titleVal = this.hasRunTitleColumn ? ", ?" : "";
     const params: unknown[] = [
       instanceId,
       input.workflowName,
@@ -166,6 +180,7 @@ export class WorkflowInstanceStore {
       input.currentStepId ?? null,
     ];
     if (this.hasBoundRigColumn) params.push(input.boundRig ?? null);
+    if (this.hasBoundPodColumn) params.push(input.boundPod ?? null);
     if (this.hasLifecycleColumns) {
       params.push(
         input.lifecycle?.operationKey ?? null,
@@ -176,12 +191,13 @@ export class WorkflowInstanceStore {
     if (this.hasScopeColumn) params.push(input.scope ? JSON.stringify(input.scope) : null);
     if (this.hasSpecColumn) params.push(input.startedSpec?.sourcePath ?? null, input.startedSpec ? JSON.stringify(input.startedSpec.spec) : null);
     if (this.hasRootObjectiveColumn) params.push(input.rootObjective ?? null);
+    if (this.hasRunTitleColumn) params.push(input.runTitle ?? null);
     this.db
       .prepare(
         `INSERT INTO workflow_instances (
            instance_id, workflow_name, workflow_version, created_by_session,
-           created_at, status, current_frontier_json, current_step_id, hop_count${boundRigCol}${lifecycleCols}${scopeCol}${specCol}${objectiveCol}
-         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0${boundRigVal}${lifecycleVals}${scopeVal}${specVal}${objectiveVal})`,
+           created_at, status, current_frontier_json, current_step_id, hop_count${boundRigCol}${podCol}${lifecycleCols}${scopeCol}${specCol}${objectiveCol}${titleCol}
+         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0${boundRigVal}${podVal}${lifecycleVals}${scopeVal}${specVal}${objectiveVal}${titleVal})`,
       )
       .run(...(params as never[]));
     return this.getByIdOrThrow(instanceId);
@@ -497,6 +513,7 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
     resumeCount: row.resume_count ?? 0,
     hopsBaseline: row.hops_baseline ?? 0,
     boundRig: row.bound_rig ?? null,
+    boundPod: row.bound_pod ?? null,
     lifecycleOperationKey: row.lifecycle_operation_key ?? null,
     compiledInputDigest: row.compiled_input_digest ?? null,
     lifecycleBinding: row.lifecycle_binding_json
@@ -507,6 +524,7 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
       ? { sourcePath: row.spec_source_path, spec: JSON.parse(row.spec_json) as WorkflowSpec }
       : null,
     rootObjective: row.root_objective ?? null,
+    runTitle: row.run_title ?? null,
   };
 }
 

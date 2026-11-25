@@ -1,5 +1,5 @@
 import nodePath from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 
 const ENV_REF = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
@@ -57,6 +57,27 @@ export function getOpenRigInstallRoot(): string {
 export function isPathInsideRoot(candidatePath: string, rootPath: string): boolean {
   const relative = nodePath.relative(nodePath.resolve(rootPath), nodePath.resolve(candidatePath));
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(relative));
+}
+
+/** `path` is the seat folder `folder` or lies inside it, and that folder isn't on this machine (a home that moved).
+ *  OpenRig's writers into a seat's folder don't create such a folder to write inside it: the seat's terminal started in
+ *  tmux's fallback folder instead, so nothing reads a file there, and a recreated folder would make the next restore start
+ *  the seat in that stub. One write is left as it is: the Claude state file of an account home the person placed inside
+ *  the seat's folder, which the launch itself reads. */
+export function insideMissingFolder(path: string, folder: string | null | undefined, exists: (path: string) => boolean): boolean {
+  return !!folder && !exists(folder) && isPathInsideRoot(path, folder);
+}
+
+/** Whether a folder is there, for insideMissingFolder. Only a confirmed absence reads as missing: nothing at the path, a
+ *  file on the way to it (ENOENT, ENOTDIR), or something there that isn't a folder. Any other failure to look, such as a
+ *  permission or I/O error, reads as present, so the write is still attempted and reports its own outcome. */
+export function folderPresent(path: string, stat: (path: string) => { isDirectory(): boolean } = statSync): boolean {
+  try {
+    return stat(path).isDirectory();
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code !== "ENOENT" && code !== "ENOTDIR";
+  }
 }
 
 export function isFilesystemRoot(cwd: string): boolean {

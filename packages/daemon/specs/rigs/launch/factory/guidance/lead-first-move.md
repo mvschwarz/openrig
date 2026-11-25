@@ -26,9 +26,10 @@ When the goal is done, close the operator's row with the result.
 **If a seat you're waiting on stops at a prompt,** for example a reviewer asking to run a command, look at your goal row
 first (`rig queue show <id> --full`). With a `returnRoute`, the person answers from their own conversation, not from your
 pane, so don't ask them here or give them an attach command:
-- **A permission prompt, with a route on this machine** (`<member>@<rig>`, nothing after the rig): OpenRig brings that
-  seat's prompt there as a task while the work is with that seat or your row waits on it. Hand the work over, or block
-  your row on the seat or its row (`rig queue block <id> --on <seat or row id>`). When more than one return route is
+- **A permission prompt, with a route on this machine** (`<member>@<rig>`, nothing after the rig): OpenRig sends that
+  seat's prompt there as a task while the work is with that seat or your row waits on it (if that task can't be made,
+  the prompt takes its usual route). Hand the work over, or block your row on the seat or its row
+  (`rig queue block <id> --on <seat or row id>`). When more than one return route is
   involved (another goal waiting on that seat names a different address), nothing chooses between them, so a task may
   not come: look for one at each address first
   (`rig queue list --destination <address> --state pending,in-progress,blocked`), and if there's none, ask as in the

@@ -155,6 +155,28 @@ describe("workflow-follow (WF3 FR-1)", () => {
     expect(planRows).toHaveLength(1);
   });
 
+  it("a resume row in the trail renders as ↻ with the owner and whether it was named or resolved", async () => {
+    const resumeRow = (ownerSource: string) => ({
+      stepId: "build", closureReason: "resumed", actorSession: "orch@r", nextQitemId: "Q3", priorQitemId: "Q2",
+      closureEvidence: { resume: { ownerSession: "builder-slot-2@r", ownerSource } },
+    });
+    for (const ownerSource of ["named", "resolved"]) {
+      const snapshot = {
+        status: 200,
+        data: { ...ACTIVE_SNAPSHOT.data, trail: [...ACTIVE_SNAPSHOT.data.trail, resumeRow(ownerSource)] },
+      };
+      const h = makeHarness({
+        traceResponses: [snapshot],
+        streams: [sseStream([{ type: "workflow.completed", instanceId: "WF1" }])],
+      });
+      await followInstance(h.client, "WF1", { json: false, io: h.io });
+      const row = h.outLines.find((l) => l.includes("build") && l.includes("resumed"));
+      expect(row).toContain("↻ build");
+      expect(row).not.toContain("✔");
+      expect(row).toContain(`owner builder-slot-2@r (${ownerSource})`);
+    }
+  });
+
   it("filters events from other instances", async () => {
     const h = makeHarness({
       traceResponses: [ACTIVE_SNAPSHOT],
@@ -242,6 +264,70 @@ describe("workflow-follow (WF3 FR-1)", () => {
     expect(err).toContain("poll fallback");
     // The poll rendered the new trail row exactly once, never silently frozen.
     expect(h.outLines.filter((l) => l.includes("build") && l.includes("done"))).toHaveLength(1);
+  });
+
+  it("poll fallback skips rows by trailId: a resume row sharing the failed packet's id still prints, and a later closure of the redrive packet still prints", async () => {
+    const failed = { trailId: "T1", stepId: "build", closureReason: "failed", actorSession: "b@r", nextQitemId: null, priorQitemId: "Q2" };
+    const resumed = {
+      trailId: "T2", stepId: "build", closureReason: "resumed", actorSession: "orch@r", nextQitemId: "Q3", priorQitemId: "Q2",
+      closureEvidence: { resume: { ownerSession: "builder-slot-2@r", ownerSource: "named" } },
+    };
+    // Instance redrive with no recorded failed packet: the resume row carries the redrive's own id.
+    const resumedNoClosed = { trailId: "T3", stepId: "build", closureReason: "resumed", actorSession: "orch@r", nextQitemId: "Q4", priorQitemId: "Q4" };
+    const done = { trailId: "T4", stepId: "build", closureReason: "done", actorSession: "b2@r", nextQitemId: null, priorQitemId: "Q4" };
+    const base = ACTIVE_SNAPSHOT.data;
+    const h = makeHarness({
+      traceResponses: [
+        { status: 200, data: { ...base, trail: [...base.trail, failed] } },
+        { status: 200, data: { ...base, trail: [...base.trail, failed, resumed, resumedNoClosed] } },
+        { status: 200, data: { ...base, instance: { ...base.instance, status: "completed" }, trail: [...base.trail, failed, resumed, resumedNoClosed, done] } },
+      ],
+      streams: [droppedStream()],
+    });
+    const code = await followInstance(h.client, "WF1", { json: false, io: h.io, maxReconnects: 0, pollIntervalMs: 1 });
+    expect(code).toBe(0);
+    expect(h.outLines.filter((l) => l.includes("✖ build"))).toHaveLength(1);
+    expect(h.outLines.filter((l) => l.includes("↻ build"))).toHaveLength(2);
+    expect(h.outLines.some((l) => l.includes("owner builder-slot-2@r (named)"))).toBe(true);
+    expect(h.outLines.filter((l) => l.includes("build") && l.includes("done"))).toHaveLength(1);
+  });
+
+  it("a resume row in the snapshot does not hide the stream's later closure of the redrive packet", async () => {
+    const resumedNoClosed = { trailId: "T3", stepId: "build", closureReason: "resumed", actorSession: "orch@r", nextQitemId: "Q4", priorQitemId: "Q4" };
+    const h = makeHarness({
+      traceResponses: [{ status: 200, data: { ...ACTIVE_SNAPSHOT.data, trail: [...ACTIVE_SNAPSHOT.data.trail, resumedNoClosed] } }],
+      streams: [
+        sseStream([
+          { type: "workflow.resumed", instanceId: "WF1", stepId: "build", resumedBy: "orch@r", ownerSession: "builder-slot-2@r", ownerSource: "named" },
+          { type: "workflow.step_closed", instanceId: "WF1", stepId: "build", closureReason: "done", actorSession: "b2@r", priorQitemId: "Q4" },
+          { type: "workflow.completed", instanceId: "WF1" },
+        ]),
+      ],
+    });
+    expect(await followInstance(h.client, "WF1", { json: false, io: h.io })).toBe(0);
+    expect(h.outLines.filter((l) => l.includes("build") && l.includes("done"))).toHaveLength(1);
+    // The snapshot already printed the resume row; the stream's workflow.resumed must not print it again.
+    expect(h.outLines.filter((l) => l.includes("↻ build"))).toHaveLength(1);
+  });
+
+  it("a resume streamed before a drop prints exactly once when the poll then finds its trail row", async () => {
+    const resumed = {
+      trailId: "T2", stepId: "build", closureReason: "resumed", actorSession: "orch@r", nextQitemId: "Q3", priorQitemId: "Q2",
+      closureEvidence: { resume: { ownerSession: "builder-slot-2@r", ownerSource: "named" } },
+    };
+    const base = ACTIVE_SNAPSHOT.data;
+    const h = makeHarness({
+      traceResponses: [
+        { status: 200, data: base },
+        { status: 200, data: { ...base, instance: { ...base.instance, status: "completed" }, trail: [...base.trail, resumed] } },
+      ],
+      streams: [
+        sseStream([{ type: "workflow.resumed", instanceId: "WF1", stepId: "build", resumedBy: "orch@r", resumeCount: 1, ownerSession: "builder-slot-2@r", ownerSource: "named" }]),
+      ],
+    });
+    expect(await followInstance(h.client, "WF1", { json: false, io: h.io, maxReconnects: 0, pollIntervalMs: 1 })).toBe(0);
+    expect(h.outLines.filter((l) => l.includes("↻ build"))).toHaveLength(1);
+    expect(h.outLines.some((l) => l.includes("owner builder-slot-2@r (named)"))).toBe(true);
   });
 
   it("--json emits machine lines (snapshot + events), no human table", async () => {

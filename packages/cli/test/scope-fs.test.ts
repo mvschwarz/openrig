@@ -18,6 +18,7 @@ import {
   readFrontmatter,
   resolveMissionsRoot,
   splitFrontmatter,
+  editFrontmatter,
   updateFrontmatter,
 } from "../src/lib/scope/scope-fs.js";
 import { ScopeCliError } from "../src/lib/scope/types.js";
@@ -30,6 +31,46 @@ function writeFile(p: string, content: string): void {
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, content, "utf8");
 }
+
+it("uses only the rig association as the default, preserving explicit targets", () => {
+  const dir = fs.realpathSync(mktemp());
+  const alpha = path.join(dir, "alpha"), beta = path.join(dir, "beta"), shared = path.join(dir, "shared");
+  for (const root of [alpha, beta, shared]) fs.mkdirSync(path.join(root, "missions"), { recursive: true });
+  const catalog = path.join(dir, "workspace.yaml");
+  writeFile(catalog, "projects:\n  - id: alpha\n    root: alpha\n    rigs: [rig-a]\n  - id: beta\n    root: beta\n    rigs: [rig-b]\n");
+  vi.stubEnv("OPENRIG_WORKSPACE_CATALOG_PATH", catalog);
+  vi.stubEnv("OPENRIG_WORKSPACE_SLICES_ROOT", path.join(shared, "missions"));
+  vi.stubEnv("OPENRIG_SESSION_NAME", "seat@rig-a");
+  vi.stubEnv("OPENRIG_WORK_ROOT", "");
+  const report = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    expect(resolveMissionsRoot()).toBe(path.join(alpha, "missions"));
+    expect(report).toHaveBeenCalledWith(expect.stringContaining("alpha"));
+    expect(resolveMissionsRoot({ override: beta })).toBe(path.join(beta, "missions"));
+    vi.stubEnv("OPENRIG_WORK_ROOT", beta);
+    expect(resolveMissionsRoot()).toBe(path.join(beta, "missions"));
+    vi.stubEnv("OPENRIG_WORK_ROOT", "");
+    expect(resolveMissionsRoot({ targetPath: path.join(shared, "missions", "m", "slices", "01-x") })).toBe(path.join(shared, "missions"));
+    vi.stubEnv("OPENRIG_SESSION_NAME", "seat@no-match");
+    expect(resolveMissionsRoot()).toBe(path.join(shared, "missions"));
+    writeFile(catalog, "projects:\n  - id: alpha\n    root: alpha\n    rigs: [rig-a]\n  - id: beta\n    root: beta\n    rigs: [rig-a]\n");
+    vi.stubEnv("OPENRIG_SESSION_NAME", "seat@rig-a");
+    expect(resolveMissionsRoot()).toBe(path.join(shared, "missions"));
+    expect(report).toHaveBeenCalledWith(expect.stringMatching(/several projects.*--workspace/));
+    writeFile(catalog, "projects:\n  - id: alpha\n    root: alpha\n    rigs: [rig-a]\n");
+    writeFile(path.join(alpha, "project.yaml"), "id: different\n");
+    expect(resolveMissionsRoot()).toBe(path.join(shared, "missions"));
+    expect(report).toHaveBeenCalledWith(expect.stringMatching(/conflicts with project identity[\s\S]*--workspace/));
+    writeFile(catalog, "projects: [broken\n");
+    vi.stubEnv("OPENRIG_SESSION_NAME", "seat@no-match");
+    expect(resolveMissionsRoot()).toBe(path.join(shared, "missions"));
+    expect(report).toHaveBeenCalledWith(expect.stringMatching(/warning:.*--workspace/));
+  } finally {
+    report.mockRestore();
+    vi.unstubAllEnvs();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 describe("frontmatter parser", () => {
   it("returns {} when there is no frontmatter delimiter", () => {
@@ -150,6 +191,32 @@ describe("frontmatter parser", () => {
       expect(fs.readFileSync(file, "utf8")).toContain(unowned);
       expect(fs.readFileSync(file, "utf8").endsWith("---\nbody\n")).toBe(true);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.each(["\u2028", "\u2029", "\r"])("keeps dashes after %j inside frontmatter", (separator) => {
+    const original = `---\ntitle: before${separator}---\nstatus: active\n---\nbody\n`;
+    const updated = editFrontmatter(original, { status: "closed" }, "README.md");
+    expect(updated).toBe(original.replace("status: active", "status: closed"));
+    expect(splitFrontmatter(updated)).toMatchObject({ frontmatter: { status: "closed" }, body: "body\n" });
+  });
+
+  describe.each(["\n", "\r\n"])("empty frontmatter (%j)", (newline) => {
+    it.each(["", "# Mission", "# Mission\n---\nKeep this section."])("updates fields while preserving body %j", (bodyText) => {
+      const dir = mktemp();
+      const file = path.join(dir, "README.md");
+      const body = bodyText ? newline + bodyText.replace(/\n/g, newline) + newline : "";
+      const opening = `--- \t${newline}`;
+      const closing = "---\t";
+      try {
+        writeFile(file, opening + closing + body);
+        updateFrontmatter(file, { stage: "wip" });
+        const expected = `${opening}stage: wip${newline}${closing}${body}`;
+        expect(fs.readFileSync(file, "utf8")).toBe(expected);
+        expect(readFrontmatter(file)).toEqual({ stage: "wip" });
+        updateFrontmatter(file, { stage: "wip" });
+        expect(fs.readFileSync(file, "utf8")).toBe(expected);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    });
   });
 
   it("generates minimal frontmatter when absent", () => {

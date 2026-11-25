@@ -61,6 +61,7 @@ interface NodeInventoryRead {
   podNamespace?: string | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  configuredAccount?: string | null;
   model?: string | null;
   /** Configured launch effort and its provenance, served by the node inventory. */
   effort?: string | null;
@@ -231,8 +232,10 @@ function fmtTokens(input: number | null, output: number | null): string | null {
 function toAgentRow(node: NodeInventoryRead): AgentRow {
   const ctx = node.contextUsage;
   const known = ctx?.availability === "known";
+  const sessionMissing = node.identityVerdict?.reason === "session_missing"
+    || node.identityVerdict?.reason === "session_missing_tmux_unavailable";
   const identityDownranked = node.identityVerdict?.verdict === "mismatch"
-    || (node.identityVerdict?.verdict === "pane_missing" && node.identityVerdict?.reason !== "session_missing");
+    || (node.identityVerdict?.verdict === "pane_missing" && !sessionMissing);
   return {
     needsAttention: node.needsAttention ?? null,
     arbitratedNeedsInput: node.arbitratedNeedsInput ?? null,
@@ -240,6 +243,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     nodeId: node.nodeId,
     name: node.logicalId,
     runtime: node.runtime ?? "unknown",
+    configuredAccount: node.configuredAccount ?? null,
     model: node.model ?? null,
     effort: node.effort ?? null,
     effortSource: node.effortSource ?? null,
@@ -271,7 +275,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     },
     // Mirror the maintained web projection: lifecycle truth drives actions,
     // while session/terminal activity drives the visible status label.
-    status: node.identityVerdict?.reason === "session_missing" && node.sessionStatus === "detached" && node.lifecycleState !== "attention_required"
+    status: sessionMissing && node.sessionStatus === "detached" && node.lifecycleState !== "attention_required"
       ? "detached"
       : node.startupStatus === "failed"
         ? "failed"

@@ -264,6 +264,22 @@ it("finds every family's closed boundaries with one lineage-tag read per evaluat
   expect(tagReads).toHaveLength(1);
 });
 
+it("reads the lineage tags through migration 183's partial index, not a scan of every queue row", async () => {
+  const t = await setup();
+  addFamilies(t, [22]);
+  const original = t.queue.db.prepare;
+  const tagReads: string[] = [];
+  t.queue.db.prepare = function(sql: string) {
+    if (sql.includes("health-lineage")) tagReads.push(sql);
+    return original.call(this, sql);
+  } as typeof t.queue.db.prepare;
+  try { expect(t.projection.records().map((r) => r.ceremony!.lineageId).sort()).toEqual(["family-000", "root"]); } finally { t.queue.db.prepare = original; }
+  expect(tagReads).toHaveLength(1);
+  const plan = (t.queue.db.prepare(`EXPLAIN QUERY PLAN ${tagReads[0]}`).all() as Array<{ detail: string }>).map((row) => row.detail);
+  expect(plan.join(" | ")).toContain("idx_queue_items_health_lineage");
+  expect(plan).not.toContain("SCAN queue_items");
+});
+
 it("past the family limit evaluates exactly the busiest families and reports the rest as omitted, not healthy", async () => {
   const t = await setup();
   // root has 30 transitions; 198 families have 22; three tie at 21. The limit keeps root,
@@ -277,8 +293,113 @@ it("past the family limit evaluates exactly the busiest families and reports the
   // Omitted families are never read, so nothing about them can be concluded.
   expect(new Set(read.mock.calls.map((c) => c[0]))).toEqual(new Set(lineages));
   expect(t.projection.list({ limit: 200 })).toMatchObject({ total: 200, coverage: [{ source: "passive-ceremony", unit: "handoff families",
-    limit: 200, total: 202, evaluated: 200, omitted: 2, partial: true, order: "most queue transitions in the observation window, then lineage ID" }] });
+    limit: 200, total: 202, evaluated: 200, omitted: 2, partial: true, screened: 0, deepCandidates: 202, order: expect.stringContaining("most transitions first, then lineage ID") }] });
   expect(t.projection.records().map((r) => r.ceremony!.lineageId).sort()).toEqual(lineages);
+});
+
+it("covers every family past 200 when the rest are below the ceremony threshold, reading none of them", async () => {
+  const t = await setup();
+  // root has 30 transitions; 250 families have 19 (threshold 20), so none can qualify.
+  addFamilies(t, Array<number>(250).fill(19));
+  const read = vi.spyOn(t.queue.transitionLog, "listForQitemWindow");
+  expect(t.projection.records().map((r) => r.ceremony!.lineageId)).toEqual(["root"]);
+  expect(new Set(read.mock.calls.map((c) => c[0]))).toEqual(new Set(["root"]));
+  const [coverage] = t.projection.list({ limit: 200 }).coverage;
+  expect(coverage).toMatchObject({ unit: "handoff families", total: 251, evaluated: 251, omitted: 0, partial: false, limit: 200, screened: 250, deepCandidates: 1 });
+  expect(coverage!.order).toContain("below the ceremony threshold");
+});
+
+it("spends the 200 deep budget only on families that can qualify and omits only their overflow", async () => {
+  const t = await setup();
+  // root plus 201 families at the threshold exceed the budget by 2; 50 below it are screened, not omitted.
+  addFamilies(t, [...Array<number>(201).fill(20), ...Array<number>(50).fill(5)]);
+  const lineages = t.projection.records().map((r) => r.ceremony!.lineageId);
+  expect(lineages).toHaveLength(200);
+  expect(t.projection.list({ limit: 200 }).coverage).toEqual([expect.objectContaining({ total: 252, evaluated: 250, omitted: 2, partial: true, limit: 200, screened: 50, deepCandidates: 202 })]);
+});
+
+it("screens on live and archived transitions together: a family split across the archive still qualifies", async () => {
+  const t = await setup();
+  addFamilies(t, [24, ...Array<number>(240).fill(19)]);
+  // Retention archived the 5 oldest of family-000: 19 live plus 5 archived is 24 in the window.
+  t.db.prepare(`INSERT INTO queue_transitions_archive (transition_id, qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target, archived_at)
+    SELECT transition_id, qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target, '2026-09-05T12:00:10.000Z' FROM queue_transitions
+    WHERE qitem_id = 'family-000' AND transition_id IN (SELECT transition_id FROM queue_transitions WHERE qitem_id = 'family-000' ORDER BY ts LIMIT 5)`).run();
+  t.db.prepare("DELETE FROM queue_transitions WHERE transition_id IN (SELECT transition_id FROM queue_transitions_archive WHERE qitem_id = 'family-000')").run();
+  expect((t.db.prepare("SELECT COUNT(*) n FROM queue_transitions WHERE qitem_id = 'family-000'").get() as { n: number }).n).toBe(19);
+  expect(t.projection.records().map((r) => r.ceremony!.lineageId).sort()).toEqual(["family-000", "root"]);
+  expect(t.projection.list({ limit: 200 }).coverage).toEqual([expect.objectContaining({ total: 242, evaluated: 242, omitted: 0, partial: false, screened: 240, deepCandidates: 2 })]);
+});
+
+function archiveRows(t: Awaited<ReturnType<typeof setup>>, qitemId: string, where = "1 = 1", ...args: string[]) {
+  t.db.prepare(`INSERT INTO queue_transitions_archive (transition_id, qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target, archived_at)
+    SELECT transition_id, qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target, '2026-09-05T12:00:10.000Z' FROM queue_transitions WHERE qitem_id = ? AND ${where}`).run(qitemId, ...args);
+  t.db.prepare(`DELETE FROM queue_transitions WHERE qitem_id = ? AND transition_id IN (SELECT transition_id FROM queue_transitions_archive WHERE qitem_id = ?) AND ${where}`).run(qitemId, qitemId, ...args);
+}
+const lineageIds = (t: Awaited<ReturnType<typeof setup>>) => t.projection.records().map((r) => r.ceremony!.lineageId).sort();
+const coverageOf = (t: Awaited<ReturnType<typeof setup>>) => t.projection.list({ limit: 200 }).coverage;
+
+it("discovers a family whose in-window transitions are all archived", async () => {
+  const t = await setup();
+  addFamilies(t, [24, 3]);
+  archiveRows(t, "family-000");
+  expect((t.db.prepare("SELECT COUNT(*) n FROM queue_transitions WHERE qitem_id = 'family-000'").get() as { n: number }).n).toBe(0);
+  expect(lineageIds(t)).toEqual(["family-000", "root"]);
+  expect(coverageOf(t)).toEqual([expect.objectContaining({ total: 3, evaluated: 3, omitted: 0, partial: false, screened: 1, deepCandidates: 2 })]);
+});
+
+it("counts a handed-off member that exists only in the archive toward its family", async () => {
+  const t = await setup();
+  addFamilies(t, [10]);
+  t.db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,tags,body,handed_off_from) VALUES('family-000-child','2026-09-05T11:59:00.000Z','2026-09-05T11:59:00.000Z','a@rig','b@rig','pending',?,'child','family-000')")
+    .run(JSON.stringify(["mission:mission", "slice:slice-1"]));
+  const add = t.db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES('family-000-child',?,'pending','a@rig')");
+  for (let k = 0; k < 15; k++) add.run(new Date(Date.parse("2026-09-05T11:59:00.000Z") + k * 1000).toISOString());
+  archiveRows(t, "family-000-child");
+  expect(lineageIds(t)).toEqual(["family-000", "root"]);
+});
+
+it("counts a qitem stored in both tables once, with both counts summed, and ignores archived rows outside the window", async () => {
+  const t = await setup();
+  addFamilies(t, [24, 10]);
+  archiveRows(t, "family-000", "ts < ?", "2026-09-05T11:59:12.000Z");
+  const live = (t.db.prepare("SELECT COUNT(*) n FROM queue_transitions WHERE qitem_id = 'family-000'").get() as { n: number }).n;
+  expect(live).toBe(12);
+  // family-001 has 10 live rows and 15 archived rows far outside the window: it must not qualify.
+  const old = t.db.prepare("INSERT INTO queue_transitions_archive (transition_id, qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target, archived_at) VALUES(?,?,?,'pending',NULL,'a@rig',NULL,NULL,'2026-09-05T12:00:10.000Z')");
+  for (let k = 0; k < 15; k++) old.run(9_000_000 + k, "family-001", new Date(Date.parse("2026-01-01T00:00:00.000Z") + k * 1000).toISOString());
+  expect(lineageIds(t)).toEqual(["family-000", "root"]);
+  expect(coverageOf(t)).toEqual([expect.objectContaining({ total: 3, evaluated: 3, omitted: 0, partial: false, screened: 1, deepCandidates: 2 })]);
+});
+
+it("reads a schema without an archive table from the live table alone", async () => {
+  const t = await setup();
+  addFamilies(t, [24, 3]);
+  t.db.exec("DROP TABLE queue_transitions_archive");
+  // A queue built on a schema with no archive, as an old database presents it.
+  const queue = new QueueRepository(t.db, new EventBus(t.db));
+  const source = new PassiveCeremonySource(t.workspace, queue, t.policy, () => "2026-09-05T12:00:30.000Z");
+  const read = new HealthProjectionService(source, () => t.policy.read(), delegatedPostureFixture);
+  expect(read.records().map((r) => r.ceremony!.lineageId).sort()).toEqual(["family-000", "root"]);
+  expect(read.list({ limit: 200 }).coverage).toEqual([expect.objectContaining({ total: 3, evaluated: 3, omitted: 0, partial: false })]);
+});
+
+it("throws on the combined live and archived discovery past 2000 qitems, and accepts exactly 2000", async () => {
+  const t = await setup();
+  addFamilies(t, Array<number>(1999).fill(1));
+  for (let i = 1000; i < 1999; i++) archiveRows(t, `family-${String(i).padStart(3, "0")}`);
+  expect(() => t.source.read()).not.toThrow();
+  addFamilies(t, [1], "extra");
+  archiveRows(t, "extra-000");
+  expect(() => t.source.read()).toThrow("health_passive_queue_window_truncated");
+});
+
+it("a family that does not qualify on counted transitions stays evaluated, and a real stale family stays a finding", async () => {
+  const t = await setup();
+  addFamilies(t, [...Array<number>(240).fill(2), 25]);
+  const lineages = t.projection.records().map((r) => r.ceremony!.lineageId).sort();
+  expect(lineages).toEqual(["family-240", "root"]);
+  expect(t.projection.list({ limit: 200 }).coverage).toEqual([expect.objectContaining({ total: 242, evaluated: 242, omitted: 0, partial: false })]);
 });
 
 it("at the family limit evaluates every family as before and reports complete coverage", async () => {
@@ -290,7 +411,7 @@ it("at the family limit evaluates every family as before and reports complete co
 
 it("the scheduled evaluation records partial coverage instead of failing past the family limit", async () => {
   const t = await setup();
-  addFamilies(t, Array<number>(201).fill(1));
+  addFamilies(t, Array<number>(201).fill(20));
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   t.service.start();
   await vi.advanceTimersByTimeAsync(60000);
@@ -302,9 +423,9 @@ it("the scheduled evaluation records partial coverage instead of failing past th
 
 it("the scheduled evaluation keeps its own coverage when another health read runs during delivery", async () => {
   const t = await setup();
-  addFamilies(t, Array<number>(201).fill(1));
+  addFamilies(t, Array<number>(201).fill(20));
   // A health-list request served while the evaluation awaits delivery replaces the source's latest coverage.
-  t.send.mockImplementation(async () => { addFamilies(t, [1, 1, 1], "late"); t.projection.list(); return { ok: true, verified: true }; });
+  t.send.mockImplementation(async () => { addFamilies(t, [20, 20, 20], "late"); t.projection.list(); return { ok: true, verified: true }; });
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   t.service.start();
   await vi.advanceTimersByTimeAsync(60000);
