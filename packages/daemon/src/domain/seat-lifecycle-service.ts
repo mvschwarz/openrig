@@ -1267,8 +1267,11 @@ export class SeatLifecycleService {
     return { contract: "seat-stop.v1", expected: { nodeId: resolved.nodeId, sessionId: this.latestSession(resolved.nodeId)?.id ?? null } };
   }
 
-  /** Stop one managed seat; an explicit expected tuple activates strict identity checks. */
-  async stopSeat(input: { seatRef: string; reason: string; operator?: string | null; expected?: unknown }): Promise<StopSeatResult> {
+  /** Stop one managed seat; an explicit expected tuple activates strict identity checks. `recheck` (in-process only, with
+   *  `expected`) is the caller's own refusal, run at the final step before each effect, after the liveness probe. */
+  async stopSeat(input: {
+    seatRef: string; reason: string; operator?: string | null; expected?: unknown; recheck?: () => SeatRefusal | null;
+  }): Promise<StopSeatResult> {
     const required = this.requireReason(input.reason);
     if (required) return required;
     if ("expected" in input) {
@@ -1318,7 +1321,7 @@ export class SeatLifecycleService {
 
   /** Hold the existing lifecycle lease from selection validation through terminal and DB effects. */
   private async stopSeatChecked(
-    input: { seatRef: string; reason: string; operator?: string | null }, expected: StopPrecondition,
+    input: { seatRef: string; reason: string; operator?: string | null; recheck?: () => SeatRefusal | null }, expected: StopPrecondition,
   ): Promise<StopSeatResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (!guard) return { ok: false, code: "guard_unavailable", message: "Checked stop requires the delivery guard." };
@@ -1353,7 +1356,9 @@ export class SeatLifecycleService {
           }
           return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to stop.`, guidance: "A dead seat with stale records is returned to launchable with: rig seat clean" };
         }
-        return this.stopManagedTmuxSeat(resolved, session, input.reason, input.operator, true, { selection, guard });
+        const recheck = input.recheck;
+        return this.stopManagedTmuxSeat(resolved, session, input.reason, input.operator, true,
+          { selection, guard, ...(recheck ? { prove: async () => recheck() } : {}) });
       });
     } catch (error) {
       const code = (error as { code?: string }).code;
