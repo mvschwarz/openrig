@@ -18,11 +18,11 @@
 // exit 0 unless the daemon is unreachable.
 
 import { Command } from "commander";
-import { DaemonClient, terminalAuthHeaders } from "../client.js";
+import { DaemonClient, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { openAllTerminalWindows, openTerminalWindow, type WindowDeps } from "../terminal-window.js";
+import { BULK_TERMINAL_OPEN_TIMEOUT_MS, BULK_TERMINAL_OPEN_UNCONFIRMED, openAllTerminalWindows, openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
 import { attentionLines, checkSeatAttention } from "../seat-attention.js";
 import { existsSync } from "node:fs";
@@ -334,12 +334,29 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
         await withClient(deps, async (client) => {
           if (opts.window || !named) {
             const res = await openAllTerminalWindows(client, named, deps.windowDeps, session);
+            if (!opts.json && res.code === "terminal_window_failed" && res.error?.endsWith(BULK_TERMINAL_OPEN_UNCONFIRMED)) {
+              // The unconfirmed-result warning goes to stderr, like --provider herdr, so redirecting stdout does not hide it.
+              console.error([res.error, ...(res.notes ?? []).map(n => `  note: ${n}`)].join("\n"));
+              process.exitCode = 1;
+              return;
+            }
             printOpenAll(opts.json ?? false, res, 200);
             return;
           }
-          const res = await client.post<OpenAllResult>("/api/terminal/open-all",
-            { provider: named, reuseLive: true, ...(session !== undefined ? { session } : {}) },
-            { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS, headers: terminalAuthHeaders() });
+          // Only herdr opens views; the daemon answers any other provider name at once with unknown_provider.
+          const herdr = named === "herdr";
+          let res: { status: number; data: OpenAllResult };
+          try {
+            res = await client.post<OpenAllResult>("/api/terminal/open-all",
+              { provider: named, reuseLive: true, ...(session !== undefined ? { session } : {}) },
+              { timeoutMs: herdr ? BULK_TERMINAL_OPEN_TIMEOUT_MS : TERMINAL_OPEN_TIMEOUT_MS, headers: terminalAuthHeaders() });
+          } catch (err) {
+            if (!herdr || !(err instanceof DaemonTimeoutError)) throw err;
+            // No automatic retry: the daemon may still be opening views.
+            if (!opts.json) { console.error(BULK_TERMINAL_OPEN_UNCONFIRMED); process.exitCode = 1; return; }
+            res = { status: 200, data: { ok: false, provider: named, ...(session !== undefined ? { session } : {}), rigs: [],
+              code: "bulk_open_outcome_unknown", error: BULK_TERMINAL_OPEN_UNCONFIRMED } };
+          }
           printOpenAll(opts.json ?? false, res.data, res.status);
         });
         return;
