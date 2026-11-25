@@ -442,6 +442,10 @@ function projectForExternal<T>(row: T, view: ExternalView): T {
   }
   const pickup = fields.pickup as { state?: unknown } | null | undefined;
   if (pickup && typeof pickup === "object") fields.pickup = { state: pickup.state };
+  if (fields.lateAnswer && typeof fields.lateAnswer === "object") {
+    const { deliveryId, state, deliveryOutcome } = structured(fields.lateAnswer);
+    fields.lateAnswer = { deliveryId, state, deliveryOutcome };
+  }
   return fields as T;
 }
 
@@ -1812,13 +1816,19 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         tier: z.string().optional().describe("Tier (as rig queue create --tier)"),
         qitemId: z.string().optional().describe("A request id you choose, unique to this request (for example qitem- and random letters), so an uncertain create can be checked by it; pass the same one to retry, never a new one (default: a new id)"),
         revises: z.string().optional().describe("The qitemId of the work this asks to revise"),
+        lateAnswer: z.boolean().optional().describe("Explicitly ask for the selected lead's recorded answer as a gateway update if a positive wait times out or disconnects. Requires an authenticated local grant bound to the registered recipient and an explicit destination."),
         alert: z.boolean().optional().describe("For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now (as rig queue create --alert). It stands out in Slack. Without it the ask still posts to Slack unless the person's Slack subscription is urgent-only, in which case it waits on Steering and the TUI"),
         host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
     },
-    async ({ destination, body, summary, tags, priority, tier, qitemId, revises, alert, host }) => {
+    async ({ destination, body, summary, tags, priority, tier, qitemId, revises, lateAnswer, alert, host }) => {
       const target = hostTarget(host);
       if ("content" in target) return target;
+      const recipient = lateAnswer ? personOf(access) : undefined;
+      if (lateAnswer && (!recipient || !options.principalSource || target.remote || !destination?.includes("@"))) {
+        const message = "A late answer needs your authenticated local connection's registered person and an explicit lead address (member@rig).";
+        return errorResult(message, "late_answer_refused", message);
+      }
       // The server's one receiver counts for this connection only when its grant reaches it. Then a refused destination
       // says how to reach it, so the assistant retries instead of telling the person the connection lacks access. It
       // never names the receiver.
@@ -1923,6 +1933,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           tags: access?.external ? tags?.filter((tag) => !OPENRIG_PROVENANCE_TAG.test(tag)) : tags,
           ...(alert ? { humanAlert: true } : {}),
           ...(lineage ? { chainOfRecord: lineage.chainOfRecord } : {}),
+          ...(recipient ? { lateAnswerRecipient: `${recipient}@external` } : {}),
         });
         // An external caller reusing the id of an item it can't see learns only that the id is taken, never that item's
         // parties.
@@ -1967,17 +1978,39 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (item.status >= 400) return mapResult(item);
         if (scope && !scope.item(item.data)) return outOfScope(`Item ${qitemId}`);
         let waited: unknown;
+        const httpSignal = options.requestSignal;
+        const signal = httpSignal ? AbortSignal.any([ctx.mcpReq.signal, httpSignal]) : ctx.mcpReq.signal;
+        const question = structured(item.data);
+        const person = personOf(access);
+        let recordStop: (() => Promise<DaemonResponse<unknown> | undefined>) | undefined;
+        if (waitSeconds && httpSignal && !target.remote && options.principalSource && !access?.readOnly && person
+          && structured(question.lateAnswer).recipient === `${person}@external` && question.sourceSession === seatOf()) {
+          let stopped: Promise<DaemonResponse<unknown> | undefined> | undefined;
+          recordStop = () => stopped ??= hostPost(target, `/api/queue/${id}/wait-stopped`, { recipient: `${person}@external` }).catch(() => undefined);
+          // The stop write must survive the canceled read and the loss of a response containing a ready answer.
+          const stopWait = recordStop;
+          const onStop = () => { void stopWait().then(result => {
+            if (!result || result.status >= 400) console.error("MCP queue wait ended without a confirmed follow-up record");
+          }); };
+          // The SDK also aborts its own request signal during normal handler teardown.
+          if (httpSignal.aborted) onStop();
+          else httpSignal.addEventListener("abort", onStop, { once: true });
+        }
         if (waitSeconds && ["pending", "in-progress"].includes(String(structured(item.data).state))) {
           // Scope is checked before parking and again after: the item may have changed parties while waiting.
           // Only this call gets a longer deadline; the client's ordinary five-second default stays intact.
           item = await hostGet(target, `/api/queue/${id}?waitSeconds=${waitSeconds}`, {
             timeoutMs: waitSeconds * 1000 + WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS,
-            signal: options.requestSignal ? AbortSignal.any([ctx.mcpReq.signal, options.requestSignal]) : ctx.mcpReq.signal,
+            signal,
           });
           if (item.status >= 400) return mapResult(item);
           if (scope && !scope.item(item.data)) return outOfScope(`Item ${qitemId}`);
           const { waited: marker, ...row } = structured(item.data);
-          waited = marker;
+          if (marker && recordStop) {
+            const stop = await recordStop();
+            if (stop && stop.status < 400) row.lateAnswer = structured(stop.data).lateAnswer;
+            waited = { ...structured(marker), followUp: stop && stop.status < 400 ? "recorded" : "unconfirmed" };
+          } else waited = marker;
           item = { ...item, data: row };
         }
         const transitions = await hostGet(target, `/api/queue/${id}/transitions`);

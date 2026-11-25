@@ -49,6 +49,25 @@ same grant scope as an immediate read; another member's private task is still re
 above the requested bound (the usual SDK default is 60 seconds); only this daemon call gets a longer timeout, not
 ordinary requests. `GET /api/queue/:qitemId?waitSeconds=<bound>` offers the same wait to daemon API callers.
 
+### Send an answer after the caller stops waiting
+
+An authenticated MCP connection bound to a registered person can create a question with `lateAnswer: true` and the
+chosen lead's explicit `destination` on the same daemon. The recipient comes from the connection's person binding.
+Only opt in when the person asks for a follow-up. The lead still closes the original question as `done` with
+`no-follow-on` and puts the answer in `resolution`.
+
+Use a positive `waitSeconds` on `rig_queue_show`. If that wait times out, is canceled, or disconnects before the
+response finishes, OpenRig records the follow-up. A response that finishes normally does not trigger it. When the
+selected lead has recorded the answer, OpenRig queues one `human-intent update` for the recipient. The lead can
+still send it manually with `rig queue create --human-intent update`, using `--id` with `lateAnswer.deliveryId`
+and `--destination` with `lateAnswer.recipient` from `rig queue show <question-id> --full --json`. Both paths use
+the same update ID. The first recorded update keeps its text.
+
+If OpenRig cannot queue the update, the follow-up stays in the lead's queue. `lateAnswer.state` shows the follow-up's
+progress. `lateAnswer.deliveryOutcome` shows the gateway's recorded outcome when available. Queued means the update
+exists, accepted means the bridge accepted it, and posted means the provider posted it. None confirms the person
+read or heard the answer. The gateway owns delivery retries.
+
 ## Asking a person while keeping the work
 
 When a row needs a person's approval before the member can finish it, the member keeps the row and asks:
