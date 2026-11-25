@@ -585,8 +585,9 @@ exit 1
       expect(typedFire.context).toContain("Builder learned");
       expect(typedFire.context).toContain("Deliver refocus");
       expect(typedFire.context).not.toContain("CONFIG-FIELD-NOT-FOR-OUTPUT");
+      // With the packet off, the one lookup also asks for held and pending work; the daemon adds it only with nothing in progress.
       expect(typedFire.calls).toEqual([
-        "queue whoami --json",
+        "queue whoami --json --held-work",
         "config --json",
       ]);
 
@@ -594,7 +595,24 @@ exit 1
       expect(fallback.status).toBe(0);
       expect(fallback.context).toContain(`FALLBACK — no current typed baton (${NO_BATON})`);
       expect(fallback.context).toContain("Builder learned");
-      expect(fallback.calls).toEqual(["queue whoami --json", "config --json"]);
+      expect(fallback.calls).toEqual(["queue whoami --json --held-work", "config --json"]);
+    });
+
+    it("delivers a parked seat's mission as labelled context from the same 2 rig processes, with the packet off", () => {
+      const f = fixture();
+      const mission = join(f.workspace, "missions/release");
+      const parked = { qitemId: "q-parked", summary: "waiting on review", blockedOn: "q-review", continuation: "ship it",
+        missions: ["release"], slice: "feature", missionPath: mission, slicePath: f.workStart, unresolved: null };
+      const fire = hook(f, { RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify({ currentWork: null, currentWorkBasis: NO_BATON,
+        heldAndPendingWork: { missionsRoot: join(f.workspace, "missions"), held: [parked], next: [], heldTruncated: false, nextTruncated: false } }) });
+      expect(fire.status, fire.stderr).toBe(0);
+      expect(fire.context).toContain("CONTEXT FROM HELD AND PENDING WORK — nothing is in progress, and every held and pending row (1 held, 0 pending) resolves to this slice.");
+      expect(fire.context).toContain("Ship the release");
+      expect(fire.context).toContain("Deliver refocus");
+      expect(fire.context).toContain("- q-parked — waiting on review — blocked on q-review — continuation: ship it [mission: release / slice: feature]");
+      expect(fire.context).not.toContain("FALLBACK");
+      expect(fire.context).not.toContain("TRACE GAP");
+      expect(fire.calls).toEqual(["queue whoami --json --held-work", "config --json"]);
     });
 
     it("local notes avoid a delayed CLI inside the unchanged default trace cap", () => {
@@ -682,7 +700,7 @@ exit 1
       expect(elapsed).toBeLessThan(5_000);
       expect(result.context).toContain("REFOCUS (on demand)");
       expect(result.context).toContain("TRACE GAP");
-      expect(result.calls[0]).toBe("queue whoami --json");
+      expect(result.calls[0]).toBe("queue whoami --json --held-work");
       expect(result.calls.filter((call) => call === "config --json").length).toBeLessThanOrEqual(1);
     }, 20_000);
 

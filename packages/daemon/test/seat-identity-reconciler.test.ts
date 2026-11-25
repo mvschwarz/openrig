@@ -18,7 +18,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 
 import { afterEach, describe, it, expect, vi } from "vitest";
 import type Database from "better-sqlite3";
-import { createFullTestDb } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import {
   SeatIdentityReconciler,
   classifyPaneRuntimeMatch,
@@ -388,6 +388,164 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     expect(v?.verdict).toBe("pane_missing");
     expect(v?.reason).toBe("pane_pid_gone");
     expect(v?.evidenceSource).toBe("pane_process");
+    expect(rec.backgroundWorkUnknown()).toEqual([{ nodeId: "n1", rigId: "rig-1", sessionName: "s1@rig", state: "unknown", reason: "pane_pid_gone", observedAt: NOW().toISOString(), processes: [] }]);
+    db.close();
+  });
+
+  it("carries observed descendants across pane loss only for the same occupant", async () => {
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime: "codex" });
+    const registry = new SessionRegistry(db);
+    registry.mintOccupantTenure("n1", "initial", "first");
+    db.prepare("UPDATE occupant_tenures SET boot_at = ? WHERE node_id = ?").run("2026-07-02 11:00:00", "n1");
+    let lost = false, censusFails = false, hidden = false;
+    const root = { pid: 10, ppid: 1, pgid: 10, tpgid: 11, executableName: "bash", command: "bash", startedAt: "2026-07-02T11:00:00Z" };
+    const codex = { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: "codex", command: "codex", argv: ["codex"], startedAt: "2026-07-02T11:00:30Z" };
+    const child = { pid: 12, ppid: 11, command: "worker", startedAt: "2026-07-02T11:01:00Z" };
+    const tmux = {
+      ...makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 10 }, paneCommand: { "%1": "bash" } }),
+      readAllPaneProcesses: async () => lost ? new Map() : new Map([["%1", { pid: 10, command: "bash" }]]),
+      listPanes: async () => [{ id: lost ? "%2" : "%1" }] as never,
+      getPanePid: async () => lost ? null : 10,
+    };
+    const census = vi.fn(async () => {
+        if (censusFails) throw new Error("process table unavailable");
+        return { rows: lost ? [{ ...child, ppid: 1 }] : [root, codex, child], permissionHiddenPids: hidden ? [99] : [] };
+      });
+    const rec = new SeatIdentityReconciler({ db, tmux, now: NOW, readProcessTableCensus: census,
+      listProcesses: async () => lost ? [{ ...child, ppid: 1 }] : [root, codex, child] });
+    await rec.reconcileAll();
+    expect(census).toHaveBeenCalledTimes(2);
+    lost = true;
+    await rec.reconcileAll();
+    expect(rec.backgroundWorkUnknown()).toMatchObject([{
+      sessionName: "s1@rig", state: "unknown", reason: "pane_pid_gone",
+      processes: [{ pid: 12, command: "worker", startedAt: child.startedAt }],
+    }]);
+    const { app } = createTestApp(db, { appDeps: { seatIdentityReconciler: rec } });
+    const health = await (await app.request("/healthz")).json() as { backgroundWork: unknown };
+    expect(health.backgroundWork).toMatchObject([{ sessionName: "s1@rig", processes: [{ pid: 12, command: "worker", startedAt: child.startedAt }] }]);
+    hidden = true;
+    await rec.reconcileAll();
+    expect(rec.backgroundWorkUnknown()).toMatchObject([{ processes: [] }]);
+    hidden = false;
+    await rec.reconcileAll();
+    expect(rec.backgroundWorkUnknown()).toMatchObject([{ processes: [{ pid: 12 }] }]);
+    censusFails = true;
+    await rec.reconcileAll();
+    expect(rec.backgroundWorkUnknown()).toMatchObject([{ processes: [] }]);
+    censusFails = false;
+    await rec.reconcileAll();
+    expect(rec.backgroundWorkUnknown()).toMatchObject([{ processes: [{ pid: 12 }] }]);
+    registry.mintOccupantTenure("n1", "handover", "second");
+    // Health serves the last completed sweep until the new tenure is reconciled.
+    expect((await (await app.request("/healthz")).json() as { backgroundWork: unknown }).backgroundWork)
+      .toMatchObject([{ processes: [{ pid: 12 }] }]);
+    await rec.reconcileAll();
+    expect(rec.backgroundWorkUnknown()).toEqual([]);
+    db.prepare("UPDATE sessions SET status = 'stopped' WHERE node_id = 'n1'").run();
+    await rec.reconcileAll();
+    expect(rec.backgroundWorkUnknown()).toEqual([]);
+    db.close();
+    const afterClose = await (await app.request("/healthz")).json() as { backgroundWork: unknown };
+    expect(afterClose.backgroundWork).toEqual([]);
+  });
+
+  it.each(["complete", "hidden", "failed"] as const)("reuses one empty-session census with retained background evidence (%s)", async mode => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime: "codex" });
+      const registry = new SessionRegistry(db);
+      registry.mintOccupantTenure("n1", "initial", "first");
+      db.prepare("UPDATE occupant_tenures SET boot_at = ? WHERE node_id = ?").run("2026-07-02 11:00:00", "n1");
+      let lost = false;
+      const root = { pid: 10, ppid: 1, pgid: 10, tpgid: 11, executableName: "bash", command: "bash", startedAt: "2026-07-02T11:00:00Z" };
+      const codex = { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: "codex", command: "codex", argv: ["codex"], startedAt: "2026-07-02T11:00:30Z" };
+      const child = { pid: 12, ppid: 11, command: "worker", startedAt: "2026-07-02T11:01:00Z" };
+      const tmux = { ...makeTmux({ panePid: { "%1": 10 }, paneCommand: { "%1": "bash" } }),
+        listSessions: async () => lost ? [] : [{ name: "s1@rig" }] as never,
+        probeSession: async () => ({ state: lost ? "absent" as const : "present" as const }),
+        readAllPaneProcesses: async () => lost ? new Map() : new Map([["%1", { pid: 10, command: "bash" }]]) };
+      const census = vi.fn(async () => {
+        if (lost && mode === "failed") throw new Error("census unavailable");
+        return { rows: lost ? [{ ...child, ppid: 1 }] : [root, codex, child], permissionHiddenPids: lost && mode === "hidden" ? [99] : [] };
+      });
+      const rec = new SeatIdentityReconciler({ db, tmux, now: NOW, readProcessTableCensus: census,
+        listProcesses: async () => lost ? [{ ...child, ppid: 1 }] : [root, codex, child] });
+      await rec.reconcileAll();
+      expect(census).toHaveBeenCalledTimes(2); // Healthy native proof keeps two fresh observations.
+      lost = true;
+      for (let sweep = 0; sweep < 2; sweep++) {
+        census.mockClear();
+        await rec.reconcileAll();
+        expect(census).toHaveBeenCalledTimes(1);
+        expect(rec.backgroundWorkUnknown()).toMatchObject([{ state: "unknown", reason: "session_missing",
+          processes: mode === "complete" ? [{ pid: 12, command: "worker" }] : [] }]);
+      }
+    } finally { db.close(); }
+  });
+
+  it("uses the first census time to reject a newborn descendant after a slow sweep", async () => {
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime: "codex" });
+    new SessionRegistry(db).mintOccupantTenure("n1", "initial", "first");
+    db.prepare("UPDATE occupant_tenures SET boot_at = ? WHERE node_id = ?").run("2026-07-02 11:00:00", "n1");
+    let lost = false, now = Date.parse("2026-07-02T12:00:00Z");
+    const root = { pid: 10, ppid: 1, pgid: 10, tpgid: 11, executableName: "bash", command: "bash", startedAt: "2026-07-02T11:00:00Z" };
+    const codex = { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: "codex", command: "codex", argv: ["codex"], startedAt: "2026-07-02T11:00:30Z" };
+    const child = { pid: 12, ppid: 11, command: "worker", startedAt: "2026-07-02T12:00:00Z" };
+    const tmux = { ...makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 10 }, paneCommand: { "%1": "bash" } }),
+      readAllPaneProcesses: async () => lost ? new Map() : new Map([["%1", { pid: 10, command: "bash" }]]),
+      listPanes: async () => [{ id: lost ? "%2" : "%1" }] as never, getPanePid: async () => lost ? null : 10 };
+    const rec = new SeatIdentityReconciler({ db, tmux, now: () => new Date(now),
+      readProcessTableCensus: async () => { now += 3000; return { rows: lost ? [{ ...child, ppid: 1 }] : [root, codex, child], permissionHiddenPids: [] }; },
+      listProcesses: async () => [root, codex, child] });
+    await rec.reconcileAll();
+    lost = true;
+    await rec.reconcileAll();
+    expect(rec.backgroundWorkUnknown()).toMatchObject([{ state: "unknown", processes: [] }]);
+    db.close();
+  });
+
+  it("does not retain descendants when the pane root changes identity between snapshots", async () => {
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime: "codex" });
+    new SessionRegistry(db).mintOccupantTenure("n1", "initial", "first");
+    db.prepare("UPDATE occupant_tenures SET boot_at = ? WHERE node_id = ?").run("2026-07-02 11:00:00", "n1");
+    let lost = false, reads = 0;
+    const child = { pid: 12, ppid: 11, command: "worker", startedAt: "2026-07-02T11:01:00Z" };
+    const codex = { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: "codex", command: "codex", argv: ["codex"], startedAt: "2026-07-02T11:00:30Z" };
+    const root = { pid: 10, ppid: 1, pgid: 10, tpgid: 11, executableName: "bash", command: "bash", startedAt: "2026-07-02T11:00:00Z" };
+    const tmux = {
+      ...makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 10 }, paneCommand: { "%1": "bash" } }),
+      readAllPaneProcesses: async () => lost ? new Map() : new Map([["%1", { pid: 10, command: "bash" }]]),
+      listPanes: async () => [{ id: lost ? "%2" : "%1" }] as never,
+      getPanePid: async () => lost ? null : 10,
+    };
+    const rec = new SeatIdentityReconciler({ db, tmux, now: NOW, readProcessTableCensus: async () => ({
+      rows: lost ? [{ ...child, ppid: 1 }] : [{ ...root,
+        startedAt: ++reads === 1 ? "2026-07-02T11:00:00Z" : "2026-07-02T11:00:01Z" }, codex, child],
+      permissionHiddenPids: [],
+    }), listProcesses: async () => [root, codex, child] });
+    await rec.reconcileAll();
+    lost = true;
+    await rec.reconcileAll();
+    expect(rec.backgroundWorkUnknown()).toMatchObject([{ state: "unknown", processes: [] }]);
+    db.close();
+  });
+
+  it("does not start a process census just for a live direct seat", async () => {
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime: "claude-code" });
+    new SessionRegistry(db).mintOccupantTenure("n1", "initial", "first");
+    const census = vi.fn(async () => ({ rows: [], permissionHiddenPids: [] }));
+    const tmux = {
+      ...makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 10 }, paneCommand: { "%1": "claude" } }),
+      readAllPaneProcesses: async () => new Map([["%1", { pid: 10, command: "claude" }]]),
+    };
+    const rec = new SeatIdentityReconciler({ db, tmux, now: NOW, readProcessTableCensus: census });
+    await rec.reconcileAll();
+    expect(census).not.toHaveBeenCalled();
     db.close();
   });
 
@@ -404,6 +562,7 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     expect(v?.verdict).toBe("pane_missing");
     expect(v?.reason).toBe("session_missing");
     expect(v?.evidenceSource).toBe("tmux_session");
+    expect(rec.backgroundWorkUnknown()).toEqual([{ nodeId: "n1", rigId: "rig-1", sessionName: "s1@rig", state: "unknown", reason: "session_missing", observedAt: NOW().toISOString(), processes: [] }]);
     db.close();
   });
 
@@ -615,6 +774,100 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
 
     expect(new SeatIdentityStore(db).getForNode("n1")?.verdict).toBe("pane_missing");
     db.close();
+  });
+});
+
+// A seat whose tmux session is gone keeps its binding's pane id. tmux numbers panes per server, so after a server
+// restart (or seats relaunched onto a new server) that id can belong to a different seat's live pane. Reported on 0.7.18:
+// rig ps read the missing seat running/verified while its activity read session_missing, and its reminder failed for hours.
+describe("a missing seat's recycled pane id", () => {
+  const databases: Database.Database[] = [];
+  afterEach(() => { for (const db of databases.splice(0)) db.close(); });
+
+  /** `lead@team` is gone; `other@team` now owns the live pane `%22` that lead's binding still names. */
+  function recycled(opts: { runtime?: string; token?: string | null; command?: string;
+    sessions?: string[]; members?: Record<string, string[] | "missing"> } = {}) {
+    const db = createFullTestDb(); databases.push(db);
+    seedSeat(db, { nodeId: "lead", sessionName: "lead@team", pane: "%22", runtime: opts.runtime ?? "claude-code" });
+    seedSeat(db, { nodeId: "other", sessionName: "other@team", pane: "%22", runtime: "claude-code" });
+    db.prepare("UPDATE sessions SET created_at = '2026-01-01 00:00:00'").run();
+    if (opts.token !== null) db.prepare("UPDATE sessions SET resume_token = ? WHERE node_id = 'lead'").run(opts.token ?? "lead-token");
+    const members = { "other@team": ["%22"], ...(opts.members ?? {}) } as Record<string, string[] | "missing">;
+    const tmux = {
+      ...makeTmux({ sessions: opts.sessions ?? ["other@team"], panePid: { "%22": 5000 }, paneCommand: { "%22": opts.command ?? "claude" } }),
+      readAllPaneProcesses: vi.fn(async () => new Map([["%22", { pid: 5000, command: opts.command ?? "claude" }]])),
+      // Real tmux answers list-panes for a session it doesn't have with "can't find session", which the adapter throws.
+      listPanes: vi.fn(async (session: string) => {
+        const ids = members[session] ?? "missing";
+        if (ids === "missing") throw new Error(`can't find session: ${session}`);
+        return ids.map((id, index) => ({ id, index, cwd: "/tmp", width: 80, height: 24, active: index === 0 })) as never;
+      }),
+    };
+    const rec = new SeatIdentityReconciler({ db, tmux, now: NOW, listProcesses: async () => [] });
+    const store = new SeatIdentityStore(db);
+    return { db, tmux, rec, store };
+  }
+
+  it.each([
+    ["Claude with a resume token, labelled claude", { command: "claude" }],
+    ["Claude without a token, labelled node", { token: null, command: "node" }],
+    ["Claude labelled with its version", { command: "2.1.89" }],
+    ["Codex", { runtime: "codex", command: "claude" }],
+  ] as const)("reads the missing seat session_missing, not its neighbour's pane: %s", async (_label, opts) => {
+    const f = recycled(opts);
+    await f.rec.reconcileAll();
+    expect(f.store.getForNode("lead")).toMatchObject({
+      verdict: "pane_missing", reason: "session_missing", evidenceSource: "tmux_session",
+      evidence: { registeredPane: "%22", observedPid: null, observedCommand: null },
+    });
+    expect(nodeSessionConfirmedMissing(f.db, "lead")).toBe(true);
+    // The neighbour's process is never recorded as the missing seat's last process.
+    expect(f.store.getProcessEvidence("lead")).toBeNull();
+    // The pane's real owner is unaffected.
+    expect(f.store.getForNode("other")).toMatchObject({ verdict: "verified", evidence: { observedPid: 5000 } });
+  });
+
+  it("keeps a missing session that a failed send recorded through the next sweep", async () => {
+    // SessionTransport records this when a send (a reminder, say) finds no such session; the sweep used to overwrite it.
+    const f = recycled();
+    f.store.upsert({ nodeId: "lead", verdict: "pane_missing", evidenceSource: "tmux_session", reason: "session_missing",
+      evidence: { registeredPane: "%22", observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: "lead@team", observedAt: "2026-07-02T11:59:00.000Z" });
+    for (let sweep = 0; sweep < 2; sweep++) {
+      await f.rec.reconcileAll();
+      expect(f.store.getForNode("lead")).toMatchObject({ verdict: "pane_missing", reason: "session_missing" });
+      expect(nodeSessionConfirmedMissing(f.db, "lead")).toBe(true);
+    }
+  });
+
+  it("a session that appears after the listing without the bound pane reads unavailable, not missing or verified", async () => {
+    const f = recycled({ members: { "lead@team": ["%40"] } });
+    await f.rec.reconcileAll();
+    expect(f.tmux.listPanes).toHaveBeenCalledWith("lead@team", true);
+    expect(f.store.getForNode("lead")).toMatchObject({ verdict: "tmux_unavailable", reason: "tmux_unavailable" });
+    expect(nodeSessionConfirmedMissing(f.db, "lead")).toBe(false);
+  });
+
+  // Boundaries: these read the same before and after the fix.
+  it("a listing that missed a session whose pane is still its own keeps verifying it", async () => {
+    const f = recycled({ members: { "lead@team": ["%22"] } });
+    await f.rec.reconcileAll();
+    expect(f.store.getForNode("lead")).toMatchObject({ verdict: "verified", reason: null });
+  });
+
+  it("the same recycled pane under an unreadable listing stays unknown, not missing", async () => {
+    const f = recycled();
+    vi.mocked(f.tmux.listSessions).mockRejectedValue(new Error("error connecting to /tmp/tmux-501/default (Permission denied)"));
+    await f.rec.reconcileAll();
+    expect(f.store.getForNode("lead")).toMatchObject({ verdict: "tmux_unavailable", reason: "tmux_unavailable" });
+    expect(nodeSessionConfirmedMissing(f.db, "lead")).toBe(false);
+  });
+
+  it("a listed session's own live pane still verifies, with no extra session read", async () => {
+    const f = recycled({ sessions: ["other@team", "lead@team"], members: { "lead@team": ["%22"] } });
+    await f.rec.reconcileAll();
+    expect(f.store.getForNode("lead")).toMatchObject({ verdict: "verified", evidence: { observedPid: 5000 } });
+    expect(f.tmux.listPanes).not.toHaveBeenCalled();
   });
 });
 

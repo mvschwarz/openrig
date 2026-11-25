@@ -91,7 +91,7 @@ describe("the documented Cursor launcher and preset", () => {
     expect(resumed.args).toEqual(["--resume", "chat-777", "--trust"]);
   });
 
-  it("declares conversation reporting, resume and first input without an assisted check, and doesn't yet take a model", () => {
-    expect(loadCommunityHarnessPreset("cursor", EXAMPLE)).toMatchObject({ ok: true, preset: { command: "openrig-cursor-launch", launchResult: true, resume: true, firstInput: true, startupAssisted: false, passesModel: false } });
+  it("declares conversation reporting, resume and first input without an assisted check, and takes the seat's model", () => {
+    expect(loadCommunityHarnessPreset("cursor", EXAMPLE)).toMatchObject({ ok: true, preset: { command: "openrig-cursor-launch", launchResult: true, resume: true, firstInput: true, startupAssisted: false, passesModel: true } });
   });
 });

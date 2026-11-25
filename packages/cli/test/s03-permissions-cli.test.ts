@@ -57,6 +57,18 @@ describe("S03 policy permissions compatibility", () => {
     expect(both.exit).toBe(1); expect(both.errors.join(" ")).toContain("Choose exactly one of");
     expect(posts).toHaveLength(2);
   });
+  it("prints the daemon's warning when a Codex envelope leaves the seat unable to reach rig", async () => {
+    const advisory = "impl: network is off in this seat's codex_permissions. The launch continues with the permissions as written.";
+    const deps = { lifecycleDeps: {
+      readFile: (p: string) => p === STATE_FILE ? JSON.stringify({ pid: 123, port: 7433, db: "inert.sqlite", startedAt: "2026-09-27T00:00:00Z" }) : null,
+      exists: (p: string) => p === STATE_FILE, isProcessAlive: () => true, fetch: async () => ({ ok: true }),
+    }, clientFactory: () => ({ post: async () => ({ status: 200, data: { ok: true, changed: true, advisories: [advisory], effect: "Next launch." } }) }) };
+    const file = join(mkdtempSync(join(tmpdir(), "codex-envelope-")), "envelope.json");
+    writeFileSync(file, JSON.stringify({ sandbox: "workspace-write", approval: "never" }));
+    const set = await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--codex-permissions", file, "--reason", "narrow"]);
+    expect(set.logs).toEqual(["Codex permission envelope recorded and audited.", `Warning: ${advisory}`, "Next launch."]);
+    expect(set.exit).toBeUndefined();
+  });
   it("posts an auto mode block from its JSON file, null to clear it, and prints the daemon's warnings", async () => {
     const posts: unknown[][] = [];
     const advisories = ['claude_auto_mode.soft_deny: without "$defaults", this list replaces Claude\'s built-in soft_deny entries'];

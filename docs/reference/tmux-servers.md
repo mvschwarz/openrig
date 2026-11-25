@@ -185,6 +185,22 @@ session names on the selected server.
 Dedicated selection requires POSIX tmux. On native Windows (not a supported platform;
 the [README](../../README.md) covers WSL2), psmux retains its existing server behavior; requesting `isolated` produces a status note and a pending choice.
 
+## Background work after a pane disappears
+
+When an unexpectedly missing seat pane or session is positively observed, `rig ps`
+reports that background work is unknown. It also lists descendants sampled under
+that occupant before the loss when their PID and start time still match a later
+process observation. The executable name is shown without arguments or paths.
+This is a partial observation, not a complete process inventory: unsampled or
+unreadable work, a daemon restart, or changed process identity can leave the
+list empty while work is still running. Explicitly stopped seats are not labeled
+as unexpected loss. OpenRig does not terminate these processes.
+Live-pane samples are taken only on identity-check passes that already inspect
+native processes; if no such pass occurs before the loss, attribution remains
+unknown. On a host with only token-bound Claude seats, these native-process
+samples are not taken, so the process list remains empty. A later check of previously sampled identities shares the existing
+process-table reader and does not create a new polling loop.
+
 ## When the server stops answering
 
 The tmux server can go away while the daemon keeps running: something kills it, or

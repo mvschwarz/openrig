@@ -1729,11 +1729,11 @@ describe("MCP Server", () => {
       await setup({ get: getFn });
       const texts = (result: Awaited<ReturnType<typeof mcpClient.callTool>>) => (result.content as Array<{ text: string }>).map((c) => c.text);
 
-      // A cut page: the items as before, the limit the daemon applied, truncated, and a line saying so.
+      // A cut page keeps the original JSON text; pagination metadata stays in structuredContent.
       const cut = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
       expect(cut.isError).toBeFalsy();
       expect(cut.structuredContent).toEqual({ items: [row], limit: 7, truncated: true });
-      expect(texts(cut)).toEqual([JSON.stringify([row]), "This page stops at the limit of 7 and more items match; pass a larger limit to see the rest."]);
+      expect(texts(cut)).toEqual([JSON.stringify([row])]);
 
       // Exactly the limit matched: a full page alone claims nothing more.
       const exact = await mcpClient.callTool({ name: "rig_queue_list", arguments: { all: true, limit: 1 } });
