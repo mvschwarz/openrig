@@ -28,6 +28,7 @@ import { SettingsStore } from "./user-settings/settings-store.js";
 import { SuccessorSessionLauncher } from "./successor-session-launcher.js";
 import { deriveResumeToken, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
 import { validateResumeToken } from "./resume-token-validation.js";
+import { usableCommunityNativeRef } from "./community-harness-launch-result.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import type { JsonlExchange } from "./session-jsonl.js";
@@ -230,6 +231,12 @@ interface SessionRow {
   session_name: string;
   status: string;
 }
+
+/** A successor's conversation reference as its launch returned it: `provenance` when a community harness's launcher
+ *  reported it or OpenRig named and passed it, absent when it was read from the runtime itself. */
+type LaunchToken = { token: string; resumeType?: string; provenance?: "launcher" | "passed" };
+/** The community harness a successor was launched for, with its preset's runner declaration at launch. */
+type LaunchedHarness = { app: string; runner: boolean | "pi-rpc" };
 
 interface BindingOwnerRow {
   node_id: string;
@@ -725,8 +732,8 @@ export class SeatHandoverService {
         // retiree wholly untouched; a failure after the in-place respawn leaves the seat re-wakeable from
         // its provider session file (never destroyed). Inspect tmux/daemon logs and retry.
         ...limitsFailure,
-        guidance: (launch.code === "successor_preflight_failed"
-          ? `The predecessor is still running and its binding is unchanged. ${launch.message}`
+        guidance: (!launch.replacementStarted
+          ? `The handover didn't end the predecessor, and its binding is unchanged. ${launch.message}`
           : "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry."),
       };
     }
@@ -798,7 +805,7 @@ export class SeatHandoverService {
     let sourceOutcome: SeatHandoverMutationResult["sourceOutcome"];
     // A fork's own id is never its parent's (the fork source) or the retiring occupant's; either answer
     // from the launch-time capture is treated as not captured.
-    const launchToken = this.successorLaunchToken(forkSource, launch.resumeToken, launch.resumeType, latestSession.id);
+    const launchToken = this.successorLaunchToken(forkSource, launch.resumeToken, launch.resumeType, latestSession.id, launch.resumeProvenance);
     const forkOwnId = forkSource ? launchToken?.token ?? null : null;
     // OPR.0.7.0.9: the successor's conversation start: a fresh one starts with today's prompt; a fork inherits its
     // parent's recorded start (or none).
@@ -894,6 +901,7 @@ export class SeatHandoverService {
       // B2 (launched/fresh): the launch-scraped resume token captured by the
       // successor launcher is persisted atomically at commit (provenance scrape).
       launchToken,
+      ...(launch.communityHarness ? { launchedHarness: launch.communityHarness } : {}),
       occupantGeneration,
       appliedLaunch: launch.appliedLaunch ?? null,
       sourceOutcome,
@@ -1275,7 +1283,7 @@ export class SeatHandoverService {
   /** The successor's own resume token from its launch: a fork's is never its parent's (the fork source) nor the retiring
    *  occupant's; either answer from the launch-time capture is treated as not captured. */
   private successorLaunchToken(forkSource: { value: string } | null, resumeToken: string | undefined, resumeType: string | undefined,
-    retireeSessionId: string): { token: string; resumeType?: string } | null {
+    retireeSessionId: string, provenance?: LaunchToken["provenance"]): LaunchToken | null {
     const launchedId = resumeToken?.trim() || null;
     if (!launchedId) return null;
     if (forkSource) {
@@ -1283,7 +1291,7 @@ export class SeatHandoverService {
         { resume_token: string | null } | undefined)?.resume_token?.trim() || null;
       if (launchedId === forkSource.value || launchedId === retireeId) return null;
     }
-    return { token: launchedId, resumeType };
+    return { token: launchedId, resumeType, ...(provenance ? { provenance } : {}) };
   }
 
   /** #2985 / #2861: records a handover that failed with its successor launched in the respawned pane, so `--recover`
@@ -1365,7 +1373,9 @@ export class SeatHandoverService {
     departingProcess: SeatHandoverMutationResult["sideEffects"]["departingProcess"];
     restorePacket?: SeatHandoverMutationResult["restorePacket"];
     /** Launch-scraped resume token for a fresh successor (persisted at commit). */
-    launchToken: { token: string; resumeType?: string } | null;
+    launchToken: LaunchToken | null;
+    /** The community harness the composer launched the successor for (recorded at commit); absent otherwise. */
+    launchedHarness?: LaunchedHarness;
     /** Source-bound generation reserved before a fresh successor started; null for discovered seats. */
     occupantGeneration: string | null;
     /** Exact enforcing value returned by the launch adapter; absent for adopted/discovered successors. */
@@ -1491,6 +1501,7 @@ export class SeatHandoverService {
       departingProcess: input.departingProcess,
       restorePacket: input.restorePacket,
       launchToken: input.launchToken,
+      launchedHarness: input.launchedHarness,
       occupantGeneration: input.occupantGeneration,
       appliedLaunch: input.appliedLaunch,
       sourceOutcome: input.sourceOutcome,
@@ -1875,7 +1886,8 @@ export class SeatHandoverService {
     contextDelivered: boolean;
     departingProcess: SeatHandoverMutationResult["sideEffects"]["departingProcess"];
     restorePacket?: SeatHandoverMutationResult["restorePacket"];
-    launchToken: { token: string; resumeType?: string } | null;
+    launchToken: LaunchToken | null;
+    launchedHarness?: LaunchedHarness;
     occupantGeneration: string | null;
     appliedLaunch: AppliedLaunchObservation | null;
       sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
@@ -1943,6 +1955,11 @@ export class SeatHandoverService {
         this.db.prepare("UPDATE sessions SET origin = 'launched' WHERE id = ?").run(newSession.id);
         // It was launched in the seat's saved folder (the successor launch's node.cwd).
         this.sessionRegistry.recordLaunchedCwd(newSession.id, input.node.cwd);
+        // A successor launched for a community harness records it with its launch's runner declaration, as a start does,
+        // so its relaunch or restore resolves the same harness. A successor OpenRig didn't launch records none.
+        if (input.launchedHarness) {
+          this.sessionRegistry.recordCommunityHarnessSelection(newSession.id, input.launchedHarness.app, input.launchedHarness.runner);
+        }
       }
       // The receipt's lineage record: that mint is best-effort (a failure is logged and swallowed), so read it back.
       const tenure = this.readOccupantTenure(input.node.id);
@@ -1962,7 +1979,17 @@ export class SeatHandoverService {
       // with the claim, provenance "scrape" (mirrors StartupOrchestrator's
       // launch-token capture). Validity-guarded; a malformed token is dropped,
       // never a bad write. The token is never logged.
-      if (input.launchToken) {
+      // A community harness's own conversation (`community:<name>`, a type the built-in validator doesn't know) is recorded
+      // as a start records it: with its launcher's or OpenRig's provenance, else (Pi RPC's validated session file) scraped.
+      // The type and shape are checked as a runtime switch's commit checks them.
+      const harness = input.launchedHarness;
+      if (input.launchToken && harness) {
+        const { token, resumeType, provenance } = input.launchToken;
+        if (resumeType === `community:${harness.app}` && usableCommunityNativeRef(token)) {
+          if (provenance) this.sessionRegistry.recordLauncherReportedToken(newSession.id, resumeType, token, provenance);
+          else this.sessionRegistry.updateResumeToken(newSession.id, resumeType, token, "scrape");
+        }
+      } else if (input.launchToken) {
         const validated = validateResumeToken(input.node.runtime, input.launchToken.token);
         if (validated.ok) {
           this.sessionRegistry.updateResumeToken(newSession.id, validated.resumeType, validated.token, "scrape");
