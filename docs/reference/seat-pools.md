@@ -149,8 +149,8 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
     code `held`;
   - a comeback that runs is reported `running`, with the `snapshotSelection` it was launched from (`mode:
     "explicit"`), and the slot is `live` again. When the slot's stored settings differ from the model's, it still comes
-    back with its own, and the report carries a warning naming the fields that differ; change the slot with the
-    existing seat commands;
+    back with its own, and the report carries a warning naming the fields that differ (`cwd` is compared only without
+    `cwd_template`, when the slot took the model's folder); change the slot with the existing seat commands;
   - every evaluation reports a slot's reuse hold with the slot.
 - **After `pool: {}`.** Clearing the block on re-apply leaves the job running: it drains the free agents with the
   block it was last ensured with (`context.pool`), leaves busy agents `live` until they are free, and ends

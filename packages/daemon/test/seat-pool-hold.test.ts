@@ -921,6 +921,7 @@ describe("seat-pool holds: no comeback while held (#3395 Piece 1)", () => {
       expect(restored.ok, JSON.stringify(restored)).toBe(true);
       // `rig up` keeps the drained agent down
       expect(w.slots.forModel(m.nodeId)[0]!.phase).toBe("drained");
+      expect(sessionsOf(w, s1.nodeId)).toEqual(before);
       const released = await w.notesOf(job.jobId);
       expect(released).not.toHaveProperty("held");
       expect((released.add as { comebacks: Array<Record<string, unknown>> }).comebacks).toEqual([
@@ -928,6 +929,11 @@ describe("seat-pool holds: no comeback while held (#3395 Piece 1)", () => {
       ]);
       await w.executor.idle();
       expect(w.launch.mock.calls).toEqual([[m.rigId, "dev.impl-s1", { snapshotId }]]);
+      // the comeback settled: the same slot is `live` and its node has a new running session
+      expect(w.slots.forModel(m.nodeId).map((s) => [s.slotNumber, s.nodeId, s.phase])).toEqual([[1, s1.nodeId, "live"]]);
+      const after = sessionsOf(w, s1.nodeId) as Array<{ status: string }>;
+      expect(after).toHaveLength((before as unknown[]).length + 1);
+      expect(after.at(-1)!.status).toBe("running");
     } finally {
       w.db.close();
     }

@@ -140,6 +140,8 @@ export interface SeatPoolComebackRequest {
   attemptId: string;
   /** The snapshot the attempt was issued on. */
   snapshotId: string;
+  /** True when the pool block has no `cwd_template`: the slot took the model's folder, so `cwd` is compared too. */
+  cwdFromModel: boolean;
 }
 
 export interface SeatPoolExecutorDeps {
@@ -713,8 +715,10 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
   };
 
   /** The fields of the slot's stored settings that differ from the model's, both read as the export writes them, apart
-   *  from the keys an agent never takes from the model. Null when they can't both be read (no warning then). */
-  const settingsDiffer = (rigId: string, modelNodeId: string, nodeId: string): string[] | null => {
+   *  from the keys an agent never takes from the model. `cwd` is one of those keys only when a `cwd_template` gives the
+   *  slot its own folder; without one the slot took the model's folder, so it is compared. Null when they can't both be
+   *  read (no warning then). */
+  const settingsDiffer = (rigId: string, modelNodeId: string, nodeId: string, cwdFromModel: boolean): string[] | null => {
     if (!deps.add) return null;
     let modelMember: Record<string, unknown>;
     let own: Record<string, unknown>;
@@ -725,7 +729,8 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       return null;
     }
     return [...new Set([...Object.keys(modelMember), ...Object.keys(own)])]
-      .filter((key) => !NOT_INHERITED.includes(key) && canonical(modelMember[key]) !== canonical(own[key]))
+      .filter((key) => (!NOT_INHERITED.includes(key) || (cwdFromModel && key === "cwd"))
+        && canonical(modelMember[key]) !== canonical(own[key]))
       .sort();
   };
 
@@ -753,7 +758,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         return;
       }
       // The slot comes back with its own stored settings, never the model's: a difference is only named.
-      const differ = settingsDiffer(request.rigId, request.modelNodeId, request.nodeId);
+      const differ = settingsDiffer(request.rigId, request.modelNodeId, request.nodeId, request.cwdFromModel);
       const warning = differ && differ.length > 0
         ? { warning: `the slot's stored settings differ from the model's (${differ.join(", ")}); it comes back with its own` }
         : {};
@@ -763,7 +768,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         launch = await deps.comeback.launch(request.rigId, request.logicalId, { snapshotId: request.snapshotId });
       } catch (error) {
         threw = true;
-        const code = (error as { code?: unknown }).code;
+        const code = (error as { code?: unknown } | null | undefined)?.code;
         launch = { ok: false, code: typeof code === "string" ? code : "launch_failed", message: errorMessage(error) };
       }
       const node = launch.launched?.find((n) => n.nodeId === request.nodeId) ?? launch.launched?.[0];
@@ -1100,7 +1105,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
                 comebackNotes.push({ ...note, snapshotId, code: error.code });
                 continue;
               }
-              comebacks.push({ jobId: job.jobId, modelNodeId, rigId, slotId: slot.slotId, slotNumber: slot.slotNumber, nodeId, logicalId, attemptId, snapshotId });
+              comebacks.push({ jobId: job.jobId, modelNodeId, rigId, slotId: slot.slotId, slotNumber: slot.slotNumber, nodeId, logicalId, attemptId, snapshotId, cwdFromModel: spec.cwdTemplate === null });
               comebackNotes.push({ ...note, snapshotId, attempt: inFlight(attemptId) });
               continue units;
             }

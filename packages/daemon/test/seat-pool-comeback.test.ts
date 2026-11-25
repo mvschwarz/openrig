@@ -398,6 +398,22 @@ describe("seat-pool comeback: the drained agent comes back on its own node (#339
     expect(settled[0]).not.toHaveProperty("warning");
   });
 
+  it("A reused slot with no `cwd_template` whose model's folder changed comes back in its own folder with a warning naming `cwd`.", async () => {
+    const w = comebackWorld();
+    const { m, w1 } = await w.drainedAgent();
+    const ownFolder = w.nodeOf(m.rigId, "dev.impl-s1")!.cwd;
+    // the model's folder changes after the agent took it
+    expect(w.rigRepo.setNodeCwd(m.nodeId, `${ownFolder}-moved`, w.nodeOf(m.rigId, "dev.impl")!.cwd)).toBe(true);
+    await w.wantOne(m);
+
+    const { settled } = await comeBack(w, m.jobId);
+    expect(settled).toEqual([expect.objectContaining({
+      slotNumber: 1, nodeId: w1.nodeId, attempt: expect.objectContaining({ status: "running" }),
+      warning: "the slot's stored settings differ from the model's (cwd); it comes back with its own",
+    })]);
+    expect(w.nodeOf(m.rigId, "dev.impl-s1")!.cwd).toBe(ownFolder);
+  });
+
   it("An add with a `drained` slot eligible counts as one add and reuses the lowest eligible number.", async () => {
     // two eligible drained slots: the lower one comes back, the other stays drained
     {
@@ -620,6 +636,22 @@ describe("seat-pool comeback: a launch not settled, and one never made (#3395 Pi
     expect(slot).toMatchObject({ nodeId: w1.nodeId, phase: "adding", attemptKind: "comeback", attemptState: "issued", reuseHold: null });
     expect(JSON.parse(slot.attemptOutcome!)).toEqual({ ok: false, code: "snapshot_not_found", message: "the launch went away", threw: true });
     expect(w.sessionsOf(w1.nodeId).map((s) => s.status)).toEqual(["stopped"]);
+  });
+
+  it("A comeback whose launch rejects with no error value keeps its outcome as `launch_failed` and stays issued, reported in flight.", async () => {
+    const w = comebackWorld();
+    const { m, w1 } = await w.drainedAgent();
+    w.launch.mockRejectedValueOnce(null);
+    await w.wantOne(m);
+
+    const { settled } = await comeBack(w, m.jobId);
+    expect(settled).toEqual([{
+      slotNumber: 1, logicalId: "dev.impl-s1", nodeId: w1.nodeId,
+      attempt: { id: expect.any(String), status: "in_flight", code: "launch_failed", message: expect.any(String) },
+    }]);
+    const slot = w.slots.forModel(m.nodeId).find((s) => s.slotNumber === 1)!;
+    expect(slot).toMatchObject({ nodeId: w1.nodeId, phase: "adding", attemptKind: "comeback", attemptState: "issued", reuseHold: null });
+    expect(JSON.parse(slot.attemptOutcome!)).toMatchObject({ ok: false, code: "launch_failed", threw: true });
   });
 
   it("A comeback whose issue fails with an unexpected error leaves the slot `drained` on its own row and node, and the next cycle brings it back.", async () => {
