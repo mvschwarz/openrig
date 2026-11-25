@@ -48,29 +48,51 @@ in the case named:
 | `bind` | The bind plan: `mode` (`explicit` or `default`), `hosts` (the addresses bound), `tailscaleDetected`, and `ignoredRoutingHost` when a routing value was ignored. |
 | `stuckSweep`, `wakeLadder` | The heartbeats of the stuck sweep and the wake ladder, when they run. In `stuckSweep`, `findingsRouted` counts the findings created since the daemon started (an open finding a later pass finds again is not counted again), `findingsOpen` is how many finding rows were still open after the last pass, and `lastOutcome` is `findings` when the last pass created, found again or closed one. |
 | `terminals` | Whether the daemon reaches its tmux server, from what it last observed (healthz doesn't call tmux). `state` is `ok`, `degraded` (a server doesn't answer) or `unknown` (none observed yet, or a server's last reading couldn't be made); each entry of `servers` has `socket`, `state` (`reachable`, `unreachable`, or `unknown` when the return probe couldn't be read: not held, with the loss it was watching in `lastLoss`), `since` (when that state began), `lastCheckedAt`, `transitions`, and in `cause` the tmux diagnostic while unreachable or why the reading is unknown. `status` stays `"ok"`: the daemon is up even when its terminals can't be reached. |
+| `backgroundWork` | Running seats with a positively observed missing pane or session. Each entry has `nodeId`, `rigId`, `sessionName`, `state: "unknown"`, `reason`, `observedAt`, and `processes`: previously sampled descendants still matching their process identity, with PID, start time and executable name only. Arguments and paths are omitted. The list is not exhaustive: sampling gaps, unavailable process information, unobserved descendants, restarts and reparenting can leave it empty even when work remains. No process is stopped. `backgroundWorkUnavailable: true` means the diagnostic itself could not be read. |
 
 ## Bearer tokens
 
-The daemon reads two tokens from its environment at start:
+The daemon reads these two bearer-token settings from its environment at start:
 
 - **`OPENRIG_AUTH_BEARER_TOKEN`** checks Mission Control's write routes (`POST /api/mission-control/action` and
-  `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`, `pair-decision`), and the `/api/rig-mode`
-  binding writes. `rig host pair` hands this token to the paired machine, so a daemon that will be paired with
-  needs it set (see `rig host pair` in [the command reference](../as-built/cli-reference.md)).
-- **`OPENRIG_TERMINAL_BEARER_TOKEN`** checks every `/api/transport` and `/api/compaction` route, `POST
-  /api/terminal/follow` and `/viewer/ensure`, and every `GET /api/terminal/<name>` route, the terminal websocket
-  included. When the daemon is bound to an explicit address (`rig daemon start --host`) that isn't loopback or a
-  tailnet address, and this token isn't set, these routes check `OPENRIG_AUTH_BEARER_TOKEN` instead.
+  `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`, `pair-decision`) and `GET /api/hosts/pair/<pairId>`, the `/api/rig-mode`
+  binding writes, the `/api/network` writes (`POST /bindings`, `POST /installations` and `POST /bindings/<id>/disconnect`;
+  `GET /bindings` checks no token), `POST /api/apps/v1/credentials` and `DELETE /api/apps/v1/credentials/<id>`, and
+  `POST /api/gateway/slack/forwarded`, a shared Slack app's relay. The other `/api/apps/v1` routes take a Core app
+  credential instead; see [Core app](core-app.md). `rig host pair` hands this token to the paired machine, so a daemon
+  that will be paired with needs it set (see `rig host pair` in [the command reference](../as-built/cli-reference.md)).
+- **`OPENRIG_TERMINAL_BEARER_TOKEN`** checks every `/api/transport`, `/api/compaction` and `/api/startup` route, `POST
+  /api/terminal/follow`, `/viewer/ensure`, `/open-all` and `/close-all`, and every `GET /api/terminal/<name>` route, the terminal websocket
+  included. It also checks these seat routes:
+  - `GET /api/rigs/<rigId>/nodes/<logicalId>/preview` and `POST /api/rigs/<rigId>/nodes/<logicalId>/open-cmux`;
+  - under `/api/sessions/<session>`: `GET /preview`, `/generation-record` and `/generation-record-expected`, and `POST
+    /reconcile`, `/repair-missing-pane`, `/clear-attention`, `/resume-token` and `/unclaim`.
 
-A route whose token isn't set lets every request through. Send a token as `Authorization: Bearer <token>`; the
+  When the daemon is bound to an explicit address (`rig daemon start --host`) that isn't loopback or a tailnet
+  address, and this token isn't set, these routes check `OPENRIG_AUTH_BEARER_TOKEN` instead.
+
+The `/api/transcripts` routes (`GET /api/transcripts/<session>/tail`, `/grep` and `/full`) do not check either
+of these bearer tokens. On the default binds (loopback, and the tailnet address when Tailscale is active),
+a client that can reach the daemon can read them. The [Browser access](browser-access.md) boundary still applies.
+
+Pairing-request routes `POST /api/hosts/pair-request`, `GET /api/hosts/pair-requests` and
+`GET /api/hosts/pair-request/<pairId>` do not check the operator bearer. They are open by design: a requester
+does not yet have the paired machine's token. They remain subject to their pairing workflow and the
+[Browser access](browser-access.md) boundary.
+
+When one of the two bearer checks has no configured token, that check passes the request through. Other
+route-specific requirements still apply. Send a token as `Authorization: Bearer <token>`; the
 `GET /api/terminal/<name>` routes, the websocket included, also take `?token=<token>`. The CLI sends the terminal token from `OPENRIG_TERMINAL_BEARER_TOKEN`,
 or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; the daemon doesn't create it. `rig host
 approve|deny`, the TUI's answers to asks and the MCP tool `rig_question_answer` (on the answer's writes only) send
 `OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also takes `--bearer`), and otherwise the terminal token;
 refused for want of it, `rig host` and the TUI say what to set.
 
-A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
-and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
+A configured bearer check rejects a wrong or missing token with HTTP 401. The shared bearer middleware returns
+`{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`; the seat routes above
+use this shared body. The Core app API also has its own credential errors; see [Core app](core-app.md).
+`/api/startup` replaces an authentication failure with `{ "ok": false, "code": "terminal_auth_unavailable",
+"freshAllowed": false, "message" }`.
 The `GET /api/terminal/<name>` routes, the websocket included, answer `{ "error": "unauthorized", "hint" }`. A valid configured bearer token in the Authorization header can pass the browser boundary's target-name check
 for a well-formed but unaccepted Host. It cannot pass a malformed Host or a refused Origin; see
 [Browser access](browser-access.md).
@@ -112,6 +134,62 @@ All of them are server-sent events (`text/event-stream`):
   `queue.handed_off`, `queue.claimed`, `queue.unclaimed`, `qitem.fallback_routed`, `qitem.closure_overdue`,
   `inbox.absorbed` and `inbox.denied`.
 
+## Recorded lineage for a queue row
+
+`GET /api/queue/<qitemId>/lineage` uses the same read authority as the ordinary queue-row read. It needs no app request and makes no changes. It returns `rootId`, `nodes`, `edges`, `scope: "this-daemon"`, `status` (`available`, `partial` or `unknown`), `partial`, `partialReasons`, `unresolved`, and `limits`.
+
+Edges keep `reply-to`, `handed-off-from` and `blocked-on` distinct. Each edge runs from the referenced row to the row that records the relationship; `sourceQitemId` names that recording row. No relationship is inferred from a shared sender or a timestamp. The read follows recorded ancestors and descendants through the same graph traversal used by app request results, bounded to 100 nodes, 100 related edges per row and 20 handoff hops. Edges can name rows outside the returned node set when a limit or an unavailable row prevents traversal.
+
+A cycle, limit, missing or erased row, or a handed-to address without a recorded successor makes the result partial and names the reason. Unresolved references retain their recorded values; this route does not fetch another host. `available` means only that the bounded local traversal found no such gap, never that all hosts were searched. A missing or erased root returns 404 with `status: "unknown"` and no row content.
+
+A node's terminal state is `completion.status: "closed-as-recorded"`; other nodes say `open`. The graph's overall `completion.status` is always `unknown`: a closed record does not establish that the person's goal succeeded.
+
+## Read many stream items' reader actions
+
+A reader action is an agent's recorded response to a stream item: it acted on it as work, declined it, or marked
+it as a duplicate. `GET /api/stream/actions/list` pages these records without a request per item. Each `items`
+entry has `actionId`, `streamItemId`, `readerSession`, `action` (`act`, `decline`, `duplicate`), `workQitemId`,
+`duplicateOf`, `reason` and `actedAt`. Repeated historical acts remain separate records. The existing
+`GET /api/stream/:id/actions` returns one item's records.
+
+- `mode=history` (default) reads all matching retained actions. `mode=current` reads the newest **actionId** per
+  item and reader, selected across the whole history before kind, time and page filters. A later decline cannot
+  cause an older act to reappear just because `action=act` was requested.
+- Repeat `streamItemId` to select particular items. `hintTag` and `sourceSession` filter item metadata;
+  `readerSession` filters the action's actor. `action` selects one of the three kinds. `since` and `until` are
+  inclusive **action-time** bounds, valid ISO timestamps with at most millisecond precision, normalized to UTC.
+- `limit` defaults to 200 and is clamped to 1–500 after the usual integer query parsing. Results sort by
+  ascending `actionId`, a unique tie-breaker even when action timestamps are equal. Follow `nextAfterActionId`
+  as `afterActionId`, keeping the other filters/mode unchanged, until `hasMore` is false. A page is not a total count.
+- Archived items' actions are included. `missingStreamItemIds` lists explicitly requested IDs absent from the
+  item table; a present item with no matching actions is different from a missing item. Actions can still be
+  returned after someone removes their item row. Those actions cannot match a tag or source filter because the
+  item's metadata is gone. `historyScope: "retained"` means the result includes only action records this daemon
+  still stores; it cannot recover deleted records.
+
+Tag matching examines stored JSON values. Items have a source-session index, but filtering or sorting the joined
+action records can still examine more records than a page returns. In current mode, finding each reader's latest
+action can also read more history than the page contains.
+
+Paging has no gaps or repeats on stable data. It is not a snapshot: new action IDs ahead of the cursor can appear
+on later pages, IDs inserted behind it are not revisited, and concurrent corrections can change which records
+are current. A client needing one consistent current view should restart/reconcile by newest actionId. The old
+per-item read, writes and host access behavior are unchanged; this adds no remote forwarding.
+## Attention from one host
+
+`GET /api/queue/attention-aggregate` returns `{ items, hosts }` for local attention plus enabled Feed
+subscriptions. Add `?host=local` to read only local attention without a registry lookup, or
+`?host=<registered-id>` to read only that registered host, even when it is not a Feed subscription.
+Registry IDs resolve before declared `hostId` values. A remote target uses the existing HTTP transport
+and configured daemon bearer credentials (or the existing tokenless behavior).
+
+Target selection happens before remote reads. An unknown target returns no items and one `unreachable`
+host status with an explanatory error; it never falls back to the aggregate. Other outcomes remain
+`ok`, `auth-failed` and `unsupported-transport`. A remote HTTP read retains its 5,000 ms request-and-body
+deadline after credential resolution; selecting a silent host can still take that long. An `ok` status
+is not a completeness guarantee: remote list pagination metadata is not propagated, and a successful
+non-array response produces an empty list. No person or view filter is applied by this endpoint.
+
 ## People, asks and updates without Slack
 
 `GET /api/gateway/participants` returns the same JSON projection as `rig gateway participants --json`:
@@ -133,6 +211,19 @@ Open FYIs are ordered by priority, then newest first. `view=all` (also the defau
 `view=default` selects the effective default person, or all when no default is available. A named view that cannot
 resolve a person has `perspective.basis: "unknown"` and no items when a registry is available. With no registered
 people there is no perspective filter: inspect `perspective` rather than assuming the requested view was applied.
+
+For open FYIs on one selected machine, add `host=<registered-id>` to
+`GET /api/queue/open-human-updates`. The home daemon resolves that target before reading and forwards `view` and
+`limit` using the target's configured bearer, or no bearer for a tokenless entry. It does not forward the app's
+incoming credential. An unknown or unavailable target returns a structured read failure, never a complete empty
+list or an all-host fallback. The request and response body share the existing five-second read deadline.
+
+Keep the selected request host as the origin key alongside the returned envelope; do not infer it from a queue
+item id. Successful JSON is the origin's envelope verbatim and does not add a host stamp. The target resolves its
+own `view`: an unknown named person gives an unknown perspective and no items when people are registered, while
+an absent or unavailable people registry can return unfiltered items without `perspective`. Do not label that
+unfiltered result as a confirmed personal view. This read leaves action-required attention, delivered-update
+history and notification behavior unchanged.
 A person's view also includes instance or unassigned items when that person is the default. These are views on a
 trusted daemon, not per-person authentication or access control; existing daemon and browser access rules still apply.
 
@@ -323,6 +414,19 @@ What reads these declarations:
 
 ## Route details
 
+- **Early Claude compaction acknowledgement:** Send `{"session":"<session>","earlyAck":true}` to
+  `POST /api/compaction/trigger` to receive HTTP 202 with
+  `{"ok":true,"session":"<session>","stage":"preparing","attemptId":"<id>"}` once the daemon admits
+  your attempt. The receipt confirms admission to preparation only. Use the returned session in
+  `GET /api/compaction/state?session=<session>` and match `preparation.attemptId` to follow that attempt
+  and see whether `/compact` was submitted. A concurrent request refused as `409 already_in_progress`
+  receives no attempt ID. If the 202 response is lost, the request may still be running. Inspect state
+  and the seat before taking further action. Do not retry automatically or assume a new ID in seat state
+  belongs to the lost request. Omitting `earlyAck` or sending `false` uses the blocking response.
+  Pi's trigger returns HTTP 422 for `earlyAck:true`.
+- **Every seat's name in one read:** `GET /api/ps?seats=true` adds `seats`, the rig's seat session names, to each
+  entry of the usual `/api/ps` body, from the same read. Use it instead of reading each rig's nodes when only the
+  names are needed. The default body has no `seats`, and neither does a daemon from before this option.
 - **A rig's queue history:** `GET /api/queue/list?rig=<rig>&updatedSince=<ISO time>&sort=updated` returns the
   rig's queue items (any whose source or destination seat is in the rig) updated at or after that time: open items
   (`pending`, `in-progress`, `blocked`) first, then the rest by latest update. `limit` defaults to 100 and has no
@@ -377,6 +481,7 @@ What reads these declarations:
   Success is 201 with `instance`, `spec`, `entryQitemId` and `entryOwnerSession`, any `advisories`, and
   `scopeIgnored` when a scope wasn't applied. The instance keeps `rootObjective`, which every instance read returns
   (`/api/workflow/list`, `/api/workflow/<id>` and its `trace`). An instance started before it was kept reads `null`.
+- **A workflow step's label.** A spec step can carry an optional `label`, a short name for a person ("QA pass"). `GET /api/workflow/<id>` returns it in `startedSpec.spec.steps[].label`, the spec the run started with. Match it by step id: the instance's `currentStepId`, each `frontierPackets[].stepId`, or a trace entry's `stepId`. A step without a label, or a step the started spec doesn't list (the run's file was edited or its graph revised since it started), shows its `id`. A label is display only: the step's `objective` stays its instruction. A daemon from before labels refuses a labelled spec with `spec_unknown_key`.
 - **`GET /api/workflow/list`** accepts exact `project`, `mission`, `slice`, `rig` (the bound rig), and `name` (the workflow name) filters, repeatable `tag` filters on the instance's free-form scope tags, and `limit` from 1 to 10,000. Filters combine with AND and apply before the limit; results keep their existing oldest-first order. Instances without the requested scope or binding do not match. Without these filters, existing list behavior is unchanged.
 - **`GET /api/provider/usage`** returns `{ hostUsage }`, this host's usage rows (`host: "local"`, a `provider`
   and a `state`). A Claude row's `windows` are the seats' status-line readings, one entry per reading, each with
@@ -512,3 +617,21 @@ This is delivery-only maintenance. Direct sends, control/END requests and ordina
 The automatic wake ladder also waits before attempt budgets, rung markers and escalation for work whose destination rig is drained, including a held escalation target. It resumes at the retained rung after END. Legacy workflow packets without outbox intents remain owed: their existing keepalive resumes after END, and the sweep reports them if they stay unclaimed. END's scoped recovery pass covers pending intents. Diagnosis re-presentations wait before spending their presentation receipt. An explicit resolve notification remains an explicit action and can pass through the delivery hold.
 
 All watchdog evaluation for the held rig waits, including the context-usage watchdog's managed-compaction action. This does not add a native-start hold. If a drain admission read fails, automatic delivery proceeds and reports the uncertainty. Control/status failures remain errors, and failed BEGIN/END writes never report success.
+
+
+## Read a seat's recorded knowledge
+
+`GET /api/context-packs/seat-knowledge?rig=<rig-name>&seat=<seat-name>` reads the fixed
+`LEARNED.md` and `RECAP.md` files for that seat without requiring a context-pack library.
+It uses the same configured topology root and per-file legacy fallback as `rig context trace`.
+The response includes `rig`, `seat`, `topologyRoot` and `files` in that order of filenames.
+
+Each file carries its canonical `path`, `source` (`topology.root`, `legacy` or `absent`),
+`resolvedPath`, verbatim `content` and `extent`. A present file has `extent: "whole-file"`,
+including an empty string for an empty file. An absent file has `extent: "absent"`, null
+content and null resolved path. Legacy reads retain the trace's named migration advisory.
+Only the seat level is read; ancestor knowledge is not included. A read failure returns
+HTTP 503 rather than claiming absence. A missing/invalid rig or seat path segment returns 400.
+
+This read does not prove that a seat is active, summarize or excerpt its notes, enumerate
+other files, or write a recap. Existing daemon read-access conventions apply.

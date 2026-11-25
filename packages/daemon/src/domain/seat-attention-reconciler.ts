@@ -163,12 +163,14 @@ export async function rebindAndVerifyPaneIdentity(input: {
   const now = () => (input.now ?? (() => new Date()))().toISOString();
   let observedAt: string;
   const identityStore = new SeatIdentityStore(input.db);
+  let sessionObserved = false;
   const unavailable = (error: unknown): PaneIdentityReconcileResult => {
     const sampledAt = now();
     if (!input.assertCurrent || input.assertCurrent()) {
       identityStore.upsert(tmuxUnavailableIdentity({ nodeId: input.nodeId, runtime: input.runtime,
         sessionName: input.sessionName, observedAt: sampledAt,
-        registeredPane: input.sessionRegistry.getBindingForNode(input.nodeId)?.tmuxPane ?? null }));
+        registeredPane: input.sessionRegistry.getBindingForNode(input.nodeId)?.tmuxPane ?? null,
+        db: input.db, retainStopped: !sessionObserved }));
     }
     return { ok: false, reason: "tmux_unavailable", detail: `tmux pane identity lookup failed: ${error instanceof Error ? error.message : String(error)}` };
   };
@@ -176,6 +178,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
   try {
     panes = await input.tmux.listPanes(input.sessionName);
     observedAt = now();
+    sessionObserved = panes.length > 0;
   } catch (error) {
     return unavailable(error);
   }
@@ -344,7 +347,19 @@ export async function rebindAndVerifyPaneIdentity(input: {
     input.sessionRegistry.updateBinding(input.nodeId, { tmuxSession: input.sessionName, tmuxPane: pane.id });
     return true;
   })();
-  if (!published) return { ok: false, reason: "identity_unverified", detail: "A newer pane identity observation superseded this check" };
+  if (!published) {
+    // The periodic identity sweep (every 5 s) can store a newer verdict while this check runs. When that verdict
+    // verified the same process in the same pane, and the binding is still that pane, it confirms this check; anything
+    // else (another verdict, pane, process or binding) still supersedes it.
+    const newer = identityStore.getForNode(input.nodeId);
+    const binding = input.sessionRegistry.getBindingForNode(input.nodeId);
+    const confirmed = verdict.verdict === "verified" && newer?.verdict === "verified"
+      && newer.sessionName === input.sessionName && newer.evidence.registeredPane === pane.id
+      && (newer.evidence.observedPanePid ?? newer.evidence.observedPid) === pid
+      && newer.evidence.observedPid === verdict.evidence.observedPid
+      && binding?.tmuxSession === input.sessionName && binding.tmuxPane === pane.id;
+    if (!confirmed) return { ok: false, reason: "identity_unverified", detail: "A newer pane identity observation superseded this check" };
+  }
 
   if (verdict.verdict === "mismatch") {
     if (runtimeAmbiguous) {

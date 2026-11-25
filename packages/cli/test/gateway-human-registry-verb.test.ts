@@ -2,27 +2,35 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
 import { createProgram } from "../src/index.js";
 // The registry module is home-state owned by the daemon; the verb (and this test) reach
 // it via the narrow @openrig/daemon/gateway-human-registry subpath (the C3/crash-cart rail).
 import { humansDir, loadHumanRegistry } from "@openrig/daemon/gateway-human-registry";
 import { gatewayRoutes } from "../../daemon/src/routes/gateway.js";
 import { REGISTRATION_OFFER } from "../src/person-registration-offer.js";
+import { seatsReadAsPerson } from "../src/commands/gateway.js";
+import * as localOrigin from "../src/local-origin.js";
 
 // M1 A3 pt2 / A4b relocate — `rig gateway human add` verb integration. The verb lazy-imports
 // the relocated daemon surface; these tests drive the real command end-to-end.
 describe("rig gateway human add verb (post-relocate)", () => {
   let home: string;
   let prevHome: string | undefined;
+  let prevUrl: string | undefined;
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "a3-verb-"));
     prevHome = process.env.OPENRIG_HOME;
     process.env.OPENRIG_HOME = home;
+    // add reads the daemon's seats for its name warning: a closed port keeps these tests off any live daemon.
+    prevUrl = process.env.OPENRIG_URL;
+    process.env.OPENRIG_URL = "http://127.0.0.1:9";
     process.exitCode = undefined;
   });
   afterEach(() => {
     vi.restoreAllMocks();
     if (prevHome === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = prevHome;
+    if (prevUrl === undefined) delete process.env.OPENRIG_URL; else process.env.OPENRIG_URL = prevUrl;
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -131,6 +139,81 @@ describe("rig gateway human add verb (post-relocate)", () => {
     expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).not.toHaveProperty("delivery");
     expect(error).not.toHaveBeenCalled();
   });
+
+  /** A stand-in daemon answering `/api/ps?seats=true` with `rigs` (null: never answers it); the paths it was asked. */
+  async function fakeDaemon(rigs: unknown[] | null, holdHealth = false): Promise<{ asked: string[]; close: () => Promise<void> }> {
+    const asked: string[] = [];
+    const server = createServer((req, res) => {
+      if (req.url?.startsWith("/api/") || (holdHealth && req.url === "/healthz")) asked.push(req.url);
+      if (holdHealth && req.url === "/healthz") return;
+      if (req.url === "/api/ps?seats=true" && rigs === null) return; // holds the request open
+      const body = req.url === "/api/ps?seats=true" ? rigs : null;
+      res.writeHead(body ? 200 : 404, { "content-type": "application/json" });
+      res.end(JSON.stringify(body ?? {}));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    process.env.OPENRIG_URL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    return { asked, close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }) };
+  }
+
+  it("warns when a seat's member name is the new person's id, since that seat is then treated as the person", async () => {
+    const daemon = await fakeDaemon([{ rigId: "r1", seats: ["mike@team", "ops-lead@team"] }, { rigId: "r2", seats: [] }]);
+    try {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const add = createProgram(); add.exitOverride();
+      await add.parseAsync(["node", "rig", "gateway", "human", "add", "mike", "--display-name", "Mike", "--binding", "slack:main:vault://slack/mike:primary", "--delivery-class", "B"]);
+      expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({ ok: true, entityId: "mike" });
+      expect(error.mock.calls.map((call) => String(call[0]))).toEqual([
+        "warning: mike@team is a seat whose member name is mike, so work and messages addressed to it are treated as addressed to the person mike. "
+          + "That's intended for the person's own pane; otherwise rename the seat or choose another id.",
+      ]);
+      expect(process.exitCode).toBeUndefined();
+      // One read for every rig's seats, not a node read per rig.
+      expect(daemon.asked).toEqual(["/api/ps?seats=true"]);
+      // No seat shares the name: nothing is said.
+      error.mockClear();
+      const other = createProgram(); other.exitOverride();
+      await other.parseAsync(["node", "rig", "gateway", "human", "add", "ana", "--display-name", "Ana", "--binding", "slack:main:vault://slack/ana:primary", "--delivery-class", "B"]);
+      expect(error).not.toHaveBeenCalled();
+    } finally { await daemon.close(); }
+  });
+
+  it("registers without the warning when the daemon lists no seat names or doesn't answer in time", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const add = async (id: string) => {
+      const program = createProgram(); program.exitOverride();
+      await program.parseAsync(["node", "rig", "gateway", "human", "add", id, "--display-name", id, "--binding", `slack:main:vault://slack/${id}:primary`, "--delivery-class", "B"]);
+      expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({ ok: true, entityId: id });
+    };
+    // A daemon that doesn't list seat names (an earlier version): the person is registered, nothing is said.
+    const older = await fakeDaemon([{ rigId: "r1" }]);
+    try { await add("mike"); } finally { await older.close(); }
+    // A daemon that holds the read: add stops waiting at its bound and still registers the person.
+    const stalled = await fakeDaemon(null);
+    try {
+      const started = Date.now();
+      await add("ana");
+      expect(Date.now() - started).toBeLessThan(4_500);
+    } finally { await stalled.close(); }
+    expect(error).not.toHaveBeenCalled();
+    expect(process.exitCode).toBeUndefined();
+  }, 10_000);
+
+  it("includes a slow client preflight in the warning's two-second wait", async () => {
+    const daemon = await fakeDaemon(null, true);
+    // A seat using an explicit endpoint first asks /healthz for the endpoint's identity (up to a second).
+    // Keep that real client/network path: its request timeout alone would make the whole lookup take about three seconds.
+    vi.stubEnv("OPENRIG_SESSION_NAME", "reader@local");
+    vi.spyOn(localOrigin, "readLocalOrigin").mockReturnValue("test-origin");
+    try {
+      const started = performance.now();
+      expect(await seatsReadAsPerson(() => true)).toEqual([]);
+      expect(performance.now() - started).toBeLessThan(2_600);
+      expect(daemon.asked).toEqual(["/healthz", "/api/ps?seats=true"]);
+    } finally { vi.unstubAllEnvs(); await daemon.close(); }
+  }, 10_000);
 
   it("A6 v3: an OPTIONAL handle= token parses alongside a ':'-bearing secretsRef (inbound-resolvable)", async () => {
     const program = createProgram();

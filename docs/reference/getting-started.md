@@ -43,7 +43,10 @@ Setup and launch are separate: declining `rig setup` avoids its `~/.tmux.conf` c
 still write workspace trust and selected MCP/config fragments. `runtime.codex.hooks_enabled=false` controls hooks;
 it isn't a no-global-config option. Setup has no project-only mode. Trusted project `.codex/config.toml` settings
 don't redirect OpenRig's home-config writes. A separate selected `CODEX_HOME` keeps Codex config, login and sessions
-together in that home; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`.
+together in that home; it needs its own working sign-in and doesn't relocate `~/.tmux.conf`. A new home, such as one
+made inside a project to avoid these writes, has no login, so a team can't start on it until it's signed in. To keep
+your existing login, keep your home (`~/.codex`, or `~/.claude` for Claude Code) and accept these few writes there.
+Don't copy credentials into a project to get around them.
 
 > **What OpenRig changes on your machine**
 > - **Install:** `@openrig/cli` goes in globally with npm.
@@ -130,7 +133,9 @@ layer sets `sandbox_workspace_write.network_access` and no managed requirement
 could restrict it; if Codex can't be asked or doesn't answer in time, the launch
 is left unchanged. To keep it off, set `network_access = false` under
 `[sandbox_workspace_write]` in your Codex configuration. If Codex does not answer
-within a few seconds, the seat starts without it. A command allowance does not
+within a few seconds, the seat starts without it. The workspace-write sandbox limits the seat's direct file edits;
+with network access on, it isn't isolation from the trusted OpenRig service or the agents the seat works with.
+A command allowance does not
 change general sandbox/network settings. The starter's `profile: default` selects OpenRig resources, not a native
 permission profile.
 Agent-guided setup [recommends keeping the team default](#have-your-agent-configure-permissions)
@@ -153,8 +158,7 @@ before-install view explain that access before you choose it.
 
 WSL2 is the Windows route OpenRig supports. OpenRig's automated tests don't run on
 it yet; this is one user's working setup.
-[dajiaohuang](https://github.com/dajiaohuang)
-[ran OpenRig 0.6.6 under WSL2](https://github.com/mvschwarz/openrig/issues/88#issuecomment-6043925546)
+Wu Shuwen ran OpenRig 0.6.6 under WSL2
 on Ubuntu 24.04, with Node.js 24.14.1, tmux 3.4, Codex CLI 0.161.0 and Pi
 (`@earendil-works/pi-coding-agent`) 1.0.4, headless, as the distribution's root
 user.
@@ -189,15 +193,15 @@ agent doing the setup. These use this release's tag:
 
 ```sh
 # Claude Code
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs" --skill rigs --agent claude-code
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.23/skills/rigs" --skill rigs --agent claude-code
 
 # Codex
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs" --skill rigs --agent codex
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.23/skills/rigs" --skill rigs --agent codex
 # OMP (Oh My Pi): the pi target installs to .agents/skills, which OMP reads
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.21/skills/rigs" --skill rigs --agent pi
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.23/skills/rigs" --skill rigs --agent pi
 ```
 
-**OMP:** this pin installs the shared skill only. The `v0.7.21` skill includes OMP attachment guidance (`rig attach --self … --runtime omp`),
+**OMP:** this pin installs the shared skill only. The `v0.7.23` skill includes OMP attachment guidance (`rig attach --self … --runtime omp`),
 but complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
 signed in. To invoke the skill in OMP, type `/skill:rigs`; if OMP was already open when you installed it, type
 `/reload-plugins` first.
@@ -218,11 +222,11 @@ You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.21/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.23/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.21/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.23/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check if the installed checker is
 present (otherwise it reports the check skipped), then runs `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -408,6 +412,27 @@ once, by rig id when names are shared; it records the stop, and `--last` then
 leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
 (`OPENRIG_NO_KERNEL=1`) the daemon skips the kernel's automatic restore too;
 bring it back with `rig up kernel --existing`.
+
+A rig the daemon has nothing to restore from is left out and named with the
+daemon's reason and, when it sends them, the blockers that kept its saved state
+from standing in. With `--json` these rigs are listed under `leftOut`, each with
+its `code`, `message` and `blockers`; `neverLaunched` marks a rig none of whose
+seats has ever run. A preview that failed outright stays under `previewErrors`.
+Left-out rigs don't change the exit code.
+
+Under the default restore policy (`resume_if_possible`), a seat with neither
+saved startup context nor a resume token doesn't hold back the rest of its rig
+when OpenRig can still tell which session is that seat's current one. The other
+seats resume their own conversations, and that seat isn't started: it reads
+`awaiting-decision`, and the run exits 1 as for any seat awaiting a decision.
+Without saved startup context it can't be started fresh, so no fresh start is
+offered; restore its original session by hand. For a Claude Code, Codex, Pi or
+OMP seat whose session is the newest one under its name, the reason also names
+the command that records that session's resume token: pipe the token to
+`rig seat set-resume-token <session> --token-stdin --reason "<why>"`. A seat
+whose current session has no resume token waits the same way even with saved
+startup context. A seat set to start fresh still leaves the rig out, as does a rig
+where every seat lacks both, or where which session is current is unclear.
 
 Restore requests run one at a time by default. To keep up to two requests
 outstanding, for example, use `rig start --last --concurrency 2`. A request that
@@ -873,6 +898,14 @@ login. A source account override or Claude token is cleared only at commit;
 credentials are never converted between runtimes. Pi-to-Pi account changes keep
 Pi settings, but cross-runtime switches resolve settings afresh for the target.
 
+A runtime listed by `rig community-harness list` can be the target too: pass its
+name, for example `--runtime cursor`. The switch needs that harness's preset
+installed on the daemon, and refuses with `runtime_target_unavailable` when it
+isn't. A community harness places no guidance, skills or startup files, so a
+switch to one doesn't project the seat's skill loadout and says so in its notes.
+Moving the other way works the same: a seat on a community harness can switch to
+a built-in runtime while its own preset is still installed.
+
 A configured `launch_wrapper` carries across runtime switches among Pi, Codex
 and Claude Code. It must support each successor executable and preserve that
 runtime's credential environment. A wrapped Pi seat cannot switch to Claude
@@ -1184,6 +1217,31 @@ inspect an authored lifecycle with `rig workflow compile` and create its runtime
 with `rig workflow instantiate-lifecycle`. Compilation alone does not start work.
 [OpenRig Software Factory](../../packages/daemon/specs/agents/shared/skills/core/openrig-software-factory/SKILL.md)
 shows a small reviewed example and how to retain custody through a genuine wait.
+
+### Check a workflow start after a lost response
+
+If the connection drops after you request a workflow start, the daemon may have
+already created the instance and its entry packet. Repeating an ordinary
+`rig workflow instantiate` can create another run.
+
+For ordinary starts, choose and save a unique tag for each intended run before
+calling `instantiate`. For example, add `--tags request:review-20261123-01` and
+look for that tag on the same daemon before deciding whether to retry.
+
+```bash
+rig workflow list --name review-flow --tag request:review-20261123-01 --json
+rig queue list --all --all-rigs --tag instance:INSTANCE_ID --json
+```
+
+Use the `instanceId` from the matching run in the second command to list its
+queue packets. The first packet is tagged `entry`, or `gate` if the run starts
+with a gate. Its queue and pickup state tell you what happened after creation.
+A tag helps you find the request's effects. It can match multiple runs if reused, and an
+empty result can still mean a request is in flight, so recheck before retrying.
+
+For `rig workflow instantiate-lifecycle`, keep the original `--operation-key`.
+Run `rig workflow operation <key>` on the same daemon to look up the committed
+instance and entry packet. If you retry the original command, reuse that key.
 
 ## Have your agent configure permissions
 

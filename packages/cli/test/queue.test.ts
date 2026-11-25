@@ -615,6 +615,16 @@ describe("rig queue CLI", () => {
       expect(reads).toBe(1);
     });
 
+    it("keeps a recent hosted member's stated cadence visible in the sender receipt", async () => {
+      const wakeResult = "awaiting-pickup: 'helper@hub' is a hosted member that has been checking in about every 1 min. No wake is sent; this request waits in its queue for its next inbox read.";
+      const { result, reads } = await verify([{ lastNudgeResult: wakeResult }]);
+      expect(result).toMatchObject({ outcome: "failed", wakeResult });
+      expect(result.detail).toContain("has been checking in about every 1 min");
+      expect(result.detail).toContain("No wake is sent");
+      expect(result.detail).not.toContain("The wake failed");
+      expect(reads).toBe(1);
+    });
+
     it("a claimed row's unconfirmed wake reads claimed, not indeterminate, and is never verified", async () => {
       const { result, reads } = await verify([{ lastNudgeResult: "claimed", state: "in-progress", claimedAt: "2026-10-11T20:00:00.000Z", pickup: { state: "working" } }]);
       expect(reads).toBe(1);
@@ -1436,6 +1446,20 @@ describe("rig queue CLI", () => {
     expect(call).toBeDefined();
     expect(call!.path).toContain("session=bob%40rig");
     expect(call!.path).toContain("recentLimit=10");
+  });
+
+  // The refocus hook passes --held-work on its one lookup; every other whoami asks for nothing more.
+  it("whoami asks for held and pending work (held=1) only with --held-work", async () => {
+    const pathFor = async (extra: string[]) => {
+      const { deps, calls } = makeDeps();
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "whoami", "--session", "bob@rig", "--json", ...extra]);
+      return calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/whoami"))!.path;
+    };
+    expect(await pathFor([])).toBe("/api/queue/whoami?session=bob%40rig&recentLimit=25");
+    expect(await pathFor(["--held-work"])).toBe("/api/queue/whoami?session=bob%40rig&recentLimit=25&held=1");
+    expect(await pathFor(["--work-candidates", "--held-work"])).toBe("/api/queue/whoami?session=bob%40rig&recentLimit=25&candidates=1&held=1");
   });
 
   it("plain whoami ends with one line per candidate to choose from; --json adds nothing", async () => {

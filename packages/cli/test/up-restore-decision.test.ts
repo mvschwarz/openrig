@@ -222,6 +222,33 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
     expect(logs.join("\n")).not.toContain("not started");
   });
 
+  it("a seat with no saved startup context isn't offered a fresh start, asked or printed; a sibling still is", async () => {
+    respond = () => ({
+      status: "restored", rigId: "rig-1", rigName: "myrig", rigResult: "partially_restored",
+      nodes: [
+        { logicalId: "dev.impl", status: "awaiting-decision", noStartupContext: true,
+          error: "Original session unresumable: no resume token was captured for this seat. The seat has no saved startup context either, so it can't be started fresh. No session was started. Restore the original session manually." },
+        { logicalId: "dev.qa", status: "awaiting-decision", error: "no token available" },
+      ],
+      warnings: [],
+    });
+    const prompt = vi.fn(async () => false);
+    const asked = await captureLogs(async () => { await makeCmd(prompt).parseAsync(["node", "rig", "up", "myrig", "--existing"]); });
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(String(prompt.mock.calls[0]![0])).toContain("dev.qa");
+    expect(asked.logs.join("\n")).not.toContain("rig seat launch dev.impl@myrig --fresh");
+    expect(asked.logs.join("\n")).toContain("rig seat launch dev.qa@myrig --fresh");
+    expect(asked.logs.join("\n")).toContain("Restore the original session manually.");
+    expect(asked.exitCode).toBe(1);
+
+    // Headless: the same seat gets no --fresh hint; its reason line stays.
+    const headless = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "up", "myrig", "--existing"]); });
+    expect(headless.logs.join("\n")).not.toContain("rig seat launch dev.impl@myrig --fresh");
+    expect(headless.logs.join("\n")).toContain("dev.qa: awaiting-decision");
+    expect(headless.logs.join("\n")).toContain("Restore the original session manually.");
+    expect(headless.exitCode).toBe(1);
+  });
+
   it("TTY ASK declined: no second POST, no session started", async () => {
     respond = () => ({
       status: "restored", rigId: "rig-1", rigName: "myrig", rigResult: "partially_restored",

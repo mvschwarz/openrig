@@ -9,14 +9,16 @@ import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig, selectedPluginPaths, type ResolutionContext } from "./profile-resolver.js";
 import { claudeConflictTargetPath, filterProtectedProjections, planProjection, projectionConflictWarnings, type ProjectionPlan } from "./projection-planner.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
-import { isKeptPluginSkill, reconcileSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
+import { isKeptPluginSkill, reconcileSkillLoadout, type SkillLoadout, type SkillRuntime } from "./skill-catalog.js";
+import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { ensureSeatSkillPlugin, seatCatalogKeptNote, seatSkillLocation, seatSkillPaths, writeSeatSkillCatalog, type SeatSkillPaths } from "./seat-skill-storage.js";
 import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
 import { readSeatEffort } from "./seat-effort.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
 
-export type SwitchRuntime = "codex" | "claude-code" | "pi";
+/** A seat's runtime for a switch: a built-in one, or a community harness's name, which its installed preset defines. */
+export type SwitchRuntime = "codex" | "claude-code" | "pi" | (string & {});
 
 /** Where an effective target setting came from. `native_default` means OpenRig passes no flag. */
 export type RuntimeSwitchSettingSource = "explicit" | "agent_spec" | "native_default";
@@ -61,6 +63,8 @@ export interface RuntimeSwitchMaterialsInput {
   claudeManagedBlockFile?: ClaudeManagedBlockFile;
   resolution?: Pick<ResolutionContext, "skillsRoot" | "systemSkills" | "systemWorldError" | "homedir">;
   fsOps?: AgentResolverFsOps;
+  /** The root this rig was installed from (`rigs.install_root`), which is what its launches resolved `local:` refs against. */
+  rigRoot?: string | null;
   openrigHome?: string;
 }
 
@@ -91,7 +95,7 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
 
   if (node.agentRef) {
     if (!input.saved) throw new Error("The seat's saved startup context is missing, so its materials can't be planned for the target runtime.");
-    const source = findAgentSource(node, input.saved, fsOps);
+    const source = findAgentSource(node, input.saved, fsOps, input.rigRoot);
     const member: RigSpecPodMember = {
       id: node.logicalId.split(".").at(-1)!, agentRef: node.agentRef, profile: node.profile ?? "default", runtime, cwd,
       ...(input.explicit.model ? { model: input.explicit.model } : {}),
@@ -154,6 +158,10 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
   const notRun: string[] = [];
   const preLaunch: ResolvedStartupFile[] = [];
   const postLaunch: ResolvedStartupFile[] = [];
+  // A community harness places no startup files (its docs say so), so `send_text` material is not queued for delivery to
+  // one: the successor would read a contract the harness was never meant to take. The identity line still goes in the
+  // handover itself, which is what the seat needs.
+  const deliversStartupFiles = !isCommunityHarnessRuntime(runtime);
   for (const file of files) {
     if (!file.appliesOn.includes("fresh_start")) continue;
     // The Codex catalog is written by `prepare`; it is read then, not now.
@@ -163,10 +171,14 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
       continue;
     }
     const hint = file.deliveryHint === "auto" ? resolveConcreteHint(file.path, fsOps.readFile(file.absolutePath), file.orientation) : file.deliveryHint;
-    (hint === "send_text" ? postLaunch : preLaunch).push({ ...file, deliveryHint: hint });
+    if (hint === "send_text" && deliversStartupFiles) postLaunch.push({ ...file, deliveryHint: hint });
+    else preLaunch.push({ ...file, deliveryHint: hint });
   }
   for (const action of actions) {
     if (action === identity || !action.appliesOn.includes("fresh_start")) continue;
+    // A community harness places no startup material: the identity line above is what travels; a rig's own send_text and
+    // slash-command actions belong to a built-in seat.
+    if (!deliversStartupFiles) { if (action.type === "slash_command") notRun.push(action.value); continue; }
     if (action.type === "send_text") firstTurn.push(action.value);
     else if (action.type === "slash_command") notRun.push(action.value);
   }
@@ -187,9 +199,13 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
     async prepare(binding, adapter) {
       const notes: string[] = [];
       if (runtime === "claude-code") notes.push(...ensureSeatSkillPlugin(seatSkills));
-      if (skillLoadout && runtime !== "pi") {
-        const reconcile = (selected: SkillLoadout) => reconcileSkillLoadout({ loadout: selected, runtime, cwd, apply: true,
-          topologyOwner: input.canonicalSession, location: seatSkillLocation(seatSkills, runtime) });
+      // A community harness takes no skills or guidance, so there is nothing to project for it, and the note says so.
+      if (skillLoadout && isCommunityHarnessRuntime(runtime)) {
+        notes.push(`${runtime} is a community harness: it takes no skills, so the seat's skill loadout isn't projected.`);
+      } else if (skillLoadout && runtime !== "pi") {
+        const skillRuntime = runtime as SkillRuntime;
+        const reconcile = (selected: SkillLoadout) => reconcileSkillLoadout({ loadout: selected, runtime: skillRuntime, cwd, apply: true,
+          topologyOwner: input.canonicalSession, location: seatSkillLocation(seatSkills, skillRuntime) });
         let projection = reconcile(skillLoadout);
         // As at launch: plugin skills that can't be projected don't stop the seat; it starts without them and says why.
         if (!projection.ok && skillLoadout.entries.some((entry) => entry.pluginId)) {
@@ -218,17 +234,47 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
   };
 }
 
-function findAgentSource(node: Node, saved: ParsedStartupContext, fsOps: AgentResolverFsOps) {
-  // The rig root isn't recorded, so the agent spec is found where the saved launch read it from.
-  const candidates = new Set<string>();
-  if (node.agentRef?.startsWith("path:")) candidates.add(node.agentRef.slice("path:".length));
-  for (const entry of saved.plan.entries) candidates.add(reanchorShippedProjectionEntry(entry).sourcePath);
-  for (const file of saved.resolvedStartupFiles) candidates.add(reanchorBuiltinStartupFile(file).ownerRoot);
-  const sources = [...candidates]
+function findAgentSource(node: Node, saved: ParsedStartupContext, fsOps: AgentResolverFsOps, rigRoot?: string | null) {
+  // The saved startup context is what the launch read the spec from, so it is read first. A ref-derived candidate is a
+  // fallback for a seat whose saved context names no owner root — never a peer of a known source, because two roots
+  // that both pass the name check read as ambiguous and would refuse a switch that used to resolve.
+  const savedRoots = new Set<string>();
+  if (node.agentRef?.startsWith("path:")) savedRoots.add(node.agentRef.slice("path:".length));
+  for (const entry of saved.plan.entries) savedRoots.add(reanchorShippedProjectionEntry(entry).sourcePath);
+  for (const file of saved.resolvedStartupFiles) savedRoots.add(reanchorBuiltinStartupFile(file).ownerRoot);
+  const sources = (roots: Set<string>) => [...roots]
     .filter((root) => nodePath.isAbsolute(root) && fsOps.exists(nodePath.join(root, "agent.yaml")))
     .map((root) => resolveAgentRef(`path:${root}`, root, fsOps))
     .flatMap((result) => result.ok && result.resolved.spec.name === node.resolvedSpecName ? [result] : []);
-  const unique = new Map(sources.map((source) => [source.resolved.sourcePath, source]));
+  const fromSaved = sources(savedRoots);
+  // A `local:` ref resolves against the rig root, which isn't recorded. Its remainder is taken two ways: as an absolute
+  // path, and against a root — first the one the rig recorded (`rigs.install_root`), since that is the root its launch
+  // resolved from, and only then each ancestor of the seat's cwd carrying a rig.yaml. The order matters: a project with
+  // its own `rig.yaml` (and a same-named `agents/<name>`) must not stand in for the rig's real root.
+  const refRoots = new Set<string>();
+  if (node.agentRef?.startsWith("local:")) {
+    const remainder = node.agentRef.slice("local:".length);
+    if (remainder && nodePath.isAbsolute(remainder)) refRoots.add(remainder);
+    if (remainder && !nodePath.isAbsolute(remainder)) {
+      // The rig's own recorded root decides when it has the spec: it is the root the launch resolved from, and a project's
+      // own rig.yaml must not stand in for it (nor be read as a second answer). The cwd walk is only the fallback.
+      if (rigRoot && nodePath.isAbsolute(rigRoot)) {
+        const recorded = nodePath.resolve(rigRoot, remainder);
+        if (sources(new Set([recorded])).length > 0) refRoots.add(recorded);
+      }
+      if (refRoots.size === 0 && node.cwd && nodePath.isAbsolute(node.cwd)) {
+        for (let dir = nodePath.dirname(nodePath.join(node.cwd, "x")); ; dir = nodePath.dirname(dir)) {
+          if (fsOps.exists(nodePath.join(dir, "rig.yaml"))) {
+            refRoots.add(nodePath.resolve(dir, remainder));
+            break;
+          }
+          if (dir === nodePath.dirname(dir)) break;
+        }
+      }
+    }
+  }
+  const found = fromSaved.length ? fromSaved : sources(refRoots);
+  const unique = new Map(found.map((source) => [source.resolved.sourcePath, source]));
   if (unique.size !== 1) {
     throw new Error(unique.size === 0
       ? `The seat's agent spec (${node.resolvedSpecName ?? node.agentRef}) wasn't found where its last launch read it.`

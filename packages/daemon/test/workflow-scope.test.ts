@@ -101,6 +101,13 @@ describe("workflow scope tags", () => {
   const instantiate = (path: string, scope?: Parameters<typeof normalizeWorkflowScope>[0]) =>
     runtime.instantiate({ specPath: path, rootObjective: "scope", createdBySession: "ops@rig", ...(scope ? { scope } : {}) });
 
+  it("titles each ordinary successor of a parallel run", async () => {
+    const created = await runtime.instantiate({ specPath: spec(PARALLEL), rootObjective: "parallel", runTitle: "Release", createdBySession: "ops@rig" });
+    await runtime.project({ instanceId: created.instance.instanceId, currentPacketId: created.entryQitemId, exit: "done", actorSession: "root@rig" });
+    const frontier = runtime.inspect(created.instance.instanceId).frontier;
+    expect(frontier.map(row => queueRepo.getById(row.packetId)?.summary).sort()).toEqual(["Release — left", "Release — right"]);
+  });
+
   // The slice tag on the packet each step of a lifecycle chain produces, in order.
   const sliceTagsAlong = async (missionDir: string, key: string, length: number) => {
     const created = await runtime.instantiateLifecycle({ missionPath: missionDir, operationKey: key, rootObjective: "lifecycle", createdBySession: "ops@rig" });
@@ -576,6 +583,24 @@ describe("workflow scope tags", () => {
       writeFileSync(join(tmp, "workspace.yaml"), "projects:\n  - id: p1\n    root: p1\n");
       mkdirSync(join(tmp, "p1", "missions"), { recursive: true });
     };
+
+    it("replays a keyed start after its project leaves the catalog, while new keys still validate scope", async () => {
+      catalog();
+      const app = appFor(tmp);
+      const body = { specPath: spec(PIPELINE), rootObjective: "recovery", createdBySession: "ops@rig", operationKey: "catalog-retry", scope: { project: "p1" } };
+      const send = (value: unknown) => app.request("/api/workflow/instantiate-keyed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
+      const first = await send(body);
+      expect(first.status).toBe(201);
+      const created = await first.json();
+      writeFileSync(join(tmp, "workspace.yaml"), "projects: []\n");
+      const retry = await send(body);
+      expect(retry.status).toBe(200);
+      expect(await retry.json()).toMatchObject({ replayed: true, instance: { instanceId: created.instance.instanceId }, entryQitemId: created.entryQitemId });
+      expect((await send({ ...body, operationKey: "new-key" })).status).toBe(400);
+      expect((await send({ ...body, scope: { project: "other" } })).status).toBe(409);
+      expect((await send({ ...body, scope: [] })).status).toBe(400);
+      expect(instanceCount()).toBe(1);
+    });
     // The fixture spec's own advisories (unregistered seats) are not the scope's; pick out the scope notes.
     const scopeNotes = (body: { advisories: string[] }) => body.advisories.filter((a) => /^(Scope not applied|Ignored request body fields)/.test(a));
     type Created = {

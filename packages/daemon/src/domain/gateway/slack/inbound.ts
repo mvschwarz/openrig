@@ -160,7 +160,8 @@ export function ingestDecision(ev: SlackEvent): { ingest: true } | { ingest: fal
 export interface StoredInboundFile { name: string; localPath: string; mimetype?: string; bytes: number }
 export interface FailedInboundFile { name: string; error: string }
 export interface InboundFileResult { stored: StoredInboundFile[]; failed: FailedInboundFile[] }
-export interface InboundFilePort { transfer(files: unknown[], eventTs: string, eventChannel?: string): Promise<InboundFileResult> }
+export interface InboundFileOrigin { channelId: string; messageTs: string; authorId: string }
+export interface InboundFilePort { transfer(files: unknown[], origin: InboundFileOrigin): Promise<InboundFileResult> }
 
 export function shouldIngest(ev: SlackEvent): boolean {
   return ingestDecision(ev).ingest;
@@ -262,7 +263,7 @@ export class InboundRouter {
   }
 
   /** The row's summary names the person who actually wrote (their registered address); its tags stay as they were. */
-  private summaryOf(ev: SlackEvent, sender: string, transfer?: InboundFileResult | null, correlationQitemId?: string, envelope?: string): { summary: string; body: string; attachmentsChars?: number } {
+  private summaryOf(ev: SlackEvent, sender: string, transfer?: InboundFileResult | null, correlationQitemId?: string, envelope?: string): { summary: string; body: string; attachments?: string } {
     const text = String(ev.text ?? "");
     const meta = `slack channel=${ev.channel} user=${ev.user} ts=${ev.ts}`;
     // OPR.0.5.6.2 — attachments ride the row BODY by LOCAL path (Slack owns
@@ -297,7 +298,7 @@ export class InboundRouter {
     return {
       summary: `${ev.recoveredAfterGap ? "[Recovered after gap] " : ""}${sender} via Slack: ${headline.slice(0, 90)}`,
       body: `${sections.filter((s) => s.length > 0).join("\n\n")}\n\n---\nSource: ${meta}${correlationQitemId ? `\nIn reply to: ${correlationQitemId}` : ""}\nRouted by openrig slack-inbound. Default destination per config; re-route via queue as needed.`,
-      ...(attachments ? { attachmentsChars: attachments.length } : {}),
+      ...(attachments ? { attachments } : {}),
     };
   }
 
@@ -316,7 +317,7 @@ export class InboundRouter {
    * failure so callers dead-letter ONLY real failures. On success, marks seen
    * (durable qitem exists → safe).
    */
-  private async attemptLand(ev: SlackEvent, isCurrent: () => boolean = () => true): Promise<{
+  private async attemptLand(ev: SlackEvent, isCurrent: () => boolean = () => true, recovering = false): Promise<{
     landed: boolean;
     qitemId?: string;
     reason?: "dup" | "inflight" | "inactive" | "create_failed" | "resolve_failed" | "unregistered";
@@ -355,13 +356,15 @@ export class InboundRouter {
         });
         if (!this.deps.files) {
           transfer = namedAll("file transfer unavailable (no file port wired)");
+        } else if (!ev.channel || !ev.user) {
+          transfer = namedAll("file transfer unavailable (missing Slack message origin)");
         } else {
           // R1 F2: a THROWING port (disk-full mkdirp, any crash) must never cost
           // the already-ACKed message — the row still lands and every file
           // becomes a NAMED failure. Failure honesty is a property of this seam,
           // not a promise the port is trusted to keep.
           try {
-            transfer = await this.deps.files.transfer(fileMetas, ts, ev.channel);
+            transfer = await this.deps.files.transfer(fileMetas, { channelId: ev.channel, messageTs: ts, authorId: ev.user });
           } catch (e) {
             this.deps.log?.(`inbound file port CRASHED ts=${ts}: ${(e as Error).message}`);
             transfer = namedAll(`file transfer crashed: ${(e as Error).message || "unknown error"}`);
@@ -371,7 +374,7 @@ export class InboundRouter {
       if (!isCurrent()) return { landed: false, reason: "inactive" };
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
       const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
-      const { summary, body: incomingBody, attachmentsChars } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
+      const { summary, body: incomingBody, attachments } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
       // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
       const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
@@ -393,6 +396,25 @@ export class InboundRouter {
       // words for whoever it reached.
       const settles = route.correlationQitemId === undefined || this.deps.queue.routesToAsker?.(route.correlationQitemId, route.destination) !== false;
       const answerable = !ev.recoveredThreadReply && !asChannel && route.correlationQitemId !== undefined && settles;
+      if (answerable && route.correlationQitemId && correlated?.relayedAnswers && ev.text?.trim() && this.deps.queue.answerRelayedAsk) {
+        const selection = /^question:([^\s]+)(?:\r?\n|$)/.exec(ev.text);
+        const questionId = selection && ev.text.slice(selection[0].length).trim() ? selection[1] : undefined;
+        try {
+          const correction = this.deps.queue.answerRelayedAsk({ qitemId: route.correlationQitemId, actorSession: who.source,
+            identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId, direct: { text: ev.text, eventId, questionId,
+              recovering: recovering || Boolean(selection && !questionId)
+                || this.deps.deadLetter.readAll().some(entry => this.inboundEventId(entry.ev) === eventId),
+              ...(attachments ? { attachments: { body: attachments, tag: `${SLACK_ATTACHMENTS_TAG_PREFIX}${attachments.length}` } } : {}) } });
+          if (correction.replyQitemId && route.arrivalThread) {
+            this.deps.recordArrivalThread?.({ qitemId: correction.replyQitemId, ...route.arrivalThread });
+          }
+          this.deps.seen.mark(eventId, "landed");
+          return { landed: true, qitemId: correction.replyQitemId ?? undefined, correlationQitemId: route.correlationQitemId };
+        } catch (error) {
+          this.deps.log?.(`relay correction failed qitem=${route.correlationQitemId}: ${String(error)}`);
+          return { landed: false, reason: "create_failed" };
+        }
+      }
       // An absorbed event has its own identity even when the first answer came from a button or Steering.
       const consumedKey = (answerId: string) => `answer-event:${JSON.stringify([eventId, route.correlationQitemId, who.source, answerId])}`;
       // A closed ask can hold several returned answers (one per park). A replay finds the one this event returned, or the
@@ -430,18 +452,18 @@ export class InboundRouter {
           destination: route.destination,
           priority: "routine",
           tags: [...(route.tags ?? ["founder-slack", "inbound"]), ...(mintsRoot ? [SLACK_THREAD_ROOT_TAG] : []), ...(who.sharedChannel?.tags ?? []),
-            ...(attachmentsChars ? [`${SLACK_ATTACHMENTS_TAG_PREFIX}${attachmentsChars}`] : [])],
+            ...(attachments ? [`${SLACK_ATTACHMENTS_TAG_PREFIX}${attachments.length}`] : [])],
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
-          ...(askOpen && answerable ? { humanAnswer: true } : {}),
+          ...(askOpen && answerable && !correlated?.relayedAnswers ? { humanAnswer: true } : {}),
         });
       } catch (e) {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
         return { landed: false, reason: "create_failed" };
       }
       let replyResolution: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable" | undefined;
-      if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && answerable) {
+      if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && answerable && !correlated?.relayedAnswers) {
         try {
           // Reusing the durable answer consumed this event's words. Record that before close, but
           // keep the raw event unmarked until completion so an interrupted close can still retry.
@@ -510,7 +532,7 @@ export class InboundRouter {
     correlationQitemId?: string;
     replyResolution?: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable";
   }> {
-    const r = await this.attemptLand(ev, isCurrent);
+    const r = await this.attemptLand(ev, isCurrent, attempts > 0);
     if (!r.landed && (r.reason === "create_failed" || r.reason === "resolve_failed")) {
       this.deps.deadLetter.append(ev, attempts + 1);
       this.deps.log?.(`dead-lettered ts=${ev.ts} (attempt ${attempts + 1})`);
@@ -581,6 +603,24 @@ export class InboundRouter {
     if (!rootTs || !route || !qitemId) {
       if (live) await acknowledge(CLICK_REPLIES.unmapped);
       return { status: "ignored", reason: "unmapped-message" };
+    }
+    const ask = this.deps.queue.getQitem?.(qitemId);
+    if (ask?.relayedAnswers && this.deps.queue.answerRelayedAsk) {
+      try {
+        const clickKey = this.clickReplyKey(payload);
+        const answer = this.deps.queue.answerRelayedAsk({ qitemId, actorSession: who.source,
+          identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId,
+          direct: { ...picked, eventId: action?.action_ts ? `slack-click:${channel}:${rootTs}:${who.source}:${action.action_ts}` : undefined,
+            recovering: !live || Boolean(clickKey && this.deps.actionDeadLetter?.readAll().some(entry => this.clickReplyKey(entry.ev) === clickKey)) } });
+        if (live) await acknowledge(answer.unplaced ? "Your choice was sent to the asking agent without changing any answer."
+          : answer.corrected ? "Your direct correction was sent to the asking agent."
+          : answer.unanswered.length ? "Answer recorded; other questions are still open." : "All answered and sent back.");
+        return { status: "accepted", reason: answer.unplaced ? "reply-delivered" : answer.unanswered.length ? "answer-recorded" : "answers-complete" };
+      } catch (error) {
+        this.deps.log?.(`relay answer continuation failed qitem=${qitemId}: ${String(error)}`);
+        if (live) await acknowledge("This answer was not recorded. Check that the question is still open or corrects a relayed answer.");
+        return { status: "handler-failed", reason: "answer-recording-failed" };
+      }
     }
     // A decision parked on this person takes the current question's answer, as a typed reply does: a re-park gets its own.
     const parkOpen = this.deps.queue.getQitem?.(qitemId)?.state === "blocked"
@@ -1040,7 +1080,7 @@ export class InboundRouter {
         continue;
       }
       if (e.ev.ts && seen.has(this.inboundEventId(e.ev))) continue; // already landed → recovered, drop from set
-      const r = await this.attemptLand(e.ev);
+      const r = await this.attemptLand(e.ev, undefined, true);
       if (r.landed) landed++;
       else if (r.reason === "create_failed" || r.reason === "resolve_failed") stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 });
       else if (r.reason === "inflight") stillFailing.push(e); // owner has not proved durable landing yet

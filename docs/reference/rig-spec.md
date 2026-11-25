@@ -178,6 +178,7 @@ edges:
 | `summary` | string | no | — | Human-readable description. Shown in the spec library, review surfaces and `rig specs preview` (in `rig specs show` only with `--json`). |
 | `culture_file` | string | no | — | Relative path to a rig-wide culture/constitution file. Must be a safe relative path (no `..`, no absolute). |
 | `non_interruptive` | boolean | no | — | Pod-aware rig launch-warning default. With full-bypass Claude/Codex seats, true accepts or hides supported harness warnings using launch flags. Explicit CLI choices override this field; this field overrides the machine default. It does not grant permissions, change native settings files, or bypass login. |
+| `seat_slice` | string | no | — | Linux/systemd hosts only, opt-in. `rig` starts every seat the rig launches, with or without `process_limits`, in a systemd user scope beneath the rig's own slice, `openrigseats-<rig>.slice` under `openrigseats.slice`, so a weight you set on that slice in your user manager covers the whole rig. `rig` is the only value; omit the key to keep today's launch paths. OpenRig sets no CPU weight. See "Seat grouping by rig" below. |
 | `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`, `builtin:auto`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute, no empty segments, each segment `[A-Za-z0-9][A-Za-z0-9._-]*`), or `none`, a recorded choice of the floor. Absent uses the default floor with the scoped team launch allowances described below. A bare built-in name such as `yolo` is refused ("use 'builtin:yolo'"), and so is an explicit `null`. A custom file that is missing, unreadable or invalid isn't a validation error: it resolves to the floor, and preflight warns. A member may set its own `permission_policy` (not on a terminal member), which takes precedence over the rig-level one; there is no pod level. See "Attaching a permission policy" below. |
 | `env` | map | no | — | Launch environment for every seat in the rig: `NAME: value` pairs. A member's own `env` overrides it name by name. Names match `^[A-Z_][A-Z0-9_]*$`, names starting `OPENRIG_` are reserved, and values must be non-empty strings (quote numbers and booleans). Values are not secret. See "Launch environment" below. |
 | `managed_blocks` | map | no | `CLAUDE.md` | File that receives OpenRig's managed instruction blocks for Claude Code members. Only the `claude-code` key is accepted, with `CLAUDE.md` or `CLAUDE.local.md`. Codex, Pi and OMP members use `AGENTS.md`, except that a fresh Pi seat normally uses its own agent folder's `AGENTS.md` and a fresh Codex 0.164.0+ seat normally gets launch developer instructions; a link, a conflicting or unreadable Codex config layer, or a resume keeps the repository file. See [Codex guidance at launch](agent-startup-guide.md#codex-guidance-at-launch) and [Runtime Differences](agent-startup-guide.md#runtime-differences). See "Choosing the Claude instruction file" below. |
@@ -394,6 +395,14 @@ that Codex enforces them, so check the seat's actual behaviour before relying on
 envelope. An OpenRig older than 0.7.3 doesn't read a recorded envelope, so after a downgrade
 the seat launches without it. The field is also supported on legacy flat Codex nodes; other
 runtimes reject it.
+
+A seat in a narrower sandbox still has to run `rig` and reach the OpenRig daemon, which `rig`
+talks to over 127.0.0.1: `rig up`, `rig up --plan`, a seat's first `rig launch` and
+`rig seat set-permissions` warn, and carry on with the permissions as written, when a Codex
+seat's permissions don't let it read the OpenRig home, the rig install or node, or leave
+network off (read-only never has network). The node they check is the one the daemon runs on,
+while `rig` in the seat runs on the first `node` on the seat's own PATH, so that part of the
+warning is conditional: check with `rig whoami` inside the seat.
 
 For an explicit filesystem policy, use `filesystem` **instead of** `sandbox` and its
 workspace-write fields. This is the same per-seat selection and audited setter:
@@ -925,6 +934,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `summary` | string | no | — | Pod description. |
 | `continuity_policy` | ContinuityPolicy | no | — | Pod-level continuity/restore policy, validated and stored with the pod (see "Continuity Policy"). |
 | `startup` | StartupBlock | no | — | Pod-level startup files and actions. Applied to all members in this pod via the startup layering model. |
+| `cold_start` | boolean | no | `false` | Pod-level default for member `cold_start` (queue-driven cold start). A member's own value, including an explicit `false`, wins. See [Queue-driven cold start](#queue-driven-cold-start). |
 | `members` | Member[] | yes | — | The pod's members. It must be an array; validation doesn't refuse an empty one. |
 | `edges` | PodLocalEdge[] | no | `[]` | Edges between members within this pod. Must use unqualified member IDs (not `pod.member`). |
 
@@ -967,12 +977,62 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `plugin_channels` | list | no | — | Claude members only. Plugin channels this agent registers for, as `plugin:<name>@<marketplace>` entries, passed as one `--channels` on every launch; see [Claude plugin channels](#claude-plugin-channels-runtime-claude-code). |
 | `role` | string | no | — | The seat's role, letters, digits, `_`, `.` and `-`. Not valid on terminal members. |
 | `restore_policy` | string | no | the AgentSpec's | Restore behavior. One of: `resume_if_possible`, `relaunch_fresh`, `checkpoint_only`. The default comes from the AgentSpec's `defaults.lifecycle` (else `resume_if_possible`) as narrowed by its profile; a member value may only narrow it further, in that order. |
+| `cold_start` | boolean | no | `false` | Opt in to queue-driven cold start for this seat: when queued work targets the seat, its rig is running, and the seat's runner is not live, the daemon launches just this seat through the existing single-seat launch path (resuming its conversation when a resume token exists). Never fires for a seat stopped intentionally (a human `rig seat stop`, `rig down`, a removal), a seat removed from the spec, or a rig with no other live seat. A resource-reclaiming daemon stop (the idle reaper's `daemon:seat-reaper`/`idle_reap`) is revivable. A member's explicit value wins over the pod's `cold_start`. See [Queue-driven cold start](#queue-driven-cold-start). |
 | `keep_alive` | boolean | no | the AgentSpec's, else `false` | When `true`, the daemon relaunches the seat if it falls while the daemon is running, and leaves it down if it was stopped on purpose. Overrides the AgentSpec's `lifecycle.keep_alive` in either direction. See [Keep a seat running](#keep-a-seat-running-keep_alive). |
 | `compaction_strategy` | string | no | — | `default-compaction`, `managed-compaction`, `handover` or `apprentice-handover`; `harness_native` and `pod_continuity` are accepted as deprecated aliases, and `custom_prompt` is refused. `managed-compaction` and `apprentice-handover` create their jobs only for `claude-code` seats; see [Codex compaction and sizing](agent-startup-guide.md#codex-compaction-and-sizing). |
 | `mechanic` | string | no | — | A canonical `seat@rig` session address, for `apprentice-handover`. |
 | `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. A Claude Code `fork` needs Claude Code 2.0.73 or later. Not valid on terminal members. Rebuild `artifact_set` paths are read as given, relative to the daemon's working directory, so an absolute path is the reliable form. |
 | `starter_ref` | object | no | — | `{ name }` of an agent starter (`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) whose files lead the seat's startup. Not valid on terminal members or with a fork. |
 | `startup` | StartupBlock | no | — | Member-level startup files and actions. Applied only to this member. |
+
+
+### Queue-driven cold start
+
+A seat with `cold_start: true` (member, or pod-level default) does not keep a
+runner alive for nothing: when queued work targets the seat and the queue cannot
+deliver — the seat has no live runner — the daemon launches just that seat through
+the existing single-seat launch path, resuming its saved conversation when a resume
+token exists and never silently replacing a live conversation with a fresh one.
+
+The daemon cold-starts a seat only when all of these hold:
+
+- the seat opted in and is still in the rig's current spec (a removed seat never starts);
+- the seat's rig is running — some other seat of the rig is live (a down rig keeps
+  whole-rig restore as the operator's choice);
+- the seat's latest stop was **not** an intentional stop. Eligibility is keyed on who
+  stopped the seat, not merely that it is stopped:
+  - a human `rig seat stop`, `rig down`, or a seat removal records a deliberate end
+    state, and cold start never revives it;
+  - the only revivable stop is a resource-reclaiming daemon stop — the idle reaper (a
+    separate feature) stops a seat as operator `daemon:seat-reaper` with reason
+    `idle_reap` precisely so new work can wake it again;
+  - a seat that was never stopped intentionally (a crash, a lost session) is dormant;
+  - a rolled-back launch (`superseded` row, a failed start) is refused like an intentional
+    stop — a failed start is never auto-revived;
+- the seat's tmux session is gone (a probe that throws is not evidence of absence — the
+  seat is left alone, fail-closed).
+
+Stop attribution is tied to the exact session id, not its reusable tmux name. An old
+reaper stop cannot authorize reviving a later generation stopped by a person or `rig down`.
+A rig whose **only seat is dormant never cold-starts**: the running-rig gate requires
+a live peer. Start that seat explicitly with `rig launch`; this flag does not start down rigs.
+
+The launch is the ordinary single-seat door (`rig launch`), so it takes the
+delivery-guard lifecycle lease, rechecks stop intent, opt-in and seat identity under that
+lease, and applies the normal restore decision: a
+`resume_if_possible` seat with a usable token resumes its conversation, and a seat
+whose conversation cannot be resumed parks as `awaiting-decision` with no session
+started rather than being silently replaced by a fresh one.
+A cold start also parks as `awaiting-decision` when the snapshot's occupant is no longer
+the seat's current session: a stale snapshot never silently replaces a newer conversation.
+
+Simultaneous arrivals are coalesced into one launch, attempts are at least a minute
+apart, and a seat that fails to start three times in a row stops cold-starting
+until liveness is observed or a launch succeeds — the cap never expires by time. Refusal
+evaluations coalesce per seat within each queue drain pass, with a one-second TTL;
+the next pass checks liveness again. Once the seat is running, the queue's existing
+unroutable-wake retry delivers the waiting rows; no new scheduler is involved.
+Idle stopping and reaping are a separate feature and not part of this opt-in.
 
 ### Claude MCP loading (`runtime: claude-code`)
 
@@ -1144,7 +1204,7 @@ members:
   before. `tasks_max` and `memory_max` are the only supported keys; any other key, such as a CPU limit, is refused by
   name rather than accepted and ignored.
 - **The boundary:** The seat's pane command starts in a transient `systemd-run --user --scope` of its own, in
-  `openrigseats.slice`, with `TasksMax=N` and/or `MemoryMax=<bytes>` as its only limits (one scope for both). The
+  `openrigseats.slice` (beneath its rig's slice there when the rig sets `seat_slice: rig`), with `TasksMax=N` and/or `MemoryMax=<bytes>` as its only limits (one scope for both). The
   seat's processes leave the terminal server's scope:
   a limit an operator put on that scope no longer covers this seat. The other seats, the daemon and the terminal server
   stay where they were, outside this seat's limit. Processes the seat itself starts through `systemd-run --user` land
@@ -1343,6 +1403,52 @@ It's off by default. Without it, nothing relaunches a fallen seat, as before: yo
   apply, so a seat without keep_alive or a pending stop reads as before. The events are `seat.keep_alive.attempted`,
   `seat.keep_alive.recovered` (with the launch status) and `seat.keep_alive.exhausted` (with the last status and error);
   each carries the rig, the seat's node and logical id, the incident id and the attempts spent.
+
+### Seat grouping by rig (`seat_slice`, Linux/systemd)
+
+Set `seat_slice: rig` at the top of a rig spec to start every seat that rig launches in a scope beneath a slice of the
+rig's own, so the systemd user manager can share the machine between rigs rather than between seats:
+
+```yaml
+version: "0.2"
+name: alpha
+seat_slice: rig
+pods: [...]
+```
+
+- **The slice names:** a grouped seat's scope goes in `openrigseats-<rig>.slice`. A dash in a slice name is nesting to
+  systemd, so that slice sits directly beneath `openrigseats.slice`, the slice the scopes of seats with
+  `process_limits` already use. The rig's name is escaped as `systemd-escape` escapes a string (systemd.unit(5),
+  "String escaping"): every byte other than an ASCII letter, digit, `:`, `_` or `.` becomes `\xNN`, and so does a
+  leading `.`. Unlike `systemd-escape`, a `/` is escaped too (`\x2f`), so a rig name never adds a level. Rig `alpha`
+  uses `openrigseats-alpha.slice`; rig `lab-b` uses `openrigseats-lab\x2db.slice` (`systemd-escape lab-b` prints the
+  escaped part). Its cgroup is `<user manager>/openrigseats.slice/openrigseats-<escaped rig>.slice/`.
+- **Every seat, with or without limits:** a seat with `process_limits` gets its scope, with the same limits, checked the
+  same way, beneath the rig's slice instead of directly in `openrigseats.slice`. A seat without limits, which otherwise
+  starts in the terminal server's process tree, gets a scope with no limit beneath the rig's slice. Fresh launches,
+  restores, relaunches, respawns and a restart in place's respawn all start the seat there. A grouped seat without limits
+  also leaves the terminal server's scope, so any limit on that scope no longer covers it.
+- **Weights are yours:** OpenRig sets no CPU weight, quota or other property on any slice; it only names the slice
+  when it starts a scope. Give the rigs their shares in your systemd user manager, at run time or in a drop-in, for
+  example `systemctl --user set-property openrigseats-alpha.slice CPUWeight=200`, or
+  `~/.config/systemd/user/openrigseats-alpha.slice.d/weight.conf` with `[Slice]` and `CPUWeight=200`. A weight takes
+  effect only where the cpu controller is delegated to the user manager (see
+  `cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers`).
+- **When it takes effect:** the rig stores the setting when it is created from its spec, as it does its other top-level
+  keys, and each seat launch reads it. A seat starts beneath the rig's slice at its next launch. OpenRig never moves or
+  restarts a running seat for it. A rig created from a spec without the key keeps its seats ungrouped; to group them,
+  add the key and create the rig from the spec again (`rig up <spec>` replaces a stopped rig of that name with a new
+  one).
+- **Where grouping can't be applied:** the seat starts on today's path (the ungrouped scope in `openrigseats.slice` for a
+  seat with `process_limits`, with every limit checked and applied as without grouping; the terminal server's process
+  tree for a seat without), and the launch returns the warning `seat_slice requested, grouping not applied: <reason>`.
+  Grouping never refuses a launch. That covers a host without systemd or cgroup v2, a user manager that won't start
+  the scope (a masked slice, for example), a rig name whose slice name would exceed 255 characters, and a grouped scope
+  that fails after its check passed. The seat starts again on the ungrouped path only when its command is confirmed not
+  to have started; an unconfirmed start warns and stands, without another start. The next launch tries the rig's slice again.
+- **Status:** `rig seat status` reports `process_limits` as before; the scope it names sits beneath the rig's slice when
+  the seat is grouped. To see a seat's placement, read its pane process's cgroup (`cat /proc/<pid>/cgroup`) or
+  `systemctl --user status openrigseats-<rig>.slice`.
 
 ### Status line throttle (`runtime: claude-code`)
 

@@ -79,6 +79,7 @@ import {
   STUCK_SWEEP_FINDING_TAG,
   resolveOperatorSeat,
   resolveSessionNodeId,
+  resolveStuckSweepIntervalSeconds,
 } from "./queue-stuck-sweep.js";
 import {
   RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
@@ -492,7 +493,18 @@ function findWakeRecovery(db: Database.Database, qitemId: string) {
  * Diagnosis remains visible; only duplicate delivery is suppressed. */
 export function queueRecoveryOwnsWake(db: Database.Database, row: QueueItem | null): boolean {
   if (!row || !["pending", "in-progress", "blocked"].includes(row.state)) return false;
-  if (findWakeRecovery(db, row.qitemId)) return true;
+  const recovery = findWakeRecovery(db, row.qitemId);
+  if (recovery) {
+    if (["pending", "in-progress", "blocked"].includes(recovery.state)) return true;
+    // The ladder keeps a lead's closed disposition. Only the consumer's duplicate-wake
+    // suppression expires, so an idle owner can receive its ordinary reminder again.
+    const closed = db.prepare(`SELECT ts FROM queue_transitions WHERE qitem_id = ?
+      AND state NOT IN ('pending', 'in-progress', 'blocked') AND closure_reason IS NOT NULL
+      ORDER BY transition_id DESC LIMIT 1`).get(recovery.qitemId) as { ts: string } | undefined;
+    const ageMs = Date.now() - Date.parse(closed?.ts ?? "");
+    // Missing, invalid or future closure times cannot justify suppressing a wake.
+    return ageMs >= 0 && ageMs < resolveStuckSweepIntervalSeconds() * 1000;
+  }
   const mode = unclaimedWakeMode(row);
   if (!mode) return false;
   if (row.state === "pending" && !row.claimedAt && row.handedOffFrom) {
@@ -1585,6 +1597,11 @@ async function advancePromptRefusals(
   }
 
   const permissionObservations = new Map<string, PermissionPromptObservation>();
+  // Every permission-hook episode tag of every prompt alert, newest alert first, read once per tick when the first clear
+  // needs it, rather than one scan of the alert rows per observed seat. A seat's pick is the first entry whose tag starts
+  // with its prefix: the newest alert (ts_created, then qitem_id, both descending) that the per-seat LIMIT 1 chose. The
+  // loop below writes only transitions (appendMarker), never a row's tags or ts_created, so the snapshot stays exact.
+  let permissionAlertTags: Array<{ qitem_id: string; value: string }> | undefined;
   try {
     for (const observation of deps.readPermissionPrompts?.() ?? []) {
       const { state } = observation;
@@ -1593,10 +1610,13 @@ async function advancePromptRefusals(
       // without reopening or changing the owner's disposition; the next prompt gets a new key.
       if (state === "clear") {
         const prefix = `${PROMPT_EPISODE_TAG}${observation.destination}|permission-hook:${observation.episode}|`;
-        const latest = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE ${PROMPT_ALERT_ROWS}
-          AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
-          AND EXISTS (SELECT 1 FROM json_each(tags) WHERE substr(value, 1, ?) = ?)
-          ORDER BY ts_created DESC, qitem_id DESC LIMIT 1`).get(PROMPT_ALERT_TAG, prefix.length, prefix) as { qitem_id: string } | undefined;
+        permissionAlertTags ??= deps.db.prepare(`SELECT q.qitem_id, j.value FROM (
+            SELECT qitem_id, tags, ts_created FROM queue_items WHERE ${PROMPT_ALERT_ROWS}
+              AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)) q, json_each(q.tags) j
+          WHERE j.type = 'text' AND substr(j.value, 1, ?) = ? AND instr(j.value, '|permission-hook:') > 0
+          ORDER BY q.ts_created DESC, q.qitem_id DESC`)
+          .all(PROMPT_ALERT_TAG, PROMPT_EPISODE_TAG.length, PROMPT_EPISODE_TAG) as Array<{ qitem_id: string; value: string }>;
+        const latest = permissionAlertTags.find(tag => tag.value.startsWith(prefix));
         const row = latest && deps.queueRepo.getById(latest.qitem_id);
         if (row && !["pending", "in-progress", "blocked"].includes(row.state)
           && !deps.queueRepo.listTransitions(row.qitemId).some(t => t.actorSession === LADDER_ACTOR && t.transitionNote === PROMPT_CLEARED_NOTE)) {

@@ -39,7 +39,7 @@ export interface AttentionAggregatorDeps {
   listLocalAttention: () => AttentionItem[];
   /** settings-store.listFeedHostSubscriptions (the G15-P1 dynamic class). */
   listSubscriptions: () => Array<{ hostId: string; enabled: boolean }>;
-  /** S11's shared reader — called lazily, only when a remote sub exists. */
+  /** S11's shared reader — called lazily for a remote target/subscription. */
   loadRegistry: () => HostRegistryLoadResult;
   fetchImpl?: typeof fetch;
   env?: Record<string, string | undefined>;
@@ -111,13 +111,18 @@ async function readHostAttention(hostId: string, reg: HostRegistryLoadResult, de
   }
 }
 
-/** One merged attention payload: local ALWAYS included (stamped with the
- *  contract's LOCAL_HOST_ID), each enabled remote host fanned out under the
- *  read deadline + fixed cap, per-host status complete by construction. */
-export async function aggregateAttention(deps: AttentionAggregatorDeps): Promise<AggregatedPayload<AttentionItem>> {
+/** Without a target, merge local attention and enabled remote subscriptions.
+ *  An explicit target selects only that host before any other reads. Remote
+ *  targets use the same registry, credentials and per-host read deadline. */
+export async function aggregateAttention(deps: AttentionAggregatorDeps, host?: string): Promise<AggregatedPayload<AttentionItem>> {
+  if (host !== undefined && host !== LOCAL_HOST_ID) {
+    const outcome = await readHostAttention(host, deps.loadRegistry(), deps);
+    return { items: outcome.items, hosts: [outcome.status] };
+  }
   const localItems = deps.listLocalAttention().map((i) => ({ ...i, hostId: LOCAL_HOST_ID }));
   const hosts: PerHostStatus[] = [{ hostId: LOCAL_HOST_ID, status: "ok" }];
   const items: AttentionItem[] = [...localItems];
+  if (host === LOCAL_HOST_ID) return { items, hosts };
 
   const subs = deps.listSubscriptions().filter((s) => s.enabled);
   if (subs.length === 0) {

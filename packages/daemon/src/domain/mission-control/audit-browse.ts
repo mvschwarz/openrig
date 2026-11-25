@@ -24,7 +24,7 @@ export interface AuditQueryInput {
   until?: string;
   /** Default 50; capped at 200. */
   limit?: number;
-  /** Pagination cursor: returns rows whose action_id < beforeId. */
+  /** Pagination cursor: returns rows ordered after the action identified by beforeId. */
   beforeId?: string;
   /** OPR.0.4.4.19 FR-9 — the scope-approval target filters (the pinned
    *  audit_notes_json shape's read path). These make Packet 2's one-query
@@ -126,12 +126,9 @@ export class MissionControlAuditBrowse {
       params.push(input.until);
     }
     if (input.beforeId) {
-      // Look up the cursor row's rowid so pagination uses SQLite's
-      // monotonic insertion order (deterministic) rather than ULID
-      // action_id (whose same-ms tail is random; non-deterministic
-      // for tiebreaks). Filed lesson:
-      // feedback_ulid_tiebreaker_nondeterministic.md.
-      where.push("rowid < (SELECT rowid FROM mission_control_actions WHERE action_id = ?)");
+      // The cursor must follow the same (acted_at, rowid) order as the page. Rowid alone skips or repeats
+      // entries when timestamps are not in insertion order. Use rowid only as the tie-breaker for equal times.
+      where.push("(acted_at, rowid) < (SELECT acted_at, rowid FROM mission_control_actions WHERE action_id = ?)");
       params.push(input.beforeId);
     }
     const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";

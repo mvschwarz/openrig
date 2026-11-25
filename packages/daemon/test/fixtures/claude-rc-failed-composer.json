@@ -1,0 +1,11 @@
+{
+  "provenance": "Claude Code 2.1.330 idle seat whose Remote Control connection failed, so its footer draws \"/rc failed\" on its own row under the mode footer and the update banner; every draft-aware send to it held as draft_input_unknown. Captured read-only on 2026-11-25 with the captureComposerSnapshot protocol (cursor, capture-pane -e -p, cursor). Sanitized by the seat's owner before use as a test fixture: the conversation rows above the box replaced by neutral test output and the opening rule's seat label anonymized; the composer, footer rows, styles and cursor (80x24, x 2, y 18) are as captured. Sanitized source sha256 92780b82eccaed54073e1cdfbecde0c22048e0b364fe64739a16f9ed7b343c9e.",
+  "screen": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n⏺ Test output.\n✻ Worked for 1s\n\u001b[38;5;244m──────────────────────────────────            sample-seat@sample-rig           ─\n\u001b[39m❯ \n\u001b[38;5;244m────────────────────────────────────────────────────────────────────────────────\n\u001b[39m  \u001b[38;5;211m⏵⏵\u001b[39m \u001b[38;5;211mbypass\u001b[39m \u001b[38;5;211mpermissions\u001b[39m \u001b[38;5;211mon\u001b[38;5;246m ·\u001b[39m \u001b[38;5;44m1\u001b[39m \u001b[38;5;44mshell\u001b[38;5;246m ·\u001b[39m \u001b[38;5;246m↓ to manage\u001b[39m\n                                        \u001b[38;5;114m✔\u001b[39m \u001b[38;5;114mUpdate\u001b[39m \u001b[38;5;114minstalled\u001b[39m \u001b[38;5;114m·\u001b[39m \u001b[38;5;114m/restart\u001b[39m \u001b[38;5;114mto\u001b[39m \u001b[38;5;114mapply\u001b[39m\n                                                                    \u001b[38;5;211m/rc\u001b[39m \u001b[38;5;211mfailed\u001b[39m\n\n",
+  "cursor": {
+    "x": 2,
+    "y": 18,
+    "width": 80,
+    "height": 24
+  },
+  "inMode": false
+}

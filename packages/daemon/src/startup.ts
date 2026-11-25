@@ -4,6 +4,7 @@ import { RunnerChannel } from "./domain/runner-channel.js";
 import { ActivityGrantStore } from "./domain/activity-grants.js";
 import { runnerGrantIssuer } from "./domain/runner-grant-launch.js";
 import { piAccountStateRoot } from "./domain/pi-account-state.js";
+import { SeatColdStarter } from "./domain/seat-cold-start.js";
 import { EnvironmentStartup } from "./domain/environment-startup.js";
 import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
@@ -175,6 +176,9 @@ import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME 
 import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
 import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
+import { makeSeatPoolExecutor, seatPoolQueueEffects } from "./domain/seat-pool-executor.js";
+import { SeatLifecycleService } from "./domain/seat-lifecycle-service.js";
+import { convergeOp } from "./domain/topology-converge.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
@@ -225,6 +229,7 @@ import { restoreExistingRigUnattended } from "./domain/existing-rig-restore.js";
 import { lstatLinkInfo } from "./domain/restore-guidance.js";
 import { managedBlockRecords } from "./domain/managed-block-records.js";
 import { noticeHarnessNotStarted } from "./domain/harness-not-started-notice.js";
+import { noticeRosterReady } from "./domain/roster-ready-notice.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -462,6 +467,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const topologyValidateRig = makeTopologyDestinationCheck({
     findRigsByName: (name) => rigRepo.findRigsByName(name),
     loadHumanRegistry: () => loadHumanRegistry(),
+    db,
   });
   // Seat absence in positively known local topology is advice, never admission
   // authority. Keep every typed destination intact, including adopted aliases.
@@ -873,6 +879,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   // #3253: a seat's own process limits (rig spec `process_limits`), read from its node at each launch.
   tmuxAdapter.seatProcessLimits = (nodeId) => rigRepo.getNodeProcessLimits(nodeId);
+  // #80: the rig whose slice a seat's new scopes go beneath (rig spec `seat_slice: rig`), read at each launch.
+  tmuxAdapter.seatSliceRig = (nodeId) => rigRepo.getNodeSeatSliceRig(nodeId);
   const tmuxOptionDefaults = new TmuxOptionDefaultsApplier({
     tmuxAdapter,
     platform: opts?.tmuxOptionPlatform,
@@ -1002,6 +1010,25 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     armContinuity: async (rigId, nodeId) => persistedArmSeatContinuity ? persistedArmSeatContinuity(rigId, nodeId) : null,
     harnessNotStartedNotice: (input) => noticeHarnessNotStarted(db, queueRepoInstance, input),
   });
+
+  // #2829 slice 1 — queue-driven seat cold start: the queue's positive no-receiver
+  // evidence hands dormant opted-in seats of running rigs to the existing single-seat
+  // launch door (launchSingleNode), which holds the delivery-guard lifecycle lease.
+  // Late-wired here because the restore orchestrator is constructed after the queue;
+  // the launcher itself is assigned once the runtime adapters map exists (a resume
+  // needs the adapter to verify and relaunch the harness — without it the door fails
+  // closed to awaiting-decision).
+  let coldStartLaunch: ((rigId: string, logicalId: string) => Promise<{ ok: boolean; code?: string; message?: string }>) | undefined;
+  const seatColdStarter = new SeatColdStarter({
+    deliveryGuard,
+    db,
+    launchSingleNode: (rigId, logicalId) => coldStartLaunch
+      ? coldStartLaunch(rigId, logicalId)
+      : Promise.resolve({ ok: false, code: "launcher_not_ready", message: "cold-start launcher is not ready" }),
+    probeSession: (sessionName) => tmuxAdapter.probeSession(sessionName),
+    getNodeLaunchRecipe: (nodeId) => rigRepo.getNodeLaunchRecipe(nodeId),
+  });
+  queueRepoInstance.attachWakeWithoutReceiverNotifier((destination, pass) => seatColdStarter.notify(destination, pass));
 
   // Connect to cmux at startup — degrades gracefully if absent
   await cmuxAdapter.connect();
@@ -1370,6 +1397,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const podInstantiator = new PodRigInstantiator({
     db, rigRepo, podRepo,
+    rosterReadyNotice: (rigId, sessions) => noticeRosterReady(queueRepoInstance, rigId, sessions),
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
     adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter, runnerGrants }),
@@ -1452,6 +1480,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     "stub": stubAdapter,
     "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter(),
   }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter, runnerGrants });
+  // #2829 slice 1 — the cold-start launcher, now that the runtime adapters exist:
+  // a resume needs its adapter to verify continuity and relaunch the harness (the
+  // door fails closed to awaiting-decision without one), as the HTTP launch routes do.
+  coldStartLaunch = (rigId, logicalId) => restoreOrchestrator.launchSingleNode(rigId, logicalId, {
+    adapters: runtimeAdaptersMap,
+    fsOps: { exists: (path: string) => fs.existsSync(path) },
+    requireCurrentOccupant: true,
+  });
   let kernelBootTracker: import("./domain/kernel-boot-tracker.js").KernelBootTracker | undefined;
   try {
     const { bootKernelIfNeeded } = await import("./domain/kernel-boot.js");
@@ -2587,12 +2623,44 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     sessionTransport.setUsageLimitObserver(readUsageLimitState);
     // #3395 (Piece 1): the seat pool policy is composed here and not handed to the engine below, so the watchdog does
     // not run it and nothing registers a seat-pool job: the job stays unarmed until the activation change adds the
-    // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start.
+    // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start. The policy hands each
+    // evaluation to the executor, composed with the queue, the outbox's held messages, the delivery guard's custody,
+    // the seats' activity and the rig's events, the drain's effects (the delivery guard's lifecycle lease, the
+    // `auto-rehydrate` capture and the checked seat stop), and the add: the model member as the export writes it, and the
+    // member add of `rig add` (convergeOp over this daemon's instantiator); it runs only through the policy.
     const seatPoolSlots = new SeatPoolSlotsRepository(db);
-    const seatPoolPolicy = makeSeatPoolPolicy({
-      readBlock: (modelNodeId) => rigRepo.getNodePool(modelNodeId),
-      readSlots: (modelNodeId) => seatPoolSlots.forModel(modelNodeId),
+    const seatPoolStops = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter });
+    const seatPoolExecutor = makeSeatPoolExecutor({
+      db,
+      rigRepo,
+      slots: seatPoolSlots,
+      jobsRepo: watchdogJobsRepoInstance,
+      queue: seatPoolQueueEffects(queueRepoInstance),
+      heldCount: (nodeId) => outboxHandlerInstance.heldCount(nodeId),
+      confirmedStopped: (nodeId) => nodeExecutorConfirmedStopped(db, nodeId),
+      seatState: (nodeId) => seatActivityService.getSeatState(nodeId),
+      custody: (nodeIds, fn) => deliveryGuard.custody(nodeIds, fn),
+      now: () => new Date(),
+      drain: {
+        lifecycle: (nodeIds, fn) => deliveryGuard.lifecycle(nodeIds, fn),
+        // The refresh rig down runs before its snapshot, for the session the drain stops.
+        refresh: async ({ rigId, sessionId }) => {
+          await resumeMetadataRefresher.refresh(sessionRegistry.getLatestLiveSessions(rigId).filter((s) => s.sessionId === sessionId));
+        },
+        capture: (rigId) => ({ snapshotId: snapshotCapture.captureSnapshot(rigId, "auto-rehydrate").id }),
+        stopSeat: async ({ seatRef, reason, expected, recheck }) => {
+          const stopped = await seatPoolStops.stopSeat({ seatRef, reason, operator: null, expected, ...(recheck ? { recheck } : {}) });
+          if (stopped.ok) return { ok: true, ...(stopped.alreadyDown ? { alreadyDown: true as const, ...(stopped.message ? { message: stopped.message } : {}) } : {}) };
+          return { ok: false, code: stopped.code, message: stopped.message, ...(stopped.partialEffect ? { partialEffect: true } : {}) };
+        },
+      },
+      add: {
+        exportMember: (rigId, modelNodeId) => rigSpecExporter.exportedRawMemberFromNode(rigId, modelNodeId),
+        converge: (rigId, op, rigRoot, opts) => convergeOp({ instantiator: podInstantiator }, rigId, op, rigRoot, opts),
+        makeFolder: (folder) => { fs.mkdirSync(folder, { recursive: true }); },
+      },
     });
+    const seatPoolPolicy = makeSeatPoolPolicy({ cycle: (job) => seatPoolExecutor.cycle(job) });
     void seatPoolPolicy;
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       deliveryDeferred: (jobId, session) => queueRepoInstance.deliveryDrains.holds(session, jobId),

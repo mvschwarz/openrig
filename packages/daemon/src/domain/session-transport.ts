@@ -10,7 +10,7 @@ import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { createHash, randomUUID } from "node:crypto";
-import { CLAUDE_NOT_STATUS_LINE_ROW, CLAUDE_STATUS_DECORATIONS, CLAUDE_STATUS_WARNINGS, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+import { CLAUDE_NOT_STATUS_LINE_ROW, CLAUDE_REMOTE_CONTROL_ROWS, CLAUDE_STATUS_DECORATIONS, CLAUDE_STATUS_WARNINGS, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
   composerContainsOwnedText,
   composerNumberedChoicePattern,
@@ -362,11 +362,15 @@ function skipClaudeStatusRows(lines: string[], from: number): number {
   while (bar >= 0) {
     const row = lines[bar]!.trim();
     if (row && !CLAUDE_STATUS_WARNINGS.some(pattern => pattern.test(row)) &&
-        !CLAUDE_STATUS_DECORATIONS.some(pattern => pattern.test(row))) break;
+        !CLAUDE_STATUS_DECORATIONS.some(pattern => pattern.test(row)) &&
+        !CLAUDE_REMOTE_CONTROL_ROWS.some(pattern => pattern.test(row))) break;
     bar--;
   }
   return bar;
 }
+
+/** Claude's Remote Control indicator row, in any label the footer search skips. */
+const isRemoteControlRow = (row: string): boolean => row === "/rc" || CLAUDE_REMOTE_CONTROL_ROWS.some(pattern => pattern.test(row));
 
 /** The first row of Claude's task panel when it sits right under a recognized footer (#2700), or -1. The panel is
  * recognized in its own shape only, past blank and known status rows (#2605's banner can sit between them). */
@@ -561,6 +565,10 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
   if (lines.length > height || !lines[y]) return unknown("incomplete_frame", snapshot.cursor);
   const footerAt = findClaudeFooterIndex(lines);
   const footer = lines[footerAt]?.trim() ?? "";
+  // Claude draws its Remote Control indicator inverse while it is selected (↓), when Enter opens its panel.
+  if (lines.slice(footerAt + 1).some((line, i) => isRemoteControlRow(line.trim()) && styled[footerAt + 1 + i]!.inverseCells.some(Boolean))) {
+    return unknown("unrecognized_composer", snapshot.cursor);
+  }
   const candidates: ComposerInput[] = [];
   for (let start = 0; start <= y; start++) {
     const prompt = readComposerPromptLine(lines[start] ?? "", promptClass);
@@ -1507,6 +1515,12 @@ function currentMenuKeyHint(lines: string[]): boolean {
 const CODEX_STATUS_LINE = /^ {2}[^\s·][^·]* · [~/]/;
 const CODEX_NATIVE_STATUS_LINE = /^ {2}[^\s·][^·]* · [A-Za-z]:[\\/]/;
 const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2 to view\s*$|^\s*tab to queue(?: message)?(?:\s*$|\s{2,}| · )/;
+// A person can choose the status line's items with Codex's `/statusline` (0.170.0: model, approval mode, context,
+// limits, version and more; its default is model, current dir and thread name, which CODEX_STATUS_LINE matches), so a
+// chosen row needn't carry a path: a reporter's 0.170.0 seat drew `GPT-6.2-Sol xhigh · Approve for me · Context 72% used
+// · weekly 31% left · 0.170.0`. Such a row counts only with at least two items (Codex joins them with ` · `) and a known
+// hint row under it. A one-item row, or one with no hint row, still needs the path shape above.
+const CODEX_CHOSEN_STATUS_LINE = /^ {2}[^\s·›»❯>][^·]* · \S/;
 // Codex shows a long paste as this label until it is submitted. Matched on the normalized body.
 const CODEX_COLLAPSED_PASTE = /^\[PastedContent\d+chars\]$/;
 
@@ -1518,7 +1532,10 @@ function codexFooterSeparator(lines: string[], allowNativePath = false): number 
   let footerStart = last;
   while (footerStart > 0 && lines[footerStart - 1]!.trim()) footerStart--;
   const footer = lines.slice(footerStart, last + 1);
-  if (last < 0 || footer.length > 2 || !(CODEX_STATUS_LINE.test(footer[0]!) || (allowNativePath && CODEX_NATIVE_STATUS_LINE.test(footer[0]!)))
+  const chosenStatusLine = footer.length === 2 && CODEX_CHOSEN_STATUS_LINE.test(footer[0]!) && !CODEX_HINT_ROW.test(footer[0]!)
+    && !composerNumberedChoicePattern(composerPromptClassForRuntime("codex")).test(footer[0]!.trimStart());
+  if (last < 0 || footer.length > 2
+    || !(CODEX_STATUS_LINE.test(footer[0]!) || (allowNativePath && CODEX_NATIVE_STATUS_LINE.test(footer[0]!)) || chosenStatusLine)
     || !footer.slice(1).every((row) => CODEX_HINT_ROW.test(row))) return -1;
   const separator = footerStart - 1;
   return separator >= 1 && !lines[separator]!.trim() ? separator : -1;

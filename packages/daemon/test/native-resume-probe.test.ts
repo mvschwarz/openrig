@@ -6,6 +6,7 @@ import {
   buildCodexResumeCore,
   claudeTrustPromptFocus,
   isProbeShellReady,
+  noConversationFoundOwner,
 } from "../src/domain/native-resume-probe.js";
 
 import { CLAUDE_BYPASS_CONSENT } from "./fixtures/claude-bypass-consent.js";
@@ -18,7 +19,7 @@ const firstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login.t
 const legacyFirstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login-0.162.1.txt", import.meta.url), "utf8");
 const apiKeyLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-api-key-login.txt", import.meta.url), "utf8");
 const narrowFirstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login-80x24.txt", import.meta.url), "utf8");
-const managedFirstLoginPrompts = ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt"]
+const managedFirstLoginPrompts = ["codex-first-login-no-daemon.txt", "codex-first-login-no-daemon-80x24.txt", "codex-api-key-login-no-daemon.txt", "codex-first-login-0.171.0.txt"]
   .map(name => fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
 
 describe("Codex first-login readiness", () => {
@@ -1910,5 +1911,94 @@ describe("claudeTrustPromptFocus (#2820 item 2)", () => {
   });
   it("is 'unknown' on any other option set", () => {
     expect(claudeTrustPromptFocus(plain.replace("  Yes, I trust this folder", "  Yes, I trust this folder\n  No, ask me later"))).toBe("unknown");
+  });
+});
+
+// #3843: a reused pane can still show an earlier launch's "No conversation found". A staged launch is run by one typed line
+// naming its script, which is unique to the launch, so only a report below the last place that whole line shows is this
+// launch's.
+describe("whose \"No conversation found\" a resume's pane shows (noConversationFoundOwner)", () => {
+  const name = "openrig-tmux-send-12345-0f0e0d0c-1111-4222-8333-444455556666.txt";
+  const typedLine = `( . '/tmp/${name}' )`;
+  const typed = `% ${typedLine}`;
+  const earlier = "No conversation found with session ID: old-1";
+  const ours = "No conversation found with session ID: abc-123";
+  const read = { typedLine, unread: false };
+
+  it("is this launch's only below the line typed to run the launch", () => {
+    expect(noConversationFoundOwner(`${typed}\n${ours}\n% `, read)).toEqual({ owner: "this" });
+    expect(noConversationFoundOwner(`${earlier}\n${typed}\n${ours}\n% `, read)).toEqual({ owner: "this" });
+  });
+
+  it("is an earlier launch's above that line, with what this launch has drawn below it", () => {
+    expect(noConversationFoundOwner(`${earlier}\n${typed}\nClaude Code v2.1.310\n❯ `, read))
+      .toEqual({ owner: "earlier", since: "Claude Code v2.1.310\n❯ " });
+    // The same text redrawn above the line, once or twice, is still the earlier launch's.
+    expect(noConversationFoundOwner(`${earlier}\n${earlier}\n${earlier}\n${typed}\n`, read)).toEqual({ owner: "earlier", since: "" });
+  });
+
+  it("is never this launch's while its shell hasn't read the launch, even below the line's echo", () => {
+    expect(noConversationFoundOwner(`${typed}\n${ours}`, { typedLine, unread: true })).toEqual({ owner: "earlier" });
+  });
+
+  it("can't be placed when the line isn't in view", () => {
+    expect(noConversationFoundOwner(`${ours}\n% `, read)).toEqual({ owner: "unknown" });
+    // Only the line's last row is left in the capture: its first rows scrolled out.
+    expect(noConversationFoundOwner(`0d0c-1111-4222-8333-444455556666.txt' )\n${ours}\n% `, read)).toEqual({ owner: "unknown" });
+  });
+
+  it("keeps any report as this launch's for a launch typed inline (nothing staged)", () => {
+    expect(noConversationFoundOwner(`${earlier}\n% `, { unread: false })).toEqual({ owner: "this" });
+  });
+
+  // review50-r2 (reviewer-tests.patch): the script's name in output is not the typed line.
+  it("doesn't move the line for a later message naming the script", () => {
+    expect(noConversationFoundOwner(`$ ${typedLine}\n${ours}\ndiagnostic: ${name} finished\n$ `, read)).toEqual({ owner: "this" });
+    // The shell's own error naming the script, as bash prints it, is output too.
+    expect(noConversationFoundOwner(`${earlier}\n$ ${typedLine}\nbash: /tmp/${name}: Permission denied\n$ `, read))
+      .toEqual({ owner: "earlier", since: `bash: /tmp/${name}: Permission denied\n$ ` });
+  });
+
+  it("takes no line from the script's name alone", () => {
+    expect(noConversationFoundOwner(`diagnostic: ${name}\n${ours}\n$ `, read)).toEqual({ owner: "unknown" });
+    expect(noConversationFoundOwner(`$ /bin/sh /tmp/${name}\n${ours}\n$ `, read)).toEqual({ owner: "unknown" });
+  });
+
+  it("matches the line split at every position inside the script's name", () => {
+    for (let cut = 1; cut < name.length; cut++) {
+      const wrapped = `$ ${typedLine}`.replace(name, name.slice(0, cut) + "\n" + name.slice(cut));
+      expect(noConversationFoundOwner(`${wrapped}\n${ours}`, read), String(cut)).toEqual({ owner: "this" });
+    }
+  });
+
+  it("matches the line split at one of its spaces, which the capture drops from the row's end", () => {
+    // capture-pane trims each row's trailing spaces, so a row that wraps at a space loses it.
+    expect(noConversationFoundOwner(`% (\n. '/tmp/${name}'\n)\n${ours}`, read)).toEqual({ owner: "this" });
+    expect(noConversationFoundOwner(`% ( .\n'/tmp/${name}' )\n${ours}`, read)).toEqual({ owner: "this" });
+  });
+
+  // Captured from real tmux 40 columns wide (a throwaway server): zsh still running its startup files when the launch was
+  // typed, so the terminal echoed it once, then zsh's line editor drew it again after its prompt. capture-pane -J rejoins
+  // only the first (the terminal wrapped it); zsh wraps its own line, so that one stays split, mid-name.
+  const narrow = [
+    "( . '/tmp/openrig-tmux-send-12345-0f0e0d",
+    "0c-1111-4222-8333-444455556666.txt' )",
+    "% ( . '/tmp/openrig-tmux-send-12345-0f0e",
+    "0d0c-1111-4222-8333-444455556666.txt' )",
+  ].join("\n");
+  it("finds the line when a narrow pane splits it across rows, and goes by the last place it shows", () => {
+    expect(noConversationFoundOwner(`${narrow}\nNo conversation found with session ID: a\nbc-123\n%`, read)).toEqual({ owner: "this" });
+    expect(noConversationFoundOwner(`${earlier}\n${narrow}\n%`, read)).toEqual({ owner: "earlier", since: "%" });
+    // Between the terminal's echo and the shell's own line is still above the line the shell read.
+    const [echo1, echo2, line1, line2] = narrow.split("\n");
+    expect(noConversationFoundOwner([echo1, echo2, earlier, line1, line2, "%"].join("\n"), read)).toEqual({ owner: "earlier", since: "%" });
+  });
+
+  it("finds the other typed forms: /bin/sh with a quoted path, and fish's", () => {
+    const sh = `/bin/sh '/tmp/launch '"'"'quoted'"'"'.sh'`;
+    expect(noConversationFoundOwner(`${earlier}\n$ ${sh}\n${ours}`, { typedLine: sh, unread: false })).toEqual({ owner: "this" });
+    const fish = `if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :'; source '/tmp/${name}'; else; /bin/sh '/tmp/${name}'; end`;
+    expect(noConversationFoundOwner(`${earlier}\n> ${fish.slice(0, 50)}\n${fish.slice(50)}\n${ours}`, { typedLine: fish, unread: false }))
+      .toEqual({ owner: "this" });
   });
 });

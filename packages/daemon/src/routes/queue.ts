@@ -1,3 +1,4 @@
+import { recordedQueueGraph } from "../domain/queue-recorded-graph.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import { Hono, type Context } from "hono";
 import { classifierOccupant } from "../domain/classification-sources.js";
@@ -416,6 +417,7 @@ export function queueRoutes(): Hono {
         : err.code === "qitem_not_claimable" ? 409
         : err.code === "qitem_not_in_progress" ? 409
         : err.code === "qitem_already_terminal" ? 409
+        : err.code === "relayed_answer_refused" ? 409
         // An update's expected state (--expect-state) no longer matches the row; nothing was written.
         : err.code === "qitem_state_changed" ? 409
         // OPR.0.4.6.MH3 Q-a: same minted id, different destination/source =
@@ -1418,6 +1420,28 @@ export function queueRoutes(): Hono {
     }
   });
 
+  app.post("/:qitemId/relayed-answer", async (c) => {
+    const body = await c.req.json<Record<string, unknown> | null>().catch(() => null);
+    const { attributedTo, text, channel, questionId, optionId, answeredAt, actor } = body ?? {};
+    if (typeof attributedTo !== "string" || !attributedTo.trim() || typeof text !== "string" || !text.trim()
+      || typeof channel !== "string" || !channel.trim() || (questionId !== undefined && typeof questionId !== "string")
+      || (optionId !== undefined && typeof optionId !== "string")
+      || (answeredAt !== undefined && (typeof answeredAt !== "string"
+        || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(answeredAt) || !Number.isFinite(Date.parse(answeredAt))))) {
+      return c.json({ error: "invalid_relayed_answer", message: "Pass attributedTo, verbatim text and channel; name questionId/optionId as applicable, and supply answeredAt as an ISO timestamp only if known." }, 400);
+    }
+    const identity = requireSenderIdentity(c, { verb: "relay an answer", bodyClaim: typeof actor === "string" ? actor : null });
+    if (!identity.ok) return identity.response;
+    { const held = switchCustody(c, identity.session); if (held) return held; }
+    try {
+      return c.json(getRepo(c).writeRelayedAnswer({ qitemId: c.req.param("qitemId"), actorSession: identity.session,
+        identityProvenance: resolveRecordedProvenance(c, identity),
+        relay: { attributedTo, text, channel, questionId, optionId, answeredAt } }));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
   // A decision made on the person's behalf, inside the decision room of the mode they have on. Recorded by the agent that
   // asked, on the ask's own row, beside the person's answers and never as one; refused when there's no room to decide in.
   app.post("/:qitemId/delegated-decision", async (c) => {
@@ -1559,16 +1583,21 @@ export function queueRoutes(): Hono {
         .filter((tag) => tag.startsWith("project:") && tag.slice("project:".length).trim())
         .map((tag) => tag.slice("project:".length).trim()))];
       if (projectIds.length === 0) return { root: missionsRoot };
+      // Whether another root could hold a same-named mission when the configured root stands in for the row's project:
+      // an unreadable catalogue can't say, and a readable one can only if it lists project roots. With no catalogue
+      // configured the configured root is the only one, so the stand-in is no ambiguity (the reasons are unchanged).
+      const otherRoots = catalogStatus === "unavailable" || (catalogStatus === "usable" && projectMissionsRoots.size > 0);
       if (projectIds.length !== 1) {
-        return { root: missionsRoot, reason: `multiple project tags (${projectIds.join(", ")}); used configured root` };
+        return { root: missionsRoot, reason: `multiple project tags (${projectIds.join(", ")}); used configured root`, ambiguous: otherRoots };
       }
       const projectId = projectIds[0]!;
       if (catalogStatus !== "usable") {
-        return { root: missionsRoot, reason: `project:${projectId} could not be used because the workspace catalog is ${catalogStatus === "missing" ? "not configured" : "unavailable"}; used configured root` };
+        return { root: missionsRoot, reason: `project:${projectId} could not be used because the workspace catalog is ${catalogStatus === "missing" ? "not configured" : "unavailable"}; used configured root`, ambiguous: otherRoots };
       }
       const project = projectMissionsRoots.get(projectId);
-      if (!project) return { root: missionsRoot, reason: `project:${projectId} is not in the project catalogue; used configured root` };
-      if (project.error || !project.root) return { root: missionsRoot, reason: `project:${projectId} is unavailable in the project catalogue; used configured root` };
+      if (!project) return { root: missionsRoot, reason: `project:${projectId} is not in the project catalogue; used configured root`, ambiguous: otherRoots };
+      // The row's own project is catalogued but its root can't be read: its mission may be there.
+      if (project.error || !project.root) return { root: missionsRoot, reason: `project:${projectId} is unavailable in the project catalogue; used configured root`, ambiguous: true };
       return { root: project.root };
     };
     // Deliberately NOT position.asDestination.recent: that is a capped, mixed-state display
@@ -1591,25 +1620,21 @@ export function queueRoutes(): Hono {
         ?.resolve({ sessionName: transportSenderSession(c) ?? session, compact: true });
       role = deriveRole(c.get("db" as never) as Database.Database | undefined, identity?.identity.nodeId ?? null);
     } catch { /* Ambiguous/unavailable identity is not an absent role declaration. */ }
-    // OPR.0.7.0.12: labelled work candidates for the refocus packet, only on request, so the
-    // default answer is unchanged. In-progress rows are the candidate evidence, so they come
-    // from the same unbounded read as the derivation; held and next work are bounded display lists.
+    // Held and next work are bounded display lists, read only in blocked and pending states.
     // Each list gets its own bound, so newer pending rows can never push a set-aside row out of
     // "held" (a parked row silently missing there is the costliest miss).
-    if (c.req.query("candidates") === "1") {
+    const readHeldAndNext = () => {
       const held = repo.list({ destinationSession: session, state: ["blocked"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
       const next = repo.list({ destinationSession: session, state: ["pending"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
-      const heldTruncated = held.length > WORK_CANDIDATE_LIST_LIMIT;
-      const nextTruncated = next.length > WORK_CANDIDATE_LIST_LIMIT;
-      const workCandidates = deriveWorkCandidates(
-        [...inProgress, ...held.slice(0, WORK_CANDIDATE_LIST_LIMIT), ...next.slice(0, WORK_CANDIDATE_LIST_LIMIT)],
-        currentWorkRoot,
-        {
-          getRow: (qitemId) => repo.getById(qitemId) ?? null,
-          continuationOf: (qitemId) => repo.currentParkContinuation(qitemId),
-        },
-        missionsRoot,
-      );
+      return { held: held.slice(0, WORK_CANDIDATE_LIST_LIMIT), next: next.slice(0, WORK_CANDIDATE_LIST_LIMIT),
+        heldTruncated: held.length > WORK_CANDIDATE_LIST_LIMIT, nextTruncated: next.length > WORK_CANDIDATE_LIST_LIMIT };
+    };
+    // OPR.0.7.0.12: labelled work candidates for the refocus packet, only on request, so the
+    // default answer is unchanged. In-progress rows are the candidate evidence, so they come
+    // from the same unbounded read as the derivation.
+    if (c.req.query("candidates") === "1") {
+      const { held, next, heldTruncated, nextTruncated } = readHeldAndNext();
+      const workCandidates = deriveWorkCandidates([...inProgress, ...held, ...next], currentWorkRoot, lookups, missionsRoot);
       // The selected project's own missions, by its catalog entry's missions root, which may sit outside workspace.root:
       // the trace lists these when it orients from that project. An unhealthy entry adds none and keeps today's listing.
       const selectedMissionsRoot = workProject && "root" in workProject ? projectMissionsRoots.get(workProject.id)?.root : null;
@@ -1620,7 +1645,19 @@ export function queueRoutes(): Hono {
         workCandidates: { ...workCandidates, ...(projectMissions ? { projectMissions } : {}),
           heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
-    return c.json({ ...position, ...derived, ...choiceField, role, workRoots, ...(workProject ? { workProject } : {}) });
+    // Nothing in progress: the seat's held and pending rows, each with its own resolved scope, so refocus can show them
+    // as context (never as current work) from its one lookup. Only on request (held=1), as candidates=1 is, so the
+    // default answer is unchanged. Absent when there are none.
+    let heldField = {};
+    if (c.req.query("held") === "1" && inProgress.length === 0) {
+      const { held, next, heldTruncated, nextTruncated } = readHeldAndNext();
+      if (held.length > 0 || next.length > 0) {
+        // No default missions root: the host's mission listing is the work packet's, not needed here.
+        const scoped = deriveWorkCandidates([...held, ...next], currentWorkRoot, lookups, null);
+        heldField = { heldAndPendingWork: { missionsRoot, held: scoped.held, next: scoped.next, heldTruncated, nextTruncated } };
+      }
+    }
+    return c.json({ ...position, ...derived, ...choiceField, ...heldField, role, workRoots, ...(workProject ? { workProject } : {}) });
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.
@@ -1637,7 +1674,7 @@ export function queueRoutes(): Hono {
   // `state=...`). Composable with destinationSession/sourceSession/
   // targetRepo/limit.
   // OPR.0.4.4.15 FR-1 — the aggregated attention read: ONE payload in the
-  // shared P4 fanout contract ({items, hosts}), local always included,
+  // shared P4 fanout contract ({items, hosts}); absent a host query, local is included,
   // subscribed remote hosts fanned out DAEMON-SIDE (bearer never in the
   // browser). A NEW sibling endpoint by arch ruling 3 — the existing
   // /list?attention=1 wire below stays byte-preserved (the strongest form
@@ -1655,7 +1692,7 @@ export function queueRoutes(): Hono {
       listLocalAttention: () => repo.listAttention({ state: ["pending", "in-progress", "blocked"] }) as unknown as AttentionItem[],
       listSubscriptions: () => (store ? store.listFeedHostSubscriptions() : []),
       loadRegistry: registryLoader,
-    });
+    }, c.req.query("host"));
     return c.json(payload);
   });
 
@@ -1894,6 +1931,23 @@ export function queueRoutes(): Hono {
 
   app.get("/watch", sseHandler);
   app.get("/sse", sseHandler);
+
+  // Ordinary queue read authority; no app request, mutation or cross-host lookup.
+  app.get("/:qitemId/lineage", (c) => {
+    const rootId = c.req.param("qitemId");
+    const graph = recordedQueueGraph(getRepo(c), rootId, { includeAncestors: true });
+    const rootAvailable = graph.nodes.has(rootId);
+    const nodes = [...graph.nodes.values()].map(item => ({
+      qitemId: item.qitemId, state: item.state, body: item.body, summary: item.summary,
+      sourceSession: item.sourceSession, destinationSession: item.destinationSession,
+      replyTo: item.replyTo ?? null, handedOffFrom: item.handedOffFrom, handedOffTo: item.handedOffTo,
+      blockedOn: item.blockedOn, closureReason: item.closureReason, evidenceRef: item.evidenceRef,
+      completion: { status: ["done", "canceled", "denied", "failed", "handed-off"].includes(item.state) ? "closed-as-recorded" : "open" },
+    }));
+    return c.json({ rootId, scope: "this-daemon", status: !rootAvailable ? "unknown" : graph.partial ? "partial" : "available",
+      nodes, edges: graph.edges, partial: graph.partial, partialReasons: graph.partialReasons, unresolved: graph.unresolved,
+      limits: graph.limits, completion: { status: "unknown" }, ...(!rootAvailable ? { error: "qitem_not_found" } : {}) }, rootAvailable ? 200 : 404);
+  });
 
   // GET /:qitemId/transitions — registered before /:qitemId so the literal
   // suffix wins over the bare param route.

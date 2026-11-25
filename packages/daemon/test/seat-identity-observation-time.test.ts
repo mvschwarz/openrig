@@ -149,4 +149,38 @@ describe("identity verdict time belongs to its evidence sample", () => {
     } }).reconcileAll();
     expect(f.store.getForNode(f.node.id)).toMatchObject({ verdict: "verified", observedAt: time(2_000), evidence: { registeredPane: sessionChanged ? "%1" : "%2" } });
   });
+
+  // 0.7.23 r2 C7-X: the periodic sweep stored a newer verdict while a new Codex seat's startup check ran, and rig up
+  // reported the healthy seat as attention_required ("A newer pane identity observation superseded this check").
+  it.each([
+    { newerPid: 43, confirmed: true },
+    { newerPid: 99, confirmed: false },
+  ])("a newer sweep verdict for process $newerPid during a Codex check: confirmed=$confirmed", async ({ newerPid, confirmed }) => {
+    const f = fixture();
+    let clock = 1_000, reads = 0;
+    const result = await rebindAndVerifyPaneIdentity({ db, sessionRegistry: f.registry, nodeId: f.node.id,
+      sessionName: f.name, runtime: "codex", now: () => new Date(clock),
+      tmux: {
+        listPanes: async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }],
+        getPanePid: async () => 42, getPaneCommand: async () => "codex",
+      },
+      listProcesses: async () => {
+        // Between the check's two process samples, the sweep verifies a native process in the same pane.
+        if (++reads === 2) {
+          f.store.upsert({ ...f.verified, observedAt: time(3_000),
+            evidence: { registeredPane: "%1", observedPanePid: 42, observedPid: newerPid, observedCommand: "codex -C /project", matchedLayer: 1 } });
+          clock = 4_000;
+        }
+        return [
+          { pid: 42, ppid: 1, pgid: 42, tpgid: 43, executableName: "sh", command: "sh", startedAt: "start" },
+          { pid: 43, ppid: 42, pgid: 43, tpgid: 43, executableName: "codex", command: "codex -C /project", argv: ["codex", "-C", "/project"], startedAt: "start" },
+        ];
+      },
+    });
+    expect(result).toMatchObject(confirmed
+      ? { ok: true, pane: "%1", pid: 42, nativeProcess: { pid: 43 } }
+      : { ok: false, reason: "identity_unverified", detail: "A newer pane identity observation superseded this check" });
+    // The newer verdict stays stored either way.
+    expect(f.store.getForNode(f.node.id)).toMatchObject({ verdict: "verified", observedAt: time(3_000), evidence: { observedPid: newerPid } });
+  });
 });

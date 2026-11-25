@@ -293,7 +293,7 @@ describe("StartupOrchestrator", () => {
     } finally { nodeFs.rmSync(root, { recursive: true, force: true }); }
   });
 
-  it.each(["codex-first-login.txt", "codex-first-login-0.162.1.txt"])("persists %s as attention and withholds startup context", async (fixture) => {
+  it.each(["codex-first-login.txt", "codex-first-login-0.162.1.txt", "codex-first-login-0.171.0.txt"])("persists %s as attention and withholds startup context", async (fixture) => {
     const seed = seedSession();
     db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(seed.nodeId);
     const firstLoginPrompt = nodeFs.readFileSync(new URL(`./fixtures/${fixture}`, import.meta.url), "utf8");
@@ -317,6 +317,7 @@ describe("StartupOrchestrator", () => {
     expect(result.startupStatus).toBe("attention_required");
     expect(result.errors.join("\n")).toMatch(/sign in/i);
     expect(result.errors.join("\n")).not.toContain("Readiness timeout");
+    expect(result.errors.join("\n")).toContain("Open this seat's terminal and complete Codex's sign-in prompt.");
     expect(adapter.launchHarness).toHaveBeenCalledTimes(1);
     expect(adapter.checkReady).toHaveBeenCalledTimes(1);
     expect(vi.mocked(adapter.deliverStartup).mock.calls.flatMap(([files]) => files)).toEqual([]);

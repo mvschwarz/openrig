@@ -2,6 +2,6 @@
  * Importing this module does not start a server or a daemon; the caller owns start/close.
  */
 export { startMcpHttpServer, McpHttpConfigError } from "./mcp-http.js";
-export type { McpHttpOptions, McpPrincipal, McpGrant, GrantServiceOptions } from "./mcp-http.js";
-export type { McpAccess } from "./mcp-server.js";
+export type { McpHttpOptions, BindingLeaveRequest, BindingLeaveResult, McpPrincipal, McpGrant, GrantServiceOptions } from "./mcp-http.js";
+export type { McpAccess, McpInstructionExtension } from "./mcp-server.js";
 export type { CallerResolver, CallerResolution } from "./mcp-caller-resolver.js";
