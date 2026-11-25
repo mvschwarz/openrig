@@ -2553,7 +2553,8 @@ export class TmuxAdapter {
     const exact = exactTarget(paneTarget, "pane");
     const argv = ["tmux", "respawn-pane", "-t", exact];
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
-    // Everything the replacement gets with -e. Only `env` chooses the scope branch below.
+    // Everything the replacement gets with -e. Only `env` chooses the scope branch below; a seat launch it selects exports
+    // all of it, because its `env -i` would otherwise drop the launchEnv values.
     const paneEnv = opts?.env || opts?.launchEnv ? { ...opts.launchEnv, ...opts.env } : undefined;
     if (paneEnv) for (const [k, v] of Object.entries(paneEnv)) argv.push("-e", `${k}=${v}`);
     const warnings: string[] = [];
@@ -2562,7 +2563,7 @@ export class TmuxAdapter {
     try {
       scopedCommand = opts?.keepLimitOf && !opts.env
         ? await this.keptScopeCommand(opts.keepLimitOf, exact, command, warnings, notices)
-        : await this.scopedLaunchCommand(opts?.env ?? {}, command, warnings, opts?.processLimitsMode, notices);
+        : await this.scopedLaunchCommand(opts?.env ? paneEnv! : {}, command, warnings, opts?.processLimitsMode, notices);
     } catch (error) { if (error instanceof SeatProcessLimitsNotApplied) return processLimitsNotAppliedResult(error); throw error; }
     // Legacy commands remain one argument; the scoped wrapper executes directly before the user shell.
     if (scopedCommand) argv.push(...scopedCommand);

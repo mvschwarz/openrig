@@ -1019,6 +1019,19 @@ describe("a bare respawn that keeps the seat's limit (a restart in place of a se
     expect(h.writes.find(w => w.startsWith("respawn-pane"))).toBe("respawn-pane -t '%1' -c '/work/b' -e 'OPENRIG_SEAT_LAUNCH_DIR=/work/b' 'codex'\n");
   });
 
+  it("#3328: a seat launch given launchEnv as well exports it inside its env -i, and env wins on a shared name", async () => {
+    const h = makeAdapter({});
+    const result = await h.adapter.respawnPane("%1", "codex", { cwd: "/work/b", processLimitsMode: "recovery",
+      env: { OPENRIG_NODE_ID: "node-a", OPENRIG_SEAT_LAUNCH_DIR: "/from/env" },
+      launchEnv: { OPENRIG_SEAT_LAUNCH_DIR: "/from/launch-env", OPENRIG_EXTRA_LAUNCH_META: "/work/b" } });
+    expect(result).toEqual({ ok: true });
+    const exports = h.writes.find(w => w.includes("export OPENRIG_NODE_ID="))!;
+    expect(exports).toContain("export OPENRIG_EXTRA_LAUNCH_META='/work/b'");
+    expect(exports).toContain("export OPENRIG_SEAT_LAUNCH_DIR='/from/env'");
+    expect(exports).not.toContain("/from/launch-env");
+    expect(h.writes.find(w => w.startsWith("respawn-pane"))).toContain("env -i");
+  });
+
   it("a session that removed a variable gets it removed, not the server's", async () => {
     const h = makeAdapter({ limits: { "node-a": 256 }, sessionEnv: "-XDG_RUNTIME_DIR\n", globalEnv: `XDG_RUNTIME_DIR=${RT}\n` });
     await h.adapter.respawnPane("%1", "codex", { keepLimitOf: "node-a" });
