@@ -37,6 +37,13 @@ describe("proof-contract fenced examples", () => {
     expect(parseProofContract(document)).toEqual(["first", "second"]);
   });
 
+  it("indexes only visible promises around comment blocks", () => {
+    const block = ["<!-- deferred", "- [ ] hidden", "```", "-->", "- [ ] shipped",
+      "```md", "<!--", "```", "- [x] verified"].join("\n");
+    expect(parseProofContract("## Proof contract\n" + block)).toEqual(["shipped", "verified"]);
+    expect(parseLogicalCheckboxes(block).map(item => item.sourceLine)).toEqual([5, 9]);
+  });
+
   it("ignores the remainder of an unclosed example", () => {
     expect(parseLogicalCheckboxes("~~~md\n- [ ] example")).toEqual([]);
   });

@@ -46,6 +46,7 @@ export function parseLogicalCheckboxes(block: string | null): LogicalCheckboxIte
   if (!block) return [];
   const lines = block.split(/\r?\n/);
   const out: LogicalCheckboxItem[] = [];
+  let comment = false;
   let fence: { marker: string; length: number } | null = null;
   let current: { checked: boolean; parts: string[]; indent: number; sourceLine: number } | null = null;
 
@@ -57,6 +58,11 @@ export function parseLogicalCheckboxes(block: string | null): LogicalCheckboxIte
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
+    if (comment || (!fence && /^ {0,3}<!--/.test(line))) {
+      flush();
+      comment = !line.includes("-->");
+      continue;
+    }
     // Fenced examples do not declare proof items or shift evidence indexes.
     const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
