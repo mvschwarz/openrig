@@ -128,6 +128,134 @@ describe("SeatLifecycleService", () => {
     return { rig: existing, node, session, sessionName };
   }
 
+  describe("setLaunchWrapper", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    function storedWrapper(nodeId: string) {
+      return (db.prepare("SELECT launch_wrapper FROM nodes WHERE id = ?").get(nodeId) as { launch_wrapper: string | null }).launch_wrapper;
+    }
+
+    it("sets, leaves an identical selection alone, and clears only the addressed seat with an atomic audit", async () => {
+      const { rig, node, sessionName } = seatFixture("wrappers", "dev.impl");
+      const sibling = seatFixture("wrappers", "dev.qa");
+      rigRepo.setNodeLaunchWrapper(sibling.node.id, ["sibling-wrapper"]);
+      const rows = () => ({
+        nodes: db.prepare("SELECT * FROM nodes ORDER BY id").all().map(row => {
+          const { launch_wrapper, ...rest } = row as Record<string, unknown>;
+          return rest;
+        }),
+        sessions: db.prepare("SELECT * FROM sessions ORDER BY id").all(),
+        bindings: db.prepare("SELECT * FROM bindings ORDER BY id").all(),
+        tenures: db.prepare("SELECT * FROM occupant_tenures ORDER BY id").all(),
+      });
+      const before = rows();
+      const terminalCalls = (["createSession", "killSession", "hasSession", "probeSession", "sendText", "sendKeys"] as const)
+        .map(method => vi.spyOn(tmux.adapter, method));
+      const sessionWrites = [vi.spyOn(sessionRegistry, "updateStatus"), vi.spyOn(sessionRegistry, "updateBinding"),
+        vi.spyOn(sessionRegistry, "registerSession")];
+      const stop = vi.spyOn(service, "stopSeat"), launch = vi.spyOn(service, "launchFresh"), restart = vi.spyOn(service, "restartInPlace");
+      const notified: unknown[] = [];
+      eventBus.subscribe(event => {
+        if (event.type === "node.launch_wrapper_changed") {
+          expect(db.inTransaction).toBe(false);
+          expect(storedWrapper(node.id)).toBe(event.to === null ? null : JSON.stringify(event.to));
+          notified.push(event);
+        }
+      });
+      const argv = ["/missing/wrapper", "--flag", "space and 'quotes'"];
+      const input = { seatRef: sessionName, argv, reason: "  select environment  ", operator: "operator@wrappers" };
+      expect(await service.setLaunchWrapper(input)).toEqual({ ok: true,
+        seat: { rigId: rig.id, rigName: "wrappers", logicalId: "dev.impl", nodeId: node.id },
+        from: null, to: argv, changed: true, effect: "next_launch" });
+      expect(storedWrapper(node.id)).toBe(JSON.stringify(argv));
+      expect(await service.setLaunchWrapper(input)).toMatchObject({ ok: true, from: argv, to: argv, changed: false });
+      expect(await service.setLaunchWrapper({ ...input, argv: [] })).toMatchObject({
+        ok: true, from: argv, to: null, changed: true, effect: "next_launch" });
+      expect(storedWrapper(node.id)).toBeNull();
+      expect(await service.setLaunchWrapper({ ...input, argv: [] })).toMatchObject({ ok: true, changed: false, from: null, to: null });
+      expect(eventsOfType(db, "node.launch_wrapper_changed")).toEqual([
+        { type: "node.launch_wrapper_changed", rigId: rig.id, nodeId: node.id, logicalId: "dev.impl",
+          from: null, to: argv, reason: "select environment", operator: "operator@wrappers" },
+        { type: "node.launch_wrapper_changed", rigId: rig.id, nodeId: node.id, logicalId: "dev.impl",
+          from: argv, to: null, reason: "select environment", operator: "operator@wrappers" },
+      ]);
+      expect(notified).toHaveLength(2);
+      expect(storedWrapper(sibling.node.id)).toBe(JSON.stringify(["sibling-wrapper"]));
+      expect(rows()).toEqual(before);
+      for (const call of [...terminalCalls, ...sessionWrites, stop, launch, restart]) expect(call).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, null, "wrapper", {}, [3], [""], ["./wrapper"], ["bin/wrapper"], ["wrapper", "a\0b"], ["wrapper\r"], ["wrapper", "a\nb"]].map(argv => ({ argv })))(
+      "refuses invalid argv $argv without changing the saved selection", async ({ argv }) => {
+        const { node, sessionName } = seatFixture("wrappers", "dev.impl");
+        rigRepo.setNodeLaunchWrapper(node.id, ["original-wrapper"]);
+        expect(await service.setLaunchWrapper({ seatRef: sessionName, argv, reason: "invalid selection" }))
+          .toMatchObject({ ok: false, code: "invalid_launch_wrapper" });
+        expect(storedWrapper(node.id)).toBe(JSON.stringify(["original-wrapper"]));
+        expect(eventsOfType(db, "node.launch_wrapper_changed")).toEqual([]);
+      },
+    );
+
+    it.each(["", " \n "])("requires a non-empty reason (%j)", async reason => {
+      const { node, sessionName } = seatFixture("wrappers", "dev.impl");
+      expect(await service.setLaunchWrapper({ seatRef: sessionName, argv: ["wrapper"], reason }))
+        .toMatchObject({ ok: false, code: "missing_reason" });
+      expect(storedWrapper(node.id)).toBeNull();
+      expect(eventsOfType(db, "node.launch_wrapper_changed")).toEqual([]);
+    });
+
+    it.each(["stub", "terminal", "omp", "openshell-claude"])("refuses unsupported runtime %s", async runtime => {
+      const rig = rigRepo.createRig("wrappers"), node = rigRepo.addNode(rig.id, "dev", { runtime });
+      for (const argv of [["wrapper"], []]) {
+        expect(await service.setLaunchWrapper({ seatRef: "dev@wrappers", argv, reason: "select environment" }))
+          .toMatchObject({ ok: false, code: "launch_wrapper_unsupported_runtime" });
+      }
+      expect(storedWrapper(node.id)).toBeNull();
+      expect(eventsOfType(db, "node.launch_wrapper_changed")).toEqual([]);
+    });
+
+    it.each(["pi", "codex", "claude-code", "community-cli"])("supports a stored %s seat by immutable node ID", async runtime => {
+      const rig = rigRepo.createRig("wrappers"), node = rigRepo.addNode(rig.id, "dev", { runtime });
+      expect(await service.setLaunchWrapper({ nodeId: node.id, argv: ["wrapper"], reason: "select environment" }))
+        .toMatchObject({ ok: true, changed: true, to: ["wrapper"], effect: "next_launch" });
+      expect(storedWrapper(node.id)).toBe(JSON.stringify(["wrapper"]));
+    });
+
+    it("rolls back the wrapper if its audit cannot be persisted", async () => {
+      const { node, sessionName } = seatFixture("wrappers", "dev.impl");
+      const notify = vi.spyOn(eventBus, "notifySubscribers");
+      vi.spyOn(eventBus, "persistWithinTransaction").mockImplementation(() => { throw new Error("audit unavailable"); });
+      expect(await service.setLaunchWrapper({ seatRef: sessionName, argv: ["wrapper"], reason: "select environment" }))
+        .toMatchObject({ ok: false, code: "launch_wrapper_persistence_failed" });
+      expect(storedWrapper(node.id)).toBeNull();
+      expect(eventsOfType(db, "node.launch_wrapper_changed")).toEqual([]);
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it("refuses when the repository updates no row", async () => {
+      const { node, sessionName } = seatFixture("wrappers", "dev.impl");
+      vi.spyOn(rigRepo, "setNodeLaunchWrapper").mockReturnValue(false);
+      expect(await service.setLaunchWrapper({ seatRef: sessionName, argv: ["wrapper"], reason: "select environment" }))
+        .toMatchObject({ ok: false, code: "launch_wrapper_persistence_failed" });
+      expect(storedWrapper(node.id)).toBeNull();
+      expect(eventsOfType(db, "node.launch_wrapper_changed")).toEqual([]);
+    });
+
+    it.each(["launch_wrapper", "runtime"])("refuses a concurrent change to %s", async column => {
+      const { node, sessionName } = seatFixture("wrappers", "dev.impl");
+      const getRig = rigRepo.getRig.bind(rigRepo);
+      vi.spyOn(rigRepo, "getRig").mockImplementationOnce(rigId => {
+        const snapshot = getRig(rigId);
+        db.prepare(`UPDATE nodes SET ${column} = ? WHERE id = ?`).run(column === "runtime" ? "codex" : JSON.stringify(["other-wrapper"]), node.id);
+        return snapshot;
+      });
+      expect(await service.setLaunchWrapper({ seatRef: sessionName, argv: ["wrapper"], reason: "select environment" }))
+        .toMatchObject({ ok: false, code: "launch_wrapper_configuration_changed" });
+      expect(storedWrapper(node.id)).toBe(column === "launch_wrapper" ? JSON.stringify(["other-wrapper"]) : null);
+      expect(eventsOfType(db, "node.launch_wrapper_changed")).toEqual([]);
+    });
+  });
+
   // ---- P1 / P2 — set-model ----
 
   it("P1: set-model persists nodes.model and emits one audited node.model_changed event", async () => {

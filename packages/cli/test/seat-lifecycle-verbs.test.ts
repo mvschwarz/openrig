@@ -249,6 +249,95 @@ describe("rig seat runtime-home and record-runtime-home", () => {
   });
 });
 
+describe("rig seat set-launch-wrapper", () => {
+  const args = ["node", "rig", "seat", "set-launch-wrapper", "dev@project"];
+
+  it("reads the argv file and posts the wrapper, reason and operator", async () => {
+    const root = mkdtempSync(join(tmpdir(), "seat-wrapper-")), file = join(root, "wrapper.json");
+    const wrapper = ["/path with spaces/wrapper", "--flag", "literal 'quotes' and $dollars"];
+    writeFileSync(file, JSON.stringify(wrapper));
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, from: null, to: wrapper, changed: true, effect: "next_launch" } }, calls);
+    try {
+      const { logs, exitCode } = await captureLogs(() => makeCommand(deps).parseAsync([
+        ...args, "--argv-file", file, "--reason", "select environment", "--operator", "operator@project",
+      ]).then(() => {}));
+      expect(calls).toEqual([{ path: "/api/seat/set-launch-wrapper/dev%40project", body: {
+        wrapper, reason: "select environment", operator: "operator@project",
+      } }]);
+      expect(logs.join("\n")).toContain("recorded and audited");
+      expect(logs.join("\n")).toContain("next fresh launch or rebuild handover");
+      expect(logs.join("\n")).toContain("running process is untouched");
+      expect(exitCode).toBeUndefined();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("requires a reason before contacting the daemon", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    await expect(makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([...args, "--clear"]))
+      .rejects.toThrow(/--reason/);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([[], ["--clear", "--argv-file", "unused.json"]].map(selection => ({ selection })))("requires exactly one selection ($selection)", async ({ selection }) => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const { errors, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([
+      ...args, ...selection, "--reason", "select environment",
+    ]).then(() => {}));
+    expect(exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("Choose exactly one");
+    expect(calls).toEqual([]);
+  });
+
+  it.each(["{broken", "null", "{}", '"wrapper"', '["wrapper", 42]'])("rejects an invalid JSON array file %s", async content => {
+    const root = mkdtempSync(join(tmpdir(), "seat-wrapper-")), file = join(root, "wrapper.json");
+    writeFileSync(file, content);
+    const calls: Array<{ path: string; body: unknown }> = [];
+    try {
+      const { exitCode, errors } = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([
+        ...args, "--argv-file", file, "--reason", "select environment",
+      ]).then(() => {}));
+      expect(exitCode).toBe(1);
+      expect(errors.join("\n")).toContain("Cannot read a JSON array");
+      expect(calls).toEqual([]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("reports an unreadable argv file without contacting the daemon", async () => {
+    const root = mkdtempSync(join(tmpdir(), "seat-wrapper-"));
+    const calls: Array<{ path: string; body: unknown }> = [];
+    try {
+      const { exitCode } = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([
+        ...args, "--argv-file", join(root, "missing.json"), "--reason", "select environment",
+      ]).then(() => {}));
+      expect(exitCode).toBe(1);
+      expect(calls).toEqual([]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each([200, 400, 409, 500])("posts clear and preserves the JSON response (HTTP %s)", async status => {
+    const data = status === 200 ? { ok: true, from: ["wrapper"], to: null, changed: true, effect: "next_launch" }
+      : { ok: false, code: "launch_wrapper_refusal", message: "The wrapper was not changed" };
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const { logs, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status, data }, calls)).parseAsync([
+      ...args, "--clear", "--reason", "remove wrapper", "--json",
+    ]).then(() => {}));
+    expect(calls).toEqual([{ path: "/api/seat/set-launch-wrapper/dev%40project", body: {
+      clear: true, reason: "remove wrapper", operator: undefined,
+    } }]);
+    expect(logs).toHaveLength(1);
+    expect(JSON.parse(logs[0]!)).toEqual(data);
+    expect(exitCode).toBe(status === 200 ? undefined : status === 500 ? 2 : 1);
+  });
+
+  it.each([true, false])("describes a cleared or unchanged selection (changed=%s)", async changed => {
+    const { logs } = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: { ok: true, to: null, changed } }, [])).parseAsync([
+      ...args, "--clear", "--reason", "remove wrapper",
+    ]).then(() => {}));
+    expect(logs.join("\n")).toContain(changed ? "cleared and audited" : "unchanged");
+  });
+});
+
 describe("rig seat set-cwd", () => {
   const args = ["node", "rig", "seat", "set-cwd", "planner@project", "--cwd", "/srv/remote/space dir/../planner", "--reason", "isolate planning"];
 

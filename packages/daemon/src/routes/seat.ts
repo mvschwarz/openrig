@@ -497,7 +497,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
 function seatLifecycleStatus(code: string): 400 | 404 | 409 | 422 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
     || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy" || code === "invalid_statusline_throttle"
-    || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition"
+    || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_launch_wrapper" || code === "invalid_stop_precondition"
     || code === "missing_permissions_to" || code === "permissions_to_not_a_person"
     || code === "missing_home" || code === "invalid_home" || code === "missing_expectation" || code === "invalid_operation_id") return 400;
   if (code === "seat_not_found") return 404;
@@ -506,7 +506,7 @@ function seatLifecycleStatus(code: string): 400 | 404 | 409 | 422 | 500 | 502 {
   if (code === "process_limits_unsupported" || code === "process_limits_setup" || code === "process_limits_invalid") return 422;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
     || code === "effort_unavailable" || code === "statusline_throttle_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
-    || code === "permissions_to_unavailable" || code === "runtime_home_unavailable") return 500;
+    || code === "permissions_to_unavailable" || code === "runtime_home_unavailable" || code === "launch_wrapper_persistence_failed") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
   return 409;
@@ -589,6 +589,20 @@ seatRoutes.post("/set-cwd/:seatRef", async (c) => {
   });
   return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
 });
+
+const setLaunchWrapperHandler = async (c: Context) => {
+  const value: unknown = await c.req.json().catch(() => null);
+  const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const result = await seatLifecycleService(c).setLaunchWrapper({
+    ...settingTarget(c),
+    argv: body.clear === true ? [] : body.wrapper !== undefined ? body.wrapper : body.argv,
+    reason: typeof body.reason === "string" ? body.reason : "",
+    operator: transportSenderSession(c) ?? (typeof body.operator === "string" ? body.operator : null),
+  });
+  return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
+};
+seatRoutes.post("/set-launch-wrapper/:seatRef", setLaunchWrapperHandler);
+seatRoutes.post("/set-launch-wrapper/node/:nodeId", setLaunchWrapperHandler);
 
 // A seat's runtime home and what a recording is made against; read only.
 seatRoutes.get("/runtime-home/:seatRef", (c) => {
