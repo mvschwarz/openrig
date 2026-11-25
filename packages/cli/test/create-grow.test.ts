@@ -606,3 +606,24 @@ describe("rig spec show", () => {
       .toContain("show");
   });
 });
+
+
+describe("rig grow advisory output", () => {
+  it("prints returned warnings after successful growth without changing the exit status", async () => {
+    const warning = "dev.worker: network is off; the launch continues as written";
+    const client = {
+      get: vi.fn(async (path: string) => path.includes("specs/library")
+        ? { status: 200, data: library }
+        : { status: 200, data: [{ rigName: "alpha", podNamespace: "main" }] }),
+      post: vi.fn(async () => ({ status: 201, data: { ok: true, status: "ok", warnings: [warning],
+        nodes: [{ logicalId: "extra.worker", status: "launched", sessionName: "extra-worker@alpha" }] } })),
+    };
+    const program = createProgram({ growDeps: deps(client) });
+    program.exitOverride();
+    const { logs, exitCode } = await captureLogs(() =>
+      program.parseAsync(["node", "rig", "grow", "rig-1", "worker", "--new-pod", "extra", "--cwd", "/work"]));
+    expect(exitCode).toBeUndefined();
+    expect(logs.filter(line => line.includes(warning))).toEqual([`  Warning: ${warning}`]);
+    expect(logs.join("\n")).toContain("Grew rig");
+  });
+});
