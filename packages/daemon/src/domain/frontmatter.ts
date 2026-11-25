@@ -14,12 +14,14 @@ export function findFrontmatterBlock(
   const newline = crlf ? "\\r?\\n" : "\\n";
   // Keep one match so the whitespace-tolerant opener can backtrack exactly as before.
   // Closing prefixes (---- and ---suffix) remain accepted; the suffix is body text.
-  const match = new RegExp(`^---${opening}([\\s\\S]*?)${newline}---`).exec(raw);
+  // Adjacent delimiters end an empty header before any horizontal rule in the body.
+  const empty = options.openingWhitespace ? /^---[ \t]*\r?\n---(?=\r?\n|$)/ : /^---\r?\n---(?=\r?\n|$)/;
+  const match = empty.exec(raw) ?? new RegExp(`^---${opening}([\\s\\S]*?)${newline}---`).exec(raw);
   if (!match) return null;
   let bodyStart = match[0].length;
   if (options.consumeClosingNewline) {
     if (crlf && raw.startsWith("\r\n", bodyStart)) bodyStart += 2;
     else if (raw[bodyStart] === "\n") bodyStart += 1;
   }
-  return { yaml: match[1]!, bodyStart };
+  return { yaml: match[1] ?? "", bodyStart };
 }

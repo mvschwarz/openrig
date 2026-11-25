@@ -29,6 +29,16 @@ describe("shared frontmatter boundary", () => {
     }
   });
 
+  it.each(["\n", "\r\n"])("ends empty frontmatter before a body containing a horizontal rule", (eol) => {
+    const body = ["Authored requirement", "", "---", "", "More context"].join(eol);
+    const raw = ["---", "---", body].join(eol);
+    for (const openingWhitespace of [true, false]) {
+      const block = findFrontmatterBlock(raw, { openingWhitespace, consumeClosingNewline: true });
+      expect(block?.yaml).toBe("");
+      expect(raw.slice(block!.bodyStart)).toBe(body);
+    }
+  });
+
   it("returns CRLF spans without rewriting a mixed-ending body", () => {
     const raw = "---\r\nname: demo\r\n---\r\n# Body\r\n\u0000\n";
     const block = findFrontmatterBlock(raw, { consumeClosingNewline: true });
