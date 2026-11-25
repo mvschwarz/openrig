@@ -2878,6 +2878,7 @@ export class QueueRepository {
       }
       const completed = !unplacedId && ask.state === "pending" && unanswered().length === 0;
       if (completed) {
+        this.assertNotFenced(ask.qitemId);
         if (!journal.returnId) {
           // First completion only. After a deliberate reopen, the journal still names the
           // original return row; re-inserting the same deterministic id would roll back the
@@ -2904,7 +2905,7 @@ export class QueueRepository {
       events.push(...this.updateInTransactionalContext({ qitemId: ask.qitemId, actorSession: input.actorSession, ...identity,
         transitionNote: completed ? "RELAYED answer set returned to the asking seat" : correctionId ? "Direct correction to a RELAYED answer" : unplacedId ? "Direct reply returned without placing it" : "relay" in input ? "RELAYED answer recorded" : "Direct answer recorded",
         ...(completed ? { state: "done", closureReason: "relayed-answer", resolution: renderRelayedAnswers(journal, questions, direct) } : {}),
-      }, completed).persistedEvents);
+      }, completed ? "complete" : "record").persistedEvents);
       return unplacedId ? receipt(unplacedId, "unplaced") : correctionId ? receipt(correctionId, "corrected") : receipt();
     })();
     const deliverWakes = () => {
@@ -4150,11 +4151,13 @@ export class QueueRepository {
    * (the public update() wraps; the public updateWithinTransaction()
    * composes inside the caller's outer transaction).
    */
-  private updateInTransactionalContext(input: QueueUpdateInput, completingRelay = false): {
+  private updateInTransactionalContext(input: QueueUpdateInput, relayWrite?: "record" | "complete"): {
     persistedEvent: PersistedEvent;
     persistedEvents: PersistedEvent[];
   } {
-    if (!completingRelay && !["done", "failed", "denied", "canceled"].some(state => state === input.state)) this.assertNotFenced(input.qitemId);
+    const completingRelay = relayWrite === "complete";
+    const recordingRelay = relayWrite === "record" && input.state === undefined;
+    if (!recordingRelay && !["done", "failed", "denied", "canceled"].some(state => state === input.state)) this.assertNotFenced(input.qitemId);
     if (input.closureReason === "relayed-answer" && !completingRelay) {
       throw new QueueRepositoryError("invalid_closure_reason", "Use the relay-answer operation to record a relayed answer.");
     }
