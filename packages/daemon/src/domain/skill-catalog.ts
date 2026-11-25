@@ -707,7 +707,8 @@ function isGitIgnored(repoRoot: string, path: string): boolean {
     });
     return true;
   } catch (err) {
-    if ((err as { status?: number | null }).status === 1) return false;
+    if (err instanceof Error && "code" in err && err.code === "ETIMEDOUT") throw err;
+    if (err instanceof Error && "status" in err && err.status === 1) return false;
     throw err;
   }
 }
@@ -721,7 +722,8 @@ function isGitTracked(repoRoot: string, path: string): boolean {
     });
     return true;
   } catch (err) {
-    if ((err as { status?: number | null }).status === 1) return false;
+    if (err instanceof Error && "code" in err && err.code === "ETIMEDOUT") throw err;
+    if (err instanceof Error && "status" in err && err.status === 1) return false;
     throw err;
   }
 }

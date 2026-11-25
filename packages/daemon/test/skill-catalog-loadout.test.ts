@@ -72,7 +72,8 @@ const record = { site, args, pid: process.pid, parentPid: process.ppid };
 appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(record) + "\\n");
 if (site === ${JSON.stringify(site)} && ${JSON.stringify(mode)} === "hang") {
   writeFileSync(${JSON.stringify(pendingPath)}, JSON.stringify(record));
-  process.on("SIGTERM", () => process.exit(73));
+  // Git's ordinary status 1 means no match at these two sites. On timeout it means the child's TERM handler exited 1.
+  process.on("SIGTERM", () => process.exit(site === "check-ignore" || site === "ls-files" ? 1 : 73));
   setInterval(() => {}, 1000);
 } else if (site === ${JSON.stringify(site)} && ${JSON.stringify(mode)} === "error") {
   process.stderr.write("fixture git refused " + site + "\\n");
