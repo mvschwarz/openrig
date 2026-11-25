@@ -456,6 +456,38 @@ describe("current draft-aware delivery through the real transport", () => {
       expect(f.bodies.a).toBe(text);
     });
 
+  // A Claude seat whose Remote Control connection failed keeps its "/rc failed" row under the footer, below the update
+  // banner, before and after our paste. Through the real transport and guard, one owned paste is submitted; a near miss
+  // or the selected indicator gets no paste and no Enter.
+  const underRemoteControl = (f: ReturnType<typeof fixture>, text: string, indicator: string) => vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+    const staged = f.bodies.a === text;
+    const snapshot = frame(staged ? "[Pasted text #1 +2 lines]" : f.bodies.a ?? "");
+    snapshot.screen = snapshot.screen.replace("? for shortcuts\n",
+      `${staged ? "paste again to expand" : "⏵⏵ bypass permissions on · 1 shell · ↓ to manage"}\n✔ Update installed · /restart to apply\n${indicator}\n`);
+    return snapshot;
+  });
+
+  it.each(["/rc failed", "/rc reconnecting", "/rc connecting…", "/rc active"])("submits one owned paste above Claude's %j indicator", async indicator => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = "first line\nsecond line\nlast line";
+    underRemoteControl(f, text, indicator);
+    const result = await f.send("remote-control-row", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+    expect(f.writes.filter(write => write.startsWith("paste:"))).toHaveLength(1);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toHaveLength(1);
+  });
+
+  it.each(["/rc failed · Enter to view", "/rc disconnected", "\x1b[7m/rc failed\x1b[27m"])("holds a send under %j with no paste and no Enter", async indicator => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = "first line\nsecond line\nlast line";
+    underRemoteControl(f, text, indicator);
+    const result = await f.send("remote-control-near-miss", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_unknown" });
+    expect(f.submissions).toEqual([]);
+    expect(f.writes.filter(write => write.startsWith("paste:") || write.startsWith("keys:"))).toEqual([]);
+  });
+
   // D04 at full width (Claude 2.1.322 and 2.1.323, 200x50, as banked): the paste hint and the auto-update failure share
   // the footer row under an empty input box, before any paste of ours.
   const wideFooter = `  paste again to expand${" ".repeat(97)}✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code`;

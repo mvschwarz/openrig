@@ -10,7 +10,7 @@ import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { createHash, randomUUID } from "node:crypto";
-import { CLAUDE_NOT_STATUS_LINE_ROW, CLAUDE_STATUS_DECORATIONS, CLAUDE_STATUS_WARNINGS, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+import { CLAUDE_NOT_STATUS_LINE_ROW, CLAUDE_REMOTE_CONTROL_ROWS, CLAUDE_STATUS_DECORATIONS, CLAUDE_STATUS_WARNINGS, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
   composerContainsOwnedText,
   composerNumberedChoicePattern,
@@ -362,11 +362,15 @@ function skipClaudeStatusRows(lines: string[], from: number): number {
   while (bar >= 0) {
     const row = lines[bar]!.trim();
     if (row && !CLAUDE_STATUS_WARNINGS.some(pattern => pattern.test(row)) &&
-        !CLAUDE_STATUS_DECORATIONS.some(pattern => pattern.test(row))) break;
+        !CLAUDE_STATUS_DECORATIONS.some(pattern => pattern.test(row)) &&
+        !CLAUDE_REMOTE_CONTROL_ROWS.some(pattern => pattern.test(row))) break;
     bar--;
   }
   return bar;
 }
+
+/** Claude's Remote Control indicator row, in any label the footer search skips. */
+const isRemoteControlRow = (row: string): boolean => row === "/rc" || CLAUDE_REMOTE_CONTROL_ROWS.some(pattern => pattern.test(row));
 
 /** The first row of Claude's task panel when it sits right under a recognized footer (#2700), or -1. The panel is
  * recognized in its own shape only, past blank and known status rows (#2605's banner can sit between them). */
@@ -561,6 +565,10 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
   if (lines.length > height || !lines[y]) return unknown("incomplete_frame", snapshot.cursor);
   const footerAt = findClaudeFooterIndex(lines);
   const footer = lines[footerAt]?.trim() ?? "";
+  // Claude draws its Remote Control indicator inverse while it is selected (↓), when Enter opens its panel.
+  if (lines.slice(footerAt + 1).some((line, i) => isRemoteControlRow(line.trim()) && styled[footerAt + 1 + i]!.inverseCells.some(Boolean))) {
+    return unknown("unrecognized_composer", snapshot.cursor);
+  }
   const candidates: ComposerInput[] = [];
   for (let start = 0; start <= y; start++) {
     const prompt = readComposerPromptLine(lines[start] ?? "", promptClass);
