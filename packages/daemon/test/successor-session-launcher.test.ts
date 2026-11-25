@@ -179,6 +179,7 @@ describe("SuccessorSessionLauncher", () => {
   });
 
   it("the successor's respawned pane gets the seat's declared env, and the declared names are recorded", async () => {
+    getSessionEnv.mockImplementation(async (_session, key: string) => key === "OPENRIG_SEAT_ENV_KEYS" ? "OLD" : "previous");
     const res = await launcher().createSuccessor({
       node: { id: "node-1", runtime: "codex", cwd: "/w", seatEnv: { MODE: "fast", REGION: "eu" } },
       departingSessionName: "dev-impl@rig",
@@ -186,6 +187,11 @@ describe("SuccessorSessionLauncher", () => {
     expect(res.ok).toBe(true);
     const opts = respawnPane.mock.calls[0]![2];
     expect(opts.env).toMatchObject({ MODE: "fast", REGION: "eu", OPENRIG_SEAT_ENV_KEYS: "MODE,REGION", OPENRIG_NODE_ID: "node-1" });
+    expect(opts.seatEnvironment).toEqual({
+      pendingKeys: "OLD,MODE,REGION",
+      set: { MODE: "fast", REGION: "eu", OPENRIG_SEAT_ENV_KEYS: "MODE,REGION" },
+      remove: ["OLD"],
+    });
   });
 
   it.each(["codex", "claude-code"])("a selected %s plugin keeps its interpreter on handover", async runtime => {
@@ -197,10 +203,10 @@ describe("SuccessorSessionLauncher", () => {
   });
 
   it("a seat that declares no env clears its managed list and leaves a cleaned one-off name alone", async () => {
-    const values: Record<string, string | undefined> = { OPENRIG_SEAT_ENV_KEYS: "OLD,ONE_OFF_ONLY", OLD: "before" };
+    const values: Record<string, string | undefined> = { OPENRIG_SEAT_ENV_KEYS: "OLD,ADDED,ONE_OFF_ONLY", OLD: "before", ADDED: "from partial write" };
     getSessionEnv.mockImplementation(async (_session, key: string) => values[key]);
     await launcher().createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
-    expect(respawnPane.mock.calls[0]![2].seatEnvironment).toEqual({ set: { OPENRIG_SEAT_ENV_KEYS: "" }, remove: ["OLD"] });
+    expect(respawnPane.mock.calls[0]![2].seatEnvironment).toEqual({ set: { OPENRIG_SEAT_ENV_KEYS: "" }, remove: ["OLD", "ADDED"] });
   });
 
   it("leaves the incumbent running when tmux cannot read its managed launch environment", async () => {

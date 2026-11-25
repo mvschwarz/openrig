@@ -290,9 +290,12 @@ export class SuccessorSessionLauncher {
     // Capture the previous declaration before the incumbent exits. A failed read cannot tell us which keys to clear.
     const setEnv: SeatEnv = { ...declaredEnv };
     const removeEnv: string[] = [];
+    const declaredKeys = Object.keys(declaredEnv);
+    let pendingKeys: string | undefined;
     try {
       const saved = await this.tmuxAdapter.getSessionEnv(departingSession, SEAT_ENV_KEYS_VAR);
       const previousKeys = new Set((saved ?? "").split(",").filter(key => validateSeatEnvName(key) === null));
+      if (declaredKeys.some(key => !previousKeys.has(key))) pendingKeys = [...new Set([...previousKeys, ...declaredKeys])].join(",");
       for (const key of previousKeys) {
         const value = env[key];
         if (value !== undefined) setEnv[key] = value;
@@ -304,8 +307,8 @@ export class SuccessorSessionLauncher {
       return { ok: false, code: "successor_env_unreadable", step: "create_successor",
         message: "Could not read the seat's previous launch environment. The incumbent was left running.", replacementStarted: false };
     }
-    // Write the marker last, so an incomplete reconciliation can still retry using the old list.
-    setEnv[SEAT_ENV_KEYS_VAR] = Object.keys(declaredEnv).join(",");
+    // Finish with the exact declaration after all values have been reconciled.
+    setEnv[SEAT_ENV_KEYS_VAR] = declaredKeys.join(",");
 
     // #3253: the seat's scope is checked before the retiree is ended, so the respawn after it reuses that check. The
     // respawn runs in recovery mode: a limit never stops the handover after the retiree has ended (a scope failure late
@@ -330,7 +333,7 @@ export class SuccessorSessionLauncher {
     // contexts. An explicit shell also resets the pane's respawn default, self-healing the pane.
     const blankShell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
     const respawned = await this.tmuxAdapter.respawnPane(inputTarget, blankShell, {
-      cwd, env, processLimitsMode: "recovery", seatEnvironment: { set: setEnv, remove: removeEnv },
+      cwd, env, processLimitsMode: "recovery", seatEnvironment: { pendingKeys, set: setEnv, remove: removeEnv },
     });
     if (!respawned.ok) {
       return {

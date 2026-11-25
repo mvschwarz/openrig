@@ -9,6 +9,7 @@ import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import type { TerminalServerObservation } from "../domain/terminal-server-reachability.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
+import { SEAT_ENV_KEYS_VAR } from "../domain/seat-env.js";
 import { isTmuxCredentialEnvKey } from "./tmux-credential-env.js";
 import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
@@ -2723,11 +2724,16 @@ export class TmuxAdapter {
       /** #80: a bare respawn (no `env`) of this seat, which goes beneath its rig's slice when the rig groups its seats. */
       groupSeatOf?: string;
       /** Synchronize only OpenRig-owned names in a retained session before spawning its successor. */
-      seatEnvironment?: { set: Readonly<Record<string, string>>; remove: readonly string[] } },
+      seatEnvironment?: { pendingKeys?: string; set: Readonly<Record<string, string>>; remove: readonly string[] } },
   ): Promise<TmuxResult> {
     return this.guardedInput(paneTarget, async (pane, beforeWrite) => {
       if (opts?.seatEnvironment) {
         try {
+          if (opts.seatEnvironment.pendingKeys !== undefined) {
+            // A failed value or final marker write must leave every owned name available for retry.
+            beforeWrite();
+            await this.setSessionEnv(pane, SEAT_ENV_KEYS_VAR, opts.seatEnvironment.pendingKeys);
+          }
           for (const key of opts.seatEnvironment.remove) {
             beforeWrite();
             await this.unsetSessionEnv(pane, key, { inheritGlobal: false });
