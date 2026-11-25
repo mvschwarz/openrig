@@ -16,6 +16,10 @@ import { migrate } from "../../daemon/src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
+import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
+import { getSelfHostId, setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
+import { makeQueuePorts } from "../../daemon/src/domain/gateway/slack/queue-access.js";
+import type { LoadResult } from "../../daemon/src/domain/gateway/human-registry.js";
 import { addGrant, startMcpHttpServer } from "../src/mcp-http.js";
 
 const LEAD = "lead@team";
@@ -23,6 +27,7 @@ const LEAD = "lead@team";
 describe("bounded rig_queue_show over HTTP", () => {
   let db: Database.Database;
   let home: string;
+  let dbPath: string;
   let repo: QueueRepository;
   let bus: EventBus;
   let daemon: ServerType;
@@ -31,35 +36,73 @@ describe("bounded rig_queue_show over HTTP", () => {
   let client: Client;
   let token: string;
   let otherToken: string;
+  let recipientRegistered: boolean;
+  let registryUnreadable: boolean;
+  let interceptDaemon: ((request: Request) => Promise<Response | undefined>) | undefined;
   const savedHome = process.env.OPENRIG_HOME;
+  const savedDb = process.env.OPENRIG_DB;
+  const savedSelf = getSelfHostId();
 
   beforeEach(async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), "queue-wait-"));
     process.env.OPENRIG_HOME = home;
-    db = createDb(":memory:");
+    dbPath = path.join(home, "queue.sqlite");
+    process.env.OPENRIG_DB = dbPath;
+    db = createDb(dbPath);
     migrate(db, ALL_MIGRATIONS);
+    db.prepare("INSERT INTO self_host_identity VALUES (1, 'queue-wait-fixture', '', '')").run();
+    setSelfHostId("queue-wait-fixture");
     bus = new EventBus(db);
-    repo = new QueueRepository(db, bus, { validateRig: () => true });
-    const { app } = createTestApp(db, { appDeps: { queueRepo: repo, eventBus: bus } });
-    daemon = await new Promise<ServerType>(resolve => {
-      const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(server));
-    });
+    recipientRegistered = true;
+    registryUnreadable = false;
+    interceptDaemon = undefined;
+    repo = makeRepo();
+    daemon = await startDaemon(0);
     daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
     const tokenFile = path.join(home, "tokens.json");
-    token = await addGrant(tokenFile, { name: "lead", seat: LEAD, rigs: [], roots: [], workspace: false, owner: false });
+    token = await addGrant(tokenFile, { name: "lead", seat: LEAD, rigs: [], roots: [], workspace: false, owner: false, person: "fixture-person" });
     otherToken = await addGrant(tokenFile, { name: "other", seat: "other@elsewhere", rigs: [], roots: [], workspace: false, owner: false });
     mcp = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile });
     client = new Client({ name: "wait-fixture", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL(mcp.url), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
   });
 
+  function loadPeople(): LoadResult {
+    if (registryUnreadable) return { ok: false, error: "fixture registry unreadable" };
+    return { ok: true, entities: recipientRegistered
+      ? [{ entityId: "fixture-person", class: "human", address: "fixture-person@external", displayName: "Fixture Person",
+        connectorBindings: [{ kind: "slack", connectorRef: "fixture", secretsRef: "fixture", role: "primary", handle: "U123456" }],
+        prefs: { deliveryClass: "A" } }] : [] };
+  }
+
+  function makeRepo() {
+    const queue = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: loadPeople });
+    queue.attachOutbox(new OutboxHandler(db));
+    return queue;
+  }
+
+  function startDaemon(port: number) {
+    const { app } = createTestApp(db, { appDeps: { queueRepo: repo, eventBus: bus } });
+    return new Promise<ServerType>(resolve => {
+      const server = serve({ fetch: async (request, env) => {
+        return await interceptDaemon?.(request) ?? app.fetch(request, env);
+      }, port, hostname: "127.0.0.1" }, () => resolve(server));
+    });
+  }
+
+  function stopDaemon() {
+    return new Promise<void>(resolve => { daemon.closeAllConnections(); daemon.close(() => resolve()); });
+  }
+
   afterEach(async () => {
     await client?.close();
     await mcp?.close();
-    await new Promise<void>(resolve => { daemon.closeAllConnections(); daemon.close(() => resolve()); });
+    await stopDaemon();
     db.close();
     fs.rmSync(home, { recursive: true, force: true });
     if (savedHome === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = savedHome;
+    if (savedDb === undefined) delete process.env.OPENRIG_DB; else process.env.OPENRIG_DB = savedDb;
+    setSelfHostId(savedSelf);
   });
 
   const create = (qitemId: string, destinationSession = LEAD) => repo.create({ qitemId, sourceSession: destinationSession, destinationSession, body: "Question", nudge: false });
@@ -69,6 +112,237 @@ describe("bounded rig_queue_show over HTTP", () => {
     method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream",
       "MCP-Protocol-Version": "2025-06-18", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
     body: JSON.stringify(body), signal,
+  });
+
+  const lateQuestion = async (qitemId: string, expectedState = "waiting") => {
+    const result = await client.callTool({ name: "rig_queue_create", arguments: {
+      qitemId, destination: LEAD, body: "Question", lateAnswer: true,
+    } });
+    expect(result.isError, JSON.stringify(result.structuredContent ?? result.content)).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ qitemId, lateAnswer: { state: expectedState } });
+    return (result.structuredContent?.lateAnswer as { deliveryId: string }).deliveryId;
+  };
+  const lateAnswer = (qitemId: string, sender = LEAD) => fetch(`${daemonUrl}/api/queue/${qitemId}/update`, {
+    method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": sender },
+    body: JSON.stringify({ state: "done", closureReason: "no-follow-on", resolution: "The lead answer" }),
+  });
+  const lateStatus = async (qitemId: string) => (await (await fetch(`${daemonUrl}/api/queue/${qitemId}`)).json()).lateAnswer;
+  const stop = (id: string, principal = "lead", recipient = "fixture-person@external") => fetch(`${daemonUrl}/api/queue/${id}/wait-stopped`, {
+    method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": LEAD,
+      "X-OpenRig-Principal": JSON.stringify({ source: "file", id: principal }) },
+    body: JSON.stringify({ recipient }),
+  });
+  const rawWait = (qitemId: string, id: number, signal: AbortSignal) => raw(token, {
+    jsonrpc: "2.0", id, method: "tools/call", params: { name: "rig_queue_show", arguments: { qitemId, waitSeconds: 50 } },
+  }, signal).catch(() => undefined);
+  const manualUpdate = (deliveryId: string, body = "Manual lead update") => fetch(`${daemonUrl}/api/queue/create`, {
+    method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": LEAD },
+    body: JSON.stringify({ qitemId: deliveryId, destinationSession: "fixture-person@external", humanIntent: "update", body, summary: body }),
+  });
+  const gatewayNotices = () => makeQueuePorts(repo, { loadHumanRegistry: loadPeople }).listHumanAlerts({});
+
+  it.each(["blocked", "handed-off"] as const)("records a normal %s wait return without an answer", async state => {
+    const id = `qitem-late-return-${state}`;
+    const deliveryId = await lateQuestion(id);
+    const subscriptions = bus.subscriberCount;
+    const waiting = show(id, 5);
+    await expect.poll(() => bus.subscriberCount).toBe(subscriptions + 1);
+    if (state === "blocked") repo.update({ qitemId: id, actorSession: LEAD, state, blockedOn: "external:fixture-dependency" });
+    else await repo.handoff({ qitemId: id, fromSession: LEAD, toSession: "other@team", nudge: false });
+
+    expect((await waiting).structuredContent).toMatchObject({ item: { state }, followUp: "recorded" });
+    const { followUpId } = await lateStatus(id);
+    expect(repo.getById(followUpId)).toMatchObject({ destinationSession: LEAD, state: "pending" });
+    expect(await gatewayNotices()).toEqual([]);
+    if (state === "blocked") {
+      expect((await lateAnswer(id)).status).toBe(200);
+      expect(await gatewayNotices()).toEqual([expect.objectContaining({ qitemId: deliveryId, body: "The lead answer" })]);
+    }
+  });
+
+  it("retries the same disconnected wait stop after two transient failures", async () => {
+    const id = "qitem-late-retry-disconnect";
+    await lateQuestion(id);
+    let attempts = 0;
+    interceptDaemon = async request => {
+      if (new URL(request.url).pathname === `/api/queue/${id}/wait-stopped` && ++attempts <= 2) return new Response(null, { status: 503 });
+      return undefined;
+    };
+    const subscriptions = bus.subscriberCount;
+    const controller = new AbortController();
+    const waiting = rawWait(id, 122, controller.signal);
+    await expect.poll(() => bus.subscriberCount).toBe(subscriptions + 1);
+    controller.abort();
+    await waiting;
+    await expect.poll(() => lateStatus(id)).toMatchObject({ state: "waiting-for-answer", followUpId: expect.any(String) });
+    expect(attempts).toBe(3);
+  });
+
+  it("queues one registered-person update when the caller hangs up before the lead answers", async () => {
+    const id = "qitem-late-disconnect";
+    const deliveryId = await lateQuestion(id);
+    const subscriptions = bus.subscriberCount;
+    const controller = new AbortController();
+    const waiting = rawWait(id, 120, controller.signal);
+    await expect.poll(() => bus.subscriberCount).toBe(subscriptions + 1);
+    controller.abort();
+    await waiting;
+    await expect.poll(() => lateStatus(id)).toMatchObject({ deliveryId, state: "waiting-for-answer", followUpId: expect.any(String) });
+    const { followUpId } = await lateStatus(id);
+    expect(repo.getById(followUpId)).toMatchObject({ destinationSession: LEAD, state: "pending" });
+    expect((await lateAnswer(id)).status).toBe(200);
+    expect(await lateStatus(id)).toMatchObject({ deliveryId, state: "queued" });
+    expect(repo.getById(deliveryId)).toMatchObject({ sourceSession: LEAD, destinationSession: "fixture-person@external",
+      humanIntent: "update", body: "The lead answer" });
+    expect(repo.getById(followUpId)?.state).toBe("done");
+  });
+
+  it("reconciles an already recorded answer when the caller's stop arrives afterward", async () => {
+    const id = "qitem-late-reverse";
+    const deliveryId = await lateQuestion(id);
+    expect((await lateAnswer(id)).status).toBe(200);
+    expect(repo.getById(deliveryId)).toBeNull();
+    for (const response of await Promise.all([stop(id), stop(id)])) {
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ lateAnswer: { deliveryId, state: "queued" } });
+    }
+    expect(repo.getById(deliveryId)).toMatchObject({ humanIntent: "update", body: "The lead answer" });
+  });
+
+  it("queues the ready answer if the HTTP response is lost after the lead closes the question", async () => {
+    const id = "qitem-late-lost-response";
+    const deliveryId = await lateQuestion(id);
+    const { promise, resolve: release } = Promise.withResolvers<void>();
+    let readingTransitions = false;
+    interceptDaemon = async request => {
+      if (new URL(request.url).pathname !== `/api/queue/${id}/transitions`) return;
+      readingTransitions = true;
+      await promise;
+    };
+    const subscriptions = bus.subscriberCount;
+    const controller = new AbortController();
+    const waiting = rawWait(id, 121, controller.signal);
+    try {
+      await expect.poll(() => bus.subscriberCount).toBe(subscriptions + 1);
+      expect((await lateAnswer(id)).status).toBe(200);
+      await expect.poll(() => readingTransitions).toBe(true);
+      expect(repo.getById(deliveryId)).toBeNull();
+      controller.abort();
+      await waiting;
+      await expect.poll(() => lateStatus(id)).toMatchObject({ deliveryId, state: "queued" });
+      expect(await gatewayNotices()).toEqual([expect.objectContaining({ qitemId: deliveryId, body: "The lead answer" })]);
+    } finally {
+      release();
+    }
+  });
+
+  it("recovers a timed-out wait after reopening the daemon database and gives the gateway one stable update", async () => {
+    const id = "qitem-late-restart";
+    const deliveryId = await lateQuestion(id);
+    expect((await show(id, 1)).structuredContent).toMatchObject({ waited: { outcome: "timeout", seconds: 1, followUp: "recorded" } });
+    await stopDaemon();
+    db.close();
+    db = createDb(dbPath);
+    migrate(db, ALL_MIGRATIONS);
+    bus = new EventBus(db);
+    repo = makeRepo();
+    daemon = await startDaemon(0);
+    daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
+    expect(await lateStatus(id)).toMatchObject({ deliveryId, state: "waiting-for-answer" });
+    expect((await lateAnswer(id)).status).toBe(200);
+    expect((await stop(id)).status).toBe(200);
+    expect(await gatewayNotices()).toEqual([expect.objectContaining({ qitemId: deliveryId, humanIntent: "update", body: "The lead answer" })]);
+    expect(await lateStatus(id)).toMatchObject({ deliveryId, state: "queued", deliveryOutcome: null });
+  });
+
+  it.each(["manual", "automatic", "concurrent"])("coalesces the %s path and its retry into one gateway notice", async order => {
+    const id = `qitem-late-race-${order}`;
+    const deliveryId = await lateQuestion(id);
+    expect((await stop(id)).status).toBe(200);
+    const automatic = () => lateAnswer(id);
+    const manual = () => manualUpdate(deliveryId);
+    if (order === "concurrent") {
+      expect((await Promise.all([manual(), automatic()])).map(reply => reply.status)).toEqual([201, 200]);
+    } else if (order === "manual") {
+      expect((await manual()).status).toBe(201);
+      expect((await automatic()).status).toBe(200);
+    } else {
+      expect((await automatic()).status).toBe(200);
+      expect((await manual()).status).toBe(201);
+    }
+    const retry = await manual();
+    expect(await retry.json()).toMatchObject({ qitemId: deliveryId, humanIntent: "update" });
+    const expectedBody = order === "manual" ? "Manual lead update" : order === "automatic" ? "The lead answer" : expect.any(String);
+    expect(await gatewayNotices()).toEqual([expect.objectContaining({ qitemId: deliveryId, humanIntent: "update", body: expectedBody })]);
+    const status = await lateStatus(id);
+    const answerMatches = repo.getById(deliveryId)?.body === "The lead answer";
+    expect(status).toMatchObject({ deliveryId, state: answerMatches ? "queued" : "manual-required" });
+    expect(repo.getById(status.followUpId)?.state).toBe(answerMatches ? "done" : "pending");
+  });
+
+  it("treats a matching manual answer as queued and returns a reopened question to the lead", async () => {
+    const id = "qitem-late-reopened";
+    const deliveryId = await lateQuestion(id);
+    expect((await manualUpdate(deliveryId, "The lead answer")).status).toBe(201);
+    expect((await stop(id)).status).toBe(200);
+    expect((await lateAnswer(id)).status).toBe(200);
+    const { followUpId } = await lateStatus(id);
+    expect(await lateStatus(id)).toMatchObject({ deliveryId, state: "queued" });
+    expect(repo.getById(followUpId)?.state).toBe("done");
+    repo.update({ qitemId: id, actorSession: LEAD, state: "pending", reopen: true, transitionNote: "Check the answer again" });
+    expect(await lateStatus(id)).toMatchObject({ deliveryId, state: "manual-required", deliveryOutcome: null, followUpId });
+    expect(repo.getById(followUpId)?.state).toBe("pending");
+    expect((await lateAnswer(id)).status).toBe(200);
+    expect(await lateStatus(id)).toMatchObject({ deliveryId, state: "manual-required" });
+    expect(await gatewayNotices()).toEqual([expect.objectContaining({ qitemId: deliveryId, body: "The lead answer" })]);
+  });
+
+  it("keeps the question and the grant binding when the registry cannot be read", async () => {
+    const id = "qitem-late-unreadable";
+    registryUnreadable = true;
+    const deliveryId = await lateQuestion(id, "manual-required");
+    expect(await lateStatus(id)).toMatchObject({ deliveryId, recipient: "fixture-person@external", state: "manual-required" });
+    expect((await stop(id)).status).toBe(200);
+    expect((await lateAnswer(id)).status).toBe(200);
+    const { followUpId } = await lateStatus(id);
+    expect(repo.getById(followUpId)).toMatchObject({ destinationSession: LEAD, state: "pending" });
+    expect(repo.getById(deliveryId)).toBeNull();
+  });
+
+  it("keeps the ordinary answer read and rejects a stop from another grant or recipient", async () => {
+    const id = "qitem-late-normal";
+    const deliveryId = await lateQuestion(id);
+    expect((await stop(id, "other")).status).toBe(404);
+    expect((await stop(id, "lead", "somebody-else@external")).status).toBe(404);
+    expect((await lateAnswer(id)).status).toBe(200);
+    expect((await show(id, 50)).structuredContent).toMatchObject({ item: { state: "done", resolution: "The lead answer" } });
+    expect(await lateStatus(id)).toMatchObject({ deliveryId, state: "waiting" });
+    expect(await gatewayNotices()).toEqual([]);
+  });
+
+  it("leaves work for the selected lead if the person is removed or a different actor supplies the resolution", async () => {
+    for (const cause of ["recipient-removed", "other-actor"]) {
+      const id = `qitem-late-${cause}`;
+      recipientRegistered = true;
+      const deliveryId = await lateQuestion(id);
+      expect((await stop(id)).status).toBe(200);
+      if (cause === "recipient-removed") recipientRegistered = false;
+      expect((await lateAnswer(id, cause === "other-actor" ? "other@team" : LEAD)).status).toBe(200);
+      const status = await lateStatus(id);
+      expect(status).toMatchObject({ deliveryId, state: "manual-required", followUpId: expect.any(String) });
+      expect(repo.getById(status.followUpId)).toMatchObject({ destinationSession: LEAD, state: "pending" });
+      expect(repo.getById(deliveryId)).toBeNull();
+    }
+  });
+
+  it("rejects the opt-in without the grant's registered person or an explicit lead", async () => {
+    recipientRegistered = false;
+    for (const destination of ["lead", LEAD]) {
+      const id = `qitem-late-refused-${destination === LEAD ? "person" : "lead"}`;
+      const result = await client.callTool({ name: "rig_queue_create", arguments: { qitemId: id, destination, body: "Question", lateAnswer: true } });
+      expect(result.structuredContent).toMatchObject({ code: "late_answer_refused" });
+      expect(repo.getById(id)).toBeNull();
+    }
   });
 
   it("returns the answer when its pending item completes during the same call", async () => {

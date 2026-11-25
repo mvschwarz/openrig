@@ -735,6 +735,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     const controller = new AbortController();
     const disconnect = () => { if (!res.writableFinished) controller.abort(); };
     res.once("close", disconnect);
+    res.once("finish", () => res.off("close", disconnect));
     const credential = createHash("sha256").update(bearer(req) ?? "local-owner").digest("hex");
     const keyFor = (id: string | number) => JSON.stringify([credential, id]);
     const cancel = cancelCall.safeParse(body);
@@ -750,7 +751,6 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     (req as http.IncomingMessage & { auth?: AuthInfo }).auth = { token: "", clientId: principal?.id ?? "local-owner", scopes: [], extra: { caller } };
     try { await serveMcp(req, res, body); }
     finally {
-      res.off("close", disconnect);
       if (key !== undefined) {
         const active = queueWaits.get(key);
         active?.delete(controller);

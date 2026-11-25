@@ -158,7 +158,7 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
     .option("--root <name...>", "Shared file roots (OPENRIG_FILES_ALLOWLIST names) whose artifacts it may read")
     .option("--workspace", "Also read the work tree and context (rig_slices, rig_mission, rig_context_*)")
     .option("--owner", "An owner grant: every tool and object, like the local owner")
-    .option("--person <entity_id>", "The registered person (rig gateway human list) this connection may answer the team's questions for, with rig_question_list and rig_question_answer: only what they explicitly say. Never inferred from the seat or --owner")
+    .option("--person <entity_id>", "The registered person (rig gateway human list) this connection may answer the team's questions for and request late answers for. Use only what the person explicitly says or requests. Never inferred from the seat or --owner")
     .action(async (name: string, opts: { seat: string; rig?: string[]; root?: string[]; workspace?: boolean; owner?: boolean; person?: string }) => {
       const file = mcpTokenFilePath();
       try {

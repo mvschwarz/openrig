@@ -438,6 +438,7 @@ export function queueRoutes(): Hono {
         : err.code === "reply_to_requires_update" ? 400
         : err.code === "reply_to_not_found" ? 400
         : err.code === "invalid_human_questions" ? 400
+        : err.code === "late_answer_refused" ? 400
         // OPR.0.4.6.WF3 FR-6: the frontier close-path guard — operator
         // misuse of a queue verb on a live workflow packet; structured
         // 400 with the what/why/fix message, never a 500.
@@ -832,6 +833,7 @@ export function queueRoutes(): Hono {
       humanDetail?: string | null;
       replyTo?: string | null;
       humanQuestions?: HumanQuestion[] | null; // shape validated by the repository (invalid_human_questions)
+      lateAnswerRecipient?: unknown; // supplied by the authenticated local MCP adapter from its grant
       summary?: string | null;
       evidenceRef?: string | null;
       nudge?: boolean;
@@ -896,6 +898,13 @@ export function queueRoutes(): Hono {
     // branch is a no-op without hostId).
     const refusal = createInputRefusal(c, sourceSession, body);
     if (refusal) return refusal;
+    const recorded = resolveRecordedIdentity(c, identity);
+    const lateAnswerRecipient = body.lateAnswerRecipient;
+    if (lateAnswerRecipient !== undefined && (recorded.identityPrincipal === null
+      || typeof lateAnswerRecipient !== "string" || !/^[a-z0-9][a-z0-9._-]*@external$/.test(lateAnswerRecipient)
+      || (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())))) {
+      return c.json({ error: "late_answer_refused", message: "A late answer needs an authenticated local caller with a registered person." }, 400);
+    }
 
     // OPR.0.4.6.MH3 FR-2 (C1): cross-host CREATE. A registered remote host id
     // forwards the write to that host's daemon; the qitem lives in the origin
@@ -971,14 +980,16 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         evidenceRefRoots: evidenceRefRootsFrom(c),
         nudge: (body as { nudge?: boolean }).nudge,
-        ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
+        ...recorded, // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
+        ...(typeof lateAnswerRecipient === "string" ? { lateAnswerRecipient } : {}),
         ...(route ? { returnRoute: route.address, returnRouteBasis: route.basis } : {}),
       });
       const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
       const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory,
         // A same-id retry returns the stored row unchanged: say the route wasn't kept only when that row has none.
         routeNotKept && !item.returnRoute ? { code: RETURN_ROUTE_NOT_CARRIED, message: routeNotKept } : null].filter(Boolean);
-      return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
+      const lateAnswer = getRepo(c).lateAnswerStatus(item);
+      return c.json({ ...item, ...(lateAnswer ? { lateAnswer } : {}), ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -1204,9 +1215,25 @@ export function queueRoutes(): Hono {
       });
       const advisories = [body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null, ...unstoredAdvisories(body, item)]
         .filter((advisory) => advisory !== null);
-      return c.json({ ...item, ...(advisories.length > 0 ? { advisories } : {}) });
+      const lateAnswer = getRepo(c).lateAnswerStatus(item);
+      return c.json({ ...item, ...(lateAnswer ? { lateAnswer } : {}), ...(advisories.length > 0 ? { advisories } : {}) });
     } catch (err) {
       return errorResponse(c, err);
+    }
+  });
+
+  // The MCP adapter writes this independently of the canceled read's signal.
+  app.post("/:qitemId/wait-stopped", async (c) => {
+    const identity = requireSenderIdentity(c, { verb: "record a stopped queue wait" });
+    if (!identity.ok) return identity.response;
+    const { identityPrincipal } = resolveRecordedIdentity(c, identity);
+    if (!identityPrincipal) return c.json({ error: "late_answer_refused", message: "An authenticated local caller must own this wait." }, 403);
+    const { recipient } = await c.req.json<{ recipient?: unknown }>().catch(() => ({ recipient: undefined }));
+    if (typeof recipient !== "string") return c.json({ error: "late_answer_refused", message: "The caller's registered recipient is required." }, 400);
+    try {
+      return c.json({ lateAnswer: getRepo(c).stopLateAnswerWait(c.req.param("qitemId"), identity.session, identityPrincipal, recipient) });
+    } catch (error) {
+      return errorResponse(c, error);
     }
   });
 
@@ -1978,8 +2005,10 @@ export function queueRoutes(): Hono {
     // The owner notification level is what the Slack selector keys on: a registered person who
     // is also a seat with a pane is pane-bound, yet the gateway may still post the row to them.
     const closing = repo.closingTransition(qitemId, item.state);
+    const lateAnswer = repo.lateAnswerStatus(item);
     return c.json({
       ...item,
+      ...(lateAnswer ? { lateAnswer } : {}),
       ...(waited ? { waited } : {}),
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),
