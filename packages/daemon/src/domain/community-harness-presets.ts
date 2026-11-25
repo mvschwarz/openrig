@@ -16,10 +16,15 @@ import { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime } from "./built-in-runtime
 export { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime };
 
 export const COMMUNITY_HARNESS_PRESET_FORMAT = 1;
-const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted", "first_input", "runner", "passes_model", "launch_wrapper", "protocol"] as const;
+const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted", "first_input", "runner", "passes_model", "launch_wrapper", "protocol", "model_catalog"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 export type CommunityHarnessProtocol = "pi-rpc";
+
+interface PresetModelCatalog {
+  runtimeVersion?: string;
+  models: Array<{ id: string; effortLevels?: string[] }>;
+}
 
 export interface CommunityHarnessPreset {
   name: string;
@@ -45,6 +50,8 @@ export interface CommunityHarnessPreset {
   /** The command is an OpenRig-aware runner: it submits each pasted block as one prompt and posts the seat's turn
    *  boundaries as activity hooks, so its seat's activity reads from those hooks. Requires `launch_result`. */
   runner: boolean;
+  /** Optional settings-editor metadata. It has no effect on launching the harness. */
+  modelCatalog?: PresetModelCatalog;
   path: string;
 }
 
@@ -118,11 +125,32 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
   if (raw.resume === true && protocol !== "pi-rpc" && raw.launch_result !== true && raw.names_conversation !== true) {
     return bad("resume needs launch_result: true or names_conversation: true, so the conversation to reopen is one OpenRig knows");
   }
+  const modelCatalog = parseModelCatalog(raw.model_catalog);
   return { ok: true, preset: { name, command: raw.command as string, maintainer: raw.maintainer as string, limits: limits as string[],
     ...(protocol ? { protocol } : {}),
+    ...(modelCatalog ? { modelCatalog } : {}),
     launchResult: raw.launch_result === true, namesConversation: raw.names_conversation === true, resume: raw.resume === true,
     startupAssisted: raw.startup_assisted === true, firstInput: raw.first_input === true, runner: raw.runner === true, passesModel: raw.passes_model === true,
     launchWrapper: raw.launch_wrapper === true, path } };
+}
+
+function parseModelCatalog(value: unknown): PresetModelCatalog | undefined {
+  const isRecord = (entry: unknown): entry is Record<string, unknown> =>
+    entry !== null && typeof entry === "object" && !Array.isArray(entry);
+  const isLabel = (label: unknown): label is string =>
+    typeof label === "string" && label.trim().length > 0 && !/[\x00-\x1f\x7f]/.test(label);
+  if (!isRecord(value) || !Array.isArray(value.models)) return;
+  const version = value.runtime_version;
+  if (version !== undefined && !isLabel(version)) return;
+
+  const models: PresetModelCatalog["models"] = [];
+  for (const entry of value.models) {
+    if (!isRecord(entry) || !isLabel(entry.id)) return;
+    const levels = entry.effort_levels;
+    if (levels !== undefined && (!Array.isArray(levels) || !levels.every(isLabel))) return;
+    models.push({ id: entry.id, ...(levels === undefined ? {} : { effortLevels: levels }) });
+  }
+  return { ...(version === undefined ? {} : { runtimeVersion: version }), models };
 }
 
 /** The first shell construct in a preset command, or null when it's one program with its arguments. The command is
