@@ -4,6 +4,8 @@ A [staged queue import](queue-transfer-staging.md) can be made runnable on a des
 
 ## Sequence
 
+Outside a managed seat, supply `--actor <name>` to each write command, including `activate` and `reconcile`; it does not carry over from earlier commands.
+
 ```sh
 # destination
 rig queue import workshop.queue.json
