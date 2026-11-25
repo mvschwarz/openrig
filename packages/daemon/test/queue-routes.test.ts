@@ -99,6 +99,285 @@ describe("queue routes", () => {
     temporaryWorkspace = undefined;
   });
 
+  it("creates a blocked queue row and timer through one create request without an immediate nudge", async () => {
+    const response = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({
+        destinationSession: "worker@rig",
+        body: "Wait for the remote task",
+        blockedOn: "external:remote-task",
+        wakeAfterSeconds: 90,
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    const result = await response.json();
+    expect(result).toMatchObject({ state: "blocked", blockedOn: "external:remote-task", parkWarning: null });
+    expect(result).not.toHaveProperty("parkReceipt");
+    expect(queueRepo.getParkWakeStatus(result.qitemId)).toMatchObject({ kind: "timer", live: true });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM outbox_entries").get()).toMatchObject({ count: 0 });
+  });
+
+  it("creates a timed park without a blocker and reports a typed gate with no wake", async () => {
+    const create = (body: Record<string, unknown>) => app.request("/api/queue/create", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" }, body: JSON.stringify(body),
+    });
+    const timed = await create({ destinationSession: "worker@rig", body: "Remind me", wakeAfterSeconds: 45, nudge: false });
+    expect(timed.status).toBe(201);
+    const timedRow = await timed.json() as Record<string, any>;
+    expect(timedRow).toMatchObject({ state: "blocked", blockedOn: null, parkWarning: null });
+    expect(timedRow).not.toHaveProperty("parkReceipt");
+
+    const gate = await create({ destinationSession: "worker@rig", body: "Wait for outside event", blockedOn: "external:release", nudge: false });
+    expect(gate.status).toBe(201);
+    expect(await gate.json()).toMatchObject({ state: "blocked", blockedOn: "external:release", parkWarning: null,
+      advisories: [expect.objectContaining({ code: "park_without_wake" })] });
+  });
+
+  it("does not confirm a stopped timer in the create response", async () => {
+    const getParkSnapshot = queueRepo.getParkSnapshot.bind(queueRepo);
+    let suppliedLiveTimer = false;
+    vi.spyOn(queueRepo, "getParkSnapshot").mockImplementationOnce((qitemId) => {
+      const snapshot = getParkSnapshot(qitemId);
+      suppliedLiveTimer = snapshot.wake?.kind === "timer" && snapshot.wake.intervalSeconds === 90 && snapshot.wake.live;
+      return { ...snapshot, wake: snapshot.wake ? { ...snapshot.wake, live: false } : null };
+    });
+
+    const response = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({
+        qitemId: "qitem-create-stopped-timer",
+        destinationSession: "worker@rig",
+        body: "Wait for the timer",
+        blockedOn: "external:condition",
+        wakeAfterSeconds: 90,
+        nudge: false,
+      }),
+    });
+
+    expect(suppliedLiveTimer).toBe(true);
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      qitemId: "qitem-create-stopped-timer",
+      state: "blocked",
+      blockedOn: "external:condition",
+      parkWarning: { code: "qitem_park_not_confirmed" },
+    });
+  });
+
+  it("does not combine an earlier blocker with a same-interval re-park timer", async () => {
+    const getParkSnapshot = queueRepo.getParkSnapshot.bind(queueRepo);
+    vi.spyOn(queueRepo, "getParkSnapshot").mockImplementationOnce((qitemId) => {
+      const snapshot = getParkSnapshot(qitemId);
+      expect(snapshot.wake).toMatchObject({ kind: "timer", intervalSeconds: 90, live: true });
+      return {
+        ...snapshot,
+        item: snapshot.item ? { ...snapshot.item, blockedOn: "external:earlier" } : null,
+      };
+    });
+
+    const response = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({
+        qitemId: "qitem-create-repark-same-interval",
+        destinationSession: "worker@rig",
+        body: "Wait for the current blocker",
+        blockedOn: "external:current",
+        wakeAfterSeconds: 90,
+        nudge: false,
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    const reparkBody = await response.json() as { parkWarning?: { code?: string; message?: string } };
+    expect(reparkBody).toMatchObject({
+      qitemId: "qitem-create-repark-same-interval",
+      state: "blocked",
+      blockedOn: "external:earlier",
+      parkWarning: {
+        code: "qitem_park_not_confirmed",
+        message: "The row is blocked, but the requested blocker or timer is not confirmed.",
+      },
+    });
+    expect(reparkBody.parkWarning?.message).not.toContain("The row is live and may start early.");
+  });
+
+  it("same-ID park retries return the saved row and warning without adding a timer", async () => {
+    const create = (body: Record<string, unknown>) => app.request("/api/queue/create", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" }, body: JSON.stringify(body),
+    });
+    const base = { qitemId: "qitem-park-retry", destinationSession: "worker@rig", body: "Wait", blockedOn: "external:first", wakeAfterSeconds: 60, nudge: false };
+    const first = await create(base);
+    expect(first.status).toBe(201);
+    const firstRow = await first.json() as Record<string, any>;
+    expect(firstRow).toMatchObject({ parkWarning: null, state: "blocked", blockedOn: "external:first" });
+    expect(firstRow).not.toHaveProperty("parkReceipt");
+
+    const exact = await create(base);
+    expect(exact.status).toBe(201);
+    expect(await exact.json()).toMatchObject({
+      qitemId: base.qitemId,
+      state: "blocked",
+      blockedOn: "external:first",
+      parkWarning: {
+        code: "qitem_park_not_confirmed",
+        message: expect.stringContaining("this retry cannot confirm that its original blocker or timer matches the supplied park options"),
+      },
+    });
+
+    const changed = await create({ ...base, blockedOn: "external:second", wakeAfterSeconds: 120 });
+    expect(changed.status).toBe(201);
+    expect(await changed.json()).toMatchObject({ state: "blocked", blockedOn: "external:first", parkWarning: { code: "qitem_park_not_confirmed" } });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items WHERE qitem_id = ?").get(base.qitemId)).toMatchObject({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM watchdog_jobs WHERE policy = 'periodic-reminder'").get()).toMatchObject({ count: 1 });
+  });
+
+  it("a changed body on a same-ID park retry returns the stored row without another timer", async () => {
+    const create = (body: string) => app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({
+        qitemId: "qitem-park-retry-body",
+        destinationSession: "worker@rig",
+        body,
+        blockedOn: "external:release",
+        wakeAfterSeconds: 60,
+        nudge: false,
+      }),
+    });
+    const first = await create("saved body");
+    expect(first.status).toBe(201);
+    const retry = await create("new body");
+    expect(retry.status).toBe(201);
+    const result = await retry.json() as Record<string, any>;
+    expect(result).toMatchObject({
+      qitemId: "qitem-park-retry-body",
+      body: "saved body",
+      createWarning: { code: "qitem_body_not_saved", message: expect.stringContaining("The supplied body was not saved") },
+      parkWarning: { code: "qitem_park_not_confirmed" },
+    });
+    expect(result).not.toHaveProperty("parkReceipt");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items WHERE qitem_id = ?").get("qitem-park-retry-body")).toMatchObject({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM watchdog_jobs WHERE policy = 'periodic-reminder'").get()).toMatchObject({ count: 1 });
+  });
+
+  it("keeps a parked create successful when its post-commit snapshot read fails, without adding a timer on retry", async () => {
+    const qitemId = "qitem-park-snapshot-read-fails";
+    const body = {
+      qitemId,
+      destinationSession: "worker@rig",
+      body: "Wait for the release",
+      blockedOn: "external:release",
+      wakeAfterSeconds: 90,
+      nudge: false,
+    };
+    vi.spyOn(queueRepo, "getParkSnapshot").mockImplementationOnce(() => {
+      throw new Error("injected post-commit snapshot read failure");
+    });
+    const create = () => app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify(body),
+    });
+
+    const first = await create();
+    expect(first.status).toBe(201);
+    expect(await first.json()).toMatchObject({
+      qitemId,
+      state: "blocked",
+      blockedOn: "external:release",
+      parkWarning: { code: "qitem_park_not_confirmed" },
+    });
+    expect(await create().then((response) => response.json())).toMatchObject({ parkWarning: { code: "qitem_park_not_confirmed" } });
+    expect(queueRepo.getById(qitemId)).toMatchObject({ state: "blocked", blockedOn: "external:release" });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items WHERE qitem_id = ?").get(qitemId)).toMatchObject({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM watchdog_jobs WHERE policy = 'periodic-reminder'").get()).toMatchObject({ count: 1 });
+
+  });
+
+  it("returns the saved row with a warning when the first post-commit row read fails", async () => {
+    const qitemId = "qitem-first-post-commit-read-fails";
+    const original = queueRepo.getById.bind(queueRepo);
+    let injected = false;
+    vi.spyOn(queueRepo, "getById").mockImplementation((id, opts) => {
+      if (id === qitemId && !db.inTransaction && !injected) {
+        injected = true;
+        throw new Error("injected first post-commit row read failure");
+      }
+      return original(id, opts);
+    });
+    const response = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({
+        qitemId, destinationSession: "worker@rig", body: "Wait for release",
+        blockedOn: "external:release", wakeAfterSeconds: 90, nudge: false,
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(injected).toBe(true);
+    const result = await response.json() as Record<string, any>;
+    expect(result).toMatchObject({
+      qitemId,
+      state: "blocked",
+      blockedOn: "external:release",
+      parkWarning: { code: "qitem_park_not_confirmed", message: expect.stringContaining("could not confirm its current park status") },
+    });
+    expect(result).not.toHaveProperty("parkReceipt");
+    expect(queueRepo.getParkWakeStatus(qitemId)).toMatchObject({ kind: "timer", live: true, intervalSeconds: 90 });
+  });
+
+  it("keeps ordinary same-ID create output free of a park advisory for an existing parked row", async () => {
+    const qitemId = "qitem-ordinary-retry-after-park";
+    const first = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({
+        qitemId, destinationSession: "worker@rig", body: "Wait",
+        blockedOn: "external:release", nudge: false,
+      }),
+    });
+    expect(first.status).toBe(201);
+    const firstRow = await first.json() as Record<string, any>;
+    expect(firstRow.advisories).toEqual(expect.arrayContaining([expect.objectContaining({ code: "park_without_wake" })]));
+    expect(firstRow).toMatchObject({ parkWarning: null });
+    const ordinaryRetry = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({ qitemId, destinationSession: "worker@rig", body: "Wait" }),
+    });
+    expect(ordinaryRetry.status).toBe(201);
+    const result = await ordinaryRetry.json() as Record<string, any>;
+    expect(result.qitemId).toBe(qitemId);
+    expect(result).not.toHaveProperty("parkWarning");
+    expect(result.advisories ?? []).not.toEqual(expect.arrayContaining([expect.objectContaining({ code: "park_without_wake" })]));
+  });
+
+  it("rejects a non-string blockedOn with a field error before creating a row", async () => {
+    const response = await app.request("/api/queue/create", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({ destinationSession: "worker@rig", body: "Invalid blocker", blockedOn: 42 }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "invalid_blocked_on", field: "blockedOn" });
+    expect(queueRepo.list()).toHaveLength(0);
+  });
+
+  it("rejects empty or whitespace blockedOn at the raw create boundary", async () => {
+    for (const blockedOn of ["", " \t\n"]) {
+      const response = await app.request("/api/queue/create", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+        body: JSON.stringify({ destinationSession: "worker@rig", body: "Invalid blocker", blockedOn }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: "invalid_blocked_on", field: "blockedOn" });
+      expect(queueRepo.list()).toHaveLength(0);
+    }
+  });
+
   it("`POST /:qitemId/fallback` keeps today's behaviour: it passes no guard, moves the row as before, and stages no fallback wake.", async () => {
     const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
     const spy = vi.spyOn(queueRepo, "routeToFallback");

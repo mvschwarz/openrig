@@ -151,6 +151,58 @@ describe("W2b exact-set notify envelope", () => {
     expect(received.map((event) => (event as { viewName?: string }).viewName)).toEqual(["a", "b"]);
   });
 
+  it("joins a nested queue create and keeps re-entrant subscriber writes in sequence order", async () => {
+    const queueRepo = new QueueRepository(db, bus);
+    const parentId = "qitem-notify-envelope-parent";
+    const childId = "qitem-notify-envelope-child";
+    const first: PersistedEvent[] = [];
+    const second: PersistedEvent[] = [];
+    let childCreate: Promise<unknown> | undefined;
+
+    bus.subscribe((event) => {
+      first.push(event);
+      if (event.type === "queue.created" && event.qitemId === parentId && !childCreate) {
+        childCreate = queueRepo.create({
+          qitemId: childId,
+          sourceSession: "source@w2b-rig",
+          destinationSession: "child@w2b-rig",
+          body: "child",
+          nudge: false,
+        });
+      }
+    });
+    bus.subscribe((event) => second.push(event));
+
+    let parentCreate: Promise<unknown> | undefined;
+    bus.withNotifyEnvelope(() => {
+      parentCreate = queueRepo.create({
+        qitemId: parentId,
+        sourceSession: "source@w2b-rig",
+        destinationSession: "owner@w2b-rig",
+        body: "parent",
+        blockedOn: "external:release",
+        wakeAfterSeconds: 30,
+        nudge: false,
+      });
+    });
+
+    const parentResult = parentCreate;
+    expect(parentResult).toBeDefined();
+    await parentResult;
+    const childResult = childCreate;
+    expect(childResult).toBeDefined();
+    await childResult;
+    const replayed = bus.replayAll(0);
+    const expected = replayed.map((event) => event.seq);
+    const parentIndexes = replayed.flatMap((event, index) => event.qitemId === parentId ? [index] : []);
+    const childIndex = replayed.findIndex((event) => event.qitemId === childId);
+    expect(parentIndexes.length).toBeGreaterThan(1);
+    expect(childIndex).toBeGreaterThan(Math.max(...parentIndexes));
+    expect(first.map((event) => event.seq)).toEqual(expected);
+    expect(second.map((event) => event.seq)).toEqual(expected);
+    expect(first.map((event) => event.qitemId)).toEqual(second.map((event) => event.qitemId));
+  });
+
   it("fails a validation that examined zero envelope transactions", () => {
     expect(() => bus.assertNotifyEnvelopeExercised()).toThrow(/zero notify envelope transactions/i);
     bus.withNotifyEnvelope(() => undefined);

@@ -243,6 +243,45 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(repo.getParkWakeStatus(row.qitemId)).not.toHaveProperty("expiresAt");
   });
 
+  it("creates a blocked qitem with its one-shot timer in the same transaction", async () => {
+    const row = await repo.create({
+      qitemId: "qitem-create-park-timer",
+      sourceSession: "orch@rig",
+      destinationSession: "worker@rig",
+      body: "Wait for the remote task",
+      blockedOn: "external:remote-task",
+      wakeAfterSeconds: 90,
+      nudge: false,
+    } as never);
+
+    expect(row).toMatchObject({ state: "blocked", blockedOn: "external:remote-task" });
+    const wake = wakes(row.qitemId)[0] as { wake_kind: string; wake_ref: string } | undefined;
+    expect(wake?.wake_kind).toBe("timer");
+    expect(jobs.getById(wake!.wake_ref)).toMatchObject({
+      state: "active",
+      targetSession: "worker@rig",
+      intervalSeconds: 90,
+    });
+  });
+
+  it("rolls back the qitem and timer when create cannot bind the wake", async () => {
+    db.exec("CREATE TRIGGER fail_create_wake_binding BEFORE INSERT ON queue_transition_wakes BEGIN SELECT RAISE(ABORT, 'injected create wake binding failure'); END");
+
+    await expect(repo.create({
+      qitemId: "qitem-create-park-rollback",
+      sourceSession: "orch@rig",
+      destinationSession: "worker@rig",
+      body: "Wait for the remote task",
+      blockedOn: "external:remote-task",
+      wakeAfterSeconds: 90,
+      nudge: false,
+    } as never)).rejects.toThrow("injected create wake binding failure");
+
+    expect(repo.getById("qitem-create-park-rollback")).toBeNull();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM watchdog_jobs").get()).toMatchObject({ count: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_transition_wakes").get()).toMatchObject({ count: 0 });
+  });
+
   it("OPR.0.5.8.1 S1 — two materially different --wake-after durations do NOT converge on one latency", async () => {
     // The SPEC's own contract line. Measured on the base build through the real
     // public seam: a requested 20m fired 0.69s after arming and a requested 2h

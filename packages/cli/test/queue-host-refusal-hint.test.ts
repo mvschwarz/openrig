@@ -24,7 +24,9 @@ const SELF_ID = "host-5f2e9c1a";
 
 type Reply = { status: number; data: unknown } | Error;
 const UNKNOWN_HOST = (hostId: string): Reply => ({ status: 502, data: { error: "remote_queue_write_failed", hostId, failureClass: "unknown-host", detail: `unknown host id '${hostId}'.` } });
-const CREATED: Reply = { status: 201, data: { qitemId: "qitem-20261020230000-aaaa", destinationSession: "dev@rig-b", state: "pending" } };
+const CREATED: Reply = { status: 201, data: {
+  qitemId: "qitem-20261020230000-aaaa", sourceSession: "lead@rig-a", destinationSession: "dev@rig-b", body: "b", state: "pending",
+} };
 
 function makeDeps(replies: Reply[]): { deps: QueueDeps; requests: Array<{ method: string; path: string; body?: Record<string, unknown> }> } {
   const requests: Array<{ method: string; path: string; body?: Record<string, unknown> }> = [];
@@ -119,7 +121,9 @@ describe("queue writes refused for a host token the daemon doesn't know", () => 
     });
 
     it(`${c.verb}: a daemon that accepts the token decides alone, with no hint`, async () => {
-      const requests = await run(c.argv(`dev@rig-b@${SELF_ID}`), [CREATED]);
+      const argv = c.argv(`dev@rig-b@${SELF_ID}`);
+      if (c.verb === "create") argv.push("--id", "qitem-20261020230000-aaaa");
+      const requests = await run(argv, [CREATED]);
       expect(requests.filter((r) => r.method === "POST")).toHaveLength(1);
       expect(hints()).toHaveLength(0);
       expect(process.exitCode).toBeUndefined();

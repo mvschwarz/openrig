@@ -140,7 +140,12 @@ export async function remoteJsonRequest(host: HttpHostEntry, path: string, opts:
   } catch (err) {
     clearTimeout(timer);
     if (controller.signal.aborted) return { ok: false, kind: "timeout", phase: "request", detail: "" };
-    return { ok: false, kind: "network", detail: (err as Error).message };
+    return {
+      ok: false,
+      kind: "network",
+      ...(opts.method === "POST" ? { outcome: "indeterminate" as const } : {}),
+      detail: (err as Error).message,
+    };
   }
 
   // A redirect the caller won't follow is classified on its status alone; its body is never read.

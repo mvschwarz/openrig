@@ -22,7 +22,7 @@ it("preallocates timestamp/64-bit-hex IDs recognized by the existing lint, sort 
     lifecycleDeps: {} as never,
     clientFactory: () => ({ post: async (_path: string, body: { qitemId: string }) => {
       ids.push(body.qitemId);
-      return { status: 201, data: body };
+      return { status: 201, data: { ...body, state: "pending" } };
     } }) as never,
   };
   for (const time of ["2026-10-02T07:00:00Z", "2026-10-02T07:00:01Z"]) {

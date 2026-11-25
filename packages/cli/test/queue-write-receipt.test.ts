@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { QueueDeps } from "../src/commands/queue.js";
+import { DaemonConnectionError } from "../src/client.js";
 import { createProgram } from "../src/index.js";
 import { compactOutputEnabled } from "../src/queue-receipt.js";
 import { ConfigStore } from "../src/config-store.js";
@@ -23,10 +25,11 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
 
 type Row = Record<string, unknown>;
 const BODY = "Do the thing.\n".repeat(40) + "é";
+const DEFAULT_ROW_ID = "qitem-20261010180000-aaaa";
 
 /** The daemon's write response, shaped as `rowToItem` returns it. */
 function row(over: Row = {}, waiting: Row = {}): Row {
-  const id = (over.qitemId as string | undefined) ?? "qitem-20261010180000-aaaa";
+  const id = (over.qitemId as string | undefined) ?? DEFAULT_ROW_ID;
   const state = (over.state as string | undefined) ?? "pending";
   return {
     pickup: { state: "unclaimed" },
@@ -48,31 +51,52 @@ function row(over: Row = {}, waiting: Row = {}): Row {
   };
 }
 
-function makeDeps(routes: Record<string, { status: number; data: unknown } | Array<{ status: number; data: unknown }>>): QueueDeps {
+let requestPaths: string[] = [];
+
+type RouteEntry = { status: number; data: unknown } | Error;
+
+function makeDeps(routes: Record<string, RouteEntry | RouteEntry[]>): QueueDeps {
   const transitions: Array<{ transitionId: number; transitionNote: string | null; actorSession: string }> =
     [{ transitionId: 1, transitionNote: null, actorSession: "stub@rig" }];
-  const pick = (key: string, fallback: { status: number; data: unknown }) => {
+  const pick = (key: string, fallback: { status: number; data: unknown }): RouteEntry => {
     const r = routes[key];
     return (Array.isArray(r) ? r.shift() : r) ?? fallback;
   };
   return {
     lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
-    clientFactory: () => ({
+    clientFactory: (baseUrl: string) => ({
+      baseUrl,
       // The sender this stub stamps; the transitions it records carry it as their actor, as the daemon does.
       senderIdentity: async () => ({ session: "stub@rig", originUnknown: false }),
       get: vi.fn(async (p: string) => {
+        requestPaths.push(p);
         const explicit = routes[`GET ${p}`];
-        if (explicit) return Array.isArray(explicit) ? explicit.shift()! : explicit;
+        if (explicit) {
+          const entry = Array.isArray(explicit) ? explicit.shift() : explicit;
+          if (entry instanceof Error) throw entry;
+          if (entry) return entry;
+        }
         if (p.endsWith("/transitions")) return { status: 200, data: transitions };
         const update = routes[`POST ${p}/update`];
         if (update) {
           const response = Array.isArray(update) ? update[0] : update;
-          return { status: 200, data: response?.data ?? {} };
+          return { status: 200, data: response && !(response instanceof Error) ? response.data : {} };
         }
         return { status: 200, data: {} };
       }),
       post: vi.fn(async (p: string, body: unknown) => {
-        const response = pick(`POST ${p}`, { status: 500, data: { error: "unrouted" } });
+        const picked = pick(`POST ${p}`, { status: 500, data: { error: "unrouted" } });
+        if (picked instanceof Error) throw picked;
+        let response = picked;
+        const requestedId = body && typeof body === "object" ? (body as { qitemId?: unknown }).qitemId : undefined;
+        const responseRow = response.data && typeof response.data === "object" && !Array.isArray(response.data)
+          ? response.data as Row : undefined;
+        if (p === "/api/queue/create" && response.status < 400 && typeof requestedId === "string"
+          && responseRow?.qitemId === DEFAULT_ROW_ID) {
+          const waiting = responseRow.waiting && typeof responseRow.waiting === "object" && !Array.isArray(responseRow.waiting)
+            ? { ...responseRow.waiting as Row, obligation: requestedId } : responseRow.waiting;
+          response = { ...response, data: { ...responseRow, qitemId: requestedId, ...(waiting === undefined ? {} : { waiting }) } };
+        }
         const transitionNote = body && typeof body === "object" ? (body as { transitionNote?: unknown }).transitionNote : undefined;
         if (response.status < 400 && typeof transitionNote === "string") {
           transitions.push({ transitionId: transitions.length + 1, transitionNote, actorSession: "stub@rig" });
@@ -86,6 +110,7 @@ function makeDeps(routes: Record<string, { status: number; data: unknown } | Arr
 let logs: string[];
 let errors: string[];
 let stderr: string[];
+let home: string;
 
 async function run(argv: string[], routes: Parameters<typeof makeDeps>[0]): Promise<string> {
   const program = createProgram({ queueDeps: makeDeps(routes) });
@@ -122,14 +147,17 @@ const VERBS: Array<{ verb: string; argv: string[]; route: string; data: unknown;
 describe("queue write receipt (output.compact)", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "queue-write-receipt-"));
+    vi.stubEnv("OPENRIG_HOME", home);
     vi.stubEnv("OPENRIG_SESSION_NAME", "worker@r");
+    requestPaths = [];
     logs = []; errors = []; stderr = [];
     vi.spyOn(console, "log").mockImplementation((...a) => { logs.push(a.join(" ")); });
     vi.spyOn(console, "error").mockImplementation((...a) => { errors.push(a.join(" ")); });
     vi.spyOn(process.stderr, "write").mockImplementation(((s: string) => { stderr.push(String(s)); return true; }) as typeof process.stderr.write);
     process.exitCode = undefined;
   });
-  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); process.exitCode = undefined; });
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); fs.rmSync(home, { recursive: true, force: true }); process.exitCode = undefined; });
 
   describe("unchanged unless the switch is on", () => {
     for (const v of VERBS) {
@@ -301,13 +329,14 @@ describe("queue write receipt (output.compact)", () => {
       }
     });
 
-    it("an indeterminate cross-host create prints whole, warns on stderr and exits 2", async () => {
+    it("an indeterminate cross-host create prints the INDETERMINATE receipt with its ID", async () => {
       const data = { error: "remote_queue_write_failed", hostId: "far", failureClass: "unreachable", outcome: "indeterminate", detail: "socket hang up" };
       const out = await run(["create", "--destination", "worker@r", "--host", "far", "--body", "b", "--summary", "s", "--id", "qitem-fixed", "--json"],
         { "POST /api/queue/create": { status: 502, data } });
       const printed = JSON.parse(out) as Row;
       expect(printed).toMatchObject({ ...data, qitemId: "qitem-fixed" });
       expect(printed.recovery).toEqual(expect.stringContaining("--id 'qitem-fixed'"));
+      expect(errors.join("\n")).toContain("could not establish the queue for requested host");
       expect(errors.join("\n")).toContain("The write outcome is INDETERMINATE");
       expect(process.exitCode).toBe(2);
     });
@@ -332,12 +361,194 @@ describe("queue write receipt (output.compact)", () => {
       expect(out).toContain("wake: --no-nudge: no wake was requested");
     });
 
+    it("an unconfirmed park stays a request in the compact receipt", async () => {
+      const id = "qitem-20261010180000-aaaa";
+      const message = "An older receiving daemon may save this row as pending, where work can start early.";
+      const data = row({
+        qitemId: id,
+        sourceSession: "stub@rig",
+        state: "pending",
+        parkReceipt: { confirmed: false, state: "pending", blockedOn: null, wakeKind: null, wakeAfterSeconds: null },
+        parkWarning: { code: "qitem_park_not_confirmed", message },
+      });
+      const out = await create(["--id", id, "--wake-after", "15m"], data);
+      expect(out).toContain("park: not confirmed");
+      expect(out).toContain("wake: park request: no immediate terminal wake was requested; the returned row did not confirm the park");
+      expect(out).toContain(`WARNING: ${message}`);
+
+      logs = [];
+      const json = JSON.parse(await create(["--id", id, "--wake-after", "15m", "--json"], data)) as Row;
+      expect(json).toMatchObject({ qitemId: id });
+      expect(json).not.toHaveProperty("persisted");
+      expect(json).not.toHaveProperty("parkReceipt");
+      expect((json.receipt as { omitted: string[] }).omitted).toContain("parkReceipt");
+      expect(json.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed" });
+      expect(json.parkWarning.message).toBe(message);
+      expect(json.wake).toMatchObject({
+        evidence: "suppressed",
+        detail: "park request: no immediate terminal wake was requested; the returned row did not confirm the park",
+      });
+    });
+
+    it("explicit parkWarning: null on a direct blocked create confirms the park in compact output", async () => {
+      const id = "qitem-20261010180000-aaaa";
+      const data = row({
+        qitemId: id,
+        sourceSession: "stub@rig",
+        state: "blocked",
+        blockedOn: "external:release",
+        parkWarning: null,
+      });
+      const out = await create(["--id", id, "--blocked-on", "external:release", "--wake-after", "15m"], data);
+      expect(out).toContain("  park: confirmed");
+      expect(out).not.toContain("park: not confirmed");
+      expect(out).toContain("wake: parked create: no immediate terminal wake was requested; the returned row confirms the blocked state");
+
+      logs = [];
+      const json = JSON.parse(await create(["--id", id, "--blocked-on", "external:release", "--wake-after", "15m", "--json"], data)) as Row;
+      expect(json.wake).toEqual({
+        evidence: "suppressed",
+        detail: "parked create: no immediate terminal wake was requested; the returned row confirms the blocked state",
+      });
+    });
+
+    it.each(["blocked", "pending"] as const)(
+      "an older daemon create response without parkWarning (%s) never claims park confirmation in compact output",
+      async (state) => {
+        const id = "qitem-20261010180000-aaaa";
+        const data = row({
+          qitemId: id,
+          sourceSession: "stub@rig",
+          state,
+          ...(state === "blocked" ? { blockedOn: "external:release" } : {}),
+        });
+        const out = await create(["--id", id, "--blocked-on", "external:release", "--wake-after", "15m"], data);
+        expect(out).toContain("  park: not confirmed");
+        expect(out).not.toContain("park: confirmed");
+        expect(out).toContain("wake: park request: no immediate terminal wake was requested; the returned row did not confirm the park");
+
+        logs = [];
+        const json = JSON.parse(await create(["--id", id, "--blocked-on", "external:release", "--wake-after", "15m", "--json"], data)) as Row;
+        expect(json.wake).toEqual({
+          evidence: "suppressed",
+          detail: "park request: no immediate terminal wake was requested; the returned row did not confirm the park",
+        });
+      },
+    );
+
+    it.each<readonly [string, Row]>([
+      ["without parkWarning", {}],
+      ["even when GET payload carries parkWarning: null", { parkWarning: null }],
+    ])(
+      "a GET-recovered parked create (%s) never claims park confirmation in compact output",
+      async (_label, extraRowFields) => {
+        const id = "qitem-20261010180000-aaaa";
+        const recoveredRow = row({
+          qitemId: id,
+          sourceSession: "stub@rig",
+          state: "blocked",
+          blockedOn: "external:release",
+          ...extraRowFields,
+        });
+        const baseArgv = [
+          "create", "--destination", "worker@r", "--body", BODY, "--summary", "s",
+          "--id", id, "--blocked-on", "external:release", "--wake-after", "15m",
+        ];
+
+        const out = await run(baseArgv, {
+          "POST /api/queue/create": new DaemonConnectionError("connection dropped", "ECONNRESET"),
+          [`GET /api/queue/${id}`]: { status: 200, data: recoveredRow },
+        });
+        expect(requestPaths).toContain(`/api/queue/${id}`);
+        expect(out).toContain("  park: not confirmed");
+        expect(out).not.toContain("park: confirmed");
+        expect(out).toContain("wake: park request: no immediate terminal wake was requested; the returned row did not confirm the park");
+
+        logs = [];
+        requestPaths = [];
+        const json = JSON.parse(await run([...baseArgv, "--json"], {
+          "POST /api/queue/create": new DaemonConnectionError("connection dropped", "ECONNRESET"),
+          [`GET /api/queue/${id}`]: { status: 200, data: recoveredRow },
+        })) as Row;
+        expect(requestPaths).toContain(`/api/queue/${id}`);
+        expect(json.wake).toEqual({
+          evidence: "suppressed",
+          detail: "park request: no immediate terminal wake was requested; the returned row did not confirm the park",
+        });
+      },
+    );
+
+    it.each<readonly [string, { status: number; data: unknown }]>([
+      ["502 indeterminate forwarded response", { status: 502, data: { error: "remote_queue_write_failed", failureClass: "unreachable", outcome: "indeterminate", detail: "socket hang up" } }],
+      ["unusable 2xx create response", { status: 201, data: { qitemId: DEFAULT_ROW_ID } }],
+    ])(
+      "a parked create recovered after %s never claims park confirmation in compact output",
+      async (_label, postReply) => {
+        const id = DEFAULT_ROW_ID;
+        const recoveredRow = row({
+          qitemId: id,
+          sourceSession: "stub@rig",
+          state: "blocked",
+          blockedOn: "external:release",
+        });
+        const baseArgv = [
+          "create", "--destination", "worker@r", "--body", BODY, "--summary", "s",
+          "--id", id, "--blocked-on", "external:release", "--wake-after", "15m",
+        ];
+
+        const out = await run(baseArgv, {
+          "POST /api/queue/create": postReply,
+          [`GET /api/queue/${id}`]: { status: 200, data: recoveredRow },
+        });
+        expect(requestPaths).toContain(`/api/queue/${id}`);
+        expect(out).toContain("  park: not confirmed");
+        expect(out).not.toContain("park: confirmed");
+        expect(out).toContain("wake: park request: no immediate terminal wake was requested; the returned row did not confirm the park");
+
+        logs = [];
+        requestPaths = [];
+        const json = JSON.parse(await run([...baseArgv, "--json"], {
+          "POST /api/queue/create": postReply,
+          [`GET /api/queue/${id}`]: { status: 200, data: recoveredRow },
+        })) as Row;
+        expect(requestPaths).toContain(`/api/queue/${id}`);
+        expect(json).not.toHaveProperty("persisted");
+        expect(json.wake).toEqual({
+          evidence: "suppressed",
+          detail: "park request: no immediate terminal wake was requested; the returned row did not confirm the park",
+        });
+      },
+    );
+
+    it("unknown create uses the typed indeterminate error and keeps the park warning", async () => {
+      const id = "qitem-20261010180000-aaaa";
+      const rawBody = "RAW-RECEIVED-BODY-MUST-NOT-PRINT";
+      const rawRowMarker = "RAW-ROW-FIELD-MUST-NOT-PRINT";
+      const data = row({
+        qitemId: "qitem-20261010180100-bbbb",
+        body: rawBody,
+        rawRowMarker,
+        parkReceipt: { confirmed: true, state: "blocked", blockedOn: "raw-blocker", wakeKind: "raw-wake", wakeAfterSeconds: 15 },
+        parkWarning: { code: "raw-warning", message: "raw park warning" },
+      });
+
+      await expect(create(["--id", id, "--wake-after", "15m", "--json"], data))
+        .rejects.toMatchObject({ name: "DaemonResponseError", message: expect.stringContaining(id) });
+      const allOutput = [...logs, ...errors, ...stderr].join("\n");
+      expect(errors.join("\n")).toContain("Warning: raw park warning");
+      expect(allOutput).not.toContain("queue_create_outcome_unknown");
+      expect(allOutput).not.toContain(rawBody);
+      expect(allOutput).not.toContain(rawRowMarker);
+      expect(allOutput).not.toContain(BODY);
+      expect(logs).toEqual([]);
+    });
+
     it("staging failed: the row saved, the wake did not", async () => {
       const out = await create([], row({ lastNudgeResult: "failed:wake not retained: outbox locked", lastNudgeAttempt: "2026-10-10T18:00:00.500Z" }));
       expect(out).toContain("wake: failed:wake not retained: outbox locked at 2026-10-10T18:00:00.500Z — the row saved but its wake was NOT staged");
     });
 
-    it("an idempotent create that returned an existing row says no new wake, and its warning stays on stderr", async () => {
+    it("an idempotent create uses the ordinary wake receipt, and its warning stays on stderr", async () => {
       const createWarning = { code: "qitem_body_not_saved", message: "qitem q already exists with a different body. The supplied body was not saved; the existing row is returned unchanged. No new work or delivery was created." };
       const out = await create(["--id", "qitem-20261010180000-aaaa"], { ...row({ lastNudgeResult: "verified", lastNudgeAttempt: "2026-10-09T00:00:00.000Z" }), createWarning });
       expect(out).toContain("wake: an existing row was returned; this write started no new wake (the row's earlier wake result: verified at 2026-10-09T00:00:00.000Z)");
@@ -376,7 +587,7 @@ describe("queue write receipt (output.compact)", () => {
         deliveryVerify: { timeoutMs: 50, intervalMs: 0, sleep: async () => {} },
       } });
       program.exitOverride();
-      await program.parseAsync(["node", "rig", "queue", "create", "--destination", "worker@r", "--body", "b", "--summary", "s", "--verify", "--json"]);
+      await program.parseAsync(["node", "rig", "queue", "create", "--destination", "worker@r", "--body", "b", "--summary", "s", "--verify", "--id", id, "--json"]);
       const json = JSON.parse(logs.at(-1)!) as Row;
       expect(json).toMatchObject({ qitemId: id, persisted: true, delivery: { outcome: "posted", connectorAccepted: true, humanReadership: "unknown", nextAction: null } });
       expect(json).not.toHaveProperty("body");
@@ -395,7 +606,7 @@ describe("queue write receipt (output.compact)", () => {
           deliveryVerify: { timeoutMs: 50, intervalMs: 0, sleep: async () => {} },
         } });
         program.exitOverride();
-        await program.parseAsync(["node", "rig", "queue", "create", "--destination", "worker@r", "--body", "b", "--summary", "s", "--verify", ...extra]);
+        await program.parseAsync(["node", "rig", "queue", "create", "--destination", "worker@r", "--body", "b", "--summary", "s", "--verify", "--id", id, ...extra]);
         return logs.join("\n");
       };
       for (const json of [false, true]) {
@@ -436,33 +647,127 @@ describe("queue write receipt (output.compact)", () => {
       expect(json).toMatchObject({ lastNudgeResult: "verified", lastNudgeAttempt: "2026-10-10T18:00:01.000Z" });
     });
 
-    const createVia = async (extra: string[], data: Row, health: { status: number; data: unknown }) =>
-      run(["create", "--destination", "worker@r", "--body", BODY, "--summary", "s", ...extra],
-        { "POST /api/queue/create": { status: 201, data }, "GET /healthz": health });
+    const createVia = async (extra: string[], data: Row, health?: RouteEntry) =>
+      run(["create", "--destination", "worker@r", "--body", BODY, "--summary", "s", "--id", DEFAULT_ROW_ID, ...extra],
+        { "POST /api/queue/create": { status: 201, data }, ...(health ? { "GET /healthz": health } : {}) });
 
-    it("a --host create to another daemon names the host and the remote read", async () => {
+    const writeHosts = (content: string) => fs.writeFileSync(path.join(home, "hosts.yaml"), content);
+
+    it("a --host create to another daemon names the host and the remote read after checking selfHostId", async () => {
+      writeHosts("hosts:\n  - id: far\n    transport: http\n    url: https://far.example:7433\n");
       const out = await createVia(["--host", "far"], row(), { status: 200, data: { selfHostId: "here" } });
       expect(out).toContain("host: far (the row lives on that daemon)");
       expect(out).toContain("rig queue show 'qitem-20261010180000-aaaa' --host 'far' --full --json");
+      expect(requestPaths).toContain("/healthz");
     });
 
-    it("a --host naming this daemon's own host id is local, as the daemon resolves it: no remote host, a local read", async () => {
+    it("a --host matching this daemon's own host id is local even when hosts.yaml maps it to another URL", async () => {
+      writeHosts("hosts:\n  - id: here\n    transport: http\n    url: https://here.example:7433\n");
       const out = await createVia(["--host", "here"], row(), { status: 200, data: { selfHostId: "here" } });
       expect(out).not.toContain("host:");
-      expect(out).not.toContain("OPENRIG_URL");
+      expect(out).not.toContain("lives on that daemon");
       expect(out).toContain("full row: rig queue show 'qitem-20261010180000-aaaa' --full --json");
       logs = [];
       const json = JSON.parse(await createVia(["--host", "here", "--json"], row(), { status: 200, data: { selfHostId: "here" } })) as Row;
       expect(json).not.toHaveProperty("host");
+      expect(json).not.toHaveProperty("hostUnconfirmed");
       expect((json.receipt as Row).fullCommand).toBe("rig queue show 'qitem-20261010180000-aaaa' --full --json");
     });
 
-    it("a --host whose locality can't be confirmed says so rather than assert the row is remote", async () => {
+    it("a --host mapped to another URL stays unconfirmed when this daemon's own host id cannot be read", async () => {
+      writeHosts("hosts:\n  - id: here\n    transport: http\n    url: https://here.example:7433\n");
+      const out = await createVia(["--host", "here"], row(), { status: 503, data: {} });
+      expect(out).toContain("host: here (this daemon's own host id could not be read; if it is not here, the row lives on that daemon)");
+      expect(out).not.toContain("host: here (the row lives on that daemon)");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "here", "--json"], row(), { status: 503, data: {} })) as Row;
+      expect(json).toMatchObject({ host: "here", hostUnconfirmed: true });
+      expect(json.receipt).toMatchObject({
+        fullCommand: "rig queue show 'qitem-20261010180000-aaaa' --full --json",
+        fullCommandOnHost: "rig queue show 'qitem-20261010180000-aaaa' --host 'here' --full --json",
+      });
+    });
+
+    it("a --host mapped to the selected URL is remote when this daemon reports a different selfHostId", async () => {
+      writeHosts("hosts:\n  - id: vps-b\n    transport: http\n    url: http://localhost:7433\n");
+      const out = await createVia(["--host", "vps-b"], row(), { status: 200, data: { selfHostId: "host-a" } });
+      expect(out).toContain("host: vps-b (the row lives on that daemon)");
+      expect(out).toContain("rig queue show 'qitem-20261010180000-aaaa' --host 'vps-b' --full --json");
+      expect(requestPaths).toContain("/healthz");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "vps-b", "--json"], row(), { status: 200, data: { selfHostId: "host-a" } })) as Row;
+      expect(json).toMatchObject({ host: "vps-b" });
+      expect(json).not.toHaveProperty("hostUnconfirmed");
+      expect((json.receipt as Row).fullCommand).toBe("rig queue show 'qitem-20261010180000-aaaa' --host 'vps-b' --full --json");
+      expect(requestPaths).toContain("/healthz");
+    });
+
+    it("a --host mapped to the selected URL is local only after /healthz confirms matching selfHostId", async () => {
+      writeHosts("hosts:\n  - id: here\n    transport: http\n    url: http://localhost:7433\n");
+      const out = await createVia(["--host", "here"], row(), { status: 200, data: { selfHostId: "here" } });
+      expect(out).not.toContain("host:");
+      expect(out).not.toContain("OPENRIG_URL");
+      expect(out).toContain("full row: rig queue show 'qitem-20261010180000-aaaa' --full --json");
+      expect(requestPaths).toContain("/healthz");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "here", "--json"], row(), { status: 200, data: { selfHostId: "here" } })) as Row;
+      expect(json).not.toHaveProperty("host");
+      expect(json).not.toHaveProperty("hostUnconfirmed");
+      expect((json.receipt as Row).fullCommand).toBe("rig queue show 'qitem-20261010180000-aaaa' --full --json");
+      expect(requestPaths).toContain("/healthz");
+    });
+
+    it("a --host mapped to the selected URL stays unconfirmed when /healthz cannot be read", async () => {
+      writeHosts("hosts:\n  - id: here\n    transport: http\n    url: http://localhost:7433\n");
+      const out = await createVia(["--host", "here"], row(), { status: 503, data: {} });
+      expect(out).toContain("host: here (this daemon's own host id could not be read; if it is not here, the row lives on that daemon)");
+      expect(requestPaths).toContain("/healthz");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "here", "--json"], row(), { status: 503, data: {} })) as Row;
+      expect(json).toMatchObject({ host: "here", hostUnconfirmed: true });
+      expect(json.receipt).toMatchObject({
+        fullCommand: "rig queue show 'qitem-20261010180000-aaaa' --full --json",
+        fullCommandOnHost: "rig queue show 'qitem-20261010180000-aaaa' --host 'here' --full --json",
+      });
+      expect(requestPaths).toContain("/healthz");
+    });
+
+    it("an unregistered --host matching this daemon's own host id settles as local via /healthz", async () => {
+      const out = await createVia(["--host", "here"], row(), { status: 200, data: { selfHostId: "here" } });
+      expect(out).not.toContain("host:");
+      expect(out).not.toContain("could not be read");
+      expect(out).toContain("full row: rig queue show 'qitem-20261010180000-aaaa' --full --json");
+      expect(requestPaths).toContain("/healthz");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "here", "--json"], row(), { status: 200, data: { selfHostId: "here" } })) as Row;
+      expect(json).not.toHaveProperty("host");
+      expect(json).not.toHaveProperty("hostUnconfirmed");
+      expect((json.receipt as Row).fullCommand).toBe("rig queue show 'qitem-20261010180000-aaaa' --full --json");
+      expect(requestPaths).toContain("/healthz");
+    });
+
+    it("an unregistered --host differing from this daemon's own host id settles as remote via /healthz", async () => {
+      const out = await createVia(["--host", "far"], row(), { status: 200, data: { selfHostId: "here" } });
+      expect(out).toContain("host: far (the row lives on that daemon)");
+      expect(out).not.toContain("could not be read");
+      expect(out).toContain("rig queue show 'qitem-20261010180000-aaaa' --host 'far' --full --json");
+      expect(requestPaths).toContain("/healthz");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "far", "--json"], row(), { status: 200, data: { selfHostId: "here" } })) as Row;
+      expect(json).toMatchObject({ host: "far" });
+      expect(json).not.toHaveProperty("hostUnconfirmed");
+      expect((json.receipt as Row).fullCommand).toBe("rig queue show 'qitem-20261010180000-aaaa' --host 'far' --full --json");
+      expect(requestPaths).toContain("/healthz");
+    });
+
+    it("an unregistered --host stays unconfirmed only after /healthz cannot be read", async () => {
       const out = await createVia(["--host", "far"], row(), { status: 503, data: {} });
       expect(out).toContain("host: far (this daemon's own host id could not be read; if it is not far, the row lives on that daemon)");
+      expect(requestPaths).toContain("/healthz");
       logs = [];
       const json = JSON.parse(await createVia(["--host", "far", "--json"], row(), { status: 503, data: {} })) as Row;
       expect(json).toMatchObject({ host: "far", hostUnconfirmed: true });
+      expect(requestPaths).toContain("/healthz");
     });
 
     it("an unconfirmed --host offers both reads as alternatives, in the footer and in --json, for a create and a handoff's new row", async () => {
@@ -470,9 +775,11 @@ describe("queue write receipt (output.compact)", () => {
       const remote = "rig queue show 'qitem-20261010180000-aaaa' --host 'far' --full --json";
       const out = await createVia(["--host", "far"], row(), { status: 503, data: {} });
       expect(out).toContain(`full row: ${local} if this daemon is host far, otherwise ${remote}, or add --full to the create`);
+      expect(requestPaths).toContain("/healthz");
       logs = [];
       const json = JSON.parse(await createVia(["--host", "far", "--json"], row(), { status: 503, data: {} })) as Row;
       expect(json.receipt).toMatchObject({ fullCommand: local, fullCommandOnHost: remote });
+      expect(requestPaths).toContain("/healthz");
 
       const v = VERBS.find((x) => x.verb === "handoff")!;
       const newId = ((v.data as Row).created as Row).qitemId as string;

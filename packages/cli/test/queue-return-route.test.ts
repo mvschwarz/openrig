@@ -63,7 +63,7 @@ describe("queue create --return-route", () => {
       clientFactory: () => ({
         post: async (_url: string, body: Record<string, unknown>) => {
           posted.push(body);
-          const row = { qitemId: "qitem-x", sourceSession: "front@kernel", destinationSession: "dev-build@starter", state: "pending", body: "goal" };
+          const row = { qitemId: String(body.qitemId), sourceSession: "front@kernel", destinationSession: "dev-build@starter", state: "pending", body: "goal" };
           const advisories = [{ code: "return_route_not_carried", message }];
           return { status: 201, data: verb === "create" ? { ...row, advisories } : { closed: { ...row, state: "handed-off" }, created: row, advisories } };
         },
@@ -82,7 +82,7 @@ describe("queue create --return-route", () => {
       clientFactory: () => ({
         post: async (_url: string, body: Record<string, unknown>) => {
           posted.push(body);
-          return { status: 201, data: { qitemId: "qitem-x", sourceSession: "front@kernel@host-a", destinationSession: "dev-build@starter",
+          return { status: 201, data: { qitemId: String(body.qitemId), sourceSession: "front@kernel@host-a", destinationSession: "dev-build@starter",
             state: "pending", body: "goal", returnRoute, returnRouteBasis: "caller" } };
         },
       }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
@@ -102,6 +102,36 @@ describe("queue create --return-route", () => {
       + "(not choice dialogs) come there as tasks; read them with OPENRIG_SESSION_NAME='front@kernel' rig queue list --owned --state pending,in-progress."]);
   });
 
+  it("prints a host-qualified return route for a parked create", async () => {
+    const d: QueueDeps = {
+      lifecycleDeps: { readFile: () => null, exists: () => false, fetch: async () => ({ ok: true }) } as QueueDeps["lifecycleDeps"],
+      clientFactory: () => ({
+        post: async (_url: string, body: Record<string, unknown>) => {
+          posted.push(body);
+          return { status: 201, data: {
+            qitemId: String(body.qitemId), sourceSession: "front@kernel@host-a", destinationSession: body.destinationSession,
+            state: "blocked", blockedOn: "external:deploy", body: body.body, parkWarning: null,
+            returnRoute: "front@kernel@host-a", returnRouteBasis: "caller",
+          } };
+        },
+      }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
+    };
+    process.env.OPENRIG_SESSION_NAME = "front@kernel";
+    await create(d, ["--return-route", "front@kernel@host-a", "--blocked-on", "external:deploy", "--host", "host-b"]);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ returnRoute: "front@kernel@host-a", blockedOn: "external:deploy", nudge: false });
+    expect(stderr.filter(line => line.startsWith("Return route: "))).toEqual(["Return route: front@kernel@host-a is recorded with this work. It names a "
+      + "conversation on another host, and the work's host sends prompts only to a route on its own host: this work's questions and its seats' "
+      + "prompts follow their usual path."]);
+  });
+
+  it("prints a period before the session hint for a 3-part issued-actor return route", async () => {
+    await create(deps("conversation-3f2a9c1b7e44@kernel@host-a"), ["--return-route", "auto", "--host", "host-b"]);
+    expect(stderr.filter(line => line.startsWith("Return route: "))).toEqual(["Return route: conversation-3f2a9c1b7e44@kernel@host-a is recorded with this work. "
+      + "It names a conversation on another host, and the work's host sends prompts only to a route on its own host: this work's questions and its seats' "
+      + "prompts follow their usual path. Put OPENRIG_SESSION_NAME='conversation-3f2a9c1b7e44@kernel@host-a' in front of your other queue commands for this work."]);
+  });
+
   it("a local create whose named route is a registered person's prints the daemon's reason and no route line", async () => {
     const message = "The return route sam@kernel wasn't kept: it's a registered person's address, and a person is reached through the gateway, not a return route.";
     const d: QueueDeps = {
@@ -109,7 +139,7 @@ describe("queue create --return-route", () => {
       clientFactory: () => ({
         post: async (_url: string, body: Record<string, unknown>) => {
           posted.push(body);
-          return { status: 201, data: { qitemId: "qitem-x", sourceSession: "front@kernel", destinationSession: body.destinationSession, state: "pending",
+          return { status: 201, data: { qitemId: String(body.qitemId), sourceSession: "front@kernel", destinationSession: body.destinationSession, state: "pending",
             body: body.body, tags: ["return-route-not-carried"], advisories: [{ code: "return_route_not_carried", message }] } };
         },
       }) as unknown as ReturnType<QueueDeps["clientFactory"]>,

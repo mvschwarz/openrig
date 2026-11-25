@@ -5,9 +5,11 @@ keeps, using today's queue commands.** The person speaks in sentences. They neve
 unless they ask.
 
 > **Status (0.7.0).** The kernel operator's role guidance points here: when a person asks it to watch something or
-> remind them, it reads this page (installed at `$OPENRIG_HOME/reference/keeping-a-watch.md`) first. Every step below
-> was exercised with the CLI on an isolated private daemon: create, set aside, fire, re-arm, list, change, stop, a
-> daemon restart and a handover. A native run with a real operator, install and channel has **not** been run yet.
+> remind them, it reads this page (installed at `$OPENRIG_HOME/reference/keeping-a-watch.md`) first. The earlier
+> procedure for create, set aside, fire, re-arm, list, change, stop, restart and handover was exercised with the CLI
+> on an isolated private daemon. The blocked-create command added below has CLI request and daemon route tests, but no
+> test runs this page's command from the CLI to a daemon. A native run with a real operator, install and channel has
+> **not** been run yet.
 > The usage warning's command and field names are checked against the served command on a test fixture; it hasn't
 > been run as a watch.
 
@@ -43,25 +45,21 @@ Stop: after telling them once, or when they say stop.
 Unknown: not said yet.
 ```
 
-**2. Create it for yourself,** with a `watch` tag so it can be listed later (tags can't be changed after creation).
+**2. Create it for yourself, already blocked on the condition and timer.** The `watch` tag lets you list it later.
 `<your session>` is your session name from `rig whoami --json`:
 
 ```bash
 rig queue create --destination <your session> --tags watch \
-  --summary "Watch: tell <person> when the release PR merges (hourly)" --body-file <file>
+  --summary "Watch: tell <person> when the release PR merges (hourly)" --body-file <file> \
+  --blocked-on external:<what you check> --wake-after 1h
 ```
 
-**3. Set it aside with the timer.** A new pending task can be set aside directly; no claim is needed:
+`--blocked-on` uses the same blocker meaning as `queue block` and `queue update`. Here,
+`external:<what>` names the outside thing you are waiting on. The timer first fires after the interval, not now.
 
-```bash
-rig queue block <task> --on external:<what you check> --wake-after 1h \
-  --continuation "check <what>; tell <person> if met, else re-arm 1h"
-```
+An older receiving daemon may save this row as pending, where the owner or scheduler can start work early; this command suppresses the direct nudge and reports the limit, but it cannot prevent later pickup.
 
-`--on` is always required; `external:<what>` names the outside thing you're waiting on. The timer first fires after
-the interval, not now. Left without `--wake-after` (or `--wake-watchdog`), the task is still set aside, but nothing
-will wake you, and the reply says so with a `park_without_wake` advisory. Set it aside again with `--wake-after` to add
-the timer.
+**3. Check the saved row before you promise the schedule.** Run `rig queue show <task> --full --json`. Confirm that the row is `blocked` and its `blockedOn` value matches the condition. The `waiting.nextBackstop` field reports a backstop. A matching `watchdog:` interval does not prove that this request's one-shot timer is live. Use the create response's warning: if it says the park is unconfirmed, do not promise the schedule. A failed read is also unconfirmed. Do not create the watch again.
 
 **4. Say back what you set, in one or two plain lines:** what you'll check, how often, how they'll be told, and when
 it stops. For example: "I'll check the release PR every hour and message you here once it merges. Then I'll stop."
@@ -178,7 +176,7 @@ under some conditions, with no delay guarantee. So:
 - **Handing a watch to another session** (`rig queue handoff <task> --to <session>`) closes the old task and retires its
   timer (unless another task shares that timer through `--wake-watchdog`; a watch set up as above never does). The new
   task arrives pending, with its body and `watch` tag but no timer: the new owner sets it aside again with a fresh
-  timer, as in step 3.
+  timer using the **Re-arm** command (`rig queue block <task> --on external:<what> --wake-after <interval>`).
 
 ## A usage warning: "warn me when my allowance runs low"
 

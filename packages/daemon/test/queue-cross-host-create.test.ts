@@ -2,8 +2,8 @@
 // PK identity handling. The load-bearing pins:
 //   - no-host / "local" create = today's local path byte-identical (FR-6);
 //   - a registered http host FORWARDS the whole body (minted id + provenance +
-//     nudge, hostId stripped) to /api/queue/create; origin response verbatim;
-//     NO local row ever written (FR-2, origin-owns-the-record);
+//     nudge, hostId stripped) to /api/queue/create; park responses are checked
+//     before they leave the forwarder; NO local row ever written (FR-2);
 //   - unknown / ssh / unreachable host = structured host-named failure, nothing
 //     written (FR-2 honest-failure taxonomy);
 //   - origin-side: a re-forwarded create with the SAME id absorbs on the PK when
@@ -46,6 +46,21 @@ function jsonResponse(payload: unknown, status = 201): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function forwardedRequest(init?: RequestInit): Record<string, unknown> {
+  return JSON.parse(String(init?.body)) as Record<string, unknown>;
+}
+
+function remoteParkPayload(request: Record<string, unknown>, changes: Record<string, unknown> = {}): Record<string, unknown> {
+  const blockedOn = typeof request.blockedOn === "string" ? request.blockedOn : null;
+  return {
+    ...request,
+    state: "blocked",
+    blockedOn,
+    parkWarning: null,
+    ...changes,
+  };
 }
 
 function makeApp(opts: {
@@ -119,7 +134,7 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     expect(forwarded).toBe(false);
   });
 
-  it("cross-host create: forwards the WHOLE body (minted id, provenance, nudge) with hostId STRIPPED; origin response verbatim; NO local row", async () => {
+  it("cross-host create: forwards the whole body with hostId stripped and keeps the origin record without a local write", async () => {
     const capture: { url?: string; body?: Record<string, unknown> } = {};
     const app = makeApp({
       db,
@@ -142,11 +157,313 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     expect("hostId" in (capture.body ?? {})).toBe(false);
     // Whole body incl. nudge forwarded (FR-3).
     expect(capture.body?.["nudge"]).toBe(true);
+    expect(capture.body).not.toHaveProperty("wakeAfterSeconds");
     // Provenance appended, existing tag preserved (D-4).
     expect(capture.body?.["tags"]).toContain(CROSS_HOST_TAG);
     expect(capture.body?.["tags"]).toContain("existing");
     // NO local row (origin-owns-the-record).
     expect(rowCount(db)).toBe(0);
+  });
+
+  it.each([
+    ["zero", 0],
+    ["negative", -1],
+    ["fractional", 1.5],
+    ["string", "90"],
+    ["boolean", true],
+  ])("refuses a %s wakeAfterSeconds before cross-host forwarding", async (_label, wakeAfterSeconds) => {
+    let forwarded = false;
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async () => {
+        forwarded = true;
+        return jsonResponse({ qitemId: "qitem-invalid-wake" }, 201);
+      }) as unknown as typeof fetch,
+    });
+
+    const res = await post(app, {
+      ...BASE,
+      hostId: "vps-b",
+      blockedOn: "external:condition",
+      wakeAfterSeconds,
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: "wake_after_invalid",
+      message: expect.stringContaining("wakeAfterSeconds must be a positive integer"),
+    });
+    expect(forwarded).toBe(false);
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it.each([
+    ["omitted", undefined],
+    ["null", null],
+  ])("preserves a %s wakeAfterSeconds value when forwarding", async (_label, wakeAfterSeconds) => {
+    let forwardedBody: Record<string, unknown> | undefined;
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        forwardedBody = forwardedRequest(init);
+        return jsonResponse({ qitemId: "qitem-null-wake", destinationSession: "dev@rig-b", state: "pending" }, 201);
+      }) as unknown as typeof fetch,
+    });
+    const request = {
+      ...BASE,
+      hostId: "vps-b",
+      ...(wakeAfterSeconds === undefined ? {} : { wakeAfterSeconds }),
+    };
+
+    const res = await post(app, request);
+
+    expect(res.status).toBe(201);
+    expect(forwardedBody).toBeDefined();
+    if (wakeAfterSeconds === undefined) expect(forwardedBody).not.toHaveProperty("wakeAfterSeconds");
+    else expect(forwardedBody).toHaveProperty("wakeAfterSeconds", null);
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("marks a pre-header forwarded create disconnect as indeterminate", async () => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async () => {
+        throw new Error("ECONNRESET");
+      }) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b" });
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ outcome: "indeterminate" });
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("a saved pending row on an older receiver gets no nudge and carries an early-start warning", async () => {
+    const receiverDb = createDb();
+    migrate(receiverDb, ALL_MIGRATIONS);
+    const receiverBus = new EventBus(receiverDb);
+    const receiverRepo = new QueueRepository(receiverDb, receiverBus, { validateRig: () => true });
+    receiverRepo.attachOutbox(new OutboxHandler(receiverDb));
+    const capture: { body?: Record<string, unknown> } = {};
+    try {
+      const app = makeApp({
+        db,
+        bus,
+        fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+          capture.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          // Model an older fixed-field receiver. It saves an ordinary pending row.
+          const oldFieldsOnly = capture.body;
+          const saved = await receiverRepo.create({
+            qitemId: String(oldFieldsOnly.qitemId),
+            sourceSession: String(oldFieldsOnly.sourceSession),
+            destinationSession: String(oldFieldsOnly.destinationSession),
+            body: String(oldFieldsOnly.body),
+            nudge: oldFieldsOnly.nudge === true,
+          });
+          return jsonResponse(saved, 201);
+        }) as unknown as typeof fetch,
+      });
+      const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: true });
+      expect(res.status).toBe(201);
+      expect(capture.body).toMatchObject({ blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: false });
+      const returned = await res.json() as Record<string, any>;
+      expect(returned).toMatchObject({
+        state: "pending",
+        parkWarning: { code: "qitem_park_not_confirmed" },
+      });
+      expect(returned).not.toHaveProperty("parkReceipt");
+      expect(returned.parkWarning.message).toMatch(/older receiving daemon.*start work early/i);
+      expect(receiverRepo.getById(String(returned.qitemId))).toMatchObject({ state: "pending", blockedOn: null });
+      expect(receiverDb.prepare("SELECT COUNT(*) AS count FROM outbox_entries").get()).toMatchObject({ count: 0 });
+      expect(rowCount(db)).toBe(0);
+    } finally {
+      receiverDb.close();
+    }
+  });
+
+  it("accepts a matching blocker-only row from an older receiver", async () => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        const response = remoteParkPayload(forwardedRequest(init));
+        delete response.parkWarning;
+        return jsonResponse(response, 201);
+      }) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
+
+    expect(res.status).toBe(201);
+    const returned = await res.json() as Record<string, any>;
+    expect(returned).toMatchObject({
+      state: "blocked",
+      blockedOn: "external:condition",
+      parkWarning: null,
+    });
+    expect(returned).not.toHaveProperty("parkReceipt");
+    expect(returned.qitemId).toMatch(/^qitem-/);
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("preserves a prior forwarder's warning and the full pending row", async () => {
+    const priorWarning = "The receiving daemon did not confirm the requested park options.";
+    const forwarded: { body?: Record<string, unknown> } = {};
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        forwarded.body = forwardedRequest(init);
+        return jsonResponse({
+          ...forwarded.body,
+          state: "pending",
+          blockedOn: null,
+          parkWarning: { code: "qitem_park_not_confirmed", message: priorWarning },
+          privateExtension: "kept-with-the-row",
+        }, 201);
+      }) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: true });
+
+    expect(res.status).toBe(201);
+    expect(forwarded.body).toMatchObject({ nudge: false, wakeAfterSeconds: 90 });
+    const returned = await res.json() as Record<string, any>;
+    expect(returned).toMatchObject({
+      state: "pending",
+      parkWarning: { code: "qitem_park_not_confirmed", message: priorWarning },
+      privateExtension: "kept-with-the-row",
+    });
+    expect(returned).not.toHaveProperty("parkReceipt");
+    expect(returned).not.toHaveProperty("persisted");
+    expect(returned).not.toHaveProperty("createOutcome");
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("warns when an older receiver returns a matching blocked row for a timed park", async () => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        const response = remoteParkPayload(forwardedRequest(init));
+        delete response.parkWarning;
+        return jsonResponse(response, 201);
+      }) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: true });
+
+    expect(res.status).toBe(201);
+    const returned = await res.json() as Record<string, any>;
+    expect(returned).toMatchObject({
+      state: "blocked",
+      blockedOn: "external:condition",
+      parkWarning: { code: "qitem_park_not_confirmed", message: expect.stringContaining("requested timer is not confirmed") },
+    });
+    expect(returned).not.toHaveProperty("parkReceipt");
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("accepts a current receiver's direct confirmation marker for a timed park", async () => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(remoteParkPayload(forwardedRequest(init)), 201)) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: true });
+
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({
+      state: "blocked",
+      blockedOn: "external:condition",
+      parkWarning: null,
+    });
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("returns the receiver's full row and warnings on a successful park create", async () => {
+    const warning = { code: "remote_warning", message: "The receiver sent a warning.", fields: ["body"], observed: { body: "returned warning text" } };
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(remoteParkPayload(forwardedRequest(init), {
+        createWarning: warning,
+        privateExtension: "kept-with-the-row",
+      }), 201)) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
+
+    expect(res.status).toBe(201);
+    const returned = await res.json() as Record<string, any>;
+    expect(returned.createWarning).toEqual(warning);
+    expect(returned).toMatchObject({ privateExtension: "kept-with-the-row", parkWarning: null });
+    expect(returned).not.toHaveProperty("parkReceipt");
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("preserves direct row identities and warnings from the receiver", async () => {
+    const warning = { code: "remote_warning", message: "The receiver returned this warning.", observed: { raw: "kept" } };
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(remoteParkPayload(forwardedRequest(init), {
+        sourceSession: "writer@rig-a@origin",
+        destinationSession: "stored@rig-b",
+        body: "saved body",
+        createWarning: warning,
+        privateExtension: "kept-with-row",
+      }), 201)) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
+    expect(res.status).toBe(201);
+    const returned = await res.json() as Record<string, any>;
+    expect(returned).toMatchObject({
+      sourceSession: "writer@rig-a@origin",
+      destinationSession: "stored@rig-b",
+      body: "saved body",
+      createWarning: warning,
+      privateExtension: "kept-with-row",
+      parkWarning: null,
+    });
+    expect(returned).not.toHaveProperty("parkReceipt");
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("does not accept a current marker when the returned row contradicts the blocker", async () => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(remoteParkPayload(forwardedRequest(init), {
+        blockedOn: "external:other",
+      }), 201)) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
+    expect(res.status).toBe(201);
+    const returned = await res.json() as Record<string, any>;
+    expect(returned).toMatchObject({
+      blockedOn: "external:other",
+      parkWarning: { code: "qitem_park_not_confirmed" },
+    });
+    expect(returned).not.toHaveProperty("parkReceipt");
+  });
+
+  it("keeps a same-ID body-not-saved warning and does not confirm its park", async () => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(remoteParkPayload(forwardedRequest(init), {
+        body: "saved body",
+        createWarning: { code: "qitem_body_not_saved", message: "The supplied body was not saved." },
+      }), 201)) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: true });
+    expect(res.status).toBe(201);
+    const returned = await res.json() as Record<string, any>;
+    expect(returned).toMatchObject({
+      body: "saved body",
+      createWarning: { code: "qitem_body_not_saved", message: "The supplied body was not saved." },
+      parkWarning: { code: "qitem_park_not_confirmed" },
+    });
+    expect(returned).not.toHaveProperty("parkReceipt");
   });
 
   // 51-09 incr 4a correction — STAMP-AT-FORWARD: the forwarding daemon IS the
@@ -175,6 +492,7 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
       const body = "Please check the result.\nKeep my words.";
       const response = await post(app, { ...BASE, sourceSession: "human@kernel", body, hostId: "vps-b" });
       expect(response.status).toBe(201);
+      expect(response.headers.has("X-OpenRig-Queue-Target-Sha256")).toBe(false);
       expect(forwarded).toHaveLength(1);
       expect(forwarded[0]).toMatchObject({ sourceSession: "human@kernel@host-origin", body });
       expect(forwarded[0]).not.toHaveProperty("hostId");

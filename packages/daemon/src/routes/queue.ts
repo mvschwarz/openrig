@@ -73,6 +73,7 @@ import { exemptSlowOpRequest } from "../domain/slow-op-recorder.js";
 // (same class as mission-control's REMOTE_ACTION_TIMEOUT_MS). remoteJsonRequest
 // never hangs — a timeout surfaces as a structured host-named failure.
 const QUEUE_FORWARD_TIMEOUT_MS = 10_000;
+const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as pending, where the owner or scheduler can start work early.";
 /** OPR.0.7.0.12 — held and next rows listed in a refocus packet; past this the packet says the list was cut. */
 const WORK_CANDIDATE_LIST_LIMIT = 50;
 /** Private request opt-in for CLI diagnostics; its response acknowledgement is never forwarded. */
@@ -84,6 +85,33 @@ const LIST_LIMIT_HEADER = "X-OpenRig-Limit";
 const LIST_TRUNCATED_HEADER = "X-OpenRig-Truncated";
 /** QueueRepository's default for list and listAttention, applied here so the route can read one row past it. */
 const LIST_DEFAULT_LIMIT = 100;
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function unconfirmedParkWarning(state: unknown, extraMessage?: string): Record<string, unknown> {
+  const messages: string[] = [];
+  if (state === "pending") {
+    messages.push("The row is live and may start early.", EARLY_START_PARK_WARNING, "This request suppresses only the direct nudge.");
+  } else if (state === "blocked") {
+    messages.push("The row is blocked, but the requested blocker or timer is not confirmed.");
+  } else if (state === "in-progress") {
+    messages.push("The row is live and has already been claimed.");
+  } else if (typeof state === "string" && ["done", "failed", "denied", "canceled", "handed-off"].includes(state)) {
+    messages.push(`The row exists in state ${state}; the park was not confirmed.`);
+  }
+  if (extraMessage) messages.unshift(extraMessage);
+  if (messages.length === 0) messages.push("The receiving daemon did not confirm the requested blocker and timer.");
+  return { code: "qitem_park_not_confirmed", message: [...new Set(messages)].join(" ") };
+}
+
+function rowConfirmsPark(row: Record<string, unknown>, blockedOn: string | null, wakeAfterSeconds: number | null): boolean {
+  if (row.state !== "blocked" || (row.blockedOn ?? null) !== blockedOn) return false;
+  // The forwarded row exposes a next backstop, not proof that this request's
+  // live one-shot timer is armed.
+  return wakeAfterSeconds === null;
+}
 
 // OPR.0.4.6.MH3 D-4 (FR-2/R2a): the cross-host provenance shape appended to a
 // FORWARDED body's tags — a marker (`cross-host`) + the forwarding daemon's
@@ -389,10 +417,24 @@ export function queueRoutes(): Hono {
   function createInputRefusal(
     c: { get: (key: string) => unknown; json: (body: unknown, status?: number) => Response },
     sourceSession: string,
-    body: { destinationSession?: string; body?: string; targetRepo?: string | null },
+    body: { destinationSession?: string; body?: string; targetRepo?: string | null; blockedOn?: unknown; wakeAfterSeconds?: unknown },
   ): Response | null {
     if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
     if (!body.body) return c.json({ error: "body is required" }, 400);
+    if (body.blockedOn !== undefined && body.blockedOn !== null && typeof body.blockedOn !== "string") {
+      return c.json({ error: "invalid_blocked_on", field: "blockedOn", message: "blockedOn must be a string when supplied." }, 400);
+    }
+    if (typeof body.blockedOn === "string" && body.blockedOn.trim().length === 0) {
+      return c.json({ error: "invalid_blocked_on", field: "blockedOn", message: "blockedOn must not be blank." }, 400);
+    }
+    if (body.wakeAfterSeconds !== undefined && body.wakeAfterSeconds !== null
+      && (typeof body.wakeAfterSeconds !== "number" || !Number.isInteger(body.wakeAfterSeconds) || body.wakeAfterSeconds <= 0)) {
+      return c.json({
+        error: "wake_after_invalid",
+        field: "wakeAfterSeconds",
+        message: "wakeAfterSeconds must be a positive integer.",
+      }, 400);
+    }
     if (body.targetRepo) {
       const validation = validateTargetRepo(c, sourceSession, body.targetRepo);
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
@@ -825,6 +867,8 @@ export function queueRoutes(): Hono {
       tier?: string;
       tags?: string[];
       expiresAt?: string;
+      blockedOn?: unknown;
+      wakeAfterSeconds?: number;
       chainOfRecord?: string[];
       targetRepo?: string;
       humanIntent?: "decision" | "update" | null;
@@ -897,6 +941,8 @@ export function queueRoutes(): Hono {
     const refusal = createInputRefusal(c, sourceSession, body);
     if (refusal) return refusal;
 
+    const parkRequested = body.blockedOn != null || body.wakeAfterSeconds != null;
+
     // OPR.0.4.6.MH3 FR-2 (C1): cross-host CREATE. A registered remote host id
     // forwards the write to that host's daemon; the qitem lives in the origin
     // host's DB (origin-owns-the-record) and its OWN maybeNudge fires on its
@@ -916,6 +962,9 @@ export function queueRoutes(): Hono {
       const { hostId: _dropped, returnRoute: _route, returnRouteBasis: _basis, ...rest } = body;
       const forwardBody: Record<string, unknown> = {
         ...rest,
+        // An older receiving daemon may ignore park fields. Suppress its ordinary
+        // create nudge so a requested park never wakes the owner immediately.
+        ...(parkRequested ? { nudge: false } : {}),
         ...(route && carried ? { returnRoute: carried, returnRouteBasis: route.basis } : {}),
         qitemId: mintedId,
         // 51-09 incr 4a — stamp-at-FORWARD: this forwarding daemon is the origin,
@@ -931,15 +980,49 @@ export function queueRoutes(): Hono {
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
       const payload = fwd.payload;
       // A same-id retry returns the row the receiver already stored: say the route wasn't carried only when it has none.
-      const returnedRoute = payload !== null && typeof payload === "object" && !Array.isArray(payload)
-        && typeof (payload as { returnRoute?: unknown }).returnRoute === "string";
+      const returnedRoute = isObjectRecord(payload) && typeof payload.returnRoute === "string";
       const added = [...(skippedScope ? [toCreateScopeAdvisory(skippedScope)] : []),
         ...(routeNotCarried && !returnedRoute ? [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] : [])];
-      if (!added.length || payload === null || typeof payload !== "object" || Array.isArray(payload))
-        return c.json(payload, fwd.status as 200);
-      const objectPayload = payload as Record<string, unknown>;
-      const existingAdvisories = Array.isArray(objectPayload.advisories) ? objectPayload.advisories : [];
-      return c.json({ ...objectPayload, advisories: [...existingAdvisories, ...added] }, fwd.status as 200);
+      if (!parkRequested) {
+        if (!isObjectRecord(payload)) return c.json(payload, fwd.status as 200);
+        const { parkWarning: _parkWarning, ...ordinaryCreate } = payload;
+        const existingAdvisories = Array.isArray(ordinaryCreate.advisories) ? ordinaryCreate.advisories : [];
+        return added.length
+          ? c.json({ ...ordinaryCreate, advisories: [...existingAdvisories, ...added] }, fwd.status as 200)
+          : c.json(ordinaryCreate, fwd.status as 200);
+      }
+
+      const responseStatus = (fwd.status === 204 ? 200 : fwd.status) as 200;
+      if (!isObjectRecord(payload)) return c.json(payload, responseStatus);
+      const outputRow = payload;
+      const existingAdvisories = Array.isArray(outputRow.advisories) ? outputRow.advisories : [];
+      const requestedBlocker = typeof body.blockedOn === "string" ? body.blockedOn : null;
+      const requestedWakeAfter = typeof body.wakeAfterSeconds === "number" ? body.wakeAfterSeconds : null;
+      const receivedParkWarning = isObjectRecord(outputRow.parkWarning) ? outputRow.parkWarning : undefined;
+      const hasParkWarning = Object.prototype.hasOwnProperty.call(outputRow, "parkWarning");
+      const malformedParkWarning = hasParkWarning && outputRow.parkWarning !== null && !isObjectRecord(outputRow.parkWarning);
+      const bodyNotSaved = isObjectRecord(outputRow.createWarning) && outputRow.createWarning.code === "qitem_body_not_saved";
+      const hasDirectConfirmation = !bodyNotSaved && !malformedParkWarning && hasParkWarning
+        && outputRow.parkWarning === null
+        && rowConfirmsPark(outputRow, requestedBlocker, null);
+      const parkConfirmed = !bodyNotSaved && !malformedParkWarning
+        && (rowConfirmsPark(outputRow, requestedBlocker, requestedWakeAfter) || hasDirectConfirmation);
+      const timerUnconfirmed = requestedWakeAfter !== null
+        && rowConfirmsPark(outputRow, requestedBlocker, null)
+        && !parkConfirmed;
+      const extraWarning = [
+        bodyNotSaved ? "The supplied body was not saved. The requested park is not confirmed." : "",
+        timerUnconfirmed ? "The requested timer is not confirmed by the receiving daemon." : "",
+      ].filter(Boolean).join(" ");
+      const parkWarning = receivedParkWarning ?? (parkConfirmed ? undefined : unconfirmedParkWarning(
+        outputRow.state,
+        extraWarning || undefined,
+      ));
+      return c.json({
+        ...outputRow,
+        ...(parkWarning ? { parkWarning } : { parkWarning: null }),
+        ...(added.length ? { advisories: [...existingAdvisories, ...added] } : {}),
+      }, responseStatus);
     }
 
     try {
@@ -960,6 +1043,8 @@ export function queueRoutes(): Hono {
         tier: body.tier,
         tags: withRouteNotCarriedTag(body.tags, routeNotKept),
         expiresAt: body.expiresAt,
+        blockedOn: typeof body.blockedOn === "string" ? body.blockedOn : undefined,
+        wakeAfterSeconds: body.wakeAfterSeconds,
         chainOfRecord: body.chainOfRecord,
         targetRepo: body.targetRepo,
         humanIntent: body.humanIntent,
@@ -973,11 +1058,51 @@ export function queueRoutes(): Hono {
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
         ...(route ? { returnRoute: route.address, returnRouteBasis: route.basis } : {}),
       });
-      const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
-      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory,
+      let responseItem = item;
+      let parkWarning: Record<string, unknown> | undefined = item.parkWarning;
+      let parkConfirmed = false;
+      if (parkRequested) {
+        try {
+          const snapshot = getRepo(c).getParkSnapshot(item.qitemId);
+          if (snapshot.item) {
+            responseItem = {
+              ...snapshot.item,
+              ...(item.createWarning ? { createWarning: item.createWarning } : {}),
+              ...(item.parkWarning ? { parkWarning: item.parkWarning } : {}),
+            };
+            const requestedBlocker = typeof body.blockedOn === "string" ? body.blockedOn : null;
+            const timerConfirmed = body.wakeAfterSeconds == null
+              || (snapshot.wake?.kind === "timer" && snapshot.wake.live
+                && snapshot.wake.intervalSeconds === body.wakeAfterSeconds);
+            parkConfirmed = item.createWarning?.code !== "qitem_body_not_saved"
+              && responseItem.state === "blocked"
+              && responseItem.blockedOn === requestedBlocker
+              && timerConfirmed;
+            if (!parkConfirmed && !parkWarning) parkWarning = unconfirmedParkWarning(responseItem.state);
+          } else if (!parkWarning) {
+            parkWarning = {
+              code: "qitem_park_not_confirmed",
+              message: "The row was created, but the daemon could not read its current park status. Check this row by its ID before retrying.",
+            };
+          }
+        } catch {
+          // The write already committed. A failed read adds a warning and never repeats the create.
+          parkWarning ??= {
+            code: "qitem_park_not_confirmed",
+            message: "The row was created, but the daemon could not read its current park status. Check this row by its ID before retrying.",
+          };
+        }
+      }
+      const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, responseItem.tags) : null;
+      const advisories = [destinationAdvisory(c, responseItem.destinationSession), sharedChannelAskAdvisory(responseItem.destinationSession, body.humanIntent), scopeAdvisory,
+        parkRequested ? parkWithoutWakeAdvisory(responseItem) : null,
         // A same-id retry returns the stored row unchanged: say the route wasn't kept only when that row has none.
-        routeNotKept && !item.returnRoute ? { code: RETURN_ROUTE_NOT_CARRIED, message: routeNotKept } : null].filter(Boolean);
-      return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
+        routeNotKept && !responseItem.returnRoute ? { code: RETURN_ROUTE_NOT_CARRIED, message: routeNotKept } : null].filter(Boolean);
+      return c.json({
+        ...responseItem,
+        ...(parkRequested ? { parkWarning: parkConfirmed && !parkWarning ? null : parkWarning } : {}),
+        ...(advisories.length ? { advisories } : {}),
+      }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }

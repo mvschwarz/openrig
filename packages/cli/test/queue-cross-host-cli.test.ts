@@ -37,7 +37,8 @@ function makeDeps(): { deps: QueueDeps; calls: Array<{ method: string; path: str
         getText: vi.fn(async () => ({ status: 200, data: "" })),
         post: vi.fn(async (path: string, body: unknown) => {
           calls.push({ method: "POST", path, body });
-          return { status: 201, data: { qitemId: "qitem-test-1" } };
+          const req = body && typeof body === "object" ? body as { qitemId?: unknown } : {};
+          return { status: 201, data: { qitemId: typeof req.qitemId === "string" ? req.qitemId : "qitem-test-1", state: "pending" } };
         }),
         delete: vi.fn(async () => ({ status: 204, data: null })),
         postText: vi.fn(async () => ({ status: 200, data: "" })),
