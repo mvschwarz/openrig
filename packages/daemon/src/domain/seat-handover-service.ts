@@ -146,9 +146,12 @@ export interface SeatHandoverMutationResult {
   sideEffects: {
     /** The departing tmux session is kept: a successor respawns into its pane, and a discovered one runs in its own. */
     departingSessionKilled: false;
-    /** How the previous occupant's process ended: it exited on TERM, or was killed after the TERM window, before the
-     *  successor started in its pane. A discovered successor leaves it alone. */
+    /** How the previous occupant ended before the successor started in its pane: through its own shutdown, or with nothing
+     *  left running (#3901: Claude Code on TERM, Codex through /exit), or by a signal it doesn't handle or KILL after the
+     *  window. A discovered successor leaves it alone. */
     departingProcess: "ended-graceful" | "ended-forced" | "not-touched";
+    /** #3901: what happened to the previous occupant, in a sentence. Absent when it wasn't touched, and from older daemons. */
+    departingProcessDetail?: string;
     /** The startup context (restore or priming packet) was typed and submitted to the successor. That's "accepted": read
      *  `restorePacket` for whether its leaving the input box was seen. Kept for existing readers; new ones read the status. */
     startupContextDelivered: boolean;
@@ -890,6 +893,7 @@ export class SeatHandoverService {
       operator,
       contextDelivered,
       departingProcess: launch.retireeExit === "forced" ? "ended-forced" : "ended-graceful",
+      ...(launch.retireeExitDetail ? { departingProcessDetail: launch.retireeExitDetail } : {}),
       restorePacket,
       // B2 (launched/fresh): the launch-scraped resume token captured by the
       // successor launcher is persisted atomically at commit (provenance scrape).
@@ -1363,6 +1367,7 @@ export class SeatHandoverService {
     operator: string | null;
     contextDelivered: boolean;
     departingProcess: SeatHandoverMutationResult["sideEffects"]["departingProcess"];
+    departingProcessDetail?: string;
     restorePacket?: SeatHandoverMutationResult["restorePacket"];
     /** Launch-scraped resume token for a fresh successor (persisted at commit). */
     launchToken: { token: string; resumeType?: string } | null;
@@ -1489,6 +1494,7 @@ export class SeatHandoverService {
       discovered,
       contextDelivered: input.contextDelivered,
       departingProcess: input.departingProcess,
+      ...(input.departingProcessDetail ? { departingProcessDetail: input.departingProcessDetail } : {}),
       restorePacket: input.restorePacket,
       launchToken: input.launchToken,
       occupantGeneration: input.occupantGeneration,
@@ -1874,6 +1880,7 @@ export class SeatHandoverService {
     discovered: ReturnType<DiscoveryRepository["getDiscoveredSession"]> & NonNullable<unknown>;
     contextDelivered: boolean;
     departingProcess: SeatHandoverMutationResult["sideEffects"]["departingProcess"];
+    departingProcessDetail?: string;
     restorePacket?: SeatHandoverMutationResult["restorePacket"];
     launchToken: { token: string; resumeType?: string } | null;
     occupantGeneration: string | null;
@@ -2133,6 +2140,7 @@ export class SeatHandoverService {
         sideEffects: {
           departingSessionKilled: false,
           departingProcess: input.departingProcess,
+          ...(input.departingProcessDetail ? { departingProcessDetail: input.departingProcessDetail } : {}),
           startupContextDelivered: input.contextDelivered,
           provenanceRecordWritten: committed.provenanceRecordWritten,
         },

@@ -18,6 +18,8 @@ import { communityHarnessOf } from "./built-in-runtimes.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, SEAT_SKILLS_BOOTSTRAP_LINE, cleanSeatSkills, seatSkillPaths } from "./seat-skill-storage.js";
 import { settleAutomaticRestore } from "./existing-rig-restore.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
+import { exitPaneRuntime, runtimeExitStep, type RuntimeExitTiming } from "./runtime-exit.js";
+import type { NativeProcessLister } from "./native-process-lineage.js";
 
 export interface TeardownResult {
   rigId: string;
@@ -50,12 +52,16 @@ export interface TeardownResult {
    *  seat, as `rig unclaim` does, and left the session running as its owner's. A later down names a released session
    *  here too while it keeps the seat's skills for it. Present only when there was one. */
   released?: string[];
+  /** #3901: how each Claude Code or Codex seat's agent ended before its terminal was closed: `graceful` through its own
+   *  shutdown (Claude Code on TERM, Codex through /exit) or with no agent left running, `forced` by a signal it doesn't
+   *  handle, by KILL after the window, or by the terminal closing on an agent that couldn't be identified. `detail` says
+   *  which. Absent with --force (the terminals close at once) and when no such seat was stopped. */
+  runtimeExits?: Array<{ session: string; path: "graceful" | "forced"; detail: string }>;
 }
 
 interface TeardownOptions {
   delete?: boolean;
-  /** Reserved for future graceful-stop support. Currently a no-op because
-   *  tmux kill-session is already immediate — there is no graceful stop to skip. */
+  /** Close the seats' terminals at once, without first letting each agent exit through its own shutdown (#3901). */
   force?: boolean;
   snapshot?: boolean;
 }
@@ -74,6 +80,9 @@ interface TeardownDeps {
   /** Releases a claimed session's seat without stopping the session: `rig unclaim`'s own path. Absent: such a session
    *  goes through the marker-checked stop, as before. */
   releaseClaimedSession?: (sessionId: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /** #3901: the process table each agent's own exit is read from, and its bounded wait (tests); the OS's and 3 s by default. */
+  listProcesses?: NativeProcessLister;
+  runtimeExitTiming?: RuntimeExitTiming;
 }
 
 interface LatestNodeSession {
@@ -213,6 +222,14 @@ export class RigTeardownOrchestrator {
       // Without the request recorded, a kill followed by a lost daemon would read as a fall: nothing is stopped.
       result.errors.push(`Stop request could not be recorded before the kills, so nothing was stopped: ${(err as Error).message}`);
       return result;
+    }
+
+    // #3901: before the terminals close, each Claude Code or Codex seat's agent exits through its own shutdown (Claude Code
+    // on TERM, Codex through /exit), all seats at once, each bounded, with KILL at the end of its window. Closing the
+    // terminals below is still what stops everything, whatever happened here. --force skips this step.
+    if (!opts?.force) {
+      const exits = await this.exitSeatRuntimes(liveSessions, archived.archived_at !== null);
+      if (exits.length > 0) result.runtimeExits = exits;
     }
 
     // 5. Kill each live session
@@ -543,6 +560,37 @@ export class RigTeardownOrchestrator {
   /** Get latest session per node, filtered to live statuses.
    *  OPR.0.4.3.20 FR-4 — delegates to the shared SessionRegistry method so the
    *  teardown pre-down path and the periodic/manual snapshot refresh share ONE query. */
+  /** #3901: let each seat's agent exit through its own shutdown before its terminal closes. Only a session the kill below
+   *  would stop is touched: launched by OpenRig (not claimed or external), not another rig's namesake, and carrying the
+   *  seat's OpenRig marker. A failure here never stops the down; it is reported as forced. */
+  private async exitSeatRuntimes(sessions: LatestNodeSession[], archivedRig: boolean): Promise<NonNullable<TeardownResult["runtimeExits"]>> {
+    const tmux = this.deps.tmuxAdapter;
+    if (typeof tmux.signalPaneRuntime !== "function") return [];
+    const timing = this.deps.runtimeExitTiming ?? { pollMs: 100, timeoutMs: 3_000, sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)) };
+    const exits = await Promise.all(sessions.map(async (session): Promise<NonNullable<TeardownResult["runtimeExits"]>[number] | null> => {
+      if (!runtimeExitStep(session.runtime) || session.origin === "claimed") return null;
+      const binding = this.deps.sessionRegistry.getBindingForNode(session.nodeId);
+      if (seatProcessOwner(resolveSeatKind(binding?.attachmentType)) === "external") return null;
+      if (!binding?.tmuxPane || binding.tmuxSession !== session.sessionName) return null;
+      if (archivedRig && findOtherSessionOwner(this.db, session.sessionName, session.nodeId, { ignoreArchived: true }) !== null) return null;
+      // An unreadable marker (a session already gone, say) leaves the seat to the stop below, which reports it.
+      const marker = await tmux.getSessionEnv(session.sessionName, "OPENRIG_NODE_ID").catch(() => null);
+      if (marker !== session.nodeId) return null;
+      try {
+        const outcome = await exitPaneRuntime(tmux, { pane: binding.tmuxPane, inputTarget: tmux.deliveryGuard ? session.nodeId : binding.tmuxPane,
+          runtime: session.runtime }, timing, this.deps.listProcesses);
+        if (!outcome) return null;
+        const at = { session: session.sessionName };
+        if (outcome.state === "exited") return { ...at, path: outcome.path, detail: outcome.detail };
+        if (outcome.state === "no_runtime") return { ...at, path: "graceful", detail: outcome.detail };
+        return { ...at, path: "forced", detail: `${outcome.detail} ${outcome.state === "still_running" ? "Its terminal was closed with it still running." : "Its terminal was closed."}` };
+      } catch (err) {
+        return { session: session.sessionName, path: "forced", detail: `Its agent's own exit couldn't be run (${(err as Error).message}); its terminal was closed with it running.` };
+      }
+    }));
+    return exits.filter((exit): exit is NonNullable<typeof exit> => exit !== null);
+  }
+
   private getLatestLiveSessions(rigId: string): LatestNodeSession[] {
     return this.deps.sessionRegistry.getLatestLiveSessions(rigId);
   }

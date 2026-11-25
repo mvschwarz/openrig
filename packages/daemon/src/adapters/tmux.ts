@@ -2882,8 +2882,8 @@ export class TmuxAdapter {
   }
 
   /** Signal one process by pid. signalPaneProcess signals the pane's root, which in a shell-backed pane is
-   *  the shell, not the runtime running under it. Unix `kill`, like signalPaneProcess. */
-  async signalPid(pid: number, signal: "TERM" | "KILL"): Promise<TmuxResult> {
+   *  the shell, not the runtime running under it; signalPaneRuntime reaches the runtime. Unix `kill`, like signalPaneProcess. */
+  async signalPid(pid: number, signal: "TERM" | "HUP" | "KILL"): Promise<TmuxResult> {
     if (!Number.isInteger(pid) || pid <= 1) return { ok: false, code: "invalid_pid", message: `Refusing to signal pid ${pid}.` };
     try {
       await this.exec(`kill -${signal} ${pid}`);
@@ -2906,16 +2906,32 @@ export class TmuxAdapter {
     }
   }
 
-  /** Seat-handover cutover: signal the pane's foreground process (the retiree) — `TERM` for the graceful
-   *  exit-in-place, `KILL` for the bounded-timeout force fallback. Resolves the pane pid then `kill`s it;
-   *  an unresolvable pid is a structured, non-throwing failure.
+  /** Seat-handover cutover: signal the pane's ROOT process (`#{pane_pid}`): the retiree only when it is the pane's own
+   *  process; in a shell-backed pane it is the shell (#3901: signalPaneRuntime reaches the agent under it). `TERM` and
+   *  `KILL` for the pane-level stop, `HUP` to end a shell left at its prompt once its agent has exited. Resolves the pane
+   *  pid then `kill`s it; an unresolvable pid is a structured, non-throwing failure.
    *  Stays on the shell-string path deliberately: this is a Unix `kill`,
    *  not a multiplexer command (Windows needs taskkill — named follow-up). */
-  async signalPaneProcess(paneId: string, signal: "TERM" | "KILL"): Promise<TmuxResult> {
+  async signalPaneProcess(paneId: string, signal: "TERM" | "HUP" | "KILL"): Promise<TmuxResult> {
     return this.guardedInput(paneId, (pane, beforeWrite) => this.signalPaneProcessUnchecked(pane, signal, beforeWrite));
   }
 
-  private async signalPaneProcessUnchecked(paneId: string, signal: "TERM" | "KILL", beforeWrite: () => void): Promise<TmuxResult> {
+  /** #3901: signal one process in a seat's pane (its agent, which in a shell-backed pane runs under the shell), through
+   *  the same guard as signalPaneProcess. The target resolves to the seat's own pane; `stillThatProcess` then re-reads,
+   *  for that pane, that the pid is still the process the caller observed (a reused pid, or another occupant, is refused);
+   *  the guard's synchronous check runs last, right before the `kill`. */
+  async signalPaneRuntime(paneTarget: string, pid: number, signal: "TERM" | "KILL",
+    stillThatProcess: (pane: string) => Promise<boolean>): Promise<TmuxResult> {
+    return this.guardedInput(paneTarget, async (pane, beforeWrite) => {
+      if (!await stillThatProcess(pane)) {
+        return { ok: false, code: "process_changed", message: `pid ${pid} is no longer the agent observed in pane ${pane}; nothing was signalled.` };
+      }
+      beforeWrite();
+      return this.signalPid(pid, signal);
+    });
+  }
+
+  private async signalPaneProcessUnchecked(paneId: string, signal: "TERM" | "HUP" | "KILL", beforeWrite: () => void): Promise<TmuxResult> {
     const pid = await this.getPanePid(paneId);
     if (pid == null) {
       return { ok: false, code: "pane_pid_unavailable", message: `Could not resolve the pane pid for "${paneId}".` };

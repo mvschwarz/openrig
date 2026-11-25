@@ -97,6 +97,8 @@ interface TeardownResult {
   leftRunning?: string[];
   paneOnly?: string[];
   released?: string[];
+  /** #3901: how each Claude Code or Codex seat's agent ended before its terminal closed (absent from older daemons and with --force). */
+  runtimeExits?: Array<{ session: string; path: "graceful" | "forced"; detail: string }>;
 }
 
 interface DownAgentEntry {
@@ -168,7 +170,7 @@ the command warns and exits without stopping; re-run with --yes to confirm expli
   cmd
     .argument("<rig>", "Rig name or id to tear down")
     .option("--delete", "Delete rig record after stopping")
-    .option("--force", "Kill sessions immediately")
+    .option("--force", "Close the seats' terminals at once, without first letting each agent exit through its own shutdown")
     .option("--snapshot", "Take snapshot before teardown")
     .option("--yes", "Confirm stopping the rig your current seat belongs to")
     .option("--json", "JSON output for agents")
@@ -328,6 +330,12 @@ the command warns and exits without stopping; re-run with --yes to confirm expli
       }
       if (result.paneOnly && result.paneOnly.length > 0) {
         console.log(`Pane stopped: ${result.paneOnly.join(", ")}. A community harness's own processes may keep running after its pane; see its preset's limits.`);
+      }
+      // #3901: how each agent ended before its terminal closed.
+      const exitedOwn = (result.runtimeExits ?? []).filter((exit) => exit.path === "graceful");
+      if (exitedOwn.length > 0) console.log(`Exited through its own shutdown, or had already exited: ${exitedOwn.map((exit) => exit.session).join(", ")}.`);
+      for (const exit of (result.runtimeExits ?? []).filter((entry) => entry.path === "forced")) {
+        console.log(`Stopped without its own shutdown: ${exit.session}. ${exit.detail}`);
       }
 
       // Exit code: errors first, then deleted, then alreadyStopped

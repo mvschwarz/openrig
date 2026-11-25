@@ -13,6 +13,7 @@ import { isShellForeground } from "./shell-classifier.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { terminatePaneInPlace, type PaneTerminationResult } from "./pane-cutover.js";
+import type { NativeProcessLister } from "./native-process-lineage.js";
 
 /**
  * OPR.0.4.3.04 — the explicit successor-creation seam for the seat-handover
@@ -104,8 +105,10 @@ export type SuccessorLaunchResult =
       appliedLaunch?: AppliedLaunchObservation;
       /** The launch's frozen executable and whether it is a #! script (Claude managed launches, #2341). */
       launchedExecutable?: { path: string; isScript: boolean };
-      /** How the departing occupant's process ended at the cutover: it exited on TERM, or was killed after the TERM window. */
+      /** How the departing occupant ended at the cutover: through its own shutdown (or nothing was left running), or by a
+       *  signal it doesn't handle or KILL after the window (#3901). `retireeExitDetail` says which, in a sentence. */
       retireeExit: "graceful" | "forced";
+      retireeExitDetail?: string;
       /**
        * OPR.0.4.6.02 S1 — non-fatal tmux option-default warnings from the
        * fresh successor's launch (mouse/status/clipboard). Present only when
@@ -133,6 +136,7 @@ export type SuccessorLaunchResult =
       resumeToken?: string;
       resumeType?: string;
       retireeExit?: "graceful" | "forced";
+      retireeExitDetail?: string;
       launchedExecutable?: { path: string; isScript: boolean };
       /** With successorLaunched, what the launch applied, so a recovery commits it with the successor's generation. */
       appliedLaunch?: AppliedLaunchObservation;
@@ -153,6 +157,7 @@ export class SuccessorSessionLauncher {
   private tmuxOptionDefaults: TmuxOptionDefaultsApplier | null;
   private exitPollMs: number;
   private exitTimeoutMs: number;
+  private listProcesses: NativeProcessLister | undefined;
 
   constructor(
     tmuxAdapter: TmuxAdapter,
@@ -180,6 +185,8 @@ export class SuccessorSessionLauncher {
       /** Cutover retiree-exit poll interval + total bounded timeout (per graceful/forced phase). */
       exitPollMs?: number;
       exitTimeoutMs?: number;
+      /** The process table the retiree's own exit is read from (tests); the OS's by default. */
+      listProcesses?: NativeProcessLister;
     } = {},
   ) {
     this.tmuxAdapter = tmuxAdapter;
@@ -194,6 +201,7 @@ export class SuccessorSessionLauncher {
     this.tmuxOptionDefaults = opts.tmuxOptionDefaults ?? null;
     this.exitPollMs = opts.exitPollMs ?? 100;
     this.exitTimeoutMs = opts.exitTimeoutMs ?? 3_000;
+    this.listProcesses = opts.listProcesses;
   }
 
   /**
@@ -293,11 +301,12 @@ export class SuccessorSessionLauncher {
 
     // 2. Terminate the retiree IN PLACE, then respawn the now-dead pane WITHOUT -k so native scrollback
     //    survives (respawn-pane -k CLEARS the pane history — verified on tmux 3.6a; that would defeat the
-    //    money-proof). The swap: set remain-on-exit so the pane survives the exit → graceful SIGTERM
-    //    ("exits in place"; also protects the provider session state the successor's resume depends on) →
-    //    bounded-timeout SIGKILL fallback (pinned degraded path) → respawn-pane (no -k) on the dead pane.
+    //    money-proof). The swap: set remain-on-exit so the pane survives the exit → the retiree's own exit
+    //    (#3901: Claude Code on TERM, Codex through /exit; also protects the provider session state the
+    //    successor's resume depends on) → bounded-timeout KILL fallback (pinned degraded path) → the pane's
+    //    shell ended → respawn-pane (no -k) on the dead pane.
     const inputTarget = this.tmuxAdapter.deliveryGuard ? input.node.id : pane.id;
-    const terminated = await this.terminateRetiree(pane.id, inputTarget);
+    const terminated = await this.terminateRetiree(pane.id, inputTarget, input.node.runtime);
     if (!terminated.ok) {
       return { ok: false, code: "retiree_not_terminated", step: "create_successor", message: terminated.message, replacementStarted: false };
     }
@@ -352,7 +361,7 @@ export class SuccessorSessionLauncher {
     const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource, input.occupantGeneration, undefined, binding);
     if (!started.ok) {
       return { ok: false, code: started.code, step: "start_agent", message: started.message, replacementStarted: true,
-        tmuxPane: pane.id, ...limitsNotice, ...(started.launched ? { successorLaunched: true, retireeExit: terminated.path,
+        tmuxPane: pane.id, ...limitsNotice, ...(started.launched ? { successorLaunched: true, retireeExit: terminated.path, retireeExitDetail: terminated.detail,
           ...(started.resumeToken ? { resumeToken: started.resumeToken, resumeType: started.resumeType } : {}),
           ...(started.launchedExecutable ? { launchedExecutable: started.launchedExecutable } : {}),
           ...(started.appliedLaunch ? { appliedLaunch: started.appliedLaunch } : {}) } : {}) };
@@ -380,6 +389,7 @@ export class SuccessorSessionLauncher {
       ...(started.launchedExecutable ? { launchedExecutable: started.launchedExecutable } : {}),
       ...(started.activityGrantId ? { activityGrantId: started.activityGrantId } : {}),
       retireeExit: terminated.path,
+      retireeExitDetail: terminated.detail,
       ...(warnings.length ? { warnings } : {}),
       ...limitsNotice,
     };
@@ -583,11 +593,13 @@ export class SuccessorSessionLauncher {
    * Cutover: terminate the retiree occupant in its pane so the successor can respawn into it while
    * preserving scrollback (the shared in-place cutover, pane-cutover.ts). Returns which path terminated
    * the retiree, or a failure if it never became dead (then commit never runs).
-   * (Graceful signal = SIGTERM as the desk-provisional default under build-ahead; dev-planner ratifies
-   * the exact graceful mechanism — SIGTERM vs a runtime-specific quit — at their resume.)
+   * #3901: the graceful step is the runtime's own exit, measured natively (runtime-exit.ts): TERM to Claude Code itself
+   * (not to the pane's shell, which ignores it), `/exit` typed into an idle Codex with an empty input box. Another runtime,
+   * or an agent that can't be identified, keeps the pane-level TERM then KILL.
    */
-  private async terminateRetiree(paneId: string, inputTarget: string): Promise<PaneTerminationResult> {
-    return terminatePaneInPlace(this.tmuxAdapter, paneId, { pollMs: this.exitPollMs, timeoutMs: this.exitTimeoutMs, sleep: this.sleep }, "Retiree", inputTarget);
+  private async terminateRetiree(paneId: string, inputTarget: string, runtime: string | null): Promise<PaneTerminationResult> {
+    return terminatePaneInPlace(this.tmuxAdapter, paneId, { pollMs: this.exitPollMs, timeoutMs: this.exitTimeoutMs, sleep: this.sleep }, "Retiree", inputTarget,
+      { runtime, ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
   }
 
   /** KI-14: is the respawned pane's foreground a bare shell? A non-shell here means the pane booted

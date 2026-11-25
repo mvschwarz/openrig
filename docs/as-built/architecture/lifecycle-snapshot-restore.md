@@ -249,6 +249,17 @@ cited here by number with the code that carries them):
   live sessions (`packages/daemon/src/domain/rig-teardown.ts:117`, capture
   at `:128`, after refreshing resume metadata at `:119`; an already-stopped
   rig returns at `:93–115` without one).
+- Before it closes the terminals, `rig down` lets each Claude Code or Codex
+  seat's agent exit through its own shutdown (#3901,
+  `RigTeardownOrchestrator.exitSeatRuntimes`, `domain/runtime-exit.ts`):
+  Claude Code gets TERM itself, not its pane's shell; Codex gets `/exit`
+  typed into its input box only while that box is empty with no prompt open,
+  and TERM otherwise. All seats go at once, each bounded at 3 s with KILL
+  after, and only sessions the stop below would end (launched by OpenRig,
+  carrying the seat's marker). The exit is read from the process table, never
+  from the pane. Closing the terminals still stops everything afterwards.
+  `--force` skips the step. The result's `runtimeExits` says, per seat,
+  `graceful` (its own shutdown, or no agent left) or `forced`, with a sentence.
 - `rig up <rig-name>`: a source with no `/` and no
   `.yaml`/`.yml`/`.rigbundle`/`.rigtopology` extension is a rig name
   (`packages/daemon/src/domain/up-command-router.ts:49–50`). The CLI refuses
@@ -306,7 +317,15 @@ cited here by number with the code that carries them):
   `POST /api/seat/handover/:seatRef` (`routes/seat.ts:94`), which runs
   `SeatHandoverService.handover` (`seat-handover-service.ts:266`).
   `SuccessorSessionLauncher` (`successor-session-launcher.ts:92`) respawns
-  the same pane in place, so the session name stays the same. The fresh
+  the same pane in place, so the session name stays the same. Before the
+  respawn, the departing occupant exits through its own shutdown where it has
+  one (#3901: `terminatePaneInPlace` in `pane-cutover.ts`, then
+  `runtime-exit.ts`, the same exit `rig down` uses; also a kept-pane relaunch
+  and a runtime switch's retirement), read from the process table. Only then
+  is the pane's shell ended (HUP, then KILL), since the respawn needs a dead
+  pane. Another runtime, or an agent that can't be identified, keeps the
+  pane-level TERM then KILL. `sideEffects.departingProcess` and
+  `departingProcessDetail` say how the occupant ended. The fresh
   source delivers a daemon-built restore packet (`buildRestorePacket`,
   `seat-handover-service.ts:1151`), which is separate from the CLI
   `rig restore-packet` below. The rebuild source primes from the seat's

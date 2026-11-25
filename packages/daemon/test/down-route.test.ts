@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
 import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import { createApp } from "../src/server.js";
+import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { claudePane, timing } from "./fixtures/runtime-exit-pane.js";
 
 describe("POST /api/down route", () => {
   // R1: missing rigId -> 400
@@ -170,5 +172,36 @@ describe("POST /api/down route", () => {
     const body = await res.json();
     expect(body.rigName).toBe("handoff-test");
     db.close();
+  });
+
+  // #3901: the response says how each agent ended before its terminal closed; --force closes the terminals at once.
+  it.each([false, true])("reports each agent's own exit before the terminals close (force=%s)", async (force) => {
+    const pane = claudePane();
+    const base = mockTmuxAdapter();
+    const tmux = { ...base, ...pane.tmux(),
+      getSessionEnv: vi.fn(async () => node.id),
+      killSession: vi.fn(async () => { pane.effects.push("kill-session"); return { ok: true }; }) } as unknown as TmuxAdapter;
+    const db = createFullTestDb();
+    const testApp = createTestApp(db, { tmux });
+    const rig = testApp.rigRepo.createRig("exit-rig");
+    const node = testApp.rigRepo.addNode(rig.id, "dev", { runtime: "claude-code" });
+    const session = testApp.sessionRegistry.registerSession(node.id, "dev@exit-rig");
+    testApp.sessionRegistry.updateStatus(session.id, "running");
+    testApp.sessionRegistry.updateBinding(node.id, { tmuxSession: "dev@exit-rig", tmuxPane: "%1" });
+    const teardownOrchestrator = new RigTeardownOrchestrator({ db, rigRepo: testApp.rigRepo, sessionRegistry: testApp.sessionRegistry,
+      tmuxAdapter: tmux, snapshotCapture: testApp.snapshotCapture, eventBus: testApp.eventBus, listProcesses: pane.list, runtimeExitTiming: timing });
+    const app = createApp({ ...testApp, teardownOrchestrator } as never);
+
+    const res = await app.request("/api/down", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rigId: rig.id, ...(force ? { force: true } : {}) }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    if (force) {
+      expect(body.runtimeExits).toBeUndefined();
+      expect(pane.effects).toEqual(["kill-session"]);
+    } else {
+      expect(body.runtimeExits).toEqual([{ session: "dev@exit-rig", path: "graceful", detail: expect.stringMatching(/^Claude Code exited on TERM in /) }]);
+      expect(pane.effects).toEqual(["TERM 200", "kill-session"]);
+    }
   });
 });

@@ -361,6 +361,27 @@ describe("Down CLI", () => {
     expect(exitCode).toBeUndefined();
   });
 
+  // #3901: how each agent ended before its terminal closed.
+  it("says which agents exited through their own shutdown and which were stopped by a signal, and why", async () => {
+    responseOverride = {
+      status: 200,
+      body: {
+        rigId: "rig-1", sessionsKilled: 3, snapshotId: null, deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],
+        runtimeExits: [
+          { session: "dev-impl@rig-1", path: "graceful", detail: "Claude Code exited on TERM in 0.4 s." },
+          { session: "dev-qa@rig-1", path: "graceful", detail: "Codex exited through /exit in 0.5 s." },
+          { session: "dev-lead@rig-1", path: "forced", detail: "Codex was ended with TERM, which doesn't run its own shutdown, because /exit couldn't be used: its input box held text." },
+        ],
+      },
+    };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
+    });
+    expect(logs).toContain("Exited through its own shutdown, or had already exited: dev-impl@rig-1, dev-qa@rig-1.");
+    expect(logs).toContain("Stopped without its own shutdown: dev-lead@rig-1. Codex was ended with TERM, which doesn't run its own shutdown, because /exit couldn't be used: its input box held text.");
+    expect(exitCode).toBeUndefined();
+  });
+
   it("names each file in a Claude seat's cwd that still holds OpenRig's additions, and keeps the exit code", async () => {
     const kept = "/work/project/.openrig/context-collector.cjs: not the shipped collector's bytes, so it was kept";
     responseOverride = {

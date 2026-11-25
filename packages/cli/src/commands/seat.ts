@@ -203,14 +203,16 @@ interface SeatHandoverMutationResult {
     departingSessionKilled: false;
     /** Absent from an older daemon, whose receipt reported both side effects as a fixed false. */
     departingProcess?: "ended-graceful" | "ended-forced" | "not-touched";
+    /** #3901: what happened to the previous occupant, in a sentence (absent from older daemons). */
+    departingProcessDetail?: string;
     startupContextDelivered: boolean;
     provenanceRecordWritten: boolean;
   };
 }
 
 const DEPARTING_PROCESS_LINES = {
-  "ended-graceful": "The previous occupant's process exited on TERM; its tmux session was kept, and the successor runs in the same pane.",
-  "ended-forced": "The previous occupant's process didn't exit on TERM and was killed; its tmux session was kept, and the successor runs in the same pane.",
+  "ended-graceful": "The previous occupant wasn't forced to stop: it exited through its own shutdown, or had already exited. Its tmux session was kept, and the successor runs in the same pane.",
+  "ended-forced": "The previous occupant didn't exit through its own shutdown and was stopped by a signal. Its tmux session was kept, and the successor runs in the same pane.",
   "not-touched": "The previous occupant's process wasn't touched: the successor was an existing session.",
 } as const;
 
@@ -449,6 +451,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       ? "The handover's lineage record (occupant tenure) was written."
       : "The handover's lineage record (occupant tenure) was NOT written; check the daemon log, which names the first such failure since the daemon started. The seat is already bound to the successor, so don't run the handover again.");
     console.log(DEPARTING_PROCESS_LINES[result.sideEffects.departingProcess]);
+    if (result.sideEffects.departingProcessDetail) console.log(result.sideEffects.departingProcessDetail);
   }
   // OPR.0.5.5.5 — the per-source execution record: what actually carried context.
   if (result.sourceOutcome?.mode === "fork") {

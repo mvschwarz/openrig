@@ -1311,7 +1311,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       inputSchema: z.object({
         rigId: z.string().describe("Rig name or identifier to tear down"),
         delete: z.boolean().optional().describe("Delete rig record after stopping"),
-        force: z.boolean().optional().describe("Kill sessions immediately"),
+        force: z.boolean().optional().describe("Close the seats' terminals at once, without first letting each agent exit through its own shutdown"),
         snapshot: z.boolean().optional().describe("Take snapshot before teardown"),
       }),
       annotations: DESTRUCTIVE,
