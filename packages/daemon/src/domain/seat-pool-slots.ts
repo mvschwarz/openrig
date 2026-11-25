@@ -6,7 +6,9 @@ import { ulid } from "ulid";
 // number. Deleting a node by hand takes its slot row with it (ON DELETE CASCADE), which frees the number too.
 //
 // An add's attempt lives on its row: reserved with a new number, issued under the model's custody lease, then settled
-// (the agent runs) or removed (no node was created).
+// (the agent runs) or removed (no node was created). A comeback's attempt lives on the drained slot's own row: reserved,
+// issued, then settled running (`live`), refused (`drained` again, with a reuse hold) or never launched (`drained`
+// again, with no hold).
 
 export type SeatPoolSlotPhase = "adding" | "live" | "draining" | "drained";
 export type SeatPoolSlotAttemptKind = "add" | "comeback";
@@ -176,6 +178,49 @@ export class SeatPoolSlotsRepository {
     return this.db.prepare(
       "DELETE FROM seat_pool_slots WHERE slot_id = ? AND attempt_id = ? AND attempt_kind = 'add' AND phase = 'adding' AND node_id IS NULL",
     ).run(slotId, attemptId).changes === 1;
+  }
+
+  // A comeback brings a `drained` slot back on its own row, node and name. Its writes keep the slot's
+  // `phase_changed_at` (the time of the drain): only a comeback that settles running (settleAdd) changes it, so a
+  // comeback held or refused does not restart the drain's cooldown.
+
+  /**
+   * A comeback's reservation on the slot's own row, only while it is `drained`, with its node and no `reuse_hold`:
+   * `adding`, with a new reserved comeback attempt under `attemptId` that holds the chosen snapshot. False when the
+   * slot moved on.
+   */
+  reserveComeback(input: { slotId: string; attemptId: string; snapshotId: string }): boolean {
+    return this.db.prepare(
+      `UPDATE seat_pool_slots SET phase = 'adding', attempt_id = ?, attempt_kind = 'comeback', attempt_state = 'reserved',
+         attempt_basis = ?, attempt_outcome = NULL, attempt_result = NULL
+        WHERE slot_id = ? AND phase = 'drained' AND reuse_hold IS NULL AND node_id IS NOT NULL`,
+    ).run(input.attemptId, JSON.stringify({ snapshotId: input.snapshotId }), input.slotId).changes === 1;
+  }
+
+  /** A `drained` slot no snapshot qualifies for: it stays `drained` with the pool's own reuse hold, and no attempt.
+   *  False when the slot is no longer `drained` or already has a hold. */
+  holdComeback(slotId: string, hold: string): boolean {
+    return this.db.prepare("UPDATE seat_pool_slots SET reuse_hold = ? WHERE slot_id = ? AND phase = 'drained' AND reuse_hold IS NULL")
+      .run(hold, slotId).changes === 1;
+  }
+
+  /** An issued comeback refused before any launch: settled with its outcome, and the slot `drained` again with the
+   *  reuse hold, so the same snapshot is never sent again. */
+  settleComebackRefused(slotId: string, attemptId: string, input: { outcome: string; hold: string }): boolean {
+    return this.db.prepare(
+      `UPDATE seat_pool_slots SET attempt_state = 'settled', attempt_outcome = ?, reuse_hold = ?, phase = 'drained'
+        WHERE slot_id = ? AND attempt_id = ? AND attempt_kind = 'comeback' AND attempt_state = 'issued'`,
+    ).run(input.outcome, input.hold, slotId, attemptId).changes === 1;
+  }
+
+  /** A comeback that was never launched (not issued, or held after its issue): settled with its outcome, and the slot
+   *  `drained` again with no reuse hold, its node and history kept. Never removes the row. */
+  returnComebackToDrained(slotId: string, attemptId: string, outcome: string): boolean {
+    return this.db.prepare(
+      `UPDATE seat_pool_slots SET phase = 'drained', attempt_state = 'settled', attempt_outcome = ?
+        WHERE slot_id = ? AND attempt_id = ? AND attempt_kind = 'comeback' AND attempt_state IN ('reserved', 'issued')
+          AND phase = 'adding'`,
+    ).run(outcome, slotId, attemptId).changes === 1;
   }
 
   get(slotId: string): SeatPoolSlot | undefined {

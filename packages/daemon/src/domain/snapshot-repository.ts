@@ -2,10 +2,21 @@ import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 import type { RestoreSnapshotSelection, RestoreSnapshotSummary, Snapshot, SnapshotData } from "./types.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
+import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
+import { resolveActiveSnapshotSession } from "./active-occupant.js";
 
 export type RestoreSnapshotSelectionOutcome =
   | { ok: true; snapshot: Snapshot; selection: RestoreSnapshotSelection }
   | { ok: false; code: "snapshot_not_found" | "snapshot_wrong_rig" | "snapshot_unusable" | "no_usable_snapshot"; message: string };
+
+/** What the comeback selection read: the snapshot it chose (null: none qualifies), how many snapshots it read, newest
+ *  first, and for each one that did not qualify the first condition it failed (1: not restore-usable; 2: the node is not
+ *  in its intended topology; 3: no single active occupant recorded for the node). */
+export interface ComebackSnapshotSelection {
+  chosen: Snapshot | null;
+  read: number;
+  failed: Array<{ snapshotId: string; condition: 1 | 2 | 3 }>;
+}
 
 interface ListOptions {
   kind?: string;
@@ -92,6 +103,46 @@ export class SnapshotRepository {
       return { id: row.id, rigId: row.rig_id, kind: row.kind, status: row.status, data, createdAt: row.created_at };
     }
     return null;
+  }
+
+  /**
+   * The snapshot a seat pool's comeback launches a retained node from: the newest one, whatever its kind, that
+   * (1) is restore-usable, (2) holds the node in its intended topology with this logical id, and (3) recorded exactly
+   * one active occupant for that node. Read only. Rows are ranked by id alone (`created_at DESC, rowid DESC`) and read
+   * one at a time until one qualifies, so a capture taken after the node stopped never wins over the one taken while it
+   * ran. A row removed between the ranking and its read is skipped and not counted. Returns the chosen snapshot (null
+   * when none qualifies), how many were read, and the first condition each one that did not qualify failed.
+   */
+  selectComebackSnapshot(rigId: string, nodeId: string, logicalId: string): ComebackSnapshotSelection {
+    const ids = this.db
+      .prepare("SELECT id FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC, rowid DESC")
+      .all(rigId) as Array<{ id: string }>;
+    const failed: ComebackSnapshotSelection["failed"] = [];
+    let read = 0;
+    for (const { id } of ids) {
+      const row = this.rowById(id);
+      if (!row) continue;
+      read++;
+      let data: SnapshotData;
+      try {
+        data = decodeStoredSnapshotData(row.data);
+      } catch {
+        failed.push({ snapshotId: id, condition: 1 });
+        continue;
+      }
+      if (!isRestoreUsableSnapshotData(data)) { failed.push({ snapshotId: id, condition: 1 }); continue; }
+      if (!resolveSnapshotRestoreTopology(data).intendedNodes.some((node) => node.id === nodeId && node.logicalId === logicalId)) {
+        failed.push({ snapshotId: id, condition: 2 });
+        continue;
+      }
+      if (resolveActiveSnapshotSession(data, nodeId).kind !== "resolved") { failed.push({ snapshotId: id, condition: 3 }); continue; }
+      return {
+        chosen: { id: row.id, rigId: row.rig_id, kind: row.kind, status: row.status, data, createdAt: row.created_at },
+        read,
+        failed,
+      };
+    }
+    return { chosen: null, read, failed };
   }
 
   /** Resolve an exact or policy-ranked restore source and return the evidence
