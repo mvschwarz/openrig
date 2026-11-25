@@ -25,6 +25,7 @@ import type { SeenStore } from "./state-store.js";
 import type { OutboundDecision } from "../protocol.js";
 import type { SubsystemDeliverFn, SubsystemDeliveryOutcome } from "../gateway-subsystem.js";
 import type { OutboundPostPayload } from "./outbound-driver.js";
+import { resolveAllowedAbsoluteFile, FilePathSafetyError, type AllowlistRoot } from "../../files/path-safety.js";
 
 export interface SubsystemSlackDeliveryOpts {
   botToken: string;
@@ -94,9 +95,15 @@ export interface SubsystemSlackDeliveryOpts {
    *  for hermetic tests; default reads the filesystem (LOCAL_ATTACHMENT_EXT, at most
    *  LOCAL_ATTACHMENT_MAX_BYTES). Return null = not a local attachment; { skipped } = an
    *  attachment that can't be sent (logged, the text still delivers). */
-  readLocalImage?: (refPath: string) => LocalAttachment | null;
+  readLocalImage?: (refPath: string, scope?: AttachmentScope) => LocalAttachment | null;
+  /** The daemon's shared roots (files.allowlist), read when a scoped writer's evidence is attached. Absent: none, so such
+   *  evidence isn't attached. */
+  filesAllowlist?: () => AllowlistRoot[];
   log?: (msg: string) => void;
 }
+
+/** The shared roots a scoped writer's evidence must be read from: the daemon's roots its grant names. */
+export interface AttachmentScope { roots: AllowlistRoot[] }
 
 const LOCAL_IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 /** Local evidence types uploaded into the thread, including images, videos and PDFs. */
@@ -158,17 +165,31 @@ function pendingTransportFailureReceipt(
  *  of at most LOCAL_ATTACHMENT_MAX_BYTES, readable — else null (not an attachment), or { skipped }
  *  when it is an attachment that can't be sent (too large, missing, unreadable), so the miss is
  *  logged rather than silent. */
-export function defaultReadLocalImage(refPath: string): LocalAttachment | null {
+export function defaultReadLocalImage(refPath: string, scope?: AttachmentScope): LocalAttachment | null {
   if (!path.isAbsolute(refPath)) return null;
   if (!LOCAL_ATTACHMENT_EXT.has(path.extname(refPath).toLowerCase())) return null;
+  // A scoped writer's evidence is read only inside the roots its grant names, judged now, at the read: the reference
+  // as written must sit under one of them and its real target must stay there (the file reader's own containment).
+  // That real file is then opened without following a final link and checked to still be the file at that real path,
+  // so a link swapped in after the check isn't followed out of the root.
+  let file = refPath;
+  if (scope) {
+    try {
+      file = resolveAllowedAbsoluteFile(scope.roots, refPath);
+    } catch (e) {
+      if (!(e instanceof FilePathSafetyError)) throw e;
+      return { skipped: e.code === "stat_failed" ? "missing or unreadable" : "outside the shared roots its writer may read" };
+    }
+  }
   // The path is resolved ONCE: open it, then stat and read that same descriptor, so the file checked is the file
   // sent. O_NONBLOCK keeps the open from waiting on a FIFO (refused below as not a regular file), and the read is
   // bounded by the size just checked.
   let fd: number | null = null;
   try {
-    fd = fs.openSync(refPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | (scope ? fs.constants.O_NOFOLLOW : 0));
     const st = fs.fstatSync(fd);
     if (!st.isFile()) return { skipped: "not a regular file" };
+    if (scope && !stillAt(file, st)) return { skipped: "outside the shared roots its writer may read" };
     if (st.size > LOCAL_ATTACHMENT_MAX_BYTES) {
       return { skipped: `${st.size} bytes is over the ${LOCAL_ATTACHMENT_MAX_BYTES}-byte attachment cap` };
     }
@@ -181,9 +202,30 @@ export function defaultReadLocalImage(refPath: string): LocalAttachment | null {
     }
     return { bytes: read === bytes.length ? bytes : bytes.subarray(0, read), filename: path.basename(refPath) };
   } catch (e) {
-    return { skipped: `unreadable (${(e as NodeJS.ErrnoException).code ?? "error"})` };
+    const code = (e as NodeJS.ErrnoException).code;
+    // A final link where the checked real file was: it changed after the check, and isn't followed.
+    if (scope && code === "ELOOP") return { skipped: "outside the shared roots its writer may read" };
+    return { skipped: `unreadable (${code ?? "error"})` };
   } finally {
     if (fd !== null) fs.closeSync(fd);
+  }
+}
+
+/** The roots a scoped writer's evidence is attached from: the daemon's shared roots its grant names, recorded with the
+ *  reference. Undefined for a writer with no root grant (and for a decision recorded before roots were). */
+function attachmentScope(opts: SubsystemSlackDeliveryOpts, q: OutboundPostPayload): AttachmentScope | undefined {
+  const roots = q.evidenceRefRoots;
+  return Array.isArray(roots) ? { roots: (opts.filesAllowlist?.() ?? []).filter((root) => roots.includes(root.name)) } : undefined;
+}
+
+/** Whether the opened file is still the one at this real path, with no link anywhere on the way to it. */
+function stillAt(realPath: string, opened: fs.Stats): boolean {
+  try {
+    if (fs.realpathSync(realPath) !== realPath) return false;
+    const now = fs.statSync(realPath);
+    return now.dev === opened.dev && now.ino === opened.ino;
+  } catch {
+    return false;
   }
 }
 
@@ -269,10 +311,24 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // attempts still reconcile first, including a landed message that no longer renders (#899).
     // A rejection is recorded against the plain render, so a repeat note can't make a rejected payload look new.
     const renders = new Map<string, ReturnType<typeof buildOutboundMessage>>();
+    // Qualify/read once per attempt, lazily at render. The note and upload describe the same snapshot even if a
+    // reference changes while Slack is posting; an already-landed decision normally reconciles without a file read.
+    let attachmentRead = false;
+    let attachment: ReturnType<typeof defaultReadLocalImage> = null;
+    const localAttachment = () => {
+      if (!attachmentRead) {
+        attachmentRead = true;
+        attachment = q.evidenceRef && !/^https:\/\//.test(String(q.evidenceRef))
+          ? (opts.readLocalImage ?? defaultReadLocalImage)(String(q.evidenceRef), attachmentScope(opts, q)) : null;
+      }
+      return attachment;
+    };
     const render = (possibleRepeat = false, stateUnconfirmed = false, quietUnreadable = false) => {
       const cached = renders.get(`${possibleRepeat}:${stateUnconfirmed}:${quietUnreadable}`);
       if (cached) return cached;
       const { mediaRefs, evidenceLink } = evidenceAttachment(q.media, q.evidenceRef);
+      const local = localAttachment();
+      const evidenceNotAttached = !!local && "skipped" in local && local.skipped === "outside the shared roots its writer may read";
       const built = buildOutboundMessage(
         {
           qitemId: q.qitemId ?? decision.decisionId,
@@ -305,6 +361,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           possibleRepeat,
           stateUnconfirmed,
           quietUnreadable,
+          evidenceNotAttached,
         },
       );
       renders.set(`${possibleRepeat}:${stateUnconfirmed}:${quietUnreadable}`, built);
@@ -497,9 +554,8 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // Local attachments use Slack's external upload flow in the conversation thread.
     // HTTPS evidence already appeared as a link in the posted message. Unsupported
     // local files are skipped. A failed upload is logged without reposting the decision.
-    const local = q.evidenceRef && !/^https:\/\//.test(String(q.evidenceRef))
-      ? (opts.readLocalImage ?? defaultReadLocalImage)(String(q.evidenceRef))
-      : null;
+    // A writer whose roots were recorded with the reference (a scoped grant) has it attached only from inside them.
+    const local = localAttachment();
     if (local && "skipped" in local) {
       log(`ATTACHMENT skipped for ${q.qitemId ?? decision.decisionId}: ${path.basename(String(q.evidenceRef))} ${local.skipped} (text delivered; attachment missing)`);
     } else if (local) {

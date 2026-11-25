@@ -95,6 +95,8 @@ export interface SlackWireOpts {
   inboundRetryIntervalMs?: number;
   inboundMaxConnects?: number;
   registry?: RegistrySurface;
+  /** The daemon's shared roots, which a scoped writer's evidence is attached from (only those its grant names). */
+  filesAllowlist?: () => import("../../files/path-safety.js").AllowlistRoot[];
   /** `typedReply`: a typed thread reply, whose words a decision parked on its person stores as its answer; a click's return never does.
    *  `identityPrincipal`: the replying person's registered entity id, which a direct ask's close records. */
   resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string; typedReply?: boolean; identityPrincipal?: string }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
@@ -709,6 +711,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         machineFallback: machineId ?? undefined,
         fetchImpl: opts.fetchImpl,
         stopSignal: runCtl.signal,
+        ...(opts.filesAllowlist ? { filesAllowlist: opts.filesAllowlist } : {}),
         delivered,
         attempted,
         outboundSeen,
