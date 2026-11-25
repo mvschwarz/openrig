@@ -396,6 +396,12 @@ envelope. An OpenRig older than 0.7.3 doesn't read a recorded envelope, so after
 the seat launches without it. The field is also supported on legacy flat Codex nodes; other
 runtimes reject it.
 
+A seat in a narrower sandbox still has to run `rig` and reach the OpenRig daemon, which `rig`
+talks to over 127.0.0.1: `rig up`, `rig up --plan`, a seat's first `rig launch` and
+`rig seat set-permissions` warn, and carry on with the permissions as written, when a Codex
+seat's permissions don't let it read the OpenRig home, the rig install or node, or leave
+network off (read-only never has network).
+
 For an explicit filesystem policy, use `filesystem` **instead of** `sandbox` and its
 workspace-write fields. This is the same per-seat selection and audited setter:
 

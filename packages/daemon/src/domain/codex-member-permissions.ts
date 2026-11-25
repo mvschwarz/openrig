@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { open } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import type { CodexPermissionEnvelope } from "./codex-rebuild-permissions.js";
 import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
 import { shellQuote } from "../adapters/shell-quote.js";
@@ -124,6 +124,88 @@ export function codexMemberLaunch(permissions: CodexMemberPermissions): { args: 
   }
   const envelope = codexMemberEnvelope(permissions);
   return { args: codexEnvelopeArgs(envelope), observation: observeCodexEnvelope(envelope), suppressAutoAddDirs: permissions.sandbox === "read-only" };
+}
+
+/** What a Codex seat's rig command needs to read. `rig` in a seat is a link under the OpenRig home
+ *  (run/seat-bin) to the paired CLI, which runs on node. A folder that couldn't be found is left out. */
+export interface CodexRigReachPaths {
+  openrigHome: string;
+  rigInstall?: string;
+  node?: string;
+  /** The seat's home folder, for ~/ rules. */
+  home: string;
+  /** The seat's working folder, for :workspace_roots. */
+  cwd?: string;
+}
+
+export interface CodexRigReachGap {
+  /** What the seat's filesystem rules don't let it read. */
+  unreadable: Array<{ what: "the OpenRig home" | "the rig install" | "node"; path: string }>;
+  /** read-only: the legacy read-only sandbox, which never has network. */
+  network: "on" | "off" | "read-only";
+}
+
+const ACCESS_RANK: Record<CodexFilesystemAccess, number> = { deny: 0, read: 1, write: 2 };
+
+/** Whether a Codex seat's declared sandbox lets its agent run rig and reach the daemon, which rig talks to over
+ *  127.0.0.1: what's missing, or null. Advisory: it reads the declaration, not native enforcement, and changes
+ *  nothing. A folder is readable when the closest rule containing it grants read or write: :root or /, a literal
+ *  absolute or ~/ path, :workspace_roots (the seat's cwd), :slash_tmp (/tmp), or :minimal, whose system read
+ *  defaults don't include /home, /Users, /tmp (it has its own selectors) or the seat's home. At equal closeness the
+ *  narrower access counts. The legacy sandboxes read everywhere, so only their network matters. */
+export function codexRigReach(permissions: CodexMemberPermissions, paths: CodexRigReachPaths): CodexRigReachGap | null {
+  if (!("filesystem" in permissions)) {
+    if (permissions.sandbox === "read-only") return { unreadable: [], network: "read-only" };
+    return permissions.network_access === true ? null : { unreadable: [], network: "off" };
+  }
+  const home = resolve(paths.home);
+  const within = (target: string, root: string) => target === root || target.startsWith(root === sep ? sep : root + sep);
+  const readable = (target: string): boolean => {
+    let closest: { depth: number; access: CodexFilesystemAccess } | undefined;
+    for (const [key, access] of Object.entries(permissions.filesystem)) {
+      let depth: number;
+      if (key === ":minimal") {
+        if (/^\/(?:home|Users|tmp|private\/tmp)(?:\/|$)/i.test(target) || within(target, home)) continue;
+        depth = 1;
+      } else {
+        const anchor = key === ":root" ? sep : key === ":workspace_roots" || key === ":project_roots" ? paths.cwd
+          : key === ":slash_tmp" ? "/tmp" : key.startsWith("~/") ? join(home, key.slice(2)) : isAbsolute(key) ? key : undefined;
+        if (anchor === undefined) continue;
+        const root = resolve(anchor);
+        if (!within(target, root)) continue;
+        depth = root === sep ? 0 : root.length;
+      }
+      if (!closest || depth > closest.depth || (depth === closest.depth && ACCESS_RANK[access] < ACCESS_RANK[closest.access])) closest = { depth, access };
+    }
+    return closest !== undefined && closest.access !== "deny";
+  };
+  const unreadable: CodexRigReachGap["unreadable"] = [];
+  for (const [what, path] of [["the OpenRig home", paths.openrigHome], ["the rig install", paths.rigInstall], ["node", paths.node]] as const) {
+    if (path !== undefined && !readable(resolve(path))) unreadable.push({ what, path: resolve(path) });
+  }
+  const network = permissions.network_access === true ? "on" : "off";
+  return unreadable.length || network === "off" ? { unreadable, network } : null;
+}
+
+/** The launch warning for a gap codexRigReach found. Network off was measured blocking 127.0.0.1 on Linux; elsewhere
+ *  the text says "may". */
+export function codexRigReachWarning(label: string, gap: CodexRigReachGap, platform: NodeJS.Platform = process.platform): string {
+  const named = gap.unreadable.map(({ what, path }) => `${what} (${path})`);
+  const list = named.length > 1 ? `${named.slice(0, -1).join(", ")} or ${named.at(-1)}` : named[0];
+  const networkOff = gap.network !== "on";
+  const linux = platform === "linux";
+  const said = gap.network === "read-only" ? "this seat's codex_permissions use the read-only sandbox, where network is always off."
+    : list ? `this seat's codex_permissions don't let it read ${list}${networkOff ? ", and network is off" : ""}.`
+    : "network is off in this seat's codex_permissions.";
+  const consequence = !list
+    ? `The rig command talks to the OpenRig daemon over 127.0.0.1, which a Codex sandbox with network off ${linux ? "can't reach, so the agent's tasks, questions and messages won't reach it." : "may not reach (seen on Linux), so the agent's tasks, questions and messages may not reach it."}`
+    : `Inside its sandbox the agent can't run rig${!networkOff ? "" : linux ? " or reach the OpenRig daemon" : ", and with network off it may not reach the OpenRig daemon either"}, so its tasks, questions and messages won't reach it.`;
+  const steps = [
+    ...(list ? [`add ${named.length > 1 ? "those folders" : "that folder"} with read access`] : []),
+    ...(gap.network === "off" ? ["turn network on (network_access: true)"] : []),
+    ...(gap.network === "read-only" ? ["use sandbox: workspace-write with network_access: true, or keep it read-only with a filesystem list of \":root\": read and network_access: true"] : []),
+  ];
+  return `${label}: ${said} ${consequence} The launch continues with the permissions as written. To fix it: ${steps.join(" and ")}, then run rig whoami inside the seat.`;
 }
 
 /** What an emitted envelope's arguments ask for; the native result still needs its own observation. */

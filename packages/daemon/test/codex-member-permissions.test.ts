@@ -18,8 +18,8 @@ import os from "node:os";
 import nodePath from "node:path";
 import { execFileSync } from "node:child_process";
 import { codexEnvelopeArgs } from "../src/domain/codex-rebuild-permissions.js";
-import { clearCodexMemberPermissions, codexMemberEnvelope, readCodexMemberPermissions, readProfileFingerprint, validateCodexMemberPermissions,
-  type CodexMemberPermissions, type CodexProfileObservation } from "../src/domain/codex-member-permissions.js";
+import { clearCodexMemberPermissions, codexMemberEnvelope, codexRigReach, codexRigReachWarning, readCodexMemberPermissions, readProfileFingerprint,
+  validateCodexMemberPermissions, type CodexMemberPermissions, type CodexProfileObservation, type CodexRigReachGap } from "../src/domain/codex-member-permissions.js";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import { seatRoutes } from "../src/routes/seat.js";
 import { createTestApp } from "./helpers/test-app.js";
@@ -266,6 +266,95 @@ describe("a Codex seat's current envelope (offline, no native enforcement claim)
     expect(events(f.db, "node.codex_permissions_changed")[0].actor).toBe("actual@codex-team");
     expect((await post({ codexPermissions: lease, mode: "floor", reason: "both" })).status).toBe(400);
     expect((await post({ codexProfile: "lease", codexPermissions: lease, reason: "both" })).status).toBe(400);
+  });
+});
+
+describe("whether a Codex seat's declared sandbox lets it run rig (a launch warning, never a refusal)", () => {
+  // nvm-style: rig and node both under the home folder, which :minimal never covers.
+  const paths = { openrigHome: "/home/u/.openrig", rigInstall: "/home/u/.nvm/versions/node/v22/lib/node_modules/@openrig/cli",
+    node: "/home/u/.nvm/versions/node/v22/bin", home: "/home/u", cwd: "/work/app" };
+  const HOME = { what: "the OpenRig home", path: "/home/u/.openrig" } as const;
+  const INSTALL = { what: "the rig install", path: paths.rigInstall } as const;
+  const NODE = { what: "node", path: paths.node } as const;
+  const list = (filesystem: Record<string, string>, network_access = true) =>
+    validateCodexMemberPermissions({ approval: "never", filesystem, network_access });
+
+  it.each<[string, CodexMemberPermissions, Partial<typeof paths>, CodexRigReachGap | null]>([
+    ["~/ and literal grants with network on", list({ "~/.openrig": "read", "/home/u/.nvm": "read", ":workspace_roots": "write" }), {}, null],
+    ["the OpenRig home left out", list({ "/home/u/.nvm": "read", ":workspace_roots": "write" }), {}, { unreadable: [HOME], network: "on" }],
+    ["the rig install and node left out", list({ "~/.openrig": "write", ":workspace_roots": "write" }), {}, { unreadable: [INSTALL, NODE], network: "on" }],
+    ["network off with every folder readable", list({ ":root": "read" }, false), {}, { unreadable: [], network: "off" }],
+    [":root read", list({ ":root": "read" }), {}, null],
+    [":root write", list({ ":root": "write" }), {}, null],
+    ["a literal / grant", list({ "/": "read" }), {}, null],
+    ["a deny under a granted ancestor", list({ ":root": "read", "~/.openrig": "deny" }), {}, { unreadable: [HOME], network: "on" }],
+    ["a closer grant under a denied ancestor", list({ "/home/u": "deny", "/home/u/.openrig": "read", "~/.nvm": "read" }), {}, null],
+    [":root deny", list({ ":root": "deny", ":workspace_roots": "write" }), {}, { unreadable: [HOME, INSTALL, NODE], network: "on" }],
+    ["a sibling path that only shares a prefix", list({ "/home/u/.open": "read", "~/.nvm": "read" }), {}, { unreadable: [HOME], network: "on" }],
+    [":workspace_roots with the folders inside the seat's cwd", list({ ":workspace_roots": "write" }), { cwd: "/home/u" }, null],
+    [":project_roots, the same selector", list({ ":project_roots": "read" }), { cwd: "/home/u" }, null],
+    [":workspace_roots with the folders outside the seat's cwd", list({ ":workspace_roots": "write" }), {}, { unreadable: [HOME, INSTALL, NODE], network: "on" }],
+    [":workspace_roots with no known cwd", list({ ":workspace_roots": "write" }), { cwd: undefined }, { unreadable: [HOME, INSTALL, NODE], network: "on" }],
+    [":minimal, which doesn't cover /home", list({ ":minimal": "read", ":workspace_roots": "write" }), {}, { unreadable: [HOME, INSTALL, NODE], network: "on" }],
+    [":minimal with rig and node in system folders", list({ ":minimal": "read" }),
+      { rigInstall: "/usr/lib/node_modules/@openrig/cli", node: "/usr/bin" }, { unreadable: [HOME], network: "on" }],
+    [":minimal and a home outside /home", list({ ":minimal": "read" }),
+      { openrigHome: "/root/.openrig", home: "/root", rigInstall: "/usr/lib/node_modules/@openrig/cli", node: "/usr/bin" },
+      { unreadable: [{ what: "the OpenRig home", path: "/root/.openrig" }], network: "on" }],
+    [":minimal and /Users", list({ ":minimal": "read" }, false),
+      { openrigHome: "/Users/u/.openrig", home: "/Users/u", rigInstall: "/opt/homebrew/lib/node_modules/@openrig/cli", node: "/opt/homebrew/bin" },
+      { unreadable: [{ what: "the OpenRig home", path: "/Users/u/.openrig" }], network: "off" }],
+    [":minimal and an OpenRig home under /tmp", list({ ":minimal": "read", "~/.nvm": "read" }), { openrigHome: "/tmp/rig-home" },
+      { unreadable: [{ what: "the OpenRig home", path: "/tmp/rig-home" }], network: "on" }],
+    [":slash_tmp with the OpenRig home under /tmp", list({ ":slash_tmp": "read", "~/.nvm": "read" }), { openrigHome: "/tmp/rig-home" }, null],
+    ["an unknown install folder", list({ "~/.openrig": "read" }), { rigInstall: undefined, node: undefined }, null],
+    ["workspace-write with network on", validateCodexMemberPermissions({ sandbox: "workspace-write", approval: "never", network_access: true }), {}, null],
+    ["workspace-write with network off", validateCodexMemberPermissions({ sandbox: "workspace-write", approval: "never" }), {}, { unreadable: [], network: "off" }],
+    ["read-only, which never has network", reader, {}, { unreadable: [], network: "read-only" }],
+  ])("%s", (_case, permissions, over, expected) => {
+    expect(codexRigReach(permissions, { ...paths, ...over })).toEqual(expected);
+  });
+
+  it("names only what's missing, with the fix, and says the launch continues", () => {
+    expect(codexRigReachWarning("dev.impl", { unreadable: [HOME, INSTALL], network: "off" }, "linux")).toBe(
+      "dev.impl: this seat's codex_permissions don't let it read the OpenRig home (/home/u/.openrig) or the rig install"
+      + " (/home/u/.nvm/versions/node/v22/lib/node_modules/@openrig/cli), and network is off. Inside its sandbox the agent"
+      + " can't run rig or reach the OpenRig daemon, so its tasks, questions and messages won't reach it. The launch continues"
+      + " with the permissions as written. To fix it: add those folders with read access and turn network on"
+      + " (network_access: true), then run rig whoami inside the seat.");
+    expect(codexRigReachWarning("dev.impl", { unreadable: [HOME, INSTALL, NODE], network: "on" }, "linux")).toBe(
+      "dev.impl: this seat's codex_permissions don't let it read the OpenRig home (/home/u/.openrig), the rig install"
+      + " (/home/u/.nvm/versions/node/v22/lib/node_modules/@openrig/cli) or node (/home/u/.nvm/versions/node/v22/bin)."
+      + " Inside its sandbox the agent can't run rig, so its tasks, questions and messages won't reach it. The launch"
+      + " continues with the permissions as written. To fix it: add those folders with read access, then run rig whoami"
+      + " inside the seat.");
+    expect(codexRigReachWarning("dev.review", { unreadable: [], network: "read-only" }, "linux")).toBe(
+      "dev.review: this seat's codex_permissions use the read-only sandbox, where network is always off. The rig command"
+      + " talks to the OpenRig daemon over 127.0.0.1, which a Codex sandbox with network off can't reach, so the agent's tasks, questions"
+      + " and messages won't reach it. The launch continues with the permissions as written. To fix it: use sandbox:"
+      + " workspace-write with network_access: true, or keep it read-only with a filesystem list of \":root\": read and"
+      + " network_access: true, then run rig whoami inside the seat.");
+  });
+
+  it("says may, not can't, for network off where it wasn't measured (macOS)", () => {
+    expect(codexRigReachWarning("dev.impl", { unreadable: [], network: "off" }, "darwin")).toBe(
+      "dev.impl: network is off in this seat's codex_permissions. The rig command talks to the OpenRig daemon over 127.0.0.1, which a"
+      + " Codex sandbox with network off may not reach (seen on Linux), so the agent's tasks, questions and messages may not"
+      + " reach it. The launch continues with the permissions as written. To fix it: turn network on (network_access: true),"
+      + " then run rig whoami inside the seat.");
+    expect(codexRigReachWarning("dev.impl", { unreadable: [HOME], network: "off" }, "darwin")).toContain(
+      "Inside its sandbox the agent can't run rig, and with network off it may not reach the OpenRig daemon either, so its"
+      + " tasks, questions and messages won't reach it.");
+  });
+
+  it("tells the setter too, and records the permissions as given", async () => {
+    const f = fixture();
+    const narrowed = await f.service.setPermissions(set(lease));
+    expect(narrowed).toMatchObject({ ok: true, to: lease, advisories: [expect.stringMatching(/^dev\.a: network is off in this seat's codex_permissions\. .* The launch continues with the permissions as written\./)] });
+    expect(readCodexMemberPermissions(f.db, f.a.id)).toEqual(lease);
+    const reaching = await f.service.setPermissions(set({ ...lease, network_access: true }));
+    expect(reaching).toMatchObject({ ok: true });
+    expect(reaching).not.toHaveProperty("advisories");
   });
 });
 

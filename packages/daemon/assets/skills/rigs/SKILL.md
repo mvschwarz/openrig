@@ -59,6 +59,18 @@ these writes; an explicit project-only request doesn't cover them. If they decli
 remove the writes afterwards as a substitute for consent. Explain that setup has no project-only mode. A git worktree
 or project `.codex/config.toml` doesn't redirect these writes.
 
+**A seat limited to the project still needs OpenRig:** if the person wants the team's own access limited (for Codex, a
+`filesystem` list in place of the default, not `:minimal` alone), each seat sees only what that list names, and
+OpenRig adds nothing to it. The seat still has to run `rig` and reach the OpenRig home (`~/.openrig`, or their
+`OPENRIG_HOME`): without them it reports `rig: command not found` and can't read its task, ask a question, bring up a
+prompt or close its work. Say so before they choose, and include read access to the OpenRig home, the rig install
+(`@openrig/cli` under `npm root -g`) and the folder node runs from (`command -v node`). Keep network access on for the
+seat as well (the read-only sandbox never has it): `rig` talks to the OpenRig daemon on this computer, and a Codex
+sandbox without network can't reach it (seen on Linux), even with every folder listed. `rig up` and `rig up --plan`
+warn, naming what's missing, when a seat's permissions miss any of these, and the team still starts as written. After
+the team starts, check from inside one such seat that `rig whoami` works before you hand it the goal. If it doesn't, say
+so plainly and let the person choose between more access and a team that can't reach OpenRig.
+
 **Keep their own login:** a team runs on the person's existing login through the home that holds it (`~/.codex` or
 their `CODEX_HOME`; for Claude Code, `~/.claude` or their `CLAUDE_CONFIG_DIR`). Keeping that home and asking once about
 these writes is how someone who wants changes kept in their project still gets a working team. Don't make a new

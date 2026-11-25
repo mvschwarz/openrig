@@ -2,9 +2,12 @@ import { ACCOUNT_HOME_PROVIDER_ENV, PI_ACCOUNT_HOME_PROVIDER_ENV, RUNTIME_HOME_V
 import { isLaunchWrapperRuntime, validateLaunchWrapper } from "./launch-wrapper.js";
 import { accessSync, closeSync, constants, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, statSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { getOpenRigHome } from "../openrig-compat.js";
+import type { CodexRigReachPaths } from "./codex-member-permissions.js";
 
 // Explicit public launch metadata, not a prefix/denylist over credential names.
 // Provider keys and OPENRIG_ACTIVITY_HOOK_TOKEN keep their non-typed channel.
@@ -31,20 +34,29 @@ export function publicSeatEnvironment(env: Readonly<Record<string, string | unde
   return result;
 }
 
-/** Locate the CLI paired with this daemon, never a PATH-first global install.
+/** Locate the CLI paired with this daemon, never a PATH-first global install: its package folder and rig file.
  * The first layout is the bundled CLI; the second is the workspace build.
  */
-function pairedCli(): string {
+function pairedCli(): { folder: string; rig: string } {
   for (const relative of ["../../../package.json", "../../../cli/package.json"]) {
     const manifest = path.resolve(import.meta.dirname, relative);
     try {
       const pkg = JSON.parse(readFileSync(manifest, "utf8"));
       if (pkg.name === "@openrig/cli" && typeof pkg.bin?.rig === "string") {
-        return path.resolve(path.dirname(manifest), pkg.bin.rig);
+        return { folder: path.dirname(manifest), rig: path.resolve(path.dirname(manifest), pkg.bin.rig) };
       }
     } catch { /* try the other supported layout */ }
   }
   throw new Error("Paired CLI unavailable");
+}
+
+/** The folders a seat's rig reads, for the Codex sandbox check (codexRigReach): the OpenRig home holding the seat's
+ * rig link, the paired CLI that link resolves to, and the node running this daemon, which the usual install shares.
+ * A folder that can't be found is left out. */
+export function seatRigReachPaths(): Omit<CodexRigReachPaths, "cwd"> {
+  const real = (find: () => string) => { try { return realpathSync(find()); } catch { return undefined; } };
+  return { openrigHome: path.resolve(getOpenRigHome()), rigInstall: real(() => pairedCli().folder),
+    node: real(() => path.dirname(realpathSync(process.execPath))), home: os.homedir() };
 }
 
 /** Pin npm Codex's interpreter as well as its entry file to the probe PATH.
@@ -110,7 +122,7 @@ export class SeatLaunchEnvironment {
   }
 
   private rigBin(): string {
-    const cli = realpathSync(this.cliPath ?? pairedCli());
+    const cli = realpathSync(this.cliPath ?? pairedCli().rig);
     accessSync(cli, constants.X_OK);
     if (!statSync(cli).isFile() || !this.sessionEnv.OPENRIG_HOME) throw new Error("Paired CLI or instance home unavailable");
     // Separate aliases for concurrent installed versions; never retarget another
