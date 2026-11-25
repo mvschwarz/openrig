@@ -14,6 +14,10 @@ import type { QueueTransition } from "./queue-transition-log.js";
 type RelinquishInput = { readonly archiveText: string; readonly authorization: TransferAuthorization;
   readonly intervention: string; readonly limits?: string; readonly actor: TransferActor; readonly dryRun?: boolean };
 
+function fenceNote(destinationHostId: string, transferId: string, archiveDigest: string): string {
+  return `relinquished: ownership moved to ${destinationHostId} for transfer ${transferId} (archive ${archiveDigest.slice(0, 12)}); fenced: awaiting reconciliation`;
+}
+
 export function recordTransferFence(db: Database.Database, recordId: string, receipt: TransferReceipt): string[] {
   const insert = db.prepare(`INSERT INTO queue_transfer_relinquished (qitem_id, record_id, archive_digest, destination_host_id, source_state)
     VALUES (?, ?, ?, ?, ?) ON CONFLICT(qitem_id) DO NOTHING`);
@@ -88,7 +92,7 @@ export class QueueTransferSource {
       const recordId = insertRelinquishment(db, receipt);
       const restricted = recordTransferFence(db, recordId, receipt);
       for (const { qitemId, state } of archive.rows) this.repo.transitionLog.append({ ...actor, qitemId, state,
-        transitionNote: `relinquished: ownership moved to ${destination.hostId} for transfer ${archive.transferId} (archive ${archive.digest.slice(0, 12)}); fenced: awaiting reconciliation` });
+        transitionNote: fenceNote(destination.hostId, archive.transferId, archive.digest) });
       return { receipt, archiveCurrent: true, fenced: restricted, workflowState, replayed: false };
     }).immediate();
   }
@@ -131,6 +135,7 @@ export class QueueTransferSource {
       const mark = db.prepare("UPDATE queue_transfer_relinquished SET reconciled_at = ?, reconcile_outcome = ? WHERE qitem_id = ? AND record_id = ?");
       const counts: Record<string, number> = {};
       const lateReports: { qitemId: string; currentState: QueueState; transitions: QueueTransition[] }[] = [];
+      const relinquishedNote = fenceNote(destinationHostId, archive.transferId, archive.digest);
       const rows = transferSelection(archive).map(({ qitemId, state }) => {
         const live = lookup.get(qitemId);
         const archived = archive.rows.find(row => row.qitemId === qitemId);
@@ -139,8 +144,16 @@ export class QueueTransferSource {
         else if (live && archived && fields.some(column => (live[column] ?? null) !== (archived.wire[transferWireKey(column)] ?? null))) {
           outcome = "late_report";
           lateReports.push({ qitemId, currentState: live.state, transitions: this.repo.transitionLog.listForQitem(qitemId).filter(entry => entry.ts >= prior.recordedAt) });
-        } else if (live && archived && isTerminalState(state)) outcome = "confirmed_history";
-        else if (live && archived && created.has(qitemId)) {
+        } else if (live && archived && isTerminalState(state)) {
+          const archivedIds = new Set(archived.transitions.map(entry => entry.transitionId));
+          const added = this.repo.transitionLog.listForQitem(qitemId).filter(entry => !archivedIds.has(entry.transitionId));
+          // The fence append is ordered even when it shares a millisecond with a late report.
+          // Replaying a portable receipt restores the fence without necessarily restoring its note.
+          const fenceIndex = added.findIndex(entry => entry.transitionNote === relinquishedNote);
+          const late = fenceIndex >= 0 ? added.slice(fenceIndex + 1) : added.filter(entry => entry.ts >= prior.recordedAt);
+          outcome = late.length ? "late_report" : "confirmed_history";
+          if (late.length) lateReports.push({ qitemId, currentState: live.state, transitions: late });
+        } else if (live && archived && created.has(qitemId)) {
           outcome = "superseded";
           const closureTarget = `${qitemId}@${destinationHostId}`;
           supersede.run(recordedAt, closureTarget, qitemId);

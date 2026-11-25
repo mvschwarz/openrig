@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -24,7 +24,7 @@ beforeEach(() => {
   repo = new QueueRepository(db, new EventBus(db));
   source = new QueueTransferSource(repo);
 });
-afterEach(() => db.close());
+afterEach(() => { db.close(); vi.useRealTimers(); });
 
 function snapshot() {
   const { archive: archiveText } = buildQueueTransfer(db, { kind: "qitems", names: ["qitem-a"] });
@@ -85,6 +85,24 @@ it.each([false, true])("reconciles a confirmed row without overwriting late repo
   expect(repo.getById("qitem-a")).toMatchObject(late ? { state: "done" } : { state: "canceled", closureReason: "superseded", closureTarget: "qitem-a@target" });
   expect(source.reconcile({ ...input, result })).toEqual({ ...report, replayed: true });
   expect(() => repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "pending", reopen: true, transitionNote: "retry" })).toThrow(/fenced/);
+});
+
+it.each([false, true])("distinguishes the fence note from a same-millisecond terminal history write (late=%s)", late => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-02-03T04:05:06Z"));
+  repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "done", closureReason: "no-follow-on" });
+  const input = snapshot();
+  const result = activation(input);
+  source.relinquish(input);
+  const row = db.prepare("SELECT * FROM queue_items WHERE qitem_id = 'qitem-a'");
+  const before = row.get();
+  if (late) repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "done", transitionNote: "late terminal note" });
+  const report = source.reconcile({ ...input, result: { ...result, rows: { ...result.rows, runnable: [], terminal: ["qitem-a"] } } });
+  expect(row.get()).toEqual(before);
+  expect(report).toMatchObject({ evacuation: late ? "incomplete" : "complete",
+    rows: [{ qitemId: "qitem-a", outcome: late ? "late_report" : "confirmed_history" }] });
+  expect(report.lateReports).toEqual(late ? [{ qitemId: "qitem-a", currentState: "done",
+    transitions: [expect.objectContaining({ transitionNote: "late terminal note" })] }] : []);
 });
 
 it("restores only the receipt's fence and reports incomplete status without a destination result", () => {
