@@ -338,7 +338,7 @@ export class HerdrAppProvider implements TerminalProvider {
         const host = this.host();
         const shells = view.viewers.filter((viewer) => viewer.state === "replaced");
         for (const shell of shells) notes.push(`${shell.label}: its viewer ${shell.terminal} is a plain shell now; OpenRig left it running, close its tab.`);
-        notes.push(`This view was placed in herdr-core on ${host}. A herdr-app connected to ${host} removes its tabs when it next refreshes; OpenRig can't see that window.`);
+        notes.push(`This view was placed in herdr-core on ${host}. A herdr-app connected to ${host} removes ${shells.length ? "the tabs of the viewers OpenRig ended, not the shells'," : "its tabs"} when it next refreshes; OpenRig can't see that window.`);
         // The view's own folder, once nothing of OpenRig's runs in it (rmdir leaves a folder that isn't empty).
         if (!shells.length) await rmdir(this.spaceFolder(view)).catch(() => {});
       }

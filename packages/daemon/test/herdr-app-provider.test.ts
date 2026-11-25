@@ -710,6 +710,9 @@ describe("HerdrAppProvider core placement: no window on this machine, a herdr-co
 
     const closed = await provider.closeView(opened.space!.id);
     expect(closed.notes?.join(" ")).toContain("dev.qa · S1: its viewer t11 is a plain shell now; OpenRig left it running, close its tab.");
+    // A shell's tab stays: the note doesn't say the app removes it.
+    expect(closed.notes?.join(" ")).toContain("removes the tabs of the viewers OpenRig ended, not the shells', when it next refreshes");
+    expect(closed.notes?.join(" ")).not.toContain("removes its tabs");
     expect(world.terminals.get("t11")!.state).toBe("live");
     expect(world.log.some((e) => e.startsWith("kill:"))).toBe(false);
   });
