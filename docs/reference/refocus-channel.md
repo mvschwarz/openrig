@@ -30,6 +30,7 @@ A Claude started from inside a seat (its shell or Bash tool) inherits the seat's
 A seat-scoped tool of your own (an MCP server, a cache) should read `OPENRIG_SEAT_LAUNCH_DIR`. Every seat launched in an
 absolute folder gets it, whatever plugins it selected (see "Launch environment" in [rig-spec.md](rig-spec.md)). Don't use
 `OPENRIG_SEAT_PROJECT_DIR` for this: only this plugin's seats get it, and setting it switches the plugin's hooks on.
+Several agents can share a launch folder, so key per-agent state on `OPENRIG_SESSION_NAME` and use this value only as the folder.
 A seat that loads the plugin is also given `OPENRIG_SEAT_PROJECT_DIR`, its launch project, and the plugin's seat effects (the
 activity and session-identity posts, the compaction hooks, refocus, and the first-launch marker) run only when that Claude's
 `CLAUDE_PROJECT_DIR` names the same folder (compared by real path, so a trailing slash or symlink doesn't matter). A nested
