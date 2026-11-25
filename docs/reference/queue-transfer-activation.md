@@ -51,30 +51,32 @@ The database holds the same JSON in a transfer ledger, so a repeated call return
 
 ## The source fence
 
-`relinquish` re-reads the archived items. If any differs from the archive, or no longer exists, it refuses with `archive_stale` and writes nothing; export, import and authorize again. On success each archived item is fenced with one transition. A fenced item cannot be claimed, unclaimed, handed off or moved back to an open state; the daemon answers `409 qitem_fenced`. A late report that closes the item is still recorded. Its state and claim stay as history. Wake delivery leaves a fenced item alone; the stuck sweep does not read the fence.
+`relinquish` compares the selected rows and their history with the archive. This release narrows the contract's refresh-at-relinquishment step: `archive_stale` names the changed or missing items and directs you to re-export on the source, stage on the destination, and authorize the new digest. The failed attempt changes no ownership and preserves the old archive and records as evidence. An authorized digest is never silently refreshed.
+
+On success each archived item is fenced with one transition. A fenced item cannot be claimed, unclaimed, handed off or reopened; the daemon answers `409 qitem_fenced`. Late terminal reports, ordinary notes and relayed answers stay recordable. A late answer on a fenced relay does not complete the old ask, create a reply item or notify the source. Wake delivery leaves a fenced item alone; the stuck sweep does not read the fence.
 
 The fence restricts daemon dispatch only. Work already running at the source has to be stopped by the operator, which is what `--intervention` records.
 
 ## Activation
 
-`activate` checks the staged digest, the authorization, the receipt and the destination's readiness before writing anything. `--dry-run` runs every check and reports `ready_for_activation`. A pending or in-progress item whose destination does not resolve locally after `--map` refuses the whole archive with `mapping_incomplete`.
+`activate` checks the staged digest, the authorization, the receipt and the destination's readiness before writing anything. `--dry-run` runs every check and reports `ready_for_activation`. If an item's destination does not resolve locally after `--map`, activation retains the chosen address and reports `unresolved_rig` or `unresolved_seat` without staging a wake for that item or choosing a fallback.
 
 | Source state | Destination state |
 |---|---|
-| `pending` | `pending`, with a wake intent |
+| `pending` | `pending`, with a wake intent if the destination resolves |
 | `in-progress` | `pending`, unclaimed, the body prefixed with an instruction to reconcile partial work at the origin |
 | `blocked` | `blocked`, its source continuation kept current |
 | terminal | the same state |
 
-Source transitions and mission-control actions are imported as the item's history and marked as imported: they are not destination activity, and no imported action is notified. Source wake evidence is copied onto the imported transitions without an imported marker, so this release does not guarantee that it stays inert; treat it as a known limit. Each item gets the tag `transferred:<operationId>`.
+Source transitions and mission-control actions are imported as history, not destination activity. Wake evidence stays attached to the imported transitions; active wake readers ignore it and no timer is scheduled from it. Each item gets the tag `transferred:<operationId>`.
 
 Activation is two commits. A crash between them leaves an `activating` ledger row and the staged manifest; the same call again resumes it. A crash after both is an exact retry.
 
 ## Reconciliation
 
-`reconcile` takes the activation result, not the receipt, as `--receipt`, and accepts only the result of an online handshake. An item whose source columns still equal the archive, and which the destination lists as created, closes as `superseded` with a cross-host successor. An item whose columns differ from the archive in any way is reported as a `late_report` and left alone, whether it changed before or after the fence. The fence stays on every item, so nothing transferred can be reopened at the source.
+`reconcile` takes the activation result, not the receipt, as `--receipt`, and accepts only the result of an online handshake. A confirmed item with no late changes closes as `superseded` with a cross-host successor. Changed items and notes or answers added after the fence are reported as `late_report` and left alone. The report includes the late transitions and, for confirmed transfers, the destination item in `ownerItem`: share the report with the current owner there, or append it as a history note to that item. Reconciliation does not automatically send work or notifications to either host.
 
-`status` reports, per transfer, whether the source has a record of the intervention, whether a destination result was verified, how the source reconciliation ended, which items are still fenced, and `evacuation: complete` or `incomplete`. An empty ledger reports `recordsUnavailable`; it does not say no transfer happened.
+`status` reports retained restrictions in `fenced` and lists the items still awaiting reconciliation separately in `reconciliationOwed`. A reconciled item remains fenced and cannot be reopened at the source. An empty ledger reports `recordsUnavailable`; it does not say no transfer happened. Destination `replay` checks restored items, erasure markers and imported history and reports what is missing without reconstructing or rerunning work.
 
 ## Limits
 
