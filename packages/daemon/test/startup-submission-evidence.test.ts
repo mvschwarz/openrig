@@ -18,7 +18,9 @@ describe("Claude transient startup composer", () => {
     expect(inspectStartupStagedText(composer("Press up to edit queued messages"), expected)).toBe("clear");
   });
 
-  it.each(["? for shortcuts", "paste again to expand", "paste again to expand  ◐ medium · /effort", "paste again to expand                                     ● high · /effort"])("keeps an exact expected placeholder staged under %s", footer => {
+  it.each(["? for shortcuts", "paste again to expand", "paste again to expand  ◐ medium · /effort", "paste again to expand                                     ● high · /effort",
+    "paste again to expand  Update available! Run: brew upgrade claude-code",
+    "paste again to expand  current: 2.1.326 · latest: 2.1.330 ✔ Update installed · Restart to update"])("keeps an exact expected placeholder staged under %s", footer => {
     const placeholder = "Press up to edit queued messages";
     expect(inspectStartupStagedText(composer(placeholder, footer), placeholder)).toBe("staged");
     expect(inspectStartupStagedText(composer("Press up\nto edit queued messages", footer), ` ${placeholder} `)).toBe("staged");
@@ -33,6 +35,7 @@ describe("Claude transient startup composer", () => {
     "paste again to expand  ordinary text · /effort", "paste again to expand  ❯ unfinished draft · /effort",
     "paste again to expand  medium · /effort", "paste again to expand  ◐ unknown · /effort",
     "paste again to expand  ◐ medium extra · /effort", "paste again to expand  ◐ medium · /effort trailing",
+    "paste again to expand  Update available!", "paste again to expand  ordinary text · Update available! Run: brew upgrade",
   ])("does not accept an approximate hint: %s", footer => {
     expect(inspectStartupStagedText(composer("", footer), expected)).toBe("unverified");
   });

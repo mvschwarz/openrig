@@ -23,6 +23,9 @@ interface SeatDiagnosis {
       state: string;
       summary?: string | null;
       healthy?: boolean;
+      blockedOn?: string | null;
+      updatedAt?: string | null;
+      eventOnly?: true;
       wake: { kind: string; ref: string; live: boolean; unconsumed?: boolean; deliveryStatus?: string | null } | null;
     }>;
   };
@@ -43,10 +46,13 @@ function renderSeat(d: SeatDiagnosis): void {
   if (d.obligations.items.length > 10) console.log(`    … and ${d.obligations.items.length - 10} more`);
   for (const item of d.obligations.held ?? []) {
     const wake = item.wake;
-    const wakeText = wake
-      ? `${wake.kind} ${wake.ref}: ${wake.unconsumed ? `FIRED but unconsumed${wake.deliveryStatus ? ` (${wake.deliveryStatus})` : ""}` : wake.live ? "live" : "not live"}`
-      : "no recorded wake";
+    const wakeText = item.eventOnly
+      ? `event-only on ${item.blockedOn}: shown, not reminded${item.updatedAt ? `; last updated ${item.updatedAt}` : ""}`
+      : wake
+        ? `${wake.kind} ${wake.ref}: ${wake.unconsumed ? `FIRED but unconsumed${wake.deliveryStatus ? ` (${wake.deliveryStatus})` : ""}` : wake.live ? "live" : "not live"}`
+        : "no recorded wake";
     console.log(`    - HELD ${item.qitemId}${item.summary ? ` — ${item.summary}` : ""} [${wakeText}]`);
+    if (item.eventOnly) console.log(`      Ends when its event is recorded: rig queue resolve ${item.qitemId} --decision "<what happened>"`);
     if (!item.healthy && !(wake?.live && !wake.unconsumed)) {
       console.log("      Remedy: attach a live watchdog id, arm an atomic timer, or name a live blocker qitem; deferred/not-imminent work with a workspace home belongs in its mission/slice.");
     }
@@ -55,7 +61,7 @@ function renderSeat(d: SeatDiagnosis): void {
 
 export function parkedCommand(): Command {
   return new Command("parked")
-    .description("Are we parked? Derived diagnosis: stopped seats owing work; HELD is healthy only while its recorded wake is live")
+    .description("Are we parked? Derived diagnosis: stopped seats owing work; HELD is healthy while its recorded wake is live, or as an event-only hold on an external: gate with no wake")
     .argument("[seat]", "Seat node id or canonical session name; omit to diagnose the whole rig")
     .option("--rig <rig>", "Rig scope (defaults to your seat's rig from OPENRIG_SESSION_NAME; a seat argument carrying @rig self-scopes)")
     .option("--json", "Full diagnosis as JSON")
@@ -100,7 +106,9 @@ export function parkedCommand(): Command {
       console.log(`rig: ${verdictWord(rig.parked)} — ${rig.reason}`);
       if (rig.scope) console.log(`scope: rig ${rig.scope.rig} (from ${rig.scope.resolvedFrom})`);
       for (const d of rig.seats) {
-        if (d.parked === false) continue; // the interesting cells are parked + indeterminate
+        // The interesting cells are parked + indeterminate, and a seat holding an event-only hold: it's never reminded,
+        // so this is where it's shown.
+        if (d.parked === false && !d.obligations.held?.some((h) => h.eventOnly)) continue;
         renderSeat(d);
       }
     });

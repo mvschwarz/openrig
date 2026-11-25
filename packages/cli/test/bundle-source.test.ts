@@ -206,7 +206,7 @@ describe("GitHub bundle source", () => {
   });
 
 
-  it("resolves and checks out an actual Git commit after its branch moves", async () => {
+  it.each(["main", "HEAD"])("pins a /tree/%s folder to its advertised commit even if the branch moves", async (ref) => {
     const repository = path.join(root, "repository"); fs.mkdirSync(repository);
     const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
     const git = (cwd: string, args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", ...args], { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trimEnd();
@@ -224,7 +224,8 @@ describe("GitHub bundle source", () => {
       }
       return git(cwd, args.map(arg => arg === "https://github.com/example/teams" ? repository : arg));
     };
-    const prepared = await prepareGitHubBundle(URL, adapter, path.join(root, "imports"));
+    const prepared = await prepareGitHubBundle(`https://github.com/example/teams/tree/${ref}/rigs/dev`, adapter, path.join(root, "imports"));
+    expect(prepared.source.requestedRef).toBe(ref);
     expect(prepared.source.resolvedCommit).toBe(original);
     expect(fs.readFileSync(path.join(prepared.folder, "rig.yaml"), "utf8")).toBe("name: original\n");
     expect(git(repository, ["rev-parse", "HEAD"])).not.toBe(original);

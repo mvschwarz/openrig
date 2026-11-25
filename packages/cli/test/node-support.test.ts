@@ -6,6 +6,9 @@ import { checkAbi } from "../scripts/check-abi.mjs";
 // state the same Node support policy. Walk every major from 20 to 26.
 const MATRIX: Array<[string, "supported" | "too_old" | "odd" | "untested"]> = [
   ["v20.20.2", "too_old"],
+  ["v22.0.0", "too_old"],
+  ["v22.13.1", "too_old"],
+  ["v22.14.0", "supported"],
   ["v22.22.1", "supported"],
   ["v23.11.1", "odd"],
   ["v24.21.0", "supported"],
@@ -29,6 +32,17 @@ describe("classifyNodeVersion", () => {
 });
 
 describe("installer and diagnostics agree", () => {
+  it("refuses Node 22 before 22.14 without loading the native addon", () => {
+    let loaded = false;
+    const result = checkAbi({
+      nodeVersion: "v22.13.1",
+      loadNativeAddon: () => { loaded = true; },
+    });
+    expect(result.ok).toBe(false);
+    expect(loaded).toBe(false);
+    expect(classifyNodeVersion("v22.13.1").fix).toContain("22.14.0");
+  });
+
   it.each(MATRIX)("%s: checkAbi outcome matches %s", (version, kind) => {
     const abi = checkAbi({
       nodeVersion: version,

@@ -39,25 +39,33 @@ export class ProcessCensus {
     this.now = opts.now ?? Date.now;
   }
 
-  async list(): Promise<ProcessRow[]> {
-    if (this.lastRows && this.now() - this.lastAt <= this.freshnessMs) {
-      return this.lastRows;
+  /** `fresh`: start an enumeration now even when one is cached or running, for a caller that must see the table after
+   *  something it awaited; later callers share it. */
+  async list(opts: { fresh?: boolean } = {}): Promise<ProcessRow[]> {
+    if (!opts.fresh) {
+      if (this.lastRows && this.now() - this.lastAt <= this.freshnessMs) {
+        return this.lastRows;
+      }
+      if (this.inFlight) return this.inFlight;
     }
-    if (this.inFlight) return this.inFlight;
-    this.inFlight = this.listFn().then(
+    const run: Promise<ProcessRow[]> = this.listFn().then(
       (rows) => {
-        this.lastRows = rows;
-        this.lastAt = this.now();
-        this.inFlight = null;
+        // An enumeration a fresh one replaced still answers its own callers, but doesn't overwrite the newer one.
+        if (this.inFlight === run) {
+          this.lastRows = rows;
+          this.lastAt = this.now();
+          this.inFlight = null;
+        }
         return rows;
       },
       (err) => {
         // Honest failure: nothing cached, next call retries.
-        this.inFlight = null;
+        if (this.inFlight === run) this.inFlight = null;
         throw err;
       },
     );
-    return this.inFlight;
+    this.inFlight = run;
+    return run;
   }
 
   /** A CYCLE-SCOPED lister: at most one census underneath for the closure's

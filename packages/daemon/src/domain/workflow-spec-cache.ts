@@ -17,7 +17,7 @@ import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 import { parse as parseYaml } from "yaml";
 import type { StartedWorkflowSpec, WorkflowSpec, WorkflowSpecRow } from "./workflow-types.js";
-import { WORKFLOW_AGENT_HARNESSES, WORKFLOW_EXIT_KINDS } from "./workflow-types.js";
+import { WORKFLOW_AGENT_HARNESSES, WORKFLOW_EXIT_KINDS, WORKFLOW_NEXT_OWNER_MODES } from "./workflow-types.js";
 import { bindSpecToRig } from "./workflow-rig-placeholder.js";
 
 interface SpecRow {
@@ -113,9 +113,11 @@ export const WORKFLOW_TOP_LEVEL_KEYS = [
   "exception_routing",
   "coordination_terminal_turn_rule",
   "context_refs",
+  "next_owner",
 ] as const;
 export const WORKFLOW_STEP_KEYS = [
   "id",
+  "label",
   "actor_role",
   "objective",
   "allowed_exits",
@@ -131,6 +133,7 @@ export const WORKFLOW_STEP_KEYS = [
   "gate",
   "depends_on",
   "acceptance",
+  "next_owner",
 ] as const;
 /** A spec row with `{rig}` targets resolved against `boundRig`. */
 export function bindRowToRig(row: WorkflowSpecRow, boundRig: string | null, boundPod: string | null = null): WorkflowSpecRow {
@@ -256,6 +259,7 @@ export function parseWorkflowSpec(rawYaml: string, sourcePath: string): Workflow
   // at the YAML root; a stray root sibling was silently ignored.
   rejectUnknownKeys(root, ["workflow"], "(document root)", sourcePath);
   rejectUnknownKeys(wf, WORKFLOW_TOP_LEVEL_KEYS, "workflow", sourcePath);
+  assertNextOwnerMode(wf.next_owner, "workflow.next_owner", sourcePath);
 
   // FR-6/FR-7 (guard blocker 2): loop_guards SHAPE validation at the
   // raw seam. A nonnumeric max_hops would sanction a cycle at
@@ -476,6 +480,15 @@ export function parseWorkflowSpec(rawYaml: string, sourcePath: string): Workflow
           );
         }
       }
+      assertNextOwnerMode(s.next_owner, `workflow.steps[${idx}].next_owner`, sourcePath);
+      // A display name for the step; `id` stays its identity and `objective` its instruction.
+      if (s.label !== undefined && (typeof s.label !== "string" || s.label.trim().length === 0)) {
+        throw new WorkflowSpecError(
+          "spec_field_invalid",
+          `workflow spec at ${sourcePath}: workflow.steps[${idx}].label must be a non-empty string when present (got ${JSON.stringify(s.label)}). Remove it to show the step by its id.`,
+          { sourcePath, path: `workflow.steps[${idx}].label` },
+        );
+      }
       // OPR.0.4.6.WF2 FR-3: host pin shape — non-empty string. Registry
       // membership is the validator's check (it sees the registry);
       // the parser only pins the shape.
@@ -575,7 +588,21 @@ export function parseWorkflowSpec(rawYaml: string, sourcePath: string): Workflow
       typeof wf.coordination_terminal_turn_rule === "string"
         ? wf.coordination_terminal_turn_rule
         : undefined,
+    // Validated above and copied here: a validated top-level key dropped at assembly is silently inert.
+    ...(wf.next_owner !== undefined ? { next_owner: wf.next_owner as WorkflowSpec["next_owner"] } : {}),
   };
+}
+
+/** `next_owner` (spec or step level): absent, or one of WORKFLOW_NEXT_OWNER_MODES. */
+function assertNextOwnerMode(value: unknown, path: string, sourcePath: string): void {
+  if (value === undefined) return;
+  if (typeof value !== "string" || !(WORKFLOW_NEXT_OWNER_MODES as readonly string[]).includes(value)) {
+    throw new WorkflowSpecError(
+      "spec_field_invalid",
+      `workflow spec at ${sourcePath}: ${path} must be one of [${WORKFLOW_NEXT_OWNER_MODES.join(", ")}] (got ${JSON.stringify(value)}). Remove the key to keep the default owner resolution.`,
+      { sourcePath, field: path, value, allowed: [...WORKFLOW_NEXT_OWNER_MODES] },
+    );
+  }
 }
 
 /**

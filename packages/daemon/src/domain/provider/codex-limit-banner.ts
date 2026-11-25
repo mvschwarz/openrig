@@ -3,6 +3,7 @@ import {
   AGENT_ACTIVITY_FRESHNESS_MS,
   type AgentActivityStore,
 } from "../agent-activity-store.js";
+import type { SeatActivityService } from "../seat-activity-service.js";
 
 /**
  * Codex usage-limit banner detector (#763).
@@ -140,8 +141,19 @@ export function clearRecordedBanner(sessionName: string): void {
   lastRecordedBySession.delete(sessionName);
 }
 
+type BannerStore = Pick<AgentActivityStore, "getLatestForNode" | "recordHookEvent">
+  & Partial<Pick<AgentActivityStore, "heldUsageLimitForSession">>;
+
+/** The stored limit this occupant still holds by its records (the reader a restart uses), reaching past a neutral
+ *  notification to it; null when none is held or none can be shown to be this occupant's. Without that reader (a store
+ *  that doesn't have it), only the newest record says. */
+function storedHeldLimit(store: BannerStore, sessionName: string, latest: ReturnType<BannerStore["getLatestForNode"]>) {
+  if (!store.heldUsageLimitForSession) return latest?.rawEvent === "at_limit" ? latest : null;
+  try { return store.heldUsageLimitForSession(sessionName, "codex"); } catch { return null; }
+}
+
 export function recordCodexLimitBanner(deps: {
-  store: Pick<AgentActivityStore, "getLatestForNode" | "recordHookEvent">;
+  store: BannerStore;
   resolveGeneration: (sessionName: string) => string | null;
   sessionName: string;
   banner: CodexLimitBanner | null;
@@ -154,10 +166,12 @@ export function recordCodexLimitBanner(deps: {
     clearRecordedBanner(deps.sessionName);
     const generation = deps.resolveGeneration(deps.sessionName);
     // Only a newer, same-occupant capture can end the stored episode. A
-    // neutral notification supersedes the limit without inventing idle/work;
-    // the ordinary structural and motion evidence still decides the state.
-    if (latest?.rawEvent !== "at_limit" || latest.generation !== generation ||
-        !(nowMs > Date.parse(latest.eventAt ?? ""))) return false;
+    // neutral notification supersedes the limit without inventing idle/work, and
+    // doesn't end it: the limit behind it is the one a restart would read back.
+    // The ordinary structural and motion evidence still decides the state.
+    const limit = latest?.rawEvent === "at_limit" ? latest : storedHeldLimit(deps.store, deps.sessionName, latest);
+    if (limit?.rawEvent !== "at_limit" || limit.generation !== generation ||
+        !(nowMs > Date.parse(limit.eventAt ?? ""))) return false;
     return deps.store.recordHookEvent({
       runtime: "codex", sessionName: deps.sessionName,
       hookEvent: "Notification", subtype: "usage_limit_cleared",
@@ -170,7 +184,11 @@ export function recordCodexLimitBanner(deps: {
     const eventMs = latest.eventAt ? Date.parse(latest.eventAt) : Number.NaN;
     if (Number.isFinite(eventMs) && nowMs - eventMs < AGENT_ACTIVITY_FRESHNESS_MS) return false;
   } else if (latest) {
-    if (lastRecordedBySession.get(deps.sessionName) === deps.banner.resetText) return false;
+    // The same banner while the recorded episode is still held (a newer row that ended nothing, such as a neutral
+    // notification) is that same limit. Once a newer turn or a clear ended it, a banner is a new episode, even with the
+    // same reset text.
+    if (lastRecordedBySession.get(deps.sessionName) === deps.banner.resetText
+        && (!deps.store.heldUsageLimitForSession || storedHeldLimit(deps.store, deps.sessionName, latest) !== null)) return false;
   }
   deps.store.recordHookEvent({
     runtime: "codex",
@@ -185,4 +203,24 @@ export function recordCodexLimitBanner(deps: {
     if (!oldest.done) lastRecordedBySession.delete(oldest.value);
   }
   return true;
+}
+
+/**
+ * One sweep's banner reading: recorded as above, and held by the activity oracle too, so the seat reads unknown with its
+ * usage limit while the banner shows rather than idle, and a newer capture without it ends the limit. The banner is read
+ * from the pane, so the sampling rung holds it. It states no reset OpenRig can read, so resetsAt is null.
+ */
+export function observeCodexLimitBanner(deps: {
+  store: BannerStore;
+  resolveGeneration: (sessionName: string) => string | null;
+  oracle: Pick<SeatActivityService, "holdUsageLimit" | "releaseUsageLimit">;
+  sessionName: string;
+  banner: CodexLimitBanner | null;
+  observedAt: Date;
+}): void {
+  recordCodexLimitBanner({ store: deps.store, resolveGeneration: deps.resolveGeneration, sessionName: deps.sessionName,
+    banner: deps.banner, now: () => deps.observedAt });
+  const at = deps.observedAt.toISOString();
+  if (deps.banner) deps.oracle.holdUsageLimit(deps.sessionName, { rung: "window-sampling", observedAt: at, resetsAt: null });
+  else deps.oracle.releaseUsageLimit(deps.sessionName, at);
 }
