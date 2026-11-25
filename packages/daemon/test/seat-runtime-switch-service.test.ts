@@ -22,6 +22,8 @@ import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { activityRoutes } from "../src/routes/activity.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { DefaultOccupantInvalidator } from "../src/domain/occupant-invalidator.js";
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
@@ -972,6 +974,44 @@ describe("live seat runtime switch", () => {
     db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', '[]', 'codex')").run(nodeId);
     const result = await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Read original rig", dryRun: true });
     expect(result).toMatchObject({ ok: true, dryRun: true, settings: { model: { value: "source-model", source: "agent_spec" } } });
+  });
+
+  it("a pi-rpc staged hook keeps the launcher's community session-file resume at commit", async () => {
+    fs.mkdirSync(presetsDir, { recursive: true });
+    fs.writeFileSync(path.join(presetsDir, "senpi.yaml"),
+      "format: 1\nname: senpi\ncommand: node /fixture/senpi.mjs\nmaintainer: test\nprotocol: pi-rpc\nresume: true\n");
+    const nativeId = "11111111-2222-4333-8444-555555555555";
+    const sessionFile = path.join(home, "native-session.jsonl");
+    fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: nativeId })}\n`);
+    const community = { ...adapter("senpi"), runtime: "senpi",
+      launchHarness: vi.fn(async () => ({ ok: true, resumeToken: sessionFile, resumeType: "community:senpi" })) } as unknown as RuntimeAdapter;
+    const svc = service({ runtimeAdapters: { codex: adapter("codex"), senpi: community } });
+    const hooks = new Hono();
+    hooks.use("*", async (c, next) => {
+      c.set("agentActivityStore" as never, new AgentActivityStore({ db, eventBus }) as never);
+      c.set("activityHookToken" as never, "fixture" as never);
+      c.set("sessionRegistry" as never, sessionRegistry as never);
+      c.set("eventBus" as never, eventBus as never);
+      await next();
+    });
+    hooks.route("/api/activity", activityRoutes);
+    onSleep = async () => {
+      const row = openSwitch();
+      if (row?.phase !== "preparing" || !handoverTyped()) return;
+      // PiRunner's real session_identity payload names the preset and keeps native id and file separate.
+      const response = await hooks.request("/api/activity/hooks", { method: "POST",
+        headers: { "content-type": "application/json", "x-openrig-activity-token": "fixture" },
+        body: JSON.stringify({ eventFamily: "session_identity", hookEvent: "SessionStart", sessionName: SEAT,
+          nodeId, runtime: "senpi", generation: row.successor_generation, sessionId: nativeId, sessionFile }) });
+      expect(await response.json()).toMatchObject({ ok: true, ignored: "staged_successor", tokenPersisted: false });
+      expect(db.prepare("SELECT successor_resume_type, successor_resume_token FROM seat_runtime_switches WHERE id = ?").get(row.id))
+        .toMatchObject({ successor_resume_type: "senpi", successor_resume_token: nativeId });
+      svc.confirm({ seatRef: SEAT, switchId: row.id, note: "Ready", actorSession: SEAT, generation: row.successor_generation });
+    };
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "senpi", reason: "Resume the native conversation" }))
+      .toMatchObject({ ok: true, changed: true, from: "codex", to: "senpi" });
+    expect(db.prepare("SELECT agent_app, resume_type, resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(nodeId))
+      .toMatchObject({ agent_app: "senpi", resume_type: "community:senpi", resume_token: sessionFile });
   });
 
   it.each(["openrig-build-upgrade-1a2b3c4d", "launcher-native-ref-7"])("a switch to a community harness commits the harness and its conversation, and back is accepted (%s)", async nativeRef => {

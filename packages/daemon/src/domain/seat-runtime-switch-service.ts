@@ -670,15 +670,19 @@ export class SeatRuntimeSwitchService {
       // The successor was launched in the seat's saved folder (stageSuccessor's node.cwd).
       sessionRegistry.recordLaunchedCwd(successor.id, node.cwd);
       const hooked = db.prepare("SELECT successor_resume_type, successor_resume_token FROM seat_runtime_switches WHERE id = ?").get(ctx.id) as { successor_resume_type: string | null; successor_resume_token: string | null };
-      const nativeId = hooked.successor_resume_token ?? ctx.launchResume?.token;
-      const nativeType = hooked.successor_resume_token ? hooked.successor_resume_type : ctx.launchResume?.type;
+      // A Pi RPC hook reports the preset's plain runtime and native id, not its launcher-proven session-file pair.
+      // Only a hook already naming this community target can replace that launcher's resume.
+      const hookedToken = isCommunityHarnessRuntime(target) && hooked.successor_resume_type !== `community:${target}`
+        ? null : hooked.successor_resume_token;
+      const nativeId = hookedToken ?? ctx.launchResume?.token;
+      const nativeType = hookedToken ? hooked.successor_resume_type : ctx.launchResume?.type;
       if (nativeId) {
         // A community harness's launcher reports `community:<name>`; that type is the preset's own, not a built-in's, so it is
         // accepted here when it names this target. The built-in validator still decides every built-in token.
         const communityToken = isCommunityHarnessRuntime(target) && nativeType === `community:${target}` && usableCommunityNativeRef(nativeId)
           ? { ok: true as const, resumeType: `community:${target}`, token: nativeId } : null;
         const token = communityToken ?? (isCommunityHarnessRuntime(target) ? null : validateResumeToken(target, nativeId));
-        if (token?.ok) sessionRegistry.updateResumeToken(successor.id, token.resumeType, token.token, hooked.successor_resume_token ? "hook" : "scrape");
+        if (token?.ok) sessionRegistry.updateResumeToken(successor.id, token.resumeType, token.token, hookedToken ? "hook" : "scrape");
       }
       const observations = new AppliedLaunchObservationStore(db);
       observations.invalidateGeneration(ctx.predecessorGeneration);
