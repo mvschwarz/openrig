@@ -98,6 +98,29 @@ export function realDeps(): LifecycleDeps {
     readProcessState: (pid) => readProcessState(pid),
   });
 
+  // #3953: a process's stdout and stderr, read as the daemon's own database-holder check reads them (lsof, fds 1 and 2).
+  const writesOutputTo = (pid: number, file: string): boolean | { failure: string } => {
+    let real: string;
+    try { real = fs.realpathSync(file); } catch { return { failure: `${file} can't be resolved` }; }
+    if (process.platform === "linux") {
+      // Linux names each open file under /proc without lsof; a link that can't be read leaves the answer to lsof.
+      const links = [1, 2].map((fd) => {
+        try { return fs.readlinkSync(`/proc/${pid}/fd/${fd}`); }
+        catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : undefined; }
+      });
+      if (links.every((link) => link !== undefined)) return links.includes(real);
+    }
+    try {
+      const listed = execFileSync("lsof", ["-a", "-p", String(pid), "-d", "1,2", "-Fn"], { encoding: "utf-8", timeout: 2_000, maxBuffer: 64 * 1024 });
+      return listed.split("\n").some((line) => line.startsWith("n") && (line.slice(1) === real || line.slice(1) === file));
+    } catch (error) {
+      const err = error as { status?: number | null; code?: string; signal?: string | null };
+      // Exit status 1 is an answer: none of those files is open (or the process is gone).
+      if (err.status === 1) return false;
+      return { failure: err.code === "ENOENT" ? "lsof isn't installed" : err.signal ? "lsof timed out" : "lsof failed" };
+    }
+  };
+
   // #2860: where the OS has pid namespaces (Linux), a missing pid is only proof from the daemon's own.
   const pidNamespace = (): string | undefined => {
     if (process.platform !== "linux") return "host";
@@ -178,6 +201,7 @@ export function realDeps(): LifecycleDeps {
     processStartToken,
     releaseStartReservation: archiveSpentReservation,
     retainStartReservation: markReservationRetained,
+    writesOutputTo,
   };
 }
 
