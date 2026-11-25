@@ -654,6 +654,23 @@ describe("seat-pool comeback: a launch not settled, and one never made (#3395 Pi
     expect(JSON.parse(slot.attemptOutcome!)).toMatchObject({ ok: false, code: "launch_failed", threw: true });
   });
 
+  it("A comeback whose slot row is removed while its launch is pending reports nothing for that attempt.", async () => {
+    const w = comebackWorld();
+    const { m, w1 } = await w.drainedAgent();
+    // the DELETE stands in for the ON DELETE CASCADE of a node deleted by hand
+    w.launch.mockImplementationOnce(async () => {
+      w.db.prepare("DELETE FROM seat_pool_slots WHERE node_id = ?").run(w1.nodeId);
+      return { ok: false, code: "rig_not_found", message: "gone" };
+    });
+    await w.wantOne(m);
+
+    const { notes, settled } = await comeBack(w, m.jobId);
+    const attemptId = (notes.add as { comebacks: ComebackEntry[] }).comebacks[0]!.attempt!.id;
+    expect(w.launch).toHaveBeenCalledTimes(1);
+    expect(settled.some((s) => s.slotNumber === 1 || s.attempt.id === attemptId)).toBe(false);
+    expect(w.slots.forModel(m.nodeId).some((s) => s.nodeId === w1.nodeId)).toBe(false);
+  });
+
   it("A comeback whose issue fails with an unexpected error leaves the slot `drained` on its own row and node, and the next cycle brings it back.", async () => {
     const w = comebackWorld();
     const { m, w1, b } = await w.drainedAgent();
@@ -669,6 +686,31 @@ describe("seat-pool comeback: a launch not settled, and one never made (#3395 Pi
     expect(w.slots.forModel(m.nodeId).map((s) => [s.slotNumber, s.nodeId, s.phase, s.reuseHold])).toEqual([[1, w1.nodeId, "drained", null]]);
     expect(w.nodesNamed("dev.impl-s1")).toEqual([w1.nodeId]);
     expect(w.sessionsOf(w1.nodeId).map((s) => s.status)).toEqual(["stopped"]);
+
+    const { settled } = await comeBack(w, m.jobId);
+    expect(w.launch.mock.calls).toEqual([[m.rigId, "dev.impl-s1", { snapshotId: b }]]);
+    expect(settled).toEqual([expect.objectContaining({ slotNumber: 1, nodeId: w1.nodeId, attempt: expect.objectContaining({ status: "running" }) })]);
+    expect(w.slots.forModel(m.nodeId).map((s) => [s.slotNumber, s.phase])).toEqual([[1, "live"]]);
+  });
+
+  it("A comeback whose issue fails with an unexpected error, and whose return to `drained` would fail too, leaves the slot as the drain left it, with no reserved attempt, and the next cycle brings it back.", async () => {
+    const w = comebackWorld();
+    const { m, w1, b } = await w.drainedAgent();
+    await w.wantOne(m);
+    const slotId = w.slots.forModel(m.nodeId)[0]!.slotId;
+    const before = w.slots.get(slotId);
+    const issue = vi.spyOn(w.slots, "issueAttempt").mockImplementationOnce(() => { throw new Error("disk I/O error"); });
+    const back = vi.spyOn(w.slots, "returnComebackToDrained").mockImplementationOnce(() => { throw new Error("disk I/O error"); });
+    const stored = w.jobsRepo.getByIdOrThrow(m.jobId);
+    const context = (parseYaml(stored.specYaml) as { context: Record<string, unknown> }).context;
+
+    await expect(w.executor.cycle({ jobId: m.jobId, context })).rejects.toThrow("disk I/O error");
+    await w.executor.idle();
+    expect(issue).toHaveBeenCalledTimes(1);
+    expect(w.launch).not.toHaveBeenCalled();
+    expect(w.slots.get(slotId)).toEqual(before);
+    issue.mockRestore();
+    back.mockRestore();
 
     const { settled } = await comeBack(w, m.jobId);
     expect(w.launch.mock.calls).toEqual([[m.rigId, "dev.impl-s1", { snapshotId: b }]]);

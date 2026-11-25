@@ -807,8 +807,9 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         }
       }
       // Anything else (a launch that does not run, a live session, another refusal, a call that threw) is not settled
-      // here: the attempt stays issued, with its outcome kept.
-      deps.slots.recordAttemptOutcome(request.slotId, request.attemptId, stored);
+      // here: the attempt stays issued, with its outcome kept. Nothing is reported when its row went with a node deleted
+      // by hand, or the attempt moved on.
+      if (!deps.slots.recordAttemptOutcome(request.slotId, request.attemptId, stored)) return;
       const code = launch.code ?? (launch.alreadyRunning?.length ? "already_running" : node?.status ?? "no_launch_result");
       report({
         ...base,
@@ -1078,33 +1079,32 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
                 continue;
               }
               const snapshotId = selection.chosen.id;
-              // The reservation, on the slot's own row, with the chosen snapshot.
+              // The reservation, on the slot's own row, with the chosen snapshot, and the issue: the job's state and the
+              // holds again, then the issued attempt and what it was issued on (the snapshot, the node's latest session and
+              // the rig's latest event), in one transaction. A comeback held or not issued is `drained` again in the same
+              // transaction, its row never removed; an unexpected error rolls it all back, so the slot stays `drained`
+              // with the attempt it had.
               const attemptId = randomUUID();
-              if (!deps.slots.reserveComeback({ slotId: slot.slotId, attemptId, snapshotId })) {
-                comebackNotes.push({ ...note, snapshotId, code: "slot_moved_on" });
-                continue;
-              }
-              // The issue: the job's state and the holds again, then the issued attempt and what it was issued on (the
-              // snapshot, the node's latest session and the rig's latest event).
-              let stopped: SeatPoolHoldRead | undefined;
-              try {
+              const issueComeback = deps.db.transaction((): { code: string; stopped?: SeatPoolHoldRead } | null => {
+                if (!deps.slots.reserveComeback({ slotId: slot.slotId, attemptId, snapshotId })) return { code: "slot_moved_on" };
+                const returnUnissued = (code: string, stopped?: SeatPoolHoldRead) => {
+                  deps.slots.returnComebackToDrained(slot.slotId, attemptId, JSON.stringify({ ok: false, code, launched: false }));
+                  return { code, ...(stopped ? { stopped } : {}) };
+                };
                 const recheck = readSeatPoolHold(deps.db, rigId);
-                if (!active() || recheck.stoppedSeq !== null) {
-                  stopped = recheck;
-                  throw new AddNotIssued("held");
-                }
+                if (!active() || recheck.stoppedSeq !== null) return returnUnissued("held", recheck);
                 const eventSeq = (deps.db.prepare("SELECT MAX(seq) AS seq FROM events WHERE rig_id = ?").get(rigId) as { seq: number | null }).seq;
                 const basis = JSON.stringify({ snapshotId, sessionId: latestSession(deps.db, nodeId)?.id ?? null, eventSeq });
-                if (!deps.slots.issueAttempt(slot.slotId, attemptId, basis)) throw new AddNotIssued("slot_changed");
-              } catch (error) {
-                // Whatever stops the issue after the reservation, the slot is `drained` again: its row is never removed.
-                const unissued = JSON.stringify({ ok: false, code: error instanceof AddNotIssued ? error.code : "issue_failed", launched: false });
-                try { deps.slots.returnComebackToDrained(slot.slotId, attemptId, unissued); } catch { /* the issue's own error is the one raised */ }
-                if (!(error instanceof AddNotIssued)) throw error;
-                if (stopped !== undefined) { heldAtIssue(stopped); break units; }
-                comebackNotes.push({ ...note, snapshotId, code: error.code });
+                if (!deps.slots.issueAttempt(slot.slotId, attemptId, basis)) return returnUnissued("slot_changed");
+                return null;
+              });
+              const unissued = issueComeback();
+              if (unissued !== null) {
+                if (unissued.stopped !== undefined) { heldAtIssue(unissued.stopped); break units; }
+                comebackNotes.push({ ...note, snapshotId, code: unissued.code });
                 continue;
               }
+              // The request goes out only once its issue committed.
               comebacks.push({ jobId: job.jobId, modelNodeId, rigId, slotId: slot.slotId, slotNumber: slot.slotNumber, nodeId, logicalId, attemptId, snapshotId, cwdFromModel: spec.cwdTemplate === null });
               comebackNotes.push({ ...note, snapshotId, attempt: inFlight(attemptId) });
               continue units;
