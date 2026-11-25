@@ -6,7 +6,7 @@ import { createProofPolicyRead, readMissionReadiness, readProjectReadinessAsync 
 import { lifecycleObligations } from "./lifecycle-obligations.js";
 import { renderWorkflowProjectCommand } from "./workflow-projector.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
-import { readWithCurrentParkBoundary } from "./current-park-arm.js";
+import { localQueueWakeSource, readWithCurrentParkBoundary } from "./current-park-arm.js";
 import { isTypedGateBlocker } from "./queue-repository.js";
 // S27 (OPR.0.5.6.27) — the execution view: one JSON document answering the six
 // execution questions (who-where, sequencing, care-dial, done-ness-by-rung, park
@@ -1295,6 +1295,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
   });
 
   // ---- Q5 park honesty ----
+  const localWakes = localQueueWakeSource(deps.db);
   const q5 = rows
     .filter((r) => r.state === "blocked" || (r.claimed_at && ["in-progress", "pending"].includes(r.state)))
     .map((r) => {
@@ -1311,9 +1312,9 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
         now: now(),
       });
       const wake = readWithCurrentParkBoundary(boundary => deps.db
-        .prepare(`SELECT w.wake_ref, w.phase FROM queue_transition_wakes w
+        .prepare(`SELECT w.wake_ref, w.phase FROM ${localWakes} w
           WHERE w.qitem_id = ? AND w.phase = 'armed'
-            AND w.transition_id = (SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+            AND w.transition_id = (SELECT MAX(a.transition_id) FROM ${localWakes} a
               WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed')
             ${boundary}
           ORDER BY w.transition_id DESC LIMIT 1`)
