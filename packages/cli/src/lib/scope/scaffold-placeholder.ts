@@ -38,7 +38,7 @@ export function isScaffoldPlaceholderText(text: string): boolean {
  *  intent-stage gate). `null` → false. */
 export function hasAuthoredNumberedItem(body: string | null): boolean {
   if (body === null) return false;
-  for (const line of body.split("\n")) {
+  for (const line of body.split(/\r?\n/)) {
     const m = line.match(/^\s*\d+[.)]\s+(.+)$/);
     if (m && !isScaffoldPlaceholderText(m[1]!.trim())) return true;
   }
