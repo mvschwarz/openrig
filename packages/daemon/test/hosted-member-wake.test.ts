@@ -224,6 +224,42 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     db.close();
   });
 
+  it.each(["recent", "overdue", "never", "unreadable", "no-cadence"] as const)("the sender sees a hosted member's %s check-in evidence without a wake", async scenario => {
+    const db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('checkin-rig', 'lab')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('checkin-lead', 'checkin-rig', 'lead', 'claude-code', '/tmp')").run();
+    const send = vi.fn(async () => ({ ok: true as const, verified: true }));
+    const repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }), transport: { send },
+      hostedWake: () => null, isHostedMember: destination => destination === "helper@lab",
+      hostedMembers: () => [{ seat: "helper@lab", host: "lab", capabilities: [], engagement: ["delegate"],
+        use_when: "help", why: "help", hosted: true, ...(scenario === "no-cadence" ? {} : { check_in_minutes: 1 }) }],
+    });
+    try {
+      if (scenario !== "never") repo.recordInboxCheckIn("helper@lab", new Date(Date.now() - (scenario === "overdue" ? 180_000 : 30_000)));
+      if (scenario === "unreadable") vi.spyOn(repo, "lastInboxCheckIn").mockReturnValue({ state: "unknown" });
+      const row = await repo.create({ sourceSession: "lead@lab", destinationSession: "helper@lab", body: "work", summary: "Help with this" });
+      const saved = repo.getById(row.qitemId)!;
+      const teaching = saved.lastNudgeResult!;
+      expect(teaching).toMatch(/^awaiting-pickup: /);
+      expect(saved.state).toBe("pending");
+      expect(saved.claimedAt).toBeNull();
+      expect(send).not.toHaveBeenCalled();
+      if (scenario === "recent") {
+        expect(teaching).toContain("has been checking in about every 1 min");
+        expect(teaching).toContain("waits in its queue for its next inbox read");
+        expect(teaching).not.toContain("when its person asks it to");
+      } else if (scenario === "no-cadence") {
+        expect(teaching).toContain("with no wake trigger, so no wake is sent");
+        expect(teaching).toContain("when its person asks it to, on a schedule they set");
+      } else {
+        expect(teaching).toContain(scenario === "overdue" ? "overdue:" : scenario === "never" ? "no check-in yet" : "couldn't be read");
+        expect(teaching).not.toContain("has been checking in about every");
+      }
+    } finally { db.close(); }
+  });
+
   // Real topology and a repository whose trigger comes from a secrets file, as on a running daemon.
   // A repository over the same database stands in for the daemon after a restart; `transport: false` for one that
   // stops before sending.
