@@ -74,6 +74,21 @@ afterEach(async () => {
   if (saved.session === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = saved.session;
 });
 
+it("takes a cut pending page from Core's hub without parsing its page note as JSON", async () => {
+  const token = await addGrant(tokenFile, { name: "alex", seat: "alex@team", rigs: ["team"], roots: [], workspace: false, owner: false });
+  const tasks = [];
+  for (let i = 0; i < 26; i++) tasks.push(await hubRepo.create({ sourceSession: "lead@team", destinationSession: "alex@team", summary: `Task ${i}`, body: `Body ${i}`, nudge: false } as never));
+  const localRepo = queue(localDb);
+  const bindings = new NetworkBindingStore(localDb, localHome);
+  const binding = bindings.create({ session: "dev-impl@lab", hubUrl, hubSeat: "alex@team", token, allowHttp: true });
+  const result = await runNetworkBindingPass({ db: localDb, queueRepo: localRepo, bindings, home: localHome }, binding);
+  expect(result.error).toBeUndefined();
+  expect(result.taken).toBe(26);
+  expect(localRepo.list({ limit: 50 })).toHaveLength(26);
+  for (const task of tasks) expect(hubRepo.getById(task.qitemId)!.state).toBe("in-progress");
+  expect(bindings.get(binding.id)!.lastError).toBeNull();
+});
+
 it("takes the participant's item over the wire, carries pickup and the result back, and a revoked grant ends the binding", async () => {
   const token = await addGrant(tokenFile, { name: "alex", seat: "alex@team", rigs: ["team"], roots: [], workspace: false, owner: false });
   // Longer than a list preview, with its end marked, so a shortened body would show.

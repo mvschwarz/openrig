@@ -133,7 +133,9 @@ layer sets `sandbox_workspace_write.network_access` and no managed requirement
 could restrict it; if Codex can't be asked or doesn't answer in time, the launch
 is left unchanged. To keep it off, set `network_access = false` under
 `[sandbox_workspace_write]` in your Codex configuration. If Codex does not answer
-within a few seconds, the seat starts without it. A command allowance does not
+within a few seconds, the seat starts without it. The workspace-write sandbox limits the seat's direct file edits;
+with network access on, it isn't isolation from the trusted OpenRig service or the agents the seat works with.
+A command allowance does not
 change general sandbox/network settings. The starter's `profile: default` selects OpenRig resources, not a native
 permission profile.
 Agent-guided setup [recommends keeping the team default](#have-your-agent-configure-permissions)
@@ -411,6 +413,27 @@ once, by rig id when names are shared; it records the stop, and `--last` then
 leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
 (`OPENRIG_NO_KERNEL=1`) the daemon skips the kernel's automatic restore too;
 bring it back with `rig up kernel --existing`.
+
+A rig the daemon has nothing to restore from is left out and named with the
+daemon's reason and, when it sends them, the blockers that kept its saved state
+from standing in. With `--json` these rigs are listed under `leftOut`, each with
+its `code`, `message` and `blockers`; `neverLaunched` marks a rig none of whose
+seats has ever run. A preview that failed outright stays under `previewErrors`.
+Left-out rigs don't change the exit code.
+
+Under the default restore policy (`resume_if_possible`), a seat with neither
+saved startup context nor a resume token doesn't hold back the rest of its rig
+when OpenRig can still tell which session is that seat's current one. The other
+seats resume their own conversations, and that seat isn't started: it reads
+`awaiting-decision`, and the run exits 1 as for any seat awaiting a decision.
+Without saved startup context it can't be started fresh, so no fresh start is
+offered; restore its original session by hand. For a Claude Code, Codex, Pi or
+OMP seat whose session is the newest one under its name, the reason also names
+the command that records that session's resume token: pipe the token to
+`rig seat set-resume-token <session> --token-stdin --reason "<why>"`. A seat
+whose current session has no resume token waits the same way even with saved
+startup context. A seat set to start fresh still leaves the rig out, as does a rig
+where every seat lacks both, or where which session is current is unclear.
 
 Restore requests run one at a time by default. To keep up to two requests
 outstanding, for example, use `rig start --last --concurrency 2`. A request that

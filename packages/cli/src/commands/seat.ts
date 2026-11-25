@@ -1750,6 +1750,10 @@ taken from the running Codex's own command line, not probed again. Building the
 command can create OpenRig's own seat-bin link, as every managed launch does.
 A restart that started under an earlier daemon run and never recorded a result is
 shown as staleRestart; it does not block a new restart.
+Linux and macOS: the running Codex's arguments, Codex home and working directory are
+read from /proc on Linux, and on macOS from its launch record (KERN_PROCARGS2) and
+lsof, for a Codex running as the daemon's own user. Elsewhere, or when the OS gives no
+reading, it refuses with settings_unverified before anything is stopped.
 Results: restarted_account_unverified, not_started (the original is still running),
 incomplete (it exited; the resume was not proven; the pane may be held for recovery),
 native_unknown (what happened could not be observed). Only --verify reports moved,
