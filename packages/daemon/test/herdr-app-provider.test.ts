@@ -39,6 +39,8 @@ class World {
   timeoutRun = new Set<number>();
   lateQueue: Array<(labelOverrides?: Record<string, string>) => string> = [];
   runs = 0;
+  /** Each viewer start's --cwd, in order. */
+  cwds: string[] = [];
   clock = new Date("2026-11-07T00:00:00.000Z");
   ack: { revision: string; terminals: string[] } | null = null;
   /** Terminals the strip keeps listing even after a write removed them (an acknowledgement that must be rejected). */
@@ -77,6 +79,7 @@ class World {
     const [verb] = args;
     if (verb === "run") {
       this.runs++;
+      this.cwds.push(args[args.indexOf("--cwd") + 1]!);
       if (this.failRun.has(this.runs)) {
         this.log.push("run:failed");
         return { exit: 1, json: null, stdout: "", error: { kind: this.failRunKind, message: "spawn failed" } };
@@ -399,8 +402,9 @@ describe("HerdrAppProvider.openView", () => {
     expect(result).toMatchObject({ ok: true, opened: ["dev.build@demo"], degraded: [] });
   });
 
-  it("opens nothing when herdr-app isn't answering, and gives no attach-by-hand recipe", async () => {
+  it("opens nothing when neither herdr-app nor this machine's herdr-core answers, and gives no attach-by-hand recipe", async () => {
     world.statusKind = "unavailable";
+    world.coreDown = true;
     const result = await provider.openView(composed([pane("dev.build@demo")]));
     expect(result).toMatchObject({ ok: false, code: "herdr_app_unavailable" });
     expect(world.runs).toBe(0);
@@ -408,11 +412,13 @@ describe("HerdrAppProvider.openView", () => {
     expect(JSON.stringify(result).split(home).join("<home>")).not.toMatch(/ssh|tmux attach/);
   });
 
-  it("with no window at the app home, says it looked on the daemon's own machine; a window that is there but doesn't answer isn't told that", async () => {
+  it("with no window at the app home and no core answering, says it looked on the daemon's own machine; a window that is there but doesn't answer isn't told that", async () => {
     makeProvider({ hostname: "daemon-host" });
     world.statusKind = "unavailable";
+    world.coreDown = true;
     const missing = await provider.openView(composed([pane("dev.build@demo")]));
-    expect(missing.error).toContain("This daemon looked on its own machine (daemon-host); herdr-app has to run on the machine the daemon runs on.");
+    expect(missing.error).toContain("This daemon looked on its own machine (daemon-host), and the daemon's herdr-core didn't answer either (timed out), so the view couldn't be placed there for a herdr-app on another machine. Nothing was started.");
+    world.coreDown = false;
     world.statusKind = "unknown";
     const silent = await provider.openView(composed([pane("dev.build@demo")]));
     expect(silent).toMatchObject({ ok: false, code: "herdr_app_unavailable" });
@@ -574,10 +580,12 @@ describe("HerdrAppProvider.status and core diagnostics", () => {
 
     // 1. herdr_app_unavailable names the runner's core
     world.statusKind = "unavailable";
+    world.coreDown = true;
     const unavail = await provider.openView(composed([pane("dev.build@demo")]));
     expect(unavail.error).toContain('herdr-core session "herdr-app-sb" (socket /srv/core.sock)');
 
     // 2. viewer_start_failed names the runner's core and hc's error
+    world.coreDown = false;
     world.statusKind = "ok";
     world.failRun.add(1);
     const startFailed = await provider.openView(composed([pane("dev.build@demo")]));
@@ -598,6 +606,125 @@ describe("HerdrAppProvider.status and core diagnostics", () => {
     const corruptStatus = await provider.status();
     expect(corruptStatus.available).toBe(true);
     expect(corruptStatus.pendingStarts).toBe("unknown");
+  });
+});
+
+describe("HerdrAppProvider core placement: no window on this machine, a herdr-core that answers", () => {
+  const coreOpen = async (panes: ComposedPane[]) => {
+    world.statusKind = "unavailable";
+    return provider.openView(composed(panes));
+  };
+
+  it("places the view in herdr-core: one space, one tab per seat, the writable tile at once beside the size watch, and no layout file, mods or window", async () => {
+    makeProvider({ hostname: "box", ensureMods: async () => ({ ok: false, error: "mods are a local window's" }) });
+    const build = pane("dev.build@demo");
+    const qa = pane("dev.qa@demo", true);
+    const result = await coreOpen([build, qa]);
+    const viewId = result.space!.id;
+    expect(result).toMatchObject({ ok: true, provider: "herdr-app", opened: ["dev.build@demo", "dev.qa@demo"], degraded: [], pages: 1,
+      space: { label: "demo" }, placement: { mode: "core", visibility: "unconfirmed", viewId, host: "box" } });
+    // Nothing local is asked to show it: no app command, no layout file.
+    expect(world.log.some((e) => e.startsWith("do:") || e.startsWith("write:"))).toBe(false);
+    expect(existsSync(files.rigPath)).toBe(false);
+
+    const [buildT, qaT] = [world.terminals.get("t10")!, world.terminals.get("t11")!];
+    const journal = (await files.load()).views[0]!;
+    expect(journal).toMatchObject({ id: viewId, placement: "core" });
+    expect(buildT.labels).toMatchObject({ "openrig.daemon": "inst1", "openrig.role": "viewer", "herdr.space": `openrig-${viewId}`, "herdr.tab": `openrig-${journal.viewers[0]!.cellId}` });
+    expect(qaT.labels).toMatchObject({ "herdr.space": `openrig-${viewId}`, "herdr.tab": `openrig-${journal.viewers[1]!.cellId}` });
+    expect(buildT.labels["herdr.tab"]).not.toBe(qaT.labels["herdr.tab"]);
+    // Both start in the view's own folder, which herdr names the space after.
+    const folder = join(home, "spaces", `demo-${viewId}`);
+    expect(world.cwds).toEqual([folder, folder]);
+    expect(existsSync(folder)).toBe(true);
+    // The interactive tile runs at once (no gate file, no read-only stand-in) beside the headless-size watch.
+    expect(buildT.argv.slice(5)).toEqual(build.attachArgv);
+    expect(buildT.argv[2]).toContain("refresh-client");
+    expect(buildT.argv.join(" ")).not.toContain(".shown");
+    expect(journal.viewers.map((v) => [v.state, v.gate])).toEqual([["live", undefined], ["live", undefined]]);
+    // A read-only seat is shown as composed.
+    expect(qaT.argv.slice(5)).toEqual(qa.attachArgv);
+  });
+
+  it("status says a view can be placed in core (not that a window is here) only while the core answers and no window is there", async () => {
+    makeProvider({ hostname: "box" });
+    world.statusKind = "unavailable";
+    const placed = await provider.status();
+    expect(placed).toMatchObject({ available: true, placement: "core", host: "box", capabilities: { rigLayout: false } });
+    expect(placed.assumption).toContain("views are placed in this core");
+    world.coreDown = true;
+    const nowhere = await provider.status();
+    expect(nowhere.available).toBe(false);
+    expect(nowhere.placement).toBeUndefined();
+    world.coreDown = false;
+    world.statusKind = "unknown"; // a window that's there but silent: never placed past it
+    const silent = await provider.status();
+    expect(silent.available).toBe(false);
+    expect(silent.placement).toBeUndefined();
+    expect((await provider.openView(composed([pane("dev.build@demo")]))).code).toBe("herdr_app_unavailable");
+    expect(world.runs).toBe(0);
+  });
+
+  it("closing a core view ends its verified viewers directly, with no window and no layout write, and says the removal isn't seen", async () => {
+    makeProvider({ hostname: "box" });
+    const opened = await coreOpen([pane("dev.build@demo"), pane("dev.qa@demo")]);
+    world.log = [];
+    const closed = await provider.closeView(opened.space!.id);
+    expect(closed.ok).toBe(true);
+    expect([world.terminals.get("t10")!.state, world.terminals.get("t11")!.state]).toEqual(["finished", "finished"]);
+    expect(world.log.some((e) => e.startsWith("write:"))).toBe(false);
+    expect(closed.notes?.join(" ")).toContain("A herdr-app connected to box removes its tabs when it next refreshes; OpenRig can't see that window.");
+    expect((await files.load()).views).toEqual([]);
+    expect(existsSync(join(home, "spaces", `demo-${opened.space!.id}`))).toBe(false);
+  });
+
+  it("a core viewer that ended is recorded without a layout write; one brought back as a shell is reported once, never ended, and named on close", async () => {
+    const opened = await coreOpen([pane("dev.build@demo"), pane("dev.qa@demo")]);
+    world.log = [];
+    world.terminals.get("t10")!.state = "finished"; // its tab was closed
+    world.terminals.get("t11")!.argv = ["/bin/bash"]; // core kept it and lost its program
+    expect(await provider.reconcile()).toEqual([
+      "dev.build · S1: its viewer ended outside OpenRig (its tab was closed, or herdr-core ended it).",
+      "dev.qa · S1: viewer t11 came back as a plain shell after herdr-core lost its program; OpenRig left it running, close its tab.",
+    ]);
+    expect(await provider.reconcile()).toEqual([]);
+    expect(world.log.some((e) => e.startsWith("write:"))).toBe(false);
+    expect((await files.load()).views[0]!.viewers.map((v) => [v.state, v.terminal])).toEqual([["ended", null], ["replaced", "t11"]]);
+
+    const closed = await provider.closeView(opened.space!.id);
+    expect(closed.notes?.join(" ")).toContain("dev.qa · S1: its viewer t11 is a plain shell now; OpenRig left it running, close its tab.");
+    expect(world.terminals.get("t11")!.state).toBe("live");
+    expect(world.log.some((e) => e.startsWith("kill:"))).toBe(false);
+  });
+
+  it("a failed core start is rolled back by ending what started, with no layout write", async () => {
+    world.failRun.add(2);
+    const result = await coreOpen([pane("dev.build@demo"), pane("dev.qa@demo")]);
+    expect(result).toMatchObject({ ok: false, code: "viewer_start_failed" });
+    expect(result.error).toContain("this open was rolled back");
+    expect(world.terminals.get("t10")!.state).toBe("finished");
+    expect(world.log.some((e) => e.startsWith("write:"))).toBe(false);
+    expect((await files.load()).views).toEqual([]);
+  });
+
+  it("layout and core views side by side: the Rig layout lists layout viewers only, across a restart, and each closes its own way", async () => {
+    world.statusKind = "ok";
+    await provider.openView(composed([pane("dev.build@demo")])); // t10, in the Rig layout
+    const core = await coreOpen([pane("dev.qa@demo")]); // t11, in core
+    expect(world.log.filter((e) => e.startsWith("write:"))).toEqual(["write:t10"]);
+    // A layout viewer ends while the daemon is down; the restarted provider rewrites the layout from layout views only.
+    world.statusKind = "ok";
+    world.terminals.get("t10")!.state = "finished";
+    makeProvider();
+    world.log = [];
+    await provider.reconcile();
+    expect(world.log.filter((e) => e.startsWith("write:"))).toEqual(["write:"]);
+    expect(referencedTerminals(JSON.parse(readFileSync(files.rigPath, "utf8")) as LayoutNode)).not.toContain("t11");
+    world.statusKind = "unavailable";
+    world.log = [];
+    await provider.closeView(core.space!.id);
+    expect(world.terminals.get("t11")!.state).toBe("finished");
+    expect(world.log.some((e) => e.startsWith("write:"))).toBe(false);
   });
 });
 
@@ -877,8 +1004,11 @@ describe("startup wiring (createHerdrAppProviders): passive lookups, views recov
   const hcCalls: string[][] = [];
   /** Viewers still running in core; any other recorded viewer ended while the daemon was down. */
   const live = new Set<string>();
+  /** Whether this machine's herdr-core answers a listing. */
+  let coreUp = true;
   const hc: HcRunner = async (args) => {
     hcCalls.push(args);
+    if (args[0] === "ls" && !coreUp) return { exit: -1, json: null, stdout: "", error: { message: "timed out" } };
     if (args[0] === "get" && live.has(args[2]!)) return { exit: 0, json: { address: args[2], state: "live", pid: 4000 }, stdout: "" };
     if (args[0] === "get") return { exit: 3, json: null, stdout: "", error: { kind: "not_found" } };
     return { exit: 0, json: { terminals: [] }, stdout: "" };
@@ -889,6 +1019,7 @@ describe("startup wiring (createHerdrAppProviders): passive lookups, views recov
     spawned = [];
     hcCalls.length = 0;
     live.clear();
+    coreUp = true;
     herdrAppDir = join(home, "openrig", "private", "herdr-app");
     spawnFn = ((_cmd: string, args: string[]) => {
       const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), unref: () => {}, killed: false, exitCode: null, signalCode: null, args,
@@ -904,17 +1035,59 @@ describe("startup wiring (createHerdrAppProviders): passive lookups, views recov
   };
 
   it("a status, a listing and a refused open start no hc events and create no viewers folder", async () => {
+    coreUp = false;
     const herdrApp = await create();
     await herdrApp.recovered;
     const provider = herdrApp.resolve({})!;
-    const status = await provider.status(); // no window answers at this app home
+    const status = await provider.status(); // no window answers at this app home, and no core either
     expect(status.available).toBe(false);
     expect(await provider.listViews()).toEqual([]);
     expect((await provider.openView(composed([pane("dev.build@demo")]))).code).toBe("herdr_app_unavailable");
     expect(spawned).toEqual([]);
     expect(existsSync(join(herdrAppDir, "viewers"))).toBe(false);
-    expect(hcCalls).toEqual([]);
+    // Only the core listings that ask whether a view could be placed there: nothing started.
+    expect(hcCalls.map((args) => args[0])).toEqual(["ls", "ls"]);
     herdrApp.stop();
+  });
+
+  it("a status with this machine's core answering reports core placement and still starts nothing", async () => {
+    const herdrApp = await create();
+    await herdrApp.recovered;
+    const status = await herdrApp.resolve({})!.status();
+    expect(status).toMatchObject({ available: true, placement: "core", capabilities: { rigLayout: false } });
+    expect(spawned).toEqual([]);
+    expect(existsSync(join(herdrAppDir, "viewers"))).toBe(false);
+    expect(hcCalls).toEqual([["ls", "--json", "--label", "openrig.daemon=inst1"]]);
+    herdrApp.stop();
+  });
+
+  it("after a restart, a core view's viewer that herdr-core brought back as a shell is reported once, and left running", async () => {
+    const clients = join(herdrAppDir, "clients");
+    mkdirSync(clients, { recursive: true });
+    const files = new HerdrAppClientFiles(join(home, "app"), clients);
+    const viewer = { cellId: "rv-1-seat-n1", seat: "dev.build@demo", label: "dev.build · S1", nonce: "n1", argv: ["/bin/sh", "-c", "tile"],
+      readOnly: false, attach: "local" as const, terminal: "t1", state: "live" as const };
+    await files.save({ appHome: join(home, "app"), base: null, revision: null, writtenSha: null, pendingEnds: [],
+      views: [{ id: "rv-1", name: "demo", source: { view: "rig:demo", page: 0 }, createdAt: "2026-11-25T00:00:00.000Z", placement: "core", viewers: [viewer] }] });
+    live.add("t1");
+    const coreHc = hc;
+    const shellHc: HcRunner = async (args) => args[0] === "get" && args[2] === "t1"
+      ? { exit: 0, json: { address: "t1", state: "live", argv: ["/bin/bash"], pid: 4000 }, stdout: "" } : coreHc(args);
+    const warned: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((line: string) => { warned.push(line); });
+    try {
+      const { createHerdrAppProviders } = await import("../src/startup.js");
+      const herdrApp = await createHerdrAppProviders({ herdrAppDir, daemonInstance: "inst1", hcEnv: {}, hc: shellHc, defaultAppHome: () => join(home, "app"), spawnFn });
+      await herdrApp.recovered;
+      expect(warned).toEqual(["[herdr-app] dev.build · S1: viewer t1 came back as a plain shell after herdr-core lost its program; OpenRig left it running, close its tab."]);
+      expect((await files.load()).views[0]!.viewers[0]).toMatchObject({ state: "replaced", terminal: "t1" });
+      expect(hcCalls.some((args) => args[0] === "kill")).toBe(false);
+      // No layout file: a core view is never written into one.
+      expect(existsSync(files.rigPath)).toBe(false);
+      herdrApp.stop();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("after a restart, a recorded view gets its owner back: the watcher starts and a viewer that ended outside OpenRig is rewritten", async () => {

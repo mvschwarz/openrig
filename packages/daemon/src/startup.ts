@@ -3360,7 +3360,8 @@ export async function createHerdrAppProviders(opts: {
         const provider = resolve({ appHome: recorded.appHome });
         if (!provider) continue;
         ownWork();
-        await provider.reconcile().catch(() => {});
+        // What changed while the daemon was down is reported here, a viewer herdr-core brought back as a shell included.
+        for (const note of await provider.reconcile().catch(() => [] as string[])) console.warn(`[herdr-app] ${note}`);
         // A gate still pending when the daemon stopped is followed again, within its recorded window.
         await provider.resumePendingGates().catch(() => {});
       } catch { /* an unreadable journal stays as it is; an open of that app home reports it */ }

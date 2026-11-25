@@ -14,11 +14,16 @@
 // Removing viewers (close, rollback, a viewer that ended) rewrites the file FIRST and ends a viewer only after the
 // app has acknowledged a revision that no longer shows it, and only when the viewer is verifiably OpenRig's
 // (journal + labels + exact argv). Anything uncertain is left running and reported.
-import { rm, writeFile } from "node:fs/promises";
+//
+// With no window on this machine (nothing at the app home's socket) and a herdr-core that answers, a view is placed in
+// that core instead: its viewers start with herdr's own space and tab labels (one tab per seat), so any herdr-app
+// connected to this machine shows them. Nothing local can see that window, so the result says placed, not seen; core
+// views never enter the Rig layout file, and closing one ends its verified viewers directly.
+import { mkdir, rm, rmdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tileAttachArgv } from "./tile-attach.js";
-import { cellFor, deriveRigLayout, RIG_LAYOUT, RIG_STACK, type RigView } from "./herdr-app-layout.js";
+import { cellFor, cellId, deriveRigLayout, RIG_LAYOUT, RIG_STACK, type RigView } from "./herdr-app-layout.js";
 import { awaitApplied, newNonce, type ClientState, type HerdrAppClientFiles, type PendingEnd, type ViewerRecord, type ViewRecord } from "./herdr-app-state.js";
 import { describeCore, type AppReply, type HcRunner, type HerdrAppClient } from "./herdr-app-transport.js";
 import type { ComposedPane, ComposedView, OpenViewResult, ProviderLiveness, ProviderStatus, TerminalProvider } from "./terminal-provider.js";
@@ -88,6 +93,16 @@ const GATED_WRAPPER = [
   'else wait "$v"; fi;',
   VIEWER_ENDED,
 ].join(" ");
+/** An interactive viewer placed in herdr-core: the view's writable tile from the start, as a remote ssh cell takes input
+ *  (nothing on this machine can see the window that shows it, so there's no gate to open), beside the headless-size
+ *  watch, so a tile no pane shows yet never sizes its seat. Arguments: the writable tile's argv. */
+const CORE_WRAPPER = [
+  "shift;", TERM_GUARD,
+  "a=$1; b=$2; c=$3; shift 3;",
+  HEADLESS_WATCH,
+  '"$a" "$b" "$c" "$@"; s=$?; if [ -n "$w" ]; then kill "$w" 2>/dev/null; fi; (exit "$s");',
+  VIEWER_ENDED,
+].join(" ");
 
 /** An interactive viewer's gate: its file, when its window ends (epoch seconds), and the line its cell shows then. */
 export interface ViewerGate { path: string; until: number; expired: string }
@@ -120,6 +135,22 @@ export function viewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand"
   return ["/bin/sh", "-c", GATED_WRAPPER, "openrig-viewer", nonce, gate.path, String(gate.until), gate.expired, readOnly[2]!, ...pane.attachArgv];
 }
 
+/** A viewer's argv in herdr-core placement: an interactive local pane runs its writable tile at once (`CORE_WRAPPER`);
+ *  remote and read-only panes run as `viewerArgv` runs them, and a tile shape this code can't read still takes no input. */
+export function coreViewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand" | "readOnly">, nonce: string): string[] {
+  if (!pane.attachArgv || pane.readOnly || !readOnlyTile(pane.attachArgv)) return viewerArgv(pane, nonce);
+  return ["/bin/sh", "-c", CORE_WRAPPER, "openrig-viewer", nonce, ...pane.attachArgv];
+}
+
+/** What an open says about interactive cells whose read-only tile couldn't be built. */
+function unshapedNote(labels: string[]): string {
+  const one = labels.length === 1;
+  return `${labels.join(", ")}: OpenRig could not build a read-only view of ${one ? "this seat" : "these seats"} (the tile command has a shape this OpenRig does not know), so ${one ? "its cell takes" : "their cells take"} no input and ${one ? "says" : "say"} so. Open the view with --window, or update OpenRig.`;
+}
+
+/** A folder name from a view's display name and id (herdr names a space after its first terminal's folder). */
+const folderName = (view: Pick<ViewRecord, "id" | "name">) => `${view.name}-${view.id}`.replace(/[^A-Za-z0-9._-]+/g, "-");
+
 export interface HerdrAppProviderDeps {
   files: HerdrAppClientFiles;
   app: HerdrAppClient;
@@ -128,6 +159,8 @@ export interface HerdrAppProviderDeps {
   daemonInstance: string;
   /** OpenRig's own folder the viewers start in. */
   viewerCwd: string;
+  /** Where a core-placed view's viewers start, one folder per view (default: `spaces` beside `viewerCwd`). */
+  spacesDir?: string;
   /** Installs or checks OpenRig's mods in this app home; never replaces a mod the person changed. `ok: false` only when a
    *  needed mod is missing and could not be installed; a folder left as the person's is a note, and the view opens. */
   ensureMods(): Promise<{ ok: true; notes?: string[] } | { ok: false; error: string }>;
@@ -146,7 +179,7 @@ export interface HerdrAppProviderDeps {
   now?(): Date;
 }
 
-type Removal = { terminal: string | null; seat?: string; cellId: string; nonce: string; argv: string[]; since: string };
+type Removal = { terminal: string | null; seat?: string; cellId: string; nonce: string; argv: string[]; since: string; placement?: "core" };
 
 /** What core says about a terminal. Only a definite answer counts as gone: `not_found`, or a record that is no longer
  *  live. A timeout or an unreachable core is `unknown`, and the viewer stays tracked. */
@@ -219,16 +252,35 @@ export class HerdrAppProvider implements TerminalProvider {
 
   private nonce(): string { return this.deps.nonce?.() ?? newNonce(); }
   private now(): string { return (this.deps.now?.() ?? new Date()).toISOString(); }
+  private host(): string { return this.deps.hostname?.() ?? hostname(); }
+
+  /** The herdr-core this provider starts viewers in. */
+  private core(): { session: string; socket?: string } {
+    return this.deps.hc.core ?? {
+      session: process.env.HC_SESSION || "default",
+      ...(process.env.HC_SOCKET ? { socket: process.env.HC_SOCKET } : {}),
+    };
+  }
+
+  /** Whether this machine's herdr-core answers a listing (only this daemon's own terminals, so it stays small). */
+  private async coreAnswers(): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const listed = await this.deps.hc(["ls", "--json", "--label", `openrig.daemon=${this.deps.daemonInstance}`]);
+    return listed.exit === 0 ? { ok: true } : { ok: false, reason: listed.error?.message ?? `hc exited ${listed.exit}` };
+  }
+
+  /** A core-placed view's own folder: its viewers start there, and herdr names the space after it. */
+  private spaceFolder(view: Pick<ViewRecord, "id" | "name">): string {
+    return join(this.deps.spacesDir ?? join(dirname(this.deps.viewerCwd), "spaces"), folderName(view));
+  }
 
   async status(): Promise<ProviderStatus> {
     const reply = await this.deps.app.status(1_000);
     // Bounded like the status request: a window that answers status and then stalls costs about a second more, not six.
     const commands = reply.kind === "ok" ? await this.deps.app.commands(1_000) : null;
     const names = commands?.kind === "ok" && Array.isArray(commands.value) ? (commands.value as { name?: unknown }[]).map((c) => c.name) : [];
-    const core = this.deps.hc.core ?? {
-      session: process.env.HC_SESSION || "default",
-      ...(process.env.HC_SOCKET ? { socket: process.env.HC_SOCKET } : {}),
-    };
+    const core = this.core();
+    // No window on this machine, and the core answers: an open places the view there for a window elsewhere.
+    const placed = reply.kind === "unavailable" && (await this.coreAnswers()).ok;
     let pendingStarts: number | "unknown";
     try {
       const state = await this.deps.files.load();
@@ -239,7 +291,8 @@ export class HerdrAppProvider implements TerminalProvider {
     }
     return {
       provider: HERDR_APP_PROVIDER,
-      available: reply.kind === "ok",
+      available: reply.kind === "ok" || placed,
+      ...(placed ? { placement: "core" as const, host: this.host() } : {}),
       capabilities: {
         rigLayout: reply.kind === "ok",
         layoutSelect: names.includes("layout.select"),
@@ -248,7 +301,9 @@ export class HerdrAppProvider implements TerminalProvider {
       },
       launch: { socketPath: `${this.deps.files.appHome}/herdr-app.sock`, ...(core.session !== "default" ? { session: core.session } : process.env.HC_SESSION ? { session: process.env.HC_SESSION } : {}) },
       core,
-      assumption: "viewers are started with hc in this core; herdr-app must be a client of it",
+      assumption: placed
+        ? "no herdr-app window answers on this machine; views are placed in this core, and any herdr-app connected to it shows them, which OpenRig can't see"
+        : "viewers are started with hc in this core; herdr-app must be a client of it",
       pendingStarts,
     };
   }
@@ -270,6 +325,14 @@ export class HerdrAppProvider implements TerminalProvider {
       if (!view) return fail("view_not_found", `No Rig view ${viewId} in ${this.deps.files.appHome}.`);
       this.deps.ownWork?.();
       const notes = await this.remove(state, [viewId], []);
+      if (view.placement === "core") {
+        const host = this.host();
+        const shells = view.viewers.filter((viewer) => viewer.state === "replaced");
+        for (const shell of shells) notes.push(`${shell.label}: its viewer ${shell.terminal} is a plain shell now; OpenRig left it running, close its tab.`);
+        notes.push(`This view was placed in herdr-core on ${host}. A herdr-app connected to ${host} removes its tabs when it next refreshes; OpenRig can't see that window.`);
+        // The view's own folder, once nothing of OpenRig's runs in it (rmdir leaves a folder that isn't empty).
+        if (!shells.length) await rmdir(this.spaceFolder(view)).catch(() => {});
+      }
       return { provider: HERDR_APP_PROVIDER, ok: true, opened: [], absent: [], degraded: [], pages: 0, notes };
     });
   }
@@ -292,6 +355,8 @@ export class HerdrAppProvider implements TerminalProvider {
     let changed = false;
     let journalChanged = false;
     for (const view of state.views) {
+      // A core-placed view is in no layout file: what changes in it is the journal's alone.
+      const inCore = view.placement === "core";
       const keptViewers: ViewerRecord[] = [];
       for (const viewer of view.viewers) {
         if (viewer.state === "planned" || viewer.state === "start-unknown") {
@@ -303,6 +368,7 @@ export class HerdrAppProvider implements TerminalProvider {
             argv: viewer.argv,
             since: view.createdAt || this.now(),
             revision: "unwritten",
+            ...(inCore ? { placement: "core" as const } : {}),
           });
           journalChanged = true;
           continue;
@@ -316,11 +382,22 @@ export class HerdrAppProvider implements TerminalProvider {
           viewer.state = "ended";
           viewer.terminal = null;
           await this.closeGate(viewer.nonce);
-          changed = true;
-          notes.push(`${viewer.label}: its viewer ended outside OpenRig; its cell now says so.`);
+          if (inCore) {
+            journalChanged = true;
+            notes.push(`${viewer.label}: its viewer ended outside OpenRig (its tab was closed, or herdr-core ended it).`);
+          } else {
+            changed = true;
+            notes.push(`${viewer.label}: its viewer ended outside OpenRig; its cell now says so.`);
+          }
+        } else if (inCore && Array.isArray(seen.record.argv) && JSON.stringify(seen.record.argv) !== JSON.stringify(viewer.argv)) {
+          // herdr-core gives a kept terminal whose program it lost (a core restart, a reboot) a shell in the same place,
+          // with the same address: no longer this viewer. It's left running and never typed into.
+          viewer.state = "replaced";
+          journalChanged = true;
+          notes.push(`${viewer.label}: viewer ${viewer.terminal} came back as a plain shell after herdr-core lost its program; OpenRig left it running, close its tab.`);
         }
       }
-      if (keptViewers.length !== view.viewers.length && keptViewers.length > 0 && state.writtenSha) changed = true;
+      if (keptViewers.length !== view.viewers.length && keptViewers.length > 0 && state.writtenSha && !inCore) changed = true;
       view.viewers = keptViewers;
     }
     const beforeViews = state.views.length;
@@ -339,11 +416,15 @@ export class HerdrAppProvider implements TerminalProvider {
   private async open(view: ComposedView): Promise<OpenViewResult> {
     const files = this.deps.files;
     const status = await this.deps.app.status(1_000);
+    if (status.kind === "unavailable") {
+      // No window at all here: the app may be running on another machine, connected to this machine's herdr-core.
+      const core = await this.coreAnswers();
+      if (core.ok) return this.openInCore(view);
+      return fail("herdr_app_unavailable", `herdr-app is not answering at ${files.appHome} (${describe(status)}). This daemon looked on its own machine (${this.host()}), and ${describeCore(this.deps.hc)} didn't answer either (${core.reason}), so the view couldn't be placed there for a herdr-app on another machine. Nothing was started.`,
+        { absent: view.absent, degraded: view.degraded });
+    }
     if (status.kind !== "ok") {
-      // No window at all here: the app may be running on another machine, which this provider can't reach.
-      const where = status.kind === "unavailable"
-        ? ` This daemon looked on its own machine (${this.deps.hostname?.() ?? hostname()}); herdr-app has to run on the machine the daemon runs on.` : "";
-      return fail("herdr_app_unavailable", `herdr-app is not answering at ${files.appHome} (${describe(status)}).${where} Nothing was started. Viewers start in ${describeCore(this.deps.hc)}; a window attached to a different core would not show them.`,
+      return fail("herdr_app_unavailable", `herdr-app is not answering at ${files.appHome} (${describe(status)}). Nothing was started. Viewers start in ${describeCore(this.deps.hc)}; a window attached to a different core would not show them.`,
         { absent: view.absent, degraded: view.degraded });
     }
     const mods = await this.deps.ensureMods();
@@ -390,22 +471,12 @@ export class HerdrAppProvider implements TerminalProvider {
         }),
       };
     });
-    if (unshaped.length) notes.push(`${unshaped.join(", ")}: OpenRig could not build a read-only view of ${unshaped.length === 1 ? "this seat" : "these seats"} (the tile command has a shape this OpenRig does not know), so ${unshaped.length === 1 ? "its cell takes" : "their cells take"} no input and ${unshaped.length === 1 ? "says" : "say"} so. Open the view with --window, or update OpenRig.`);
+    if (unshaped.length) notes.push(unshapedNote(unshaped));
     state.views.push(...created);
     await files.save(state);
 
     // 2. Start the viewers.
-    const failed: string[] = [];
-    let firstReason: string | undefined;
-    for (const record of created) for (const viewer of record.viewers) {
-      const started = await this.startViewer(record, viewer);
-      if ("address" in started) { viewer.terminal = started.address; viewer.state = "live"; }
-      else {
-        if (started.unknown) viewer.state = "start-unknown";
-        failed.push(viewer.seat);
-        firstReason ??= started.reason;
-      }
-    }
+    const { failed, firstReason } = await this.startAll(created);
     await files.save(state);
     if (failed.length) {
       const rollback = await this.remove(state, created.map((v) => v.id), [], { neverWritten: true });
@@ -440,12 +511,77 @@ export class HerdrAppProvider implements TerminalProvider {
     };
   }
 
+  /** No window on this machine and a core that answers: the view's viewers start in that core, labelled into one space
+   *  per page and one tab per seat, for any herdr-app connected to it. Placed, not seen: nothing here can see that window. */
+  private async openInCore(view: ComposedView): Promise<OpenViewResult> {
+    const files = this.deps.files;
+    const state = await files.load();
+    const notes = await this.reconcileState(state);
+    if (!view.pages.length) return fail("nothing_to_open", "No attachable seats in this view; nothing was started.", { absent: view.absent, degraded: view.degraded });
+    this.deps.ownWork?.();
+    const name = view.viewDescriptor?.name ?? view.spaceLabel ?? view.id;
+    const unshaped: string[] = [];
+    const created: ViewRecord[] = view.pages.map((page, index) => {
+      const id = `rv-${this.nonce()}`;
+      return {
+        id, name: view.pages.length > 1 ? `${name} ${index + 1}/${view.pages.length}` : name,
+        source: { view: view.id, page: index }, createdAt: this.now(), placement: "core" as const, ...(view.columns ? { columns: view.columns } : {}),
+        viewers: page.map((pane) => {
+          const nonce = this.nonce();
+          if (pane.attachArgv && !pane.readOnly && !readOnlyTile(pane.attachArgv)) unshaped.push(pane.label);
+          return { cellId: cellId(id, pane.seat, nonce), seat: pane.seat, label: pane.label, ...(pane.runtime ? { runtime: pane.runtime } : {}),
+            nonce, argv: coreViewerArgv(pane, nonce), readOnly: pane.readOnly,
+            attach: pane.attachArgv ? "local" as const : "remote" as const, terminal: null, state: "planned" as const };
+        }),
+      };
+    });
+    if (unshaped.length) notes.push(unshapedNote(unshaped));
+    state.views.push(...created);
+    await files.save(state);
+    // A folder that can't be made fails its viewers' starts, which roll the open back below.
+    for (const record of created) await mkdir(this.spaceFolder(record), { recursive: true }).catch(() => {});
+    const { failed, firstReason } = await this.startAll(created);
+    await files.save(state);
+    if (failed.length) {
+      const rollback = await this.remove(state, created.map((v) => v.id), [], { neverWritten: true });
+      return fail("viewer_start_failed", `herdr-core did not start viewers for ${failed.join(", ")} (${describeCore(this.deps.hc)}): ${firstReason ?? "unknown error"}; this open was rolled back.`,
+        { absent: view.absent, degraded: view.degraded, notes: [...notes, ...rollback] });
+    }
+    return {
+      provider: HERDR_APP_PROVIDER, ok: true,
+      opened: created.flatMap((v) => v.viewers.map((viewer) => viewer.seat)), absent: view.absent, degraded: view.degraded, pages: created.length,
+      space: { id: created[0]!.id, label: created[0]!.name },
+      placement: { mode: "core", visibility: "unconfirmed", core: this.core(), viewId: created[0]!.id, host: this.host() },
+      ...(notes.length ? { notes } : {}),
+    };
+  }
+
+  /** Starts every viewer of these views, in order; the journal records each outcome. */
+  private async startAll(views: ViewRecord[]): Promise<{ failed: string[]; firstReason?: string }> {
+    const failed: string[] = [];
+    let firstReason: string | undefined;
+    for (const record of views) for (const viewer of record.viewers) {
+      const started = await this.startViewer(record, viewer);
+      if ("address" in started) { viewer.terminal = started.address; viewer.state = "live"; }
+      else {
+        if (started.unknown) viewer.state = "start-unknown";
+        failed.push(viewer.seat);
+        firstReason ??= started.reason;
+      }
+    }
+    return { failed, ...(firstReason !== undefined ? { firstReason } : {}) };
+  }
+
   private async startViewer(view: ViewRecord, viewer: ViewerRecord): Promise<{ address: string } | { reason: string; unknown: boolean }> {
+    const inCore = view.placement === "core";
     const labels = [
       `openrig.daemon=${this.deps.daemonInstance}`, "openrig.role=viewer", `openrig.view=${view.id}`,
       `openrig.op=${viewer.nonce}`, `openrig.seat=${viewer.seat}`, `openrig.cell=${viewer.cellId}`,
+      // herdr-app's own labels: a connected window adopts the terminal into this space, as its own tab.
+      ...(inCore ? [`herdr.space=openrig-${view.id}`, `herdr.tab=openrig-${viewer.cellId}`] : []),
     ].flatMap((label) => ["--label", label]);
-    const run = await this.deps.hc(["run", "--bg", "--no-parent", "--no-notify", "--json", "--cwd", this.deps.viewerCwd, ...labels, "--", ...viewer.argv]);
+    const cwd = inCore ? this.spaceFolder(view) : this.deps.viewerCwd;
+    const run = await this.deps.hc(["run", "--bg", "--no-parent", "--no-notify", "--json", "--cwd", cwd, ...labels, "--", ...viewer.argv]);
     const address = (run.json as { address?: unknown } | null)?.address;
     if (run.exit === 0 && typeof address === "string") return { address };
     const reason = run.error?.message || `hc exited ${run.exit}`;
@@ -467,7 +603,8 @@ export class HerdrAppProvider implements TerminalProvider {
     const base = state.base ? await files.readLayout(state.base) : null;
     if (!base) return { ok: false, code: "base_layout_missing", error: `The base layout ${state.base ?? "(none)"} could not be read from ${files.appHome}/layouts.` };
     const revision = `r-${this.nonce()}`;
-    const views: RigView[] = state.views.map((v) => ({
+    // Core-placed views live in herdr's own spaces, never in this file.
+    const views: RigView[] = state.views.filter((v) => v.placement !== "core").map((v) => ({
       id: v.id, name: v.name, ...(v.columns ? { columns: v.columns } : {}),
       cells: v.viewers.map((viewer) => ({ id: viewer.cellId, seat: viewer.seat, title: viewer.label,
         ...(viewer.runtime ? { detail: viewer.runtime } : {}), terminal: viewer.state === "live" ? viewer.terminal : null })),
@@ -583,20 +720,29 @@ export class HerdrAppProvider implements TerminalProvider {
   private async remove(state: ClientState, viewIds: readonly string[], cells: readonly string[], opts: { neverWritten?: boolean } = {}): Promise<string[]> {
     const removals: Removal[] = [];
     const since = this.now();
-    const take = (viewer: ViewerRecord) => {
+    let touchesLayout = false;
+    const take = (view: ViewRecord) => (viewer: ViewerRecord) => {
+      const placement = view.placement === "core" ? { placement: "core" as const } : {};
       if (viewer.terminal && viewer.state === "live") {
-        removals.push({ terminal: viewer.terminal, seat: viewer.seat, cellId: viewer.cellId, nonce: viewer.nonce, argv: viewer.argv, since });
+        removals.push({ terminal: viewer.terminal, seat: viewer.seat, cellId: viewer.cellId, nonce: viewer.nonce, argv: viewer.argv, since, ...placement });
       } else if (viewer.state === "start-unknown" || (viewer.state === "planned" && !opts.neverWritten)) {
-        removals.push({ terminal: null, seat: viewer.seat, cellId: viewer.cellId, nonce: viewer.nonce, argv: viewer.argv, since });
+        removals.push({ terminal: null, seat: viewer.seat, cellId: viewer.cellId, nonce: viewer.nonce, argv: viewer.argv, since, ...placement });
       }
     };
     for (const view of state.views) {
-      if (viewIds.includes(view.id)) view.viewers.forEach(take);
-      else view.viewers.filter((viewer) => cells.includes(viewer.cellId)).forEach(take);
+      const removed = viewIds.includes(view.id) ? view.viewers : view.viewers.filter((viewer) => cells.includes(viewer.cellId));
+      if (removed.length || viewIds.includes(view.id)) touchesLayout ||= view.placement !== "core";
+      removed.forEach(take(view));
     }
     state.views = state.views.filter((view) => !viewIds.includes(view.id))
       .map((view) => ({ ...view, viewers: view.viewers.filter((viewer) => !cells.includes(viewer.cellId)) }));
     const notes: string[] = [];
+    if (!touchesLayout) {
+      // Only core-placed viewers: no layout file refers to them, so they end directly (verified, as any other).
+      state.pendingEnds.push(...removals.map((r) => ({ ...r, revision: "unwritten" })));
+      await this.deps.files.save(state);
+      return this.endPending(state);
+    }
     const written = await this.write(state);
     if (!written.ok) {
       if (opts.neverWritten) {
@@ -628,9 +774,10 @@ export class HerdrAppProvider implements TerminalProvider {
     const notes: string[] = [];
     const pending = state.pendingEnds;
     const latest = state.revision;
-    const unknownStarts = pending.filter((p) => p.terminal === null);
-    const knownTerminals = pending.filter((p): p is PendingEnd & { terminal: string } => p.terminal !== null);
-    const safe: PendingEnd[] = [...unknownStarts];
+    // A core-placed viewer is in no layout file, and an unknown start in none either: both end without the app.
+    const withoutApp = pending.filter((p) => p.terminal === null || p.placement === "core");
+    const knownTerminals = pending.filter((p): p is PendingEnd & { terminal: string } => p.terminal !== null && p.placement !== "core");
+    const safe: PendingEnd[] = [...withoutApp];
     if (knownTerminals.length) {
       const status = await this.deps.app.status(1_000);
       if (status.kind !== "ok") {

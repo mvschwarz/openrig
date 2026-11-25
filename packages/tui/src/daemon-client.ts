@@ -57,6 +57,8 @@ export interface TerminalOpenResult {
   code?: string;
   notes?: string[];
   reusedWorkspace?: { id: string; tabId: string; view: string };
+  /** herdr-app placed the view in the daemon machine's herdr-core for a window elsewhere: started, never seen. */
+  placement?: { mode: "core"; visibility: "unconfirmed"; viewId: string; host: string };
 }
 
 export interface LaunchNodeResult {

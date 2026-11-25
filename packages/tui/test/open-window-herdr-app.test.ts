@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { herdrAppHome, inHerdrApp, openTerminalInWindow, windowTarget } from "../src/terminals/open-window.js";
+import { herdrAppHome, inHerdrApp, openTerminalInWindow, terminalWindowNotice, windowTarget } from "../src/terminals/open-window.js";
 import { readTerminals, terminalLines } from "../src/terminals/terminal-model.js";
 import type { DaemonClient } from "../src/daemon-client.js";
 import type { FleetSnapshot, ViewState } from "../src/types.js";
@@ -41,7 +41,9 @@ describe("herdr-app as the TUI's terminal target", () => {
   it.each([
     ["in a herdr-app terminal", inApp(), undefined, { provider: "herdr-app" }],
     ["a shared TUI viewed from a herdr-app terminal", { TERM_PROGRAM: "tmux" }, inApp(), { provider: "herdr-app" }],
-    ["markers whose window socket is missing", { ...inApp(), HERDR_APP_HOME: join(appHome, "absent") }, undefined, { provider: "herdr" }],
+    // No window here: the view goes to this machine's herdr-core, and nothing about a window is inferred.
+    ["a herdr-core terminal whose window socket is missing", { ...inApp(), HERDR_APP_HOME: join(appHome, "absent") }, undefined,
+      { provider: "herdr-app", appHome: join(appHome, "absent"), placement: "core" }],
     ["an old Herdr pane, whatever else is set", { ...inApp(), HERDR_ENV: "1", HERDR_PANE_ID: "p", HERDR_SOCKET_PATH: "/h" }, undefined, { provider: "herdr" }],
     ["inside Rex", { ...inApp(), TERM_PROGRAM: "rex" }, undefined, { provider: "rex" }],
     ["any other configuration", { TERM_PROGRAM: "tmux" }, undefined, { provider: "herdr" }],
@@ -49,7 +51,7 @@ describe("herdr-app as the TUI's terminal target", () => {
     ownEnv(env);
     const target = await windowTarget(async () => viewed);
     expect(target).toMatchObject(expected);
-    if (expected.provider === "herdr-app") expect(target).toMatchObject({ appHome });
+    if (expected.provider === "herdr-app" && !("placement" in expected)) expect(target).toEqual({ provider: "herdr-app", appHome });
   });
 
   it("previews with the same client it opens in, so the plan matches", async () => {
@@ -81,6 +83,26 @@ describe("herdr-app as the TUI's terminal target", () => {
     expect(stale).toContain(`herdr-app is not answering at ${appHome}/herdr-app.sock (the socket file exists, but nothing replied). Nothing will open from here. Start herdr-app, or run \`rig terminal open rig:demo --window\` for a desktop window.`);
     expect(stale).not.toContain("Opens here");
     expect(linesFor("herdr-app", false).some((l) => l.action?.type === "act" && l.action.act === "open-terminal")).toBe(false);
+  });
+
+  it("a core placement preview says where OpenRig places the view, never that a window here shows it, and keeps Open", () => {
+    const pane = { seat: "dev.build@demo", label: "dev.build", readOnly: false, paneCommand: "tmux attach -t =dev.build@demo" };
+    const terminals = { catalog: [], catalogLoaded: true, daemonTarget: "http://127.0.0.1:7433",
+      preview: { view: "rig:demo", provider: "herdr-app", planId: "p1", status: { available: true, placement: "core", host: "box" },
+        composed: { id: "c", pages: [[pane]], opened: [{ seat: pane.seat }], absent: [], degraded: [] }, grids: [{ columns: 1, rows: 1, blanks: 0 }] } };
+    const state = { terminalView: "rig:demo", terminalPage: 0, filter: "", expanded: [] } as unknown as ViewState;
+    const lines = terminalLines(state, { terminals } as unknown as FleetSnapshot, 300);
+    const text = lines.map((l) => l.text).join("\n");
+    expect(text).toContain("Opens in this machine's herdr-core (box): a herdr-app connected to box shows it. OpenRig can't see that window.");
+    for (const absent of ["Opens here", "this herdr-app window", "is not answering", "env -u TMUX"]) expect(text).not.toContain(absent);
+    expect(lines.some((l) => l.action?.type === "act" && l.action.act === "open-terminal")).toBe(true);
+  });
+
+  it("an open placed in core reads as placed, not seen", () => {
+    const notice = terminalWindowNotice("rig:demo", { provider: "herdr-app", ok: true, opened: ["dev.build@demo"], absent: [], degraded: [], pages: 1,
+      placement: { mode: "core", visibility: "unconfirmed", viewId: "rv-1", host: "box" } });
+    expect(notice.split("\n").slice(0, 2)).toEqual(["Terminal view requested: rig:demo",
+      "Placed in herdr-core on box as view rv-1. Any herdr-app connected to box shows it; OpenRig can't see that window."]);
   });
 
   it("opens in the TUI's own herdr-app window through the daemon: --provider herdr-app with that client, never --window", async () => {
