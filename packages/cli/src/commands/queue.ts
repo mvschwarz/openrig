@@ -1134,6 +1134,113 @@ function requireNonEmptyResolvedBody(body: string, source: string): string {
   throw err;
 }
 
+export interface ResolveNoteOpts {
+  note?: string;
+  noteFile?: string;
+}
+
+function makeQueueNoteError(
+  message: string,
+  fact: string,
+  action: string,
+): Error & { fact: string; consequence: string; action: string } {
+  return Object.assign(new Error(message), {
+    fact,
+    consequence: "The queue command did not run; the daemon was not contacted.",
+    action,
+  });
+}
+
+function requireNonEmptyResolvedNote(note: string, source: string): string {
+  if (Buffer.byteLength(note, "utf8") > 0) return note;
+  throw makeQueueNoteError(
+    `${source} resolved to 0 bytes.`,
+    `${source} resolved to 0 bytes; an empty note is not a valid queue transition note.`,
+    source.startsWith("stdin")
+      ? "Pipe non-empty content to stdin, or pass a non-empty file with --note-file <path>."
+      : "Add content to the file, or pass a different non-empty note source.",
+  );
+}
+
+export async function resolveQueueNote(
+  opts: ResolveNoteOpts,
+  stdinReader: () => Promise<string> = defaultStdinReader,
+): Promise<string | undefined> {
+  const hasInline = opts.note !== undefined;
+  const hasFile = opts.noteFile !== undefined;
+  if (hasInline && hasFile) {
+    throw makeQueueNoteError(
+      "--note and --note-file are mutually exclusive.",
+      "Both --note and --note-file were passed; the note source is ambiguous.",
+      "Pass at most one of --note or --note-file.",
+    );
+  }
+  if (!hasInline && !hasFile) return undefined;
+  if (hasInline) return opts.note;
+
+  const filePath = opts.noteFile!;
+  if (filePath === "") {
+    throw makeQueueNoteError(
+      "--note-file path is empty.",
+      "--note-file path is empty.",
+      "Pass a path to a readable file, or use --note-file - to read from stdin.",
+    );
+  }
+  if (filePath === "-") {
+    let text: string;
+    try {
+      text = await stdinReader();
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw makeQueueNoteError(
+        `--note-file - could not be read from stdin: ${detail}`,
+        `--note-file - could not be read from stdin: ${detail}`,
+        "Pipe readable UTF-8 text to stdin, or pass a file path with --note-file <path>.",
+      );
+    }
+    return requireNonEmptyResolvedNote(text, "stdin (--note-file -)");
+  }
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw makeQueueNoteError(
+        `--note-file path does not exist: ${filePath}`,
+        `--note-file path does not exist: ${filePath}`,
+        "Check the path or use --note-file - to read from stdin.",
+      );
+    }
+    const detail = err instanceof Error ? err.message : String(err);
+    throw makeQueueNoteError(
+      `--note-file could not be read: ${filePath} (${detail})`,
+      `--note-file could not be read: ${filePath} (${detail})`,
+      "Check file permissions and path, or use --note-file - to read from stdin.",
+    );
+  }
+  if (!stat.isFile()) {
+    throw makeQueueNoteError(
+      `--note-file path is not a regular file: ${filePath}`,
+      `--note-file path is not a regular file: ${filePath}`,
+      "Pass a path to a readable file (not a directory, symlink-to-directory, or block device). Use --note-file - to read from stdin.",
+    );
+  }
+
+  let content: string;
+  try {
+    content = fs.readFileSync(filePath, "utf8");
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw makeQueueNoteError(
+      `--note-file could not be read: ${filePath} (${detail})`,
+      `--note-file could not be read: ${filePath} (${detail})`,
+      "Check file permissions and readability, or use --note-file - to read from stdin.",
+    );
+  }
+  return requireNonEmptyResolvedNote(content, `--note-file ${filePath}`);
+}
+
 /** The states that close a row; `rig queue update --resolution` needs one of them. */
 const CLOSING_STATES = ["done", "canceled", "denied", "failed", "handed-off"];
 const CLOSING_STATES_PHRASE = "done, canceled, denied, failed or handed-off";
@@ -1188,14 +1295,15 @@ function resolveUpdateActor(source: string | undefined, opts: Record<string, unk
   const refuse = (message: string): false => { console.error(message); process.exitCode = 1; return false; };
   // The same resolver the DaemonClient header uses, so the preflight and transport can never disagree.
   const seat = resolveSenderSession();
+  const hasNote = opts.note !== undefined || opts.noteFile !== undefined;
   if (source !== undefined) {
     const trimmed = source.trim();
     if (parseSessionName(trimmed).kind !== "external") {
       return refuse(`--source must be <name>@external (got '${source}'): it names a routine outside any seat, never a seat. Nothing was sent.`);
     }
     const writes = UPDATE_STATE_WRITE_FLAGS.filter(([key]) => opts[key] !== undefined).map(([, flag]) => flag);
-    if (opts.note === undefined || writes.length > 0) {
-      return refuse(`--source records a note only: pass --note and nothing else that writes${writes.length > 0 ? ` (got ${writes.join(", ")})` : ""}. ` +
+    if (!hasNote || writes.length > 0) {
+      return refuse(`--source records a note only: pass --note or --note-file and nothing else that writes${writes.length > 0 ? ` (got ${writes.join(", ")})` : ""}. ` +
         "Changing a row needs a seat. Nothing was sent.");
     }
     if (seat) {
@@ -1205,7 +1313,7 @@ function resolveUpdateActor(source: string | undefined, opts: Record<string, unk
     return { actorSession: trimmed };
   }
   if (seat) return {};
-  const noteOnly = opts.note !== undefined && UPDATE_STATE_WRITE_FLAGS.every(([key]) => opts[key] === undefined);
+  const noteOnly = hasNote && UPDATE_STATE_WRITE_FLAGS.every(([key]) => opts[key] === undefined);
   return refuse(noteOnly
     ? "notes need a seat; an external routine can pass --source <name>@external. OPENRIG_SESSION_NAME is not set and reconciled " +
       "tmux pane metadata does not resolve a seat: run this from a managed seat, or add --source <name>@external to record the note as " +
@@ -1700,7 +1808,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--actor <session>", "(deprecated, ignored) the actor is derived from the seat env (X-OpenRig-Session); P21 I3 made the update route derive it from the transport header")
     .option("--state <state>", "New state: pending | in-progress | done | blocked | failed | denied | canceled | handed-off")
     .option("--expect-state <state>", "Apply the update only if the row is still in this state (the one you last read), checked in the same transaction as the write; otherwise nothing is written or triggered (no note, event or wake) and the command fails with qitem_state_changed and the current state. An older daemon that doesn't know --expect-state ignores it and applies the update unchecked, so the check holds only against a daemon that has it. A closer that read pending: --expect-state pending --state done --closure-reason no-follow-on")
-    .option("--reopen", "Explicitly acknowledge a deliberate terminal-to-active repair; requires --state and --note")
+    .option("--reopen", "Explicitly acknowledge a deliberate terminal-to-active repair; requires --state and --note (or --note-file)")
     .option("--closure-reason <reason>", "Required for state=done. --state canceled takes no reason, except 'superseded' (with --closure-target = the successor), which records a supersession, distinct from an abandoned cancel")
     .option("--closure-target <target>", "Required for handed_off_to, escalation, and superseded; blocked_on park records use state=blocked with --blocked-on")
     .option("--closure-required-at <iso>", "Accept a revised closure deadline on an in-progress item; keeps the claim and records the old/new time and accepting actor")
@@ -1710,7 +1818,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--wake-after <duration>", "For state=blocked: atomically arm a timer (for example 90s, 15m, 2h)", wakeDurationSeconds)
     .option("--summary <text>", "Summary persisted onto the item, with or without a state change (a blank one isn't stored)")
     .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item with a state change (a park, a done close; a blank one isn't stored). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
-    .option("--note <text>", "Transition note for the audit log")
+    .option("--note <text>", "Transition note for the audit log (mutually exclusive with --note-file)")
+    .option("--note-file <path>", "Read the transition note for the audit log from a file path (use - for stdin; mutually exclusive with --note)")
     .addHelpText("after", `
 After reading an existing remote successor, record its exact closure target, including the host:
   rig queue update <source-id> --note "custody-verified: receiver@team@remote-host. Registered-host read confirmed the successor"
@@ -1718,7 +1827,7 @@ The note can accompany the closing update or be appended later; a separate note 
 A trailing period, comma, semicolon, colon or closing parenthesis is accepted; a longer or different target is not.
 For a new cross-host transfer, prefer rig queue handoff --host <registered-host>.
 `)
-    .option("--source <name@external>", "Outside a managed seat: the external routine that appends the --note, recorded as an external actor (claimed:v1), never a seat; note only, on this host's daemon (a --host that resolves to another host is refused). A managed seat stays the actor. Like any note, it resets the item's stall and notification timing (and its recovery and operator episodes) and advances a claimed item's last activity, but never resets how long an unclaimed item has waited")
+    .option("--source <name@external>", "Outside a managed seat: the external routine that appends the --note / --note-file, recorded as an external actor (claimed:v1), never a seat; note only, on this host's daemon (a --host that resolves to another host is refused). A managed seat stays the actor. Like any note, it resets the item's stall and notification timing (and its recovery and operator episodes) and advances a claimed item's last activity, but never resets how long an unclaimed item has waited")
     .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
@@ -1738,6 +1847,7 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
       summary?: string;
       evidenceRef?: string;
       note?: string;
+      noteFile?: string;
       host?: string;
       json?: boolean;
       full?: boolean;
@@ -1756,6 +1866,13 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
           process.exitCode = 1;
           return;
         }
+      }
+      let resolvedNote: string | undefined;
+      try {
+        resolvedNote = await resolveQueueNote({ note: opts.note, noteFile: opts.noteFile });
+      } catch (err) {
+        emitBodyResolveError(err as Error & { fact?: string; consequence?: string; action?: string }, opts.json ?? false);
+        return;
       }
       // P21 I3 reconcile: the actor is DERIVED from the seat env (X-OpenRig-Session, stamped by
       // DaemonClient) — --actor is deprecated + ignored, no body actorSession. Verify the env (the
@@ -1788,7 +1905,7 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
           wakeAfterSeconds: opts.wakeAfter,
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
-          transitionNote: opts.note,
+          transitionNote: resolvedNote,
           ...actor,
         };
         let transitionFloor: number | undefined;
