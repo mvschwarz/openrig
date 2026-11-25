@@ -3314,7 +3314,11 @@ export async function createHerdrAppProviders(opts: {
     env: opts.hcEnv,
     ...(opts.spawnFn ? { spawnFn: opts.spawnFn } : {}),
     reconcileAll: () => {
-      for (const provider of providers.values()) void provider.reconcile().catch(() => {});
+      // What the running daemon notices (a viewer herdr-core brought back as a shell, one that ended) is reported as at
+      // start: once recorded, a later start has nothing new to report.
+      for (const provider of providers.values()) {
+        void provider.reconcile().then((notes) => { for (const note of notes) console.warn(`[herdr-app] ${note}`); }).catch(() => {});
+      }
     },
   });
   const ownWork = () => {

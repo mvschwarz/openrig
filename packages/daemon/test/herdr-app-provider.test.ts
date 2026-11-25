@@ -1107,6 +1107,38 @@ describe("startup wiring (createHerdrAppProviders): passive lookups, views recov
     }
   });
 
+  it("while the daemon runs, a core view's viewer that herdr-core brings back as a shell is reported once when the watcher sees it", async () => {
+    const clients = join(herdrAppDir, "clients");
+    mkdirSync(clients, { recursive: true });
+    const files = new HerdrAppClientFiles(join(home, "app"), clients);
+    const viewer = { cellId: "rv-1-seat-n1", seat: "dev.build@demo", label: "dev.build · S1", nonce: "n1", argv: ["/bin/sh", "-c", "tile"],
+      readOnly: false, attach: "local" as const, terminal: "t1", state: "live" as const };
+    await files.save({ appHome: join(home, "app"), base: null, revision: null, writtenSha: null, pendingEnds: [],
+      views: [{ id: "rv-1", name: "demo", source: { view: "rig:demo", page: 0 }, createdAt: "2026-11-25T00:00:00.000Z", placement: "core", viewers: [viewer] }] });
+    live.add("t1");
+    let lost = false;
+    const lossHc: HcRunner = async (args) => lost && args[0] === "get" && args[2] === "t1"
+      ? { exit: 0, json: { address: "t1", state: "live", argv: ["/bin/bash"], pid: 4001 }, stdout: "" } : hc(args);
+    const warned: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((line: string) => { warned.push(line); });
+    try {
+      const { createHerdrAppProviders } = await import("../src/startup.js");
+      const herdrApp = await createHerdrAppProviders({ herdrAppDir, daemonInstance: "inst1", hcEnv: {}, hc: lossHc, defaultAppHome: () => join(home, "app"), spawnFn });
+      await herdrApp.recovered;
+      expect(warned).toEqual([]); // the viewer was live and unchanged at start
+      const events = spawned.find((child) => child.args[0] === "events")!;
+      // A signal kills the viewer's program; herdr-core keeps the terminal with a shell, and the watcher hears of it.
+      lost = true;
+      events.stdout.emit("data", Buffer.from('{"terminal":"t1"}\n'));
+      await vi.waitFor(() => expect(warned).toEqual(["[herdr-app] dev.build · S1: viewer t1 came back as a plain shell after herdr-core lost its program; OpenRig left it running, close its tab."]), { timeout: 2_000 });
+      expect((await files.load()).views[0]!.viewers[0]).toMatchObject({ state: "replaced", terminal: "t1" });
+      expect(hcCalls.some((args) => args[0] === "kill")).toBe(false);
+      herdrApp.stop();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("after a restart, a recorded view gets its owner back: the watcher starts and a viewer that ended outside OpenRig is rewritten", async () => {
     const appHome = join(home, "app");
     const journal = new HerdrAppClientFiles(appHome, join(herdrAppDir, "clients"));

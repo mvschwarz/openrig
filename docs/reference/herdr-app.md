@@ -132,10 +132,11 @@ connected to that machine shows it. The TUI does the same when it runs in a herd
 machine: its preview says "Opens in this machine's herdr-core (<host>)".
 
 - **One space per view, one tab per seat.** Each viewer starts with herdr's own labels, `herdr.space=openrig-<view id>`
-  and `herdr.tab=openrig-<cell>`, which a connected herdr-app adopts. herdr numbers the tabs by place (1, 2, …) and
-  names the space after the folder the viewers start in, `$OPENRIG_HOME/private/herdr-app/spaces/<view name>-<view id>`
-  (when `$OPENRIG_HOME` is inside a git checkout, herdr names it after the repo). Names are only for display: OpenRig
-  identifies its viewers by their `openrig.*` labels and exact command.
+  and `herdr.tab=openrig-<cell>`, which a connected herdr-app adopts. Each tab shows its seat's label (herdr names an
+  unnamed tab after its program, and a viewer's command leads with the seat's label), and herdr orders the tabs. herdr
+  names the space after the folder the viewers start in, `$OPENRIG_HOME/private/herdr-app/spaces/<view name>-<view id>`,
+  where a rig's view is named after the rig (when `$OPENRIG_HOME` is inside a git checkout, herdr names it after the
+  repo). Names are only for display: OpenRig identifies its viewers by their `openrig.*` labels and exact command.
 - **Nothing is written to an app home:** no mods, no `rig.json`. These views never appear in the Rig layout.
 - **Input:** an interactive cell takes input as soon as its viewer runs, as a cell for a seat on another host does. A
   read-only cell only shows. The headless-size rule under [the keyboard](#the-keyboard) still applies.
@@ -151,11 +152,12 @@ machine: its preview says "Opens in this machine's herdr-core (<host>)".
 
 Limits:
 - Nothing on the daemon's machine can see the window, so OpenRig never reports a view as seen.
-- herdr's labels give each seat a tab, with no names, split direction, sizes or order of OpenRig's choosing.
+- herdr's labels give each seat a tab, with no split direction, sizes or order of OpenRig's choosing.
 - Once a window adopts a viewer, herdr-core keeps it. If herdr-core then loses the viewer's program (a core restart, a
   reboot, or a signal other than `hc kill`, such as an out-of-memory kill), it brings the terminal back as a plain
-  shell in the same tab. The daemon reports that at its next start ("<seat>: viewer <t> came back as a plain shell
-  after herdr-core lost its program …"), leaves the shell running and never types into it. Close its tab.
+  shell in the same tab. The daemon logs that as soon as it notices, or at its next start if it was down ("<seat>:
+  viewer <t> came back as a plain shell after herdr-core lost its program …"), leaves the shell running and never types
+  into it. Close its tab.
 - Before any window has adopted a view, keep isn't on, so a reboot then doesn't bring its viewers back.
 - A window that is there but doesn't answer isn't placed past: the open fails, as before.
 
