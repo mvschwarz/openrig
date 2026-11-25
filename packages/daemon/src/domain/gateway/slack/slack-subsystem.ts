@@ -15,7 +15,7 @@
 import { SlackRecovery, ownedRecoveryChannels } from "./slack-recovery.js";
 import { channelStateDigest } from "../channel-operations.js";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { buildInProcessWire, type GatewayWire, type SubsystemDeliverFn } from "../gateway-subsystem.js";
 import { DispatchBuffer } from "../dispatch-buffer.js";
@@ -218,6 +218,31 @@ function pendingPrimaryReceipt(home: string, qitemId: string, notificationKey: s
  * so messages sharing a timestamp across channels cannot overwrite each other. The resolved path
  * is verified to stay inside `mediaDir` before any write.
  */
+function writeInboundFile(file: string, bytes: Uint8Array): void {
+  const temp = path.join(path.dirname(file), `.slack-inbound-${randomUUID()}.tmp`);
+  const fd = fs.openSync(temp, "wx", 0o600);
+  try {
+    try { fs.writeFileSync(fd, bytes); } finally { fs.closeSync(fd); }
+    fs.renameSync(temp, file);
+  } catch (error) {
+    try { fs.unlinkSync(temp); } catch { /* preserve the publication error */ }
+    throw error;
+  }
+}
+
+function committedInboundFileSize(file: string, expectedRecord: string): number | undefined {
+  try {
+    const record = fs.readFileSync(`${file}.provenance.json`, "utf8");
+    if (record !== expectedRecord) throw new Error("saved attachment has different provenance");
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile()) throw new Error("saved attachment is not a regular file");
+    return stat.size;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 /** R1 F1 — the anchored Slack-host verdict now lives in slack-api.ts and is
  *  enforced inside `downloadPrivateFile`; the transfer-path check below keeps
  *  the per-file "missing or non-Slack url_private" failure honest before the
@@ -228,48 +253,60 @@ export function makeInboundFilePort(opts: {
   fetchImpl?: FetchImpl;
   mkdirp?: (dir: string) => void;
   writeFile?: (p: string, bytes: Uint8Array) => void;
+  committedFileSize?: (file: string, expectedRecord: string) => number | undefined;
   log?: (msg: string) => void;
   maxBytes?: number;
 }): InboundFilePort {
   const log = opts.log ?? (() => {});
   const mkdirp = opts.mkdirp ?? ((dir: string) => { fs.mkdirSync(dir, { recursive: true }); });
-  const writeFile = opts.writeFile ?? ((p: string, bytes: Uint8Array) => { fs.writeFileSync(p, bytes); });
+  const writeFile = opts.writeFile ?? writeInboundFile;
+  const committedFileSize = opts.committedFileSize ?? committedInboundFileSize;
   return {
-    async transfer(files: unknown[], eventTs: string, eventChannel?: string): Promise<InboundFileResult> {
+    async transfer(files, origin): Promise<InboundFileResult> {
       const stored: StoredInboundFile[] = [];
       const failed: FailedInboundFile[] = [];
+      const { channelId, messageTs, authorId } = origin;
       mkdirp(opts.mediaDir);
       for (let i = 0; i < files.length; i++) {
         const meta = (files[i] ?? {}) as { id?: string; name?: string; mimetype?: string; url_private?: string };
         const name = String(meta.name ?? meta.id ?? `file-${i + 1}`);
         const url = meta.url_private;
-        // R1 F1: ANCHORED host check — URL-parsed hostname, exact `slack.com`
-        // or a dot-suffix subdomain. A substring/regex match admits lookalike
-        // domains (evilslack.com) and would send the Bearer token to them.
-        if (!url || !isSlackHost(url)) {
-          failed.push({ name, error: "missing or non-Slack url_private" });
-          continue;
-        }
-        const dl = await downloadPrivateFile(url, opts.token, opts.fetchImpl ?? fetch, 30_000, opts.maxBytes);
-        if (!dl.ok) {
-          log(`inbound file transfer FAILED name=${name} ts=${eventTs}: ${dl.error}`);
-          failed.push({ name, error: dl.error });
-          continue;
-        }
         const safeBase = path.basename(name).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || `file-${i + 1}`;
-        const identity = createHash("sha256").update(JSON.stringify([eventChannel ?? "-", eventTs, meta.id ?? null])).digest("hex").slice(0, 20);
-        const localPath = path.join(opts.mediaDir, `${eventTs.replace(/[^0-9.]/g, "")}-${identity}-${i + 1}-${safeBase}`);
+        const fileId = typeof meta.id === "string" ? meta.id : null;
+        const ordinal = i + 1;
+        const identity = createHash("sha256").update(JSON.stringify([channelId, messageTs, fileId])).digest("hex").slice(0, 20);
+        const localPath = path.join(opts.mediaDir, `${messageTs.replace(/[^0-9.]/g, "")}-${identity}-${ordinal}-${safeBase}`);
         if (!path.resolve(localPath).startsWith(path.resolve(opts.mediaDir) + path.sep)) {
           failed.push({ name, error: "unsafe path refused" });
           continue;
         }
+        const record = `${JSON.stringify({ version: 1, channelId, messageTs, authorId, fileId, ordinal })}\n`;
         try {
-          writeFile(localPath, dl.bytes);
+          const size = committedFileSize(localPath, record);
+          if (size !== undefined) {
+            stored.push({ name, localPath, mimetype: meta.mimetype, bytes: size });
+            continue;
+          }
+          if (typeof url !== "string" || !isSlackHost(url)) {
+            failed.push({ name, error: "missing or non-Slack url_private" });
+            continue;
+          }
+          const dl = await downloadPrivateFile(url, opts.token, opts.fetchImpl ?? fetch, 30_000, opts.maxBytes);
+          if (!dl.ok) {
+            log(`inbound file transfer FAILED name=${name} ts=${messageTs}: ${dl.error}`);
+            failed.push({ name, error: dl.error });
+            continue;
+          }
+          const committedWhileDownloading = committedFileSize(localPath, record);
+          if (committedWhileDownloading === undefined) {
+            writeFile(localPath, dl.bytes);
+            // Readers require this record and the matching media. Publish in that order on every path.
+            writeFile(`${localPath}.provenance.json`, Buffer.from(record));
+          }
+          stored.push({ name, localPath, mimetype: meta.mimetype, bytes: committedWhileDownloading ?? dl.bytes.byteLength });
         } catch (e) {
-          failed.push({ name, error: `local write failed: ${(e as Error).message}` });
-          continue;
+          failed.push({ name, error: `local write failed: ${e instanceof Error ? e.message : String(e)}` });
         }
-        stored.push({ name, localPath, mimetype: meta.mimetype, bytes: dl.bytes.byteLength });
       }
       return { stored, failed };
     },
