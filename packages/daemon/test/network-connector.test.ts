@@ -783,9 +783,12 @@ describe("network connector", () => {
 
     it("the same request id with another request is refused and sends nothing; the same request returns where it stands", async () => {
       const b = bind();
-      expect((await send(b.id, "req-2")).state).toBe("sent");
+      const sent = await send(b.id, "req-2");
+      expect(sent.state).toBe("sent");
+      // The local item is OpenRig's, so its close wakes no seat: both sent outcomes say how to be woken.
+      expect(sent.message).toContain("Nothing wakes you when it closes: to be woken, park a row of your own on it");
       await expect(send(b.id, "req-2", "Something else entirely")).rejects.toMatchObject({ code: "request_id_reused", status: 409 });
-      expect(await send(b.id, "req-2")).toMatchObject({ state: "sent" });
+      expect(await send(b.id, "req-2")).toMatchObject({ state: "sent", message: expect.stringContaining("rig network request --help shows how") });
       expect(hub.creates).toBe(1);
       expect(repo.getById("req-2")!.body).toContain("Review the release notes");
       // An id that already names another local item is refused too.
@@ -794,6 +797,43 @@ describe("network connector", () => {
       const [inbound] = runs("hub-in");
       await expect(send(b.id, inbound!.qitemId)).rejects.toMatchObject({ code: "request_id_reused" });
       expect(hub.creates).toBe(1);
+    });
+
+    // The wait the help teaches: a row of the seat's own, parked on the request item. Parked first, the answer wakes it.
+    // Parked after the answer, nothing will, which is why the help says to check the request once after the park.
+    it("a row parked on a request wakes when the answer lands; parked after the answer it never would, and the retry says so", async () => {
+      const b = bind();
+      const park = (row: string, on: string) =>
+        repo.update({ qitemId: row, actorSession: b.localSession, state: "blocked", blockedOn: on, transitionNote: "waiting for the answer" });
+      const waitRow = async (id: string) => { await repo.create({ qitemId: id, sourceSession: b.localSession, destinationSession: b.localSession, body: "Report the answer", nudge: false }); };
+
+      expect((await send(b.id, "req-8")).state).toBe("sent");
+      await waitRow("req-8-wait");
+      park("req-8-wait", "req-8");
+      answer(networkHubRequestId(b, "req-8"), { state: "done", closureReason: "no-follow-on", resolution: "Looks fine." });
+      await pass(b.id);
+      expect(repo.getById("req-8")!.state).toBe("done");
+      expect(repo.getById("req-8-wait")).toMatchObject({ state: "pending", blockedOn: null });
+
+      expect((await send(b.id, "req-9")).state).toBe("sent");
+      answer(networkHubRequestId(b, "req-9"), { state: "done", closureReason: "no-follow-on", resolution: "Looks fine." });
+      await pass(b.id);
+      // The same-id retry of an answered request no longer invites a park.
+      const again = await send(b.id, "req-9");
+      expect(again).toMatchObject({ state: "sent", message: expect.stringContaining("It has closed, so nothing more will wake you for it: read its outcome with rig queue show req-9.") });
+      expect(again.message).not.toContain("park a row");
+      // Parked too late: block takes an id that isn't qitem-shaped unchecked, and the completion has already passed.
+      await waitRow("req-9-wait");
+      park("req-9-wait", "req-9");
+      await pass(b.id);
+      expect(repo.getById("req-9-wait")).toMatchObject({ state: "blocked", blockedOn: "req-9" });
+      // A qitem-shaped request id makes block refuse a closed item outright.
+      const shaped = "qitem-20000101000000-00000009";
+      expect((await send(b.id, shaped)).state).toBe("sent");
+      answer(networkHubRequestId(b, shaped), { state: "done", closureReason: "no-follow-on", resolution: "Looks fine." });
+      await pass(b.id);
+      await waitRow(`${shaped}-wait`);
+      expect(() => park(`${shaped}-wait`, shaped)).toThrow(expect.objectContaining({ code: "blocker_not_live" }));
     });
 
     it("a peer the hub doesn't know closes the request failed with the hub's words, and nothing more is read", async () => {
@@ -923,6 +963,30 @@ describe("network connector", () => {
       const texts = [repo.getById("req-13")!.body, ...repo.listTransitions("req-13").map((t) => t.transitionNote)].join("\n");
       expect(texts).not.toContain("pasted-key");
       expect(texts).toContain("https://hub.example/mcp (query hidden)");
+    });
+
+    it("a request recorded before fragments were hidden still reads back: its unconfirmed create is sent, not settled as erased", async () => {
+      const first = bind();
+      bindings.disconnect(first.id);
+      const b = bindings.create({ session: first.localSession, hubUrl: "https://hub.example/mcp?key=pasted-key#frag=pasted", hubSeat: PARTICIPANT, token: "tok-f" });
+      hub.down = true;
+      expect((await send(b.id, "req-14")).state).toBe("unknown");
+      expect((await send(b.id, "req-15", "A second request")).state).toBe("unknown");
+      expect(repo.getById("req-14")!.body).toContain("https://hub.example/mcp (query and fragment hidden)");
+      // As an item recorded before the upgrade reads: the query hidden, the fragment shown.
+      const recordedBefore = (id: string) => db.prepare("UPDATE queue_items SET body = replace(body, ?, ?) WHERE qitem_id = ?")
+        .run("https://hub.example/mcp (query and fragment hidden)", "https://hub.example/mcp#frag=pasted (query hidden)", id);
+      recordedBefore("req-14");
+      recordedBefore("req-15");
+      // One whose request text changed since is still refused by the body hash.
+      db.prepare("UPDATE queue_items SET body = replace(body, 'A second request', 'A changed request') WHERE qitem_id = 'req-15'").run();
+      hub.down = false;
+      await pass(b.id);
+      expect(hub.items.get(networkHubRequestId(b, "req-14"))).toMatchObject({ destinationSession: PEER, body: "Review the release notes" });
+      expect(outcome("req-14")).toEqual({ outcome: null });
+      expect(repo.getById("req-14")!.state).toBe("blocked");
+      expect(hub.items.has(networkHubRequestId(b, "req-15"))).toBe(false);
+      expect(outcome("req-15")).toEqual({ outcome: "unknown" });
     });
 
     it("a command retry of an unconfirmed create shows the hub item first: one the hub rerouted after the lost reply is found, not refused", async () => {
