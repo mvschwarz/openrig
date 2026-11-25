@@ -156,7 +156,7 @@ participant's rig. `request` sends one request to a peer, named as `peers` lists
   connector keeps only a hash of it. So a request whose local item was erased, closed or canceled here isn't sent. The
   local item and the binding are read right before each create, so a close, erasure or disconnect while the hub is
   being reached still stops it.
-- **The local item's text shows the hub URL with its query hidden,** as `rig network status` does, since a query string
+- **The local item's text shows the hub URL with its query and fragment hidden,** as `rig network status` does, since either
   can carry a credential.
 - **What `request` returns:** the local item, the hub item and a state.
   - `sent`: the hub confirmed the item.
@@ -188,6 +188,32 @@ A close with no resolution reads "Closed without a stated result." The close's n
 ```bash
 rig queue show <request-id>
 ```
+
+**Waiting for the answer:** the local item belongs to OpenRig, so nothing wakes the seat when it closes. A seat that
+ends its turn and wants to be woken when the answer lands parks a row of its own on the request item. When the item
+closes, OpenRig returns that row to pending and wakes the seat:
+
+```bash
+rig queue create --id <request-id>-wait --destination <your seat> --summary "Report <request-id>'s answer" --body "..."
+rig queue claim <request-id>-wait
+rig queue block <request-id>-wait --on <request-id> --continuation "read <request-id> and report its answer"
+```
+
+Then check once: `rig queue show <request-id>`. If it already reads closed (done, failed, canceled or denied), or isn't
+found, nothing will wake you for it: read the answer now and close your own row. The answer can land before the park,
+and `block` checks that a blocker is live only for an id starting `qitem-`, so for any other id a park on a closed or
+mistyped item is accepted and never wakes. Checking after the park covers both orders: a close before it shows in the
+check, and a close after it unparks the row.
+
+- **No answer coming:** a request whose binding ends, or that the hub never answers, stays open as unknown. Add
+  `--wake-after 4h` (your choice) to the `block` to be woken anyway; the item's notes say why it's still open.
+- **Gate-shaped ids:** a request id starting `fold:`, `auth:` or `external:` is read by `block` as a typed gate, not as
+  the request item, so nothing wakes the row for it. Give a request you'll wait on another id.
+- **A retry of an answered request** says it has closed and points to `rig queue show`, rather than to the wait.
+
+`request`'s own output points to its help, which says the same. A seat finds its binding with `rig whoami`, which
+names it (binding id, the seat's address on the hub, and the hub, with any query or fragment hidden) while the binding
+is active.
 
 **A hub item handed on there** (handed off, or closed by a handoff-and-complete): it isn't an answer. The connector
 follows the successor the hub names while the participant can read it.
