@@ -204,6 +204,14 @@ export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError 
  *  hint when present), sets exit 1, returns false. Replaces the ~55 hand-rolled verbatim guards. */
 export function daemonStatusGuard(status: DaemonStatus, opts?: { json?: boolean }): boolean {
   if (daemonMayAnswer(status)) return true;
+  printStatusGuard(status, opts);
+  process.exitCode = 1;
+  return false;
+}
+
+/** The guard's words for a daemon that can't answer, without failing the command: for one that goes on anyway, as
+ *  `rig mcp serve` over stdio does when an app starts it before the daemon. */
+export function printStatusGuard(status: DaemonStatus, opts?: { json?: boolean }): void {
   const err = statusGuardMessage(status);
   if (opts?.json) {
     console.log(JSON.stringify({ error: err }));
@@ -215,8 +223,6 @@ export function daemonStatusGuard(status: DaemonStatus, opts?: { json?: boolean 
   if (status.siblingHint) {
     console.error(`  note: OPENRIG_HOME may be wrong — resolved ${status.siblingHint.resolvedHome}, live sibling ${status.siblingHint.siblingHome}`);
   }
-  process.exitCode = 1;
-  return false;
 }
 
 export function printDaemonNotRunning(opts?: { json?: boolean }): void {
@@ -514,7 +520,9 @@ async function checkPid(state: DaemonState, deps: LifecycleDeps, knownLiveness?:
   }
 }
 
-function resolveConfiguredDaemonTarget(): { host: string; port: number } {
+/** This home's configured daemon endpoint (daemon.host and daemon.port), which getDaemonStatus probes when the home has no
+ *  daemon record and a plain `rig daemon start` takes its port from. */
+export function resolveConfiguredDaemonTarget(): { host: string; port: number } {
   try {
     const config = new ConfigStore().resolve();
     return {
