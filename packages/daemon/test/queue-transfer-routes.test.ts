@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { Hono } from "hono";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { queueTransferActivationSchema } from "../src/db/migrations/191_queue_transfer_activation.js";
 import { migrate } from "../src/db/migrate.js";
@@ -12,7 +12,10 @@ import { QueueTransferStaging } from "../src/domain/queue-transfer-staging.js";
 import { queueTransferRoutes } from "../src/routes/queue-transfer.js";
 
 const databases: Database.Database[] = [];
-afterEach(() => databases.splice(0).forEach(db => db.close()));
+afterEach(() => {
+  databases.splice(0).forEach(db => db.close());
+  vi.useRealTimers();
+});
 
 function instance(hostId: string, bearerToken: string | null, beforeTransferSchema = false) {
   const db = new Database(":memory:");
@@ -50,11 +53,13 @@ it("reports a missing stage without exposing archive bytes", async () => {
   expect(await refusal.json()).toMatchObject({ error: "import_not_found" });
 });
 
-it("fences, activates, retries and reconciles across two isolated route instances", async () => {
-  const source = instance("source", null);
+it("shows late history on a retained fence without changing the exact reconciliation retry", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-02-03T04:05:06Z"));
+  const source = instance("source", "source-token");
   const dest = instance("target", "dest-token");
   source.db.exec(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body)
-    VALUES ('qitem-a', '1', '1', 'a@origin', 'b@origin', 'blocked', 'work');`);
+    VALUES ('qitem-a', '1', '1', 'a@origin', 'person@external', 'blocked', 'work');`);
   const { archive: archiveText } = buildQueueTransfer(source.db, { kind: "host" });
   const staged = new QueueTransferStaging(dest.db).import(archiveText).stage;
   if (!staged) throw new Error("Expected a staged import");
@@ -63,7 +68,7 @@ it("fences, activates, retries and reconciles across two isolated route instance
   const authorization = { kind: AUTHORIZATION_KIND, operationId: "op", archiveDigest: digest, origin,
     destination: { hostId: "target", authorizedAt: "then", seatMapping: [] },
     intervention: { kind: "online-handshake", actor: "operator", recordedAt: "then", limits: "" } };
-  const relinquish = await source.request("relinquish", post({ archiveText, authorization, intervention: "stopped work", actor: "operator" }));
+  const relinquish = await source.request("relinquish", post({ archiveText, authorization, intervention: "stopped work", actor: "operator" }, "source-token"));
   expect(relinquish.status).toBe(200);
   const { receipt } = await relinquish.json();
   const status = await source.request(`status?archiveDigest=${digest}`);
@@ -74,8 +79,34 @@ it("fences, activates, retries and reconciles across two isolated route instance
   const result = await activated.json();
   expect(result).toMatchObject({ status: "activated", replayed: false, rows: { blocked: [{ qitemId: "qitem-a" }] } });
   expect(await (await dest.request("activate", post(activation, "dest-token"))).json()).toEqual({ ...result, replayed: true });
-  const reconciled = await source.request("reconcile", post({ archiveText, result, actor: "operator" }));
+  const reconcileRequest = () => source.request("reconcile", post({ archiveText, result, actor: "operator" }, "source-token"));
+  const reconciled = await reconcileRequest();
   expect(reconciled.status).toBe(200);
-  expect(await reconciled.json()).toMatchObject({ evacuation: "complete", rows: [{ qitemId: "qitem-a", outcome: "superseded" }] });
-  expect(await (await source.request(`status?archiveDigest=${digest}`)).json()).toMatchObject({ evacuation: "complete" });
+  const report = await reconciled.json();
+  expect(report).toMatchObject({ evacuation: "complete", lateReports: [], rows: [{ qitemId: "qitem-a", outcome: "superseded" }] });
+  const statusPath = `status?archiveDigest=${digest}`;
+  const readStatus = () => source.request(statusPath, { headers: { authorization: "Bearer source-token" } });
+  const cleanStatus = await (await readStatus()).json();
+  expect(cleanStatus).toMatchObject({ evacuation: "complete" });
+  expect(cleanStatus.transfers[0]).not.toHaveProperty("postReconciliationLateReports");
+
+  const outbox = source.db.prepare("SELECT * FROM outbox_entries");
+  const beforeOutbox = outbox.all();
+  const fence = source.repo.transferFence("qitem-a");
+  const answer = source.repo.writeRelayedAnswer({ qitemId: "qitem-a", actorSession: "a@origin", nudge: true,
+    relay: { attributedTo: "person@external", channel: "phone", text: "Late answer for the new owner" } });
+  expect(answer).toMatchObject({ historyOnly: true, replyQitemId: null });
+  const late = source.repo.transitionLog.listForQitem("qitem-a").at(-1);
+  expect(late?.transitionNote).toContain("Late answer for the new owner");
+
+  expect(await (await source.request(statusPath)).json()).toEqual(cleanStatus);
+  const fresh = await readStatus();
+  expect(await fresh.json()).toMatchObject({ transfers: [{ fenced: ["qitem-a"], postReconciliationLateReports: [
+    { qitemId: "qitem-a", currentState: "canceled", ownerItem: "qitem-a@target", transitions: [late] },
+  ] }] });
+  expect(await (await reconcileRequest()).json()).toEqual({ ...report, replayed: true });
+  expect(source.repo.getById("qitem-a")).toMatchObject({ state: "canceled", closureReason: "superseded", closureTarget: "qitem-a@target" });
+  expect(source.repo.transferFence("qitem-a")).toEqual(fence);
+  expect(source.db.prepare("SELECT qitem_id FROM queue_items").pluck().all()).toEqual(["qitem-a"]);
+  expect(outbox.all()).toEqual(beforeOutbox);
 });

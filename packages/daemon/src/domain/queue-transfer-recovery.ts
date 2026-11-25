@@ -1,8 +1,10 @@
 import type Database from "better-sqlite3";
 import { assertTransferSchema, QueueTransferOperationError } from "./queue-transfer-operation.js";
-import { parseQueueTransfer } from "./queue-transfer-parse.js";
+import { isTransferObject, parseQueueTransfer } from "./queue-transfer-parse.js";
 import { RECEIPT_KIND, parseReceipt, rowsDigest, type TransferActivation, type TransferReceipt } from "./queue-transfer-records.js";
-import { insertRelinquishment, parseReconciliation, recordTransferFence } from "./queue-transfer-relinquish.js";
+import { fenceNote, insertRelinquishment, parseReconciliation, recordTransferFence } from "./queue-transfer-relinquish.js";
+import { QueueTransitionLog } from "./queue-transition-log.js";
+import type { QueueState } from "./queue-repository.js";
 import { SelfHostIdentityStore } from "./seat-identity-store.js";
 
 export function replayTransfer(db: Database.Database, record: TransferReceipt | TransferActivation) {
@@ -69,7 +71,7 @@ function verifyRestoredActivation(db: Database.Database, record: TransferActivat
     missingRows, stateMismatch, missingHistory, missingErasedRigs, ...(archive ? {} : { recordsUnavailable: true }) };
 }
 
-export function transferStatus(db: Database.Database, digest?: string) {
+export function transferStatus(db: Database.Database, digest?: string, includeHistory = true) {
   assertTransferSchema(db);
   const records = db.prepare<[string | null, string | null], { id: string; archiveDigest: string; kind: string; actor: string; recordedAt: string;
     destinationHostId: string; receipt: string | null; result: string | null }>(`SELECT record_id AS id, archive_digest AS archiveDigest, kind, actor, recorded_at AS recordedAt,
@@ -82,8 +84,11 @@ export function transferStatus(db: Database.Database, digest?: string) {
     group.push(record);
     groups.set(key, group);
   }
-  const fence = db.prepare<[string], { id: string; reconciledAt: string | null }>(`SELECT qitem_id AS id, reconciled_at AS reconciledAt
+  const fence = db.prepare<[string], { id: string; reconciledAt: string | null; outcome: string | null }>(`SELECT qitem_id AS id,
+    reconciled_at AS reconciledAt, reconcile_outcome AS outcome
     FROM queue_transfer_relinquished WHERE record_id = ? ORDER BY qitem_id`);
+  const history = includeHistory ? new QueueTransitionLog(db) : null;
+  const liveState = db.prepare<[string], QueueState>(`SELECT state FROM queue_items WHERE qitem_id = ? AND content_erased_at IS NULL`).pluck();
   const transfers = [...groups.values()].flatMap(group => {
     const first = group[0];
     if (!first) return [];
@@ -93,10 +98,31 @@ export function transferStatus(db: Database.Database, digest?: string) {
     const fences = relinquished ? fence.all(relinquished.id) : [];
     const fenced = fences.map(row => row.id);
     const reconciliationOwed = fences.filter(row => row.reconciledAt === null).map(row => row.id);
+    const receipt = relinquished?.receipt ? parseReceipt(JSON.parse(relinquished.receipt)) : null;
+    const priorReports = reconciliation && "lateReports" in reconciliation && Array.isArray(reconciliation.lateReports) ? reconciliation.lateReports : [];
+    const priorById = new Map(priorReports.filter(isTransferObject).map(row => [row.qitemId, row]));
+    const postReconciliationLateReports = history && receipt && reconciliation ? fences.flatMap(({ id, reconciledAt, outcome }) => {
+      if (!reconciledAt) return [];
+      const currentState = liveState.get(id);
+      if (!currentState) return [];
+      const prior = priorById.get(id);
+      const reported = new Set(Array.isArray(prior?.transitions) ? prior.transitions.filter(isTransferObject).map(row => row.transitionId) : []);
+      const pointer = `${id}@${first.destinationHostId}`;
+      const ownerItem = outcome === "superseded" || outcome === "confirmed_history" || prior?.ownerItem === pointer ? pointer : undefined;
+      const entries = history.listForQitem(id).filter(entry => !entry.importedFrom);
+      const fencedAt = entries.findIndex(entry => entry.transitionNote === fenceNote(first.destinationHostId, receipt.transferId, first.archiveDigest));
+      const afterFence = entries.slice(fencedAt + 1);
+      // The supersession transition orders same-millisecond writes without relying on the clock.
+      const closedAt = outcome === "superseded" ? afterFence.findIndex(entry => entry.closureReason === "superseded" && entry.closureTarget === pointer) : -1;
+      const transitions = closedAt >= 0 ? afterFence.slice(closedAt + 1)
+        : afterFence.filter(entry => entry.ts >= reconciledAt && !reported.has(entry.transitionId));
+      return transitions.length ? [{ qitemId: id, currentState, ownerItem, transitions }] : [];
+    }) : [];
     return [{ archiveDigest: first.archiveDigest, destinationHostId: first.destinationHostId, snapshot: "known",
-      intervention: relinquished?.receipt ? { actor: relinquished.actor, recordedAt: relinquished.recordedAt, method: parseReceipt(JSON.parse(relinquished.receipt)).method } : null,
+      intervention: relinquished && receipt ? { actor: relinquished.actor, recordedAt: relinquished.recordedAt, method: receipt.method } : null,
       destinationResult: reconciliation ? "verified" : "absent", sourceReconciliation: reconciliation ? reconciliation.evacuation === "complete" ? "clean" : "has_unresolved" : "absent",
       restriction: fenced.length ? "scoped" : "none", fenced, reconciliationOwed,
+      ...(postReconciliationLateReports.length ? { postReconciliationLateReports } : {}),
       evacuation: relinquished && reconciliation?.evacuation === "complete" && !reconciliationOwed.length ? "complete" : "incomplete" }];
   });
   return { transfers, evacuation: transfers.length && transfers.every(row => row.evacuation === "complete") ? "complete" : "incomplete",

@@ -14,7 +14,7 @@ import type { QueueTransition } from "./queue-transition-log.js";
 type RelinquishInput = { readonly archiveText: string; readonly authorization: TransferAuthorization;
   readonly intervention: string; readonly limits?: string; readonly actor: TransferActor; readonly dryRun?: boolean };
 
-function fenceNote(destinationHostId: string, transferId: string, archiveDigest: string): string {
+export function fenceNote(destinationHostId: string, transferId: string, archiveDigest: string): string {
   return `relinquished: ownership moved to ${destinationHostId} for transfer ${transferId} (archive ${archiveDigest.slice(0, 12)}); fenced: awaiting reconciliation`;
 }
 

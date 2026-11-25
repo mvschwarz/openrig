@@ -11,7 +11,7 @@ import { replayTransfer, transferStatus } from "../domain/queue-transfer-recover
 import { QueueTransferSource } from "../domain/queue-transfer-relinquish.js";
 import { QueueTransferStaging } from "../domain/queue-transfer-staging.js";
 import { SelfHostIdentityStore } from "../domain/seat-identity-store.js";
-import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
+import { authBearerTokenMiddleware, constantTimeEqual } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 
 const invalidBody = () => new QueueTransferOperationError("invalid_body", 400);
@@ -73,7 +73,10 @@ export function queueTransferRoutes({ db, repo, bearerToken }: {
   app.get("/status", c => {
     const digest = c.req.query("archiveDigest");
     if (digest !== undefined && !isTransferDigest(digest)) return c.json({ error: "invalid_archive_digest" }, 400);
-    return c.json(transferStatus(db, digest));
+    // The existing status summary is ungated; answer text follows the operator bearer boundary.
+    const bearer = /^Bearer\s+(.+)$/i.exec(c.req.header("Authorization") ?? "")?.[1]?.trim();
+    const includeHistory = bearerToken === null || (bearer !== undefined && constantTimeEqual(bearer, bearerToken));
+    return c.json(transferStatus(db, digest, includeHistory));
   });
 
   function write<T extends { readonly actor?: string | undefined }>(verb: string, parseBody: (body: Record<string, unknown>) => T,
