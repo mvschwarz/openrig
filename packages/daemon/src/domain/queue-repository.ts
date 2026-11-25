@@ -2775,7 +2775,8 @@ export class QueueRepository {
       const openQuestions = () => unansweredQuestions(questions.filter(q => !journal.relays.some(r => r.questionId === q.id)), direct);
       const unanswered = () => ask.state === "pending" ? openQuestions().map(q => q.id) : [];
       const receipt = (replyQitemId = journal.returnId, disposition?: "corrected" | "unplaced"): RelayedAnswerReceipt => ({
-        item: this.getByIdOrThrow(input.qitemId), replyQitemId: fenced ? null : replyQitemId, unanswered: unanswered(), ...(disposition ? { [disposition]: true } : {}),
+        item: this.getByIdOrThrow(input.qitemId), replyQitemId: fenced ? null : replyQitemId, unanswered: unanswered(),
+        ...(fenced ? { historyOnly: true } : disposition ? { [disposition]: true } : {}),
       });
       const at = new Date().toISOString();
       const identity = { identityProvenance: input.identityProvenance, identityPrincipal: input.identityPrincipal };
@@ -4158,7 +4159,8 @@ export class QueueRepository {
     persistedEvents: PersistedEvent[];
   } {
     const completingRelay = relayWrite === "complete";
-    const historyNote = input.state === undefined && !!input.transitionNote?.trim() && input.summary === undefined && input.closureRequiredAt === undefined;
+    const historyNote = input.state === undefined && typeof input.transitionNote === "string" && !!input.transitionNote.trim() &&
+      input.summary === undefined && input.closureRequiredAt === undefined;
     if (!historyNote && !["done", "failed", "denied", "canceled"].some(state => state === input.state)) this.assertNotFenced(input.qitemId);
     if (input.closureReason === "relayed-answer" && !completingRelay) {
       throw new QueueRepositoryError("invalid_closure_reason", "Use the relay-answer operation to record a relayed answer.");

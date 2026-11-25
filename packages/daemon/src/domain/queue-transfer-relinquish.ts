@@ -77,7 +77,8 @@ export class QueueTransferSource {
         const id = String(row.qitemId);
         return byId.has(id) && byId.get(id) !== canonicalQueueJson(row) ? [id] : [];
       });
-      if (missing.length || changed.length) throw new QueueTransferOperationError("archive_stale", 409, { changed, missing });
+    if (missing.length || changed.length) throw new QueueTransferOperationError("archive_stale", 409, {
+      changed, missing, next: "Re-export on the source, stage on the destination, then authorize the new digest." });
       const fenced = db.prepare<[string], string>("SELECT qitem_id FROM queue_transfer_relinquished WHERE qitem_id IN (SELECT value FROM json_each(?))").pluck().all(ids);
       if (fenced.length) throw new QueueTransferOperationError("already_relinquished", 409, { qitemIds: fenced });
       const workflowState = db.prepare<[string], { qitemId: string; instanceId: string }>(`WITH selected AS (SELECT value FROM json_each(?))
@@ -134,7 +135,7 @@ export class QueueTransferSource {
         closure_target = ?, blocked_on = NULL, closure_required_at = NULL WHERE qitem_id = ?`);
       const mark = db.prepare("UPDATE queue_transfer_relinquished SET reconciled_at = ?, reconcile_outcome = ? WHERE qitem_id = ? AND record_id = ?");
       const counts: Record<string, number> = {};
-      const lateReports: { qitemId: string; currentState: QueueState; transitions: QueueTransition[] }[] = [];
+      const lateReports: { qitemId: string; currentState: QueueState; ownerItem?: string; transitions: QueueTransition[] }[] = [];
       const relinquishedNote = fenceNote(destinationHostId, archive.transferId, archive.digest);
       const rows = transferSelection(archive).map(({ qitemId, state }) => {
         const live = lookup.get(qitemId);
@@ -150,7 +151,8 @@ export class QueueTransferSource {
           const late = fenceIndex >= 0 ? added.slice(fenceIndex + 1) : added.filter(entry => entry.ts >= prior.recordedAt);
           if (late.length || fields.some(column => (live[column] ?? null) !== (archived.wire[transferWireKey(column)] ?? null))) {
             outcome = "late_report";
-            lateReports.push({ qitemId, currentState: live.state, transitions: late });
+            lateReports.push({ qitemId, currentState: live.state, transitions: late,
+              ...(created.has(qitemId) ? { ownerItem: `${qitemId}@${destinationHostId}` } : {}) });
           } else if (isTerminalState(state)) outcome = "confirmed_history";
           else if (created.has(qitemId)) {
             outcome = "superseded";

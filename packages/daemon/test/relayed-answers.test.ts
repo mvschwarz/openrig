@@ -117,7 +117,9 @@ it.each([false, true])("keeps partial and final fenced answers as history withou
   const final = { questionId: "second", optionId: "yes" };
   vi.setSystemTime(new Date("2026-02-03T04:05:07Z"));
   const completion = await (direct ? f.correct(final) : f.relay(final));
-  expect(completion.status, await completion.text()).toBe(200);
+  const response = await completion.json();
+  expect(completion.status, JSON.stringify(response)).toBe(200);
+  if (!direct) expect(response).toMatchObject({ historyOnly: true, replyQitemId: null });
   expect(f.history()).toEqual([...history, expect.objectContaining({ questionId: "second", kind: direct ? "direct-answer" : "relayed-answer" })]);
   expect(f.repo.transitionLog.listForQitem(qitemId).at(-1)?.transitionNote).toContain(direct ? "Yes" : "Not this week.");
   expect(outbox.all()).toEqual(beforeOutbox);

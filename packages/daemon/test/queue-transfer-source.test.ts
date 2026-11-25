@@ -47,8 +47,10 @@ it("writes only a scoped fence and retries the recorded intervention exactly", (
 it("refuses a stale archive when only its history drifted", () => {
   const input = snapshot();
   repo.transitionLog.append({ qitemId: "qitem-a", state: "pending", actorSession: "a@old", transitionNote: "late note" });
-  expect(() => source.relinquish(input)).toThrow(expect.objectContaining({ code: "archive_stale", detail: { changed: ["qitem-a"], missing: [] } }));
+  expect(() => source.relinquish(input)).toThrow(expect.objectContaining({ code: "archive_stale", detail: {
+    changed: ["qitem-a"], missing: [], next: "Re-export on the source, stage on the destination, then authorize the new digest." } }));
   expect(db.prepare("SELECT record_id FROM queue_transfer_ledger").get()).toBeUndefined();
+  expect(repo.transferFence("qitem-a")).toBeUndefined();
 });
 
 it("refuses claims and reopen on the fenced row but records a late terminal report", async () => {
@@ -84,7 +86,7 @@ it.each(["none", "terminal", "note"])("reconciles a confirmed row without overwr
   const report = source.reconcile({ ...input, result });
   expect(report).toMatchObject({ evacuation: late !== "none" ? "incomplete" : "complete", rows: [{ qitemId: "qitem-a", outcome: late !== "none" ? "late_report" : "superseded" }] });
   expect(repo.getById("qitem-a")).toMatchObject(late === "none" ? { state: "canceled", closureReason: "superseded", closureTarget: "qitem-a@target" } : { state: late === "note" ? "pending" : "done" });
-  if (late === "note") expect(report.lateReports).toMatchObject([{ qitemId: "qitem-a", transitions: [{ transitionNote: "late ordinary note" }] }]);
+  if (late === "note") expect(report.lateReports).toMatchObject([{ qitemId: "qitem-a", ownerItem: "qitem-a@target", transitions: [{ transitionNote: "late ordinary note" }] }]);
   expect(source.reconcile({ ...input, result })).toEqual({ ...report, replayed: true });
   expect(() => repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "pending", reopen: true, transitionNote: "retry" })).toThrow(/fenced/);
 });
@@ -103,7 +105,7 @@ it.each([false, true])("distinguishes the fence note from a same-millisecond ter
   expect(row.get()).toEqual(before);
   expect(report).toMatchObject({ evacuation: late ? "incomplete" : "complete",
     rows: [{ qitemId: "qitem-a", outcome: late ? "late_report" : "confirmed_history" }] });
-  expect(report.lateReports).toEqual(late ? [{ qitemId: "qitem-a", currentState: "done",
+  expect(report.lateReports).toEqual(late ? [{ qitemId: "qitem-a", currentState: "done", ownerItem: "qitem-a@target",
     transitions: [expect.objectContaining({ transitionNote: "late terminal note" })] }] : []);
 });
 
