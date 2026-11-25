@@ -423,8 +423,7 @@ preservation. The result reports what was emitted, not native successor equivale
 **Adopt it promptly.** The saved directory doesn't move the running process, but background work can use it before
 adoption. Saved configuration isn't the live process's directory, and these examples aren't the only consumers. For a
 running Claude seat:
-- **Collector provisioning** writes `.openrig/context-collector.cjs` and merges `.claude/settings.local.json` in the
-  saved directory, under its existing preservation rules.
+- **Claude context collection** stays with the current launch while polling reads the samples it produces.
 - **Managed compaction,** manual (`POST /api/compaction/trigger`) or automatic, asks the seat to write its restore map
   under it. That may be outside the seat's current workspace, so a seat without bypass permissions may meet a write
   prompt.
@@ -926,8 +925,8 @@ relative to that directory.
 | Path | When OpenRig writes it | What `rig down` does |
 | --- | --- | --- |
 | Managed blocks in `CLAUDE.md` (or the rig's `managed_blocks` file, such as `CLAUDE.local.md`) or `AGENTS.md` | Each launch merges the seat's guidance blocks. A fresh Codex launch that takes developer instructions puts them in its launch text instead: in `AGENTS.md` it adds only the seat-skills line, after your yes, and refreshes blocks already there. A fresh Pi seat writes its own agent-directory `AGENTS.md` outside the project, except when that folder or file is a link: then its guidance stays in the repository `AGENTS.md`. | Removes OpenRig's blocks, current or legacy, and keeps everything else. When nothing else is left, it deletes the file if the file began with an OpenRig block, or held only blocks in an older format. A block-only file isn't proof that OpenRig created it. The seat-skills line is kept if you edited it. |
-| `.openrig/context-collector.cjs` | Claude seats, at launch. | Removes it while its bytes are still the shipped collector's; otherwise keeps it and says so. |
-| `.claude/settings.local.json` | Claude seats, at launch: OpenRig's status line and its activity hooks are merged in, separately. Your own status line is never replaced, but the activity hooks are still merged beside it. A file that doesn't parse gets neither. | Removes OpenRig's status line and hooks and keeps the file, even if `{}` is all that's left. |
+| `.openrig/context-collector.cjs` | Earlier managed Claude launches and collector setup for an attached Claude session. | Removes it while its bytes are still the shipped collector's; otherwise keeps it and says so. |
+| `.claude/settings.local.json` | Earlier managed Claude launches put collector and activity settings here. Current managed launches put them in the session's launch settings. Explicit settings resources and attached-session collector setup can still use this file. | Removes OpenRig's status line and hooks after other seats sharing the directory have stopped. Keeps the file and its other settings. |
 | `.claude/settings.local.json` fragments and `.mcp.json` | When a profile or spec declares `claude_settings_fragment` or `claude_mcp_fragment`. | Leaves the merged content in place. |
 | `.claude/agents/`, `.claude/plugins/<id>/`, `.claude/extensions/<id>/`; `.agents/<id>.yaml`, `.codex/plugins/<id>/`, `.agents/extensions/<id>/` | When the seat's projection includes subagents, plugins or runtime resources (Claude, then Codex). | Leaves them in place. |
 | `.claude/skills/<id>/`, `.agents/skills/<id>/` | Only for a seat without seat storage. New Claude and Codex seats keep their skills under `$OPENRIG_HOME/state/seats/`, outside the project. | Leaves them in place. |

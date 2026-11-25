@@ -544,9 +544,7 @@ describe("S03 bound launch across existing paths", () => {
   it("production startup supplies one helper to both adapters without calling startup", () => {
     const startup = readFileSync(new URL("../src/startup.ts", import.meta.url), "utf8");
     expect(startup).toContain("new ClaudeManagedLaunch(db, { ...launchSessionEnv, CLAUDE_CONFIG_DIR: configuredClaudeHome },");
-    // The resume adapter gets the same helper; the hook bridge's launch check (#3270) and the status line throttle
-    // (#3416) are the options after it.
-    expect(startup).toContain("new ClaudeResumeAdapter(tmuxAdapter, { claudeManagedLaunch, seatLaunchEnvironment, openrigHome: OPENRIG_HOME, restoreReadPolicy,\n    hookBridgeLaunch: (nodeId, executable) => hookBridge.launchWanted(nodeId, executable),\n    statuslineThrottleLaunch: (nodeId) => rigRepo.getNodeStatuslineThrottle(nodeId) })");
+    expect(startup).toContain("new ClaudeResumeAdapter(tmuxAdapter, { claudeManagedLaunch, seatLaunchEnvironment, openrigHome: OPENRIG_HOME, restoreReadPolicy,\n    hookBridgeLaunch: (nodeId, executable) => hookBridge.launchWanted(nodeId, executable),\n    launchTelemetry: claudeLaunchTelemetry })");
     expect(startup).toContain("new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch,");
   });
   it("does not submit after a context change following a valid paste; preserves partial-input semantics", async () => {

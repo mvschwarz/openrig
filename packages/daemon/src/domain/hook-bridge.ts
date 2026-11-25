@@ -173,16 +173,21 @@ export class HookBridge {
     return this.preference(nodeId)!;
   }
 
-  /** Whether this Claude launch adds the bridge's hooks: the seat opted in, and its Claude is one with `asyncRewake`
-   *  (HOOK_BRIDGE_MIN_CLAUDE or later). Otherwise the launch is unchanged and delivery stays typed; the status says why. */
-  async launchWanted(nodeId: string, executable = "claude"): Promise<boolean> {
-    this.launchNotes.delete(nodeId);
-    if (this.preference(nodeId)?.desired !== true) return false;
+  async claudeVersionFor(executable = "claude"): Promise<string | null> {
     const key = `${executable}\0${(this.deps.stamp ?? executableStamp)(executable) ?? ""}`;
     if (!this.versions.has(key)) this.versions.set(key, Promise.resolve((this.deps.version ?? claudeVersion)(executable)).catch(() => null));
     const version = await this.versions.get(key)!;
     // An unreadable version (a timed-out probe under load, say) is read again at the next launch.
     if (version === null) this.versions.delete(key);
+    return version;
+  }
+
+  /** Whether this Claude launch adds the bridge's hooks: the seat opted in, and its Claude is one with `asyncRewake`
+   *  (HOOK_BRIDGE_MIN_CLAUDE or later). Otherwise the launch is unchanged and delivery stays typed; the status says why. */
+  async launchWanted(nodeId: string, executable = "claude"): Promise<boolean> {
+    this.launchNotes.delete(nodeId);
+    if (this.preference(nodeId)?.desired !== true) return false;
+    const version = await this.claudeVersionFor(executable);
     if (version && atLeast(version, HOOK_BRIDGE_MIN_CLAUDE)) return true;
     this.launchNotes.set(nodeId, version
       ? `Claude Code ${version} is older than ${HOOK_BRIDGE_MIN_CLAUDE}, the first with the bridge's asyncRewake hooks: launched without them, delivery stays typed.`

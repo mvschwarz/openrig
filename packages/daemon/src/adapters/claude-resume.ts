@@ -4,11 +4,10 @@ import { claudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "../domain/cl
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { transportClaudeSettings } from "./claude-settings-transport.js";
+import type { ClaudeLaunchTelemetry } from "./claude-launch-telemetry.js";
 import { claudeMcpArgs, type ClaudeMcp } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import { setTimeout as sleep } from "node:timers/promises";
-import fs from "node:fs";
-import { throttledStatusLineForLaunch } from "../domain/claude-statusline-throttle.js";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { shellQuote } from "./shell-quote.js";
@@ -44,8 +43,7 @@ interface ClaudeResumeOptions {
   restoreReadPolicy?: () => RestoreReadPolicy | null;
   /** Slice 13: whether this restore adds a seat's hook bridge (opted in, on a Claude with asyncRewake). */
   hookBridgeLaunch?: (nodeId: string, executable?: string) => boolean | Promise<boolean>;
-  /** #3416 (3): the seat's status line throttle in seconds, or null when it has none; read at each restore. */
-  statuslineThrottleLaunch?: (nodeId: string) => number | null | Promise<number | null>;
+  launchTelemetry?: ClaudeLaunchTelemetry;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   claudeManagedLaunch?: ClaudeManagedLaunch;
   listProcesses?: NativeProcessLister;
@@ -64,17 +62,6 @@ export class ClaudeResumeAdapter {
     if (!isClaudeResumeType(resumeType)) return false;
     if (!resumeToken) return false;
     return true;
-  }
-
-  /** #3416 (3): the throttled status line for this restore's --settings, as on a fresh launch (claude-code-adapter.ts). */
-  private async throttledStatusLine(nodeId: string | null | undefined, cwd: string, sessionName: string,
-    notes: string[]): Promise<{ statusLine?: Record<string, unknown> }> {
-    const seconds = nodeId ? await this.options.statuslineThrottleLaunch?.(nodeId) ?? null : null;
-    if (seconds === null || !this.options.openrigHome || !cwd) return {};
-    const result = throttledStatusLineForLaunch({ readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p), cwd,
-      stateDir: this.options.openrigHome, nodeExecutable: process.execPath, sessionName, seconds });
-    if ("note" in result) { notes.push(result.note); return {}; }
-    return { statusLine: result.statusLine };
   }
 
   async resume(
@@ -144,8 +131,7 @@ export class ClaudeResumeAdapter {
     if (seatToken) tokenWarnings.push(...(await this.options.claudeManagedLaunch?.tokenPrecedenceWarnings?.(nodeId!, seatToken.ref) ?? []));
     const choice = { claudePermissions, claudeAutoMode, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode,
       // The version gate reads the Claude this resume runs, not PATH's.
-      hookBridge: nodeId ? (await this.options.hookBridgeLaunch?.(nodeId, executable ?? undefined)) === true : false,
-      ...await this.throttledStatusLine(nodeId, cwd, tmuxSessionName, tokenWarnings) };
+      hookBridge: nodeId ? (await this.options.hookBridgeLaunch?.(nodeId, executable ?? undefined)) === true : false };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const autoMode = claudeAutoModeForLaunch(claudeAutoMode);
     if (autoMode.warning) tokenWarnings.push(autoMode.warning);
@@ -161,8 +147,13 @@ export class ClaudeResumeAdapter {
       catch { return { ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." }; }
     }
     let nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture, autoMode.block ?? null, settingsSeat);
-    if (managed || (continuation?.args && executable)) nativeArgs = transportClaudeSettings(nativeArgs, settingsSeat, tokenWarnings, continuation?.args);
-    else launchArgs = transportClaudeSettings(launchArgs, settingsSeat, tokenWarnings, continuation?.args);
+    const transportSettings = async (args: string[]) => transportClaudeSettings(nodeId ? await this.options.launchTelemetry?.({
+      args, nodeId, cwd, session: tmuxSessionName, paneSession: tmuxSessionName,
+      configDir: managed?.configDir ?? continuation?.configDir ?? undefined,
+      executable: managed?.executable ?? executable, warnings: tokenWarnings,
+    }) ?? args : args, settingsSeat, tokenWarnings, continuation?.args);
+    if (managed || (continuation?.args && executable)) nativeArgs = await transportSettings(nativeArgs);
+    else launchArgs = await transportSettings(launchArgs);
     const permissionMode = posture + launchArgs.map(arg => ` ${shellQuote(arg)}`).join("");
     const cmd = managed ? managed.command(nativeArgs, claudeResumeLaunchEnv(resumeToken!))
       : `${claudeResumeLaunchPrefix(resumeToken!)}${claudeClassicRendererEnvPrefix(process.env)}${executable ? `exec ${wrapperPrefix}${shellQuote(executable)}` : "claude"} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(resumeToken!)}`;

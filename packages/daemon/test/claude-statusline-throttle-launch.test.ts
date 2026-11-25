@@ -1,6 +1,5 @@
-// #3416 (3): a seat that opted in to the status line throttle gets the throttled status line in its launch's own
-// --settings value, on a fresh launch, a resume and a restore; a seat without it launches exactly as before, and a status
-// line command of the person's own in the folder's settings wins. The generated shell runs against an argv-printing fake.
+// A fresh launch, resume and restore carry the seat's collector in --settings, optionally throttled.
+// A status line configured in the folder wins. An argv-printing fake receives the actual shell command.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { execFileSync } from "node:child_process";
@@ -10,6 +9,7 @@ import path from "node:path";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
+import { withClaudeLaunchTelemetry, type ClaudeLaunchTelemetry } from "../src/adapters/claude-launch-telemetry.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
@@ -22,10 +22,12 @@ function fixture(throttle: number | null, ownSettings?: unknown) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), "claude-statusline-launch-")));
   cleanups.push(() => fs.rmSync(root, { recursive: true, force: true }));
   const cwd = path.join(root, "seat's workspace"), bin = path.join(root, "bin"), home = path.join(root, "home"), state = path.join(root, "openrig");
+  const collector = path.join(import.meta.dirname, "../assets/claude-statusline-context.cjs");
+  const localSettings = path.join(cwd, ".claude", "settings.local.json");
   for (const dir of [cwd, bin, home, state]) fs.mkdirSync(dir);
   if (ownSettings !== undefined) {
     fs.mkdirSync(path.join(cwd, ".claude"));
-    fs.writeFileSync(path.join(cwd, ".claude", "settings.local.json"), JSON.stringify(ownSettings));
+    fs.writeFileSync(localSettings, JSON.stringify(ownSettings));
   }
   const executable = path.join(bin, "claude");
   fs.writeFileSync(executable, `#!${process.execPath}\nif (process.argv.includes('--help')) console.log('--permission-mode <mode> (choices: "auto", "acceptEdits", "default")'); else console.log(JSON.stringify(process.argv.slice(2)));\n`);
@@ -53,18 +55,21 @@ function fixture(throttle: number | null, ownSettings?: unknown) {
   ];
   const fsOps = { readFile: (p: string) => fs.readFileSync(p, "utf8"), writeFile: () => {}, exists: (p: string) => fs.existsSync(p),
     mkdirp: () => {}, copyFile: () => {} };
-  const statuslineThrottleLaunch = vi.fn((_nodeId: string) => throttle);
+  const launchTelemetry: ClaudeLaunchTelemetry = async ({ args, cwd, configDir, session, warnings }) => withClaudeLaunchTelemetry(args, {
+    openrigHome: state, cwd, configDir: configDir ?? path.join(home, ".claude"), session, collector,
+    relay: path.join(state, "state", "claude-activity-hooks", "activity-relay.cjs"), events: [], throttleSeconds: throttle,
+  }, warnings);
   const adapter = new ClaudeCodeAdapter({ tmux, fsOps, stateDir: state, claudeManagedLaunch: launcher, sessionIdFactory: () => "fresh-id",
-    listProcesses, sleep: async () => {}, statuslineThrottleLaunch });
+    listProcesses, sleep: async () => {}, launchTelemetry });
   const resume = new ClaudeResumeAdapter(tmux, { claudeManagedLaunch: launcher, openrigHome: state, listProcesses, sleep: async () => {},
-    statuslineThrottleLaunch });
+    launchTelemetry });
   const binding: NodeBinding = { id: "binding", nodeId: "node", cwd, tmuxSession: "seat", tmuxPane: "%1", tmuxWindow: null,
     cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", permissionMode: "auto" };
   const settings = () => {
     const at = args.indexOf("--settings");
     return at < 0 ? {} : JSON.parse(args[at + 1]!) as Record<string, unknown>;
   };
-  return { adapter, resume, binding, args: () => args, settings, state, cwd, statuslineThrottleLaunch };
+  return { adapter, resume, binding, args: () => args, settings, state, collector, localSettings };
 }
 
 const launch = async (f: ReturnType<typeof fixture>, mode: string) => mode === "restore"
@@ -76,26 +81,30 @@ describe("the status line throttle at launch (#3416 item 3)", () => {
     const f = fixture(30);
     const result = await launch(f, mode);
     expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
-    const statusLine = f.settings()["statusLine"] as { type: string; command: string };
-    expect(statusLine.type).toBe("command");
-    expect(statusLine.command).toContain(`f=${shellQuote(path.join(f.state, "state", "context-usage", "seat"))};`);
-    expect(statusLine.command).toContain('[ "$a" -lt 30 ]');
-    expect(statusLine.command).toContain(shellQuote(path.join(f.cwd, ".openrig", "context-collector.cjs")));
-    expect(f.statuslineThrottleLaunch).toHaveBeenCalledWith("node");
+    expect(f.args().filter(arg => arg === "--settings")).toHaveLength(1);
+    expect(f.settings()["statusLine"]).toMatchObject({ type: "command", command: expect.stringContaining('[ "$a" -lt 30 ]') });
+    const { command } = f.settings()["statusLine"] as { command: string };
+    expect(command).toContain(`f=${shellQuote(path.join(f.state, "state", "context-usage", "seat"))};`);
+    expect(command).toContain(shellQuote(f.collector));
     expect(claudeCommandSessionToken(`claude ${f.args().join(" ")}`)).toBe(mode === "fresh" ? "fresh-id" : "history-id");
   });
 
-  it.skipIf(process.platform === "win32").each(["fresh", "resume", "restore"])("leaves an unthrottled %s launch without a status line in its settings", async mode => {
+  it.skipIf(process.platform === "win32").each(["fresh", "resume", "restore"])("puts the unthrottled collector into the %s launch's --settings", async mode => {
     const f = fixture(null);
     expect(await launch(f, mode)).toMatchObject({ ok: true });
-    expect(f.settings()).not.toHaveProperty("statusLine");
+    const collectorArgs = [process.execPath, f.collector,
+      path.join(f.state, "state", "context-usage"), path.join(f.state, "state", "provider-usage")];
+    expect(f.settings()["statusLine"]).toEqual({ type: "command", command: `exec ${collectorArgs.map(shellQuote).join(" ")}` });
+    expect(fs.existsSync(f.localSettings)).toBe(false);
   });
 
   it.skipIf(process.platform === "win32").each(["fresh", "restore"])("lets the folder's own status line command win on a %s launch, and says so", async mode => {
     const f = fixture(30, { statusLine: { type: "command", command: "sh ~/my-status-line.sh" } });
+    const originalSettings = fs.readFileSync(f.localSettings);
     const result = await launch(f, mode) as { ok: boolean; warnings?: string[] };
     expect(result.ok).toBe(true);
     expect(f.settings()).not.toHaveProperty("statusLine");
-    expect(result.warnings).toEqual(expect.arrayContaining([expect.stringContaining("sets its own status line command, which wins")]));
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.stringContaining("kept the configured Claude status line and skipped its context collector throttle")]));
+    expect(fs.readFileSync(f.localSettings)).toEqual(originalSettings);
   });
 });
