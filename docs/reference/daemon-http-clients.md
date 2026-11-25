@@ -144,6 +144,37 @@ A cycle, limit, missing or erased row, or a handed-to address without a recorded
 
 A node's terminal state is `completion.status: "closed-as-recorded"`; other nodes say `open`. The graph's overall `completion.status` is always `unknown`: a closed record does not establish that the person's goal succeeded.
 
+## Read many stream items' reader actions
+
+A reader action is an agent's recorded response to a stream item: it acted on it as work, declined it, or marked
+it as a duplicate. `GET /api/stream/actions/list` pages these records without a request per item. Each `items`
+entry has `actionId`, `streamItemId`, `readerSession`, `action` (`act`, `decline`, `duplicate`), `workQitemId`,
+`duplicateOf`, `reason` and `actedAt`. Repeated historical acts remain separate records. The existing
+`GET /api/stream/:id/actions` returns one item's records.
+
+- `mode=history` (default) reads all matching retained actions. `mode=current` reads the newest **actionId** per
+  item and reader, selected across the whole history before kind, time and page filters. A later decline cannot
+  cause an older act to reappear just because `action=act` was requested.
+- Repeat `streamItemId` to select particular items. `hintTag` and `sourceSession` filter item metadata;
+  `readerSession` filters the action's actor. `action` selects one of the three kinds. `since` and `until` are
+  inclusive **action-time** bounds, valid ISO timestamps with at most millisecond precision, normalized to UTC.
+- `limit` defaults to 200 and is clamped to 1–500 after the usual integer query parsing. Results sort by
+  ascending `actionId`, a unique tie-breaker even when action timestamps are equal. Follow `nextAfterActionId`
+  as `afterActionId`, keeping the other filters/mode unchanged, until `hasMore` is false. A page is not a total count.
+- Archived items' actions are included. `missingStreamItemIds` lists explicitly requested IDs absent from the
+  item table; a present item with no matching actions is different from a missing item. Actions can still be
+  returned after someone removes their item row. Those actions cannot match a tag or source filter because the
+  item's metadata is gone. `historyScope: "retained"` means the result includes only action records this daemon
+  still stores; it cannot recover deleted records.
+
+Tag matching examines stored JSON values. Items have a source-session index, but filtering or sorting the joined
+action records can still examine more records than a page returns. In current mode, finding each reader's latest
+action can also read more history than the page contains.
+
+Paging has no gaps or repeats on stable data. It is not a snapshot: new action IDs ahead of the cursor can appear
+on later pages, IDs inserted behind it are not revisited, and concurrent corrections can change which records
+are current. A client needing one consistent current view should restart/reconcile by newest actionId. The old
+per-item read, writes and host access behavior are unchanged; this adds no remote forwarding.
 ## Attention from one host
 
 `GET /api/queue/attention-aggregate` returns `{ items, hosts }` for local attention plus enabled Feed
