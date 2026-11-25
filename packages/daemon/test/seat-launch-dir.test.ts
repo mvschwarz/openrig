@@ -153,6 +153,48 @@ describe.skipIf(process.platform === "win32")("OPENRIG_SEAT_LAUNCH_DIR on real s
     expect(seen.pwd).toBe(chosen);
   }, 60_000);
 
+  it.runIf(available)("a seat started in A, handed over into B, then restarted directly, runs in B and sees B", async () => {
+    const a = seatFolder("restart A"), b = seatFolder("restart B");
+    const db = createFullTestDb(); dbs.push(db);
+    const rigRepo = new RigRepository(db);
+    const rig = rigRepo.createRig(`launch-dir-restart-${++counter}`);
+    rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", cwd: a });
+    const tmuxAdapter = adapter();
+    const sessionEnv = { OPENRIG_HOME: state, PATH: `${bin}:/usr/bin:/bin`, HOME: home };
+    const launcher = new NodeLauncher({ db, rigRepo, sessionRegistry: new SessionRegistry(db), eventBus: new EventBus(db), tmuxAdapter, sessionEnv });
+    const session = `dev-impl@launch-dir-restart-${counter}`;
+    expect((await launcher.launchNode(rig.id, "dev.impl", { sessionName: session })).ok).toBe(true);
+    const node = rigRepo.getRig(rig.id)!.nodes[0]!;
+    const pane = (await tmux(["list-panes", "-t", `=${session}:`, "-F", "#{pane_id}"])).trim();
+    // Each step's process records what it saw and exits; the pane stays (as a restart holds it) for the next respawn.
+    await tmux(["set-option", "-p", "-t", pane, "remain-on-exit", "on"]);
+    const record = join(root, "record.sh");
+    writeFileSync(record, `printf '%s|%s' "\${OPENRIG_SEAT_LAUNCH_DIR-absent}" "$(pwd)" > "$1.part" && mv "$1.part" "$1"\n`);
+    const dead = async () => { for (let i = 0; i < 100; i++) { if ((await tmux(["display-message", "-p", "-t", pane, "#{pane_dead}"])).trim() === "1") return; await new Promise((r) => setTimeout(r, 50)); } throw new Error("pane still alive"); };
+    const run = async (name: string, respawn: (command: string) => Promise<{ ok: boolean }>) => {
+      await dead();
+      const out = join(root, `restart-${counter}-${name}.txt`);
+      const result = await respawn(`/bin/sh ${shellQuote(record)} ${shellQuote(out)}`);
+      expect(result.ok, `${name}: ${JSON.stringify(result)}`).toBe(true);
+      for (let i = 0; i < 100 && !existsSync(out); i++) await new Promise((r) => setTimeout(r, 50));
+      return readFileSync(out, "utf8");
+    };
+    await tmux(["send-keys", "-t", pane, "exit", "Enter"]);
+    // The handover respawns the pane into B with the seat's environment, as successor-session-launcher.ts does.
+    const handedOver = await run("handover", (command) => tmuxAdapter.respawnPane(pane, command, { cwd: b,
+      env: { OPENRIG_NODE_ID: node.id, OPENRIG_SESSION_NAME: session, ...launchDirEnv(b) }, processLimitsMode: "recovery" }));
+    expect(handedOver).toBe(`${b}|${b}`);
+    // The tmux session's own copy is still the first launch's, and a bare respawn would start from it.
+    expect((await tmux(["show-environment", "-t", `=${session}`, SEAT_LAUNCH_DIR_ENV])).trim()).toBe(`${SEAT_LAUNCH_DIR_ENV}=${a}`);
+    expect(await run("bare", (command) => tmuxAdapter.respawnPane(pane, command, { cwd: b }))).toBe(`${a}|${b}`);
+    // The direct restart's respawn (seat-restart-in-place.ts), with and without a kept limit, carries B.
+    for (const keep of [false, true]) {
+      const seen = await run(`restart-keep-${keep}`, (command) => tmuxAdapter.respawnPane(pane, command,
+        { cwd: b, launchEnv: launchDirEnv(b), ...(keep ? { keepLimitOf: node.id, processLimitsMode: "recovery" as const } : {}) }));
+      expect(seen, `keep=${keep}`).toBe(`${b}|${b}`);
+    }
+  }, 60_000);
+
   it.runIf(available)("a seat launched without a folder doesn't get the variable, even when the tmux server holds one", async () => {
     await tmux(["set-environment", "-g", SEAT_LAUNCH_DIR_ENV, "/stale/from/the/server"]);
     try {

@@ -21,6 +21,7 @@ import type { RunningCodexLaunch } from "../adapters/codex-runtime-adapter.js";
 import { emittedEffortFromArgv } from "./seat-effort.js";
 import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
 import { CODEX_NON_LOGIN_SHELL_OVERRIDE } from "./native-resume-probe.js";
+import { launchDirEnv } from "./seat-launch-environment.js";
 
 /**
  * OPR.0.7.0.5 — restart ONE Codex seat in place so it reads its Codex home's current account: the same
@@ -326,7 +327,7 @@ export class CodexInPlaceRestart {
       return this.verifyReplacement(target, report, oldExe);
     }
 
-    // #3253: this respawn carries no seat environment. Chosen before anything is stopped: a seat whose process reads
+    // #3253: this respawn carries no seat environment (#3328: only the launch dir, for the folder it runs in). Chosen before anything is stopped: a seat whose process reads
     // back under its limit is respawned in a new scope with it; otherwise it goes ahead with a structured warning, and a
     // fresh launch re-applies the limit.
     const keepPlan = this.deps.tmux.seatProcessLimitsKeepPlan
@@ -354,10 +355,11 @@ export class CodexInPlaceRestart {
     progress.stage = "stop";
     const terminated = await terminatePaneInPlace(this.deps.tmux, pane, this.timing, "Codex");
     if (!terminated.ok) return this.afterFailedStop(target, report, observed, held, recoveryCommand, terminated.message, progress);
-    // Respawn the dead pane WITHOUT -k (scrollback stays) with the resume command as its own command.
+    // Respawn the dead pane WITHOUT -k (scrollback stays) with the resume command as its own command. #3328: the
+    // replacement gets the folder it runs in as its launch dir; the session's copy can be an earlier launch's.
     progress.stage = "respawn";
     const respawned = await this.deps.tmux.respawnPane(pane, relaunch.command,
-      { cwd, ...(keepPlan?.keep ? { keepLimitOf: target.seat.nodeId, processLimitsMode: "recovery" as const } : {}) });
+      { cwd, launchEnv: launchDirEnv(cwd), ...(keepPlan?.keep ? { keepLimitOf: target.seat.nodeId, processLimitsMode: "recovery" as const } : {}) });
     if (!respawned.ok) {
       return this.afterFailedStop(target, report, observed, held, recoveryCommand, `the pane could not be respawned: ${respawned.message}`, progress);
     }

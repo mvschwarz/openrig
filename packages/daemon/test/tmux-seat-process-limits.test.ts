@@ -999,6 +999,26 @@ describe("a bare respawn that keeps the seat's limit (a restart in place of a se
       "/usr/bin/env", "DBUS_SESSION_BUS_ADDRESS=disabled:", `XDG_RUNTIME_DIR=${RT}`, "/bin/bash", "-c", "codex resume 'T'"]);
   });
 
+  it("#3328: the launch dir a restart passes is set on the replacement with -e, and the respawn still keeps its scope", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 }, sessionEnv: "DBUS_SESSION_BUS_ADDRESS=disabled:\n", globalEnv: `XDG_RUNTIME_DIR=${RT}\n` });
+    const result = await h.adapter.respawnPane("%1", "codex resume T",
+      { cwd: "/work/b", keepLimitOf: "node-a", launchEnv: { OPENRIG_SEAT_LAUNCH_DIR: "/work/b" } });
+    expect(result).toEqual({ ok: true });
+    const respawn = h.writes.find(w => w.startsWith("respawn-pane"))!;
+    expect(respawn).toContain("-e 'OPENRIG_SEAT_LAUNCH_DIR=/work/b'");
+    // The kept-scope command, not a seat launch's scoped `env -i` one, which would drop the -e value.
+    expect(respawn).toContain("TasksMax=256");
+    expect(respawn).toContain("'/bin/bash' '-c' 'codex resume T'");
+    expect(respawn).not.toContain("env -i");
+  });
+
+  it("#3328: a bare respawn with a launch dir stays bare: the value is set with -e and nothing else is added", async () => {
+    const h = makeAdapter({});
+    const result = await h.adapter.respawnPane("%1", "codex", { cwd: "/work/b", launchEnv: { OPENRIG_SEAT_LAUNCH_DIR: "/work/b" } });
+    expect(result).toEqual({ ok: true });
+    expect(h.writes.find(w => w.startsWith("respawn-pane"))).toBe("respawn-pane -t '%1' -c '/work/b' -e 'OPENRIG_SEAT_LAUNCH_DIR=/work/b' 'codex'\n");
+  });
+
   it("a session that removed a variable gets it removed, not the server's", async () => {
     const h = makeAdapter({ limits: { "node-a": 256 }, sessionEnv: "-XDG_RUNTIME_DIR\n", globalEnv: `XDG_RUNTIME_DIR=${RT}\n` });
     await h.adapter.respawnPane("%1", "codex", { keepLimitOf: "node-a" });

@@ -2532,7 +2532,10 @@ export class TmuxAdapter {
     command?: string,
     opts?: { cwd?: string; env?: Record<string, string>; processLimitsMode?: ProcessLimitsMode;
       /** #3253: a bare respawn (no `env`) of this seat that keeps its limit in a new scope (seatProcessLimitsKeepPlan). */
-      keepLimitOf?: string },
+      keepLimitOf?: string;
+      /** #3328: launch metadata (`launchDirEnv`) for the replacement process, set with `-e` like `env`. Unlike `env`, it
+       *  doesn't make the respawn a seat launch: a bare respawn stays bare, and `keepLimitOf` keeps its branch. */
+      launchEnv?: Record<string, string> },
   ): Promise<TmuxResult> {
     return this.guardedInput(paneTarget, async (pane, beforeWrite) => {
       beforeWrite();
@@ -2546,11 +2549,13 @@ export class TmuxAdapter {
 
   private async respawnPaneUnchecked(paneTarget: string, command?: string,
     opts?: { cwd?: string; env?: Record<string, string>; processLimitsMode?: ProcessLimitsMode; keepLimitOf?: string;
-      failedStart?: SeatProcessLimitsProblem }): Promise<TmuxResult> {
+      launchEnv?: Record<string, string>; failedStart?: SeatProcessLimitsProblem }): Promise<TmuxResult> {
     const exact = exactTarget(paneTarget, "pane");
     const argv = ["tmux", "respawn-pane", "-t", exact];
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
-    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) argv.push("-e", `${k}=${v}`);
+    // Everything the replacement gets with -e. Only `env` chooses the scope branch below.
+    const paneEnv = opts?.env || opts?.launchEnv ? { ...opts.launchEnv, ...opts.env } : undefined;
+    if (paneEnv) for (const [k, v] of Object.entries(paneEnv)) argv.push("-e", `${k}=${v}`);
     const warnings: string[] = [];
     let scopedCommand: string[] | null;
     const notices: ScopeNotices = opts?.failedStart ? { failedStart: opts.failedStart } : {};
@@ -2562,22 +2567,22 @@ export class TmuxAdapter {
     // Legacy commands remain one argument; the scoped wrapper executes directly before the user shell.
     if (scopedCommand) argv.push(...scopedCommand);
     else if (command != null && command.length > 0) argv.push(command);
-    const quote = opts?.env && Object.keys(opts.env).length ? tmuxConfigQuote : shellQuote;
+    const quote = paneEnv && Object.keys(paneEnv).length ? tmuxConfigQuote : shellQuote;
     const legacyRespawn = ["tmux", "respawn-pane", "-t", quote(exact)];
     if (opts?.cwd != null) legacyRespawn.push("-c", quote(opts.cwd));
-    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", quote(`${k}=${v}`));
+    if (paneEnv) for (const [k, v] of Object.entries(paneEnv)) legacyRespawn.push("-e", quote(`${k}=${v}`));
     if (scopedCommand) legacyRespawn.push(...scopedCommand.map(quote));
     else if (command != null && command.length > 0) legacyRespawn.push(quote(command));
     // The successor starts from the session environment: exclude inherited
     // parent-session identity there first (sessions made before this existed).
     // A failure here is a warning; the respawn goes ahead as it did before.
     try {
-      await this.excludeParentSessionEnv(exact, Object.keys(opts?.env ?? {}));
+      await this.excludeParentSessionEnv(exact, Object.keys(paneEnv ?? {}));
     } catch (err) {
       warnings.push(parentSessionEnvWarning(exact, err));
     }
     try {
-      if (opts?.env && Object.keys(opts.env).length) await this.runEnvironmentCommand(argv, legacyRespawn.join(" "));
+      if (paneEnv && Object.keys(paneEnv).length) await this.runEnvironmentCommand(argv, legacyRespawn.join(" "));
       else await this.run(argv, legacyRespawn.join(" "));
       // #3253: a capped respawn counts only once its scope is seen to start. A fresh one that isn't is refused (the pane
       // is not this launch's to remove). A recovery never stops for the limit, also when systemd-run fails at this

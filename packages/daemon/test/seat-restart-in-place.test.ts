@@ -1343,6 +1343,19 @@ describe("#3253: a seat with process limits: a restart in place never stops for 
     expect(result).not.toMatchObject({ outcome: "not_started" });
     expect("processLimits" in (result as object)).toBe(false);
     expect(w.respawnOpts).toEqual([expect.objectContaining({ keepLimitOf: w.node.id, processLimitsMode: "recovery" })]);
+    // #3328: the launch dir rides along as launchEnv, not env, so the kept-scope branch is still the one that runs.
+    expect(w.respawnOpts[0]).not.toHaveProperty("env");
+  });
+
+  it("#3328: a direct respawn gives the replacement the folder it runs in as its launch dir, with and without a kept limit", async () => {
+    for (const keep of [true, false]) {
+      const w = world({ shape: "direct_native", remainOnExit: "off", ...(keep ? { processLimited: true, processLimitsKeep: { keep: true } } : {}) });
+      const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+      expect(result, `keep=${keep}`).not.toMatchObject({ outcome: "not_started" });
+      const opts = w.respawnOpts[0] as { cwd: string; launchEnv?: Record<string, string> };
+      expect(opts.launchEnv, `keep=${keep}`).toEqual({ OPENRIG_SEAT_LAUNCH_DIR: opts.cwd });
+      expect(opts, `keep=${keep}`).not.toHaveProperty("env");
+    }
   });
 
   it("a bare pane kept in a new scope whose start can't be told reports unknown, not that it went on without the limit", async () => {
