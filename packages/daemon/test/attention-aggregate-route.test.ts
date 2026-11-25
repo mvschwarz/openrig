@@ -20,6 +20,8 @@ const LOCAL_ATTENTION_ROW = { qitemId: "q-1", priority: "urgent", tier: "human-g
 
 function makeApp(opts: { subscriptions?: Array<{ hostId: string; enabled: boolean }>; withStore?: boolean } = {}) {
   const attentionCalls: unknown[] = [];
+  let registryCalls = 0;
+  let subscriptionCalls = 0;
   const repo = {
     listAttention: (query: unknown) => {
       attentionCalls.push(query);
@@ -27,18 +29,18 @@ function makeApp(opts: { subscriptions?: Array<{ hostId: string; enabled: boolea
     },
   };
   const store = {
-    listFeedHostSubscriptions: () => opts.subscriptions ?? [],
+    listFeedHostSubscriptions: () => { subscriptionCalls += 1; return opts.subscriptions ?? []; },
   };
   const app = new Hono();
   app.use("*", async (c, next) => {
     const set = c.set.bind(c) as (key: string, value: unknown) => void;
     set("queueRepo", repo);
     if (opts.withStore !== false) set("settingsStore", store);
-    set("hostRegistryLoader", () => ({ ok: true, registry: REGISTRY }));
+    set("hostRegistryLoader", () => { registryCalls += 1; return { ok: true, registry: REGISTRY }; });
     await next();
   });
   app.route("/api/queue", queueRoutes());
-  return { app, attentionCalls };
+  return { app, attentionCalls, reads: () => ({ registryCalls, subscriptionCalls }) };
 }
 
 describe("GET /api/queue/attention-aggregate", () => {
@@ -76,5 +78,37 @@ describe("GET /api/queue/attention-aggregate", () => {
     expect(res.status).toBe(200);
     const data = (await res.json()) as unknown;
     expect(data).toEqual([LOCAL_ATTENTION_ROW]); // exactly the repo rows, unwrapped, unstamped
+  });
+});
+
+
+describe("GET /api/queue/attention-aggregate?host=", () => {
+  it("explicit local target does not read subscriptions or registry", async () => {
+    const { app, attentionCalls, reads } = makeApp({ subscriptions: [{ hostId: "vps-b", enabled: true }] });
+    const res = await app.request("/api/queue/attention-aggregate?host=local");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ items: [{ ...LOCAL_ATTENTION_ROW, hostId: "local" }], hosts: [{ hostId: "local", status: "ok" }] });
+    expect(attentionCalls).toHaveLength(1);
+    expect(reads()).toEqual({ registryCalls: 0, subscriptionCalls: 0 });
+  });
+
+  it("registered unsubscribed target excludes local and subscribed hosts", async () => {
+    const { app, attentionCalls, reads } = makeApp({ subscriptions: [{ hostId: "unrelated", enabled: true }] });
+    const res = await app.request("/api/queue/attention-aggregate?host=vps-b");
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.items).toEqual([]);
+    expect(data.hosts).toEqual([{ hostId: "vps-b", status: "unsupported-transport", error: expect.any(String) }]);
+    expect(attentionCalls).toEqual([]);
+    expect(reads()).toEqual({ registryCalls: 1, subscriptionCalls: 0 });
+  });
+
+  it("unknown target returns one unreachable status with no fallback", async () => {
+    const { app, attentionCalls, reads } = makeApp({ subscriptions: [{ hostId: "vps-b", enabled: true }] });
+    const res = await app.request("/api/queue/attention-aggregate?host=ghost");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ items: [], hosts: [{ hostId: "ghost", status: "unreachable", error: expect.stringContaining("ghost") }] });
+    expect(attentionCalls).toEqual([]);
+    expect(reads()).toEqual({ registryCalls: 1, subscriptionCalls: 0 });
   });
 });

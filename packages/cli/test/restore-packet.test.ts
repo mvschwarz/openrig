@@ -332,10 +332,68 @@ describe("M2b redaction (openrig-v0 / velocity-v1 patterns)", () => {
     expect(redacted).toContain("[REDACTED]");
   });
 
-  it("redacts long base64-shaped strings", () => {
-    const text = "Encoded: aGVsbG93b3JsZGFlaW91YWVpb3VhZWlvdWFlaW91YWVpb3U=";
-    const redacted = redact(text);
-    expect(redacted).toContain("[REDACTED]");
+  it("keeps full commits, 64-hex hashes, paths and ids as they were", () => {
+    const text = [
+      "commit " + "a".repeat(40),
+      "sha256 " + "b".repeat(64),
+      "path /Users/example/code/rigs/lab/seats/security",
+      "path /Users/example/code/rigs/lab/seats/security-reviewer/notes",
+      "row qitem-root-three-retraces-20261123T0823",
+      "short e3b3d90c5",
+      "encoded aGVsbG93b3JsZGFlaW91YWVpb3VhZWlvdWFlaW91YWVpb3U=",
+    ].join("\n");
+    expect(redact(text)).toBe(text);
+    expect(hasSecretPattern(text)).toBe(false);
+  });
+
+  it("redacts the explicit credential shapes", () => {
+    // Synthetic values, assembled at run time so no source line holds a token-shaped literal. NOT real.
+    const cases: Record<string, string> = {
+      gitlab: "glpat" + "-" + "A1".repeat(10),
+      npm: "npm_" + "a1B2".repeat(9),
+      slackBot: "xox" + "b-" + "1".repeat(12) + "-abcdefghij",
+      slackRotation: "xoxe" + ".xoxp-" + "2".repeat(12),
+      slackApp: "xapp" + "-1-" + "A".repeat(12),
+      slackWebhook: "https://hooks" + ".slack.com/services/" + "T000/B000/" + "x".repeat(24),
+      awsKeyId: "AKIA" + "ABCDEFGH" + "IJKLMNOP",
+      awsSecret: "aws_secret_access_key = " + "wJalr" + "X".repeat(35),
+      awsFormattedSecret: "aws_secret_access_key" + " ".repeat(12) + "=" + " ".repeat(12) + "wJalr" + "Y".repeat(35),
+      google: "AIza" + "Sy" + "A".repeat(33),
+      jwt: "eyJ" + "hbGciOiJIUzI1NiJ9" + ".eyJ" + "zdWIiOiIxMjM0In0" + "." + "s".repeat(20),
+      privateKey: "-----BEGIN " + "PRIVATE KEY-----\n" + "MIIEv".repeat(13) + "\n-----END " + "PRIVATE KEY-----",
+      encryptedKey: "-----BEGIN RSA " + "PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC," + "0A1B".repeat(8) + "\n\n" + "QUJDRA".repeat(13) + "\n-----END RSA " + "PRIVATE KEY-----",
+      jsonKey: JSON.stringify({ private_key: "-----BEGIN " + "PRIVATE KEY-----\n" + "MIIEv".repeat(13) + "\n-----END " + "PRIVATE KEY-----" }),
+      awsCliSecret: '"SecretAccessKey": "' + "wJalr" + "Z".repeat(35) + '"',
+      awsSessionToken: '"SessionToken": "' + "FwoG" + "ZXIvYXdz".repeat(20) + '"',
+      azureKey: "AccountName=acct;AccountKey=" + "Zm9vYmFy".repeat(11) + "==;EndpointSuffix=core.windows.net",
+      basicAuth: "Authorization: Basic " + "ZGVwbG95" + "Omh1bnRlcjI=",
+      urlPassword: "https://deploy:" + "hunter2hunter2" + "@git.example.com/repo.git",
+      urlPasswordOnly: "https://:" + "s3cr3t".repeat(8) + "@git.example.com/repo.git",
+    };
+    for (const [name, secret] of Object.entries(cases)) {
+      const out = redact(`before ${secret} after`);
+      expect(out, name).toContain("[REDACTED]");
+      expect(out, name).toContain("before ");
+      expect(out, name).toContain(" after");
+      expect(hasSecretPattern(secret), name).toBe(true);
+    }
+    // What isn't the credential stays: the named key, the URL's host, nothing of a private key's body.
+    expect(redact(cases.awsSecret!)).toBe("aws_secret_access_key = [REDACTED]");
+    expect(redact(cases.urlPassword!)).toBe("https://[REDACTED]@git.example.com/repo.git");
+    expect(redact(cases.privateKey!)).toBe("[REDACTED]");
+    expect(redact(cases.encryptedKey!)).toBe("[REDACTED]");
+    expect(redact(cases.jsonKey!)).toBe('{"private_key":"[REDACTED]"}');
+    expect(redact(cases.awsCliSecret!)).toBe('"SecretAccessKey": "[REDACTED]"');
+    expect(redact(cases.urlPasswordOnly!)).toBe("https://[REDACTED]@git.example.com/repo.git");
+    // A private key whose END line was cut off still loses its body.
+    expect(redact("-----BEGIN " + "RSA PRIVATE KEY-----\n" + "MIIEv".repeat(13))).toBe("[REDACTED]");
+  });
+
+  it("masks compact encrypted private keys through the CLI surface", () => {
+    const compact = ["-----BEGIN RSA " + "PRIVATE KEY-----", "Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-256-CBC," + "0A1B".repeat(8), "QUJDRA".repeat(13), "-----END RSA " + "PRIVATE KEY-----"].join("");
+    expect(redact(`left|${compact}|right`)).toBe("left|[REDACTED]|right");
+    expect(redact(compact.slice(0, compact.indexOf("-----END")))).toBe("[REDACTED]");
+    expect(redact(JSON.stringify({ private_key: compact }))).toBe('{"private_key":"[REDACTED]"}');
   });
 
   it("leaves non-credential content unchanged byte-for-byte", () => {
@@ -350,8 +408,9 @@ describe("M2b redaction (openrig-v0 / velocity-v1 patterns)", () => {
     expect(hasSecretPattern("")).toBe(false);
   });
 
-  it("exposes the pattern list (5 patterns per Velocity prior art)", () => {
-    expect(SECRET_PATTERNS.length).toBe(5);
+  it("uses the daemon's one transcript rule, not a copy", async () => {
+    const shared = await import("@openrig/daemon/transcript-redaction");
+    expect(SECRET_PATTERNS).toBe(shared.TRANSCRIPT_SECRET_PATTERNS);
   });
 });
 
@@ -1725,6 +1784,72 @@ describe("M2c-Daemon final regression — CLI-surface redaction + omitted round-
 
     // Summary's omitted_classes records the redaction occurrence.
     const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    expect(summary.omitted_classes).toContain("redacted_secrets");
+    expect(summary.redaction_policy_id).toBe("openrig-v0");
+  });
+
+  it("--source-jsonl keeps commits, hashes, paths and ids in the packet while masking credentials", async () => {
+    const { createProgram } = await import("../src/index.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const commit = "a".repeat(40);
+    const hash = "b".repeat(64);
+    const longPath = "/Users/example/code/rigs/lab/seats/security-reviewer/notes";
+    const row = "qitem-20261123130716-94e5eb06";
+    // Synthetic credentials, assembled at run time. NOT real tokens.
+    const key = "sk-" + "Fake".repeat(5);
+    const privateKey = "-----BEGIN " + "PRIVATE KEY-----\n" + "MIIEv".repeat(13) + "\n-----END " + "PRIVATE KEY-----";
+    const awsSecret = "wJalr" + "Y".repeat(35);
+    const awsContext = "aws_secret_access_key" + " ".repeat(12) + "=" + " ".repeat(12);
+    const encryptedKey = "-----BEGIN RSA " + "PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC," + "0A1B".repeat(8) + "\n\n" + "QUJDRA".repeat(13) + "\n-----END RSA " + "PRIVATE KEY-----";
+    const awsCliSecret = "wJalr" + "Z".repeat(35);
+    const urlPassword = "s3cr3t".repeat(8);
+    const src = path.join(tmpRoot, "with-identifiers.jsonl");
+    fs.writeFileSync(src, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/x", id: "ids-driver@ids-rig" } }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "text", text: `Built ${commit} for ${row}; tarball sha256 ${hash}; notes in ${longPath}; ignore ${key} and\n${privateKey}\n${awsContext}${awsSecret}\nservice account ${JSON.stringify({ private_key: privateKey })}\n${encryptedKey}\ncompact encrypted ${encryptedKey.replaceAll("\n", "")}\n{"Credentials": {"SecretAccessKey": "${awsCliSecret}"}}\ncloned https://:${urlPassword}@git.example.com/r.git` }],
+        },
+      }),
+    ].join("\n"), "utf8");
+
+    const target = path.join(tmpRoot, "packet-ids");
+    const program = createProgram();
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "restore-packet", "write",
+      "--source-jsonl", src,
+      "--target", target,
+      "--target-rig", "openrig-velocity-claude",
+      "--target-runtime", "claude-code",
+      "--current-work-summary", "identifier round-trip.",
+      "--authority-boundaries", "redaction proof.",
+    ]);
+
+    const transcripts = ["transcript-latest.md", "transcript.md"].filter((name) => fs.existsSync(path.join(target, name)));
+    expect(transcripts).toContain("transcript-latest.md");
+    for (const name of transcripts) {
+      const text = fs.readFileSync(path.join(target, name), "utf-8");
+      for (const identifier of [commit, hash, longPath, row]) expect(text, `${name}: ${identifier}`).toContain(identifier);
+      expect(text, name).not.toContain(awsSecret);
+      expect(text, name).toContain(awsContext + "[REDACTED]");
+      expect(text, name).not.toContain("QUJDRAQUJDRA");
+      expect(text, name).not.toContain(awsCliSecret);
+      expect(text, name).toContain('"SecretAccessKey": "[REDACTED]"');
+      expect(text, name).not.toContain(urlPassword);
+      expect(text, name).toContain("https://[REDACTED]@git.example.com/r.git");
+      expect(text, name).not.toContain(key);
+      expect(text, name).not.toContain("MIIEvMIIEv");
+      expect(text, name).toContain("[REDACTED]");
+    }
+    // Paths are found in the redacted text, so a long path reaches touched-files.md only when it survives redaction.
+    expect(fs.readFileSync(path.join(target, "touched-files.md"), "utf-8")).toContain(longPath);
+    const summary = JSON.parse(fs.readFileSync(path.join(target, "restore-summary.json"), "utf-8"));
+    expect(validateRestoreSummary(summary).valid).toBe(true);
     expect(summary.omitted_classes).toContain("redacted_secrets");
     expect(summary.redaction_policy_id).toBe("openrig-v0");
   });

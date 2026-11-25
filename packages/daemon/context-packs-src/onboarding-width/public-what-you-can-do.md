@@ -808,8 +808,7 @@ not have to tear one down to change it, and you rarely have to start from nothin
   Codex seat OpenRig launched, in a single pane, with a conversation it can prove and unchanged
   running settings. `--plan` runs every check and stops nothing; `--verify --expect-account
   <account>` reports `moved` only when a tool turn has completed in the same conversation since
-  the restart and Codex's status names that account. Linux only: on macOS a
-  request that reaches the running-process check refuses before stopping the seat.
+  the restart and Codex's status names that account.
   An adopted seat (one OpenRig didn't launch) refuses with `claimed_session`. "A conversation it
   can prove" means the stored conversation matches the one the running Codex's command line names
   (or, when it names none, the only one Codex has logged since it started); OpenRig can't tell

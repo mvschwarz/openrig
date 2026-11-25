@@ -142,6 +142,28 @@ describe("rig create", () => {
     expect(client.postText).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["create", ["create", "alpha"]],
+    ["grow", ["grow", "rig-1", "worker", "--pod", "main"]],
+  ])("%s --json reports a failed default-agent lookup as JSON", async (_name, argv) => {
+    const client = {
+      get: vi.fn(async (path: string) => {
+        if (path.includes("specs/library")) throw new Error("request timed out");
+        return { status: 200, data: [{ rigName: "alpha", podNamespace: "main" }] };
+      }),
+      post: vi.fn(),
+      postText: vi.fn(),
+    };
+    const program = createProgram({ createDeps: deps(client), growDeps: deps(client) });
+    program.exitOverride();
+    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rig", ...argv, "--json"]));
+
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(logs.join("\n"))).toEqual({ ok: false, detail: "request timed out" });
+    expect(client.post).not.toHaveBeenCalled();
+    expect(client.postText).not.toHaveBeenCalled();
+  });
+
   async function createWith(response: { status: number; data: Record<string, unknown> }, json: boolean) {
     const client = { get: vi.fn(async () => ({ status: 200, data: library })), postText: vi.fn(async () => response) };
     const program = createProgram({ createDeps: deps(client) });
@@ -604,5 +626,26 @@ describe("rig spec show", () => {
     expect(template.pods[0].members[0]).not.toHaveProperty("starter_ref");
     expect(createProgram().commands.find((command) => command.name() === "spec")?.commands.map((command) => command.name()))
       .toContain("show");
+  });
+});
+
+
+describe("rig grow advisory output", () => {
+  it("prints returned warnings after successful growth without changing the exit status", async () => {
+    const warning = "dev.worker: network is off; the launch continues as written";
+    const client = {
+      get: vi.fn(async (path: string) => path.includes("specs/library")
+        ? { status: 200, data: library }
+        : { status: 200, data: [{ rigName: "alpha", podNamespace: "main" }] }),
+      post: vi.fn(async () => ({ status: 201, data: { ok: true, status: "ok", warnings: [warning],
+        nodes: [{ logicalId: "extra.worker", status: "launched", sessionName: "extra-worker@alpha" }] } })),
+    };
+    const program = createProgram({ growDeps: deps(client) });
+    program.exitOverride();
+    const { logs, exitCode } = await captureLogs(() =>
+      program.parseAsync(["node", "rig", "grow", "rig-1", "worker", "--new-pod", "extra", "--cwd", "/work"]));
+    expect(exitCode).toBeUndefined();
+    expect(logs.filter(line => line.includes(warning))).toEqual([`  Warning: ${warning}`]);
+    expect(logs.join("\n")).toContain("Grew rig");
   });
 });

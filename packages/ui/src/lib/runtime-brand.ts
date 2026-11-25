@@ -58,8 +58,15 @@ export function normalizeRuntimeBrandId(runtime: string | null | undefined): Run
   return "unknown";
 }
 
+/**
+ * The brand for a runtime. A runtime that is not built in (a community harness such as "opencode")
+ * keeps the generic id and tone but is labelled with its own name; only a missing runtime says "Unknown".
+ */
 export function runtimeBrand(runtime: string | null | undefined): RuntimeBrand {
-  return RUNTIME_BRANDS[normalizeRuntimeBrandId(runtime)];
+  const brand = RUNTIME_BRANDS[normalizeRuntimeBrandId(runtime)];
+  const name = runtime?.trim();
+  if (brand.id !== "unknown" || !name) return brand;
+  return { ...brand, label: name, shortLabel: name };
 }
 
 export function formatRuntimeModel(runtime: string | null | undefined, model?: string | null): string {

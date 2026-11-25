@@ -2396,6 +2396,30 @@ export class TmuxAdapter {
     return this.guardedInput(target, () => this.sendShellCommandUnchecked(target, command, beforeInput, options));
   }
 
+  /** The script sendShellCommand last staged a launch in, per target, with the line it typed to run it, kept after its
+   *  shell reads it until the next launch sent to that target replaces it (or goes inline and removes it). */
+  private readonly stagedLaunches = new Map<string, { path: string; typed: string; read: boolean }>();
+
+  /** Whether the shell in `target` has yet to read the launch sendShellCommand last staged there. The script removes
+   *  itself as its first step, so while it is still there the shell hasn't started the launch: a new pane's shell can
+   *  still be running its startup files, and its pane reads as an idle shell meanwhile. False when nothing was staged
+   *  for the target, or the script is gone or can't be read. */
+  stagedLaunchUnread(target: string): boolean {
+    const staged = this.stagedLaunches.get(target);
+    if (!staged || staged.read) return false;
+    try { if (statSync(staged.path).isFile()) return true; } catch { /* gone (the shell read it), or unreadable: no evidence */ }
+    staged.read = true;
+    return false;
+  }
+
+  /** The exact line sendShellCommand typed into `target` to run the launch it last staged there: `( . '<script>' )`,
+   *  `/bin/sh '<script>'` or the fish form. It names the script, unique to that launch, so it marks the line the pane's
+   *  shell read: output below the last place it shows came after the launch. Undefined when the last launch sent there
+   *  went inline (nothing staged), or none was sent. */
+  stagedLaunchTypedLine(target: string): string | undefined {
+    return this.stagedLaunches.get(target)?.typed;
+  }
+
   /** Stage or send a launch while leaving a consumed script's cleanup to the receiving shell. */
   private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
     const commandBytes = Buffer.byteLength(command, "utf8");
@@ -2445,6 +2469,7 @@ export class TmuxAdapter {
       }
       // The receiver now owns removal. Unlinking here races shell startup.
       created = false;
+      if (path) this.stagedLaunches.set(target, { path, typed: invocation, read: false }); else this.stagedLaunches.delete(target);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);

@@ -1,18 +1,17 @@
-// Two files carry the same credential-pattern list, and nothing checked that they stayed the same:
+// Transcript text has one credential-redaction rule:
 //
-//   packages/cli/src/restore-packet/redaction.ts        SECRET_PATTERNS
-//   packages/daemon/src/domain/transcript-redaction.ts  TRANSCRIPT_SECRET_PATTERNS
+//   packages/daemon/src/domain/transcript-redaction.ts   TRANSCRIPT_SECRET_PATTERNS (the list)
+//   packages/cli/src/restore-packet/redaction.ts         imports it via @openrig/daemon/transcript-redaction
 //
-// The daemon copy says it outright — "keep this list byte-equivalent to the CLI list … drift between
-// these two arrays is a defect — reviewers should diff them on any change" — and a future slice is
-// meant to fold them into one package. Until then the invariant has no guard, so a change to one
-// side redacts one surface (restore packets) and silently leaves the other (transcript reads)
-// exposed.
+// GET /api/transcripts/:session/full and restore packets used to carry two copies of the list, and this
+// file compared them. The copies were folded into the daemon module, which the CLI imports through the
+// daemon's `./transcript-redaction` export (the package build rewrites that import to the shipped daemon
+// copy). This keeps a second copy from coming back: the CLI module holds no pattern literal of its own,
+// and the export it imports exists, with a whole list.
 //
-// The two files cannot import each other: the daemon is not a dependency of the CLI, and the daemon
-// file notes that importing it "would invert the package graph". So the lists are read as source,
-// but as *lists*: the initialiser is located after the `=`, its closing bracket is found by
-// scanning, and the entries are the depth-zero comma-separated elements with comments removed.
+// The source is read as source, but as *lists*: the initialiser is located after the `=`, its closing
+// bracket is found by scanning, and the entries are the depth-zero comma-separated elements with comments
+// removed. The same scan finds the regex literals anywhere in a file.
 //
 // Both scans carry the last significant character with them rather than looking back at the raw
 // text, because `/* note *` + `/ /a,b/g` would otherwise read the comment's closing slash as the
@@ -26,17 +25,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 const ROOT = path.join(import.meta.dirname, "..");
-
-const LISTS = {
-  cli: {
-    file: path.join(ROOT, "packages", "cli", "src", "restore-packet", "redaction.ts"),
-    constName: "SECRET_PATTERNS",
-  },
-  daemon: {
-    file: path.join(ROOT, "packages", "daemon", "src", "domain", "transcript-redaction.ts"),
-    constName: "TRANSCRIPT_SECRET_PATTERNS",
-  },
-};
+const CLI = path.join(ROOT, "packages", "cli", "src", "restore-packet", "redaction.ts");
+const DAEMON = path.join(ROOT, "packages", "daemon", "src", "domain", "transcript-redaction.ts");
+const SURFACE = path.join(ROOT, "packages", "daemon", "src", "transcript-redaction-surface.ts");
+const DAEMON_PACKAGE = path.join(ROOT, "packages", "daemon", "package.json");
 
 /** The shipped v0 policy has five patterns; a shorter list means the extractor lost entries. */
 const MIN_PATTERNS = 5;
@@ -177,29 +169,48 @@ export function arrayEntries(source, constName) {
   return entries.filter((entry) => entry !== "");
 }
 
+/** Every regex literal in a file, found by the same scan: comments and strings skipped, division not a pattern. */
+export function regexLiterals(source) {
+  const literals = [];
+  let prev;
+  for (let i = 0; i < source.length; i++) {
+    if (isCommentStart(source, i)) { i = commentEnd(source, i); continue; }
+    const ch = source[i];
+    if (ch === "/" && startsRegexAfter(prev)) {
+      const end = regexEnd(source, i);
+      literals.push(source.slice(i, end + 1));
+      i = end;
+      prev = ")";
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { i = stringEnd(source, i); prev = ")"; continue; }
+    if (!WHITESPACE.has(ch)) prev = ch;
+  }
+  return literals;
+}
+
 function read(file) {
   return readFileSync(file, "utf8");
 }
 
-test("the transcript and restore-packet redaction lists are the same list", () => {
-  const cli = arrayEntries(read(LISTS.cli.file), LISTS.cli.constName);
-  const daemon = arrayEntries(read(LISTS.daemon.file), LISTS.daemon.constName);
-
-  assert.ok(
-    cli.length >= MIN_PATTERNS,
-    `refusing to compare a list shorter than the shipped ${MIN_PATTERNS}: ${JSON.stringify(cli)}`,
-  );
-  assert.deepEqual(
-    daemon,
-    cli,
-    "the two redaction lists have drifted. A pattern added to one side redacts only that surface " +
-      "and leaves the other exposed, so change both files in the same commit:\n" +
-      `  ${path.relative(ROOT, LISTS.cli.file)} (${LISTS.cli.constName})\n` +
-      `  ${path.relative(ROOT, LISTS.daemon.file)} (${LISTS.daemon.constName})`,
-  );
+test("the restore packet's redaction imports the daemon's one list and keeps no copy", () => {
+  const cli = read(CLI);
+  assert.match(cli, /from "@openrig\/daemon\/transcript-redaction"/, "the CLI must import the shared rule");
+  assert.deepEqual(regexLiterals(cli), [],
+    "the CLI's redaction module carries its own pattern literal again. A pattern added on one side redacts only that " +
+      `surface; add it to ${path.relative(ROOT, DAEMON)} instead.`);
 });
 
-// The shapes an extractor can get wrong, or that a future edit to either list can look like.
+test("the daemon exports the list the CLI imports", () => {
+  const exportsMap = JSON.parse(read(DAEMON_PACKAGE)).exports ?? {};
+  assert.equal(exportsMap["./transcript-redaction"]?.import, "./dist/transcript-redaction-surface.js");
+  assert.match(read(SURFACE), /export \* from "\.\/domain\/transcript-redaction\.js";/);
+  const entries = arrayEntries(read(DAEMON), "TRANSCRIPT_SECRET_PATTERNS");
+  assert.ok(entries.length >= MIN_PATTERNS, `refusing to pass a list shorter than ${MIN_PATTERNS}: ${JSON.stringify(entries)}`);
+  assert.ok(entries.every((entry) => entry.startsWith("/")), "every entry is a pattern literal");
+});
+
+// The shapes an extractor can get wrong, or that a future edit to the list can look like.
 
 test("an annotation-only change is not drift", () => {
   const entries = ["/\\bsk-[A-Za-z0-9_-]{16,}\\b/g", "/\\bAKIA[0-9A-Z]{16}\\b/g"];
@@ -300,4 +311,15 @@ test("whitespace inside a pattern is not normalised away", () => {
     arrayEntries(single, "L"),
     "/a  b/g and /a b/g match different text",
   );
+});
+test("the literal scan finds a pattern and skips comments, strings and division", () => {
+  const source = [
+    'import { A } from "@openrig/daemon/transcript-redaction"; // a path, not a pattern',
+    "/** see `a/b/c` */",
+    "export const L: readonly RegExp[] = A;",
+    "const half = total / 2 / count;",
+    "const p = [/sk-[a-z]{4}/g];",
+  ].join("\n");
+  assert.deepEqual(regexLiterals(source), ["/sk-[a-z]{4}/g"]);
+  assert.deepEqual(regexLiterals(source.split("\n").slice(0, 4).join("\n")), []);
 });

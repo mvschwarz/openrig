@@ -6337,6 +6337,7 @@ export class QueueRepository {
       hasTerminalTransport: (dest) => this.hasTerminalTransport(dest),
       hostedWake: (dest) => this.hostedWakeFn(dest),
       isHostedMember: (dest) => this.hostedMemberFn(dest),
+      hostedCheckIn: (dest) => this.hostedMemberCheckIn(dest),
     });
   }
 

@@ -207,6 +207,29 @@ describe("mission-control routes Phase B (PL-005)", () => {
   });
 
   describe("GET /audit", () => {
+    it("pages out-of-order timestamps without repeating or skipping actions", async () => {
+      const { app, actionLog } = buildApp({ bus, queueRepo, bearerToken: null, withDispatcher: false });
+      const record = (actedAt: string) => actionLog.record({ actionVerb: "approve", qitemId: null, actorSession: "alice@r", actedAt });
+      const middle = record("2026-05-04T05:02:00Z");
+      const newest = record("2026-05-04T05:03:00Z");
+      const oldest = record("2026-05-04T05:01:00Z");
+      const tied = record("2026-05-04T05:02:00Z");
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      for (let i = 0; i < 5; i++) {
+        const query = new URLSearchParams({ limit: "1", actor_session: "alice@r" });
+        if (cursor) query.set("before_id", cursor);
+        const response = await app.request(`/api/mission-control/audit?${query}`);
+        expect(response.status).toBe(200);
+        const page = await response.json() as { rows: Array<{ actionId: string }>; hasMore: boolean; nextBeforeId: string | null };
+        seen.push(...page.rows.map((row) => row.actionId));
+        if (!page.hasMore) { expect(page.nextBeforeId).toBeNull(); break; }
+        expect(page.nextBeforeId).toBeTruthy();
+        cursor = page.nextBeforeId;
+      }
+      expect(seen).toEqual([newest.actionId, tied.actionId, middle.actionId, oldest.actionId]);
+    });
+
     it("returns rows + pagination metadata", async () => {
       const { app, actionLog } = buildApp({ bus, queueRepo, bearerToken: null, withDispatcher: false });
       // Seed an action.
