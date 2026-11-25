@@ -16,7 +16,7 @@ import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js"
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
 import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, SENDER_IDENTITY_HEADER, RELAY_HEADER, IDENTITY_PROVENANCE_HEADER, transportSenderSession, canonicalSenderSession, evidenceRefRootsFrom } from "./require-sender-identity.js";
-import { inheritedReturnRoute, issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
+import { conversationIssuedAddress, inheritedReturnRoute, issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
   routeIsPersonMessage, routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
@@ -845,16 +845,17 @@ export function queueRoutes(): Hono {
       returnRouteBasis?: string;
     }>().catch(() => ({} as never));
 
-    // The return route, when the caller asks for one: `auto` issues a conversation address for this create (from its id, so
-    // an exact retry issues the same one), `self` takes the caller's own identity, and anything else is an address the
-    // caller named. Absent, the create is exactly as before.
+    // The return route, when the caller asks for one: `auto` issues a conversation address (the one the conversation this
+    // create names by its key was already issued, else one from this create's id, so an exact retry issues the same one),
+    // `self` takes the caller's own identity, and anything else is an address the caller named. Absent, the create is
+    // exactly as before.
     const requestedRoute = typeof body.returnRoute === "string" ? body.returnRoute.trim() : undefined;
     if (body.returnRoute !== undefined && (!requestedRoute
       || (requestedRoute !== "auto" && requestedRoute !== "self" && !isRouteAddress(canonicalSenderSession(requestedRoute))))) {
       return c.json({ error: "invalid_return_route", message: "A return route is auto, self, or an agent conversation's queue address (member@rig). A person is reached through the gateway, not a return route." }, 400);
     }
     const createId = body.qitemId ?? (requestedRoute ? newQitemId() : undefined);
-    const issued = requestedRoute === "auto" ? issuedReturnAddress(createId!) : null;
+    const issued = requestedRoute === "auto" ? conversationIssuedAddress(getRepo(c).db, body.tags) ?? issuedReturnAddress(createId!) : null;
 
     // P21 I3 — the source is the transport-derived sender (X-OpenRig-Session), NEVER the body claim.
     // P18 deliver-and-label: absent header + a body sourceSession → recorded as the claimed-era stamp
@@ -868,7 +869,7 @@ export function queueRoutes(): Hono {
     const sourceSession = identity.session;
     c.set("refusalSource" as never, sourceSession as never); // read by traceCreateOutcome
     let route: { address: string; basis: ReturnRouteBasis } | null = requestedRoute === undefined ? null
-      : requestedRoute === "auto" ? { address: issued!, basis: sourceSession === issued ? "issued-actor" : "issued" }
+      : requestedRoute === "auto" ? { address: issued!, basis: derived.ok ? "issued" : "issued-actor" }
         : requestedRoute === "self" ? { address: sourceSession, basis: "caller" }
           : { address: canonicalSenderSession(requestedRoute), basis: carriedRouteBasis(requestedRoute, body.returnRouteBasis) };
     if (route && !isRouteAddress(route.address)) {

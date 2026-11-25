@@ -46,6 +46,43 @@ describe("queue create --return-route", () => {
     expect(line).toContain("in front of your other queue commands for this work");
   });
 
+  // Slice 15: the handover line, as proven in place: check the address at each wake, first, and start the wait where the app
+  // wakes on a background command's end.
+  it("auto's route line says to check that address first at each wake, and gives the background wait", async () => {
+    await create(deps("conversation-3f2a9c1b7e44@kernel"), ["--return-route", "auto"]);
+    expect(stderr.filter(l => l.startsWith("Return route: "))).toEqual(["Return route: conversation-3f2a9c1b7e44@kernel. This work's questions "
+      + "and its seats' prompts (not choice dialogs) come there as tasks. At each wake, before anything else, check that address first: "
+      + "OPENRIG_SESSION_NAME='conversation-3f2a9c1b7e44@kernel' rig queue list --owned --state pending,in-progress, and put "
+      + "OPENRIG_SESSION_NAME='conversation-3f2a9c1b7e44@kernel' in front of your other queue commands for this work. Where your app wakes you "
+      + "when a background command ends, start this wait in the background now, and again after you handle each task: until "
+      + "OPENRIG_SESSION_NAME='conversation-3f2a9c1b7e44@kernel' rig queue list --owned --state pending --json 2>/dev/null | grep -q '\"qitemId\"'; do sleep 20; done"]);
+  });
+
+  // Slice 15: the record the openrig plugin's hooks read. Only an issued address on this host's daemon is recorded with the
+  // conversation's key; no key, no tag.
+  it("auto records this conversation's key beside the issued address, after the tags it was given", async () => {
+    const key = vi.fn(() => "claude:1a2b3c4d.5000:4242");
+    await create({ ...deps("conversation-3f2a9c1b7e44@kernel"), conversationKey: key }, ["--return-route", "auto", "--tags", "mission:m"]);
+    expect(JSON.parse(JSON.stringify(posted[0])).tags).toEqual(["mission:m", "conversation-key:claude:1a2b3c4d.5000:4242"]);
+    expect(key).toHaveBeenCalledTimes(1);
+  });
+
+  it("records no key when none can be derived, without auto, or on another host's daemon", async () => {
+    // The control: a derivable key on a local auto create is recorded, so the absences below aren't vacuous.
+    await create({ ...deps("conversation-3f2a9c1b7e44@kernel"), conversationKey: () => "claude:1a2b3c4d.5000:4242" }, ["--return-route", "auto"]);
+    expect(JSON.parse(JSON.stringify(posted[0])).tags).toEqual(["conversation-key:claude:1a2b3c4d.5000:4242"]);
+    await create({ ...deps("conversation-3f2a9c1b7e44@kernel"), conversationKey: () => null }, ["--return-route", "auto"]);
+    expect(JSON.parse(JSON.stringify(posted[1]))).not.toHaveProperty("tags");
+    const key = vi.fn(() => "claude:1a2b3c4d.5000:4242");
+    process.env.OPENRIG_SESSION_NAME = "front@kernel";
+    await create({ ...deps("front@kernel"), conversationKey: key }, ["--return-route", "self"]);
+    await create({ ...deps(null), conversationKey: key }, []);
+    await create({ ...deps("conversation-3f2a9c1b7e44@kernel@host-a"), conversationKey: key }, ["--return-route", "auto", "--host", "host-b"]);
+    expect(posted).toHaveLength(5);
+    for (const sent of posted.slice(2)) expect(JSON.parse(JSON.stringify(sent))).not.toHaveProperty("tags");
+    expect(key).not.toHaveBeenCalled();
+  });
+
   it("without the flag, or with self, a session with no address still needs one, as before", async () => {
     for (const extra of [[], ["--return-route", "self"]]) {
       process.exitCode = undefined;
@@ -99,7 +136,10 @@ describe("queue create --return-route", () => {
     stderr = [];
     await run(respond("front@kernel"), []);
     expect(stderr.filter(l => l.startsWith("Return route: "))).toEqual(["Return route: front@kernel. This work's questions and its seats' prompts "
-      + "(not choice dialogs) come there as tasks; read them with OPENRIG_SESSION_NAME='front@kernel' rig queue list --owned --state pending,in-progress."]);
+      + "(not choice dialogs) come there as tasks. At each wake, before anything else, check that address first: "
+      + "OPENRIG_SESSION_NAME='front@kernel' rig queue list --owned --state pending,in-progress. Where your app wakes you when a background "
+      + "command ends, start this wait in the background now, and again after you handle each task: until OPENRIG_SESSION_NAME='front@kernel' "
+      + "rig queue list --owned --state pending --json 2>/dev/null | grep -q '\"qitemId\"'; do sleep 20; done"]);
   });
 
   it("a local create whose named route is a registered person's prints the daemon's reason and no route line", async () => {

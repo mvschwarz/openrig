@@ -13,6 +13,7 @@ import { shellQuote } from "../cross-host-executor.js";
 import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer } from "../host-registry.js";
 import { loadHostBindings } from "../host-bindings.js";
 import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
+import { conversationKey, conversationKeyTag } from "@openrig/daemon/conversation-key";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
@@ -43,6 +44,8 @@ export interface QueueDeps extends StatusDeps {
   deliveryVerify?: DeliveryVerifyDeps;
   /** The host registry `--host` resolves against on the verbs that name an existing row; tests give their own. */
   hostRegistryLoader?: () => ReturnType<typeof loadHostRegistry>;
+  /** The key of the conversation this command runs in (`@openrig/daemon/conversation-key`); tests give their own. */
+  conversationKey?: () => string | null;
 }
 
 interface DeliveryResultBase {
@@ -1467,7 +1470,12 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // Atom 6b snapshot provenance: record WHERE the body came from so the
       // handoff stays auditable even if the pack is edited later.
       if (opts.bodyContext) fromFlags.push(`body-context:${opts.bodyContext}`);
-      const merged = [...fromFlags, ...fromTagsArg];
+      // With --return-route auto on this host's daemon, the issued address is recorded with this conversation's key, so the
+      // openrig plugin's hooks find it in OpenRig's own record and wake the conversation when a task arrives there. No key
+      // (not run from Claude Code or Codex), no tag: nothing wakes, and no other conversation reads the address.
+      const local = hostResolved.hostId === undefined || hostResolved.hostId === "local";
+      const key = opts.returnRoute?.trim() === "auto" && local ? (deps.conversationKey ?? conversationKey)() : null;
+      const merged = [...fromFlags, ...fromTagsArg, ...(key ? [conversationKeyTag(key)] : [])];
       const seen = new Set<string>();
       const dedupedTags = merged.filter((t) => { if (seen.has(t)) return false; seen.add(t); return true; });
       const tags = dedupedTags.length > 0 ? dedupedTags : undefined;
@@ -1594,9 +1602,13 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               console.error(`Return route: ${route}, carried from the routed work you hold. This work's questions and its seats' prompts ` +
                 `(not choice dialogs) go to that conversation as tasks.`);
             } else {
-              console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks; read them with ` +
-                `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
-                (created.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
+              // Slice 15: the wording proven in place on real runs: check the address at each wake, first, and start the wait
+              // where the app wakes on a background command's end.
+              console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks. ` +
+                `At each wake, before anything else, check that address first: OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
+                (created.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : ".") +
+                ` Where your app wakes you when a background command ends, start this wait in the background now, and again after you handle each task: ` +
+                `until OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending --json 2>/dev/null | grep -q '"qitemId"'; do sleep 20; done`);
             }
           }
           // An ask to a shared channel was accepted; nothing there will answer it (0.7.3).

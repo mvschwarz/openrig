@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { conversationKey } from "@openrig/daemon/conversation-key";
 import { DaemonClient } from "../client.js";
 import { daemonMayAnswer, daemonStatusGuard, getDaemonStatus, getDaemonUrl, printStatusGuard, resolveConfiguredDaemonTarget } from "../daemon-lifecycle.js";
 import { createMcpServer, dropUnfilledSeat, unfilledSeatText, type UnfilledSeat } from "../mcp-server.js";
@@ -136,7 +137,8 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
       process.once("SIGINT", finish);
       process.once("SIGTERM", finish);
       // Serves the protocol revision the client opens with: 2026-07-28 per request, or 2025's initialize handshake.
-      const served = serveStdio(() => createMcpServer(client, { frontDoor: opts.frontDoor === true, ...(unfilledSeat ? { unfilledSeat } : {}) }), { onerror: (err) => console.error(`rig mcp serve: ${err.message}`) });
+      // The stdio server runs as a child of the app's conversation, so it can derive that conversation's key (slice 15).
+      const served = serveStdio(() => createMcpServer(client, { frontDoor: opts.frontDoor === true, ...(unfilledSeat ? { unfilledSeat } : {}), conversationKey }), { onerror: (err) => console.error(`rig mcp serve: ${err.message}`) });
       try {
         // EOF is a normal stdio disconnect, not an unresolved top-level await.
         if (process.stdin.readableEnded) finish();
