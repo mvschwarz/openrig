@@ -2134,17 +2134,17 @@ describe.skipIf(process.platform === "win32")("rig down leaves a terminal it can
       if (replaced || !argv.includes("show-environment")) return;
       replaced = true;
       await tmux("kill-server");
-      await tmux("new-session", "-d", "-s", NAME, `exec ${agent} 301`);
+      await tmux("new-session", "-d", "-s", NAME, `exec ${shellQuote(agent)} -e ${shellQuote("setTimeout(() => {}, 301000)")}`);
     }, async (command) => {
       signalled.push(command);
       return (await exec("/bin/sh", ["-c", command], { timeout: 5000 })).stdout;
     });
     try {
-      // A process the exit recognises as Claude Code: an executable named claude, the pane's foreground process.
+      // A foreground executable named claude. Use this Node, since a multicall sleep (e.g. uutils) rejects a renamed argv[0].
       agent = path.join(h.home, "claude");
-      fs.copyFileSync(fs.realpathSync("/bin/sleep"), agent);
+      fs.copyFileSync(fs.realpathSync(process.execPath), agent);
       fs.chmodSync(agent, 0o755);
-      await h.tmux("new-session", "-d", "-s", NAME, "-e", `OPENRIG_NODE_ID=${h.node.id}`, `${agent} 300`);
+      await h.tmux("new-session", "-d", "-s", NAME, "-e", `OPENRIG_NODE_ID=${h.node.id}`, `${shellQuote(agent)} -e ${shellQuote("setTimeout(() => {}, 300000)")}`);
       await h.bind();
       const result = await h.teardown();
       expect(replaced).toBe(true);
