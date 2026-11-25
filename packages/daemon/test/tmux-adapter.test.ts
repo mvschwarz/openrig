@@ -1693,6 +1693,54 @@ describe("TmuxAdapter", () => {
   });
 
   describe("respawnPane", () => {
+    it("refuses all later writes and respawn if the managed target changes during environment lookup", async () => {
+      let targetChanged = false;
+      const exec = vi.fn<ExecFn>(async command => {
+        if (command === "tmux show-environment -g") targetChanged = true;
+        return "";
+      });
+      const adapter = adapterFor(exec);
+      vi.spyOn(adapter, "listPanes").mockResolvedValue([{ id: "%3", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
+      const target = { nodeId: "n1", session: "dev@rig", pane: "%3" };
+      adapter.deliveryGuard = {
+        maybeTarget: () => target, target: () => target, ownsLifecycle: () => true,
+        needsInputCheck: () => false, input: (_identity: string, run: () => Promise<TmuxResult>) => run(),
+        attachInputInspection: () => {},
+        checkInput: () => {
+          if (targetChanged) throw new DeliveryGuardError("guard_target_changed", "The managed target changed.");
+        },
+      } as unknown as SeatDeliveryGuard;
+      const result = await adapter.respawnPane("n1", "sh", {
+        seatEnvironment: { set: { OPENRIG_SEAT_ENV_KEYS: "" }, remove: ["OLD"] },
+      });
+
+      expect(result).toMatchObject({ ok: false, code: "guard_target_changed" });
+      expect(exec.mock.calls).toEqual([["tmux show-environment -g"]]);
+    });
+
+    it("retains ownership of new session values if the final seat environment marker write fails", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = adapterFor(exec);
+      const sessionEnv = new Map([["OPENRIG_SEAT_ENV_KEYS", "OLD"]]);
+      vi.spyOn(adapter, "setSessionEnv").mockImplementation(async (_target, key, value) => {
+        if (key === "OPENRIG_SEAT_ENV_KEYS" && value === "ADDED") throw new Error("marker write failed");
+        sessionEnv.set(key, value);
+      });
+
+      const result = await adapter.respawnPane("%3", "sh", {
+        seatEnvironment: {
+          pendingKeys: "OLD,ADDED",
+          set: { ADDED: "new", OPENRIG_SEAT_ENV_KEYS: "ADDED" },
+          remove: [],
+        },
+      });
+
+      expect(result).toMatchObject({ ok: true, warnings: [expect.stringContaining("OPENRIG_SEAT_ENV_KEYS")] });
+      expect(sessionEnv.get("ADDED")).toBe("new");
+      expect(sessionEnv.get("OPENRIG_SEAT_ENV_KEYS")).toBe("OLD,ADDED");
+      expect(exec.mock.calls.some(([command]) => command.includes("respawn-pane"))).toBe(true);
+    });
+
     it("respawns the pane in place WITHOUT -k (retiree already exited; -k would CLEAR scrollback)", async () => {
       // Empirically (tmux 3.6a): respawn-pane -k CLEARS the pane's scrollback, defeating the money-proof.
       // The cutover terminates the retiree FIRST (graceful exit + remain-on-exit), then respawns the

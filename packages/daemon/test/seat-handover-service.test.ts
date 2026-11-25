@@ -113,7 +113,8 @@ describe("SeatHandoverService", () => {
   });
 
   function tmux(): TmuxAdapter {
-    return { hasSession, createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, sendText, sendKeys, capturePaneScreen, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    return { hasSession, createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, sendText, sendKeys, capturePaneScreen, getDefaultShell, getPaneCommand,
+      getSessionEnv: async () => undefined } as unknown as TmuxAdapter;
   }
 
   function codexAdapter(): RuntimeAdapter {
@@ -1725,6 +1726,7 @@ describe("SeatHandoverService", () => {
       throw new Error("no server running on /private/tmp/tmux-501/w3");
     });
     vi.spyOn(adapter, "capturePaneScreen").mockResolvedValue("predecessor screen tail");
+    vi.spyOn(adapter, "getSessionEnv").mockResolvedValue(undefined);
     vi.spyOn(adapter, "listPanes").mockResolvedValue([
       { id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true },
     ]);

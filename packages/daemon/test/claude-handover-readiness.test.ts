@@ -95,7 +95,8 @@ describe("Claude fresh in-place handover readiness", () => {
   });
 
   function tmux(): TmuxAdapter {
-    return { hasSession, createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, sendText, sendKeys, capturePaneScreen, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    return { hasSession, createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, sendText, sendKeys, capturePaneScreen, getDefaultShell, getPaneCommand,
+      getSessionEnv: async () => undefined } as unknown as TmuxAdapter;
   }
 
   function codexAdapter(): RuntimeAdapter {

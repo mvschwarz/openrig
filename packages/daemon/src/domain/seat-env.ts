@@ -90,3 +90,24 @@ export function seatEnvLaunchVars(env: SeatEnv): SeatEnv {
   const keys = Object.keys(env);
   return keys.length > 0 ? { ...env, [SEAT_ENV_KEYS_VAR]: keys.join(",") } : {};
 }
+
+/** Read only valid, non-reserved names from the managed session marker. */
+export function parseSeatEnvKeys(raw: string | undefined): string[] {
+  const keys = (raw ?? "").split(",").filter(key => key !== "TMUX" && key !== "TMUX_PANE" && validateSeatEnvName(key) === null);
+  return [...new Set(keys)];
+}
+
+/** Dropped declarations either reveal the global value or restore a launch-level setting. */
+export function diffSeatEnvKeys(previousKeys: readonly string[], nextEnv: Readonly<SeatEnv>) {
+  const nextDeclaredKeys = parseSeatEnvKeys(nextEnv[SEAT_ENV_KEYS_VAR]);
+  const declared = new Set(nextDeclaredKeys);
+  const remove: string[] = [];
+  const reconcile: SeatEnv = {};
+  for (const key of previousKeys) {
+    if (declared.has(key)) continue;
+    const value = nextEnv[key];
+    if (value === undefined) remove.push(key);
+    else reconcile[key] = value;
+  }
+  return { nextDeclaredKeys, remove, reconcile };
+}

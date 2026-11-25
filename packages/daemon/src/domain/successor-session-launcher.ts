@@ -1,8 +1,8 @@
 import { ActivityGrantStore } from "./activity-grants.js";
 import { ulid } from "ulid";
-import { seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
+import { SEAT_ENV_KEYS_VAR, diffSeatEnvKeys, parseSeatEnvKeys, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "./claude-core-plugin-env.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { SeatEnvironmentReconciliation, TmuxAdapter } from "../adapters/tmux.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
 import type { RuntimeAdapter, NodeBinding, ReadinessResult, ForkSource } from "./runtime-adapter.js";
@@ -223,6 +223,7 @@ export class SuccessorSessionLauncher {
     // proof). The retiree exits in place; its provider session file is the durable wake target, so the
     // new unwind invariant is that a failed successor NEVER destroys that recoverable state.
     const departingSession = input.departingSessionName;
+    const declaredEnv = input.node.seatEnv ?? {};
 
     // OpenRig identity env mirrors NodeLauncher.launchNode's pattern so the successor self-identifies +
     // reports activity like a launched seat. OPENRIG_SESSION_NAME is the PRESERVED canonical name.
@@ -232,7 +233,7 @@ export class SuccessorSessionLauncher {
       OPENRIG_RUNTIME: input.node.runtime ?? undefined,
       ...this.sessionEnv,
       ...(input.node.runtime ? this.runtimeSessionEnv[input.node.runtime] : undefined),
-      ...seatEnvLaunchVars(input.node.seatEnv ?? {}),
+      ...seatEnvLaunchVars(declaredEnv),
       ...(input.node.seatProjectDir ? { [SEAT_PROJECT_DIR_ENV]: input.node.seatProjectDir } : {}),
       // Selected Claude and Codex plugin hooks use this interpreter, as at launch (node-launcher.ts).
       ...(input.node.seatProjectDir && (input.node.runtime === "codex" || input.node.runtime === "claude-code") ? { [SEAT_NODE_ENV]: process.execPath } : {}),
@@ -288,6 +289,25 @@ export class SuccessorSessionLauncher {
       }
     }
 
+    // Capture the previous declaration before the incumbent exits. A failed read cannot tell us which keys to clear.
+    let seatEnvironment: SeatEnvironmentReconciliation = {
+      set: declaredEnv, remove: [],
+    };
+    let environmentWarning: string | undefined;
+    try {
+      const saved = await this.tmuxAdapter.getSessionEnv(departingSession, SEAT_ENV_KEYS_VAR);
+      const previousKeys = parseSeatEnvKeys(saved);
+      const { nextDeclaredKeys, remove, reconcile } = diffSeatEnvKeys(previousKeys, env);
+      const pending = new Set([...previousKeys, ...nextDeclaredKeys]);
+      seatEnvironment = {
+        ...(pending.size > previousKeys.length ? { pendingKeys: [...pending].join(",") } : {}),
+        set: { ...declaredEnv, ...reconcile, [SEAT_ENV_KEYS_VAR]: nextDeclaredKeys.join(",") }, remove,
+      };
+    } catch {
+      // Keep the unreadable marker untouched so a later handover can still recover its previous keys.
+      environmentWarning = `Could not read the previous launch environment for ${departingSession}; dropped environment keys may remain.`;
+    }
+
     // #3253: the seat's scope is checked before the retiree is ended, so the respawn after it reuses that check. The
     // respawn runs in recovery mode: a limit never stops the handover after the retiree has ended (a scope failure late
     // in the path ends in a structured warning, logged only once it has gone on). The request stays stored.
@@ -310,7 +330,9 @@ export class SuccessorSessionLauncher {
     // <old-token>`), which is exactly how the 2026-08-22 wave's "fresh" successors booted 14-day-old
     // contexts. An explicit shell also resets the pane's respawn default, self-healing the pane.
     const blankShell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
-    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, blankShell, { cwd, env, processLimitsMode: "recovery" });
+    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, blankShell, {
+      cwd, env, processLimitsMode: "recovery", seatEnvironment,
+    });
     if (!respawned.ok) {
       return {
         ok: false,
@@ -370,7 +392,7 @@ export class SuccessorSessionLauncher {
       cwd: input.node.cwd ?? undefined,
     });
 
-    const warnings = [...preflightWarnings, ...(respawned.warnings ?? [])];
+    const warnings = [...preflightWarnings, ...(environmentWarning ? [environmentWarning] : []), ...(respawned.warnings ?? [])];
     return {
       ok: true,
       discoveredId: discovered.id,

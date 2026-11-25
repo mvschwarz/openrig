@@ -8,8 +8,10 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
 import type { RigSpec } from "../src/domain/types.js";
 import {
+  diffSeatEnvKeys,
   mergeSeatEnv,
   parseSeatEnvAssignment,
+  parseSeatEnvKeys,
   seatEnvLaunchVars,
   SEAT_ENV_KEYS_VAR,
 } from "../src/domain/seat-env.js";
@@ -89,6 +91,12 @@ describe("--env KEY=VALUE", () => {
 });
 
 describe("merging", () => {
+  it("separates dropped keys from launch-level values that replace a declaration", () => {
+    const previous = parseSeatEnvKeys("DROPPED,SHARED,HOME,OPENRIG_NODE_ID,TMUX,TMUX_PANE,bad-key,SHARED");
+    expect(diffSeatEnvKeys(previous, { SHARED: "next", HOME: "/launch", [SEAT_ENV_KEYS_VAR]: "SHARED" }))
+      .toEqual({ nextDeclaredKeys: ["SHARED"], remove: ["DROPPED"], reconcile: { HOME: "/launch" } });
+  });
+
   it("applies rig, then member, then a one-off override", () => {
     expect(mergeSeatEnv({ A: "rig", B: "rig" }, { B: "member", C: "member" }, { C: "override" }))
       .toEqual({ A: "rig", B: "member", C: "override" });
