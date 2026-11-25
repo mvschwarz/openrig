@@ -142,10 +142,23 @@ export function shownHubUrl(hubUrl: string): string {
   }
 }
 
+/** How a hub URL was shown before fragments were hidden: the query hidden, a fragment left in. Request items recorded
+ *  then carry it in their head, and still read back; nothing new is written this way. */
+function priorShownHubUrl(hubUrl: string): string {
+  try {
+    const url = new URL(hubUrl);
+    if (!url.search) return hubUrl;
+    url.search = "";
+    return `${url.toString()} (query hidden)`;
+  } catch {
+    return hubUrl;
+  }
+}
+
 /** The local item's text around the request, built from the receipt's fields, so the request reads back out of the local
  *  item: the receipt keeps only its hash, and erasing the local item erases the only copy. */
-const requestHead = (r: Pick<RequestRow, "peer" | "hub_url" | "hub_seat" | "hub_qitem_id">): string =>
-  `To ${r.peer} through the network hub ${shownHubUrl(r.hub_url)}, as ${r.hub_seat} (hub item ${r.hub_qitem_id}).\n\n`;
+const requestHead = (r: Pick<RequestRow, "peer" | "hub_url" | "hub_seat" | "hub_qitem_id">, shown = shownHubUrl): string =>
+  `To ${r.peer} through the network hub ${shown(r.hub_url)}, as ${r.hub_seat} (hub item ${r.hub_qitem_id}).\n\n`;
 const requestFoot = (requestId: string): string =>
   `\n\n---\nWhen the hub item closes, OpenRig closes this item with its answer and says who gave it. Read it with rig queue show ${requestId}.`;
 const summaryLead = (peer: string): string => `To ${peer} via network hub`;
@@ -153,8 +166,10 @@ const summaryLead = (peer: string): string => `To ${peer} via network hub`;
 /** What a create sends: the request's body and summary, read from its local item. Null when that text is gone (the item
  *  was erased) or isn't the request the receipt names; such a request is never sent. */
 function requestPayload(local: QueueItem, receipt: RequestRow): { body: string; summary: string | null } | null {
-  const head = requestHead(receipt), foot = requestFoot(receipt.local_qitem_id), all = local.body ?? "";
-  if (all.length < head.length + foot.length || !all.startsWith(head) || !all.endsWith(foot)) return null;
+  const foot = requestFoot(receipt.local_qitem_id), all = local.body ?? "";
+  // Today's head, or the one written before fragments were hidden (the same text for a URL without a fragment).
+  const head = [requestHead(receipt), requestHead(receipt, priorShownHubUrl)].find((h) => all.startsWith(h));
+  if (!head || all.length < head.length + foot.length || !all.endsWith(foot)) return null;
   const body = all.slice(head.length, all.length - foot.length);
   if (sha256(body) !== receipt.body_sha256) return null;
   const lead = `${summaryLead(receipt.peer)}: `;

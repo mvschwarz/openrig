@@ -953,6 +953,30 @@ describe("network connector", () => {
       expect(texts).toContain("https://hub.example/mcp (query hidden)");
     });
 
+    it("a request recorded before fragments were hidden still reads back: its unconfirmed create is sent, not settled as erased", async () => {
+      const first = bind();
+      bindings.disconnect(first.id);
+      const b = bindings.create({ session: first.localSession, hubUrl: "https://hub.example/mcp?key=pasted-key#frag=pasted", hubSeat: PARTICIPANT, token: "tok-f" });
+      hub.down = true;
+      expect((await send(b.id, "req-14")).state).toBe("unknown");
+      expect((await send(b.id, "req-15", "A second request")).state).toBe("unknown");
+      expect(repo.getById("req-14")!.body).toContain("https://hub.example/mcp (query and fragment hidden)");
+      // As an item recorded before the upgrade reads: the query hidden, the fragment shown.
+      const recordedBefore = (id: string) => db.prepare("UPDATE queue_items SET body = replace(body, ?, ?) WHERE qitem_id = ?")
+        .run("https://hub.example/mcp (query and fragment hidden)", "https://hub.example/mcp#frag=pasted (query hidden)", id);
+      recordedBefore("req-14");
+      recordedBefore("req-15");
+      // One whose request text changed since is still refused by the body hash.
+      db.prepare("UPDATE queue_items SET body = replace(body, 'A second request', 'A changed request') WHERE qitem_id = 'req-15'").run();
+      hub.down = false;
+      await pass(b.id);
+      expect(hub.items.get(networkHubRequestId(b, "req-14"))).toMatchObject({ destinationSession: PEER, body: "Review the release notes" });
+      expect(outcome("req-14")).toEqual({ outcome: null });
+      expect(repo.getById("req-14")!.state).toBe("blocked");
+      expect(hub.items.has(networkHubRequestId(b, "req-15"))).toBe(false);
+      expect(outcome("req-15")).toEqual({ outcome: "unknown" });
+    });
+
     it("a command retry of an unconfirmed create shows the hub item first: one the hub rerouted after the lost reply is found, not refused", async () => {
       const b = bind();
       const hubId = networkHubRequestId(b, "req-20");
