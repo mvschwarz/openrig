@@ -162,6 +162,8 @@ export interface SeatRefusal {
     | "missing_model"
     | "missing_cwd"
     | "invalid_cwd"
+    | "invalid_expectation"
+    | "cwd_baseline_changed"
     | "cwd_check_failed"
     | "cwd_persistence_failed"
     | "cwd_configuration_changed"
@@ -235,13 +237,15 @@ export type SetPermissionsToResult =
 export type SetCwdResult =
   | { ok: true; seat: SeatDescriptor; from: string | null; to: string; changed: boolean;
       effect: "next_launch"; warnings: string[] }
-  | (SeatRefusal & { warnings?: string[] });
+  | (SeatRefusal & { warnings?: string[]; expected?: { nodeId?: string; cwd?: string }; current?: { nodeId: string; cwd: string | null } });
 
 interface SetCwdInput {
   seatRef: string;
   cwd: string;
   reason: string;
   operator?: string | null;
+  expectedNodeId?: unknown;
+  expectedCwd?: unknown;
 }
 
 export type SetPolicyResult =
@@ -582,12 +586,54 @@ export class SeatLifecycleService {
     if (to === path.parse(to).root) {
       return { ok: false, code: "invalid_cwd", message: "Choose a project directory, not a filesystem root, for managed startup files." };
     }
+    let expectedNodeId: string | undefined;
+    if (input.expectedNodeId !== undefined) {
+      if (typeof input.expectedNodeId !== "string" || !input.expectedNodeId.length || /\s/.test(input.expectedNodeId) || input.expectedNodeId.includes("\0")) {
+        return { ok: false, code: "invalid_expectation", message: "expectedNodeId must be a nonempty node id without whitespace." };
+      }
+      expectedNodeId = input.expectedNodeId;
+    }
+    let expectedCwd: string | undefined;
+    if (input.expectedCwd !== undefined) {
+      if (typeof input.expectedCwd !== "string" || !input.expectedCwd.trim() || !path.isAbsolute(input.expectedCwd) || input.expectedCwd.includes("\0")) {
+        return { ok: false, code: "invalid_expectation", message: "expectedCwd must be an absolute working directory on the daemon's host." };
+      }
+      expectedCwd = input.expectedCwd;
+    }
     const resolved = this.resolveSeat(input.seatRef);
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const node = this.rigRepo.getRig(seat.rigId)?.nodes.find(candidate => candidate.id === seat.nodeId);
     if (!node) return { ok: false, code: "seat_not_found", message: "The seat no longer exists.", guidance: SEAT_LOOKUP_GUIDANCE };
     const from = node.cwd;
+    if (expectedNodeId !== undefined || expectedCwd !== undefined) {
+      const canonical = (dir: string): string => {
+        const resolvedPath = path.resolve(dir);
+        try { return fs.realpathSync(resolvedPath); } catch { return resolvedPath; }
+      };
+      const nodeMismatch = expectedNodeId !== undefined && node.id !== expectedNodeId;
+      const cwdMismatch = expectedCwd !== undefined && (
+        from === null || !path.isAbsolute(from) || canonical(from) !== canonical(expectedCwd)
+      );
+      if (nodeMismatch || cwdMismatch) {
+        const detail = nodeMismatch && cwdMismatch
+          ? `node id and saved working directory changed since you inspected it (expected node ${expectedNodeId} and cwd ${expectedCwd}; currently node ${node.id} and cwd ${from ?? "none"})`
+          : nodeMismatch
+            ? `node id changed since you inspected it (expected ${expectedNodeId}, currently ${node.id})`
+            : `saved working directory changed since you inspected it (expected ${expectedCwd}, currently ${from ?? "none"})`;
+        return {
+          ok: false,
+          code: "cwd_baseline_changed",
+          message: `The seat's ${detail}; no directory was created and the cwd was not changed.`,
+          guidance: `Re-inspect the seat with: rig ps --nodes --full --json or rig seat status ${input.seatRef}`,
+          expected: {
+            ...(expectedNodeId !== undefined ? { nodeId: expectedNodeId } : {}),
+            ...(expectedCwd !== undefined ? { cwd: expectedCwd } : {}),
+          },
+          current: { nodeId: node.id, cwd: from },
+        };
+      }
+    }
     try {
       fs.mkdirSync(to, { recursive: true });
       to = fs.realpathSync(to);

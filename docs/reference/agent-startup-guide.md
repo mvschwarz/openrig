@@ -381,6 +381,13 @@ not where the running process is.
 **What it writes:** it creates the folder if it's missing, and writes nothing else there. The seat's next fresh launch or
 rebuild handover writes its startup files there, as launch does today.
 
+**Guarding against a stale inspection:** pass `--expected-node-id <id>` and/or `--expected-cwd <directory>` (from an
+earlier `rig ps --nodes --full --json` or `rig seat status` read; `expectedNodeId` and `expectedCwd` on the route) to
+require that the seat was not recreated or moved since you inspected it. If an expectation no longer matches, `set-cwd`
+refuses with `cwd_baseline_changed` (HTTP 409) before creating the destination folder or saving anything, reporting the
+expected and current values; a malformed expectation is rejected with `invalid_expectation` (HTTP 400). Calls without
+either option behave as before. An older daemon that does not know these fields ignores them.
+
 **`set-cwd`'s preflight policy:** before saving, it reads, without writing, the enumerated resource copies (including
 nested plugin files) and startup skills that launch would place in the new directory, at their actual destinations,
 as they are at that moment. It's a point-in-time check, not a global overwrite guarantee or protection against later
