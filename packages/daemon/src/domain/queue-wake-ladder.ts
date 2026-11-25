@@ -664,9 +664,10 @@ function stageHeldSenderNotice(deps: WakeLadderDeps, m: { row: QueueItem; view: 
 
 /** #48: send a staged notice and record its actual outcome on the row. With no outbox it's sent at once, as before. */
 async function sendHeldSenderNotice(deps: WakeLadderDeps, row: QueueItem, notice: HeldSenderNotice | null): Promise<void> {
-  if (!notice) return;
+  if (!notice || deps.queueRepo.transferFence(row.qitemId)) return;
   const outcome = notice.outboxId ? await deps.queueRepo.deliverHeldSenderNotice(notice.outboxId)
-    : await deps.queueRepo.noticeHeldSender(notice.sender, notice.body);
+    : await deps.queueRepo.noticeHeldSender(notice.sender, notice.body, row.qitemId);
+  if (deps.queueRepo.transferFence(row.qitemId)) return;
   // A recorded notice that wasn't sent now (no transport yet, or already settled) gets no marker: it's owed or done.
   if (notice.outboxId && outcome.startsWith("skipped:")) return;
   appendMarker(deps.queueRepo, row, `${LADDER_SENDER_NOTICE_PREFIX} ${notice.sender} outcome=${outcome}`, true);

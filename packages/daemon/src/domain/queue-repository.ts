@@ -423,13 +423,13 @@ export interface QueueNudgeTransport {
   deliveryTarget?(session: string): import("./seat-delivery-guard.js").GuardTarget | null;
   retentionTarget?(session: string, input?: import("./seat-delivery-guard.js").AdmissionInput): import("./seat-delivery-guard.js").GuardTarget | null;
   draftAwareTarget?(session: string): import("./seat-delivery-guard.js").GuardTarget | null;
-  configureGuardedWakes?(applicable: (entries: readonly QueueWakeFacts[]) => boolean): void;
+  configureGuardedWakes?(applicable: (entries: readonly QueueWakeFacts[]) => boolean, fenced?: (qitemId: string) => boolean): void;
   send(
     sessionName: string,
     // (h): stampISO threads the nudge's compose time so the transport's delivered-latency calc can
     // measure the wait for a handoff nudge too (the real impl is SessionTransport, which accepts it).
     text: string,
-    opts?: { verify?: boolean; stampISO?: string; actorSession?: string; committedOutboxIds?: string[]; deliveryId?: string; auditPointer?: string; queueWake?: boolean; openrigNotice?: true }
+    opts?: import("./session-transport.js").SendOpts
   ): Promise<{ ok: boolean; verified?: boolean; sent?: boolean; inputPhase?: "not_reached" | "attempted" | "written"; error?: string; reason?: string; outcome?: string;
     sessionName?: string; usageLimit?: { asOf: string; resetsAt: string } }>;
 }
@@ -1431,9 +1431,9 @@ export class QueueRepository {
     this.transport = transport;
     transport.configureGuardedWakes?.(entries => entries.every(entry => {
       const row = entry.auditPointer ? this.getById(entry.auditPointer) : null;
-      if (!row || row.destinationSession !== entry.destinationSession) return false;
+      if (!row || this.transferFence(row.qitemId) || row.destinationSession !== entry.destinationSession) return false;
       return entry.outboxId.startsWith(WAKE_INTENT_PREFIX) ? this.currentWakeIntent(entry) : isBlockerLive(row.state);
-    }));
+    }), qitemId => !!this.transferFence(qitemId));
   }
 
   private currentWakeIntent(entry: QueueWakeFacts): boolean {
@@ -2018,11 +2018,14 @@ export class QueueRepository {
       return "indeterminate";
     }
     const released: OutboxEntry[] = [];
-    const recheckMembers = group.length < 2 ? undefined : (holds: (input: import("./seat-delivery-guard.js").AdmissionInput) => boolean, held: boolean) => {
-      const keep = group.filter((entry, i) => {
+    const recheckMembers: NonNullable<import("./session-transport.js").SendOpts["recheckMembers"]> = (holds, held) => {
+      const current = (entry: OutboxEntry) => entry.auditPointer && !this.transferFence(entry.auditPointer) && this.currentWakeIntent(entry);
+      // Without the lead, let surviving members retry under their own admission instead of borrowing the lead's.
+      const keep = !current(intent) ? [] : group.filter((entry, i) => {
         if (i === 0) return true;
+        if (!current(entry) || !entry.auditPointer) return false;
         const memberTrigger: WakeTrigger = entry.tags?.includes(WAKE_TRIGGER_OPENRIG_TAG) ? "openrig" : "agent";
-        const admission = this.wakeAdmission(entry.auditPointer!, memberTrigger);
+        const admission = this.wakeAdmission(entry.auditPointer, memberTrigger);
         return holds({ source: admission.source, urgent: admission.urgent }) === held;
       });
       for (const entry of group) {
@@ -2034,7 +2037,7 @@ export class QueueRepository {
         })();
         released.push(entry);
       }
-      return { text: recoveryNotice(keep) + keep.map(entry => entry.body).join("\n"), outboxIds: keep.map(entry => entry.outboxId) };
+      return keep.length > 0 && { text: recoveryNotice(keep) + keep.map(entry => entry.body).join("\n"), outboxIds: keep.map(entry => entry.outboxId) };
     };
     const outcome = await this.performWakeSend(
       qitemId, intent.destinationSession, intent.senderSession, undefined, recoveryNotice(group) + group.map(entry => entry.body).join("\n"), group.map(entry => entry.outboxId),
@@ -2106,7 +2109,7 @@ export class QueueRepository {
     for (const entry of released) {
       await this.deliverWakeIntent(entry.outboxId, attempted, eligible).catch((err) => console.error(`Queue wake delivery failed for ${entry.outboxId}:`, err));
     }
-    return reportedState;
+    return released.length === group.length ? "skipped" : reportedState;
   }
 
   /** Deliver after the queue transaction commits, never from inside it. The shared
@@ -2268,6 +2271,7 @@ export class QueueRepository {
     if (!opts?.explicit && this.deliveryDrains.holds(destinationSession)) return;
     if (!this.transport) return;
     const outcome = await this.performWakeSend(qitemId, destinationSession, sourceSession, bodyOverride, undefined, undefined, trigger, undefined, opts?.explicit === true);
+    if (this.transferFence(qitemId)) return;
     // #2829 slice 1 — `preInputFailure` is the honest no-receiver shape: the input phase
     // was never reached and nothing was sent, meaning the seat was gone before the wake
     // could be typed. The positive-evidence check itself rides the shared send path
@@ -2431,6 +2435,7 @@ export class QueueRepository {
       AND last_nudge_result = 'retained:draft_aware' ORDER BY ts_created, qitem_id`).all(...addresses) as Array<{ qitem_id: string }>;
     const cap = resolveWakeRetryCap();
     for (const { qitem_id } of rows) {
+      if (this.transferFence(qitem_id)) continue;
       const intent = `${WAKE_INTENT_PREFIX}${qitem_id}`;
       const after = lastMeaningfulTransition(this.db, qitem_id)?.id ?? 0;
       const tries = (this.db.prepare(`SELECT COUNT(*) AS n FROM queue_transitions WHERE qitem_id = ? AND transition_id > ?
@@ -2461,11 +2466,19 @@ export class QueueRepository {
     if (!this.outbox || !this.transport) return "skipped:no transport";
     const entry = this.outbox.getById(outboxId);
     if (!entry) return "skipped:no notice";
+    const notificationCurrent = () => !entry.auditPointer || !this.transferFence(entry.auditPointer);
+    if (!notificationCurrent()) return "skipped:transfer fence";
     if (!this.outbox.claimUnsent(outboxId)) return `skipped:${entry.deliveryState}`;
     let outcome: WakeAttemptOutcome;
     try {
-      outcome = this.classifyWakeResult(await this.transport.send(entry.destinationSession,
-        wrapPaneEnvelope(OPENRIG_SENDER, entry.destinationSession, entry.body), { verify: true, actorSession: OPENRIG_SENDER, openrigNotice: true }));
+      const result = await this.transport.send(entry.destinationSession, wrapPaneEnvelope(OPENRIG_SENDER, entry.destinationSession, entry.body),
+        { verify: true, actorSession: OPENRIG_SENDER, openrigNotice: true, auditPointer: entry.auditPointer ?? undefined, notificationCurrent });
+      if (result.reason === "draft_wake_superseded" && !notificationCurrent()) {
+        this.db.prepare("UPDATE outbox_entries SET delivery_state = ? WHERE outbox_id = ? AND delivery_state = 'sending'")
+          .run(entry.deliveryState, outboxId);
+        return "skipped:transfer fence";
+      }
+      outcome = this.classifyWakeResult(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       outcome = isWakeTimeoutSignal(message) ? { classified: "indeterminate", nudgeResult: `indeterminate:${message}` }
@@ -2501,11 +2514,14 @@ export class QueueRepository {
   /** #48: the wake ladder's one notice to a held row's sender, sent as OpenRig through the same guarded transport (the
    *  sender's own guard applies), with no custody: the path for a repository with no outbox. Returns the outcome for the
    *  ladder's record. */
-  async noticeHeldSender(sender: string, body: string): Promise<string> {
+  async noticeHeldSender(sender: string, body: string, qitemId: string): Promise<string> {
     if (!this.transport) return "skipped:no transport";
+    const notificationCurrent = () => !this.transferFence(qitemId);
+    if (!notificationCurrent()) return "skipped:transfer fence";
     try {
       const res = await this.transport.send(sender, wrapPaneEnvelope(OPENRIG_SENDER, sender, body),
-        { verify: true, actorSession: OPENRIG_SENDER, openrigNotice: true });
+        { verify: true, actorSession: OPENRIG_SENDER, openrigNotice: true, auditPointer: qitemId, notificationCurrent });
+      if (res.reason === "draft_wake_superseded" && !notificationCurrent()) return "skipped:transfer fence";
       return res.verified ? "verified" : !res.ok ? `failed:${res.reason ?? res.error ?? "unknown"}` : res.outcome ?? "sent-unverified";
     } catch (error) {
       return `failed:${error instanceof Error ? error.message : String(error)}`;
@@ -2618,7 +2634,8 @@ export class QueueRepository {
       const res = await this.transport!.send(destinationSession, text, { verify: true, stampISO, actorSession: sourceSession, committedOutboxIds,
         deliveryId: committedOutboxIds ? undefined : deliveryId, auditPointer: qitemId, queueWake: true,
         ...(trigger === "openrig" ? { openrigNotice: true as const } : {}), ...(admission.urgentBy ? { urgent: { by: admission.urgentBy } } : {}),
-        ...(recheckMembers ? { recheckMembers } : {}), ...(explicit ? { drainExempt: true as const } : {}) });
+        ...(recheckMembers ? { recheckMembers } : { notificationCurrent: () => !this.transferFence(qitemId) }),
+        ...(explicit ? { drainExempt: true as const } : {}) });
       // OPR.0.3.2.21.FR-4(c) — wording rename: the prior literal
       // "sent-unverified" read as a failure even in the common case
       // (delivery confirmed but the synchronous ack window expired,
@@ -6652,6 +6669,7 @@ export class QueueRepository {
    *  as prompt-clear recovery of a refused wake) read the real end and not `bridged:queued` (#3270). A typed fallback's
    *  result is recorded as a typed wake's is. */
   recordBridgedWakeEnd(qitemId: string, end: import("./hook-bridge.js").HookBridgeEnd): void {
+    if (this.transferFence(qitemId)) return;
     const typed = end.kind === "typed" && end.result ? this.classifyWakeResult(end.result as Awaited<ReturnType<QueueNudgeTransport["send"]>>) : null;
     const result = typed ? typed.nudgeResult
       : end.kind === "handed-to-hook" ? "bridged:handed-to-hook"

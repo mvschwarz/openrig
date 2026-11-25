@@ -8,6 +8,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 
 let db: Database.Database;
 let repo: QueueRepository;
@@ -59,4 +60,32 @@ it("does not wake a fenced row whose unroutable seat becomes reachable, while an
   expect(sent).toEqual(["other@r"]);
   expect(repo.getById(fenced)!.lastNudgeResult).toBe("unroutable:no-pane");
   expect(repo.getById(alive)!.lastNudgeResult).not.toMatch(/^unroutable:/);
+});
+
+it("skips a fenced row's held-sender notice without claiming it", async () => {
+  const outbox = new OutboxHandler(db);
+  repo.attachOutbox(outbox);
+  const fenced = await pendingUnroutable("late@r");
+  const live = await pendingUnroutable("other@r");
+  const fencedNotice = repo.stageHeldSenderNotice(fenced, 0, "late@r", "held");
+  const liveNotice = repo.stageHeldSenderNotice(live, 0, "other@r", "held");
+  if (!fencedNotice || !liveNotice) throw new Error("missing notice fixture");
+  fence(fenced);
+
+  await repo.deliverHeldSenderNotice(fencedNotice);
+  await repo.deliverHeldSenderNotice(liveNotice);
+
+  expect(sent).toEqual(["other@r"]);
+  expect(outbox.getById(fencedNotice)?.deliveryState).toBe("pending");
+});
+
+it("skips a fenced row's legacy held-sender notice", async () => {
+  const fenced = await pendingUnroutable("late@r");
+  const live = await pendingUnroutable("other@r");
+  fence(fenced);
+
+  await repo.noticeHeldSender("late@r", "held", fenced);
+  await repo.noticeHeldSender("other@r", "held", live);
+
+  expect(sent).toEqual(["other@r"]);
 });

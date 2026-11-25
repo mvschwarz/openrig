@@ -653,4 +653,28 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     expect(check).not.toHaveBeenCalled();
   });
 
+  it.each(["poll", "fallback"] as const)("skips an explicit wake fenced after bridge deposit at %s", async (mode) => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const repo = new QueueRepository(s.db, new EventBus(s.db), { validateRig: () => true, transport: s.transport });
+    const row = await repo.create({ sourceSession: "peer@team", destinationSession: s.sessionName, body: "work", nudge: false });
+    await repo.maybeNudge(row.qitemId, s.sessionName, true, row.sourceSession, undefined, "agent", { explicit: true });
+    await s.transport.send(s.sessionName, "unrelated input", { actorSession: "peer@team" });
+    expect(s.bridge.queued(s.nodeId)).toHaveLength(2);
+    s.db.exec(`INSERT INTO queue_transfer_ledger (record_id, side, kind, transfer_id, archive_digest, origin_host_id,
+      origin_minted_at, destination_host_id, authorization_digest, mapping_digest, actor, recorded_at)
+      VALUES ('rel', 'origin', 'relinquished', 'transfer', 'digest', 'origin', 'minted', 'target', 'auth', 'map', 'operator', '1')`);
+    s.db.prepare(`INSERT INTO queue_transfer_relinquished (qitem_id, record_id, archive_digest, destination_host_id, source_state)
+      VALUES (?, 'rel', 'digest', 'target', 'pending')`).run(row.qitemId);
+
+    if (mode === "poll") {
+      expect(s.bridge.poll(s.nodeId, armId)).toMatchObject({ action: "deliver", messages: [{ text: "unrelated input" }] });
+    } else {
+      s.advance(HOOK_BRIDGE_TURN_BOUND_MS + 1);
+      const typed = await s.transport.sweepHookBridge({ nodeId: s.nodeId });
+      expect(typed.filter(item => item.result.ok)).toHaveLength(1);
+      expect(s.writes.filter(write => write === "paste")).toHaveLength(1);
+    }
+  });
+
 });
