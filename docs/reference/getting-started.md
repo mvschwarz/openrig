@@ -133,7 +133,9 @@ layer sets `sandbox_workspace_write.network_access` and no managed requirement
 could restrict it; if Codex can't be asked or doesn't answer in time, the launch
 is left unchanged. To keep it off, set `network_access = false` under
 `[sandbox_workspace_write]` in your Codex configuration. If Codex does not answer
-within a few seconds, the seat starts without it. A command allowance does not
+within a few seconds, the seat starts without it. The workspace-write sandbox limits the seat's direct file edits;
+with network access on, it isn't isolation from the trusted OpenRig service or the agents the seat works with.
+A command allowance does not
 change general sandbox/network settings. The starter's `profile: default` selects OpenRig resources, not a native
 permission profile.
 Agent-guided setup [recommends keeping the team default](#have-your-agent-configure-permissions)
