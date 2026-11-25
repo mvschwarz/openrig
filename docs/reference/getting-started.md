@@ -425,10 +425,12 @@ when OpenRig can still tell which session is that seat's current one. The other
 seats resume their own conversations, and that seat isn't started: it reads
 `awaiting-decision`, and the run exits 1 as for any seat awaiting a decision.
 Without saved startup context it can't be started fresh, so no fresh start is
-offered. Restore its original session by hand, or record that session's resume
-token with `rig seat set-resume-token <session> --token-stdin`. A seat whose
-current session has no resume token waits the same way even with saved startup
-context. A seat set to start fresh still leaves the rig out, as does a rig
+offered; restore its original session by hand. For a Claude Code, Codex, Pi or
+OMP seat whose session is the newest one under its name, the reason also names
+the command that records that session's resume token: pipe the token to
+`rig seat set-resume-token <session> --token-stdin --reason "<why>"`. A seat
+whose current session has no resume token waits the same way even with saved
+startup context. A seat set to start fresh still leaves the rig out, as does a rig
 where every seat lacks both, or where which session is current is unclear.
 
 Restore requests run one at a time by default. To keep up to two requests

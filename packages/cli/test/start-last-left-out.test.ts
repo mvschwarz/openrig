@@ -7,6 +7,9 @@
 // - When that seat's current occupant is ambiguous, nothing is guessed: the rig is still left out and named with the
 //   daemon's reason and blockers, as #3823 reports it. Before #3823 the rig vanished from the output ("Daemon and kernel
 //   are up. No rigs to restore.", --json `{"status":"started","candidates":[],"keptDown":[],"restoredRigs":[]}`).
+// - The waiting seat's reason names `rig seat set-resume-token` only when that command records on the session restore
+//   kept for it: followed as printed, it does. With a newer exited row under the same name, it would record there, so the
+//   reason doesn't name it.
 
 import { afterEach, expect, it, vi } from "vitest";
 import { serve } from "@hono/node-server";
@@ -18,6 +21,7 @@ import type { RuntimeAdapter } from "../../daemon/src/domain/runtime-adapter.js"
 import { Reconciler } from "../../daemon/src/domain/reconciler.js";
 import { snapshotMatchesCurrentOccupants } from "../../daemon/src/domain/rehydrate-eligibility.js";
 import { startCommand } from "../src/commands/start.js";
+import { seatCommand } from "../src/commands/seat.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type DaemonState, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import { allowFetchTarget, resetFetchAllowlist } from "./fetch-guard.js";
@@ -59,8 +63,9 @@ function readyAdapter(runtime: string, launches: Launch[], onLaunch: (launch: La
 }
 
 /** `ambiguousTokenless`: the token-less seat also keeps a second current row (a registered launch that never recorded a
- *  token and was never superseded), so which row is its occupant can't be told. */
-async function rebootedAfterRestore(opts: { ambiguousTokenless?: boolean } = {}) {
+ *  token and was never superseded), so which row is its occupant can't be told. `newerExitedRow`: after the reboot, the
+ *  token-less seat also has a newer row under the same session name that has exited, so it isn't the occupant. */
+async function rebootedAfterRestore(opts: { ambiguousTokenless?: boolean; newerExitedRow?: boolean } = {}) {
   const db = createFullTestDb(); cleanup.push(() => db.close());
   const live = new Set<string>();
   const created: string[] = [];
@@ -143,6 +148,10 @@ async function rebootedAfterRestore(opts: { ambiguousTokenless?: boolean } = {})
 
   // The next reboot, before a later periodic snapshot names the restored rows.
   await reboot();
+  if (opts.newerExitedRow) {
+    const exited = sessionRegistry.registerSession(nodeIds["dev.c"]!, "dev-c@rebooted");
+    sessionRegistry.updateStatus(exited.id, "exited");
+  }
   // Only what `rig start --last` launches from here on.
   launches.length = 0;
   created.length = 0;
@@ -159,8 +168,8 @@ async function serveDaemon(app: ReturnType<typeof createTestApp>["app"]): Promis
   return port;
 }
 
-function startCmd(port: number, extra: { promptYesNo?: (question: string) => Promise<boolean> } = {}): Command {
-  const lifecycleDeps: LifecycleDeps = {
+function lifecycleDeps(port: number): LifecycleDeps {
+  return {
     acquireStartLock: () => ({ recordChild: vi.fn(), release: vi.fn() }),
     spawn: vi.fn(() => ({ pid: 1, unref: vi.fn() }) as never),
     fetch: vi.fn(async () => ({ ok: true })) as never,
@@ -174,19 +183,30 @@ function startCmd(port: number, extra: { promptYesNo?: (question: string) => Pro
     openForAppend: vi.fn(() => 3),
     isProcessAlive: vi.fn(() => true),
   };
+}
+
+function startCmd(port: number, extra: { promptYesNo?: (question: string) => Promise<boolean> } = {}): Command {
   const prog = new Command();
   prog.exitOverride();
-  prog.addCommand(startCommand({ lifecycleDeps, clientFactory: (url: string) => new DaemonClient(url), ...extra }));
+  prog.addCommand(startCommand({ lifecycleDeps: lifecycleDeps(port), clientFactory: (url: string) => new DaemonClient(url), ...extra }));
   return prog;
 }
 
-async function run(prog: Command, args: string[]) {
+/** `rig seat ...` against the served daemon, with `stdin` as what is piped in. */
+function seatCmd(port: number, stdin: string): Command {
+  const prog = new Command();
+  prog.exitOverride();
+  prog.addCommand(seatCommand({ lifecycleDeps: lifecycleDeps(port), clientFactory: (url: string) => new DaemonClient(url), readStdin: async () => stdin }));
+  return prog;
+}
+
+async function run(prog: Command, args: string[], verb = "start") {
   const logs: string[] = [];
   const log = console.log, error = console.error, exitCode = process.exitCode;
   process.exitCode = undefined;
   console.log = (...parts: unknown[]) => logs.push(parts.join(" "));
   console.error = (...parts: unknown[]) => logs.push(parts.join(" "));
-  try { await prog.parseAsync(["node", "rig", "start", ...args]); }
+  try { await prog.parseAsync(["node", "rig", verb, ...args]); }
   finally { console.log = log; console.error = error; }
   const code = process.exitCode;
   process.exitCode = exitCode;
@@ -295,6 +315,48 @@ it("interactively, rig start --last doesn't ask to fresh-prime a waiting seat th
   expect(output).not.toContain("fresh-primed");
   expect(launches.map((launch) => launch.name)).toEqual(["dev-a@rebooted", "dev-b@rebooted"]);
   expect(human.exitCode).toBe(1);
+});
+
+const SEAT_TOKEN = (db: ReturnType<typeof createFullTestDb>, id: string) =>
+  db.prepare("SELECT resume_type AS type, resume_token AS token, resume_provenance AS provenance FROM sessions WHERE id = ?").get(id);
+
+it("the token command dev.c's reason names, followed as printed, records the token on the session restore kept for dev.c", async () => {
+  const { fixture, db, current } = await rebootedAfterRestore();
+  const tokenless = current().find((row) => row.seat === "dev.c")!;
+  const port = await serveDaemon(fixture.app);
+  const json = await run(startCmd(port), ["--last", "--json"]);
+  const nodes = JSON.parse(json.logs.find((line) => line.startsWith("{"))!).restoredRigs[0].nodes as Array<{ logicalId: string; error?: string }>;
+  const named = nodes.find((node) => node.logicalId === "dev.c")?.error
+    ?.match(/Restore the original session manually; to record its resume token, pipe it to: rig seat (set-resume-token) (\S+) --token-stdin --reason "<why>"\.$/);
+  expect(named?.slice(1)).toEqual(["set-resume-token", "dev-c@rebooted"]);
+  const token = "019a0000-0000-7000-8000-0000000000cc";
+  const set = await run(seatCmd(port, token), [named![1]!, named![2]!, "--token-stdin", "--reason", "dev.c's codex thread"], "seat");
+  expect(set.exitCode).toBeUndefined();
+  expect(set.logs.join("\n")).toContain("Set resume token for dev-c@rebooted: codex_id (provenance: operator). Token redacted.");
+  expect(SEAT_TOKEN(db, tokenless.id)).toEqual({ type: "codex_id", token, provenance: "operator" });
+});
+
+it("when a newer exited row shares dev.c's session name, its reason doesn't name the token command, which would record on that row", async () => {
+  const { fixture, db, rig, current, nodeIds } = await rebootedAfterRestore({ newerExitedRow: true });
+  const tokenless = current().find((row) => row.seat === "dev.c")!;
+  const exited = db.prepare("SELECT id FROM sessions WHERE node_id = ? AND status = 'exited' ORDER BY id DESC LIMIT 1").get(nodeIds["dev.c"]!) as { id: string };
+  expect(exited.id > tokenless.id).toBe(true);
+  const port = await serveDaemon(fixture.app);
+  const json = await run(startCmd(port), ["--last", "--json"]);
+  const restoredRig = JSON.parse(json.logs.find((line) => line.startsWith("{"))!).restoredRigs[0] as { status: string; nodes: Array<{ logicalId: string; status: string; error?: string; noStartupContext?: true }> };
+  // Restore still keeps the detached row for dev.c, waiting, and the siblings resume.
+  expect(restoredRig.status).toBe("partially_restored");
+  expect(restoredRig.nodes.map((node) => [node.logicalId, node.status])).toEqual([["dev.a", "resumed"], ["dev.b", "resumed"], ["dev.c", "awaiting-decision"]]);
+  const rehydrate = fixture.snapshotRepo.listSnapshots(rig.id).find((snapshot) => snapshot.kind === "auto-rehydrate")!;
+  expect(rehydrate.data.activeOccupantsByNode?.[nodeIds["dev.c"]!]).toEqual({ kind: "resolved", sessionId: tokenless.id });
+  const devC = restoredRig.nodes.find((node) => node.logicalId === "dev.c")!;
+  expect(devC.noStartupContext).toBe(true);
+  expect(devC.error).toBe("Original session unresumable: no resume token was captured for this seat. The seat has no saved startup context either, so it can't be started fresh. No session was started. Restore the original session manually.");
+  // Why: the command records on the newest row under that name, the exited one, and reports success; dev.c's stays empty.
+  const set = await run(seatCmd(port, "019a0000-0000-7000-8000-0000000000cc"), ["set-resume-token", "dev-c@rebooted", "--token-stdin", "--reason", "dev.c's codex thread"], "seat");
+  expect(set.exitCode).toBeUndefined();
+  expect(SEAT_TOKEN(db, exited.id)).toMatchObject({ token: "019a0000-0000-7000-8000-0000000000cc" });
+  expect(SEAT_TOKEN(db, tokenless.id)).toMatchObject({ token: null });
 });
 
 it("with saved startup context, the token-less seat waits the same way and its fresh start is still offered", async () => {

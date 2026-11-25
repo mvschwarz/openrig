@@ -280,9 +280,14 @@ cited here by number with the code that carries them):
   token, and restore stops it as `awaiting-decision` before any launch while
   the other seats resume from their own rows. Its result carries
   `noStartupContext` and names no fresh launch, which would refuse without
-  startup context; the CLI doesn't offer one either. An eligible agent seat
-  whose current occupant has no token stops the same way, so it is listed
-  too, and `noSeatStarts` marks a rig where every seat would wait.
+  startup context; the CLI doesn't offer one either. It names
+  `rig seat set-resume-token` only when that command records on this seat's
+  session: its lookup (`findResumeContextByName`, the newest row under the
+  name) returns the occupant's row, and the runtime has a token type
+  (`resumeTypeForRuntime`). Otherwise it names manual recovery alone. An
+  eligible agent seat whose current occupant has no token stops the same way,
+  so it is listed too, and `noSeatStarts` marks a rig where every seat would
+  wait.
 - Post-command handoff: `down` output includes the snapshot ID and
   `To restore: rig up <name>` (or `rig restore <snapshotId> --rig <rigId>`
   when the name is not unique); `up` output includes node statuses and an
