@@ -187,7 +187,8 @@ describe.skipIf(process.platform === "win32")("OPENRIG_SEAT_LAUNCH_DIR on real s
     // The tmux session's own copy is still the first launch's, and a bare respawn would start from it.
     expect((await tmux(["show-environment", "-t", `=${session}`, SEAT_LAUNCH_DIR_ENV])).trim()).toBe(`${SEAT_LAUNCH_DIR_ENV}=${a}`);
     expect(await run("bare", (command) => tmuxAdapter.respawnPane(pane, command, { cwd: b }))).toBe(`${a}|${b}`);
-    // The direct restart's respawn (seat-restart-in-place.ts), with and without a kept limit, carries B.
+    // The direct restart's respawn (seat-restart-in-place.ts) carries B. This seat has no limit, so with keepLimitOf set it
+    // takes the same bare path; the kept-scope command is checked in tmux-seat-process-limits.test.ts.
     for (const keep of [false, true]) {
       const seen = await run(`restart-keep-${keep}`, (command) => tmuxAdapter.respawnPane(pane, command,
         { cwd: b, launchEnv: launchDirEnv(b), ...(keep ? { keepLimitOf: node.id, processLimitsMode: "recovery" as const } : {}) }));
