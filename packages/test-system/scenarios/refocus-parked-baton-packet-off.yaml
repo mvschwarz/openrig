@@ -24,5 +24,5 @@ steps:
       surface: hook_context
       seat: work-worker@solo-stub
       within: 0ms
-      contains: "CONTEXT FROM HELD AND PENDING WORK — nothing is in progress, and every held and pending row (1 held, 0 pending) resolves to this slice."
+      contains: "CONTEXT FROM HELD AND PENDING WORK — nothing is in progress, and every held and pending row (1 held, 0 pending; 1 OpenRig notice set aside) resolves to this slice."
   - down: {}
