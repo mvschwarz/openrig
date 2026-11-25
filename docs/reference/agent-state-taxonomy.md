@@ -191,6 +191,16 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   carries an interval holds for two of them, then lapses to unknown, so a runner killed without saying so stops reading
   idle. Silence never clears a pending attention prompt, and a runner that states no interval (omp, an older pi
   runner) keeps the hold-until-the-next-boundary behaviour.
+- **A plain community preset's declared hooks** (`activity_hooks`, recorded at launch): the hook events the
+  harness's own script posts decide working, idle and needs-input, taken in their own order (time, then sequence)
+  as a runner's are, so a delayed older `Stop` that carries its `occurredAt` doesn't read a working seat idle. A post
+  without `occurredAt` is stamped at arrival and ordered by it. Only a declared turn start (`UserPromptSubmit` or `active`) makes an idle
+  boundary hold until the next post; without one it lasts the 15 s hook window, then positive-only sampling decides
+  (working or unknown). A dialog the structural recognizer reads on screen (the `needs-input-chrome` rung, source
+  `community:structural-prompt`) raises needs-input while its frame is fresh (5 s), captured after the inventory
+  began, from the seat's pane where that's known, and started after the seat's latest hook; the next hook, a frame
+  with no dialog or a failed read ends it. The trust rests on the installed preset's declaration, and nothing
+  demotes it automatically. A runner preset ignores the declaration.
 
 Claude permission notifications raise needs-input immediately. A visible permission can clear
 after it has been observed and then disappears. A notification whose dialog was never observed

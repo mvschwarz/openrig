@@ -769,7 +769,7 @@ export class AgentActivityStore {
  *  Pi-protocol runner raises it too for a `protocol: pi-rpc` fork (`piRpc`, its launch record), when the fork reports
  *  no session file; a preset's own runner (`runner: true`) only records it (harness-runner-contract). */
 export function hookEventState(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null, communityRunner = false, piRpc = false): AgentActivity["state"] {
-  if (rawEvent === "UserPromptSubmit" || rawEvent === "PreToolUse" || rawEvent === "active") return "running";
+  if (rawEvent === "UserPromptSubmit" || rawEvent === "PreToolUse" || rawEvent === "PostToolUse" || rawEvent === "active") return "running";
   if (rawEvent === "PermissionRequest") return seatRuntime === "codex" ? "unknown" : "needs_input";
   if (rawEvent === "PermissionPromptConfirmed") return "needs_input";
   if (rawEvent === "Notification") {

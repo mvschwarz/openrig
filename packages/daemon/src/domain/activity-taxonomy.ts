@@ -101,8 +101,8 @@ export interface RungDeclaration {
   initialTrust: RungTrust;
   /** Hooks only: the source sees every turn boundary in order, so its last idle or attention boundary holds until the
    *  next instead of expiring with the hook window. A working boundary still expires: a turn whose end was lost must not
-   *  read working forever. Its posts are taken in the source's own order. Only a runner that reads its child's whole
-   *  event stream declares it. */
+   *  read working forever. Its posts are taken in the source's own order. A runner that reads its child's whole event
+   *  stream declares it, and so does a community preset whose declared hooks include a turn start. */
   durableBoundaries?: true;
 }
 
@@ -113,6 +113,9 @@ export interface AdapterRungInventory {
   adapterId: string;
   runtime: "claude-code" | "codex" | "pi" | "omp" | "tmux-generic" | "community-harness" | "community-runner";
   rungs: RungDeclaration[];
+  /** A plain community preset's recorded `activity_hooks`, sorted: the hook events its own script posts. Part of the
+   *  inventory's identity, so a seat re-declares when its recorded declaration changes. */
+  activityHooks?: readonly string[];
 }
 
 /** One piece of evidence an adapter reports into the oracle. Every rung's evidence is
@@ -229,7 +232,7 @@ export const TMUX_GENERIC_RUNG_INVENTORY: AdapterRungInventory = {
   rungs: [{ rung: "window-sampling", lifecycleCoverage: "full", initialTrust: "authoritative" }],
 };
 
-/** A community harness declares no activity signal. A changing screen reads working, decided by window
+/** A community harness that declares no activity signal. A changing screen reads working, decided by window
  *  sampling; a quiet screen reads unknown, never idle, since an app can sit quietly at a prompt or an approval. */
 export const COMMUNITY_HARNESS_RUNG_INVENTORY: AdapterRungInventory = {
   adapterId: "community-harness",
@@ -266,14 +269,41 @@ export const COMMUNITY_RUNNER_RUNG_INVENTORY: AdapterRungInventory = {
   rungs: RUNNER_ACTIVITY_RUNGS,
 };
 
+/** A plain community preset whose own hook script posts the events its launch recorded (`activity_hooks`): those hooks
+ *  decide, and its posts are taken in their own order (time, then sequence) as a runner's are. Only a declared turn start
+ *  (`UserPromptSubmit` or `active`) makes its boundaries durable: without one, an idle `Stop` lasts the hook window, since
+ *  nothing would report the next turn starting. A dialog the screen shows raises needs-input while that frame is fresh
+ *  and newer than the latest hook. A quiet pane reads unknown, never idle. The trust rests on the installed preset's own
+ *  declaration, and nothing demotes it automatically. */
+export function communityHooksRungInventory(activityHooks: readonly string[]): AdapterRungInventory {
+  const turnStart = activityHooks.includes("UserPromptSubmit") || activityHooks.includes("active");
+  return {
+    adapterId: "community-hooks",
+    runtime: "community-harness",
+    activityHooks: [...new Set(activityHooks)].sort(),
+    rungs: [
+      { rung: "lifecycle-hooks", lifecycleCoverage: turnStart ? "full" : "partial", initialTrust: "authoritative",
+        ...(turnStart ? { durableBoundaries: true as const } : {}) },
+      { rung: "needs-input-chrome", lifecycleCoverage: "partial", initialTrust: "authoritative" },
+      { rung: "window-sampling", lifecycleCoverage: "partial", initialTrust: "positive-only" },
+    ],
+  };
+}
+
 /** Resolve a runtime string to its rung inventory (the ingest auto-declaration path).
  *  Unknown runtimes get the generic floor — partial-coverage honesty by default. A seat launched for a community
- *  community harness (its session's recorded selection, still the node's runtime) gets that app's inventory. */
-export function runtimeRungInventory(runtime: string | null, communityHarness?: string | null, communityRunner?: boolean): AdapterRungInventory {
+ *  community harness (its session's recorded selection, still the node's runtime) gets that app's inventory: a runner's,
+ *  the declared-hooks one when its launch recorded `activity_hooks`, else the screen-only one. */
+export function runtimeRungInventory(runtime: string | null, communityHarness?: string | null, communityRunner?: boolean,
+  activityHooks?: readonly string[] | null): AdapterRungInventory {
   if (runtime === "claude-code") return CLAUDE_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "codex") return CODEX_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "pi") return PI_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "omp") return OMP_ACTIVITY_RUNG_INVENTORY;
-  if (communityHarnessOf(communityHarness, runtime)) return communityRunner === true ? COMMUNITY_RUNNER_RUNG_INVENTORY : COMMUNITY_HARNESS_RUNG_INVENTORY;
+  // A runner reports for itself, so its recorded hook declaration is ignored.
+  if (communityHarnessOf(communityHarness, runtime)) {
+    if (communityRunner === true) return COMMUNITY_RUNNER_RUNG_INVENTORY;
+    return activityHooks?.length ? communityHooksRungInventory(activityHooks) : COMMUNITY_HARNESS_RUNG_INVENTORY;
+  }
   return TMUX_GENERIC_RUNG_INVENTORY;
 }

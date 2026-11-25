@@ -1,4 +1,4 @@
-import type { RigWithRelations, Session, Binding, Pod, AgentActivity, SeatIdentityVerdict } from "./types.js";
+import type { RigWithRelations, Session, Binding, Pod, AgentActivity, SeatIdentityVerdict, NodeInventoryEntry } from "./types.js";
 import { identityVerdictDownranksRunning } from "./types.js";
 
 export interface RigGraphInput extends RigWithRelations {
@@ -41,6 +41,8 @@ interface RFNodeData {
   contextTotalOutputTokens: number | null;
   needsAttention?: boolean;
   agentActivity?: AgentActivity | null;
+  /** The served oracle state: its display and needs-input count decide the graph's glyph. Null when it has no answer. */
+  activityState?: NodeInventoryEntry["activityState"];
   currentQitems?: CurrentQitemSummary[];
   terminalActive?: boolean | null;
   hasAssignedWork?: boolean;
@@ -89,6 +91,8 @@ export interface InventoryOverlay {
   contextTotalOutputTokens?: number | null;
   needsAttention?: boolean;
   agentActivity?: AgentActivity | null;
+  /** The served oracle state: its display and needs-input count decide the graph's glyph. Null when it has no answer. */
+  activityState?: NodeInventoryEntry["activityState"];
   currentQitems?: CurrentQitemSummary[];
   terminalActive?: boolean | null;
   hasAssignedWork?: boolean;
@@ -174,6 +178,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         contextTotalOutputTokens: overlay?.contextTotalOutputTokens ?? null,
         needsAttention: overlay?.needsAttention,
         agentActivity: overlay?.agentActivity ?? null,
+        activityState: overlay?.activityState ?? null,
         currentQitems: overlay?.currentQitems ?? [],
         terminalActive: overlay?.terminalActive,
         hasAssignedWork: overlay?.hasAssignedWork ?? false,

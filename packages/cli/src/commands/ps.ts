@@ -99,7 +99,8 @@ export interface NodeEntry {
   /** The registry's recorded session status, kept when the served sessionStatus is corrected. */
   storedSessionStatus?: string | null;
   /** A community harness's seat: its label, maintainer and declared limits. */
-  communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
+  communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string;
+    activityHooks?: string[] };
   /** Configured literal argv prefix wrapping local built-in Pi/Codex launches; omitted when absent. */
   launchWrapper?: string[];
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
@@ -801,6 +802,9 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       oriented: n.oriented ?? "n-a",
       lifecycleState: n.lifecycleState,
       // Keep the current usage limit visible without classifying it as human attention.
+      // The decided activity word, as the table shows it (the oracle's, with the screen fallback where it applies);
+      // agentActivity below is the older hook-and-screen reading.
+      activity: formatActivity(n),
       agentActivity: keepDiagnostics || hasCurrentUsageLimit(n)
         ? { state: n.agentActivity?.state ?? "unknown", reason: n.agentActivity?.reason }
         : { state: n.agentActivity?.state ?? "unknown" },

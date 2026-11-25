@@ -7,7 +7,7 @@ import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
 import type { RuntimeAdapter, NodeBinding, ReadinessResult, ForkSource } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode } from "./runtime-adapter.js";
-import { communityHarnessAdapter, launchedCommunityHarness } from "../adapters/community-harness-runtime-adapter.js";
+import { communityHarnessAdapter, launchedCommunityHarness, type LaunchedCommunityHarness } from "../adapters/community-harness-runtime-adapter.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { isShellForeground } from "./shell-classifier.js";
@@ -105,8 +105,8 @@ export type SuccessorLaunchResult =
       /** A community harness's conversation reported by its launcher, or named by OpenRig and passed to it. Absent for a
        *  token read from the runtime itself (a built-in's, or Pi RPC's session file). */
       resumeProvenance?: "launcher" | "passed";
-      /** The community harness this successor was launched for, with its preset's runner declaration at launch. */
-      communityHarness?: { app: string; runner: boolean | "pi-rpc" };
+      /** The community harness this successor was launched for, with its preset's runner and hook declarations at launch. */
+      communityHarness?: LaunchedCommunityHarness;
       appliedLaunch?: AppliedLaunchObservation;
       /** The launch's frozen executable and whether it is a #! script (Claude managed launches, #2341). */
       launchedExecutable?: { path: string; isScript: boolean };

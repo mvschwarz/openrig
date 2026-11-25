@@ -49,7 +49,7 @@ the same harness can run in many places, and one place can host many harnesses.
 | | Plain community preset | Runner preset (`runner: true`) | OpenRig-hosted protocol runner (`protocol: pi-rpc`) |
 |---|---|---|---|
 | **What runs in the pane** | The harness's own terminal app | A small program you maintain, *the runner*, which hosts the agent (for example an ACP agent over stdio) | OpenRig's own Pi runner, which starts your binary (`command`) in Pi's RPC mode |
-| **How OpenRig reads activity** | From the screen: a changing screen reads working; a quiet one reads **unknown**, never idle | From the runner's reports: working, idle, needs input | From the Pi runner's reports, through the same channel as built-in Pi; identity is the session file Pi's `get_state` reports |
+| **How OpenRig reads activity** | From the screen: a changing screen reads working; a quiet one reads **unknown**, never idle. A preset that declares the hooks its own script posts (`activity_hooks`) reads from those instead | From the runner's reports: working, idle, needs input | From the Pi runner's reports, through the same channel as built-in Pi; identity is the session file Pi's `get_state` reports |
 | **How input arrives** | Typed into the app's prompt | Typed into the runner, which turns each submitted message into one agent prompt; a message sent mid-turn waits | Pi's input: a submitted block is a prompt, a message sent while busy steers the current turn, `/followup` queues after it and `/abort` cancels it |
 | **Choose it when** | The harness has a usable terminal UI (Cursor, Hermes, OpenClaw examples) | The harness speaks a protocol rather than a screen (ACP, JSON-RPC, stream-JSON), or you can report turn boundaries reliably | Your harness is a Pi fork, or speaks Pi's CLI and JSONL RPC protocol |
 
@@ -160,6 +160,12 @@ host hooks, contained guest grants and install-token Pi usage keep their legacy 
 current bound Pi credential. No native input channel or cancellation capability is implied by this credential.
 
 Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer <token>`.
+
+A plain preset needs no runner to report: its harness's own hook script can post on the install-token path, and the preset
+lists the events it posts (`activity_hooks`). Those posts carry the same fields a runner's do, `occurredAt` and an
+increasing `sequence` included, and are ordered the same way; a turn start decides whether its idle holds. See
+[Hook-reporting presets](community-harness-presets.md#hook-reporting-presets-activity_hooks). A runner's preset that also
+declares `activity_hooks` keeps its runner's reports.
 
 The same endpoint accepts an observation-only report from a current run-bound credential:
 
