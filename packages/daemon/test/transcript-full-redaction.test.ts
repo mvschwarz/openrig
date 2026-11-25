@@ -121,22 +121,32 @@ describe("transcript redaction keeps identifiers", () => {
     expect(redactTranscriptContent(`abc${jwt}`)).toBe(`abc${jwt}`);
   });
 
-  it("masks every JWT when a signature only ends like a joined header, or a joined signature starts like one", () => {
+  it("masks every field of every JWT-shaped run, however its joined and dotted fields read", () => {
     const signed = (signature: string) => jwt.slice(0, jwt.lastIndexOf(".") + 1) + signature;
-    for (const marker of ["-eyJ" + "abcdefghijk", "_eyJ" + "abcdefghijk"]) {
+    const marker = "eyJ" + "abcdefghijk";
+    // A signature that ends like a joined header also reads as a header, a payload and a signature with the next
+    // dot-joined JWT, so that dot is masked with them; nothing of either JWT stays visible.
+    for (const joiner of ["-", "_"]) {
       for (const separator of [".", "-", "_"]) {
         for (const label of ["", "label-"]) {
-          const text = label + signed("x".repeat(43) + marker) + separator + signed("y".repeat(43));
-          // Joined by a dot they're two matches; joined by "-" or "_", one.
-          expect(redactTranscriptContent(text), `${marker[0]} ${separator} ${label}`).toBe(label + (separator === "." ? "[REDACTED].[REDACTED]" : "[REDACTED]"));
+          const text = label + signed("x".repeat(43) + joiner + marker) + separator + signed("y".repeat(43));
+          expect(redactTranscriptContent(text), `${joiner} ${separator} ${label}`).toBe(label + "[REDACTED]");
           expect(hasTranscriptSecret(text)).toBe(true);
         }
       }
     }
-    // A chain whose middle signature starts with "eyJ" still goes whole, and a JWT that ends like a header, then a dot,
-    // then a joined chain is two matches.
+    // The same with one to three more dot-joined JWTs, whose payloads may also end like a header: no signature stays,
+    // and a dot no JWT-shaped run crosses still separates two.
+    const first = `${marker}.${marker}.${"x".repeat(43)}-${marker}`;
+    for (const payload of [marker, `${marker}-${marker}`]) {
+      for (const count of [1, 2, 3]) {
+        const text = first + `.${marker}.${payload}.${"y".repeat(43)}`.repeat(count);
+        expect(redactTranscriptContent(text), `${payload.length} ${count}`).toBe(Array(count).fill("[REDACTED]").join("."));
+      }
+    }
+    // A chain whose middle signature starts with "eyJ" goes whole; a plain JWT, a dot, then a chain stays two.
     expect(redactTranscriptContent(`${jwt}-${signed("eyJ" + "q".repeat(20))}-${jwt}`)).toBe("[REDACTED]");
-    expect(redactTranscriptContent(`${signed("x".repeat(43) + "-eyJ" + "abcdefghijk")}.${jwt}-${jwt}`)).toBe("[REDACTED].[REDACTED]");
+    expect(redactTranscriptContent(`${jwt}.${jwt}-${jwt}`)).toBe("[REDACTED].[REDACTED]");
   });
 
   it("runs in linear time on JWT-shaped runs that never finish", () => {
@@ -148,16 +158,22 @@ describe("transcript redaction keeps identifiers", () => {
       expect(hasTranscriptSecret(text)).toBe(false);
       expect(performance.now() - started).toBeLessThan(100);
     }
-    // A long label in front of a real JWT is walked once, a long joined chain is one match, and a payload that never
-    // finishes after a JWT gives the one JWT back.
-    const started = performance.now();
-    expect(redactTranscriptContent("a-".repeat(50_000) + jwt)).toBe("a-".repeat(50_000) + "[REDACTED]");
-    expect(redactTranscriptContent(`${jwt}-`.repeat(5_000) + jwt)).toBe("[REDACTED]");
-    expect(redactTranscriptContent(jwt + ".eyJ" + "a".repeat(100_000))).toBe("[REDACTED].eyJ" + "a".repeat(100_000));
-    expect(redactTranscriptContent(jwt + "-eyJ".repeat(25_000) + ".x")).toBe("[REDACTED].x");
+    // A long label in front of a real JWT is walked once, a long joined chain is one match, a payload that never
+    // finishes after a JWT gives the one JWT back, and long dot-joined runs are each walked once.
     const endsLikeHeader = jwt.slice(0, jwt.lastIndexOf(".") + 1) + "x".repeat(43) + "-eyJ" + "abcdefghijk";
-    expect(redactTranscriptContent(`${endsLikeHeader}.`.repeat(5_000) + jwt)).toBe("[REDACTED].".repeat(5_000) + "[REDACTED]");
-    expect(performance.now() - started).toBeLessThan(100);
+    const masked: Array<[string, string]> = [
+      ["a-".repeat(50_000) + jwt, "a-".repeat(50_000) + "[REDACTED]"],
+      [`${jwt}-`.repeat(5_000) + jwt, "[REDACTED]"],
+      [jwt + ".eyJ" + "a".repeat(100_000), "[REDACTED].eyJ" + "a".repeat(100_000)],
+      [jwt + "-eyJ".repeat(25_000) + ".x", "[REDACTED].x"],
+      [`${endsLikeHeader}.`.repeat(5_000) + jwt, "[REDACTED]"],
+      [`${jwt}.`.repeat(5_000) + jwt, "[REDACTED].".repeat(5_000) + "[REDACTED]"],
+    ];
+    for (const [text, expected] of masked) {
+      const started = performance.now();
+      expect(redactTranscriptContent(text)).toBe(expected);
+      expect(performance.now() - started).toBeLessThan(100);
+    }
   });
 
   it("is the rule the CLI's restore packets import", () => {
