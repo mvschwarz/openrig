@@ -1,0 +1,589 @@
+{
+  "schema": "network-hub-contract/v1",
+  "scenario": "revoked",
+  "description": "The hub refuses the participant's credential with 401 and its challenge: the binding ends revoked.",
+  "recordedFrom": "The network connector of @openrig/cli 0.7.23 against a hub that answers application/json (never SSE). Seats, ids, times and texts are synthetic.",
+  "participant": {
+    "hubSeat": "alex@team",
+    "token": "<TOKEN>"
+  },
+  "normalize": {
+    "match": [
+      "method",
+      "path",
+      "authorization",
+      "rpcMethod",
+      "tool",
+      "arguments"
+    ],
+    "argumentsFor": [
+      "tools/call"
+    ],
+    "replace": [
+      {
+        "name": "time",
+        "pattern": "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z",
+        "with": "<TIME>"
+      },
+      {
+        "name": "outbound-item",
+        "pattern": "qitem-netout-[0-9a-f]{20}",
+        "with": "<REQUEST_ITEM>",
+        "bind": true
+      }
+    ],
+    "response": {
+      "jsonrpcId": "echo-request",
+      "substitute": [
+        "<HUB_ORIGIN>",
+        "<REQUEST_ITEM>"
+      ]
+    },
+    "placeholders": {
+      "<TOKEN>": "The participant's bearer: the token the test gives the binding.",
+      "<HUB_ORIGIN>": "The fixture hub's own origin.",
+      "<REQUEST_ITEM>": "The hub item id the connector derives for an outbound request (bound from the first request that names one).",
+      "<TIME>": "Any ISO time in a request (a local claim time in a pickup note, say)."
+    }
+  },
+  "passes": [
+    {
+      "pass": 1,
+      "does": "Idle pass while the credential is good."
+    },
+    {
+      "pass": 2,
+      "does": "Initialize answered 401 with a Bearer challenge: the binding is revoked."
+    }
+  ],
+  "exchanges": [
+    {
+      "pass": 1,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "initialize",
+          "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {
+              "name": "openrig-network-connector",
+              "version": "fixture"
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 0
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 0,
+          "result": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {
+                "listChanged": true
+              },
+              "resources": {
+                "listChanged": true
+              }
+            },
+            "serverInfo": {
+              "name": "openrig",
+              "version": "fixture"
+            },
+            "instructions": "Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\nThis server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.\nTo hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. Queue items are durable: they outlive this conversation and this server.\nTools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.\nA question reserved for a person is theirs to answer: don't answer it on their behalf.\nAcceptance is not completed work. Choose a qitemId and pass it to rig_queue_create, so an uncertain create (a timeout, or an error after sending) can be checked: read that same qitemId with rig_queue_show first, and create again only with that same id, never a new one.\nItems addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.\nBefore sending a request to another assistant, list the team's members. If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude chat agent\"), never reading the address out. Don't pick from your own history or memory. If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway. If the list says the chosen one's person is no longer on the team, don't send; tell your person and ask whether to send it to someone else. When you send to another connected assistant, tell your person how it picks requests up as the list says (when its person asks it, or on its check-in schedule); if the list doesn't say, say that's unknown, and don't promise a time. If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again. If your person still asks to send to one whose person is no longer on the team, tell them it can't be delivered: requests to an assistant whose person is no longer on the team are closed unanswered."
+          }
+        }
+      }
+    },
+    {
+      "pass": 1,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "notifications/initialized",
+          "jsonrpc": "2.0"
+        }
+      },
+      "response": {
+        "status": 202,
+        "headers": {},
+        "body": ""
+      }
+    },
+    {
+      "pass": 1,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/list",
+          "jsonrpc": "2.0",
+          "id": 1
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "result": {
+            "tools": [
+              {
+                "name": "rig_queue_create",
+                "title": "Send a request",
+                "description": "Sends a request to another assistant on your team. When it's picked up depends on that assistant: rig_team shows how each one checks for requests, where that's known. Returns its qitemId: follow the request and its answer with rig_queue_show. Pass a qitemId you choose, so an uncertain create can be checked: if the call times out or errors after sending, check rig_queue_show with that qitemId first, and retry only with the same id, never a new one. When the seat's roster entry says it takes no requests, the item is still written and requestsAdvisory says so, with the owner's note. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
+                "inputSchema": {
+                  "type": "object",
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "properties": {
+                    "destination": {
+                      "description": "Destination seat: member@rig, or its name alone as the team shows it (e.g. workshop-lead) within this connection's team; omit to use the connected team's configured receiver",
+                      "type": "string"
+                    },
+                    "body": {
+                      "type": "string",
+                      "description": "The task: what to do and what to return"
+                    },
+                    "summary": {
+                      "description": "One-line summary",
+                      "type": "string"
+                    },
+                    "tags": {
+                      "description": "Tags, e.g. mission:<name>",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "priority": {
+                      "description": "Priority (as rig queue create --priority)",
+                      "type": "string"
+                    },
+                    "tier": {
+                      "description": "Tier (as rig queue create --tier)",
+                      "type": "string"
+                    },
+                    "qitemId": {
+                      "description": "A request id you choose, unique to this request (for example qitem- and random letters), so an uncertain create can be checked by it; pass the same one to retry, never a new one (default: a new id)",
+                      "type": "string"
+                    },
+                    "revises": {
+                      "description": "The qitemId of the work this asks to revise",
+                      "type": "string"
+                    },
+                    "alert": {
+                      "description": "For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now (as rig queue create --alert). It stands out in Slack. Without it the ask still posts to Slack unless the person's Slack subscription is urgent-only, in which case it waits on Steering and the TUI",
+                      "type": "boolean"
+                    },
+                    "host": {
+                      "description": "Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does",
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "body"
+                  ]
+                },
+                "annotations": {
+                  "readOnlyHint": false,
+                  "destructiveHint": false,
+                  "title": "Send a request"
+                }
+              },
+              {
+                "name": "rig_queue_show",
+                "title": "Show one request",
+                "description": "Shows one request, who picked it up, and its answer. For a task you handed off, this is where its answer is: the state, the closure reason and target, the notes the assignee recorded, and evidenceRef when it names an artifact (read it with rig_artifact_read). When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found. A revision names the work it revises in chainOfRecord. The item's sourceSession is who created it, and each transition's actorSession and identityPrincipal (with its grant) name who made that change, not necessarily you; for an external connection, viewer is you (this connection), and createdBy and each transition's actor say whether that one is you (you: null when no principal was recorded to tell). host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
+                "inputSchema": {
+                  "type": "object",
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "properties": {
+                    "qitemId": {
+                      "type": "string",
+                      "description": "The qitemId returned by rig_queue_create (or any queue item)"
+                    },
+                    "host": {
+                      "description": "Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does",
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "qitemId"
+                  ]
+                },
+                "annotations": {
+                  "readOnlyHint": true,
+                  "title": "Show one request"
+                }
+              },
+              {
+                "name": "rig_queue_list",
+                "title": "List my OpenRig requests",
+                "description": "Lists the requests addressed to this assistant, or that it sent. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included. since finds work updated after a time; handedOffFrom finds where a handed-off item went. tags are exact, case-sensitive AND filters; mission and slice add their corresponding exact tags. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
+                "inputSchema": {
+                  "type": "object",
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "properties": {
+                    "owned": {
+                      "description": "Only items assigned to this seat: its whole inbox (overrides destination)",
+                      "type": "boolean"
+                    },
+                    "mine": {
+                      "description": "Items this seat sent or owns",
+                      "type": "boolean"
+                    },
+                    "destination": {
+                      "description": "Filter by destination seat",
+                      "type": "string"
+                    },
+                    "source": {
+                      "description": "Filter by source seat",
+                      "type": "string"
+                    },
+                    "state": {
+                      "description": "Only these states, comma-separated; closed states included when named",
+                      "type": "string"
+                    },
+                    "tags": {
+                      "description": "Exact, case-sensitive tags; every supplied tag must match. Commas are literal.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "mission": {
+                      "description": "Add the exact mission:<id> tag filter",
+                      "type": "string"
+                    },
+                    "slice": {
+                      "description": "Add the exact slice:<id> tag filter",
+                      "type": "string"
+                    },
+                    "all": {
+                      "description": "Without state: include closed items",
+                      "type": "boolean"
+                    },
+                    "since": {
+                      "description": "Only items updated at or after this ISO-8601 time, e.g. done work since Monday: state done, since 2026-10-19",
+                      "type": "string"
+                    },
+                    "handedOffFrom": {
+                      "description": "The items handed on from this qitemId, in any state and any rig",
+                      "type": "string"
+                    },
+                    "limit": {
+                      "description": "Result limit (default 100)",
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "host": {
+                      "description": "Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does",
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "annotations": {
+                  "readOnlyHint": true,
+                  "title": "List my OpenRig requests"
+                }
+              },
+              {
+                "name": "rig_queue_claim",
+                "title": "Pick up a request",
+                "description": "Marks a request addressed to this assistant as picked up, so others see it's being worked on. Do it before working on the request.",
+                "inputSchema": {
+                  "type": "object",
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "properties": {
+                    "qitemId": {
+                      "type": "string",
+                      "description": "The queue item to claim"
+                    }
+                  },
+                  "required": [
+                    "qitemId"
+                  ]
+                },
+                "annotations": {
+                  "readOnlyHint": false,
+                  "destructiveHint": true,
+                  "title": "Pick up a request"
+                }
+              },
+              {
+                "name": "rig_queue_update",
+                "title": "Answer a request",
+                "description": "Adds this assistant's answer to a request, or a note while it works. It can also block, close or reopen one. To answer a task, close it with state done, a closure reason and the answer in resolution, which the item keeps and its sender reads on this same item; note records why this transition happened. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
+                "inputSchema": {
+                  "type": "object",
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "properties": {
+                    "qitemId": {
+                      "type": "string",
+                      "description": "The queue item to update"
+                    },
+                    "state": {
+                      "description": "New state (e.g. in-progress, blocked, done)",
+                      "type": "string"
+                    },
+                    "closureReason": {
+                      "description": "Why it closed: no-follow-on for finished work, or handed_off_to, denied, canceled, escalation or superseded (as rig queue update --closure-reason)",
+                      "type": "string"
+                    },
+                    "closureTarget": {
+                      "description": "Closure target, when the reason needs one",
+                      "type": "string"
+                    },
+                    "note": {
+                      "description": "Transition note: progress, or why this transition happened (required to reopen)",
+                      "type": "string"
+                    },
+                    "resolution": {
+                      "description": "The outcome the item keeps, stored only by the update that closes an open item (as rig queue update --resolution)",
+                      "type": "string"
+                    },
+                    "reopen": {
+                      "description": "Reopen a closed item: give an active state (pending, in-progress or blocked) and a note (as rig queue update --reopen)",
+                      "type": "boolean"
+                    },
+                    "summary": {
+                      "description": "Replace the one-line summary",
+                      "type": "string"
+                    },
+                    "evidenceRef": {
+                      "description": "Pointer to the durable artifact, stored on the item with a state change (a park, a done close; a blank one isn't stored). For a code result, a JSON file of kind openrig.code-result/v1 with repo, base and revision (full commit ids) and paths lets a reader diff it exactly",
+                      "type": "string"
+                    },
+                    "blockedOn": {
+                      "description": "What it waits on, when blocking: another qitemId (this item returns to pending when that one closes), or the address of the person this item came from, not a shared channel (they're asked with this item's summary, and their answer returns it to you in progress)",
+                      "type": "string"
+                    },
+                    "wakeAfterSeconds": {
+                      "description": "Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked.",
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "host": {
+                      "description": "Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does",
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "qitemId"
+                  ]
+                },
+                "annotations": {
+                  "readOnlyHint": false,
+                  "destructiveHint": true,
+                  "title": "Answer a request"
+                }
+              },
+              {
+                "name": "rig_team",
+                "title": "Show my team",
+                "description": "Shows the assistants on your team, each one's address for sending it a request, and which one leads. Send to an address exactly as shown. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown. rig.displayName and a member's label, where a roster authors them, are the names the person knows them by. An entry with takesRequests: false is one whose owner says it takes no requests (takesRequestsNote says why): work sent to it is written, and isn't expected to be picked up. An entry's participant.app and participant.kind, where a roster records them, are which client it uses (such as chatgpt or claude-code) and what kind of participant it is, as the service that gave it access recorded them; absent is unknown, and a seat's own kind is its node kind. Where the daemon names no single lead and exactly one roster entry declares lead_of, lead is that entry with declared: true and its team: the team's entry point for new work, not a manager of others' work, and nothing escalates to it.",
+                "inputSchema": {
+                  "type": "object",
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "properties": {
+                    "rigId": {
+                      "description": "Rig name or id. A connection from outside the rig (an external grant) usually leaves this out, and the tool finds its team; if it passes one, it must be the granted rig's name, never its id or the team's display name.",
+                      "type": "string"
+                    }
+                  }
+                },
+                "annotations": {
+                  "readOnlyHint": true,
+                  "title": "Show my team"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "pass": 1,
+      "required": false,
+      "note": "The SDK opens its optional GET stream after initialize, concurrently and not always before the client closes; the hub has none (405).",
+      "request": {
+        "method": "GET",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": ""
+      },
+      "response": {
+        "status": 405,
+        "headers": {
+          "content-type": "application/json",
+          "allow": "POST"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "error": {
+            "code": -32000,
+            "message": "Method not allowed."
+          },
+          "id": null
+        }
+      }
+    },
+    {
+      "pass": 1,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/call",
+          "params": {
+            "name": "rig_queue_list",
+            "arguments": {
+              "owned": true,
+              "state": "in-progress",
+              "limit": 200
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 2
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "[]"
+              }
+            ],
+            "structuredContent": {
+              "items": []
+            }
+          }
+        }
+      }
+    },
+    {
+      "pass": 1,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/call",
+          "params": {
+            "name": "rig_queue_list",
+            "arguments": {
+              "owned": true,
+              "state": "pending",
+              "limit": 25
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 3
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 3,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "[]"
+              }
+            ],
+            "structuredContent": {
+              "items": []
+            }
+          }
+        }
+      }
+    },
+    {
+      "pass": 2,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "initialize",
+          "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {
+              "name": "openrig-network-connector",
+              "version": "fixture"
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 0
+        }
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "content-type": "application/json",
+          "www-authenticate": "Bearer realm=\"openrig\", resource_metadata=\"<HUB_ORIGIN>/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\""
+        },
+        "body": {
+          "error": "unauthenticated",
+          "message": "This connection was disconnected. Reconnect it where it was made."
+        }
+      }
+    }
+  ]
+}
