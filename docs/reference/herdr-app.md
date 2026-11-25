@@ -135,8 +135,9 @@ machine: its preview says "Opens in this machine's herdr-core (<host>)".
   and `herdr.tab=openrig-<cell>`, which a connected herdr-app adopts. Each tab shows its seat's label (herdr names an
   unnamed tab after its program, and a viewer's command leads with the seat's label), and herdr orders the tabs. herdr
   names the space after the folder the viewers start in, `$OPENRIG_HOME/private/herdr-app/spaces/<view name>-<view id>`,
-  where a rig's view is named after the rig (when `$OPENRIG_HOME` is inside a git checkout, herdr names it after the
-  repo). Names are only for display: OpenRig identifies its viewers by their `openrig.*` labels and exact command.
+  where a rig's view is named after the rig (when that folder is inside a git checkout, herdr-app 0.1.18 keeps the
+  folder's name and shows the repo's beside it). Names are only for display: OpenRig identifies its viewers by their
+  `openrig.*` labels and exact command.
 - **Nothing is written to an app home:** no mods, no `rig.json`. These views never appear in the Rig layout.
 - **Input:** an interactive cell takes input as soon as its viewer runs, as a cell for a seat on another host does. A
   read-only cell only shows. The headless-size rule under [the keyboard](#the-keyboard) still applies.
