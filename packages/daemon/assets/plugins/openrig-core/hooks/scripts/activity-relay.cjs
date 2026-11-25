@@ -89,9 +89,21 @@ function promptBoundaryFields(hookEvent, providerPayload) {
   };
 }
 
+// #3633: Claude Code runs short headless helpers of its own (`claude -p`, such as a conversation summary on Haiku) inside
+// an interactive seat. They inherit the seat's environment and load this plugin, so this relay would post their hooks as
+// the seat, and their transcript is their own `<session id>.jsonl`, so #2702's transcript check lets them through: a
+// helper's SessionStart became the seat's resume target, and its turn read as the seat's activity. Claude Code runs such
+// a process with CLAUDE_CODE_ENTRYPOINT=sdk-cli, where a seat's own interactive Claude runs as `cli` (recorded on Claude
+// Code 2.1.330). For a helper this relay posts nothing: no activity, no session identity, no first-launch marker. An unset
+// or other entrypoint (an older Claude Code, another runtime, an SDK or ACP runner) leaves the relay as it was.
+function isHeadlessClaudeHelper(env = process.env) {
+  return firstString(env.CLAUDE_CODE_ENTRYPOINT) === "sdk-cli";
+}
+
 // The route this run reports by, so the daemon can count one event once per route: "plugin" for the plugin's hook
 // (started with --from-plugin), "managed" for the settings or managed hook copy.
 function buildOpenRigPayload(providerPayload, env = process.env, now = () => new Date(), argv = process.argv) {
+  if (isHeadlessClaudeHelper(env)) return null;
   const sessionName = firstString(env.OPENRIG_SESSION_NAME, env.RIGGED_SESSION_NAME);
   const nodeId = firstString(env.OPENRIG_NODE_ID, env.RIGGED_NODE_ID);
   const runtime = firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME);
@@ -379,6 +391,7 @@ function postHookPayload(payload, env = process.env) {
 
 function buildSessionIdentityPayload(providerPayload, env = process.env, now = () => new Date()) {
   if (!providerPayload || typeof providerPayload !== "object") return null;
+  if (isHeadlessClaudeHelper(env)) return null;
   const hookEvent = firstString(
     providerPayload.hookEvent, providerPayload.hookEventName,
     providerPayload.hook_event_name, providerPayload.event, providerPayload.eventName
