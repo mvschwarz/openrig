@@ -5,6 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
+    "./topology-trace": { "types": "./dist/topology-trace-surface.d.ts", "import": "./dist/topology-trace-surface.js" },
     "./queue-transfer-export": { "types": "./dist/queue-transfer-export-surface.d.ts", "import": "./dist/queue-transfer-export-surface.js" },
     "./queue-transfer-staging": { "types": "./dist/queue-transfer-staging-surface.d.ts", "import": "./dist/queue-transfer-staging-surface.js" },
     "./queue-transfer-records": { "types": "./dist/queue-transfer-records-surface.d.ts", "import": "./dist/queue-transfer-records-surface.js" },
@@ -21,6 +22,7 @@
     "./attention": { "types": "./dist/attention-surface.d.ts", "import": "./dist/attention-surface.js" },
     "./project-catalog": { "types": "./dist/project-catalog-surface.d.ts", "import": "./dist/project-catalog-surface.js" },
     "./mission-parent": { "types": "./dist/mission-parent-surface.d.ts", "import": "./dist/mission-parent-surface.js" },
+    "./transcript-redaction": { "types": "./dist/transcript-redaction-surface.d.ts", "import": "./dist/transcript-redaction-surface.js" },
     "./daemon-shutdown": {
       "types": "./dist/daemon-shutdown.d.ts",
       "import": "./dist/daemon-shutdown.js"

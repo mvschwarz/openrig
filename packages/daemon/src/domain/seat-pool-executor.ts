@@ -19,7 +19,7 @@ import type { NodeWithBinding } from "./types.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { seatPoolModelOfJob, type SeatPoolModel } from "./seat-pool-registration.js";
 import type { SeatPoolSlot, SeatPoolSlotsRepository } from "./seat-pool-slots.js";
-import type { SeatPoolSpec, StoredSeatPool } from "./seat-pool-spec.js";
+import { parsePoolBlock, type SeatPoolSpec, type StoredSeatPool } from "./seat-pool-spec.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { seatLaunchAdditionPathsForNode } from "./seat-launch-additions.js";
 import type { SeatSkillPaths } from "./seat-skill-storage.js";
@@ -31,9 +31,19 @@ import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 //
 // One cycle reads the pool afresh (the model's stored block, its slot rows, each pool agent's latest session, activity,
 // open rows and held messages, and the rows waiting for the model or for a drained agent), plans with the pure planner,
-// and applies two effects: moving a waiting row to a free pool agent, and adding agents. The plan is read outside any
-// lease; the hold check, the moves and the add's reservation and issue run under the delivery guard's custody lease on
-// the model node, and each move re-checks the stored block and the agent just before it.
+// and applies three effects: moving a waiting row to a free pool agent, draining a free agent idle past
+// `idle_grace_s`, and adding agents. The plan is read outside any lease; the hold check, the moves, each drain's
+// decision and the add's reservation and issue run under the delivery guard's custody lease on the model node, and each
+// move and drain re-checks the stored block and the agent just before it.
+//
+// A drain keeps the agent's node, sessions and history. Under the agent's lifecycle lease it reads the agent again (a
+// row or a held message that reached it, or a wake since the plan, sends the slot back to `live`; an agent relaunched
+// since the plan is left alone), captures an `auto-rehydrate` snapshot while the agent still runs, and stops it with the
+// checked stop (`expected` = the session the plan read). What the stop returned is reported in `stop.result`: `stopped`
+// and `absent` mark the slot `drained`, `changed_owner` sends it back to `live`, and `unconfirmed` leaves it `draining`,
+// to be stopped again (never captured again) by the next cycle when a kill was attempted, and only while the agent is
+// free; an unconfirmed stop known to have had no effect gives the slot back to `live`. After `pool: {}` the job drains
+// with the last spec stored on its row and ends once every agent is drained.
 //
 // An add reserves a new `<member>-s<n>` slot, issues it with an operation id, and, after the lease is released, adds the
 // member through the same converge path as `rig add`, from the model member as the export writes it (without
@@ -41,10 +51,10 @@ import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 // the add in flight, and the settlement writes the outcome to the slot row (the agent runs: `live`; no node was created:
 // the row goes and frees the number). A later cycle reports what settled.
 //
-// The whole pool is held, and nothing is moved or added, while the job is not `active`, while the stored block can't be
-// read, while the model node is gone (or has no canonical session), and from the rig's latest `rig.stopped` until a
-// later `restore.completed`, whatever its result. The cause goes in the job's notes. Draining and bringing agents back
-// are not done here; while a slot is `drained`, no new number is added.
+// The whole pool is held, and nothing moves, drains or is added, while the job is not `active`, while the stored block
+// can't be read, while the model node is gone (or has no canonical session), and from the rig's latest `rig.stopped`
+// until a later `restore.completed`, whatever its result. The cause goes in the job's notes. Bringing agents back is not
+// done here; while a slot is `drained`, no new number is added.
 
 /** What one move returns: moved, or refused with the queue's code. */
 export type SeatPoolMoveResult = { ok: true } | { ok: false; code: string; message: string };
@@ -88,8 +98,8 @@ export interface SeatPoolExecutorDeps {
   /** The job's model, the agents' latest sessions and the rig's events. */
   db: Database.Database;
   rigRepo: Pick<RigRepository, "getNodePool" | "getNodeLaunchRecipe" | "getRig">;
-  slots: Pick<SeatPoolSlotsRepository, "forModel" | "get" | "reserveAdd" | "issueAttempt" | "recordAttemptNode" | "settleAdd"
-    | "recordAttemptOutcome" | "removeAddWithoutNode">;
+  slots: Pick<SeatPoolSlotsRepository, "forModel" | "setPhase" | "stopOutcome" | "get" | "reserveAdd" | "issueAttempt"
+    | "recordAttemptNode" | "settleAdd" | "recordAttemptOutcome" | "removeAddWithoutNode">;
   jobsRepo: Pick<WatchdogJobsRepository, "getById">;
   queue: SeatPoolQueue;
   /** Messages held for a node in the outbox (OutboxHandler.heldCount). */
@@ -101,12 +111,62 @@ export interface SeatPoolExecutorDeps {
   /** The delivery guard's custody lease on these nodes (SeatDeliveryGuard.custody). */
   custody<T>(nodeIds: string[], fn: () => Promise<T>): Promise<T>;
   now(): Date;
+  /** The drain's effects. Without them a planned drain is not made, and the cycle reports it as not composed. */
+  drain?: SeatPoolDrainEffects;
   /** The add's effects. Without them a cycle adds nothing (and skips the whole add stage). */
   add?: SeatPoolAddDeps;
 }
 
+/** What the checked stop returned, as the pool reads it (SeatLifecycleService.stopSeat). */
+export type SeatPoolSeatStop =
+  | { ok: true; alreadyDown?: true; message?: string }
+  | { ok: false; code: string; message: string; partialEffect?: boolean };
+
+/** The drain's effects, composed by the daemon. */
+export interface SeatPoolDrainEffects {
+  /** The lifecycle lease on these nodes (SeatDeliveryGuard.lifecycle): the drain re-reads, captures and stops under it. */
+  lifecycle<T>(nodeIds: string[], fn: () => Promise<T>): Promise<T>;
+  /** Refresh the agent's resume metadata, as `rig down` does before its snapshot (ResumeMetadataRefresher.refresh).
+   *  Best-effort: the drain captures and stops after a refresh that fails. */
+  refresh(input: { rigId: string; nodeId: string; sessionId: string }): Promise<void>;
+  /** Capture an `auto-rehydrate` snapshot of the rig (SnapshotCapture.captureSnapshot). Throws when it can't. */
+  capture(rigId: string): { snapshotId: string };
+  /** The checked stop: stop the seat only while its latest session is still `expected.sessionId`. `recheck` runs at the
+   *  stop's final step before each effect, after its liveness probe; a refusal it returns stops nothing more. */
+  stopSeat(input: {
+    seatRef: string; reason: string; expected: { nodeId: string; sessionId: string };
+    recheck?: () => { ok: false; code: "selection_changed"; message: string } | null;
+  }): Promise<SeatPoolSeatStop>;
+}
+
+/**
+ * What a pool stop is reported as, in `stop.result`, never two at once: `stopped` (a successful stop), `absent` (a
+ * confirmed absence: the stop found the session absent in tmux, `session_not_live`), `changed_owner` (the seat or its
+ * latest session changed before anything was stopped) and `unconfirmed` (anything else, with its real code and message).
+ */
+export type SeatPoolStopResult = "stopped" | "absent" | "changed_owner" | "unconfirmed";
+
+export interface SeatPoolStopReport {
+  cause: "drain";
+  result: SeatPoolStopResult;
+  code?: string;
+  message?: string;
+}
+
+/** The report of a stop from what the checked stop returned. */
+export function seatPoolStopReport(stop: SeatPoolSeatStop): SeatPoolStopReport {
+  // A keep_alive seat whose session was already gone is recorded as stopped, but nothing was stopped: an absence.
+  if (stop.ok && stop.alreadyDown) return { cause: "drain", result: "absent", code: "already_down", ...(stop.message ? { message: stop.message } : {}) };
+  if (stop.ok) return { cause: "drain", result: "stopped" };
+  if (stop.code === "session_not_live") return { cause: "drain", result: "absent", code: stop.code, message: stop.message };
+  if (stop.code === "selection_changed" && stop.partialEffect !== true) {
+    return { cause: "drain", result: "changed_owner", code: stop.code, message: stop.message };
+  }
+  return { cause: "drain", result: "unconfirmed", code: stop.code, message: stop.message };
+}
+
 export interface SeatPoolExecutor {
-  /** One cycle of the job: read, hold, plan, move, add. Never throws for a refused move or a custody refusal. */
+  /** One cycle of the job: read, hold, plan, move, drain, add. Never throws for a refused move or a custody refusal. */
   cycle(job: Pick<PolicyJob, "jobId" | "context">): Promise<PolicyEvaluation>;
   /** Resolves once every add started so far has settled. */
   idle(): Promise<void>;
@@ -377,7 +437,68 @@ class AddNotIssued extends Error {
   constructor(readonly code: string) { super(code); }
 }
 
+
+/** One drain step as the cycle reports it. */
+interface DrainReport {
+  slotNumber: number;
+  session: string | null;
+  /** The slot's phase after this step. */
+  phase: SeatPoolPhase;
+  /**
+   * `drained`: stopped (or found absent) after the capture. `returned`: work or a wake reached the agent, or the drain
+   * was not finished, so the slot is `live` again and nothing was stopped. `left`: the agent was relaunched (or stopped
+   * running) since the plan read it, or its seat changed before the stop: left alone, `live`. `draining`: not finished
+   * (the capture failed, the stop is unconfirmed, or the job stopped first); the next cycle carries on. `skipped`: not
+   * started, with the reason in `code`.
+   */
+  outcome: "drained" | "returned" | "left" | "draining" | "skipped";
+  code?: string;
+  message?: string;
+  snapshotId?: string;
+  stop?: SeatPoolStopReport;
+}
+
+/** A drain decided under the custody lease, made after it. */
+interface DrainStep { slot: SeatPoolSlot; nodeId: string; session: string; sessionId: string; idleSince: string }
+
+/** A drain whose stop came back unconfirmed after a kill was attempted: stopped again, never captured again. */
+interface Restop { slot: SeatPoolSlot; nodeId: string; session: string; sessionId: string }
+
+/** A node's latest session, in the order the reader uses. Null: none. */
+function latestSession(db: Database.Database, nodeId: string): { id: string; status: string } | null {
+  return (db.prepare("SELECT id, status FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1").get(nodeId) as
+    { id: string; status: string } | undefined) ?? null;
+}
+
+/** The spec the job was last ensured with (`context.pool`); null when it has none that reads. */
+function lastEnsuredSpec(context: Record<string, unknown>): SeatPoolSpec | null {
+  const read = parsePoolBlock(context["pool"]);
+  return read.ok ? read.spec : null;
+}
+
+/** The time of the latest drain step on record: the newest phase change of a `draining` or `drained` slot. */
+function lastDrainStep(slots: readonly SeatPoolSlot[]): string | null {
+  let latest: string | null = null;
+  for (const slot of slots) {
+    if ((slot.phase !== "draining" && slot.phase !== "drained") || !validIso(slot.phaseChangedAt)) continue;
+    if (latest === null || Date.parse(slot.phaseChangedAt) > Date.parse(latest)) latest = slot.phaseChangedAt;
+  }
+  return latest;
+}
+
+/** Free to drain: its latest session runs, idle at its prompt, with no open row and no held message. */
+function freeToDrain(agent: SeatPoolAgentRead): boolean {
+  return agent.running && agent.idleAtPrompt && agent.openRows === 0 && agent.heldCount === 0;
+}
+
 export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecutor {
+  /** Woken since the plan: the agent's recorded idle time can be read and is not the one the plan read. */
+  const woken = (nodeId: string, idleSince: string) => {
+    const changedAt = deps.seatState(nodeId)?.changedAt;
+    return validIso(changedAt) && changedAt !== idleSince;
+  };
+  const at = () => deps.now().toISOString();
+
   /** The adds started and not settled yet. */
   const pending = new Set<Promise<void>>();
   /** model node id → what settled since that model's last report. */
@@ -499,28 +620,59 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       // waits for custody is then reported the same way in `slots` and in `settled`.
       const base = () => ({ modelNodeId, ...block, slots: slotsView(deps.slots.forModel(modelNodeId)) });
       if (!active()) return report({ ...base(), held: JOB_STOPPED });
-      if (block.block === "none") return report(base());
       if (block.block === "unusable") return report({ ...base(), held: BLOCK_UNREADABLE, advisory: unreadableAdvisory(block.error) });
+      // After `pool: {}` the model has no block: the job drains with the spec last stored on its row (`drain` set), and
+      // ends once every agent is drained. A job with no readable spec of its own does nothing.
+      const removed = block.block === "none";
+      const lastSpec = removed ? lastEnsuredSpec(job.context) : null;
+      if (block.block === "none" && lastSpec === null) return report(base());
+      const spec: SeatPoolSpec = block.block === "stored" ? block.spec : { ...lastSpec!, drain: true };
+      const removal = removed ? { removal: "the pool block was removed; draining with the spec last stored on the job" } : {};
 
-      // The plan is read outside the lease; the custody is for the hold check, the moves and the add's reservation and
-      // issue. The add's call goes out after it.
-      const spec = block.spec;
-      const read = readSeatPoolState(deps, model, slots);
+      // The plan is read outside the lease; the custody is for the hold check, the moves, the drain decisions and the
+      // add's reservation and issue. The add's call goes out after it.
+      const read: SeatPoolReadState = { ...readSeatPoolState(deps, model, slots), lastStepAt: lastDrainStep(slots) };
       const plan = planSeatPool(spec, read, deps.now().getTime());
       const dispatches = plan.intents.filter((i): i is Extract<SeatPoolIntent, { kind: "dispatch" }> => i.kind === "dispatch");
+      const drainIntents = plan.intents.filter((i): i is Extract<SeatPoolIntent, { kind: "drain" }> => i.kind === "drain");
       const addIntent = plan.intents.find((i): i is Extract<SeatPoolIntent, { kind: "add" }> => i.kind === "add");
       const plannedTo = (slotNumber: number) => read.agents.find((a) => a.slotNumber === slotNumber)?.sessionName ?? `slot ${slotNumber}`;
+      // The session each agent ran when the plan read it: a drain stops only that session.
+      const planSession = new Map(read.agents.map((a) => [a.slotNumber, a.nodeId === null ? null : latestSession(deps.db, a.nodeId)?.id ?? null]));
 
       let held: Held | undefined;
       let advisory: string | undefined;
       let hold: SeatPoolHoldRead | undefined;
       let custody: { code: string; message: string } | undefined;
+      let blockChanged = false;
       const moved: Move[] = [];
       const skipped: Array<Move & { code: string }> = [];
       const failed: Array<Move & { code: string; message: string }> = [];
+      const drains: DrainReport[] = [];
+      const toDrain: DrainStep[] = [];
+      const restops: Restop[] = [];
+      const gone: Restop[] = [];
+
+      /** The block again: a re-apply since the plan (cleared, broken, or with any other value; after `pool: {}`, a block
+       *  stored again) ends this cycle's effects, since the plan may no longer hold. The next evaluation plans against the
+       *  block as it is then. */
+      const blockChangedNow = (): boolean => {
+        const storedNow = deps.rigRepo.getNodePool(modelNodeId);
+        const same = removed
+          ? storedNow === undefined
+          : storedNow !== undefined && "spec" in storedNow && sameSpec(storedNow.spec, spec);
+        if (same) return false;
+        blockChanged = true;
+        block = blockView(storedNow);
+        if (block.block === "unusable") { held = BLOCK_UNREADABLE; advisory = unreadableAdvisory(block.error); }
+        return true;
+      };
+      const drainSkipped = (step: { slotNumber: number; session: string | null; phase: SeatPoolPhase }, code: string): void => {
+        drains.push({ ...step, outcome: "skipped", code });
+      };
+
       let addNotes: Record<string, unknown> | undefined;
       const issued: IssuedAdd[] = [];
-      let blockChanged = false;
       let thrown: unknown;
       try {
         await deps.custody([modelNodeId], async () => {
@@ -537,18 +689,44 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             };
             return;
           }
+          // A drain an earlier cycle left unfinished. One whose unconfirmed stop may have had an effect (a kill was
+          // attempted) is stopped again below, never captured again. Any other (its capture failed, it ended before the
+          // capture, or its stop is known to have had no effect) goes back to `live`: nothing was stopped, and a later plan
+          // decides again, with a new capture.
+          for (const slot of slots.filter((s) => s.phase === "draining")) {
+            const agent = read.agents.find((a) => a.slotNumber === slot.slotNumber);
+            const session = agent?.sessionName ?? null;
+            const stop = deps.slots.stopOutcome(slot.slotId);
+            if (stop?.result === "unconfirmed" && stop.partialEffect === true && typeof stop.sessionId === "string"
+              && slot.nodeId !== null && agent?.nodeId && session) {
+              restops.push({ slot, nodeId: slot.nodeId, session, sessionId: stop.sessionId });
+            } else if (deps.slots.setPhase({ slotId: slot.slotId, from: "draining", to: "live", at: at() })) {
+              drains.push({ slotNumber: slot.slotNumber, session, phase: "live", outcome: "returned", code: "drain_not_finished" });
+            }
+          }
+          // Under `drain` (after `pool: {}`, or a block with `drain: true`), a `live` agent positively gone (its latest
+          // session `exited`, or its node confirmed stopped) with no work: the planner never picks it, since only running
+          // agents drain, so it would keep the job from ending. Its slot goes to `draining`, and the checked stop below
+          // confirms the session is absent before the slot is `drained`. An unknown or stale status is not gone.
+          if (spec.drain && deps.drain && !held && !blockChangedNow()) {
+            const current = deps.slots.forModel(modelNodeId);
+            const agentsNow = readSeatPoolAgents(deps, current);
+            for (const slot of current.filter((s) => s.phase === "live" && s.nodeId !== null)) {
+              const agent = agentsNow.find((a) => a.slotNumber === slot.slotNumber);
+              if (!agent || agent.nodeId === null || agent.sessionName === null || agent.running) continue;
+              if (agent.openRows > 0 || agent.heldCount > 0) continue;
+              if (agent.latestSessionStatus !== "exited" && !deps.confirmedStopped(agent.nodeId)) continue;
+              const sessionId = planSession.get(slot.slotNumber) ?? null;
+              if (sessionId === null || latestSession(deps.db, agent.nodeId)?.id !== sessionId) continue;
+              if (!deps.slots.setPhase({ slotId: slot.slotId, from: "live", to: "draining", at: at(), stop: null })) continue;
+              gone.push({ slot, nodeId: agent.nodeId, session: agent.sessionName, sessionId });
+            }
+          }
           for (const [index, d] of dispatches.entries()) {
             // A job stopped while an earlier move awaited: no later effect.
             if (!active()) { held = JOB_STOPPED; break; }
             const from = read.rawDestination.get(d.qitemId)!;
-            // The block again: a re-apply since the plan (cleared, broken or with any other value) stops the planned moves
-            // here, since the plan may no longer hold (a new dispatch_tag, a longer dispatch_after_s, drain, a lower max).
-            // The next evaluation plans against the block as it is then.
-            const storedNow = deps.rigRepo.getNodePool(modelNodeId);
-            if (storedNow === undefined || !("spec" in storedNow) || !sameSpec(storedNow.spec, spec)) {
-              blockChanged = true;
-              block = blockView(storedNow);
-              if (block.block === "unusable") { held = BLOCK_UNREADABLE; advisory = unreadableAdvisory(block.error); }
+            if (blockChangedNow()) {
               for (const rest of dispatches.slice(index)) {
                 skipped.push({ qitemId: rest.qitemId, from: read.rawDestination.get(rest.qitemId)!, to: plannedTo(rest.slotNumber), code: "pool_block_changed" });
               }
@@ -567,6 +745,28 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             if (result.ok) moved.push({ qitemId: d.qitemId, from, to });
             else if (ROW_MOVED_ON.has(result.code)) skipped.push({ qitemId: d.qitemId, from, to, code: result.code });
             else failed.push({ qitemId: d.qitemId, from, to, code: result.code, message: result.message });
+          }
+          // The drains: each agent again, just before its slot goes to `draining`. The capture and the stop come after
+          // the custody lease, under the agent's own lifecycle lease.
+          for (const [index, d] of drainIntents.entries()) {
+            if (held || blockChanged) break;
+            if (!active()) { held = JOB_STOPPED; break; }
+            if (blockChangedNow()) {
+              for (const rest of drainIntents.slice(index)) drainSkipped({ slotNumber: rest.slotNumber, session: plannedTo(rest.slotNumber), phase: "live" }, "pool_block_changed");
+              break;
+            }
+            const current = deps.slots.forModel(modelNodeId);
+            const slot = current.find((s) => s.slotNumber === d.slotNumber);
+            const agent = readSeatPoolAgents(deps, current).find((a) => a.slotNumber === d.slotNumber);
+            const step = { slotNumber: d.slotNumber, session: agent?.sessionName ?? plannedTo(d.slotNumber), phase: slot?.phase ?? "live" };
+            if (!slot || !agent || slot.nodeId === null || agent.nodeId === null || agent.sessionName === null) { drainSkipped(step, "agent_gone"); continue; }
+            const sessionId = planSession.get(d.slotNumber) ?? null;
+            // An agent relaunched since the plan read it is left alone.
+            if (sessionId === null || latestSession(deps.db, slot.nodeId)?.id !== sessionId) { drainSkipped(step, "relaunched"); continue; }
+            if (slot.phase !== "live" || !freeToDrain(agent) || woken(slot.nodeId, d.idleSince)) { drainSkipped(step, "agent_not_free"); continue; }
+            if (!deps.drain) { drainSkipped(step, "drain_not_composed"); continue; }
+            if (!deps.slots.setPhase({ slotId: slot.slotId, from: "live", to: "draining", at: at(), stop: null })) { drainSkipped(step, "slot_moved_on"); continue; }
+            toDrain.push({ slot, nodeId: slot.nodeId, session: agent.sessionName, sessionId, idleSince: d.idleSince });
           }
 
           // The add, after the moves of the same cycle, under the same lease. Nothing in it awaits.
@@ -665,6 +865,262 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         custody = { code: thrown.code, message: thrown.message };
       }
 
+      if (!held && !custody && deps.drain) {
+        const effects = deps.drain;
+        /** The slot's phase after a write, read back when the write found it moved on. */
+        const moveTo = (slot: SeatPoolSlot, to: SeatPoolPhase, stop?: Record<string, unknown> | null): SeatPoolPhase =>
+          deps.slots.setPhase({ slotId: slot.slotId, from: "draining", to, at: at(), ...(stop !== undefined ? { stop } : {}) })
+            ? to
+            : deps.slots.forModel(modelNodeId).find((s) => s.slotId === slot.slotId)?.phase ?? "draining";
+        /** The slot after the checked stop: `stopped` and `absent` drain it, `changed_owner` leaves it `live`, and
+         *  `unconfirmed` keeps it `draining`, recorded with the session it stopped so the next cycle stops it again. */
+        const settle = (
+          s: { slot: SeatPoolSlot; session: string; sessionId: string }, stop: SeatPoolSeatStop, snapshotId?: string, attemptedBefore = false,
+        ): DrainReport => {
+          const reported = seatPoolStopReport(stop);
+          const to: SeatPoolPhase = reported.result === "stopped" || reported.result === "absent" ? "drained"
+            : reported.result === "changed_owner" ? "live" : "draining";
+          // A kill attempted by an earlier stop of the same session stays on record until a stop is confirmed.
+          const partial = !stop.ok && (stop.partialEffect === true || attemptedBefore) ? { partialEffect: true } : {};
+          const phase = moveTo(s.slot, to, { ...reported, ...partial, sessionId: s.sessionId, at: at() });
+          return {
+            slotNumber: s.slot.slotNumber, session: s.session, phase,
+            outcome: to === "drained" ? "drained" : to === "live" ? "left" : "draining",
+            ...(snapshotId !== undefined ? { snapshotId } : {}),
+            stop: reported,
+          };
+        };
+        const stopReason = (what: string) => `seat pool ${job.jobId}: ${what}`;
+        const phaseNow = (slot: SeatPoolSlot): SeatPoolPhase =>
+          deps.slots.forModel(modelNodeId).find((s) => s.slotId === slot.slotId)?.phase ?? "draining";
+        /** What holds the pool now: the job, the model and rig holds, and the current block. Null when none does. */
+        const holdsNow = (): string | null => {
+          if (!active()) { held = JOB_STOPPED; return "job_stopped"; }
+          const modelNow = seatPoolModelOfJob(deps.db, job);
+          if (!modelNow.found) {
+            held = modelNow.cause === "node_gone"
+              ? { cause: "model node gone", message: "held: model node gone" }
+              : { cause: "model has no canonical session", message: "held: model has no canonical session" };
+            return "model_held";
+          }
+          const holdNow = readSeatPoolHold(deps.db, rigId);
+          if (holdNow.stoppedSeq !== null) {
+            held = { cause: "rig stopped", seq: holdNow.stoppedSeq, message: `held: rig stopped (event ${holdNow.stoppedSeq})` };
+            return "rig_stopped";
+          }
+          if (blockChangedNow()) return "pool_block_changed";
+          return null;
+        };
+        /** What keeps an agent from being stopped now, read again at the checked stop's final step before each effect
+         *  (after its liveness probe): the job, the rig and model holds, the current block, the agent's work and activity,
+         *  and, for a retry (`idleSince` null), whether the pool still has surplus. Null when the stop may go on. */
+        const keeps = (slotNumber: number, nodeId: string, idleSince: string | null): string | null => {
+          const holding = holdsNow();
+          if (holding !== null) return holding;
+          const now = readSeatPoolState(deps, model, deps.slots.forModel(modelNodeId));
+          const agent = now.agents.find((a) => a.slotNumber === slotNumber);
+          if (!agent || agent.phase !== "draining") return "slot_moved_on";
+          // Work first: `running` comes from the recorded status, so false does not prove the process is gone.
+          if (agent.openRows > 0 || agent.heldCount > 0) return "work_arrived";
+          // An agent positively gone keeps nothing: the stop only confirms it. Gone is its latest session `exited`, or the
+          // node's executor confirmed stopped (session missing or pane exited); an unknown or stale status keeps it.
+          if (!agent.running) {
+            return agent.latestSessionStatus === "exited" || deps.confirmedStopped(nodeId) ? null : "not_confirmed_gone";
+          }
+          if (!agent.idleAtPrompt || (idleSince !== null && woken(nodeId, idleSince))) return "woken";
+          if (idleSince === null) {
+            // A stop already attempted is finished only while the pool still has surplus, the draining agents counted as
+            // serving.
+            const serving = now.agents.map((a) => (a.phase === "draining" ? { ...a, phase: "live" as const } : a));
+            if (planSeatPool(spec, { ...now, agents: serving }, deps.now().getTime()).surplus === 0) return "no_surplus";
+          }
+          return null;
+        };
+        /** The recheck the checked stop runs, and the code it refused with (the stop itself reports `selection_changed`). */
+        const recheckOf = (slotNumber: number, nodeId: string, idleSince: string | null) => {
+          const refused: { code: string | null } = { code: null };
+          const recheck = () => {
+            const code = keeps(slotNumber, nodeId, idleSince);
+            if (code === null) return null;
+            refused.code = code;
+            return { ok: false as const, code: "selection_changed" as const, message: `The seat pool drain stops nothing: ${code} right before the stop.` };
+          };
+          return { refused, recheck };
+        };
+
+        for (const r of restops) {
+          if (!active()) { held = JOB_STOPPED; break; }
+          const step = { slotNumber: r.slot.slotNumber, session: r.session };
+          try {
+            drains.push(await effects.lifecycle([r.nodeId], async (): Promise<DrainReport> => {
+              if (!active()) { held = JOB_STOPPED; return { ...step, phase: "draining", outcome: "draining", code: "job_stopped" }; }
+              // The block again, under the lease: one changed or unreadable while the lease was awaited ends this cycle's
+              // effects. A kill was attempted, so the slot stays `draining` and a later cycle stops it again.
+              if (blockChangedNow()) return { ...step, phase: "draining", outcome: "draining", code: "pool_block_changed" };
+              // The agent again, under its lifecycle lease: one that still runs and got work or is not idle is never
+              // stopped. A kill was attempted, so it is not given back to `live` either: the slot stays `draining`, and a
+              // later cycle stops it once it is free.
+              const agent = readSeatPoolAgents(deps, deps.slots.forModel(modelNodeId)).find((a) => a.slotNumber === r.slot.slotNumber);
+              if (!agent || agent.phase !== "draining") return { ...step, phase: agent?.phase ?? "draining", outcome: "skipped", code: "slot_moved_on" };
+              if (agent.running && (agent.openRows > 0 || agent.heldCount > 0 || !agent.idleAtPrompt)) {
+                return { ...step, phase: "draining", outcome: "draining", code: agent.openRows > 0 || agent.heldCount > 0 ? "work_arrived" : "woken" };
+              }
+              const { refused, recheck } = recheckOf(r.slot.slotNumber, r.nodeId, null);
+              const stop = await effects.stopSeat({
+                seatRef: r.session, reason: stopReason("the drain's stop was unconfirmed; stopping again"),
+                expected: { nodeId: r.nodeId, sessionId: r.sessionId }, recheck,
+              });
+              // Refused at the stop's final step before any effect: the earlier attempt stays on record, and the slot stays
+              // `draining` until a later cycle finishes it.
+              if (refused.code !== null && !stop.ok && stop.partialEffect !== true) {
+                return { ...step, phase: phaseNow(r.slot), outcome: "draining", code: refused.code };
+              }
+              return settle(r, stop, undefined, true);
+            }));
+          } catch (error) {
+            // The guard refused the lease. A stop was already tried, so the slot stays `draining` until one is confirmed.
+            if (!(error instanceof DeliveryGuardError)) throw error;
+            drains.push({ ...step, phase: "draining", outcome: "draining", code: error.code, message: error.message });
+          }
+        }
+
+        /** What keeps a gone agent's slot from being `drained` now, read under its lifecycle lease and again at the
+         *  checked stop's final step: the holds, its work, and whether it is still positively gone. */
+        const keepsGone = (slotNumber: number, nodeId: string): string | null => {
+          const holding = holdsNow();
+          if (holding !== null) return holding;
+          const agent = readSeatPoolAgents(deps, deps.slots.forModel(modelNodeId)).find((a) => a.slotNumber === slotNumber);
+          if (!agent || agent.phase !== "draining") return "slot_moved_on";
+          if (agent.openRows > 0 || agent.heldCount > 0) return "work_arrived";
+          if (agent.running) return "running";
+          return agent.latestSessionStatus === "exited" || deps.confirmedStopped(nodeId) ? null : "not_confirmed_gone";
+        };
+        for (const g of gone) {
+          if (held) break;
+          if (!active()) { held = JOB_STOPPED; break; }
+          const step = { slotNumber: g.slot.slotNumber, session: g.session };
+          try {
+            drains.push(await effects.lifecycle([g.nodeId], async (): Promise<DrainReport> => {
+              // Relaunched since the plan read it: someone's seat now, left alone.
+              if (latestSession(deps.db, g.nodeId)?.id !== g.sessionId) return { ...step, phase: moveTo(g.slot, "live"), outcome: "left", code: "relaunched" };
+              const before = keepsGone(g.slot.slotNumber, g.nodeId);
+              if (before === "slot_moved_on") return { ...step, phase: phaseNow(g.slot), outcome: "skipped", code: before };
+              if (before !== null) {
+                return { ...step, phase: moveTo(g.slot, "live"), outcome: before === "work_arrived" ? "returned" : "left", code: before };
+              }
+              const refused: { code: string | null } = { code: null };
+              const stop = await effects.stopSeat({
+                seatRef: g.session, reason: stopReason("its session is gone; drained"),
+                expected: { nodeId: g.nodeId, sessionId: g.sessionId },
+                recheck: () => {
+                  const code = keepsGone(g.slot.slotNumber, g.nodeId);
+                  if (code === null) return null;
+                  refused.code = code;
+                  return { ok: false as const, code: "selection_changed" as const, message: `The seat pool drain stops nothing: ${code} right before the stop.` };
+                },
+              });
+              // Refused at the stop's final step before any effect: nothing was stopped, and the slot is `live` again.
+              if (refused.code !== null && !stop.ok && stop.partialEffect !== true) {
+                return { ...step, phase: moveTo(g.slot, "live", null), outcome: refused.code === "work_arrived" ? "returned" : "left", code: refused.code };
+              }
+              // A session found absent returns before the stop's final step, so its recheck never ran: the same reading
+              // again before the slot is `drained`. Nothing was stopped, so a slot that got work meanwhile is `live` again.
+              if (seatPoolStopReport(stop).result === "absent") {
+                const after = keepsGone(g.slot.slotNumber, g.nodeId);
+                if (after === "slot_moved_on") return { ...step, phase: phaseNow(g.slot), outcome: "skipped", code: after };
+                if (after !== null) {
+                  return { ...step, phase: moveTo(g.slot, "live", null), outcome: after === "work_arrived" ? "returned" : "left", code: after };
+                }
+              }
+              return settle(g, stop);
+            }));
+          } catch (error) {
+            // The guard refused the lease: nothing was stopped, and the slot is `live` again.
+            if (!(error instanceof DeliveryGuardError)) throw error;
+            drains.push({ ...step, phase: moveTo(g.slot, "live"), outcome: "left", code: error.code, message: error.message });
+          }
+        }
+
+        for (const [index, t] of toDrain.entries()) {
+          // A job stopped, or a block changed, while an earlier drain awaited: no later effect. The slots left
+          // `draining` go back to `live` in the next cycle, with nothing stopped.
+          if (held) break;
+          if (!active()) { held = JOB_STOPPED; break; }
+          if (blockChangedNow()) {
+            for (const rest of toDrain.slice(index)) drainSkipped({ slotNumber: rest.slot.slotNumber, session: rest.session, phase: "draining" }, "pool_block_changed");
+            break;
+          }
+          const step = { slotNumber: t.slot.slotNumber, session: t.session };
+          const back = (outcome: "returned" | "left", code: string, message?: string): DrainReport =>
+            ({ ...step, phase: moveTo(t.slot, "live"), outcome, code, ...(message !== undefined ? { message } : {}) });
+          try {
+            drains.push(await effects.lifecycle([t.nodeId], async (): Promise<DrainReport> => {
+              // The agent again, under its lifecycle lease.
+              const agent = readSeatPoolAgents(deps, deps.slots.forModel(modelNodeId)).find((a) => a.slotNumber === t.slot.slotNumber);
+              if (!agent || agent.phase !== "draining") return { ...step, phase: agent?.phase ?? "draining", outcome: "skipped", code: "slot_moved_on" };
+              // Relaunched since the plan read it (or no longer running): someone's seat now, left alone.
+              if (latestSession(deps.db, t.nodeId)?.id !== t.sessionId) return back("left", "relaunched");
+              if (!agent.running) return back("left", "not_running");
+              // A row or a held message reached it, or something woke it: it serves, and nothing is stopped.
+              if (agent.openRows > 0 || agent.heldCount > 0) return back("returned", "work_arrived");
+              if (!agent.idleAtPrompt || woken(t.nodeId, t.idleSince)) return back("returned", "woken");
+              if (!active()) { held = JOB_STOPPED; return { ...step, phase: "draining", outcome: "draining", code: "job_stopped" }; }
+              // The block again, under the lease: one changed or unreadable while the lease was awaited ends this cycle's
+              // effects before any capture. Nothing was stopped, so the slot goes back to `live` in a later cycle.
+              if (blockChangedNow()) return { ...step, phase: "draining", outcome: "draining", code: "pool_block_changed" };
+              // The agent's resume metadata, refreshed as `rig down` does before its snapshot. Best-effort: a refresh that
+              // fails still captures and stops.
+              try {
+                await effects.refresh({ rigId, nodeId: t.nodeId, sessionId: t.sessionId });
+              } catch {
+                // best-effort, as in teardown
+              }
+              // The job, the holds and the block again after the refresh, which can take a while: one that holds the pool
+              // now captures nothing and stops nothing. Nothing was stopped, so the slot goes back to `live` in a later cycle.
+              const heldAfterRefresh = holdsNow();
+              if (heldAfterRefresh !== null) return { ...step, phase: "draining", outcome: "draining", code: heldAfterRefresh };
+              // The capture, while the agent still runs, right before the stop. A capture that fails stops nothing.
+              let snapshotId: string;
+              try {
+                snapshotId = effects.capture(rigId).snapshotId;
+              } catch (error) {
+                return { ...step, phase: "draining", outcome: "draining", code: "capture_failed", message: errorMessage(error) };
+              }
+              // The attempt goes on record before the stop: a daemon exit after the stop took effect and before its result
+              // is written leaves the slot `draining` with it, and the next cycle stops the recorded session again instead
+              // of giving back to `live` an agent that no longer runs. The result below replaces it.
+              const inFlight = { cause: "drain", result: "unconfirmed", code: "stop_in_flight", partialEffect: true, sessionId: t.sessionId, at: at() };
+              if (!deps.slots.setPhase({ slotId: t.slot.slotId, from: "draining", to: "draining", at: at(), stop: inFlight })) {
+                const phase = deps.slots.forModel(modelNodeId).find((s) => s.slotId === t.slot.slotId)?.phase ?? "draining";
+                return { ...step, phase, outcome: "skipped", code: "slot_moved_on" };
+              }
+              const { refused, recheck } = recheckOf(t.slot.slotNumber, t.nodeId, t.idleSince);
+              const stop = await effects.stopSeat({
+                seatRef: t.session, reason: stopReason(`idle since ${t.idleSince}; drained`),
+                expected: { nodeId: t.nodeId, sessionId: t.sessionId }, recheck,
+              });
+              // Refused at the stop's final step before any effect: nothing was stopped, and the attempt record goes. An
+              // agent that got work or woke serves again; otherwise the slot goes back to `live` in a later cycle.
+              if (refused.code !== null && !stop.ok && stop.partialEffect !== true) {
+                if (refused.code === "work_arrived" || refused.code === "woken") {
+                  return { ...step, phase: moveTo(t.slot, "live", null), outcome: "returned", code: refused.code, snapshotId };
+                }
+                return { ...step, phase: moveTo(t.slot, "draining", null), outcome: "draining", code: refused.code, snapshotId };
+              }
+              return settle(t, stop, snapshotId);
+            }));
+          } catch (error) {
+            // The guard refused the lease: nothing was captured or stopped, and the agent serves again.
+            if (!(error instanceof DeliveryGuardError)) throw error;
+            drains.push(back("returned", error.code, error.message));
+          }
+        }
+      }
+
+      // After `pool: {}`, the block again before the job ends: one stored again (or broken) while the cycle waited for
+      // custody, with no effect to read it, keeps the job active. Read before the notes, which report the block it finds.
+      const ends = removed && !held && !custody && !blockChanged && !blockChangedNow()
+        && deps.slots.forModel(modelNodeId).every((s) => s.phase === "drained");
       const restore = !held && hold && hold.unfinishedRestoreSeq !== null
         ? {
           seq: hold.unfinishedRestoreSeq,
@@ -672,17 +1128,24 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           message: `restore at event ${hold.unfinishedRestoreSeq} has no restore.completed; nothing is held without a rig.stopped`,
         }
         : undefined;
-      return report({
+      const notes = {
         ...base(),
+        ...(blockChanged ? {} : removal),
         ...(held ? { held } : {}),
         ...(advisory ? { advisory } : {}),
         ...(restore ? { restore } : {}),
         ...(moved.length ? { moved } : {}),
         ...(skipped.length ? { skipped } : {}),
         ...(failed.length ? { failed } : {}),
+        ...(drains.length ? { drains } : {}),
         ...(addNotes && Object.keys(addNotes).length ? { add: addNotes } : {}),
         ...(custody ? { custody } : {}),
-      });
+      };
+      // After `pool: {}`: the job ends once every agent is drained (busy agents stay `live` until they are free).
+      if (ends) {
+        return { action: "terminal", reason: "seat_pool_removed_drained", notes };
+      }
+      return report(notes);
     },
   };
 }

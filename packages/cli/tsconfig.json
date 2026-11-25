@@ -7,6 +7,7 @@
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
+      "@openrig/daemon/topology-trace": ["../daemon/dist/topology-trace-surface.d.ts"],
       "@openrig/daemon/local-reading": ["../daemon/dist/local-reading-surface.d.ts"],
       "@openrig/daemon/codex-auth": ["../daemon/dist/codex-auth-surface.d.ts"],
       "@openrig/daemon/crash-cart": ["../daemon/dist/crash-cart-surface.d.ts"],

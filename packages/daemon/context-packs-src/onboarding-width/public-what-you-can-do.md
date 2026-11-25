@@ -808,8 +808,7 @@ not have to tear one down to change it, and you rarely have to start from nothin
   Codex seat OpenRig launched, in a single pane, with a conversation it can prove and unchanged
   running settings. `--plan` runs every check and stops nothing; `--verify --expect-account
   <account>` reports `moved` only when a tool turn has completed in the same conversation since
-  the restart and Codex's status names that account. Linux only: on macOS a
-  request that reaches the running-process check refuses before stopping the seat.
+  the restart and Codex's status names that account.
   An adopted seat (one OpenRig didn't launch) refuses with `claimed_session`. "A conversation it
   can prove" means the stored conversation matches the one the running Codex's command line names
   (or, when it names none, the only one Codex has logged since it started); OpenRig can't tell
@@ -1677,7 +1676,7 @@ your circumstances is configuration, and the ones that are not, another agent ca
   ignored and shown. `rig up --env` leaves both names out. A conversation saved under an earlier home
   doesn't resume in the new one, and live usage refresh still reads only the daemon's own logins.
 - **`rig provider precheck --seat <seat> --to-account <name>`**, then **`rig provider switch --seat
-  <seat> --to-account <name>`** — move one Codex seat (Linux only) to a login saved in its Codex home
+  <seat> --to-account <name>`** — move one Codex seat (Linux or macOS) to a login saved in its Codex home
   (`rig auth save`), on the same conversation: it saves the outgoing login, activates the chosen one,
   restarts the seat in place and prints a restart command for every peer on that home. For a Claude
   seat, `--to-account <label> --token-file <absolute path>` moves it to its own subscription token

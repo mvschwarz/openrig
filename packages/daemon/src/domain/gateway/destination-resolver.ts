@@ -36,6 +36,7 @@
 //      work when its person asks it to or on a schedule they set, not to fix the address.
 //   5. Anything else is unroutable, with teaching that names BOTH checks.
 import { parseSessionName } from "../session-name.js";
+import { describeCheckIn, type MemberCheckIn } from "../connection-contract.js";
 import type { RosterWake } from "../rosters.js";
 import { resolveRegisteredHumanAddress, type HumanFragment } from "./human-registry.js";
 
@@ -55,6 +56,8 @@ export interface ClassifyDeps {
   hostedWake?: (destination: string) => RosterWake | null;
   /** Whether a roster lists the destination as a hosted member, trigger or not. */
   isHostedMember?: (destination: string) => boolean;
+  /** The existing roster/inbox check-in reading used by the team view. */
+  hostedCheckIn?: (destination: string) => MemberCheckIn;
 }
 
 /** Whether a recorded wake result says no transport could take the wake: an address nothing holds (`unroutable:`), or a
@@ -82,6 +85,14 @@ export function classifyDestination(destination: string, deps: ClassifyDeps): De
   if (deps.isHostedMember?.(destination)) {
     // The member reads this teaching too: the address is right, and it isn't a person to register. A requester's
     // assistant repeats it, so it says the work waits, not that it can't be delivered.
+    const checkIn = deps.hostedCheckIn?.(destination);
+    if (checkIn && (checkIn.expectedMinutes !== null || checkIn.onRequest)) {
+      const cadence = checkIn.status === "checking-in"
+        ? `has been checking in about every ${checkIn.expectedMinutes} min`
+        : `reports ${describeCheckIn(checkIn)}`;
+      return { class: "unroutable", teaching: `awaiting-pickup: '${destination}' is a hosted member that ${cadence}. ` +
+        "No wake is sent; this request waits in its queue for its next inbox read." };
+    }
     return {
       class: "unroutable",
       teaching: `awaiting-pickup: '${destination}' is a hosted member with no wake trigger, so no wake is sent. The work waits ` +

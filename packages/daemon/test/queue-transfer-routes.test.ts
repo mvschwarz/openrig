@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { afterEach, expect, it } from "vitest";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { queueTransferActivationSchema } from "../src/db/migrations/191_queue_transfer_activation.js";
 import { migrate } from "../src/db/migrate.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -16,7 +17,7 @@ afterEach(() => databases.splice(0).forEach(db => db.close()));
 function instance(hostId: string, bearerToken: string | null, beforeTransferSchema = false) {
   const db = new Database(":memory:");
   databases.push(db);
-  migrate(db, beforeTransferSchema ? ALL_MIGRATIONS.slice(0, -1) : ALL_MIGRATIONS);
+  migrate(db, beforeTransferSchema ? ALL_MIGRATIONS.filter(migration => migration !== queueTransferActivationSchema) : ALL_MIGRATIONS);
   db.prepare("INSERT INTO self_host_identity VALUES (1, ?, 'minted', 'minted')").run(hostId);
   const repo = new QueueRepository(db, new EventBus(db));
   const app = new Hono().route("/api/queue-transfer", queueTransferRoutes({ db, repo, bearerToken }));

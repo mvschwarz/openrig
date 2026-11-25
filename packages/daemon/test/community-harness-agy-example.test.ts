@@ -59,8 +59,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 
 interface Hook { body: Record<string, unknown> }
 
-const cleanups: Array<() => void> = [];
-afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
+const cleanups: Array<() => void | Promise<unknown>> = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 async function fakeOpenRig(mode: "permit" | "deny" = "permit") {
   const hooks: Hook[] = [];
@@ -108,7 +108,13 @@ function start(openrig: { url: string }, opts: { args?: string[]; env?: Record<s
   child.stdout!.on("data", (data: Buffer) => { out += data.toString(); });
   child.stderr!.on("data", (data: Buffer) => { out += data.toString(); });
   const exited = new Promise<number | null>((done) => child.on("exit", (code) => done(code)));
-  cleanups.push(() => { child.kill("SIGKILL"); rmSync(dir, { recursive: true, force: true }); });
+  cleanups.push(async () => {
+    child.kill("SIGKILL");
+    // The runner's own child (the fake harness) can still be writing in the folder: wait for the runner, then retry
+    // the removal, as macOS can report ENOTEMPTY while the last write lands.
+    await Promise.race([exited, new Promise((done) => setTimeout(done, 2_000))]);
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
   return {
     dir, agyHome, exited,
     out: () => out,

@@ -102,6 +102,10 @@ export type HealthSourceCoverage = {
   evaluated: number;
   omitted: number;
   partial: boolean;
+  /** Items classified cheaply as non-candidates, counted in `evaluated`; `limit` does not apply to them. */
+  screened?: number;
+  /** Items that can qualify and need deep evaluation; `limit` bounds this many. */
+  deepCandidates?: number;
   order: string;
 };
 

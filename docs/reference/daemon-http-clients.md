@@ -143,6 +143,21 @@ A cycle, limit, missing or erased row, or a handed-to address without a recorded
 
 A node's terminal state is `completion.status: "closed-as-recorded"`; other nodes say `open`. The graph's overall `completion.status` is always `unknown`: a closed record does not establish that the person's goal succeeded.
 
+## Attention from one host
+
+`GET /api/queue/attention-aggregate` returns `{ items, hosts }` for local attention plus enabled Feed
+subscriptions. Add `?host=local` to read only local attention without a registry lookup, or
+`?host=<registered-id>` to read only that registered host, even when it is not a Feed subscription.
+Registry IDs resolve before declared `hostId` values. A remote target uses the existing HTTP transport
+and configured daemon bearer credentials (or the existing tokenless behavior).
+
+Target selection happens before remote reads. An unknown target returns no items and one `unreachable`
+host status with an explanatory error; it never falls back to the aggregate. Other outcomes remain
+`ok`, `auth-failed` and `unsupported-transport`. A remote HTTP read retains its 5,000 ms request-and-body
+deadline after credential resolution; selecting a silent host can still take that long. An `ok` status
+is not a completeness guarantee: remote list pagination metadata is not propagated, and a successful
+non-array response produces an empty list. No person or view filter is applied by this endpoint.
+
 ## People, asks and updates without Slack
 
 `GET /api/gateway/participants` returns the same JSON projection as `rig gateway participants --json`:
@@ -367,6 +382,16 @@ What reads these declarations:
 
 ## Route details
 
+- **Early Claude compaction acknowledgement:** Send `{"session":"<session>","earlyAck":true}` to
+  `POST /api/compaction/trigger` to receive HTTP 202 with
+  `{"ok":true,"session":"<session>","stage":"preparing","attemptId":"<id>"}` once the daemon admits
+  your attempt. The receipt confirms admission to preparation only. Use the returned session in
+  `GET /api/compaction/state?session=<session>` and match `preparation.attemptId` to follow that attempt
+  and see whether `/compact` was submitted. A concurrent request refused as `409 already_in_progress`
+  receives no attempt ID. If the 202 response is lost, the request may still be running. Inspect state
+  and the seat before taking further action. Do not retry automatically or assume a new ID in seat state
+  belongs to the lost request. Omitting `earlyAck` or sending `false` uses the blocking response.
+  Pi's trigger returns HTTP 422 for `earlyAck:true`.
 - **Every seat's name in one read:** `GET /api/ps?seats=true` adds `seats`, the rig's seat session names, to each
   entry of the usual `/api/ps` body, from the same read. Use it instead of reading each rig's nodes when only the
   names are needed. The default body has no `seats`, and neither does a daemon from before this option.
@@ -560,3 +585,21 @@ This is delivery-only maintenance. Direct sends, control/END requests and ordina
 The automatic wake ladder also waits before attempt budgets, rung markers and escalation for work whose destination rig is drained, including a held escalation target. It resumes at the retained rung after END. Legacy workflow packets without outbox intents remain owed: their existing keepalive resumes after END, and the sweep reports them if they stay unclaimed. END's scoped recovery pass covers pending intents. Diagnosis re-presentations wait before spending their presentation receipt. An explicit resolve notification remains an explicit action and can pass through the delivery hold.
 
 All watchdog evaluation for the held rig waits, including the context-usage watchdog's managed-compaction action. This does not add a native-start hold. If a drain admission read fails, automatic delivery proceeds and reports the uncertainty. Control/status failures remain errors, and failed BEGIN/END writes never report success.
+
+
+## Read a seat's recorded knowledge
+
+`GET /api/context-packs/seat-knowledge?rig=<rig-name>&seat=<seat-name>` reads the fixed
+`LEARNED.md` and `RECAP.md` files for that seat without requiring a context-pack library.
+It uses the same configured topology root and per-file legacy fallback as `rig context trace`.
+The response includes `rig`, `seat`, `topologyRoot` and `files` in that order of filenames.
+
+Each file carries its canonical `path`, `source` (`topology.root`, `legacy` or `absent`),
+`resolvedPath`, verbatim `content` and `extent`. A present file has `extent: "whole-file"`,
+including an empty string for an empty file. An absent file has `extent: "absent"`, null
+content and null resolved path. Legacy reads retain the trace's named migration advisory.
+Only the seat level is read; ancestor knowledge is not included. A read failure returns
+HTTP 503 rather than claiming absence. A missing/invalid rig or seat path segment returns 400.
+
+This read does not prove that a seat is active, summarize or excerpt its notes, enumerate
+other files, or write a recap. Existing daemon read-access conventions apply.
