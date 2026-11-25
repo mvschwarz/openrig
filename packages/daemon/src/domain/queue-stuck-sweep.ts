@@ -1638,7 +1638,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           const { created } = await deps.queueRepo.handoff({
             qitemId: row.qitemId, fromSession: "stuck-sweep@system", toSession: target,
             body: `${row.body}\n\nOriginal finding destination ${row.destinationSession} references a missing rig. This finding was handed back to the originating agent.`,
-            summary: row.summary, evidenceRef: row.evidenceRef,
+            summary: row.summary, evidenceRef: row.evidenceRef, evidenceRefRoots: row.evidenceRefRoots,
           });
           othersMayHaveRun();
           findings.push({ kind, qitemId: row.qitemId, findingQitemId: created.qitemId, action: "created" });
