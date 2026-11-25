@@ -527,6 +527,14 @@ describe("OPR.0.4.4.23 rev1-r2 fixback — mini-requirements + mockup-ref tighte
     expect(result.findings.some((f) => f.kind === "mini_requirements_missing_or_malformed")).toBe(true);
   });
 
+  it("flags a numbered requirement with no text on a CRLF line", () => {
+    const result = classifyScopeItem(sliceInput({
+      readmeContent: "## Mini-requirements\r\n1.  \r\n## Proof contract\r\n- [ ] check\r\n",
+      implementationPrdContent: null,
+    }));
+    expect(result.findings.some(f => f.kind === "mini_requirements_missing_or_malformed")).toBe(true);
+  });
+
   it.each(["\n", "\r\n"])("accepts numbered mini-requirements in the README with %j newlines", (eol) => {
     const result = classifyScopeItem(sliceInput({
       readmeContent: ["# S", "## Intent", "x", "## Mini-requirements", "1. one observable outcome", "## Proof contract", "- [ ] y", ""].join(eol),
