@@ -691,6 +691,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     ? subsystemSlackDeliver({
         botToken: bot!,
         channel: cfg.channel!,
+        textAttachmentExtensions: cfg.textAttachmentExtensions,
         // #192: a reply-to update whose choice is already recorded posts in that choice's channel:
         // the one it names, or, for a choice recorded without one (before any map existed), the
         // default channel it was made for. Otherwise the map. (The delivery layer first reuses the

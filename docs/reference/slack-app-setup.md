@@ -154,6 +154,19 @@ Human-row posts suppress link and media previews by default. Run `rig slack setu
 allow Slack previews, or `rig slack setup --unfurl off` to suppress them again. The selection reaches
 the running connector on its next rewire or daemon restart; it does not remove already posted previews.
 
+Local image, video and PDF evidence refs upload into the message's thread. To upload text files too,
+add `"textAttachmentExtensions": [".md", ".txt", ".csv", ".json"]` to your `slack-connector.json`,
+choosing only the extensions you want to share. Leave the key absent or use `[]` to keep text refs
+as pointers. The setting applies on the next connector rewire or daemon restart, including to
+queued notifications that have not been delivered yet. `rig slack status` lists enabled extensions.
+
+Text attachments must be UTF-8 files at absolute paths and fit the same 50 MB cap as other
+attachments. OpenRig redacts recognized Slack tokens, webhook URLs and bearer tokens from the
+uploaded copy; the source file stays unchanged. This is the message redactor, not a general
+secret or private-path scanner, so check the files you choose to share. Uploads need `files:write`.
+An unreadable, oversized or invalid UTF-8 file is skipped with a daemon log entry; the message
+text still delivers.
+
 To have reactions ignored instead, run `rig slack setup --reactions off`. The agent that asked
 never hears of a reaction, including one still waiting to be retried, and a person answers an ask by
 typing a reply in its thread. Slack still sends the event and the manifest keeps it, so switching
