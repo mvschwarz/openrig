@@ -11,6 +11,7 @@ import { workflowRunTitleSchema } from "./migrations/194_workflow_run_title.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
 import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";
+import { communityHarnessRuntimeSwitchesSchema } from "./migrations/179_community_harness_runtime_switches.js";
 import { networkRequestsSchema } from "./migrations/184_network_requests.js";
 
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
@@ -385,6 +386,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueRelayedAnswersSchema,
   queueItemsScanIndexesSchema,
   rigSeatSliceSchema,
+  communityHarnessRuntimeSwitchesSchema,
   networkBindingProvidersSchema,
   workflowRunTitleSchema,
   networkRequestsSchema,
