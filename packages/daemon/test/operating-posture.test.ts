@@ -24,6 +24,7 @@ import { healthAuthority } from "../src/domain/health-context.js";
 import { adaptQueueTransitionEvidence, boundHealthEvidence, deriveHealthSourceFreshness } from "../src/domain/health-projection.js";
 import { rigModeRoutes } from "../src/routes/rig-mode.js";
 import { healthRoutes } from "../src/routes/health.js";
+import { attentionRoutes } from "../src/routes/attention.js";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => cleanup.splice(0).reverse().forEach(f => f()));
@@ -471,4 +472,46 @@ it("resolves a rig name to its live rig when archived rigs share the name, and n
   const ambiguous = t.service.resolve({ rigId: "twin" });
   expect(ambiguous.posture).toBe("unknown");
   for (const rig of twins) expect(ambiguous.reason).toContain(rig.id);
+});
+
+it("shows a person's request and its work posture in the Feed detail", async () => {
+  const t = await setup();
+  await t.queue.create({ qitemId: "feed-person", sourceSession: "author@demo", destinationSession: "pat@external", body: "Choose the release", tags: ["project:alpha", "mission:release"], nudge: false });
+  const feed = new Hono();
+  feed.use("*", async (c, next) => {
+    c.set("queueRepo" as never, t.queue);
+    c.set("operatingPosture" as never, t.service);
+    await next();
+  });
+  feed.route("/api/attention", attentionRoutes());
+  const read = async () => (await (await feed.request("/api/attention?item=queue:feed-person")).json()).detail;
+  const initial = await read();
+  expect(initial.lines).toContain("Choose the release");
+  expect(initial.lines.find((line: string) => line.startsWith("Posture:"))).toBe("Posture: human-led · No explicit operating posture at this resolved scope; the product default is human-led.");
+  expect((await t.put("delegated", "mission", "alpha/release")).status).toBe(200);
+  expect((await read()).lines).toContain("Posture: delegated · Explicit operating posture at the most specific applicable scope.");
+});
+
+it("reads and sets the live rig by name through the same HTTP route as its exact id", async () => {
+  const t = await setup();
+  for (let i = 0; i < 2; i++) t.rigs.archiveRig(t.rigs.createRig("strategic").id);
+  const live = t.rigs.createRig("strategic");
+  const effective = async (rig: string) => (await (await t.app.request("/api/rig-mode/effective?rig=" + rig)).json()).operatingPosture;
+  const byId = await effective(live.id);
+  expect(byId.posture).toBe("human-led");
+  expect(await effective("strategic")).toEqual(byId);
+  expect((await t.put("delegated", "rig", "strategic")).status).toBe(200);
+  expect(await effective("strategic")).toEqual(await effective(live.id));
+  expect((await effective(live.id)).binding.id).toBe("rig:" + live.id);
+});
+
+it("keeps a sole archived rig addressable by name when no live rig has that name", async () => {
+  const t = await setup();
+  const archived = t.rigs.createRig("retired");
+  t.rigs.archiveRig(archived.id);
+  const byId = t.service.resolve({ rigId: archived.id });
+  expect(byId.posture).toBe("human-led");
+  expect(t.service.resolve({ rigId: "retired" })).toEqual(byId);
+  expect((await t.put("delegated", "rig", "retired")).status).toBe(200);
+  expect(t.service.resolve({ rigId: archived.id }).binding?.id).toBe("rig:" + archived.id);
 });

@@ -109,6 +109,7 @@ export class OperatingPostureService {
       const live = this.rigs.findUnarchivedRigsByName(value);
       if (live.length === 1) return live[0]!.id;
       const candidates = live.length ? live : this.rigs.findRigsByName(value);
+      if (candidates.length === 1) return candidates[0]!.id;
       if (!candidates.length) throw new Error("no rig named or with id " + value);
       throw new Error("rig name " + value + " matches " + candidates.length + (live.length ? " live rigs" : " archived rigs and no live one")
         + "; name one by id: " + candidates.map(rig => rig.id).join(", "));
