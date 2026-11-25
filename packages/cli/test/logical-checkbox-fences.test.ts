@@ -44,6 +44,14 @@ describe("proof-contract fenced examples", () => {
     expect(parseLogicalCheckboxes(block).map(item => item.sourceLine)).toEqual([5, 9]);
   });
 
+  it("preserves a nested item's continuation across an indented comment", () => {
+    const block = ["  - [ ] ship", "    <!-- deferred", "    - [ ] hidden", "    -->",
+      "    with tests", "<!-- outside -->", "    new paragraph"].join("\n");
+    expect(parseLogicalCheckboxes(block)).toEqual([
+      { checked: false, rawText: "ship with tests", sourceLine: 1 },
+    ]);
+  });
+
   it("ignores the remainder of an unclosed example", () => {
     expect(parseLogicalCheckboxes("~~~md\n- [ ] example")).toEqual([]);
   });

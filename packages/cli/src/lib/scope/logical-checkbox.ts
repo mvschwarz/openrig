@@ -58,8 +58,8 @@ export function parseLogicalCheckboxes(block: string | null): LogicalCheckboxIte
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    if (comment || (!fence && /^ {0,3}<!--/.test(line))) {
-      flush();
+    if (comment || (!fence && line.trimStart().startsWith("<!--"))) {
+      if (!comment && current && line.length - line.trimStart().length <= current.indent) flush();
       comment = !line.includes("-->");
       continue;
     }
