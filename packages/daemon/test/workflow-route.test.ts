@@ -17,6 +17,7 @@ import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js"
 import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
 import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step_trails.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
+import { queueItemEvidenceRefRootsSchema } from "../src/db/migrations/196_queue_item_evidence_ref_roots.js";
 import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
 import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow_instance_version.js";
 import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
@@ -136,7 +137,7 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
       outboxEntriesSchema,
       coreSchema, bindingsSessionsSchema, rigArchiveSchema, eventsSchema,
       queueItemsSchema, queueTransitionsSchema,
-      queueItemSummarySchema, queueItemEvidenceRefSchema,
+      queueItemSummarySchema, queueItemEvidenceRefSchema, queueItemEvidenceRefRootsSchema,
       workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema,
       workflowInstanceVersionSchema, workflowSpecJsonSchema,
     ]);
@@ -242,6 +243,15 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
     expect(after.hopCount).toBe(before.hopCount);
     // chainOfRecord threads the lineage
     expect(String(newPacket?.chain_of_record ?? "")).toContain(entryPacket);
+  });
+
+  it.each([[[]], [["proof"]]])("route preserves the copied evidence authority %j", async (roots) => {
+    const { instanceId, entryPacket } = await instantiate();
+    db.prepare("UPDATE queue_items SET evidence_ref = ?, evidence_ref_roots = ? WHERE qitem_id = ?")
+      .run("/fixture/chart.png", JSON.stringify(roots), entryPacket);
+    const routed = await runtime.route({ instanceId, toSession: "producer2@rig", actorSession: "orch@rig" });
+    expect(db.prepare("SELECT evidence_ref, evidence_ref_roots FROM queue_items WHERE qitem_id = ?").get(routed.newPacketId))
+      .toEqual({ evidence_ref: "/fixture/chart.png", evidence_ref_roots: JSON.stringify(roots) });
   });
 
   it("(6) routing_table_changed emits with the ADDITIVE re-route detail", async () => {

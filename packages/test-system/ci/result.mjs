@@ -10,16 +10,25 @@ export const CASES = {
   fixture: { file: 'scenarios/scenario-02-baton.yaml', destination: 'dev-worker@scn-baton', failedStep: 3 },
   library: { file: 'library/queue-baton-survives-restart.yaml', destination: 'dev-qa@dev-pair-stub', failedStep: 4, seed: 'baton-drop' },
 };
+// A fresh seat also holds OpenRig's pending roster notice, which names no mission (#3849). It's set aside when deciding the
+// mission, so the parked row's slice is still the labelled context, and the notice stays listed. Pinning the notice (as
+// #3941 first did) keeps the check honest: it can't pass because the notice went missing.
+const parkedContext = [
+  'HELD WORK (blocked; this is not next):\n- refocus-baton — ',
+  'blocked on external:scenario-release',
+  'CONTEXT FROM HELD AND PENDING WORK — nothing is in progress, and every held and pending row (1 held, 0 pending; 1 OpenRig notice set aside) resolves to this slice.',
+  'POSSIBLE NEXT WORK (pending; no order implied):\n- qitem-roster-ready-',
+];
 // Stub-script scenarios run in their passing form only. Their planted failures are
 // product-code mutations, so they stay per-PR evidence outside CI.
 export const PASSING_CASES = {
   'prompt-state': { file: 'library/prompt-state.json', scenario: 'prompt-state', kind: 'prompt-state' },
   'refocus-active': { file: 'library/refocus-active-baton.yaml', scenario: 'refocus-active-baton', kind: 'hook',
     includes: ['Trace the exact held work'], excludes: ['FALLBACK'] },
-  // The parked case with the work packet switched off: today's labelled root fallback, never the slice as work.
+  // The parked case with the work packet switched off: the held row's slice as labelled context, never as current work.
   'refocus-parked-off': { file: 'library/refocus-parked-baton-packet-off.yaml', scenario: 'refocus-parked-baton-packet-off', kind: 'hook',
-    includes: ['FALLBACK — no current typed baton', 'not evidence of a current mission'],
-    excludes: ['Execute the scoped regression mission', 'HELD WORK', 'WORK FROM QUEUE EVIDENCE'] },
+    includes: [...parkedContext, 'Trace the exact held work'],
+    excludes: ['FALLBACK', 'WORK FROM QUEUE EVIDENCE', 'does not settle one mission'] },
   transcript: { file: 'library/transcript-reads-addressed-seat.yaml', scenario: 'transcript-reads-addressed-seat' },
   capture: { file: 'library/capture-returns-addressed-seat.yaml', scenario: 'capture-returns-addressed-seat' },
   'daemon-restart': { file: 'library/daemon-restart-preserves-team-identity.yaml', scenario: 'daemon-restart-preserves-team-identity' },
@@ -82,12 +91,11 @@ export function verifyRun(mode, exitCode, report, caseName = 'fixture') {
     verifyHookOutput(report.hook);
     const context = report.hook.additionalContext;
     if (mode === 'healthy') {
-      // The work packet is on: the parked row is held work, never the current work.
+      // The work packet is on: the parked row is held work, and its slice is labelled context, never the current work.
       assert.equal(exitCode, 0); assert.equal(report.result.verdict, 'PASS'); assert.equal(report.fault, null);
-      assert.ok(context.includes('HELD WORK (blocked; this is not next):\n- refocus-baton — '));
-      assert.ok(context.includes('blocked on external:scenario-release'));
+      for (const text of parkedContext) assert.ok(context.includes(text), text);
+      assert.ok(!context.includes('does not settle one mission'));
       assert.ok(!context.includes('WORK FROM QUEUE EVIDENCE'));
-      assert.ok(!context.includes('Trace the exact held work'));
     } else {
       assert.equal(mode, 'seeded'); assert.equal(exitCode, 1);
       assert.deepEqual(report.fault, { class: selected.seed, movedRows: 1 });
