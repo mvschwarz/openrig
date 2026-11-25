@@ -2940,7 +2940,11 @@ export class QueueRepository {
         throw new QueueRepositoryError("late_answer_refused", "Use this delivery id from the selected lead as an update to the recorded person.");
       }
       const created = this.createInTransactionalContext(input);
-      const followUpEvents = late ? this.markLateAnswerQueued(late) : [];
+      let followUpEvents: PersistedEvent[] = [];
+      if (late) {
+        this.markLateAnswerQueued(late);
+        followUpEvents = this.reconcileLateAnswerFollowUp(this.getByIdOrThrow(late.question_id), { ...late, queued: 1 }, true);
+      }
       if (this.outbox && input.nudge !== false) {
         try {
           // A savepoint removes any partial intent when staging fails, while
@@ -3207,7 +3211,7 @@ export class QueueRepository {
     if (!this.hasLateAnswers || input.identityProvenance !== "principal:v1" || !input.identityPrincipal
       || parseSessionName(input.destinationSession).kind !== "canonical" || input.destinationSession.split("@").length !== 2
       || this.isPersonAddress(input.destinationSession)
-      || this.reachablePerson(recipient) !== recipient || this.isSharedChannel(recipient)) {
+      || this.lateAnswerRecipientStatus(recipient) === "ineligible") {
       throw new QueueRepositoryError("late_answer_refused", "A late answer needs an authenticated caller, a selected local lead, and the grant's registered person.");
     }
     const deliveryId = LATE_ANSWER_PREFIX + createHash("sha256").update(id).digest("hex");
@@ -3218,31 +3222,50 @@ export class QueueRepository {
       .run(id, deliveryId, input.identityPrincipal, input.destinationSession, recipient);
   }
 
+  private lateAnswerRecipientStatus(recipient: string): "registered" | "ineligible" | "unknown" {
+    if (this.isSharedChannel(recipient)) return "ineligible";
+    const people = registeredPeople(this.loadHumanRegistryFn());
+    if (people === null) return "unknown";
+    return resolveRegisteredHumanAddress(recipient, people) === recipient ? "registered" : "ineligible";
+  }
+
+  /** The resolution belongs to the selected lead's recorded closing transition in the original episode. */
+  private authorizedLateAnswer(item: QueueItem, late: LateAnswerRecord): string | null {
+    return item.state === "done" && late.answer_transition_id !== null
+      && this.closingTransition(item.qitemId, item.state)?.transitionId === late.answer_transition_id ? item.resolution : null;
+  }
+
+  private lateAnswerMatchesDelivery(late: LateAnswerRecord, answer: string | null): boolean {
+    return late.queued === 1 && answer !== null && this.getById(late.delivery_id)?.body === answer;
+  }
+
   lateAnswerStatus(item: QueueItem) {
     const late = this.lateAnswerRecord("question_id", item.qitemId);
     if (!late) return undefined;
-    const state = late.queued ? "queued" : !late.stopped ? "waiting"
-      : isBlockerLive(item.state) && item.destinationSession === late.lead ? "waiting-for-answer" : "manual-required";
-    const followUp = late.stopped ? this.lateAnswerFollowUp(late) : null;
-    return { deliveryId: late.delivery_id, recipient: late.recipient, state,
+    const answer = this.authorizedLateAnswer(item, late);
+    const queued = this.lateAnswerMatchesDelivery(late, answer);
+    const manual = (late.queued && (item.resolution !== null || !isBlockerLive(item.state)))
+      || this.lateAnswerRecipientStatus(late.recipient) !== "registered"
+      || (late.stopped && (!isBlockerLive(item.state) || item.destinationSession !== late.lead));
+    const state = queued ? "queued" : manual ? "manual-required" : late.stopped ? "waiting-for-answer" : "waiting";
+    const followUp = this.lateAnswerFollowUp(late);
+    return { deliveryId: late.delivery_id, recipient: late.recipient, state, hasAnswer: answer !== null,
       ...(followUp ? { followUpId: followUp.qitemId } : {}),
-      deliveryOutcome: late.queued ? this.deliveryOutcomeFor(late.delivery_id)?.outcome ?? null : null };
+      deliveryOutcome: queued ? this.deliveryOutcomeFor(late.delivery_id)?.outcome ?? null : null };
   }
 
   /** A stop is a write by the question's caller. A read alone never registers it. */
   stopLateAnswerWait(qitemId: string, caller: string, principal: string, recipient: string) {
-    const { item, staged, followUpEvent } = this.db.transaction(() => {
+    const { item, staged, followUpEvents } = this.db.transaction(() => {
       const late = this.lateAnswerRecord("question_id", qitemId);
       const item = late && late.principal === principal && late.recipient === recipient ? this.getById(qitemId) : null;
       if (!late || !item || item.sourceSession !== caller) {
         throw new QueueRepositoryError("qitem_not_found", "No opted-in question for this caller.");
       }
       this.db.prepare("UPDATE queue_late_answers SET stopped = 1 WHERE question_id = ? AND stopped = 0").run(qitemId);
-      const staged = this.stageLateAnswer(item, { ...late, stopped: 1 });
-      const followUpEvent = !late.stopped && !late.queued && !staged ? this.createLateAnswerFollowUp(late) : undefined;
-      return { item, staged, followUpEvent };
+      return { item, ...this.reconcileLateAnswer(item, { ...late, stopped: 1 }) };
     })();
-    if (followUpEvent) this.eventBus.notifySubscribers(followUpEvent);
+    this.notifyCommitted(followUpEvents);
     this.notifyLateAnswer(staged);
     return this.lateAnswerStatus(item);
   }
@@ -3257,32 +3280,51 @@ export class QueueRepository {
     if (this.getById(id) || !this.canRecordDestination(late.lead)) return undefined;
     return this.createWithinTransaction({ qitemId: id, sourceSession: OPENRIG_SENDER, destinationSession: late.lead,
       summary: "Follow up on a question after its caller stopped waiting",
-      body: `The caller stopped waiting for ${late.question_id}. Record your answer on that question as usual. If automatic delivery cannot proceed, use the question's lateAnswer delivery id ${late.delivery_id} for the manual gateway update.`,
+      body: `Check the answer and delivery status for ${late.question_id}. Record an answer on the question as usual. To send its first update manually, use ${late.delivery_id}. If that update already holds earlier or different text, check its receipt before deciding how to send a correction.`,
       chainOfRecord: [late.question_id], nudge: false }).persistedEvent;
   }
 
-  private markLateAnswerQueued(late: LateAnswerRecord): PersistedEvent[] {
+  private markLateAnswerQueued(late: LateAnswerRecord): void {
     this.db.prepare("UPDATE queue_late_answers SET queued = 1 WHERE question_id = ?").run(late.question_id);
-    const followUp = late.stopped ? this.lateAnswerFollowUp(late) : null;
-    return followUp && isBlockerLive(followUp.state) ? this.updateInTransactionalContext({ qitemId: followUp.qitemId,
-      actorSession: OPENRIG_SENDER, state: "done", closureReason: "no-follow-on",
-      transitionNote: `Gateway update ${late.delivery_id} is queued. See its delivery record for later outcomes.` }).persistedEvents : [];
+  }
+
+  private reconcileLateAnswerFollowUp(item: QueueItem, late: LateAnswerRecord, reopenSettled = false): PersistedEvent[] {
+    const followUp = this.lateAnswerFollowUp(late);
+    if (this.lateAnswerMatchesDelivery(late, this.authorizedLateAnswer(item, late))) {
+      return followUp && isBlockerLive(followUp.state) ? this.updateInTransactionalContext({ qitemId: followUp.qitemId,
+        actorSession: OPENRIG_SENDER, state: "done", closureReason: "no-follow-on",
+        transitionNote: `Gateway update ${late.delivery_id} is queued. See its delivery record for later outcomes.` }).persistedEvents : [];
+    }
+    if (!late.stopped && !(late.queued && (item.resolution !== null || !isBlockerLive(item.state)))) return [];
+    if (!followUp) {
+      const event = this.createLateAnswerFollowUp(late);
+      return event ? [event] : [];
+    }
+    if (!reopenSettled || !late.queued || followUp.state !== "done") return [];
+    return this.updateInTransactionalContext({ qitemId: followUp.qitemId, actorSession: OPENRIG_SENDER,
+      state: "pending", reopen: true, transitionNote: "The accepted gateway update does not cover the question's current answer. Check the delivery record before sending a correction." }).persistedEvents;
+  }
+
+  private reconcileLateAnswer(item: QueueItem, late: LateAnswerRecord, reopenSettled = false) {
+    const staged = this.stageLateAnswer(item, late);
+    const followUpEvents = this.reconcileLateAnswerFollowUp(item, staged ? { ...late, queued: 1 } : late, reopenSettled);
+    return { staged, followUpEvents };
   }
 
   /** Only the selected lead's explicit close can supply the words. The queue row owns those words. The close id
    *  fences a reopening or a later episode, whose resolution may append unrelated text. */
   private stageLateAnswer(item: QueueItem, late: LateAnswerRecord) {
-    const answer = item.resolution;
-    if (!late.stopped || late.queued || late.answer_transition_id === null || item.state !== "done" || !answer
-      || this.closingTransition(item.qitemId, item.state)?.transitionId !== late.answer_transition_id
-      || this.reachablePerson(late.recipient) !== late.recipient || this.isSharedChannel(late.recipient) || !this.outbox) return undefined;
+    if (!late.stopped || late.queued || !this.outbox || this.lateAnswerRecipientStatus(late.recipient) !== "registered") return undefined;
+    const answer = this.authorizedLateAnswer(item, late);
+    if (answer === null) return undefined;
     try {
       return this.db.transaction(() => {
         const staged = this.createWithinTransaction({ qitemId: late.delivery_id, sourceSession: late.lead,
           destinationSession: late.recipient, humanIntent: "update", body: answer, summary: "Answer to your question",
           chainOfRecord: [item.qitemId] });
         this.stageWakeIntent(staged.qitemId, late.lead, late.recipient, null, undefined);
-        return { ...staged, followUpEvents: this.markLateAnswerQueued(late) };
+        this.markLateAnswerQueued(late);
+        return staged;
       })();
     } catch (error) {
       // The stop or answer must still land when gateway staging fails. The question shows manual-required in that case.
@@ -3294,7 +3336,6 @@ export class QueueRepository {
   private notifyLateAnswer(staged: ReturnType<QueueRepository["stageLateAnswer"]>): void {
     if (!staged) return;
     this.eventBus.notifySubscribers(staged.persistedEvent);
-    this.notifyCommitted(staged.followUpEvents);
     this.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${staged.qitemId}`);
   }
 
@@ -4151,13 +4192,13 @@ export class QueueRepository {
    * view bridge.
    */
   update(input: QueueUpdateInput): QueueItem {
-    const { result, staged } = this.db.transaction(() => {
+    const { result, staged, followUpEvents } = this.db.transaction(() => {
       const result = this.updateInTransactionalContext(input);
-      const late = input.state === "done" && input.resolution ? this.lateAnswerRecord("question_id", input.qitemId) : undefined;
-      const staged = late ? this.stageLateAnswer(this.getByIdOrThrow(input.qitemId), late) : undefined;
-      return { result, staged };
+      const late = input.state === "done" || input.reopen ? this.lateAnswerRecord("question_id", input.qitemId) : undefined;
+      return { result, ...(late ? this.reconcileLateAnswer(this.getByIdOrThrow(input.qitemId), late, true) : { staged: undefined, followUpEvents: [] }) };
     })();
     for (const event of result.persistedEvents) this.eventBus.notifySubscribers(event);
+    this.notifyCommitted(followUpEvents);
     this.notifyLateAnswer(staged);
     return this.getByIdOrThrow(input.qitemId);
   }

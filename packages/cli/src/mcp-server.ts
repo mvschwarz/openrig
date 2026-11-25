@@ -3,6 +3,7 @@ import { z } from "zod";
 import { createHash, randomBytes } from "node:crypto";
 import { statSync } from "node:fs";
 import nodePath from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { ToolAnnotations } from "@modelcontextprotocol/server";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, operatorAuthHeaders, remoteDaemonClient, terminalAuthHeaders, type DaemonResponse } from "./client.js";
 import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer, type HostRegistryLoadResult } from "./host-registry.js";
@@ -25,6 +26,8 @@ export type McpInstructionExtension = {
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
+const WAIT_STOP_RETRY_DELAYS_MS = [0, 100, 250];
+const WAIT_STOP_ATTEMPT_TIMEOUT_MS = 1_000;
 /** The most text rig_context_get and rig_artifact_read return in one call; a longer file or section is cut, and says so. */
 const CONTEXT_TEXT_LIMIT = 48_000;
 
@@ -1816,7 +1819,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         tier: z.string().optional().describe("Tier (as rig queue create --tier)"),
         qitemId: z.string().optional().describe("A request id you choose, unique to this request (for example qitem- and random letters), so an uncertain create can be checked by it; pass the same one to retry, never a new one (default: a new id)"),
         revises: z.string().optional().describe("The qitemId of the work this asks to revise"),
-        lateAnswer: z.boolean().optional().describe("Explicitly ask for the selected lead's recorded answer as a gateway update if a positive wait times out or disconnects. Requires an authenticated local grant bound to the registered recipient and an explicit destination."),
+        lateAnswer: z.boolean().optional().describe("Explicitly ask for the selected lead's recorded answer as a gateway update if a positive wait ends without the answer. Requires an authenticated local grant bound to the registered recipient and an explicit destination."),
         alert: z.boolean().optional().describe("For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now (as rig queue create --alert). It stands out in Slack. Without it the ask still posts to Slack unless the person's Slack subscription is urgent-only, in which case it waits on Steering and the TUI"),
         host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
@@ -1978,6 +1981,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (item.status >= 400) return mapResult(item);
         if (scope && !scope.item(item.data)) return outOfScope(`Item ${qitemId}`);
         let waited: unknown;
+        let followUp: "recorded" | "unconfirmed" | undefined;
         const httpSignal = options.requestSignal;
         const signal = httpSignal ? AbortSignal.any([ctx.mcpReq.signal, httpSignal]) : ctx.mcpReq.signal;
         const question = structured(item.data);
@@ -1986,7 +1990,16 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (waitSeconds && httpSignal && !target.remote && options.principalSource && !access?.readOnly && person
           && structured(question.lateAnswer).recipient === `${person}@external` && question.sourceSession === seatOf()) {
           let stopped: Promise<DaemonResponse<unknown> | undefined> | undefined;
-          recordStop = () => stopped ??= hostPost(target, `/api/queue/${id}/wait-stopped`, { recipient: `${person}@external` }).catch(() => undefined);
+          const writeStop = async () => {
+            for (const delay of WAIT_STOP_RETRY_DELAYS_MS) {
+              if (delay) await sleep(delay);
+              const result = await hostPost(target, `/api/queue/${id}/wait-stopped`, { recipient: `${person}@external` },
+                { timeoutMs: WAIT_STOP_ATTEMPT_TIMEOUT_MS }).catch(() => undefined);
+              if (result && result.status < 500) return result;
+            }
+            return undefined;
+          };
+          recordStop = () => stopped ??= writeStop();
           // The stop write must survive the canceled read and the loss of a response containing a ready answer.
           const stopWait = recordStop;
           const onStop = () => { void stopWait().then(result => {
@@ -2006,12 +2019,17 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           if (item.status >= 400) return mapResult(item);
           if (scope && !scope.item(item.data)) return outOfScope(`Item ${qitemId}`);
           const { waited: marker, ...row } = structured(item.data);
-          if (marker && recordStop) {
-            const stop = await recordStop();
-            if (stop && stop.status < 400) row.lateAnswer = structured(stop.data).lateAnswer;
-            waited = { ...structured(marker), followUp: stop && stop.status < 400 ? "recorded" : "unconfirmed" };
-          } else waited = marker;
+          waited = marker;
           item = { ...item, data: row };
+        }
+        if (recordStop && structured(structured(item.data).lateAnswer).hasAnswer !== true) {
+          const stop = await recordStop();
+          followUp = stop && stop.status < 400 ? "recorded" : "unconfirmed";
+          if (stop && stop.status < 400) item = { ...item, data: { ...structured(item.data), lateAnswer: structured(stop.data).lateAnswer } };
+          if (waited) {
+            waited = { ...structured(waited), followUp };
+            followUp = undefined;
+          }
         }
         const transitions = await hostGet(target, `/api/queue/${id}/transitions`);
         if (transitions.status >= 400) return mapResult(transitions);
@@ -2025,7 +2043,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           ? labelActors({ item: projectForExternal(shownItem, view), transitions: Array.isArray(transitions.data) ? transitions.data.map((t) => projectForExternal(t, view)) : transitions.data },
             { seat: seatOf() ?? null, principal: access?.principal ?? null, grant: access?.external?.grant?.id ?? null })
           : { item: shownItem, transitions: transitions.data };
-        return mapResult({ status: 200, data: { ...data, ...(handedOn ? { successor } : {}), ...(waited ? { waited } : {}) } }, undefined, { structured: true });
+        return mapResult({ status: 200, data: { ...data, ...(handedOn ? { successor } : {}), ...(waited ? { waited } : {}), ...(followUp ? { followUp } : {}) } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }

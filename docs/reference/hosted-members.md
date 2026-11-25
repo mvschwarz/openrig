@@ -56,17 +56,23 @@ chosen lead's explicit `destination` on the same daemon. The recipient comes fro
 Only opt in when the person asks for a follow-up. The lead still closes the original question as `done` with
 `no-follow-on` and puts the answer in `resolution`.
 
-Use a positive `waitSeconds` on `rig_queue_show`. If that wait times out, is canceled, or disconnects before the
-response finishes, OpenRig records the follow-up. A response that finishes normally does not trigger it. When the
-selected lead has recorded the answer, OpenRig queues one `human-intent update` for the recipient. The lead can
-still send it manually with `rig queue create --human-intent update`, using `--id` with `lateAnswer.deliveryId`
-and `--destination` with `lateAnswer.recipient` from `rig queue show <question-id> --full --json`. Both paths use
-the same update ID. The first recorded update keeps its text.
+Use a positive `waitSeconds` on `rig_queue_show`. The MCP server tries to record a follow-up when the wait returns
+without the selected lead's answer, including when the question is blocked or handed off. It also tries if the wait
+is canceled or the response disconnects. A normal response with the lead's answer needs no follow-up. The MCP server
+retries a transient stop failure a few times. If it stops before recording the follow-up, or all attempts to reach
+the daemon fail, the lead can still send the answer by hand.
 
-If OpenRig cannot queue the update, the follow-up stays in the lead's queue. `lateAnswer.state` shows the follow-up's
-progress. `lateAnswer.deliveryOutcome` shows the gateway's recorded outcome when available. Queued means the update
-exists, accepted means the bridge accepted it, and posted means the provider posted it. None confirms the person
-read or heard the answer. The gateway owns delivery retries.
+When the daemon has the follow-up and the selected lead's recorded answer, it can queue a `human-intent update`.
+Use `rig queue create --human-intent update` for a manual send. Pass `--id` with `lateAnswer.deliveryId` and
+`--destination` with `lateAnswer.recipient` from `rig queue show <question-id> --full --json`. Both paths use the
+same update ID, and the first recorded update keeps its text. If that text differs from the lead's answer or the
+question is reopened, the lead's follow-up stays open so they can check the earlier receipt and decide on a correction.
+
+If the recipient registry is unreadable, OpenRig keeps the question and its recipient binding and leaves the answer
+for the lead to resolve. `lateAnswer.state` shows the follow-up's progress. `lateAnswer.deliveryOutcome` shows the
+gateway's recorded outcome when available. Queued means the matching update exists, accepted means the bridge accepted
+it, and posted means the provider posted it. Whether the person read or heard it is unknown. The gateway owns delivery
+retries after an update is queued.
 
 ## Asking a person while keeping the work
 
