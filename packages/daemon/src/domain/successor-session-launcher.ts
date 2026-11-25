@@ -2,7 +2,7 @@ import { ActivityGrantStore } from "./activity-grants.js";
 import { ulid } from "ulid";
 import { seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "./claude-core-plugin-env.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { PaneTerminal, TmuxAdapter } from "../adapters/tmux.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
 import type { RuntimeAdapter, NodeBinding, ReadinessResult, ForkSource } from "./runtime-adapter.js";
@@ -106,7 +106,8 @@ export type SuccessorLaunchResult =
       /** The launch's frozen executable and whether it is a #! script (Claude managed launches, #2341). */
       launchedExecutable?: { path: string; isScript: boolean };
       /** How the departing occupant ended at the cutover: through its own shutdown (or nothing was left running), or by a
-       *  signal it doesn't handle or KILL after the window (#3901). `retireeExitDetail` says which, in a sentence. */
+       *  signal: one it doesn't handle, KILL after the window, or the pane-level stop when its own exit couldn't be
+       *  confirmed (#3901). `retireeExitDetail` says which, in a sentence. */
       retireeExit: "graceful" | "forced";
       retireeExitDetail?: string;
       /**
@@ -279,6 +280,14 @@ export class SuccessorSessionLauncher {
         message: `The managed binding does not match pane "${pane.id}" of "${departingSession}"; no cutover was started.` };
     }
 
+    // #3901: the pane's terminal (its session's immutable id and the tmux server), read as the pane is resolved, which
+    // the cutover's effects are then held to: a replaced server reuses names and pane ids for other terminals.
+    const terminal = this.tmuxAdapter.paneTerminal ? await this.tmuxAdapter.paneTerminal(pane.id) : undefined;
+    if (terminal && terminal.sessionName !== departingSession) {
+      return { ok: false, code: "pane_unresolved", step: "resolve_pane", replacementStarted: false,
+        message: `Pane "${pane.id}" is no longer in "${departingSession}"; no cutover was started.` };
+    }
+
     const binding = successorBinding(input.node, departingSession, pane.id, cwd, input.occupantGeneration);
     const adapter = input.node.runtime ? this.runtimeAdapters[input.node.runtime] : undefined;
     let preflightWarnings: string[] = [];
@@ -306,9 +315,11 @@ export class SuccessorSessionLauncher {
     //    successor's resume depends on) → bounded-timeout KILL fallback (pinned degraded path) → the pane's
     //    shell ended → respawn-pane (no -k) on the dead pane.
     const inputTarget = this.tmuxAdapter.deliveryGuard ? input.node.id : pane.id;
-    const terminated = await this.terminateRetiree(pane.id, inputTarget, input.node.runtime);
+    const terminated = await this.terminateRetiree(pane.id, inputTarget, input.node.runtime, terminal);
     if (!terminated.ok) {
-      return { ok: false, code: "retiree_not_terminated", step: "create_successor", message: terminated.message, replacementStarted: false };
+      // retiree_not_terminated: the retiree was seen still running after KILL (or its pane never ended). A pane seen in
+      // another tmux session or on another server (#3901) was left alone, and says so.
+      return { ok: false, code: terminated.code ?? "retiree_not_terminated", step: "create_successor", message: terminated.message, replacementStarted: false };
     }
     input.onReplacementStarted?.();
     // KI-14: the respawn command must be EXPLICIT. `respawn-pane` without a command re-runs the
@@ -595,11 +606,12 @@ export class SuccessorSessionLauncher {
    * the retiree, or a failure if it never became dead (then commit never runs).
    * #3901: the graceful step is the runtime's own exit, measured natively (runtime-exit.ts): TERM to Claude Code itself
    * (not to the pane's shell, which ignores it), `/exit` typed into an idle Codex with an empty input box. Another runtime,
-   * or an agent that can't be identified, keeps the pane-level TERM then KILL.
+   * or an agent that can't be identified, keeps the pane-level TERM then KILL. Every effect is held to `terminal`, the
+   * pane's terminal as it was resolved.
    */
-  private async terminateRetiree(paneId: string, inputTarget: string, runtime: string | null): Promise<PaneTerminationResult> {
+  private async terminateRetiree(paneId: string, inputTarget: string, runtime: string | null, terminal: PaneTerminal | null | undefined): Promise<PaneTerminationResult> {
     return terminatePaneInPlace(this.tmuxAdapter, paneId, { pollMs: this.exitPollMs, timeoutMs: this.exitTimeoutMs, sleep: this.sleep }, "Retiree", inputTarget,
-      { runtime, ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
+      { runtime, ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}), ...(terminal !== undefined ? { terminal } : {}) });
   }
 
   /** KI-14: is the respawned pane's foreground a bare shell? A non-shell here means the pane booted

@@ -147,8 +147,8 @@ export interface SeatHandoverMutationResult {
     /** The departing tmux session is kept: a successor respawns into its pane, and a discovered one runs in its own. */
     departingSessionKilled: false;
     /** How the previous occupant ended before the successor started in its pane: through its own shutdown, or with nothing
-     *  left running (#3901: Claude Code on TERM, Codex through /exit), or by a signal it doesn't handle or KILL after the
-     *  window. A discovered successor leaves it alone. */
+     *  left running (#3901: Claude Code on TERM, Codex through /exit), or by a signal: one it doesn't handle, KILL after
+     *  the window, or the pane-level stop when its own exit couldn't be confirmed. A discovered successor leaves it alone. */
     departingProcess: "ended-graceful" | "ended-forced" | "not-touched";
     /** #3901: what happened to the previous occupant, in a sentence. Absent when it wasn't touched, and from older daemons. */
     departingProcessDetail?: string;

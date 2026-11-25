@@ -33,12 +33,17 @@ export class Pane {
   runtimeIgnores = new Set<Signal>();
   beforeRuntimeEffect: (() => void) | null = null;
   afterTyping: ((text: string) => ComposerSnapshot | null) | null = (text) => codexTwoRowComposerAt(text);
+  /** The pane's terminal, as tmux reports it (#3901): its session's name and id, and its server. Null: unreadable. A
+   *  replaced server is another pid and start time. */
+  session = "r01-dev";
+  server: { pid: string; start: string } | null = { pid: "4000", start: "1764061200" };
 
   constructor(rows: NativeProcessRow[], panePid = 100) { this.rows = [init, ...rows]; this.panePid = panePid; }
 
   list = vi.fn(async () => this.rows.map((row) => ({ ...row })));
 
-  private runtimeGone(pid: number): void {
+  /** The process `pid` ends (with the launch script above Codex); the shell takes the terminal back. */
+  runtimeGone(pid: number): void {
     const gone = new Set([pid, ...this.rows.filter((row) => row.pid === launchScript.pid && pid === codex.pid).map((row) => row.pid)]);
     this.rows = this.rows.filter((row) => !gone.has(row.pid));
     if (pid === this.panePid) { this.dead = true; this.rows = [init]; return; }
@@ -50,6 +55,7 @@ export class Pane {
     return {
       setRemainOnExit: vi.fn(async () => { this.effects.push("remain-on-exit"); return { ok: true }; }),
       getPanePid: vi.fn(async (target: string) => (this.dead || target === "%other" ? (target === "%other" ? 999 : null) : this.panePid)),
+      paneTerminal: vi.fn(async () => this.server ? { sessionName: this.session, sessionId: "$1", server: { ...this.server } } : null),
       isPaneDead: vi.fn(async () => this.dead),
       signalPaneRuntime: vi.fn(async (_target: string, pid: number, signal: "TERM" | "KILL", still: (pane: string) => Promise<boolean>) => {
         this.beforeRuntimeEffect?.();
@@ -58,7 +64,11 @@ export class Pane {
         if (!this.runtimeIgnores.has(signal)) this.runtimeGone(pid);
         return { ok: true };
       }),
-      signalPaneProcess: vi.fn(async (_target: string, signal: Signal) => {
+      signalPaneProcess: vi.fn(async (_target: string, signal: Signal, stillThatPane?: (pane: string) => Promise<boolean>) => {
+        if (stillThatPane && !await stillThatPane("%1")) {
+          this.effects.push(`refused root ${signal}`);
+          return { ok: false, code: "guard_target_unknown", message: "the pane couldn't be shown to be the one read earlier" };
+        }
         this.effects.push(`root ${signal}`);
         const root = this.rows.find((row) => row.pid === this.panePid);
         if (root && root.executableName === "bash" && signal === "TERM") return { ok: true }; // an interactive shell ignores TERM
@@ -68,12 +78,21 @@ export class Pane {
         return { ok: true };
       }),
       captureComposerSnapshot: vi.fn(async () => this.composer),
-      sendText: vi.fn(async (_target: string, text: string, _before?: unknown, options?: { bracketed?: boolean }) => {
+      // As the adapter does: the caller's beforePaste runs right before the paste, and a refusal there pastes nothing.
+      sendText: vi.fn(async (_target: string, text: string, _before?: unknown, options?: { bracketed?: boolean; beforePaste?: (pane: string) => Promise<void> }) => {
+        try { await options?.beforePaste?.("%1"); } catch (error) {
+          this.effects.push(`refused type ${text}`);
+          return { ok: false, code: "unknown", message: (error as Error).message };
+        }
         this.effects.push(`type ${text}${options?.bracketed === false ? " (keys)" : ""}`);
         this.composer = this.afterTyping?.(text) ?? this.composer;
         return { ok: true };
       }),
-      sendKeys: vi.fn(async (_target: string, keys: string[]) => {
+      sendKeys: vi.fn(async (_target: string, keys: string[], _before?: unknown, options?: { beforeKeys?: (pane: string) => Promise<void> }) => {
+        try { await options?.beforeKeys?.("%1"); } catch (error) {
+          this.effects.push(`refused keys ${keys.join(" ")}`);
+          return { ok: false, code: "unknown", message: (error as Error).message };
+        }
         this.effects.push(`keys ${keys.join(" ")}`);
         if (keys.includes("Enter") && this.rows.some((row) => row.pid === codex.pid)) this.runtimeGone(codex.pid);
         return { ok: true };

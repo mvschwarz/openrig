@@ -427,7 +427,9 @@ export class NodeLauncher {
       | { ok: false; code: string; message: string; retryable?: boolean; processLimits?: import("../adapters/tmux.js").SeatProcessLimitsProblem }> {
     let panes: Array<{ id: string }> = [];
     try { panes = await this.tmuxAdapter.listPanes(sessionName); } catch { /* an unreadable session holds no pane to keep */ }
-    if (!panes.some((candidate) => candidate.id === pane)) {
+    // #3901: the pane's terminal (its session's immutable id and the tmux server), which the stop's effects are held to.
+    const terminal = this.tmuxAdapter.paneTerminal ? await this.tmuxAdapter.paneTerminal(pane) : undefined;
+    if (!panes.some((candidate) => candidate.id === pane) || (terminal && terminal.sessionName !== sessionName)) {
       return { ok: false, code: "pane_not_found", message: `Pane ${pane} isn't in tmux session "${sessionName}", so nothing was stopped.` };
     }
     // #3253: the seat's scope is checked before the running process is ended, so the respawn after the stop reuses that
@@ -436,8 +438,9 @@ export class NodeLauncher {
     await this.tmuxAdapter.seatProcessLimitsRecoveryPlan?.(nodeId);
     // The guard resolves the selected seat before writing to its immutable pane id.
     const inputTarget = this.tmuxAdapter.deliveryGuard ? nodeId : pane;
-    const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget, { runtime });
-    if (!ended.ok) return { ok: false, code: "pane_process_not_ended", message: ended.message };
+    const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget,
+      { runtime, ...(terminal !== undefined ? { terminal } : {}) });
+    if (!ended.ok) return { ok: false, code: ended.code ?? "pane_process_not_ended", message: ended.message };
     const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
     const respawned = await this.tmuxAdapter.respawnPane(inputTarget, shell, { ...(cwd ? { cwd } : {}), env, processLimitsMode: "recovery" });
     if (!respawned.ok) {

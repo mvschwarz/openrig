@@ -212,7 +212,7 @@ interface SeatHandoverMutationResult {
 
 const DEPARTING_PROCESS_LINES = {
   "ended-graceful": "The previous occupant wasn't forced to stop: it exited through its own shutdown, or had already exited. Its tmux session was kept, and the successor runs in the same pane.",
-  "ended-forced": "The previous occupant didn't exit through its own shutdown and was stopped by a signal. Its tmux session was kept, and the successor runs in the same pane.",
+  "ended-forced": "The previous occupant was stopped by a signal: it didn't exit through its own shutdown, or that couldn't be confirmed. Its tmux session was kept, and the successor runs in the same pane.",
   "not-touched": "The previous occupant's process wasn't touched: the successor was an existing session.",
 } as const;
 

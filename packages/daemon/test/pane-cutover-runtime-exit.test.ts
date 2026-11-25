@@ -16,7 +16,7 @@ describe("terminatePaneInPlace with the occupant's own exit (#3901)", () => {
     expect(pane.effects).toEqual(["remain-on-exit", "TERM 200", "root HUP"]);
   });
 
-  it("doesn't take the pane's death as the agent's exit: a shell that dies under a still-running agent doesn't end the cutover", async () => {
+  it("doesn't take the pane's death as the agent's exit: a shell that dies under a still-running agent is reported forced and unverified", async () => {
     const pane = claudePane();
     pane.runtimeIgnores.add("TERM");
     // After TERM, the pane's shell dies (the pane reads dead) while the agent keeps running, reparented out of the pane.
@@ -26,10 +26,45 @@ describe("terminatePaneInPlace with the occupant's own exit (#3901)", () => {
       pane.rows = [init, { ...claude(), ppid: 1 }];
     };
     const result = await terminatePaneInPlace(pane.tmux(), "%1", timing, "Retiree", "%1", { runtime: "claude-code", listProcesses: pane.list });
-    // Before #3901 a dead pane read as a graceful exit. The agent can no longer be shown to be the pane's, so KILL is withheld
-    // too, and the cutover says the agent didn't exit.
-    expect(result).toMatchObject({ ok: false, message: expect.stringMatching(/did not exit: Claude Code didn't exit within 0\.0 s, and KILL wasn't sent/) });
-    expect(pane.effects).toEqual(["remain-on-exit", "TERM 200", "refused KILL 200"]);
+    // Before #3901 a dead pane read as a graceful exit. The agent can no longer be shown to be the pane's, so KILL is
+    // withheld. That isn't proof it is still running either: the pane-level stop goes on, and the report is forced, with
+    // the agent's end unverified.
+    expect(result).toMatchObject({ ok: true, path: "forced",
+      detail: "Claude Code didn't exit within 0.0 s of TERM, and KILL wasn't sent (changed), so its end wasn't verified. The pane's process exited on TERM." });
+    expect(pane.effects).toEqual(["remain-on-exit", "TERM 200", "refused KILL 200", "root TERM"]);
+  });
+
+  it("an exit that can't be checked after TERM (the process table unreadable) goes on through the pane-level stop, reported forced", async () => {
+    const pane = claudePane();
+    const rows = pane.list.getMockImplementation()!;
+    pane.list.mockImplementation(async () => { if (pane.effects.includes("TERM 200")) throw new Error("table unreadable"); return rows(); });
+    const result = await terminatePaneInPlace(pane.tmux(), "%1", timing, "Retiree", "%1", { runtime: "claude-code", listProcesses: pane.list });
+    expect(result).toEqual({ ok: true, path: "forced", detail: "Claude Code was sent TERM, but its exit couldn't be checked: the process table couldn't be "
+      + "read, and KILL wasn't sent (changed). The pane's process didn't exit within 0.0 s of TERM and was killed." });
+    // The shell ignores the pane-level TERM; KILL ends it.
+    expect(pane.effects).toEqual(["remain-on-exit", "TERM 200", "refused KILL 200", "root TERM", "root KILL"]);
+  });
+
+  it("a pane that is another server's by the time of the agent's TERM is left alone: no signal, no pane stop", async () => {
+    const pane = claudePane();
+    // The terminal is read when the cutover starts; the server is replaced before the TERM, reusing the pane id.
+    pane.beforeRuntimeEffect = () => { pane.server = { pid: "4001", start: "1764061290" }; };
+    const result = await terminatePaneInPlace(pane.tmux(), "%1", timing, "Retiree", "%1", { runtime: "claude-code", listProcesses: pane.list });
+    expect(result).toMatchObject({ ok: false, code: "guard_target_changed", message: expect.stringMatching(/no longer in the tmux session and server it was first read in/) });
+    expect(pane.effects).toEqual(["remain-on-exit", "refused TERM 200"]);
+  });
+
+  it("a pane that is another server's by the time of the shell's HUP is left alone", async () => {
+    const pane = claudePane();
+    const tmux = pane.tmux();
+    (tmux.isPaneDead as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      // Claude has exited; the server is replaced before the shell is retired.
+      if (pane.effects.includes("TERM 200")) pane.server = { pid: "4001", start: "1764061290" };
+      return pane.dead;
+    });
+    const result = await terminatePaneInPlace(tmux, "%1", timing, "Retiree", "%1", { runtime: "claude-code", listProcesses: pane.list });
+    expect(result).toMatchObject({ ok: false, code: "guard_target_changed" });
+    expect(pane.effects).toEqual(["remain-on-exit", "TERM 200", "refused root HUP"]);
   });
 
   it("an unresponsive agent is killed at the end of the window, reported forced, and the wait stays bounded", async () => {
