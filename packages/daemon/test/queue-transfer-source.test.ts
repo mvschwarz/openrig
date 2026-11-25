@@ -91,6 +91,39 @@ it.each(["none", "terminal", "note"])("reconciles a confirmed row without overwr
   expect(() => repo.update({ qitemId: "qitem-a", actorSession: "b@old", state: "pending", reopen: true, transitionNote: "retry" })).toThrow(/fenced/);
 });
 
+it("confirms a pending row written without a wake as created, not an unconfirmed leftover", () => {
+  const input = snapshot();
+  const result = activation(input);
+  source.relinquish(input);
+  // Activation writes every archive row; an unresolved destination leaves it pending and unwoken.
+  const report = source.reconcile({ ...input, result: { ...result, rows: { ...result.rows, runnable: [] } } });
+  expect(report.counts).toEqual({ superseded: 1 });
+  expect(report).toMatchObject({ evacuation: "complete", rows: [{ qitemId: "qitem-a", outcome: "superseded" }] });
+  expect(repo.getById("qitem-a")).toMatchObject({ state: "canceled", closureReason: "superseded", closureTarget: "qitem-a@target" });
+});
+
+it("confirms an in-progress row activation wrote as projectedToPending", () => {
+  repo.claim({ qitemId: "qitem-a", destinationSession: "b@old" });
+  const input = snapshot();
+  const result = activation(input);
+  source.relinquish(input);
+  const report = source.reconcile({ ...input, result: { ...result,
+    rows: { ...result.rows, runnable: [], projectedToPending: [{ qitemId: "qitem-a", previouslyClaimedBy: "b@old" }] } } });
+  expect(report.counts).toEqual({ superseded: 1 });
+  expect(report).toMatchObject({ evacuation: "complete", rows: [{ qitemId: "qitem-a", outcome: "superseded" }] });
+  expect(repo.getById("qitem-a")).toMatchObject({ state: "canceled", closureReason: "superseded" });
+});
+
+it("keeps a fully erased row on the confirmed_erased path", () => {
+  db.prepare("INSERT INTO queue_erased_ids (qitem_id, erased_at, reason) VALUES ('qitem-a', '2', 'account deletion')").run();
+  db.prepare("DELETE FROM queue_items WHERE qitem_id = 'qitem-a'").run();
+  const input = snapshot();
+  const result = activation(input);
+  source.relinquish(input);
+  const report = source.reconcile({ ...input, result });
+  expect(report).toMatchObject({ rows: [{ qitemId: "qitem-a", outcome: "confirmed_erased" }] });
+});
+
 it.each([false, true])("distinguishes the fence note from a same-millisecond terminal history write (late=%s)", late => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-02-03T04:05:06Z"));

@@ -127,7 +127,9 @@ export class QueueTransferSource {
         return { ...parseReconciliation(stored), replayed: true };
       }
       const recordedAt = new Date().toISOString();
-      const created = new Set([...result.rows.runnable, ...result.rows.blocked.map(row => row.qitemId), ...result.rows.terminal]);
+      // Activation writes EVERY non-erased archive row, so the destination holds a copy even when it
+      // left the row pending (unresolved destination) or projected an in-progress row to pending without waking.
+      const created = new Set(archive.rows.filter(row => !row.erased).map(row => row.qitemId));
       const erased = db.prepare<[string]>("SELECT 1 FROM queue_erased_ids WHERE qitem_id = ?");
       const fields = QUEUE_TRANSFER_COLUMNS.queue_items;
       const lookup = db.prepare<[string], Record<string, string | number | null> & { state: QueueState }>(`SELECT ${fields.join(",")} FROM queue_items WHERE qitem_id = ?`);
