@@ -1,6 +1,6 @@
 # Network connector: a local seat as a hub participant
 
-Source of truth: `packages/daemon/src/domain/network/` (`network-bindings.ts`, `network-connector.ts`, `hub-client.ts`),
+Source of truth: `packages/daemon/src/domain/network/` (`network-bindings.ts`, `network-connector.ts`, `network-requests.ts`, `hub-client.ts`),
 `packages/daemon/src/routes/network.ts`, `packages/cli/src/commands/network.ts`.
 
 A hub is another OpenRig queue that its participants reach over MCP, such as a daemon served by `rig mcp serve --http`
@@ -21,8 +21,8 @@ rig network connect <seat> --as <name>
 ```
 
 - `enroll` trades the code, with this daemon's host id, for an installation key. The key is stored like a participant's
-  token, under `<OpenRig home>/network-secrets/<installation>/key.json`, and is never returned or shown. A code is
-  single-use and short-lived; a refused one says why, so get a new one from the page. If the account doesn't answer,
+  token, under `<OpenRig home>/network-secrets/<installation>/key.json`, and is never returned or shown. A refused
+  code says why; get a new one from the account page. If the account doesn't answer,
   whether it took the code is unknown: try again with the same code, and get a new one if that's refused.
 - Enrolling trusts the site with where your connected seats' work goes: for each name, the account answers the front
   and rig the binding reaches.
@@ -55,7 +55,8 @@ again with a new code from the account page:
 rig network enroll <code> --site <site URL> --replace
 ```
 
-Without `--replace`, a second enroll at the same site is refused and the code isn't spent. With it, the replace first
+Without `--replace`, a second enroll at the same site is refused and the code isn't spent: the daemon is already
+connected, so carry on with `rig network connect`. With it, the replace first
 waits for any other change to this enrollment to finish, within the same 30 seconds; one that runs out of time while
 waiting says so and doesn't send the code. The account makes a new installation, with a new key, for the new code. Here,
 that key takes the old one's place and the bindings made through the old installation end, in one step:
@@ -129,6 +130,73 @@ rig queue update <local item> --state done --closure-reason no-follow-on --resol
 - The derived id makes the queue item unique, not the work's outside effects. Anything your agent did outside OpenRig
   before a crash is neither undone nor deduplicated.
 
+## Send a request from a bound seat
+
+A connected seat can also ask the hub's other participants for work, and read their answers here. The daemon reaches
+the hub as the seat's participant, so the agent never holds the participant's token.
+
+```bash
+rig network peers <binding-or-seat> [--json]
+rig network request <binding-or-seat> <peer> --id <request-id> --body-file <path> [--summary "<text>"] [--json]
+```
+
+`peers` lists the seats and members the hub lets the participant address, as the hub's `rig_team` answers for the
+participant's rig. `request` sends one request to a peer, named as `peers` lists it:
+
+- **`--id` is your own id for this request,** unique to it. It becomes the local item's id. To retry a request whose
+  outcome you don't know, send it again with the same id: the hub item is looked up by its id first, and created under
+  that id only if the hub answers that it has none. If the hub can't answer, the outcome stays unknown and a later try
+  asks again. The same id with a different request is refused
+  (`request_id_reused`), and so is an id that already names another local item.
+- **The request is recorded here first,** as a local queue item from the seat to OpenRig, parked on the hub item
+  (`external:network-request/<hub item>`). It's addressed to OpenRig rather than the seat, so the seat owes nothing on it
+  and isn't reminded about it while it waits. Find it with `rig queue list --mine`.
+- **Then it's created on the hub** under an id derived from the seat's node, the hub, the participant and your request
+  id, so one request is always one hub item. A create that goes again reads the request from the local item; the
+  connector keeps only a hash of it. So a request whose local item was erased, closed or canceled here isn't sent. The
+  local item and the binding are read right before each create, so a close, erasure or disconnect while the hub is
+  being reached still stops it.
+- **The local item's text shows the hub URL with its query hidden,** as `rig network status` does, since a query string
+  can carry a credential.
+- **What `request` returns:** the local item, the hub item and a state.
+  - `sent`: the hub confirmed the item.
+  - `unknown`: the create timed out or its answer was lost. The connector looks for the hub item by its id on its next
+    pass, and creates it there under the same id if it's missing.
+  - `refused`: the hub refused it with a reason, such as `destination_not_found`. The local item closes failed with the
+    hub's words, and `request` exits 1.
+  - **Two cases that read `unknown`, not `refused`:**
+    - A create the hub answers with `qitem_id_reuse`. Another create of the same request, such as a retry and a pass at
+      once, may have landed first and been moved on there, so the hub item is read back by its id. If it can't be read,
+      the outcome stays unknown.
+    - A retry of a request whose earlier create wasn't confirmed, when the hub refuses the binding's credential. The
+      earlier create may still be on the hub, so the local item stays open with a note saying so, for a new binding for
+      the same seat, hub and participant to read. A new request whose credential is refused is `refused`.
+
+**Reading the answer:** on each pass, the connector reads every open request's hub item. A grant for sending only (team
+list, queue create and show, without the queue's list) is enough: the connector takes inbound work only when the hub offers
+the queue's list, and reads the answers either way. If the hub stops answering while requests are read, the pass reads
+unavailable and backs off, and the requests stay open for the next one. When the hub item closes, the local item closes
+the same way:
+- done with the hub's resolution and its closure reason. A reason that needs a closure target here (`escalation`) reads
+  `no-follow-on`, with the hub's reason in the note;
+- canceled or denied as itself;
+- failed as failed.
+
+A close with no resolution reads "Closed without a stated result." The close's note names who answered and the hub item:
+"Answered by <peer> via network hub <hub URL> (hub item <id>)". Read it with:
+
+```bash
+rig queue show <request-id>
+```
+
+**A hub item handed on there** (handed off, or closed by a handoff-and-complete): it isn't an answer. The connector
+follows the successor the hub names while the participant can read it.
+One it can't read leaves the local item open, with a note saying the answer isn't visible here. That outcome is unknown,
+never done.
+
+**A revoked binding:** each open request sent through it gets a note that its answer can't be read here, and stays
+open. A new binding for the same seat, hub and participant takes it over and keeps reading its hub item.
+
 ## Status
 
 ```bash
@@ -146,6 +214,11 @@ a replaced installation. `--json` adds the connector's view: each binding's next
 - **The hub can't be reached, or a pass runs past its deadline:** the binding stays active, the error is recorded, and
   retries back off, doubling to 5 minutes by default, or to the poll interval when that is longer, with up to 20%
   jitter either way. A failure on this machine is recorded as local, not as the hub's.
+- **A new connection is still being set up:** a network answers a new participant's first requests with 503
+  `grant_authority_unavailable` until it has set them up. On a binding that has never had contact, status reads "The
+  network is still finishing setup for this agent. Try again in a moment.", and for its first minute the connector asks
+  again every 5 seconds (or every poll interval, when that's shorter) instead of backing off. After that, the same
+  answer backs off as above. Once a binding has had contact, the answer reads as the hub's own error.
 - **The hub refuses the credential** (HTTP 401): the binding is marked revoked and its credential removed. No new work
   comes in; local items and results stay.
 
@@ -163,6 +236,35 @@ If the credential can't be removed, the binding still ends, and the error names 
 `rig network disconnect <binding id>` to run again. The daemon also removes credentials whose binding isn't active
 each time it starts.
 
+## Provider-managed bindings
+
+An integration can pass `provider: { id, installation, participant, remoteInstallation? }` to
+`POST /api/network/bindings`, alongside the existing seat, hub URL and token. Provider references are
+opaque metadata. A separate `removal: { revision, token }` capability authorizes leaving that binding;
+it is stored separately from its work credential and is never returned by a read. Direct bindings
+remain provider-free. Existing enrolled bindings expose their recorded installation and participant as
+provider metadata without reconnecting or moving their files.
+
+To refresh a credential for the same binding, call `POST /api/network/bindings/<id>/credential` with
+`{ expectedRevision, provider, token, removal? }`. Use the current `credentialRevision` and exact provider
+object from GET (omit `provider` for a direct binding). A managed rotation needs a new removal revision
+and capability too. This preserves binding, node, hub and work/receipt IDs; changing identity requires a
+separate binding. Immutable private files are staged before the DB selects their revision. An interrupted
+attempt can leave unused files for the credential sweep, without replacing the selected revision.
+
+Disconnect commits local inactive state and provider removal intent together, then removes the work
+credential. A cleanup failure leaves that state readable as `credentialCleanup: "pending"` and is retried by the connector. A separate pass in the
+existing connector handles ended bindings with removal capabilities, using persisted retry times and
+bounded requests. A lost reply stays `pending`; only a matching provider/revision receipt confirms removal. Its safe fields remain readable as `providerRemovalReceipt`.
+`superseded` is terminal and does not claim removal. A provider refusal is `unconfirmed`, with its code,
+and stops automatic retries. `rig network status` displays these states separately from local disconnect.
+
+An integration can report its own completed reconciliation with `PATCH /api/network/bindings/<id>` and
+`{ provider, removalRevision, providerRemoval: "confirmed" | "unconfirmed" | "superseded", reason? }`.
+The original provider and removal revision must match the ended binding. Lifecycle writes use the same
+configured daemon bearer as existing network writes. Existing account callbacks remain in place; this
+interface does not perform a live provider migration or replace their cleanup journey.
+
 ## Limits
 
 - The connector polls, so new work normally waits up to one interval before it reaches the seat, and longer when the
@@ -173,6 +275,12 @@ each time it starts.
   An atomic close-if-open needs the hub to offer a conditional close.
 - After a disconnect or a revocation, work already taken keeps running here, but its pickup and result no longer reach
   the hub item, which stays at its last reported stage.
+- **Requests a seat sends:**
+  - Closing or canceling the local item here leaves the hub item as it is: the request isn't withdrawn there.
+  - A disconnected binding leaves its open requests unread, with no note on them, until a new binding for the same
+    seat, hub and participant takes them over.
+  - `rig network status` doesn't list open requests yet. Use `rig queue list --mine`.
+  - Nothing wakes the seat when an answer arrives. Read the local item.
 - If the daemon stops between storing a new installation key and recording the enrollment, that key's folder under
   `network-secrets/` stays with no enrollment, and nothing removes it. It's private to you and unused, so remove it by
   hand.

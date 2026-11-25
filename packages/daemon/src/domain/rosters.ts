@@ -65,6 +65,7 @@ export interface RosterMember extends Reference {
 export interface Roster {
   version: 1;
   id: string;
+  /** Empty when the roster's author hasn't named the team. */
   name: string;
   purpose: string;
   curator: Reference;
@@ -126,8 +127,9 @@ function participantField(field: "app" | "kind", value: unknown): { token?: stri
 /** Select authored fields only: a file cannot supply runtime or observed-model facts. */
 export function parseRoster(value: unknown): Roster {
   if (!object(value) || value.version !== 1 || !reference(value.curator) ||
-      ![value.id, value.name, value.purpose, value.updated_at].every(v => text(v) !== null) || !Array.isArray(value.members)) {
-    throw new Error("Expected a version 1 roster with id, name, purpose, curator, updated_at and members");
+      ![value.id, value.purpose, value.updated_at].every(v => text(v) !== null) ||
+      (value.name !== undefined && value.name !== "" && text(value.name) === null) || !Array.isArray(value.members)) {
+    throw new Error("Expected a version 1 roster with id, purpose, curator, updated_at and members (optional name)");
   }
   const members = value.members.map((m): RosterMember => {
     if (!reference(m) || !object(m) || !strings(m.capabilities) || !strings(m.engagement) ||
@@ -172,7 +174,7 @@ export function parseRoster(value: unknown): Roster {
       ...(participantProblem ? { participant_problem: participantProblem } : {}),
       ...(leadOf === undefined ? {} : leadOfProblem ? { lead_of_problem: leadOfProblem } : { lead_of: (leadOf as string).trim() }) };
   });
-  return { version: 1, id: value.id as string, name: value.name as string, purpose: value.purpose as string,
+  return { version: 1, id: value.id as string, name: (value.name as string | undefined) ?? "", purpose: value.purpose as string,
     curator: { seat: value.curator.seat, host: value.curator.host }, updated_at: value.updated_at as string, members };
 }
 
@@ -214,7 +216,7 @@ export function rosterTeamName(folder: string, rig: string): { name: string | nu
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { name: null };
     name = readRosters(folder).rosters.find((roster) => roster.id === rig)?.name;
   }
-  if (name === undefined) return { name: null };
+  if (name === undefined || name === "") return { name: null };
   const problem = shownTextProblem("name", name);
   return problem ? { name: null, problem } : { name };
 }

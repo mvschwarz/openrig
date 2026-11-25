@@ -21,6 +21,16 @@ const FIX = "Install Node 22 or 24 via nvm, fnm, or your package manager, then r
 export function classifyNodeVersion(version: string): NodeSupport {
   const match = version.match(/^v?(\d+)/);
   const major = match ? parseInt(match[1]!, 10) : 0;
+  const minorMatch = version.match(/^v?22\.(\d+)/);
+  if (major === 22 && minorMatch && Number(minorMatch[1]) < 14) {
+    return {
+      major,
+      kind: "too_old",
+      message: `Node ${version} is not supported (Node 22 requires 22.14.0 or newer).`,
+      reason: "OpenRig's SQLite binding requires Node-API 10, available in Node 22.14.0 and later.",
+      fix: "Install Node 22.14.0 or newer in the Node 22 line, or Node 24, then reinstall @openrig/cli.",
+    };
+  }
 
   if ((SUPPORTED_NODE_MAJORS as readonly number[]).includes(major)) {
     return { major, kind: "supported" };

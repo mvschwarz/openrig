@@ -149,6 +149,57 @@ describe("refocus trace with no typed baton (#3320)", () => {
     expect(result.stdout).toContain(`root: ${w.workspace}`);
     expect(result.stdout).not.toContain("intent: ship project b");
   });
+
+  /** The daemon's evidence: workspace.root's listing, and the selected project's own missions beside it. */
+  const projectEvidence = (w: ReturnType<typeof world>, extra: object = {}) => ({
+    missionsRoot: join(w.workspace, "missions"), missionsOnHost: ["local"], missionsOnHostTruncated: false,
+    projectMissions: { project: "project-b", missionsRoot: join(w.projectB, "missions"), names: ["m1"], truncated: false },
+    ...extra,
+  });
+
+  it("lists the selected project's missions and names its missions root when nothing is in progress", () => {
+    const w = world();
+    const result = w.trace(["--packet", "--work-candidates", candidates({ candidates: [], ...projectEvidence(w) }),
+      "--work-root", w.projectB, "--work-project", w.projectB]);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("Missions in the selected project (project-b): m1");
+    expect(result.stdout).toContain(`--work-root ${w.projectB} --work-start ${join(w.projectB, "missions")}/<mission>`);
+    expect(result.stdout).not.toContain("Missions on this host");
+    expect(result.stdout).not.toContain(`--work-start ${join(w.workspace, "missions")}/`);
+    expect(result.stdout).toContain("## ORIENTATION — the selected project's chain, not your work");
+    // The printed next step is the agent's own call: run it in a fresh process, with no extra root in its environment.
+    const next = result.stdout.split("\n").find((line) => line.includes("--work-start"))!.trim().replace("<mission>", "m1");
+    const followed = spawnSync("/bin/sh", ["-c", next], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: root!, OPENRIG_WORKSPACE_ROOT: w.workspace } });
+    expect(followed.status, followed.stdout + followed.stderr).toBe(0);
+    expect(followed.stdout).toContain("intent: mission one");
+    expect(followed.stdout).toContain("intent: ship project b");
+    expect(followed.stdout).not.toContain("TRACE GAP");
+  });
+
+  it("keeps workspace.root's listing when no project is selected, the daemon names none, or its root isn't the project's", () => {
+    const w = world();
+    const hostListing = (evidence: object, project: string[]) => {
+      const result = w.trace(["--packet", "--work-candidates", candidates({ candidates: [], ...evidence }), ...project]);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout).toContain("Missions on this host: local");
+      expect(result.stdout).toContain(`--work-start ${join(w.workspace, "missions")}/<mission>`);
+      expect(result.stdout).not.toContain("Missions in the selected project");
+    };
+    hostListing(projectEvidence(w), []);
+    // A daemon that predates the field sends no projectMissions (JSON drops the undefined key).
+    hostListing(projectEvidence(w, { projectMissions: undefined }), ["--work-root", w.projectB, "--work-project", w.projectB]);
+    hostListing(projectEvidence(w, { projectMissions: { project: "other", missionsRoot: join(w.workspace, "missions"), names: ["local"] } }),
+      ["--work-root", w.projectB, "--work-project", w.projectB]);
+  });
+
+  it("keeps workspace.root's listing and command while candidates are in flight, even with the project's missions", () => {
+    const w = world();
+    const inFlight = [{ mission: "m1", kind: "mission", source: "row q1" }, { mission: "m2", kind: "mission", source: "row q2" }];
+    const result = w.trace(["--packet", "--work-candidates", candidates({ candidates: inFlight, ...projectEvidence(w) }),
+      "--work-project", w.projectB]);
+    expect(result.stdout).toContain(`--work-start ${join(w.workspace, "missions")}/<mission>`);
+    expect(result.stdout).not.toContain("Missions in the selected project");
+  });
 });
 
 describe("refocus hook forwards the daemon's catalogued work roots (#2693)", () => {

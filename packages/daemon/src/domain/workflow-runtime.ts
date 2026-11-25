@@ -1,4 +1,5 @@
 import { physicalSessionName } from "./session-registry.js";
+import { workflowRunSummary } from "./workflow-run-title.js";
 import { readWorkflowGuidance, type GuidanceInput } from "./workflow-guidance.js";
 import { exceptionConfigurationSource, inspectExceptionReadiness, type ExceptionReadiness } from "./workflow-exception-readiness.js";
 import { inspectGraph, recoverGraphOperation, reviseGraph } from "./workflow-reconciliation.js";
@@ -104,6 +105,7 @@ export interface WorkflowRuntimeDeps {
 export interface InstantiateInput {
   specPath: string;
   rootObjective: string;
+  runTitle?: string;
   createdBySession: string;
   /**
    * Override default entry-step owner. v1 falls back to spec
@@ -775,6 +777,7 @@ export class WorkflowRuntime {
         // #2607: the run keeps the spec it starts with and its file; another file with this id and version can't move it.
         startedSpec: { sourcePath: specSource, spec: specRow.spec },
         rootObjective: input.rootObjective,
+        runTitle: input.runTitle,
         createdBySession: input.createdBySession,
         initialFrontier: [],
         // R2 fix: set durable current_step_id at instantiate so the
@@ -839,7 +842,7 @@ export class WorkflowRuntime {
           ...(entryGateException ? workflowExceptionTags(entryGateException.identity).filter((t) => !t.startsWith("workflow:") && !t.startsWith("instance:")) : []),
           ...packetScopeTags(instance, entryStep.id),
         ],
-        summary: entryGate?.summary ?? undefined,
+        summary: entryGate ? entryGate.summary ?? undefined : workflowRunSummary(instance.runTitle, entryStep),
         evidenceRef: entryGate?.evidenceRef ?? undefined,
       });
       entryQitemId = created.qitemId;
@@ -1060,12 +1063,17 @@ export class WorkflowRuntime {
   async abort(input: { instanceId: string; reason: string; actorSession: string; identityProvenance?: string | null }): Promise<{
     instanceId: string;
     closedPacketIds: string[];
+    /** Frontier packets the queue had already closed (done or handed-off): recorded on the workflow, queue row untouched. */
+    alreadyClosedPacketIds?: string[];
+    advisories?: string[];
     status: "aborted";
   }> {
     if (!input.reason.trim()) {
       throw new WorkflowProjectorError("abort_reason_required", "workflow abort requires a non-empty reason");
     }
     const closedPacketIds: string[] = [];
+    const alreadyClosedPacketIds: string[] = [];
+    const advisories: string[] = [];
     this.eventBus.withNotifyEnvelope((register) => {
       const instance = this.instanceStore.getByIdOrThrow(input.instanceId);
       if (instance.status === "completed" || instance.status === "aborted") {
@@ -1081,39 +1089,65 @@ export class WorkflowRuntime {
         const stepId = binding?.stepId ?? (instance.currentFrontier.length === 1 ? instance.currentStepId : null);
         if (!stepId) throw new WorkflowProjectorError("frontier_binding_indeterminate", `cannot abort: packet ${packetId} has no step binding`, { instanceId: instance.instanceId, packetId });
         const step = spec?.steps.find((candidate) => candidate.id === stepId);
-        const closed = this.queueRepo.updateWithinTransaction({
-          qitemId: packetId,
-          actorSession: input.actorSession,
-          identityProvenance: input.identityProvenance ?? null,
-          viaWorkflowVerb: true,
-          state: "canceled",
-          transitionNote: `workflow abort by ${input.actorSession}: ${input.reason}`,
-        });
-        register(closed.persistedEvent);
+        // A frontier packet the queue already closed (an ordinary `rig queue handoff`, or `rig queue handoff-and-complete`,
+        // doesn't move the workflow) has nothing left to cancel, and canceling it would reopen a terminal row. The abort records it on the
+        // workflow without writing its queue row; a handoff successor stays as the queue left it, and the advisory names it.
+        const alreadyClosed = isTerminalState(packet.state);
+        if (alreadyClosed) {
+          // `rig queue handoff` leaves it handed-off and `rig queue handoff-and-complete` leaves it done; both record the
+          // successor's handed_off_from.
+          const successors = (this.db.prepare("SELECT qitem_id FROM queue_items WHERE handed_off_from = ?").all(packetId) as Array<{ qitem_id: string }>)
+            .map((row) => this.queueRepo.getById(row.qitem_id)).filter((row) => row !== null);
+          // Only a live successor can still be canceled; a closed one is named for the record, with no command to run.
+          const live = successors.filter((row) => isBlockerLive(row.state));
+          const named = successors.length > 0
+            ? `; its successor ${successors.map((row) => `${row.qitemId} (${row.destinationSession}, ${row.state})`).join(", ")} is left as the queue has it`
+            : "";
+          const howToStop = live.length > 0
+            ? `: if that work should stop too, ${live.map((row) => `rig queue update ${row.qitemId} --state canceled`).join("; ")}`
+            : "";
+          advisories.push(`packet ${packetId} was already ${packet.state} in the queue, so the abort recorded it on the workflow without writing its queue row${named}${howToStop}`);
+        } else {
+          const closed = this.queueRepo.updateWithinTransaction({
+            qitemId: packetId,
+            actorSession: input.actorSession,
+            identityProvenance: input.identityProvenance ?? null,
+            viaWorkflowVerb: true,
+            state: "canceled",
+            transitionNote: `workflow abort by ${input.actorSession}: ${input.reason}`,
+          });
+          register(closed.persistedEvent);
+        }
         this.trailLog.record({
           instanceId: instance.instanceId,
           stepId,
           stepRole: step?.actor_role ?? "unknown",
           closedAt,
           closureReason: "failed",
-          closureEvidence: { abort: { reason: input.reason, actorSession: input.actorSession } },
+          closureEvidence: { abort: { reason: input.reason, actorSession: input.actorSession, ...(alreadyClosed ? { queueState: packet.state } : {}) } },
           actorSession: input.actorSession,
           nextQitemId: null,
           priorQitemId: packetId,
         });
         this.instanceStore.removeFrontierBinding(instance.instanceId, packetId);
-        closedPacketIds.push(packetId);
+        (alreadyClosed ? alreadyClosedPacketIds : closedPacketIds).push(packetId);
       }
       this.instanceStore.updateFrontier(instance.instanceId, [], "aborted", {
         currentStepId: "clear",
         completedAt: closedAt,
         expectedVersion: instance.version,
-        lastContinuationDecision: { action: "abort", actorSession: input.actorSession, reason: input.reason, closedPacketIds },
+        lastContinuationDecision: { action: "abort", actorSession: input.actorSession, reason: input.reason, closedPacketIds,
+          ...(alreadyClosedPacketIds.length > 0 ? { alreadyClosedPacketIds } : {}) },
       });
       if (this.watchdogJobsRepo) disarmAllWorkflowKeepalives(this.watchdogJobsRepo, instance.instanceId, `workflow_aborted: ${input.reason}`);
       register(this.eventBus.persistWithinTransaction({ type: "workflow.failed", instanceId: instance.instanceId, workflowName: instance.workflowName, reason: `aborted: ${input.reason}` }));
     });
-    return { instanceId: input.instanceId, closedPacketIds, status: "aborted" };
+    return {
+      instanceId: input.instanceId,
+      closedPacketIds,
+      ...(alreadyClosedPacketIds.length > 0 ? { alreadyClosedPacketIds, advisories } : {}),
+      status: "aborted",
+    };
   }
 
   /**

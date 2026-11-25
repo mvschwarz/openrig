@@ -158,6 +158,18 @@ describe("startup consent and effect boundary", () => {
       expect(seen).toMatchObject({ state: "attention_required", detail: "The probe pane returned to a shell instead of staying inside the runtime." });
     });
   });
+  it("observes the current Codex sign-in chooser with the action the person can take", async () => {
+    const { rig } = seat();
+    setup.tmuxAdapter.probeSession = vi.fn(async () => ({ state: "present" } as never));
+    setup.tmuxAdapter.listPanes = vi.fn(async () => [{ id: "%1", index: 0, cwd: "/p", width: 80, height: 24, active: true }]) as never;
+    setup.tmuxAdapter.getPaneCommand = vi.fn(async () => "codex");
+    const frame = readFileSync(new URL("./fixtures/codex-first-login-0.171.0.txt", import.meta.url), "utf8");
+    setup.tmuxAdapter.capturePaneContent = vi.fn(async () => frame);
+    const response = await setup.app.request(`/api/startup/${rig.id}`);
+    expect((await response.json()).seats[0].observed).toMatchObject({ state: "attention_required",
+      detail: "Codex needs you to sign in or configure provider credentials. Open this seat's terminal and complete Codex's sign-in prompt." });
+    expect(setup.tmuxAdapter.sendKeys).not.toHaveBeenCalled();
+  });
   it("re-probes a Codex status footer after the foreground process is verified", async () => {
     setup = createTestApp(db, {
       appDeps: {

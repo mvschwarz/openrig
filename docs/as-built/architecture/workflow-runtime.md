@@ -56,6 +56,13 @@ harness grammar. Nonlocal host pins can validate as registered names but
 This is a workflow-step restriction, not a claim that all queue traffic is
 local-only.
 
+A step can carry an optional `label`, a short name a person sees in place of its
+`id`. It must be a non-empty string. It's display only: `id` stays the step's
+identity (and its display without a label), and `objective` stays its
+instruction; nothing routes or validates on it. A daemon from before this key
+refuses a labelled spec with `spec_unknown_key`, so author labelled specs only
+for versions that support them.
+
 A step whose `allowed_exits` can neither finish it nor route it on is refused as
 `step_cannot_finish` (`workflow-validator.ts:223-236`): its exits leave out `done`, none is
 mapped in `next_hop.on`, and it allows no `handoff` that routes on. In a dependency graph,
@@ -139,6 +146,19 @@ parked `blocked_on` that human seat in the same transaction (summary and
 for a declared role, an ordinary packet goes to that handler role's seat
 (`workflow-projector.ts:1659`–`1778`).
 
+On the serial path, a `handoff` into a step of the same `actor_role` that
+resolves through `preferred_targets`, while the closing session was the
+destination of the packet it closed, returns an advisory naming
+`--next-owner`. `next_owner: same_as_previous`, on a step or at the spec's top
+level (the step's value wins), keeps such a handoff with that closing
+session instead. It applies only to the `handoff` exit (another exit that
+`next_hop.on` routes into the step, such as `failed`, doesn't count) into a
+step of the same `actor_role` that has no gate, with no explicit next owner,
+when the closing session was the closed packet's
+destination; the closure evidence then records
+`owner_resolution.mode: "continuation"`. Without it, resolution is unchanged.
+Dependency-graph successors (`depends_on`) don't read it.
+
 `rig workflow instantiate` and `rig workflow run` accept `--pod <namespace>`
 when the instance is bound to a registered rig. The pod must exist on that rig.
 The instance stores the selection, and role-only resolution considers seats in
@@ -146,6 +166,15 @@ that pod on later projections and resumes. A preferred target can use the
 quoted YAML form `"{pod}-builder@{rig}"`; the instance expands it from its
 stored bindings. Literal preferred targets and explicit owner overrides retain
 their existing precedence and may name other seats.
+
+Both commands also accept an optional `--title <text>`. Empty titles are
+untitled; control characters become spaces and titles longer than 120
+characters are shortened. The response reports normalization and the stored
+title. The instance retains it across restarts; ordinary
+entry and handoff packets receive a summary combining the title and step label
+(or step ID). Gate summaries keep their own behavior. A packet's summary can
+still be corrected with `rig queue update`; without a title the existing
+summary behavior is unchanged. The root objective remains the full instruction.
 
 A `preferred_targets` entry may end in `@{rig}`, for example `watcher@{rig}`.
 When the instance is bound to a rig (`--rig`, or the spec's `target.rig`

@@ -2155,6 +2155,53 @@ describe("scope create dependency identity", () => {
     const fm = readFrontmatter(path.join(missionsRoot, "release-0.3.2", "slices", "02-next", "SPEC.md"));
     expect(fm.depends_on).toEqual(["OPR.0.3.2.1"]);
   });
+
+  // #3615: two paths. --depends-on stays advisory SPEC.md frontmatter; --execution-depends-on is the explicit
+  // slice.yaml execution.depends_on edge that proof readiness reads.
+  describe("advisory frontmatter versus an explicit execution edge", () => {
+    const missionPath = () => path.join(missionsRoot, "release-0.3.2");
+    const manifestOf = (folder: string) =>
+      YAML.parse(fs.readFileSync(path.join(missionPath(), "slices", folder, "slice.yaml"), "utf8"));
+    const readinessOf = (folder: string) =>
+      readMissionReadiness(missionPath()).slices.find((slice) => slice.scope === folder);
+    beforeEach(() => {
+      writeFile(path.join(missionPath(), "mission.yaml"),
+        "schema: openrig.mission/v0alpha1\nkind: mission\ncomposition:\n  slices: []\n");
+    });
+
+    it("--depends-on writes only SPEC.md frontmatter, which readiness reports as advisory", async () => {
+      const result = await run(["slice", "create", "release-0.3.2", "next", "--depends-on", "OPR.0.3.2.1"], missionsRoot);
+      expect(result.exitCode).toBe(0);
+      expect(readFrontmatter(path.join(missionPath(), "slices", "02-next", "SPEC.md")).depends_on).toEqual(["OPR.0.3.2.1"]);
+      expect(manifestOf("02-next")).not.toHaveProperty("execution");
+      expect(readinessOf("02-next")).toMatchObject({ dependsOnBasis: "frontmatter-advisory" });
+    });
+
+    it("--execution-depends-on writes only slice.yaml execution.depends_on, which readiness reads", async () => {
+      const result = await run(["slice", "create", "release-0.3.2", "next", "--execution-depends-on", "OPR.0.3.2.1"], missionsRoot);
+      expect(result.exitCode).toBe(0);
+      const manifest = manifestOf("02-next");
+      expect(manifest.execution).toEqual({ depends_on: ["OPR.0.3.2.1"] });
+      expect(manifest.composition.mission).toBe("../../mission.yaml");
+      expect(readFrontmatter(path.join(missionPath(), "slices", "02-next", "SPEC.md")).depends_on).toEqual([]);
+      expect(readinessOf("02-next")).toMatchObject({ dependsOn: ["OPR.0.3.2.1"], dependsOnBasis: "slice.yaml" });
+    });
+
+    it("keeps today's scaffold with neither option: no execution block, an advisory empty frontmatter list", async () => {
+      const result = await run(["slice", "create", "release-0.3.2", "free"], missionsRoot);
+      expect(result.exitCode).toBe(0);
+      expect(manifestOf("02-free")).not.toHaveProperty("execution");
+      expect(readFrontmatter(path.join(missionPath(), "slices", "02-free", "SPEC.md")).depends_on).toEqual([]);
+      expect(readinessOf("02-free")).toMatchObject({ dependsOnBasis: "frontmatter-advisory" });
+    });
+
+    it("rejects an --execution-depends-on edge outside the mission before creating the folder", async () => {
+      const result = await run(["slice", "create", "release-0.3.2", "next", "--execution-depends-on", "OPR.9.9.9.1"], missionsRoot);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("--execution-depends-on");
+      expect(fs.existsSync(path.join(missionPath(), "slices", "02-next"))).toBe(false);
+    });
+  });
 });
 
 // A project nested in another workspace (its own project.yaml and missions) mints ids with its project.yaml's optional

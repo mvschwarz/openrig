@@ -22,6 +22,10 @@ import {
   hasLinkedSuccessor,
 } from "../src/domain/queue-repository.js";
 import { DONE_CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
+import { missionControlActionsSchema } from "../src/db/migrations/037_mission_control_actions.js";
+import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
+import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
+import { DefaultOccupantInvalidator } from "../src/domain/occupant-invalidator.js";
 import type { PersistedEvent } from "../src/domain/types.js";
 
 describe("QueueRepository", () => {
@@ -1838,6 +1842,99 @@ describe("QueueRepository — generation stamps (Class-B)", () => {
   });
 });
 
+describe("QueueRepository — resuming a parked row re-stamps the claimant generation (#3573)", () => {
+  let db: Database.Database;
+  let bus: EventBus;
+  let repo: QueueRepository;
+  let writeContract: MissionControlWriteContract;
+  let invalidator: DefaultOccupantInvalidator;
+  let genBySession: Map<string, string | null>;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, watchdogJobsSchema,
+      occupantGenerationStampsSchema, missionControlActionsSchema, queueItemSummarySchema, queueItemEvidenceRefSchema]);
+    bus = new EventBus(db);
+    genBySession = new Map();
+    repo = new QueueRepository(db, bus, { validateRig: () => true, resolveOccupantGeneration: (s) => genBySession.get(s) ?? null });
+    writeContract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
+    invalidator = new DefaultOccupantInvalidator({
+      enforcer: { invalidateOccupant: () => {} },
+      contextUsage: { invalidateOccupantSidecar: () => {} },
+      queue: repo,
+    });
+  });
+  afterEach(() => db.close());
+
+  const stamp = (qitemId: string): string | null =>
+    (db.prepare("SELECT claimed_by_generation_uuid AS v FROM queue_items WHERE qitem_id = ?").get(qitemId) as { v: string | null }).v;
+  const swap = (from: string, to: string): void => {
+    genBySession.set("bob@rig", to);
+    invalidator.invalidateRetiringOccupant({ retiringSessionName: "bob@rig", successorSessionName: "bob@rig", retiringGeneration: from });
+  };
+  const releaseNotes = (qitemId: string): string[] =>
+    repo.transitionLog.listForQitem(qitemId).map((t) => t.transitionNote ?? "").filter((n) => /claimant generation retired/.test(n));
+
+  /** Claimed by gen-1, parked on a typed gate, then inherited by gen-2 at a swap that keeps the blocked row. */
+  async function parkedAndInherited(): Promise<string> {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+    genBySession.set("bob@rig", "gen-1");
+    repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "blocked", blockedOn: "external:x" });
+    swap("gen-1", "gen-2");
+    expect(repo.getById(item.qitemId)!.state).toBe("blocked");
+    expect(stamp(item.qitemId)).toBe("gen-1");
+    return item.qitemId;
+  }
+
+  it("resolve stamps the destination's current occupant, not the resolving seat's, and the next swap releases the row", async () => {
+    const qitemId = await parkedAndInherited();
+    genBySession.set("carol@rig", "gen-carol");
+    await writeContract.act({ verb: "resolve", qitemId, actorSession: "carol@rig", decision: "x done" });
+    expect(repo.getById(qitemId)!.state).toBe("in-progress");
+    expect(stamp(qitemId)).toBe("gen-2");
+
+    swap("gen-2", "gen-3");
+    expect(repo.getById(qitemId)!.state).toBe("pending");
+    expect(stamp(qitemId)).toBeNull();
+    expect(releaseNotes(qitemId)).toHaveLength(1);
+  });
+
+  it("an update to in-progress stamps the destination's current occupant, and the next swap releases the row", async () => {
+    const qitemId = await parkedAndInherited();
+    genBySession.set("carol@rig", "gen-carol");
+    repo.update({ qitemId, actorSession: "carol@rig", state: "in-progress", transitionNote: "resuming" });
+    expect(stamp(qitemId)).toBe("gen-2");
+
+    swap("gen-2", "gen-3");
+    expect(repo.getById(qitemId)!.state).toBe("pending");
+    expect(releaseNotes(qitemId)).toHaveLength(1);
+  });
+
+  it("a runtime switch after the resume moves the row's claim to the successor generation", async () => {
+    const qitemId = await parkedAndInherited();
+    await writeContract.act({ verb: "resolve", qitemId, actorSession: "carol@rig", decision: "x done" });
+    expect(repo.transferClaimsByGeneration("gen-2", "gen-3", "runtime switch")).toBe(1);
+    expect(stamp(qitemId)).toBe("gen-3");
+  });
+
+  it("an update that keeps a row in progress keeps the claim it has", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+    genBySession.set("bob@rig", "gen-1");
+    repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    genBySession.set("bob@rig", "gen-2");
+    repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "in-progress", transitionNote: "still on it" });
+    expect(stamp(item.qitemId)).toBe("gen-1");
+  });
+
+  it("a swap still keeps a blocked row with the successor, and other updates leave the stamp as it was", async () => {
+    const qitemId = await parkedAndInherited();
+    expect(releaseNotes(qitemId)).toHaveLength(0);
+    repo.update({ qitemId, actorSession: "bob@rig", state: "pending", transitionNote: "back to the queue" });
+    expect(stamp(qitemId)).toBe("gen-1");
+  });
+});
+
 describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)", () => {
   let db: Database.Database;
   let bus: EventBus;
@@ -2088,7 +2185,7 @@ describe("QueueRepository.listOpenObligations: the parked query's lean read", ()
     const ids = repo.list({ destinationSession: "b@r" }).map((r) => r.qitemId);
     repo.claim({ qitemId: ids[0]!, destinationSession: "b@r" });
     const want = repo.list({ destinationSession: "b@r", state: ["pending", "in-progress", "blocked"], limit: 500 })
-      .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null }));
+      .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null, blockedOn: r.blockedOn ?? null, updatedAt: r.tsUpdated }));
     const prepare = vi.spyOn(db, "prepare");
     const got = repo.listOpenObligations("b@r", 500);
     expect(got).toEqual(want);
@@ -2133,7 +2230,7 @@ describe("QueueRepository.listOpenObligations: same rows, order and limit as lis
       for (const seat of [...seats, "nobody@r"]) {
         for (const limit of [1, 3, 500]) {
           const want = repo.list({ destinationSession: seat, state: ["pending", "in-progress", "blocked"], limit })
-            .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null }));
+            .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null, blockedOn: r.blockedOn ?? null, updatedAt: r.tsUpdated }));
           expect(repo.listOpenObligations(seat, limit), `seed ${seed} ${seat} limit ${limit}`).toEqual(want);
         }
       }

@@ -290,7 +290,16 @@ export class TranscriptStore {
       // for the first restore on a fresh rig.
       mkdirSync(dirname(filePath), { recursive: true });
       const marker = `--- SESSION BOUNDARY: ${reason} at ${new Date().toISOString()} ---\n`;
-      appendFileSync(filePath, marker, "utf-8");
+      // Markers must start on their own line: history search and rotation both recognize only whole marker lines.
+      const fd = openSync(filePath, "a+");
+      try {
+        const size = fstatSync(fd).size;
+        const lastByte = Buffer.alloc(1);
+        if (size > 0 && readSync(fd, lastByte, 0, 1, size - 1) !== 1) throw new Error("Transcript changed during read");
+        appendFileSync(fd, `${size > 0 && lastByte[0] !== 10 ? "\n" : ""}${marker}`, "utf-8");
+      } finally {
+        closeSync(fd);
+      }
       return true;
     } catch {
       return false;

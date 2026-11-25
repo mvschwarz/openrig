@@ -1,6 +1,6 @@
 {
   "name": "@openrig/cli",
-  "version": "0.7.20",
+  "version": "0.7.21",
   "type": "module",
   "description": "Build your own network of agents from Claude Code, Codex and Pi: persistent teams with roles, shared context and owned work.",
   "keywords": [
@@ -35,7 +35,9 @@
     "daemon",
     "ui",
     "tui",
-    "scripts"
+    "scripts",
+    "mcp.js",
+    "mcp.d.ts"
   ],
   "scripts": {
     "build": "tsc && node ../../scripts/prepare-workspace-build.mjs cli",
@@ -45,8 +47,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@hono/node-server": "^1.13.0",
-    "@hono/node-ws": "^1.3.1",
+    "@hono/node-server": "^1.19.11",
+    "@hono/node-ws": "1.3.1",
     "@modelcontextprotocol/node": "^2.1.2",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@modelcontextprotocol/server": "^2.4.0",
@@ -55,10 +57,11 @@
     "better-sqlite3": "^13.0.3",
     "commander": "^13.0.0",
     "hono": "^4.7.0",
+    "https-proxy-agent": "^7.0.6",
     "jsonc-parser": "^3.3.1",
     "smol-toml": "^1.8.0",
     "string-width": "^8.3.0",
-    "tar": "^7.5.13",
+    "tar": "^7.5.21",
     "ulid": "^2.3.0",
     "yaml": "^2.8.3",
     "zod": "^4.3.6"

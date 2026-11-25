@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
-import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp, mockTmuxAdapter, mockNativeRuntime } from "./helpers/test-app.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import type { RigSpec } from "../src/domain/types.js";
@@ -61,11 +61,32 @@ describe("persisted pod-aware launch recipes", () => {
     }));
   });
 
+  // #2940: a restore that follows the sessions it launches (daemon start's, for a keep_alive incident) hears the recipe's
+  // fresh launch register its session too, for a terminal seat as for an agent one.
+  it("tells the caller the session a fresh launch from the recipe registers", async () => {
+    db = createFullTestDb();
+    const setup = createTestApp(db);
+    const rig = setup.rigRepo.createRig("recipe-term-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-term", rig.id, "dev", "Development");
+    const rigRoot = process.cwd();
+    const rigSpec: RigSpec = { version: "0.2", name: "recipe-term-rig", edges: [], pods: [{ id: "dev", label: "Development",
+      members: [{ id: "shell", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: "." }], edges: [] }] };
+    const node = setup.rigRepo.addNode(rig.id, "dev.shell", { runtime: "terminal", podId: "pod-term", cwd: rigRoot,
+      launchRecipe: { version: 1, rigRoot, rigSpec } });
+    const registered: string[] = [];
+    const result = await setup.podInstantiator.launchPersistedFresh(rig.id, node.id, { onSessionRegistered: (id) => registered.push(id) });
+    expect(result.status).toBe("launched");
+    const sessions = setup.sessionRegistry.getSessionsForRig(rig.id).filter((s) => s.nodeId === node.id);
+    expect(sessions).toHaveLength(1);
+    expect(registered).toEqual([sessions[0]!.id]);
+  });
+
   it("keeps saved seat choices authoritative over the recipe defaults", async () => {
     db = createFullTestDb();
     const launchHarness = vi.fn(async () => ({ ok: true as const }));
     const agentYaml = `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\n  guidance: []\n  subagents: []\n  plugins: []\n  runtime_resources: []\nprofiles:\n  default: {}\n`;
     const setup = createTestApp(db, {
+      ...mockNativeRuntime(() => "codex"),
       adapters: {
         codex: {
           runtime: "codex",
@@ -248,6 +269,7 @@ describe("persisted pod-aware launch recipes", () => {
     const freshLaunchAvailable = vi.fn((rigId: string, nodeId: string) => setup.podInstantiator.canLaunchPersistedFresh(rigId, nodeId));
     const agentYaml = `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\n  guidance: []\n  subagents: []\n  plugins: []\n  runtime_resources: []\nprofiles:\n  default: {}\n`;
     setup = createTestApp(db, {
+      ...mockNativeRuntime(() => "codex"),
       freshLaunch,
       freshLaunchAvailable,
       podInstantiatorFsOps: {
@@ -380,7 +402,7 @@ describe("persisted pod-aware launch recipes", () => {
     // The provisional shell's start couldn't be told; the replacement's is known not applied: the node reports the
     // replacement's.
     const provisional = { state: "unknown" as const, kind: "unverified" as const, reason: "the start was not seen", retryable: true };
-    const tmux = mockTmuxAdapter();
+    const { tmux, listProcesses } = mockNativeRuntime(() => "codex");
     let recoveries = 0;
     const createSession = vi.fn(async (_name: string, _cwd?: string, _env?: Record<string, string>,
       launchOpts?: { processLimitsMode?: "fresh" | "recovery" }) => launchOpts?.processLimitsMode === "recovery"
@@ -389,6 +411,7 @@ describe("persisted pod-aware launch recipes", () => {
     (tmux as unknown as Record<string, unknown>).createSession = createSession;
     setup = createTestApp(db, {
       tmux,
+      listProcesses,
       freshLaunch,
       freshLaunchAvailable,
       podInstantiatorFsOps: {
@@ -458,6 +481,7 @@ describe("persisted pod-aware launch recipes", () => {
       [`${rigRoot}/agents/shared/agent.yaml`]: `name: shared\nversion: "1.0.0"\ndefaults:\n  lifecycle:\n    compaction_strategy: harness_native\nresources:\n  skills: []\nprofiles: {}\n`,
     };
     setup = createTestApp(db, {
+      ...mockNativeRuntime(() => "codex"),
       freshLaunch,
       freshLaunchAvailable,
       podInstantiatorFsOps: {
@@ -644,6 +668,7 @@ describe("a restore reports the stored pool block of a model seat", () => {
     const freshLaunch = vi.fn(async (rigId: string, nodeId: string, launchOpts?: { processLimitsMode?: "fresh" | "recovery" }) => setup.podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts));
     const freshLaunchAvailable = vi.fn((rigId: string, nodeId: string) => setup.podInstantiator.canLaunchPersistedFresh(rigId, nodeId));
     setup = createTestApp(db, {
+      ...mockNativeRuntime(() => "codex"),
       freshLaunch,
       freshLaunchAvailable,
       podInstantiatorFsOps: {

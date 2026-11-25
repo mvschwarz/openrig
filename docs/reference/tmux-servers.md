@@ -11,8 +11,17 @@ new instance, or before a deliberate restart of an existing daemon:
 rig config set terminal.tmux_server isolated
 ```
 
-The setting is read once at daemon startup. Changing it does not move a running
-seat. Inspect the effective choice with:
+Isolation separates the seats from your own tmux server, so a server-wide command
+on yours, such as `tmux kill-server`, doesn't end them. It doesn't protect the
+seats' server from the agents running on it: each seat's pane carries tmux's `TMUX`
+value for that server, so a tmux command an agent runs there without `-L` or `-S`,
+`tmux kill-server` included, acts on the seats' own server and can end every seat
+on it.
+
+The setting is read once at daemon startup, and a restart keeps the previous server
+while registered sessions remain on it (see
+[Existing teams and deferred migration](#existing-teams-and-deferred-migration)).
+Changing it does not move a running seat. Inspect the effective choice with:
 
 ```sh
 rig terminal status --json
@@ -209,6 +218,22 @@ run: a daemon restarted during a loss records it again. In between:
   healthz carries the state in `terminals` while `status` stays `ok`, because the
   daemon itself is up.
 
+To bring the seats back after the server has died, including when it left its
+socket file behind (as after `tmux kill-server`), run `rig up <rig> --existing`
+for each rig that ran on it. The restore finds the seats' sessions gone, starts the
+tmux server again, and resumes each seat's conversation where its provider history
+allows; a seat without usable history waits for an explicit fresh-start choice, as
+in the restoration rules above. The command talks to the daemon, not to tmux, so
+run it from any terminal that wasn't on the lost server.
+
+`rig seat launch <seat> --fresh --reason "<why>"` can also reopen a dead server
+whose socket file remains, one seat at a time, unless the seat's recorded process
+is still running: then it refuses, launches nothing and asks you to end that process
+first, because the server may only have lost its socket. That is a deliberate blank
+replacement, not a resume: the seat starts a new conversation and none of its
+earlier ones is resumed. `--reason` is required. Use it when you want that seat to
+start over, not to get its conversation back.
+
 ## Two instances on one machine
 
 Isolation selects only a tmux server. Give each daemon its own OpenRig home,
@@ -254,3 +279,22 @@ runs over skips the next tick, the Codex working-frame proof expires, and a work
 can briefly read idle. At 2000 ms the remaining 1 s margin is also what a lagging event loop
 uses up. The two settings compose: `OPENRIG_TMUX_CONTROL=1` makes each tmux command cheaper,
 and this one makes there be fewer of them.
+
+The seat identity reconciler is a third poller: every 5 s it reads each running seat's pane
+process from tmux, and for some seats the host's process table, to record whether the pane still
+runs the seat's agent. The setting `daemon.identity_poll_interval_ms` slows it down, from the
+5000 ms default up to 30000 ms. Set it with `rig config set daemon.identity_poll_interval_ms 15000`
+or with `OPENRIG_IDENTITY_POLL_INTERVAL_MS`, which overrides the saved value. Like the seat poll
+interval, it is startup-only (a change takes a daemon restart), `rig config set` refuses a value
+outside 5000..30000, and an environment value outside it is dropped with a warning.
+The cost is staleness. A longer interval can delay the sweep noticing a stopped seat or a changed
+pane process, updating the seat's identity verdict, and revoking the activity grants that go with
+it. The verdict feeds the running and active views, and sends and reads that name an expected
+identity (and resume of the original conversation) need a verified one: a seat that `rig up` has
+just launched answers those with `expected_identity_unavailable` until a sweep verifies it.
+The setting caps the cadence: the first scheduled sweep comes one interval after daemon start,
+and then at most one sweep starts per interval. It is not a freshness deadline. A tick that
+comes due while a sweep's reads are still pending is skipped (more than one can be), and a
+change seen after a sweep began waits for a later sweep, so a successful verification, or a
+revocation, can take longer than one interval. Keep the default unless the reconciler's reads
+are a measured share of the daemon's load.
