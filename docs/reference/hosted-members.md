@@ -297,7 +297,7 @@ A result may also reduce the profile with `readOnly: true`, or set `newWorkRetry
 are offered only read operations and cannot invoke hidden writes. Backoff holds only new creates, returns a
 retryable result with the same request id, and leaves reads, claims, updates and already-landed same-id retries
 available. The existing backoff range is 1–600 seconds for a positive delay; zero means no backoff.
-Fractional milliseconds round up to the next whole second. The token-file field
+A delay that isn't a whole number of seconds rounds up to the next whole second. The token-file field
 `newWorkRetryAfterSeconds` feeds the same evaluator: for example, `1001` milliseconds or `1.001` seconds
 returns a two-second delay. The resolver may set its delay on the result or on `access`; the result field
 takes precedence when both are supplied. These fields need no service payload or service-shaped caller id.
@@ -309,8 +309,10 @@ goes through the usual reuse check, so changed content is not silently accepted.
 
 A refusal is `{ ok: false, refusal }`. `unknown`, `revoked`, `expired` and `wrong_instance` return HTTP 401 with a
 Bearer challenge; `malformed` and `unavailable` return 503. A thrown error, unusable result, missing instance or
-unavailable seat is also unavailable. Resolver exceptions are not echoed or logged. No result falls back to the
-token file or the process's seat. A resolver and a grant service cannot both be selected.
+unavailable seat is also unavailable. A negative or non-finite resolver delay makes the whole request unavailable
+(503), including reads and settlement; an invalid token-file delay instead holds new work for 600 seconds with a
+warning. Resolver exceptions are not echoed or logged. No result falls back to the token file or the process's seat.
+A resolver and a grant service cannot both be selected.
 
 The default 5000 ms budget covers reading the body, looking up the instance, calling the resolver and checking
 the seat. The signal aborts on that deadline or a disconnected client. Core bounds its wait even when the returned
