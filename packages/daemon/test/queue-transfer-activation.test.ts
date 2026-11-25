@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { QueueTransferActivation } from "../src/domain/queue-transfer-activation.js";
 import { buildQueueTransfer } from "../src/domain/queue-transfer-export.js";
@@ -76,6 +77,17 @@ it("fails closed before recording activation when runnable work has no wake stor
   const input = stage("in-progress");
   expect(() => service.activate(input)).toThrow(expect.objectContaining({ code: "wake_intent_store_unavailable" }));
   expect(db.prepare("SELECT record_id FROM queue_transfer_ledger").get()).toBeUndefined();
+});
+
+it("activates a resolvable item beside an unresolved destination without rerouting", () => {
+  const repo = new QueueRepository(db, new EventBus(db));
+  repo.attachOutbox(new OutboxHandler(db));
+  const input = stage("pending", false, `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body)
+    VALUES ('qitem-b', '1', '1', 'a@old', 'worker@unknown', 'pending', 'unresolved')`);
+  expect(new QueueTransferActivation(repo).activate(input)).toMatchObject({ status: "activated",
+    rows: { created: 2, runnable: ["qitem-a"] }, warnings: expect.arrayContaining([{ qitemId: "qitem-b", code: "unresolved_rig", reference: "worker@unknown" }]) });
+  expect(repo.getById("qitem-b")).toMatchObject({ state: "pending", destinationSession: "worker@unknown" });
+  expect(db.prepare("SELECT 1 FROM outbox_entries WHERE outbox_id = 'wake-intent-qitem-b'").get()).toBeUndefined();
 });
 
 it("shows imported actions and transitions as history but not as local receipts or activity", () => {

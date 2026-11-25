@@ -68,7 +68,6 @@ export class QueueTransferActivation {
       }
       const refusal = review.refusals[0];
       if (refusal) throw new QueueTransferOperationError(refusal.code, 409, { refusals: review.refusals });
-      if (review.unresolved.length) throw new QueueTransferOperationError("mapping_incomplete", 409, { qitemIds: review.unresolved });
       if (review.projectedRunnable.length && !this.repo.hasWakeIntentStore) throw new QueueTransferOperationError("wake_intent_store_unavailable", 500);
       const recordedAt = new Date().toISOString();
       if (!input.dryRun && !prior) db.prepare(`INSERT INTO queue_transfer_ledger (record_id, side, kind, transfer_id, archive_digest, origin_host_id,
@@ -80,8 +79,8 @@ export class QueueTransferActivation {
     const prepared = input.dryRun ? prepare() : prepare.immediate();
     if ("result" in prepared) return prepared.result;
     const { archive, review, recordedAt, digest } = prepared;
-    const warnings: TransferActivation["warnings"] = review.warnings.filter(w => !["destination_unbound", "missing_evidence", "evidence_not_checked"].includes(w.code));
-    if (input.dryRun) return { status: "ready_for_activation" as const, importId, runnable: review.projectedRunnable, warnings };
+    const activationWarnings = (readiness: typeof review): TransferActivation["warnings"] => readiness.warnings.filter(w => !["destination_unbound", "missing_evidence", "evidence_not_checked"].includes(w.code));
+    if (input.dryRun) return { status: "ready_for_activation" as const, importId, runnable: review.projectedRunnable, warnings: activationWarnings(review) };
 
     const result = db.transaction((): TransferActivation => {
       const current = stages.manifest(importId);
@@ -89,7 +88,7 @@ export class QueueTransferActivation {
       const liveReview = transferReadiness(db, archive, authorization.destination.seatMapping);
       const refusal = liveReview.refusals[0];
       if (refusal) throw new QueueTransferOperationError(refusal.code, 409, { refusals: liveReview.refusals });
-      if (liveReview.unresolved.length) throw new QueueTransferOperationError("mapping_incomplete", 409, { qitemIds: liveReview.unresolved });
+      const warnings = activationWarnings(liveReview);
       const addRow = transferInsert(db, "queue_items", columns.queue_items);
       const addErasedId = transferInsert(db, "queue_erased_ids", columns.queue_erased_ids);
       const addErasedRig = transferInsert(db, "queue_erased_rigs", columns.queue_erased_rigs);
