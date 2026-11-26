@@ -47,8 +47,9 @@ describe("Codex activity relay across Node installation moves", () => {
     if (format === "json") fs.writeFileSync(hooks, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "echo user-hook" }] }] } }));
     // Start from the previously shipped install-bound command and a native disable choice.
     f.adapter(path.join(f.first, "activity-relay.cjs")).ensureCodexActivityHooks();
+    // The resolved spelling is written in every build; a linked temporary folder (macOS /var) changes it.
     const { key } = computeCodexHookTrust("Stop", {
-      keySource: format === "json" ? hooks : config, command: `node "${path.join(f.first, "activity-relay.cjs")}"`,
+      keySource: fs.realpathSync.native(format === "json" ? hooks : config), command: `node "${path.join(f.first, "activity-relay.cjs")}"`,
       timeoutSec: 5, groupIndex: format === "json" ? 1 : 0,
     });
     const header = `[hooks.state.${JSON.stringify(key)}]`;
