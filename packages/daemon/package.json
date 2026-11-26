@@ -107,6 +107,10 @@
       "types": "./dist/codex-auth-surface.d.ts",
       "import": "./dist/codex-auth-surface.js"
     },
+    "./conversation-key": {
+      "types": "./dist/conversation-key-surface.d.ts",
+      "import": "./dist/conversation-key-surface.js"
+    },
     "./herdr-live-workspace": {
       "types": "./dist/herdr-live-workspace-surface.d.ts",
       "import": "./dist/herdr-live-workspace-surface.js"

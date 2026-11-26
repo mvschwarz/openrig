@@ -2,6 +2,8 @@ import { readdirSync, realpathSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { QueueRepository } from "./queue-repository.js";
+import { CONTINUATION_MARKER } from "./queue-transition-log.js";
+import { CLOSE_PREFIX, DELIVERED_PREFIX, FAILED_PREFIX, HELD_PREFIX, REFUSED_PREFIX, RESERVE_PREFIX } from "./policies/parked-owner-consumer.js";
 import type { HealthCheckpointSource } from "./health-checkpoints.js";
 import type { OperatingPostureService } from "./rig-mode/operating-posture.js";
 import { readHealthArtifact, healthSelectedContext } from "./health-context.js";
@@ -37,6 +39,42 @@ function isCoordinationTransition(t: { actorSession: string; transitionNote: str
   if (isSystemActor(t.actorSession)) return false;
   const note = t.transitionNote;
   return !note || !DAEMON_BOOKKEEPING_NOTE_PREFIXES.some((prefix) => note.startsWith(prefix));
+}
+
+/** Wake notes the daemon writes on a parked row while the owner's wait is unchanged. The parked-owner
+ * "episode closed" note is bookkeeping but not a wake: the wait ended, so a park after it is a new one. */
+const WAKE_NOTE_PREFIXES = ["park wake ", RESERVE_PREFIX, DELIVERED_PREFIX, REFUSED_PREFIX, FAILED_PREFIX, HELD_PREFIX] as const;
+
+/**
+ * The transitions seats decided, in transition order. An owner's note-only blocked -> blocked
+ * acknowledgement is not one of them when it directly follows a wake note on that row and repeats
+ * the actor, blocker (closure target) and note of the owner's last park: nothing changed,
+ * so nothing was decided. A state change, a new blocker or continuation, or an acknowledgement
+ * with no earlier owner park in the window still counts.
+ */
+function coordinationTransitions<T extends { qitemId: string; state: string; actorSession: string; transitionNote: string | null; closureTarget: string | null }>(window: T[]): T[] {
+  const counted: T[] = [];
+  const lastPark = new Map<string, { note: string; target: string | null; actor: string }>();
+  const previous = new Map<string, T>();
+  for (const t of window) {
+    const prev = previous.get(t.qitemId);
+    previous.set(t.qitemId, t);
+    // A state change or a closed parked-owner episode ends the remembered park even when the row is
+    // bookkeeping and never counts: the next park is a new one, not an acknowledgement of the old wait.
+    if (t.state !== "blocked" || t.transitionNote?.startsWith(CLOSE_PREFIX)) lastPark.delete(t.qitemId);
+    if (!isCoordinationTransition(t)) continue;
+    const park = lastPark.get(t.qitemId);
+    if (t.state !== "blocked" || !t.transitionNote?.startsWith(CONTINUATION_MARKER)) lastPark.delete(t.qitemId);
+    else {
+      const acknowledgesWake = park !== undefined && park.actor === t.actorSession && park.note === t.transitionNote && park.target !== null && park.target === t.closureTarget
+        && prev?.state === "blocked" && prev.transitionNote !== null
+        && WAKE_NOTE_PREFIXES.some((prefix) => prev.transitionNote!.startsWith(prefix));
+      lastPark.set(t.qitemId, { note: t.transitionNote, target: t.closureTarget, actor: t.actorSession });
+      if (acknowledgesWake) continue;
+    }
+    counted.push(t);
+  }
+  return counted;
 }
 
 /** A read-only question generator. Proof files, closures and acceptance receipts
@@ -124,7 +162,7 @@ export class PassiveCeremonySource implements HealthObservationSource {
       }
       window.sort((a, b) => a.transitionId - b.transitionId);
       // Count, segment and report only what seats decided (#2762); the raw window still names the family.
-      const transitions = window.filter(isCoordinationTransition);
+      const transitions = coordinationTransitions(window);
       if (transitions.length < p.thresholds.ceremonyTransitions) continue;
       const rows = [...new Set(window.map((t) => t.qitemId))].map((id) => get(id)!);
       const tags = rows.flatMap((r) => r.tags ?? []);
@@ -220,7 +258,9 @@ export class PassiveCeremonySource implements HealthObservationSource {
           productStateChanges: null, boundedAuthority: false, reviewReturns: 0, candidateChanges: 0, newRiskClasses: 0, ceremony,
           sourceDescription: `Passively read ${rows.length} declared handoff members. Normal evidence paths and workflow closure receipts are starting points, not proof counts or acceptance judgments. This source performs no writes or agent calls.`,
           source: boundHealthEvidence(segment.map(adaptQueueTransitionEvidence), { source: "mixed", startedAt: start > episodeStartedAt ? start : episodeStartedAt, endedAt: measuredEnd, limit: 10000, retentionSeconds: p.observationWindowSeconds },
-            deriveHealthSourceFreshness({ evaluatedAt: now, newestSourceAt: latest, maxAgeSeconds: p.freshnessSeconds, available: true })) });
+            // Freshness is the successful read of the queue, not the lineage's last activity: `lastObservedAt` carries
+            // activity and the detector gates confirmation and wake on it. Activity dated after the read stays contradictory.
+            deriveHealthSourceFreshness({ evaluatedAt: now, newestSourceAt: now, maxAgeSeconds: p.freshnessSeconds, available: true, contradictory: Date.parse(latest) > Date.parse(now) })) });
       }
     }
     return observations;

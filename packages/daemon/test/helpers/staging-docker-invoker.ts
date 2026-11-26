@@ -68,6 +68,7 @@ export function makeRealStagingDocker(opts: RealStagingDockerOptions = {}): Stag
       let producerDone: Promise<ProcExit> | null = null;
       let consumerClosed = false;
       let producerClosed = false;
+      let producerFeedEnded = false;
       let producerKilledEarly = false;
       let killProducer: (() => void) | null = null;
       try {
@@ -96,6 +97,10 @@ export function makeRealStagingDocker(opts: RealStagingDockerOptions = {}): Stag
           // EPIPE on the wiring (consumer exited early) must not crash the invoker — the producer's
           // own SIGPIPE death is the loud signal, reported through the dual-exit check below.
           consumer.stdin!.on("error", () => {});
+          // The producer's EOF, seen here, is what pipe() forwards as the consumer's EOF. So a consumer that read its
+          // feed to the end can close before the producer's own close is seen; this flag tells that order apart from a
+          // producer still writing. It's set in the same 'end' event that ends the consumer's stdin.
+          producer.stdout!.once("end", () => { producerFeedEnded = true; });
           producer.stdout!.pipe(consumer.stdin!); // pipe() forwards EOF when the producer exits
           producerDone = waitExit(producer).then((exit) => {
             producerClosed = true;
@@ -117,11 +122,13 @@ export function makeRealStagingDocker(opts: RealStagingDockerOptions = {}): Stag
       const consumerExit = await waitExit(consumer);
       consumerClosed = true; // as for the producer: a closed side's group is never signalled again
       untrackGroup(consumer, groups);
-      // Consumer gone while the producer still runs: the producer's stdout now backs up against a
-      // pipe nobody drains, so it would block FOREVER (measured — this invoker's own first cut
-      // hung here). Kill it and report the anomaly: a consumer that exited before its feed
-      // finished did not stage what the feed carried, whatever its exit code said.
-      if (producerDone && !producerClosed) {
+      // Consumer gone while the producer is still WRITING: the producer's stdout now backs up
+      // against a pipe nobody drains, so it would block FOREVER (measured — this invoker's own
+      // first cut hung here). Kill it and report the anomaly: a consumer that exited before its
+      // feed finished did not stage what the feed carried, whatever its exit code said.
+      // A producer whose feed already ended isn't killed: its own exit code is awaited below
+      // (still bounded by the step timeout), so a tar failure is reported as tar's.
+      if (producerDone && !producerClosed && !producerFeedEnded) {
         producerKilledEarly = true;
         killProducer!();
       }

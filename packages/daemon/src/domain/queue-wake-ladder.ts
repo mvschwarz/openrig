@@ -12,6 +12,7 @@ import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
 import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
+import { nativeAskHoldsPrompt } from "./runner-permissions.js";
 import { PROMPT_ROUTED_WORK_PREFIX, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RETURN_ROUTE_NOTE_PREFIX, isEpisodeRelay,
   promptKindFromReason, resolveEscalationReturnRoute, routeOnThisHost, type PromptKind } from "./return-route.js";
 import { isTypedGateBlocker } from "./queue-blocker.js";
@@ -1625,6 +1626,9 @@ async function advancePromptRefusals(
         }
       }
       if (state !== "blocked" || deps.queueRepo.deliveryDrains.holds(observation.destination)) continue;
+      // The seat's own prompt is already asked through OpenRig (a native ask, slice 15), and that ask is still taking an
+      // answer: its person is being asked there, so this alert waits until the ask ends.
+      if (nativeAskHoldsPrompt(deps.db, observation.destination)) continue;
       // Each prompt is its own episode when its start is known; otherwise the occupant's prompts share one key.
       const key = `${PROMPT_EPISODE_TAG}${observation.destination}|permission-hook:${observation.episode}`
         + `${observation.prompt ? `|prompt:${observation.prompt}` : ""}|after:${clearedAlert(observation.destination)?.qitemId ?? "start"}`;
@@ -1667,6 +1671,8 @@ async function advancePromptRefusals(
   for (const work of routedPromptWork(deps.db)) {
     const dest = work.subject;
     if (deps.queueRepo.deliveryDrains.holds(dest) || readAt(dest, now.toISOString()) !== "blocked") continue;
+    // The seat's prompt is being asked through OpenRig right now (a native ask, slice 15): no relay task while it is.
+    if (nativeAskHoldsPrompt(deps.db, dest)) continue;
     const key = `${PROMPT_EPISODE_TAG}${dest}|routed-work:${work.qitemId}|after:${clearedAlert(dest)?.qitemId ?? "start"}`;
     if (closedEpisode(key)) continue;
     const row = readCandidate(work.qitemId, dest);

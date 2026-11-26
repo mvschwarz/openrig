@@ -61,6 +61,7 @@ export interface DaemonTerminalsEvidence {
 }
 
 export interface DaemonStatus {
+  backgroundWork?: Array<{ nodeId: string; rigId: string; sessionName: string; state: "unknown"; reason: string; observedAt: string; processes: Array<{ pid: number; startedAt: string; command: string }> }>;
   /** The selected OPENRIG_URL names a non-loopback endpoint. */
   explicitRemote?: boolean;
   databaseWarnings?: string[];
@@ -1445,7 +1446,7 @@ export async function getDaemonStatus(
       const res = await probeHealthzWithSettle(deps, `${openrigUrl}/healthz`);
       const ev = await readHealthEvidence(res);
       const url = new URL(openrigUrl);
-      return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}), ...(ev.terminals ? { terminals: ev.terminals } : {}) };
+      return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}), ...(ev.terminals ? { terminals: ev.terminals } : {}), ...(ev.backgroundWork ? { backgroundWork: ev.backgroundWork } : {}) };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
       if (!isRefusedError(err)) return { state: "unverified", ...endpoint, ...probeErrorCodeOf(err) };
@@ -1481,7 +1482,7 @@ export async function getDaemonStatus(
         healthy: ev.healthy,
         reason: ev.reason,
         eventLoop: ev.eventLoop,
-        ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}), ...(ev.terminals ? { terminals: ev.terminals } : {}),
+        ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}), ...(ev.terminals ? { terminals: ev.terminals } : {}), ...(ev.backgroundWork ? { backgroundWork: ev.backgroundWork } : {}),
       };
     } catch (err) {
       // 1ae863d2: the resolved home has NO daemon state — before asserting anything,
@@ -1522,7 +1523,7 @@ export async function getDaemonStatus(
     try {
       const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`);
       const ev = await readHealthEvidence(res);
-      return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}), ...(ev.terminals ? { terminals: ev.terminals } : {}) };
+      return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}), ...(ev.terminals ? { terminals: ev.terminals } : {}), ...(ev.backgroundWork ? { backgroundWork: ev.backgroundWork } : {}) };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
       // T2: unless a live start reservation says a launch is in progress.
@@ -1542,6 +1543,7 @@ export async function getDaemonStatus(
   let eventLoop: DaemonEventLoopEvidence | undefined;
   let databaseWarnings: string[] | undefined;
   let terminals: DaemonTerminalsEvidence | undefined;
+  let backgroundWork: DaemonStatus["backgroundWork"];
   let probeFailure: Pick<DaemonStatus, "probeErrorCode"> = {};
   try {
     const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`);
@@ -1551,6 +1553,7 @@ export async function getDaemonStatus(
     eventLoop = ev.eventLoop;
     databaseWarnings = ev.databaseWarnings;
     terminals = ev.terminals;
+    backgroundWork = ev.backgroundWork;
   } catch (err) {
     if (err instanceof SandboxProxyError) {
       return { state: "unverified", port: state.port, host, pid: state.pid, ...probeErrorCodeOf(err) };
@@ -1564,7 +1567,7 @@ export async function getDaemonStatus(
 
   // pid alive = running (state file preserved either way)
   return { state: "running", port: state.port, host, pid: state.pid, healthy, reason, eventLoop, ...(databaseWarnings ? { databaseWarnings } : {}),
-    ...(terminals ? { terminals } : {}), ...probeFailure };
+    ...(terminals ? { terminals } : {}), ...(backgroundWork ? { backgroundWork } : {}), ...probeFailure };
 }
 
 /** #275 — keep the OS code of a failed health probe (absent for a timeout). */
@@ -1606,15 +1609,16 @@ function readDatabaseWarnings(value: unknown): string[] {
 async function readHealthEvidence(
   res: { ok: boolean; json?: () => Promise<unknown> },
 ): Promise<{ healthy: boolean; reason?: DaemonStatus["reason"]; eventLoop?: DaemonEventLoopEvidence; databaseWarnings?: string[];
-  terminals?: DaemonTerminalsEvidence }> {
+  terminals?: DaemonTerminalsEvidence; backgroundWork?: DaemonStatus["backgroundWork"] }> {
   if (!res.ok) return { healthy: false };
   if (!res.json) return { healthy: true };
   try {
-    const body = (await res.json()) as { eventLoop?: Partial<DaemonEventLoopEvidence>; databaseWarnings?: unknown; terminals?: unknown } | null;
+    const body = (await res.json()) as { eventLoop?: Partial<DaemonEventLoopEvidence>; databaseWarnings?: unknown; terminals?: unknown; backgroundWork?: unknown } | null;
     const warnings = readDatabaseWarnings(body?.databaseWarnings);
     const terminals = readTerminalsEvidence(body?.terminals);
     // #3315: the terminals ride along and never change `healthy`: the daemon up and its terminals reachable are two facts.
-    const context = { ...(warnings.length ? { databaseWarnings: warnings } : {}), ...(terminals ? { terminals } : {}) };
+    const backgroundWork = readBackgroundWork(body?.backgroundWork);
+    const context = { ...(warnings.length ? { databaseWarnings: warnings } : {}), ...(terminals ? { terminals } : {}), ...(backgroundWork ? { backgroundWork } : {}) };
     const el = body?.eventLoop;
     if (el && typeof el.healthy === "boolean" && typeof el.lagMeanMs === "number") {
       const eventLoop: DaemonEventLoopEvidence = {
@@ -1633,6 +1637,29 @@ async function readHealthEvidence(
     // Body absent / not JSON — treat as plain healthy (res.ok already true).
   }
   return { healthy: true };
+}
+
+/** Read only the documented fields from the unauthenticated health response. */
+function readBackgroundWork(value: unknown): DaemonStatus["backgroundWork"] {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((raw): NonNullable<DaemonStatus["backgroundWork"]> => {
+    if (!raw || typeof raw !== "object") return [];
+    const item = raw as Record<string, unknown>;
+    if (typeof item.nodeId !== "string" || typeof item.rigId !== "string" || typeof item.sessionName !== "string" || item.state !== "unknown" || typeof item.reason !== "string"
+      || typeof item.observedAt !== "string" || !Number.isFinite(Date.parse(item.observedAt))
+      || /[\x00-\x1f\x7f]/.test(item.observedAt) || !Array.isArray(item.processes)) return [];
+    if ([item.nodeId, item.rigId, item.sessionName].some(text => text.length > 256 || /[\x00-\x1f\x7f]/.test(text))) return [];
+    const processes = item.processes.flatMap((entry: unknown) => {
+      if (!entry || typeof entry !== "object") return [];
+      const process = entry as Record<string, unknown>;
+      return Number.isSafeInteger(process.pid) && Number(process.pid) > 0
+        && typeof process.startedAt === "string" && Number.isFinite(Date.parse(process.startedAt))
+        && !/[\x00-\x1f\x7f]/.test(process.startedAt) && typeof process.command === "string"
+        && /^[a-zA-Z0-9._+-]{1,128}$/.test(process.command)
+        ? [{ pid: Number(process.pid), startedAt: process.startedAt, command: process.command }] : [];
+    });
+    return [{ nodeId: item.nodeId, rigId: item.rigId, sessionName: item.sessionName, state: "unknown", reason: item.reason, observedAt: item.observedAt, processes }];
+  });
 }
 
 /** #3315 — the healthz `terminals` field, kept only when its shape is the one the daemon writes. */

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdirSync, mkdtempSync, realpathSync, statSync, lstatSync, readdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, statSync, lstatSync, readdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { DaemonClient } from "../client.js";
@@ -267,6 +267,18 @@ export interface BundleLinkOptions {
   projectDir?: string;
   allowDrift?: boolean;
   provenance?: Record<string, unknown>;
+  /** Local receipt only; never sent to the assembler. */
+  buildProvenance?: Record<string, unknown>;
+}
+
+/** A private local receipt; it is never staged in the archive or sent to the daemon. */
+export function writeBundleBuildReceipt(receiptPath: string, bundlePath: string, result: Record<string, unknown>, provenance?: Record<string, unknown>): string | undefined {
+  try {
+    writeFileSync(receiptPath, JSON.stringify({ ...result, bundlePath, ...(provenance ? { provenance } : {}) }, null, 2) + "\n", { mode: 0o600 });
+    chmodSync(receiptPath, 0o600);
+  } catch (error) {
+    return `The private build receipt could not be written at ${receiptPath}: ${(error as Error).message}. The bundle creation result is unchanged.`;
+  }
 }
 
 /** Four commands share this preparation. The archive and receipt outlive install/history. */
@@ -330,7 +342,8 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
     || (res.data.source as BundleSource | undefined)?.resolvedCommit !== prepared.source.resolvedCommit)) {
     throw new Error(`The daemon did not return bundle source/digest evidence. Update the local daemon before importing links. The created archive is retained at ${bundlePath}; no install was requested.`);
   }
-  writeFileSync(path.join(path.dirname(prepared.receiptPath), "build.json"), JSON.stringify({ ...res.data, bundlePath }, null, 2) + "\n");
+  const receiptWarning = writeBundleBuildReceipt(path.join(path.dirname(prepared.receiptPath), "build.json"), bundlePath, res.data, opts.buildProvenance);
+  if (receiptWarning) res.data.warning = [res.data.warning, receiptWarning].filter(Boolean).join("; ");
   return { client, bundlePath, res };
 }
 

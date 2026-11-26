@@ -814,8 +814,21 @@ export function createApp(deps: AppDeps): Hono {
     // #3315 — the daemon answering (status "ok") is not its terminals answering: `terminals` says whether its tmux
     // server is reachable, from memory, without calling tmux. ADDITIVE; absent = legacy body.
     const terminals = deps.terminalReachability ? { terminals: deps.terminalReachability.snapshot() } : {};
+    // Health is unauthenticated: report only a conservative executable name, never arguments or paths.
+    const backgroundWork = (() => {
+      if (!deps.seatIdentityReconciler) return {};
+      try {
+        return { backgroundWork: deps.seatIdentityReconciler.backgroundWorkUnknown()
+          .map(({ processes, ...item }) => ({ ...item, processes: processes.map(({ pid, startedAt, command }) => {
+            const executable = nodePath.basename(command.trim().split(/\s+/, 1)[0] ?? "");
+            return { pid, startedAt, command: /^[a-zA-Z0-9._+-]{1,128}$/.test(executable) ? executable : "unknown" };
+          }) })) };
+      } catch {
+        return { backgroundWorkUnavailable: true };
+      }
+    })();
     if (!monitor) {
-      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder, ...terminals });
+      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder, ...terminals, ...backgroundWork });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
@@ -829,6 +842,7 @@ export function createApp(deps: AppDeps): Hono {
       ...bind,
       ...stuckSweep,
       ...wakeLadder,
+      ...backgroundWork,
       ...terminals,
     });
   });

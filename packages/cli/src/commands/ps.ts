@@ -1,11 +1,12 @@
 import { modelObservation, formatModelObservation, type ModelObservation } from "../lib/model-observation.js";
 import { formatCheckIn } from "../lib/check-in.js";
+import { fitCell } from "../lib/terminal-cell.js";
 import { Command } from "commander";
 import stringWidth from "string-width";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { sessionRigOf } from "../session-name.js";
 import { DaemonClient, remoteDaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, resolveOriginSelfHostId, type LifecycleDeps , daemonStatusGuard, terminalsDegradedLine} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, resolveOriginSelfHostId, type LifecycleDeps, type DaemonStatus, daemonStatusGuard, terminalsDegradedLine } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { loadHostRegistry, resolveHost, hostDisplayTarget, resolveRemoteBearer, classifyHttpFailedStep, classifyHttpError, type HttpHostEntry } from "../host-registry.js";
@@ -45,6 +46,7 @@ interface PsEntry {
 }
 
 export interface NodeEntry {
+  nodeId?: string;
   /** Served daemon attention, never re-derived here. Missing on an older daemon. */
   needsAttention?: boolean;
   arbitratedNeedsInput?: boolean | null;
@@ -1175,7 +1177,7 @@ Exit codes:
         return;
       }
       if (opts.nodes) {
-        await handleNodes(client, opts, parsedFilter, limit, fields, useEnvelope, undefined, scopedToSessionRig);
+        await handleNodes(client, opts, parsedFilter, limit, fields, useEnvelope, undefined, scopedToSessionRig, status.backgroundWork);
         return;
       }
 
@@ -1313,6 +1315,15 @@ Exit codes:
       const humanList = (opts.full || limit !== null) ? tableRows : tableRows.slice(0, HUMAN_RIG_BUDGET);
       const humanTruncated = !opts.full && limit === null && tableRows.length > HUMAN_RIG_BUDGET;
 
+      const shownRigs = new Set(humanList.map(rig => rig.rigId));
+      for (const item of status.backgroundWork ?? []) {
+        if (!shownRigs.has(item.rigId)) continue;
+        console.log(`Background work (${item.sessionName}, node ${item.nodeId}): unknown; a missing pane or session does not prove its processes have exited.`);
+        for (const process of item.processes) {
+          console.log(`  Observed descendant: pid ${process.pid}, command ${process.command}, started ${process.startedAt} (sampled ${item.observedAt}).`);
+        }
+      }
+
       const headers = ["RIG", "NODES", "RUNNING", "ACTIVE", "WORK", "ATTN", "STATUS", "LIFECYCLE", "UPTIME", "SNAPSHOT"];
       const rows = (humanList as PsEntry[]).map((e) => [
         e.isArchived ? `${e.rigName ?? e.name} *` : (e.rigName ?? e.name),
@@ -1409,6 +1420,7 @@ async function handleNodes(
   useEnvelope: boolean,
   requestHeaders?: Record<string, string>,
   scopedToSessionRig?: boolean,
+  backgroundWork?: DaemonStatus["backgroundWork"],
 ): Promise<void> {
   const rigRes = await client.get<PsEntry[]>(psApiPath(opts), requestHeaders ? { headers: requestHeaders } : undefined);
   if (rigRes.status >= 400) {
@@ -1619,6 +1631,16 @@ async function handleNodes(
   await printConnectedAssistants(client, opts.rig, requestHeaders);
   for (const n of humanList as NodeEntry[]) {
     if (livenessUnconfirmed(n)) console.log(livenessLine(n.canonicalSessionName ?? n.logicalId, n));
+    if (!n.intentionallyStopped && n.identityVerdict?.verdict === "pane_missing"
+      && ["session_missing", "pane_pid_gone", "pane_exited"].includes(n.identityVerdict.reason ?? "")) {
+      const missing = n.identityVerdict.reason === "session_missing" ? "session" : "pane";
+      const seat = n.canonicalSessionName ?? n.logicalId;
+      console.log(`Background work (${seat}): unknown; a missing tmux ${missing} does not prove its processes have exited.`);
+      const observation = n.nodeId ? backgroundWork?.find(item => item.nodeId === n.nodeId && item.rigId === n.rigId && item.sessionName === seat) : undefined;
+      for (const process of observation?.processes ?? []) {
+        console.log(`  Observed descendant: pid ${process.pid}, command ${process.command}, started ${process.startedAt} (sampled ${observation!.observedAt}).`);
+      }
+    }
   }
   if (humanTruncated) {
     const remaining = filtered.length - HUMAN_NODE_BUDGET;
@@ -1635,23 +1657,6 @@ function truncate(s: string, max: number): string {
 }
 
 const RIG_COLUMN_SEPARATOR = "  ";
-const cellSegmenter = new Intl.Segmenter();
-
-function fitCell(value: string, width: number): string {
-  if (stringWidth(value) > width) {
-    const limit = width - 1;
-    let prefix = "";
-    let used = 0;
-    for (const { segment } of cellSegmenter.segment(value)) {
-      const segmentWidth = stringWidth(segment);
-      if (used + segmentWidth > limit) break;
-      prefix += segment;
-      used += segmentWidth;
-    }
-    value = prefix + "…";
-  }
-  return value + " ".repeat(width - stringWidth(value));
-}
 
 function padRigRow(cells: string[], widths: number[]): string {
   return cells.map((cell, i) => i < widths.length ? fitCell(cell, widths[i]!) : cell).join(RIG_COLUMN_SEPARATOR);

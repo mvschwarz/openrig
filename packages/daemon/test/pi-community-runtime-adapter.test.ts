@@ -368,6 +368,27 @@ describe("PiCommunityRuntimeAdapter", () => {
     }
   });
 
+  // 0.7.24: a handover asks this before it ends the predecessor. Only built-in Pi applies a launch wrapper, so a wrapped
+  // seat is refused there, as its launch refuses it, and nothing starts; an unwrapped one passes (readiness is the launch's).
+  it("its preflight refuses a launch wrapper as its launch does, and passes a seat without one", async () => {
+    const f = makeFixture({ seatLaunchEnvironment: { command: vi.fn(), resolveLaunchWrapper: (wrapper: readonly string[]) => [...wrapper] } as never });
+    try {
+      const preset = { name: "omo", command: "omo", protocol: "pi-rpc", runner: false } as never;
+      const adapter = PiCommunityRuntimeAdapter.fromPiAdapter(f.piAdapter, "omo", preset);
+      const binding = { nodeId: "node-1", tmuxSession: "omo-seat@rig", tmuxPane: "%1", cwd: "/work" } as NodeBinding;
+      const wrapped = { ...binding, launchWrapper: ["rtk", "--"] };
+      const checked = await adapter.preflightLaunch(wrapped);
+      expect(checked).toEqual({ ok: false, error: "launch_wrapper support unavailable; no agent started." });
+      expect(await adapter.launchHarness(wrapped, { name: "omo-seat@rig" })).toEqual(checked);
+      expect(f.tmux.sendShellCommand).not.toHaveBeenCalled();
+      expect(await adapter.preflightLaunch(binding)).toEqual({ ok: true });
+      // Built-in Pi keeps no preflight: its wrapper resolution stays in its launch.
+      expect((f.piAdapter as { preflightLaunch?: unknown }).preflightLaunch).toBeUndefined();
+    } finally {
+      f.cleanup();
+    }
+  });
+
   it("refuses resume when reported session file mismatches requested (request A, report B)", async () => {
     const f = makeFixture();
     try {

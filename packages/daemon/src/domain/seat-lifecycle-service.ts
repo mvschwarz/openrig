@@ -1,5 +1,6 @@
 import { validateStatuslineThrottle } from "./claude-statusline-throttle.js";
-import { communityHarnessOf } from "./built-in-runtimes.js";
+import { communityHarnessOf, isCommunityHarnessRuntime } from "./built-in-runtimes.js";
+import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { claudeAutoModeAdvisories, readClaudeAutoMode, validateClaudeAutoMode } from "./claude-auto-mode.js";
 import { clearCodexMemberPermissions, codexRigReach, codexRigReachWarning, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
@@ -44,7 +45,7 @@ import { resolvePermissionPolicyAttachment, validatePermissionPolicyRef } from "
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import type { PaneCutoverTiming } from "./pane-cutover.js";
 import {
-  effortPrecedence, emittedEffortFromArgv, readNativeEffort, resolveSeatEffort, unknownLevelWarning,
+  effortPrecedence, emittedEffortFromArgv, readNativeEffort, readSeatEffort, resolveSeatEffort, unknownLevelWarning,
   type EffortResolution, type NativeEffortObservation,
 } from "./seat-effort.js";
 import {
@@ -160,6 +161,7 @@ export interface SeatRefusal {
     | "seat_ref_required"
     | "seat_not_found"
     | "seat_ambiguous"
+    | "seat_name_shared"
     | "missing_model"
     | "missing_cwd"
     | "invalid_cwd"
@@ -470,6 +472,28 @@ export class SeatLifecycleService {
     } catch (error) {
       return { ok: false as const, code: "terminal_policy_unavailable" as const, message: (error as Error).message };
     }
+  }
+
+  /** Settings suggestions and the seat's saved choices. This read never starts or interrogates a runtime. */
+  modelCatalog(target: SeatSettingTarget) {
+    const resolved = this.resolveSettingTarget(target);
+    if ("code" in resolved) return resolved;
+    const { runtime, model } = resolved.entry;
+    const seat = this.describe(resolved);
+    const saved = { model: model ?? null, effort: readSeatEffort(this.db, seat.nodeId) };
+    const preset = isCommunityHarnessRuntime(runtime) ? loadCommunityHarnessPreset(runtime) : undefined;
+    const declaration = preset?.ok ? preset.preset.modelCatalog : undefined;
+    if (!declaration) {
+      return { ok: true as const, seat, runtime, saved,
+        catalog: { status: "unavailable" as const, reason: "No supported local catalog for this seat's runtime." } };
+    }
+    const observedAt = new Date().toISOString();
+    const { runtimeVersion } = declaration;
+    const models = declaration.models.map(entry => ({
+      ...entry, source: "community-harness-preset" as const, observedAt,
+      ...(runtimeVersion === undefined ? {} : { runtimeVersion }),
+    }));
+    return { ok: true as const, seat, runtime, saved, catalog: { status: "available" as const, models } };
   }
 
   async setModel(input: SeatSettingTarget & { model: string; reason: string; operator?: string | null }): Promise<SetModelResult> {
@@ -2045,6 +2069,7 @@ export class SeatLifecycleService {
       resolvedStartupFiles: startup.resolvedStartupFiles,
       startupActions: startup.startupActions,
       isRestore: false,
+      refreshClaudeFragments: true,
       includeDurableObligations: true,
       sessionName: canonicalSessionName,
       allowFreshFallback: false,
@@ -2185,24 +2210,38 @@ export class SeatLifecycleService {
    * needs input) and child processes are reported for the operator to judge, not refused. Identity, typing
    * guard, adopted sessions, unreadable tmux and settings drift are named refusals before any signal.
    */
-  async restartInPlace(input: { seatRef: string; reason?: string; plan?: boolean; operator?: string | null }): Promise<RestartInPlaceResult> {
+  async restartInPlace(input: { seatRef: string; reason?: string; plan?: boolean; operator?: string | null; nodeId?: string }): Promise<RestartInPlaceResult> {
     if (!input.plan) {
       const required = this.requireReason(input.reason ?? "");
       if (required) return required;
     }
     const resolved = this.resolveSeat(input.seatRef);
-    if ("code" in resolved) return resolved;
+    // #3625: a caller that selected the seat by its node (an assignment) passes it, so a name that now resolves to another
+    // seat, to more than one (another rig took it meanwhile), or to none (its rig was archived), restarts nothing, and is
+    // refused as a name that no longer reaches that seat alone.
+    if (input.nodeId !== undefined && "code" in resolved && resolved.code === "seat_ambiguous") {
+      return { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" now names more than one seat, not only the one this restart was for; nothing was restarted.` };
+    }
+    // The same when the node is gone by the time its target is read (a removal held the seat's lease first).
+    const gone = <T,>(r: T | SeatRefusal): T | SeatRefusal => input.nodeId !== undefined && typeof r === "object" && r !== null
+      && "code" in r && r.code === "seat_not_found"
+      ? { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" no longer names the seat this restart was for, or any seat; nothing was restarted.` }
+      : r;
+    if ("code" in resolved) return gone(resolved);
+    if (input.nodeId !== undefined && resolved.nodeId !== input.nodeId) {
+      return { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" now names the seat in rig ${resolved.entry.rigName} (${resolved.entry.rigId}), not the one this restart was for; nothing was restarted.` };
+    }
     const prepared = this.inPlaceRestarter();
     if ("code" in prepared) return prepared;
     if (input.plan) {
-      const target = await this.inPlaceTarget(resolved, input.seatRef);
+      const target = gone(await this.inPlaceTarget(resolved, input.seatRef));
       return "code" in target ? target : prepared.plan(target);
     }
     // Recorded before waiting for the lease: a restart that ran meanwhile refuses this one (no repeat
     // on a slow reply).
     const seenStartedSeq = prepared.latestStartedSeq(resolved.nodeId);
     const run = async (): Promise<RestartInPlaceResult> => {
-      const target = await this.inPlaceTarget(resolved, input.seatRef);
+      const target = gone(await this.inPlaceTarget(resolved, input.seatRef));
       if ("code" in target) return target;
       return prepared.execute(target, { reason: input.reason ?? "", operator: input.operator ?? null, seenStartedSeq });
     };
@@ -2549,6 +2588,7 @@ export class SeatLifecycleService {
         ...(typeof raw["mergeStrategy"] === "string" ? { mergeStrategy: raw["mergeStrategy"] as ProjectionEntry["mergeStrategy"] } : {}),
         ...(typeof raw["target"] === "string" ? { target: raw["target"] } : {}),
         ...(typeof raw["pluginType"] === "string" ? { pluginType: raw["pluginType"] as ProjectionEntry["pluginType"] } : {}),
+        ...(raw["onRestore"] === "follow_source" ? { onRestore: "follow_source" as const } : {}),
       }));
     }
 

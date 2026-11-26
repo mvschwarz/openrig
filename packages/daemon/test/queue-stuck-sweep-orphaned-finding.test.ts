@@ -74,6 +74,20 @@ describe("#3529 orphaned sweep findings", () => {
     expect(queue.getById(row.qitemId)?.state).toBe("pending");
   });
 
+  it("the system handoff preserves a scoped finding's evidence authority", async () => {
+    queue.attachOutbox(new OutboxHandler(db));
+    await work();
+    await sweep();
+    const [original] = openFindings();
+    db.prepare("UPDATE queue_items SET evidence_ref = ?, evidence_ref_roots = ? WHERE qitem_id = ?")
+      .run("/fixture/chart.png", "[]", original.qitemId);
+    removeRig("archived");
+    await sweep();
+    expect(openFindings()).toEqual([expect.objectContaining({
+      handedOffFrom: original.qitemId, evidenceRef: "/fixture/chart.png", evidenceRefRoots: [],
+    })]);
+  });
+
   it("still selects a handed-off finding whose source rig is deleted before pickup", async () => {
     queue.attachOutbox(new OutboxHandler(db));
     await work();

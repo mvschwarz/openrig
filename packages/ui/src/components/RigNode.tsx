@@ -21,6 +21,7 @@ import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "
 import { formatRuntimeModel } from "../lib/runtime-brand.js";
 import { postOpenCmux } from "../hooks/useCmuxLaunch.js";
 import { ToolMark } from "./graphics/RuntimeMark.js";
+import { CopySessionNameButton } from "./CopySessionNameButton.js";
 import { ContextBar, SeatEngine } from "./SeatEngine.js";
 
 interface RigNodeData {
@@ -344,6 +345,13 @@ export function RigNode({ data }: { data: RigNodeData }) {
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => e.stopPropagation()}
           >
+            {data.canonicalSessionName && (
+              <CopySessionNameButton
+                sessionName={data.canonicalSessionName}
+                testId="toolbar-copy-session-name"
+                className={toolbarIconButtonClass}
+              />
+            )}
             {data.rigId && (
               <button
                 onClick={handleOpenCmux}

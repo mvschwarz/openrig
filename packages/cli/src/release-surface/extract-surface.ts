@@ -14,6 +14,7 @@
 // The registration NAME wins over the filename (the `rig-mode.ts` file's
 // `new Command("policy")` surfaces as `policy`, never `rig-policy`).
 
+import { posix } from "node:path";
 import ts from "typescript";
 
 export interface Surface {
@@ -84,17 +85,31 @@ function freshNode(rawName: string): CmdNode {
   return { name: firstToken(rawName), flags: new Set(), children: [] };
 }
 
-/** Extract the root command node(s) for a single source file. */
-function extractFile(fileName: string, text: string): CmdNode[] {
+type Builder = () => CmdNode | null;
+
+/** Index exported builders lazily so a parent can register a command from another file. */
+function indexFile(fileName: string, text: string, modules: Map<string, Map<string, Builder>>, attached: Set<CmdNode>): void {
   const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.ES2022, true);
 
   const fnDecls = new Map<string, ts.FunctionDeclaration>();
-  const exportedFnNames: string[] = [];
+  const exports = new Map<string, Builder>();
+  modules.set(fileName, exports);
+  const imports = new Map<string, Builder>();
   sf.forEachChild((node) => {
     if (ts.isFunctionDeclaration(node) && node.name) {
       fnDecls.set(node.name.text, node);
       const exported = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
-      if (exported) exportedFnNames.push(node.name.text);
+      const name = node.name.text;
+      if (exported) exports.set(name, () => rootOfFunction(name));
+    } else if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+      const spec = node.moduleSpecifier.text;
+      const bindings = node.importClause?.namedBindings;
+      if (!spec.startsWith(".") || !bindings || !ts.isNamedImports(bindings)) return;
+      const path = posix.join(posix.dirname(fileName), spec.replace(/\.js$/, ".ts"));
+      for (const binding of bindings.elements) {
+        const name = (binding.propertyName ?? binding.name).text;
+        imports.set(binding.name.text, () => modules.get(path)?.get(name)?.() ?? null);
+      }
     }
   });
 
@@ -155,8 +170,8 @@ function extractFile(fileName: string, text: string): CmdNode[] {
       const callee = expr.expression;
 
       // builderFn() -> the root command that function returns
-      if (ts.isIdentifier(callee) && fnDecls.has(callee.text)) {
-        return rootOfFunction(callee.text);
+      if (ts.isIdentifier(callee)) {
+        return fnDecls.has(callee.text) ? rootOfFunction(callee.text) : imports.get(callee.text)?.() ?? null;
       }
 
       if (ts.isPropertyAccessExpression(callee)) {
@@ -181,7 +196,10 @@ function extractFile(fileName: string, text: string): CmdNode[] {
         if (method === "addCommand") {
           const arg0 = expr.arguments[0];
           const child = arg0 ? evalExpr(arg0, vars) : null;
-          if (recv && child) recv.children.push(child);
+          if (recv && child) {
+            recv.children.push(child);
+            attached.add(child);
+          }
           return recv;
         }
         // description / action / argument / alias / addHelpText / etc. -> receiver
@@ -191,17 +209,6 @@ function extractFile(fileName: string, text: string): CmdNode[] {
 
     return null;
   }
-
-  const roots: CmdNode[] = [];
-  const seen = new Set<CmdNode>();
-  for (const name of exportedFnNames) {
-    const r = rootOfFunction(name);
-    if (r && !seen.has(r)) {
-      roots.push(r);
-      seen.add(r);
-    }
-  }
-  return roots;
 }
 
 function walk(node: CmdNode, prefix: string[], surface: Surface): void {
@@ -215,10 +222,18 @@ function walk(node: CmdNode, prefix: string[], surface: Surface): void {
 /** Build the combined command surface from a set of `{name, text}` sources. */
 export function extractSurfaceFromSources(files: { name: string; text: string }[]): Surface {
   const surface: Surface = { commands: new Set(), flags: new Set() };
-  for (const file of files) {
-    for (const root of extractFile(file.name, file.text)) {
-      walk(root, [], surface);
+  const modules = new Map<string, Map<string, Builder>>();
+  const attached = new Set<CmdNode>();
+  for (const file of files) indexFile(file.name, file.text, modules, attached);
+  const roots = new Set<CmdNode>();
+  for (const builders of modules.values()) {
+    for (const build of builders.values()) {
+      const node = build();
+      if (node) roots.add(node);
     }
+  }
+  for (const root of roots) {
+    if (!attached.has(root)) walk(root, [], surface);
   }
   return surface;
 }

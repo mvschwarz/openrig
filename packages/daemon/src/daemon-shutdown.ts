@@ -17,6 +17,10 @@ export function daemonStartCommandTimeoutMs(readinessWaitMs: number = DAEMON_STA
 export const DAEMON_START_READINESS_WAIT_MAX_SECONDS = Math.floor((2 ** 31 - 1 - DAEMON_START_CALLER_MARGIN_MS) / 1000);
 export const DAEMON_START_COMMAND_TIMEOUT_MS = daemonStartCommandTimeoutMs();
 export const DAEMON_HTTP_CONNECTION_GRACE_MS = 250;
+let markDaemonStopping: () => void = () => {};
+/** Settles when the daemon starts shutting down. A request that waits for a change (a permission read's long-poll)
+ *  answers then with what it has, so its connection doesn't hold the shutdown's connections phase. */
+export const daemonStopping: Promise<void> = new Promise((resolve) => { markDaemonStopping = resolve; });
 // A daemon whose listener failed to bind exits with this code (sysexits EX_UNAVAILABLE) after one
 // `OPENRIG_LISTEN_FAILED <errno> <host:port> <guidance>` line, so a supervisor can tell a failed bind, which needs a
 // look before another start, from a crash. It skips the shutdown: no shutdown receipt and no recorded stop.
@@ -137,6 +141,7 @@ export function createDaemonShutdown(options: {
   return (signal) => {
     if (started) return;
     started = true;
+    markDaemonStopping();
     let finished = false;
     let phase = "starting";
     const startedAt = new Date().toISOString();
