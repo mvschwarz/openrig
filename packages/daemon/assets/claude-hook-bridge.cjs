@@ -167,7 +167,7 @@ const ROUTES_REFRESH_MS = 5 * 60 * 1000;
 const RETRY_MAX_MS = 5 * 60 * 1000;
 /** As slice 13's waiter: its hook timeout (7200 s, the plugin's hooks file) less a margin, after which it exits 0. */
 const CONVERSATION_WAITER_MS = (7200 - 120) * 1000;
-/** A Codex watcher whose session's rollout hasn't changed for this long takes the session as gone. */
+/** Without a Codex pid to observe, stop an orphan watcher after this long without rollout growth. */
 const CODEX_IDLE_EXIT_MS = 6 * 3600 * 1000;
 /** A watcher that hasn't ticked for this long isn't live, whatever its recorded pid says. */
 const WATCHER_LIVE_MS = 3 * CONVERSATION_POLL_MS;
@@ -360,11 +360,22 @@ function forgetNoRig(state) {
   state.install.remove(NO_RIG);
 }
 
+/** The CLI lists newest first and has no cursor. Widen a full page until it includes the whole matching set: shown
+ *  pending tasks and newer inherited handoffs must not hide an older question or the original issued route. */
+function conversationRows(args, limit, rig) {
+  for (;;) {
+    const rows = rig(["queue", "list", ...args, "--limit", String(limit), "--json"]);
+    if (!Array.isArray(rows)) return null;
+    if (rows.length < limit) return rows;
+    limit *= 2;
+  }
+}
+
 /** The return-route addresses OpenRig issued under this conversation's key, each with the handed-over row that issued it;
  *  null when OpenRig couldn't be read. A row without the tag (an older daemon that ignored the filter) is never taken. */
 function conversationRoutes(key, rig) {
   const tag = conversationKeyTag(key);
-  const rows = rig(["queue", "list", "--tag", tag, "--all", "--limit", "100", "--json"]);
+  const rows = conversationRows(["--tag", tag, "--all"], 100, rig);
   if (!Array.isArray(rows)) return null;
   const routes = new Map();
   for (const row of rows) {
@@ -379,7 +390,7 @@ function conversationRoutes(key, rig) {
 
 /** The pending tasks at one route; null when OpenRig couldn't be read. */
 function pendingAt(route, rig) {
-  const rows = rig(["queue", "list", "--destination", route, "--state", "pending", "--limit", "50", "--json"]);
+  const rows = conversationRows(["--destination", route, "--state", "pending"], 50, rig);
   return Array.isArray(rows) ? rows.filter((row) => row && row.state === "pending" && row.destinationSession === route && typeof row.qitemId === "string") : null;
 }
 
@@ -470,7 +481,7 @@ function freshTasks(routes, state, rig) {
 function markShown(state, fresh) {
   const shown = new Set(state.read("shown.json", []));
   for (const task of fresh) shown.add(task.row.qitemId);
-  state.write("shown.json", [...shown].slice(-500));
+  state.write("shown.json", [...shown]);
 }
 
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -616,7 +627,7 @@ function codexQueuer(sessionId, state, { env = process.env, now = Date.now, run 
 }
 
 /** The Codex watcher. Returns 0 when its session ended, its Codex process exited, a newer watcher replaced it, or its
- *  rollout went idle. */
+ *  rollout went idle with no Codex process to observe. */
 async function codexWatch({ sessionId = "", transcriptPath = "", codexPid = 0, deps = {} } = {}) {
   const env = deps.env ?? process.env;
   if (inSeat(env) || !UUID_RE.test(sessionId)) return 0;
@@ -650,7 +661,7 @@ async function codexWatch({ sessionId = "", transcriptPath = "", codexPid = 0, d
     let current = null;
     try { current = transcriptPath ? statSize(transcriptPath) : null; } catch { current = null; }
     if (current !== size) { size = current; grewAt = now(); }
-    if (now() - grewAt > CODEX_IDLE_EXIT_MS) { state.log("stopped: the session's rollout went idle"); return 0; }
+    if (codexPid <= 0 && now() - grewAt > CODEX_IDLE_EXIT_MS) { state.log("stopped: the session's rollout went idle"); return 0; }
     const read = routes();
     const fresh = read && freshTasks(read, state, rig);
     if (!fresh) {

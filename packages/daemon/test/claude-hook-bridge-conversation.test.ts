@@ -575,3 +575,58 @@ describe("the conversation hooks, run as Claude Code runs them", () => {
     expect(existsSync(stateFile("turn.json"))).toBe(true);
   });
 });
+
+
+describe("conversation delivery beyond the first listing page", () => {
+  function pagedRig(goals: Array<Record<string, unknown>>, pending: Array<Record<string, unknown>>) {
+    const { rig: read } = fakeRig({ goals, pending });
+    return (args: string[]) => {
+      const rows = read(args);
+      return Array.isArray(rows) && args[1] === "list" ? rows.slice(0, Number(args[args.indexOf("--limit") + 1])) : rows;
+    };
+  }
+  it("brings in every pending task when the newest 50 don't include an older question", async () => {
+    const pending = Array.from({ length: 51 }, (_, n) => question({ qitemId: `qitem-backlog-${n}` }));
+    const s = sink();
+    expect(await bridge.conversationWaiter({ input, out: s.out, deps: {
+      env: env(), alive: () => true, key: KEY, rig: pagedRig([goal()], pending), ...clock()
+    } })).toBe(2);
+    expect(s.text()).toContain("qitem-backlog-50:");
+  });
+  it("still finds the original issued route behind 100 newer inherited handoffs", async () => {
+    const goals = Array.from({ length: 100 }, (_, n) => goal(KEY, { qitemId: `qitem-handoff-${n}`, returnRouteBasis: "inherited" }));
+    const s = sink();
+    expect(await bridge.conversationWaiter({ input, out: s.out, deps: {
+      env: env(), alive: () => true, key: KEY, rig: pagedRig([...goals, goal()], [question()]), ...clock()
+    } })).toBe(2);
+    expect(s.text()).toContain("qitem-q1:");
+  });
+  it("doesn't forget a shown task after more than 500 tasks in the same session", async () => {
+    const pending = Array.from({ length: 501 }, (_, n) => question({ qitemId: `qitem-many-${n}` }));
+    const { rig } = fakeRig({ goals: [goal()], pending });
+    expect(await bridge.conversationWaiter({ input, out: sink().out, deps: {
+      env: env(), alive: () => true, key: KEY, rig, ...clock()
+    } })).toBe(2);
+    const shown = JSON.parse(readFileSync(stateFile("shown.json"), "utf8"));
+    expect(shown).toContain("qitem-many-0");
+    expect(shown).toHaveLength(501);
+  });
+});
+
+
+describe("the lifetime of a live Codex conversation", () => {
+  it("still queues a question after six hours without transcript growth while Codex is alive", async () => {
+    let tick = 0;
+    const queued: string[] = [];
+    const { rig: read } = fakeRig({ goals: [goal(`codex:${SESSION}`)], pending: [question()] });
+    const rig = (args: string[]) => args[2] === "--destination" && tick === 0 ? [] : read(args);
+    expect(await bridge.codexWatch({ sessionId: SESSION, transcriptPath: "/rollout.jsonl", codexPid: 3131, deps: {
+      env: env(), rig, alive: () => queued.length === 0, statSize: () => 1,
+      now: () => 1_000_000 + tick * 7 * 3600 * 1000,
+      sleep: async () => { tick += 1; },
+      queue: (text: string) => { queued.push(text); return { ok: true }; }
+    } })).toBe(0);
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toContain("qitem-q1:");
+  });
+});
