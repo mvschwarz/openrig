@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type Database from "better-sqlite3";
-import { COMPACTION_RECORD_FILE, type CompactionDebtEnded, type PreparationFailure, type RestoreDeliveryFailure, type RestoreUptakeUnknown } from "./claude-compaction-enforcer.js";
+import { COMPACTION_RECORD_FILE, type ClaudeCompactionEnforcer, type CompactionDebtEnded, type PreparationFailure, type RestoreDeliveryFailure, type RestoreUptakeUnknown } from "./claude-compaction-enforcer.js";
 import type { EventBus } from "./event-bus.js";
 import type { QueueItem, QueueRepository } from "./queue-repository.js";
 import { defaultResolveOrchestrator } from "./queue-owner.js";
@@ -15,6 +15,17 @@ import { shellQuote } from "../adapters/shell-quote.js";
 /** Positive evidence that an agent can't act on a recovery notice now, or null when OpenRig holds none: unknown capacity,
  *  silence and ordinary activity are not inability. The daemon passes the compaction enforcer's `recoveryInability`. */
 export type RecoveryInability = (session: string) => string | null;
+
+/** Recipient selection can precede its first context poll after restart. Read the same retained record the state route
+ *  would read, from the actual seat's launch workspace/policy roots, before deciding that no inability is recorded. */
+export function recordedRecoveryInability(db: Database.Database,
+  enforcer: Pick<ClaudeCompactionEnforcer, "recoverSeat" | "recoveryInability">, session: string): string | null {
+  const physical = physicalSessionName(db, session);
+  const seat = db.prepare(`SELECT n.runtime, n.cwd FROM sessions s JOIN nodes n ON n.id = s.node_id
+    WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`).get(physical) as { runtime: string | null; cwd: string | null } | undefined;
+  if (seat) enforcer.recoverSeat({ sessionName: physical, ...seat });
+  return enforcer.recoveryInability(physical);
+}
 
 interface RecoveryRecipient {
   session: string;

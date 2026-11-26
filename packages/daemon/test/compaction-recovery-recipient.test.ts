@@ -15,9 +15,9 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
-import { moveNoticesFromUnableRecipient, newestCompleteMap, reportPreparationFailure, reportRestoreDeliveryFailure,
+import { recordedRecoveryInability, moveNoticesFromUnableRecipient, newestCompleteMap, reportPreparationFailure, reportRestoreDeliveryFailure,
   reportRestoreUptakeUnknown } from "../src/domain/compaction-restore-notice.js";
-import { COMPACTION_RECORD_FILE, type PreparationFailure, type RestoreDeliveryFailure } from "../src/domain/claude-compaction-enforcer.js";
+import { ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE, type PreparationFailure, type RestoreDeliveryFailure } from "../src/domain/claude-compaction-enforcer.js";
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
 
 const PERSON = "alice@external";
@@ -240,4 +240,46 @@ describe("what the preparation notice carries", () => {
       expect(row.body).not.toContain(dirs[0]!);
     } finally { db.close(); }
   });
+});
+
+
+it.each([
+  { root: "home", replaced: false }, { root: "workspace", replaced: false }, { root: "policy", replaced: false },
+  { root: "home", replaced: true }, { root: "workspace", replaced: true }, { root: "policy", replaced: true },
+])("reads the recipient's $root failure record before its first restart poll, replaced=$replaced", async ({ root, replaced }) => {
+  const { db, queue } = world();
+  const home = mkdtempSync(join(tmpdir(), "recipient-restart-")); dirs.push(home);
+  let clock = 10000, generation = "g1";
+  const cwd = root === "workspace" ? join(home, "workspace") : null;
+  if (cwd) { mkdirSync(cwd); db.prepare("UPDATE nodes SET cwd = ? WHERE logical_id = 'owner'").run(cwd); }
+  const input = { sessionName: "owner@rr", runtime: "claude-code", usedPercentage: 90, cwd };
+  const transport = { send: vi.fn(async () => { clock++; return { ok: false, sent: false, inputPhase: "not_reached", reason: "draft_input_busy" }; }),
+    waitUntilIdle: vi.fn(async () => ({ ok: true })) };
+  const policy = { enabled: true, thresholdPercent: 80, preCompactInstruction: "Write a map.", compactInstruction: "",
+    ...(root === "policy" ? { preparationRoot: join(home, "configured") } : {}) };
+  const make = (daemonInstance: string): ClaudeCompactionEnforcer => new ClaudeCompactionEnforcer(
+    { resolveClaudeCompactionPolicy: () => policy } as any, transport as any,
+    { openrigHome: home, now: () => clock, daemonInstance, resolveOccupantGeneration: () => generation, autoRetryAfterStopMs: 1,
+      onPreparationFailure: (failure) => reportPreparationFailure(db, queue, failure, s => recordedRecoveryInability(db, enforcer, s)) });
+  let enforcer = make("before");
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let ended = false;
+      for (let poll = 0; poll < 4; poll++) {
+        await enforcer.maybeAutoCompact(input);
+        if (enforcer.getPreparationState(input.sessionName)?.status === "stopped") { ended = true; clock += 2; break; }
+      }
+      expect(ended).toBe(true);
+    }
+    await enforcer.maybeAutoCompact(input);
+    expect(enforcer.recoveryInability(input.sessionName)).not.toBeNull();
+    expect(noticesAbout(queue, input.sessionName)).toHaveLength(1);
+    enforcer = make("after");
+    if (replaced) generation = "g2";
+    const sends = transport.send.mock.calls.length;
+    await reportRestoreDeliveryFailure(db, queue, restore("writer@rr"), { unable: s => recordedRecoveryInability(db, enforcer, s) });
+    const [row] = noticesAbout(queue, "writer@rr");
+    expect(row!.destinationSession).toBe(replaced ? "owner@rr" : PERSON);
+    expect(transport.send).toHaveBeenCalledTimes(sends);
+  } finally { db.close(); }
 });
