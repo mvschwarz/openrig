@@ -144,6 +144,30 @@ describe("a Herdr view's writable tile pins its seat before each attach", () => 
     expect(seat.hooks()).toEqual([]);
     expect(seat.size()).toBe("160x50");
   });
+
+  // A Herdr view of a team: several seats on one server, each watched by its own tile. A client format in the focus hook
+  // can name another tile's client, so each seat took the other tile's size; the hook reads its own client's size instead.
+  it("fits each of two seats on one server to its own focused tile, not the other tile", async () => {
+    const socket = server("two");
+    tmux(socket, ["new-session", "-d", "-s", "a@rig", "-x", "160", "-y", "50", "-e", "OPENRIG_NODE_ID=nodeA", "sleep 120"]);
+    tmux(socket, ["new-session", "-d", "-s", "b@rig", "-x", "140", "-y", "45", "-e", "OPENRIG_NODE_ID=nodeB", "sleep 120"]);
+    const size = (session: string) => () => tmux(socket, ["display-message", "-p", "-t", `=${session}:`, "#{window_width}x#{window_height}"]).trim();
+    const watch = (session: string, x: string, y: string) => {
+      const tile = server("tile");
+      const argv = pinnedTileAttachArgv("tmux", ["-L", socket], session);
+      tmux(tile, ["new-session", "-d", "-s", "tile", "-x", x, "-y", y, `env -u TMUX ${argv.map(shellQuote).join(" ")}`]);
+      return () => tmux(tile, ["send-keys", "-t", "tile", "-H", "1b", "5b", "49"]);
+    };
+    const focusA = watch("a@rig", "100", "30");
+    const focusB = watch("b@rig", "90", "25");
+    const sessions = () => tmux(socket, ["list-clients", "-F", "#{session_name}"]).trim().split("\n").sort().join(" ");
+    expect(await eventually(sessions, "a@rig b@rig")).toBe("a@rig b@rig");
+    focusA();
+    expect(await eventually(size("a@rig"), "100x30")).toBe("100x30");
+    focusB();
+    expect(await eventually(size("b@rig"), "90x25")).toBe("90x25");
+    expect(size("a@rig")()).toBe("100x30"); // its own tile still has focus
+  });
 });
 
 describe("which tiles pin their seat", () => {
