@@ -263,6 +263,39 @@ describe("words and conditions go to the receiving agent, which judges the exact
     expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
   });
 
+  it("keeps the longest answer window inclusive at its boundary and excludes expired history", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit({ holdSeconds: 86400 }));
+    const by = f.queueRepo.getById(askId)!.tags!.find(tag => tag.startsWith("permission-answer-by:"))!;
+    const deadline = Date.parse(by.slice("permission-answer-by:".length));
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline)).toBe(true);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline + 1)).toBe(false);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, Number.NaN)).toBe(false);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, Number.POSITIVE_INFINITY)).toBe(false);
+    // This is a valid old ask: both creation and its one-day answer window are in the past.
+    const old = new Date(deadline - 3 * 86400_000).toISOString();
+    f.db.prepare("UPDATE queue_items SET ts_created = ?, tags = ? WHERE qitem_id = ?")
+      .run(old, JSON.stringify(["runner-permission", "permission-native-hook:claude-code", "permission-answer-by:" + new Date(deadline - 2 * 86400_000).toISOString()]), askId);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline)).toBe(false);
+  });
+
+  it("keeps holding an ask passed on with handoff-and-complete until its colleague's row closes, here or on another host", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    const { created } = await f.queueRepo.handoffAndComplete({ qitemId: askId, fromSession: PERSON, toSession: "other@perm-rig", nudge: false });
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "done", closureReason: "handed_off_to" });
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    f.queueRepo.update({ qitemId: created.qitemId, actorSession: "other@perm-rig", state: "done", closureReason: "no-follow-on" });
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+    // The cross-host form closes the source done too, with no successor on this host: it holds until answer-by.
+    const remote = askIdOf(await f.submit({ requestId: "req-remote" }));
+    f.db.prepare("UPDATE queue_items SET state = 'done', closure_reason = 'handed_off_to', handed_off_to = ? WHERE qitem_id = ?")
+      .run("receiver@elsewhere", remote);
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    const by = f.queueRepo.getById(remote)!.tags!.find(tag => tag.startsWith("permission-answer-by:"))!;
+    expect(nativeAskHoldsPrompt(f.db, SEAT, Date.parse(by.slice("permission-answer-by:".length)) + 1)).toBe(false);
+  });
+
   it("releases the prompt-alert hold after a word answer is decided on its handoff", async () => {
     const f = fixture({ decider: DECIDER });
     const askId = askIdOf(await f.submit());
@@ -994,8 +1027,10 @@ describe("the reads on every tool batch and wake-ladder tick cover only the seat
     const [sql] = await preparedDuring(f, (text) => text.includes("state IN ('pending','in-progress','blocked','handed-off')"),
       () => expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true));
     expect(sql).toBeDefined();
-    const read = plan(f, sql!, SEAT);
-    expect(read).toContain(`SEARCH queue_items USING INDEX ${INDEX} (source_session=?)`);
+    // Bounded by the longest answer window: an ask created before it can't still be taking an answer, so a seat's older
+    // native history (handed-off asks stay handed-off) is never read on a tick.
+    const read = plan(f, sql!, SEAT, new Date(0).toISOString());
+    expect(read).toContain(`SEARCH queue_items USING INDEX ${INDEX} (source_session=? AND ts_created>?)`);
     expect(read).not.toMatch(/SCAN queue_items|TEMP B-TREE/);
   });
 });

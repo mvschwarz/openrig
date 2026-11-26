@@ -1153,9 +1153,13 @@ function nativeDecisionMessage(input: { decider: string; relay: boolean; denies:
 export function nativeAskHoldsPrompt(db: Database.Database, sessionName: string, now = Date.now()): boolean {
   try {
     // The seat's native asks only (the partial index), not every row it ever sent: the wake ladder asks this on its ticks.
-    // Stream the indexed asks: decided handoffs must not consume a row limit and hide an older open ask.
-    const rows = db.prepare(`SELECT qitem_id, state, tags FROM queue_items WHERE source_session = ? AND state IN ('pending','in-progress','blocked','handed-off')
-      AND ${NATIVE_ASK_ROWS} ORDER BY ts_created DESC`).iterate(sessionName) as Iterable<{ qitem_id: string; state: string; tags: string | null }>;
+    // Stream the indexed asks: decided handoffs must not consume a row limit and hide an older open ask. An ask's answer-by is
+    // at most MAX_HOLD_SECONDS after it was created, so older asks (handed-off ones stay handed-off) are never read.
+    if (!Number.isFinite(now)) return false;
+    const since = new Date(now - MAX_HOLD_SECONDS * 1000 - NATIVE_GRACE_MS).toISOString();
+    const rows = db.prepare(`SELECT qitem_id, state, tags FROM queue_items WHERE source_session = ? AND ts_created >= ?
+      AND (state IN ('pending','in-progress','blocked','handed-off') OR (state = 'done' AND closure_reason = 'handed_off_to'))
+      AND ${NATIVE_ASK_ROWS} ORDER BY ts_created DESC`).iterate(sessionName, since) as Iterable<{ qitem_id: string; state: string; tags: string | null }>;
     const handedOff: string[] = [];
     for (const { qitem_id, state, tags } of rows) {
       let parsed: unknown;
@@ -1163,7 +1167,8 @@ export function nativeAskHoldsPrompt(db: Database.Database, sessionName: string,
       const by = Array.isArray(parsed) ? parsed.find((tag): tag is string => typeof tag === "string" && tag.startsWith(ANSWER_BY_TAG)) : undefined;
       const until = Date.parse(by?.slice(ANSWER_BY_TAG.length) ?? "");
       if (!Array.isArray(parsed) || !parsed.includes(RUNNER_PERMISSION_TAG) || !Number.isFinite(until) || !(now <= until)) continue;
-      if (state !== "handed-off") return true;
+      // Handed on (handed-off, or done by handoff-and-complete): its chain decides, below.
+      if (state !== "handed-off" && state !== "done") return true;
       handedOff.push(qitem_id);
     }
     if (handedOff.length === 0) return false;
