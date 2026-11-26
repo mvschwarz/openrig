@@ -855,9 +855,18 @@ export class RestoreOrchestrator {
     if (!node || current?.sessionId !== standby.sessionId || current.identity !== standby.identity
       || !source?.resumeToken?.trim() || !source.resumeType || source.resumeType === "none" || source.restorePolicy !== "resume_if_possible") return refused;
     data.activeOccupantsByNode = { [node.id]: { kind: "resolved", sessionId: source.id } };
-    const launched = await this.restoreNodeWithCompensation({ node }, rigId, `standby:${source.id}`, data,
-      { ...opts, keepPane: true, standby, requireCurrentOccupant: true });
-    return { ok: true, launched: [launched], alreadyRunning: [], failedTargets: [], unmatchedIds: [], nonTargetEffects: { mode: "unchanged", reason: null, affected: [] } };
+    const snapshotId = `standby:${source.id}`;
+    const subsetWarnings: string[] = [];
+    const launched = [await this.restoreNodeWithCompensation({ node }, rigId, snapshotId, data,
+      { ...opts, keepPane: true, standby, requireCurrentOccupant: true }, subsetWarnings)];
+    // A standby resume answers through the same attempt record as any launch. Without it, an attention_required
+    // standing pane leaves no restore.subset_completed, so reconcileNodeRuntimeTruth reads no attempt (or an older one).
+    const harnessNotStarted = await this.completeSubset(rigId, {
+      snapshotId, preRestoreSnapshotId: null, rigResult: rollupRestoreRigResult(launched), nodes: launched, warnings: subsetWarnings,
+    }, "standby attempt");
+    return { ok: true, launched, alreadyRunning: [], failedTargets: [], unmatchedIds: [],
+      ...(subsetWarnings.length > 0 ? { warnings: subsetWarnings } : {}), ...(harnessNotStarted ? { harnessNotStarted } : {}),
+      nonTargetEffects: { mode: "unchanged", reason: null, affected: [] } };
   }
 
   private async launchNodeTargets(rigId: string, logicalIds: string[], opts: {
@@ -1064,17 +1073,10 @@ export class RestoreOrchestrator {
     // Emit restore.subset_completed for launched targets only
     let harnessNotStarted: HarnessNotStartedReport | undefined;
     if (launched.length > 0) {
-      const subsetResult: RestoreResult = {
-        snapshotId: snapshot.id,
-        preRestoreSnapshotId: null as unknown as string,
-        rigResult: rollupRestoreRigResult(launched),
-        nodes: launched,
-        // A copy: the notice below adds its warnings to the launch's result, not to the event already emitted.
-        warnings: [...subsetWarnings],
-        snapshotSelection,
-      };
-      const completed = this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: snapshot.id, result: subsetResult });
-      harnessNotStarted = await this.noticeBareShells(rigId, `launch attempt ${completed.seq}`, launched, subsetWarnings);
+      harnessNotStarted = await this.completeSubset(rigId, {
+        snapshotId: snapshot.id, preRestoreSnapshotId: null, rigResult: rollupRestoreRigResult(launched),
+        nodes: launched, warnings: subsetWarnings, snapshotSelection,
+      }, "launch attempt");
     }
 
     // Emit node.held for non-running held non-targets (tri-state: running/unknown/held)
@@ -1130,6 +1132,15 @@ export class RestoreOrchestrator {
         affected: held,
       },
     };
+  }
+
+  /** Emit a subset's completion and run the bare-shell notice: the one attempt record every launch path leaves, since
+   *  reconcileNodeRuntimeTruth finds an attempt only through restore.started or restore.subset_completed. */
+  private async completeSubset(rigId: string, result: RestoreResult, label: string): Promise<HarnessNotStartedReport | undefined> {
+    const completed = this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: result.snapshotId,
+      // A copy: the notice adds its warnings to the launch's result, not to the event already emitted.
+      result: { ...result, warnings: [...result.warnings] } });
+    return this.noticeBareShells(rigId, `${label} ${completed.seq}`, result.nodes, result.warnings);
   }
 
   /** Why a keep_alive relaunch of this seat must not happen now (#2940), read under its lifecycle lease: the latest session

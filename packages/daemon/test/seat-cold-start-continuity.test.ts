@@ -153,17 +153,42 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
     return (db.prepare("SELECT last_outcome FROM seat_cold_starts WHERE node_id = ?").get(implNodeId) as { last_outcome: string } | undefined)?.last_outcome;
   }
 
-  it.each(["create", "handoff", "park timer", "standalone reminder", "plain send", "stage-only import"] as const)("dispatches %s against a recorded standby seat", async trigger => {
+  function recordStandby() {
     const sessionId = implSessionId();
+    const identity = "$1|42|100|%1";
     sessionRegistry.updateResumeToken(sessionId, "pi_session_file", SESSION_FILE);
     sessionRegistry.markIntentionallyStopped(sessionId);
     sessionRegistry.updateBinding(implNodeId, { attachmentType: "tmux", tmuxSession: SEAT_SESSION, tmuxPane: "%1" });
     eventBus.emit({ type: "session.stopped", rigId, nodeId: implNodeId, sessionId, sessionName: SEAT_SESSION,
-      operator: "daemon:seat-reaper", reason: "idle_reap", standbyPane: "$1|42|100|%1" });
+      operator: "daemon:seat-reaper", reason: "idle_reap", standbyPane: identity });
+    return { nodeId: implNodeId, sessionId, session: SEAT_SESSION, pane: "%1", identity };
+  }
+
+  it("records the restore attempt when standby resume needs attention", async () => {
+    const standby = recordStandby();
+    const tmux = tmuxWithLivePeer();
+    tmux.getDefaultShell = async () => "/bin/sh";
+    tmux.standbyPaneIdentity = async () => standby.identity;
+    tmux.respawnPane = async () => ({ ok: true });
+    tmux.hasSession = async () => false;
+    const resume = vi.fn<PiResumeAdapter["resume"]>(async () => ({ ok: false, code: "attention_required", message: "Needs operator" }));
+    const restore = orchestratorWith({ canResume: () => true, resume } as PiResumeAdapter, tmux);
+
+    const result = await deliveryGuard.lifecycle([implNodeId], () => restore.launchSingleNode(rigId, "dev.impl", { standby }));
+
+    expect(result.launched).toEqual([expect.objectContaining({ nodeId: implNodeId, status: "attention_required" })]);
+    expect(eventBus.replayAll(0)).toContainEqual(expect.objectContaining({ type: "restore.subset_completed", rigId,
+      result: expect.objectContaining({ nodes: result.launched }) }));
+    // The attempt is found, not missing: reconcile reads this standby resume rather than no attempt at all.
+    expect((await restore.reconcileNodeRuntimeTruth(rigId, implNodeId)).code).not.toBe("no_attempt");
+  });
+
+  it.each(["create", "handoff", "park timer", "standalone reminder", "plain send", "stage-only import"] as const)("dispatches %s against a recorded standby seat", async trigger => {
+    const standby = recordStandby();
     const tmux = tmuxWithLivePeer();
     tmux.probeSession = async name => ({ state: name === SEAT_SESSION ? "present" : "absent" });
     tmux.getDefaultShell = async () => "/bin/sh";
-    tmux.standbyPaneIdentity = async () => "$1|42|100|%1";
+    tmux.standbyPaneIdentity = async () => standby.identity;
     tmux.respawnPane = vi.fn(async () => ({ ok: true as const }));
     const resume = vi.fn<PiResumeAdapter["resume"]>(async () => ({ ok: true }));
     const restore = orchestratorWith({ canResume: () => true, resume } as PiResumeAdapter, tmux);
