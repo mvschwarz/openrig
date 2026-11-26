@@ -4,7 +4,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isMap, isScalar, isSeq, parseDocument, type Document, type YAMLMap, type YAMLSeq } from "yaml";
+import { isMap, isScalar, isSeq, parseDocument, stringify, type Document, type YAMLMap, type YAMLSeq } from "yaml";
 import { resolveNodeFile } from "./node-file.js";
 import { parseFrontmatter } from "../slices/slice-indexer.js";
 import { readMissionReadiness } from "../proof/judgments.js";
@@ -151,15 +151,18 @@ export function writeMissionStatus(missionPath: string, status: string): Manifes
   const resolved = resolveNodeFile(missionPath);
   const nodePath = resolved ?? path.join(missionPath, "SPEC.md");
   const original = resolved ? fs.readFileSync(resolved, "utf-8") : "";
+  // Written as YAML writes it, so a `: ` or a leading `#` is quoted and the node file stays readable to its YAML readers
+  // (parseFrontmatter strips the quotes). Function replacements keep `$` patterns in the status and the frontmatter literal.
+  const line = `status: ${stringify(status, { lineWidth: 0 }).trimEnd()}`;
   let body = original;
   const fmMatch = body.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (fmMatch) {
     const fmInner = fmMatch[1] ?? "";
     const statusLineRegex = /^\s*status\s*:\s*[^\r\n]*$/m;
-    const newFm = statusLineRegex.test(fmInner) ? fmInner.replace(statusLineRegex, `status: ${status}`) : `${fmInner.trimEnd()}\nstatus: ${status}`;
-    body = body.replace(fmMatch[0], `---\n${newFm}\n---`);
+    const newFm = statusLineRegex.test(fmInner) ? fmInner.replace(statusLineRegex, () => line) : `${fmInner.trimEnd()}\n${line}`;
+    body = body.replace(fmMatch[0], () => `---\n${newFm}\n---`);
   } else {
-    body = `---\nstatus: ${status}\n---\n${body}`;
+    body = `---\n${line}\n---\n${body}`;
   }
   if (resolved && body === original) return "unchanged";
   writeAtomically(nodePath, body);

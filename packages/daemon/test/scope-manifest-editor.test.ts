@@ -192,4 +192,24 @@ describe("mission status", () => {
     expect(writeMissionStatus(missionPath, "active")).toBe("unchanged");
     expect(servedMissionStatus(missionPath)).toEqual({ status: "active", countsTowardReadiness: false });
   });
+
+  it("quotes a legacy status that YAML would misread, so the node file's YAML readers still parse it", () => {
+    const missionPath = path.join(dir, "legacy");
+    file("legacy/README.md", "---\nid: OPR.9\nstatus: planned\n---\n# Legacy\n");
+    expect(writeMissionStatus(missionPath, "blocked: waiting on 0.7.24")).toBe("written");
+    const text = fs.readFileSync(path.join(missionPath, "README.md"), "utf8");
+    expect(text).toBe("---\nid: OPR.9\nstatus: \"blocked: waiting on 0.7.24\"\n---\n# Legacy\n");
+    expect(YAML.parse(text.split("---\n")[1]!)).toEqual({ id: "OPR.9", status: "blocked: waiting on 0.7.24" });
+    expect(servedMissionStatus(missionPath).status).toBe("blocked: waiting on 0.7.24");
+    expect(writeMissionStatus(missionPath, "blocked: waiting on 0.7.24")).toBe("unchanged");
+  });
+
+  it("writes `$` patterns in a legacy status, and in the rest of the frontmatter, as they are", () => {
+    const missionPath = path.join(dir, "legacy");
+    file("legacy/README.md", "---\nid: OPR.9\nintent: saves $$ and $' each run\nstatus: planned\n---\n# Legacy\n");
+    expect(writeMissionStatus(missionPath, "cost $& more")).toBe("written");
+    expect(fs.readFileSync(path.join(missionPath, "README.md"), "utf8"))
+      .toBe("---\nid: OPR.9\nintent: saves $$ and $' each run\nstatus: cost $& more\n---\n# Legacy\n");
+    expect(writeMissionStatus(missionPath, "cost $& more")).toBe("unchanged");
+  });
 });
