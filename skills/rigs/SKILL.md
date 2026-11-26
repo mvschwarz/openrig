@@ -453,7 +453,10 @@ commands; if the two ever differ, this step is right.
   when you saw the prompt first: answer that ask, with
   `OPENRIG_SESSION_NAME=<address> rig seat decide-permission <ask> --option allow --relay --person-said '<their words>'`
   (or `--option deny`) for a plain yes or no, or the plugin's `rig_seat_decide_permission`, and as its text says for
-  words or a condition. A relay is recorded as relayed by you, and unconfirmed, since OpenRig doesn't get it from them.
+  words or a condition. Before you decide one under a standing instruction of theirs ("don't ask me about test runs"),
+  read what the command touches, such as the files a test writes, and check it against what they asked to be asked
+  about: if it's on that list, ask them. A relay is recorded as relayed by you, and unconfirmed, since OpenRig doesn't
+  get it from them.
   It takes their answer for as long as the prompt stays open. Don't type into the seat for it:
   that answers it in the terminal, ends the ask, and needs their exception for a terminal command. If the reply says it
   hasn't reached the prompt, the seat's hook stopped reading the ask: tell them, and answer that prompt in the seat like

@@ -126,8 +126,10 @@ task, without anyone asking you to check.
   with `rig_seat_decide_permission` (in a shell, `rig seat decide-permission`). A plain yes or no is the person's own
   answer: pass it on exactly, with `relay` and their words in `personSaid`. It's recorded as relayed by this chat, and
   unconfirmed, since OpenRig doesn't get it from them. For their words or a condition, judge
-  whether that exact action meets them, and give your `reason`. It takes their answer for as long as the prompt stays
-  open; once it's answered in the seat's terminal, an answer here is too late. Don't type into the seat for it
+  whether that exact action meets them, and give your `reason`. Before you decide one under a standing instruction
+  of theirs ("don't ask me about test runs"), read what the command touches, such as the files a test writes, and
+  check it against what they asked to be asked about: if it's on that list, ask them. It takes their answer for as
+  long as the prompt stays open; once it's answered in the seat's terminal, an answer here is too late. Don't type into the seat for it
   (`rig send --dangerously-interact`): that answers it in the terminal, ends the ask, and needs the person's exception
   for a terminal command. If the reply says it hasn't reached the seat's prompt, the seat's hook stopped reading the ask:
   tell the person, and that prompt waits in the seat's terminal like one with no ask. Only a prompt with no ask (a choice menu, a Codex seat's prompt, a seat on
