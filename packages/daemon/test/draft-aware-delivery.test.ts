@@ -9,7 +9,7 @@ import nativePaste from "./fixtures/claude-paste-footer.json";
 import { wrapPaneEnvelope } from "../src/lib/pane-envelope.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { COALESCED_INTO, DRAFT_HELD_PER_SENDER, OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { RigDeliveryDrainStore } from "../src/domain/rig-delivery-drain.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
@@ -2241,5 +2241,55 @@ describe("standby delivery controls becoming active between messages", () => {
     await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
     expect(f.outbox.getById(second.outboxIds![0]!)!.deliveryState).toBe("delivered");
     expect(f.submissions.filter(text => text.includes("second retained request"))).toHaveLength(1);
+  });
+});
+
+
+// The architecture round on #3991: one sender keeps at most DRAFT_HELD_PER_SENDER draft-held messages at a seat, past
+// which its oldest is coalesced into its newest (#2430's recorded supersession); a full quota says so; OpenRig's own
+// senders, the daemon included, are never draft-held.
+describe("draft-held messages bounded per sender", () => {
+  const rows = (f: ReturnType<typeof fixture>, sender: string) => f.db.prepare(
+    "SELECT outbox_id, body, delivery_state, retirement_reason, tags FROM outbox_entries WHERE sender_session = ? ORDER BY ts_dispatched, rowid",
+  ).all(sender) as Array<{ outbox_id: string; body: string; delivery_state: string; retirement_reason: string | null; tags: string | null }>;
+  const tagged = (row: { tags: string | null }) => (JSON.parse(row.tags ?? "[]") as string[]).includes("delivery:draft-eligible");
+
+  it("keeps one sender's newest messages, coalesces its older ones into the newest, and types only those once the draft clears", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const total = DRAFT_HELD_PER_SENDER + 2;
+    for (let i = 1; i <= total; i++) await f.transport.send("worker@test", `request ${i}`, { actorSession: "pm@test" });
+    await f.transport.send("worker@test", "another sender's request", { actorSession: "qa@test" });
+    const pm = rows(f, "pm@test");
+    // Each older one is coalesced into the message whose arrival took it past the bound, and that message names it.
+    expect(pm.slice(0, 2).map(r => [r.delivery_state, r.retirement_reason]))
+      .toEqual([["retired", `${COALESCED_INTO}${pm[DRAFT_HELD_PER_SENDER]!.outbox_id}`], ["retired", `${COALESCED_INTO}${pm[DRAFT_HELD_PER_SENDER + 1]!.outbox_id}`]]);
+    expect(f.outbox.coalescedInto(pm[DRAFT_HELD_PER_SENDER + 1]!.outbox_id)).toEqual([pm[1]!.outbox_id]);
+    expect(pm.slice(2).every(r => r.delivery_state === "retained" && tagged(r))).toBe(true);
+    expect(rows(f, "qa@test").map(r => [r.delivery_state, tagged(r)])).toEqual([["retained", true]]);
+    f.bodies.a = "";
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    const typed = f.submissions.flatMap(text => [...text.matchAll(/request (\d+)/g)].map(m => Number(m[1])));
+    expect(typed).toEqual(Array.from({ length: DRAFT_HELD_PER_SENDER }, (_, i) => i + 3));
+    expect(f.submissions.filter(text => text.includes("another sender's request"))).toHaveLength(1);
+  });
+
+  it("names the quota when a new message can't be held because the seat's held quota is full", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const target = f.guard.target("worker@test");
+    for (let i = 0; i < 100; i++) f.outbox.retain({ outboxId: `full-${i}`, senderSession: `other-${i}@test`, destinationSession: "worker@test", body: "held" }, target);
+    const result = await f.transport.send("worker@test", "one more request", { actorSession: "pm@test" });
+    expect(result).toMatchObject({ ok: false, sent: false, outcome: "failed" });
+    expect(result.warning).toContain("held-message quota is full (100 messages or 8 MB)");
+    expect(result.warning).toContain("rig seat held-messages worker@test");
+    expect(result.warning).not.toContain("bookkeeping is unavailable");
+    expect(f.submissions).toEqual([]);
+  });
+
+  it.each(["daemon@kernel", "system:health", "watchdog@system"])("never draft-holds a message from OpenRig's own sender %s", async (sender) => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const result = await f.transport.send("worker@test", "a notice", { actorSession: sender });
+    expect(result.outcome).toBe("retained");
+    expect(result.warning).not.toContain("typed once the input is clear");
+    expect(rows(f, sender).map(r => tagged(r))).toEqual([false]);
   });
 });

@@ -279,6 +279,12 @@ interface LadderView {
   senderNoticed: boolean;
 }
 
+/** Whether this row's wake ladder has given up since the row last changed meaningfully: the ladder's own reading of its
+ *  markers, for a caller outside the ladder that must leave a row to its ladder until then (the reachable-seat retry). */
+export function wakeLadderGaveUp(db: Database.Database, qitemId: string): boolean {
+  return readLadder(db, qitemId).exhausted;
+}
+
 function readLadder(db: Database.Database, qitemId: string, after = lastMeaningfulTransition(db, qitemId)?.id ?? 0): LadderView {
   const rows = db
     .prepare("SELECT ts, transition_note FROM queue_transitions WHERE qitem_id = ? AND transition_id > ? ORDER BY transition_id")

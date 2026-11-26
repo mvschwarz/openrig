@@ -1,5 +1,10 @@
 import type Database from "better-sqlite3";
-import { DRAFT_HELD_ELIGIBLE_TAG, DRAFT_HELD_REASONS, OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
+import { DRAFT_HELD_ELIGIBLE_TAG, DRAFT_HELD_REASONS, HELD_QUOTA_BYTES, HELD_QUOTA_COUNT, OutboxHandler, OutboxHandlerError, type OutboxEntry } from "./outbox-handler.js";
+import { isOpenRigSender } from "../lib/pane-envelope.js";
+
+/** OpenRig's own senders, which have their own schedules: the daemon and its subsystem actors (`isOpenRigSender`), and the
+ *  `…@system` machinery (a watchdog, the wake ladder), as the stuck sweep reads them. */
+const openRigOwnSender = (sender: string): boolean => isOpenRigSender(sender) || sender.endsWith("@system");
 import { DeliveryGuardError, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import type { SendOpts, SendResult } from "./session-transport.js";
 
@@ -60,6 +65,7 @@ export class DraftAwareDelivery {
       ? receipt.ids.map(id => this.outbox.getById(id)!)
       : [{ outboxId: receipt.ids[0]!, auditPointer: opts.auditPointer ?? null, destinationSession: session }];
     let recorded = false;
+    let quotaFull = false;
     try {
       this.db.transaction(() => {
         for (const id of receipt.ids) {
@@ -76,6 +82,7 @@ export class DraftAwareDelivery {
     } catch (error) {
       if (opts.expectedIdentity) throw error; // A conditional send cannot lose its durable constraint and still type.
       /* Legacy bookkeeping cannot veto input; report its absence with the actual result. */
+      quotaFull = error instanceof OutboxHandlerError && error.code === "retained_quota_full";
     }
     try {
       // A paste the guard left unsubmitted (#2429) is recognized here, to be submitted ahead of this delivery, unless the
@@ -108,15 +115,16 @@ export class DraftAwareDelivery {
       "transport_unavailable", "session_missing", "tmux_unavailable"].includes(result.reason ?? "");
     const noWrite = !result.ok && !inputWritten && preInputRefusal;
     // A plain message from an agent or a person, held only for a draft in the input, is typed once the input is clear. A
-    // queue wake has its own retry, and a system sender (a watchdog, a notice) its own schedule, so neither is.
-    // It keeps its own outcome only while the seat's held quota has room for it; at a full quota it takes its sender's
-    // place as any held message does (#2430), so one sender can't fill the quota.
+    // queue wake has its own retry, and OpenRig's own senders (the daemon, a watchdog, a notice) their own schedules, so
+    // neither is. It keeps its own outcome while the seat's held quota has room; at a full quota it takes its sender's
+    // place as any held message does (#2430). Past DRAFT_HELD_PER_SENDER from one sender, that sender's oldest is
+    // coalesced into its newest (supersedeDraftHeld), so one sender can't fill the quota.
     const draftHeld = noWrite && !opts.queueWake && DRAFT_HELD_REASONS.has(result.reason ?? "")
-      && !!opts.actorSession && !opts.actorSession.endsWith("@system")
+      && !!opts.actorSession && !openRigOwnSender(opts.actorSession)
       && !!target.nodeId && this.outbox.fitsWithoutCoalescing(target.nodeId, text);
     if (noWrite) result = { ...result, ok: true, sent: false, verified: false, outcome: "retained",
       warning: draftHeld
-        ? "Held, not delivered yet: the input shows a draft. It's typed once the input is clear, after any earlier held message; nothing else is replayed."
+        ? "Held, not delivered yet: the input shows a draft. It's typed once the input is clear while draft-aware delivery stays on, after any earlier held message; nothing else is replayed."
         : "Held, not delivered. Retry the current request when the input is free; no saved callback or message is replayed automatically." };
     else if (!inputWritten && result.sent === false && result.inputPhase !== "not_reached") {
       // A wait-path failure can follow a dispatched native write. Only a positive pre-input result proves no write.
@@ -133,9 +141,12 @@ export class DraftAwareDelivery {
         this.db.transaction(() => {
           for (const id of receipt.ids) {
             this.outbox.finalizeDelivery(id, state);
-            if (draftHeld) this.db.prepare(`UPDATE outbox_entries SET tags=json_insert(COALESCE(tags,'[]'),'$[#]',?)
-              WHERE outbox_id=? AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)`)
-              .run(DRAFT_HELD_ELIGIBLE_TAG, id, DRAFT_HELD_ELIGIBLE_TAG);
+            if (draftHeld) {
+              this.db.prepare(`UPDATE outbox_entries SET tags=json_insert(COALESCE(tags,'[]'),'$[#]',?)
+                WHERE outbox_id=? AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)`)
+                .run(DRAFT_HELD_ELIGIBLE_TAG, id, DRAFT_HELD_ELIGIBLE_TAG);
+              this.outbox.supersedeDraftHeld(id);
+            }
             this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?").run(JSON.stringify({ ...receipt, result }), id);
           }
           // Settled as held: only now does it take its sender's place (#2430); a delivered attempt never absorbs held ones.
@@ -144,7 +155,9 @@ export class DraftAwareDelivery {
       } catch { recorded = false; }
     }
     if (!recorded) {
-      const warning = "Delivery bookkeeping is unavailable; this result describes the input attempt, not a saved receipt. Repeating the request may duplicate input.";
+      const warning = quotaFull
+        ? `This seat's held-message quota is full (${HELD_QUOTA_COUNT} messages or ${HELD_QUOTA_BYTES / (1024 * 1024)} MB), so this message wasn't saved${noWrite ? " or delivered" : ""}. Read or retire what's held (rig seat held-messages ${session}), then retry.`
+        : "Delivery bookkeeping is unavailable; this result describes the input attempt, not a saved receipt. Repeating the request may duplicate input.";
       // The input was protected, but failed bookkeeping cannot claim durable custody of its message.
       if (noWrite) result = { ...result, ok: false, outcome: "failed" };
       return { ...result, warning: [result.warning, warning].filter(Boolean).join(" ") };

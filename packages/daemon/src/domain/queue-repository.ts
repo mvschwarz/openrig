@@ -1,6 +1,6 @@
 import { RigDeliveryDrainStore } from "./rig-delivery-drain.js";
-import { PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap } from "./queue-wake-ladder.js";
-import { LADDER_ATTEMPT_PREFIX, LADDER_EXHAUSTED_PREFIX, LADDER_RUNG_PREFIX } from "./queue-stuck-sweep.js";
+import { PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap, wakeLadderGaveUp } from "./queue-wake-ladder.js";
+import { LADDER_ATTEMPT_PREFIX } from "./queue-stuck-sweep.js";
 import { withUrgentLine } from "./urgent-line.js";
 import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js";
 import type Database from "better-sqlite3";
@@ -2379,23 +2379,11 @@ export class QueueRepository {
    *  {@link retryUnroutableWakesOnReachable}: unclaimed, not a person's notice, not a local human decision with no
    *  gateway, not held or released for quiet hours, and its seat now pane-bound. A handoff's retry ladder is the
    *  caller's to check: the sweep defers to a live ladder, and the reachable-seat retry leaves a handed-off row to its
-   *  ladder until that ladder has given up ({@link wakeLadderExhausted}). */
+   *  ladder until that ladder has given up (the ladder's own reading, `wakeLadderGaveUp`). */
   unroutableWakeRetryable(row: QueueItem, now: Date = new Date()): boolean {
     return recordsNoWakeRoute(row.lastNudgeResult) && this.reachableWakeRetryable(row, now);
   }
 
-  /** A handed-off row whose wake ladder has given up: its latest ladder marker is `ladder-exhausted:`. Nothing else
-   *  re-wakes it, so a seat that returns (a standby seat started for this work) gets its wake from the reachable-seat
-   *  retry. A ladder still retrying reaches the returned seat itself. */
-  private wakeLadderExhausted(qitemId: string): boolean {
-    const notes = this.db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ? AND transition_note IS NOT NULL ORDER BY transition_id DESC")
-      .all(qitemId) as Array<{ transition_note: string }>;
-    for (const { transition_note: note } of notes) {
-      if (note.startsWith(LADDER_EXHAUSTED_PREFIX)) return true;
-      if (note.startsWith(LADDER_ATTEMPT_PREFIX) || note.startsWith(LADDER_RUNG_PREFIX)) return false;
-    }
-    return false;
-  }
 
   private reachableWakeRetryable(row: QueueItem, now: Date): boolean {
     return !row.claimedAt
@@ -2438,7 +2426,7 @@ export class QueueRepository {
       if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return false;
       const current = this.getById(entry.auditPointer);
       return current?.state === "pending" && addresses.includes(current.destinationSession)
-        && (!current.handedOffFrom || this.wakeLadderExhausted(current.qitemId))
+        && (!current.handedOffFrom || wakeLadderGaveUp(this.db, current.qitemId))
         && this.reachableWakeRetryable(current, now)
         && (this.unroutableWakeRetryable(current, now) || entry.tags?.includes(WAKE_PRE_INPUT_FAILURE_TAG) === true);
     };
@@ -2446,7 +2434,7 @@ export class QueueRepository {
       const row = this.getById(qitem_id);
       if (!row || row.state !== "pending" || !this.reachableWakeRetryable(row, now)) continue;
       // A handed-off row is its ladder's until the ladder has given up.
-      if (row.handedOffFrom && !this.wakeLadderExhausted(row.qitemId)) continue;
+      if (row.handedOffFrom && !wakeLadderGaveUp(this.db, row.qitemId)) continue;
       // The failed wake may be the row's own intent or an un-park's blocker intent: re-send whichever failed.
       // One in flight or delivered is never sent again; only a row with no intent at all takes the plain nudge.
       const intents = this.outbox ? this.db.prepare(`SELECT outbox_id, delivery_state FROM outbox_entries

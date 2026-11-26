@@ -24,15 +24,20 @@ export const COALESCE_ACTOR = "outbox@system";
 /** The retirement reason of a held message coalesced into a newer one from the same sender; the id follows. */
 export const COALESCED_INTO = "coalesced into ";
 /** A plain message from an agent or a person, held only because the seat's input showed a draft (draft-aware guard). It is
- *  typed once the input reads empty (QueueRepository.deliverDraftHeldMessagesOnIdle), keeps its own outcome, and is never
- *  coalesced into a later message or a later message into it. Written only when the message is first held under this
- *  behaviour, so messages held before it, hold-mode messages and other held reasons stay as they were. */
+ *  typed once the input reads empty (QueueRepository.deliverDraftHeldMessagesOnIdle) and keeps its own outcome, up to
+ *  DRAFT_HELD_PER_SENDER from one sender at a seat. Written only when the message is first held under this behaviour, so
+ *  messages held before it, hold-mode messages and other held reasons stay as they were. */
 export const DRAFT_HELD_ELIGIBLE_TAG = "delivery:draft-eligible";
 /** The draft-aware refusals that mean only "a draft is in the input". */
 export const DRAFT_HELD_REASONS: ReadonlySet<string> = new Set(["draft_input_busy", "draft_input_unknown", "draft_input_changed"]);
+/** How many draft-held messages one sender keeps at a seat, each with its own outcome. Past it, the sender's oldest is
+ *  coalesced into its newest, as #2430 does for held messages (recorded, readable by ID). Five covers a realistic burst
+ *  while a person types (a request, a correction, a follow-up or two), bounds what a clearing draft types from one sender,
+ *  and keeps one sender to a small share of the seat's quota (five here, plus one ordinary held message). */
+export const DRAFT_HELD_PER_SENDER = 5;
 /** A seat's active held-message quota (provisional bounded defaults). */
-const HELD_QUOTA_COUNT = 100;
-const HELD_QUOTA_BYTES = 8 * 1024 * 1024;
+export const HELD_QUOTA_COUNT = 100;
+export const HELD_QUOTA_BYTES = 8 * 1024 * 1024;
 /** Senders whose held messages coalesce: not an unattributed sender, and not a watchdog (one reminder per job instead). */
 const coalescibleSender = (sender: string | null | undefined): sender is string => !!sender && sender !== "unknown" && sender !== WATCHDOG_SENDER;
 
@@ -608,6 +613,27 @@ export class OutboxHandler {
     const older = group.includes(newestId)
       ? held.filter(id => !group.includes(id))
       : held.filter(id => id !== newestId && group.includes(id));
+    this.retireInto(senderSession, nodeId, newestId, older);
+  }
+
+  /** A sender's draft-held messages at a seat past DRAFT_HELD_PER_SENDER: the oldest are retired into the newest, by the
+   *  same recorded coalescing (#2430), so a clearing draft types at most that many from one sender. */
+  supersedeDraftHeld(outboxId: string): void {
+    const entry = this.getById(outboxId);
+    if (entry?.deliveryState !== "retained" || !entry.guardBinding || !coalescibleSender(entry.senderSession)) return;
+    const nodeId = entry.guardBinding.nodeId;
+    const held = (this.db.prepare(`SELECT outbox_id FROM outbox_entries
+      WHERE delivery_state='retained' AND sender_session=? AND json_extract(guard_binding,'$.nodeId')=?
+        AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)
+      ORDER BY ts_dispatched,rowid`)
+      .all(entry.senderSession, nodeId, DRAFT_HELD_ELIGIBLE_TAG) as Array<{ outbox_id: string }>).map(row => row.outbox_id);
+    if (held.length <= DRAFT_HELD_PER_SENDER) return;
+    this.retireInto(entry.senderSession, nodeId, held[held.length - 1]!, held.slice(0, held.length - DRAFT_HELD_PER_SENDER));
+  }
+
+  /** Retire `older` into `newestId` (#2430's recorded coalescing): the ones already coalesced into them are repointed, so
+   *  the newest names every message it stands for, and an urgent marking carries forward. */
+  private retireInto(senderSession: string, nodeId: string, newestId: string, older: readonly string[]): void {
     if (older.length === 0) return;
     const now = new Date().toISOString();
     const reason = `${COALESCED_INTO}${newestId}`;
