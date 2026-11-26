@@ -20,7 +20,7 @@ export function seatEvidenceReader(db: Database.Database,
     try {
       nodeId = (db.prepare("SELECT node_id FROM sessions WHERE session_name = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
         .get(physicalSessionName(db, session)) as { node_id: string } | undefined)?.node_id;
-    } catch { return null; }
+    } catch { return { heldMessages: null, context: null }; } // unread is not evidence of a non-seat
     if (!nodeId) return null;
     let heldMessages: number | null = null;
     try { heldMessages = new OutboxHandler(db).heldCount(nodeId); } catch { /* unread: reported as unknown */ }
