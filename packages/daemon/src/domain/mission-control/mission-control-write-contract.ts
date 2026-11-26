@@ -779,6 +779,8 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId });
     }
     const replyId = returned.qitemId;
+    // An ask whose source's rig isn't known here keeps the answer on itself (createHumanAnswer): say where it went.
+    const kept = replyId === input.qitemId && this.queueRepo.answerNotReturned(input.qitemId) !== null;
     input.appSubmission?.verify();
     // Two people answering at once: one answer returns, and the other is told whose it was.
     if (replyId !== input.qitemId && returned.sourceSession !== input.actorSession) this.answeredByAnother(input, returned, primaryUser);
@@ -799,7 +801,8 @@ export class MissionControlWriteContract {
       input,
       before,
       decision,
-      { outcome: "answered", unanswered: [] },
+      { outcome: "answered", unanswered: [],
+        ...(kept ? { message: `Your answer is kept on ${input.qitemId}. It couldn't go back to ${ask.sourceSession}: this OpenRig doesn't know that seat's rig, and the ask's history says so.` } : {}) },
       replyId,
       {
         primaryUser,
@@ -809,6 +812,7 @@ export class MissionControlWriteContract {
             "answer_not_closed",
             runnerPermissionOrigin(ask)
               ? `Your answer is kept on ${input.qitemId}, but it couldn't be passed to its receiving agent just now, and nothing ran. Answer again, or decide directly: rig seat decide-permission ${input.qitemId} --option <id>.`
+              : kept ? `Your answer is kept on ${input.qitemId}, but it didn't close: it changed meanwhile.`
               : `The answer went back to ${ask.sourceSession} as ${replyId}, but qitem ${input.qitemId} didn't close: it changed meanwhile.`,
             { qitemId: input.qitemId, replyQitemId: replyId },
           ),

@@ -246,6 +246,8 @@ const FALLBACK_ACTOR = "system:queue-fallback";
 
 /** The actor a terminal act is recorded as when it names no responder: explicitly unattributed, never a person. */
 export const UNATTRIBUTED_ACTOR = "human@host";
+/** Recorded on an ask whose answer is kept on it because its source's rig isn't known here (createHumanAnswer). */
+export const ANSWER_NOT_RETURNED_PREFIX = "human-answer not returned:";
 
 /**
  * #165: a claim is the destination acting on the row, which is stronger evidence than
@@ -2703,7 +2705,27 @@ export class QueueRepository {
     // One reply per ask: another person's answer already returned is the answer, so it comes back, and the caller says so.
     const answered = this.getById(qitemId);
     if (answered) return answered;
-    return this.create({ ...create, qitemId, tags: [...new Set([...(input.tags ?? []), "human-answer"])] }, verifyBeforeCreate);
+    try {
+      return await this.create({ ...create, qitemId, tags: [...new Set([...(input.tags ?? []), "human-answer"])] }, verifyBeforeCreate);
+    } catch (error) {
+      // `rig queue create --source` takes any source, so an ask can name a rig this daemon doesn't know, with no queue
+      // here for the answer to go back to. The person's answer still counts: it's kept on the ask, as a runner's or a
+      // pairing ask's is, and the ask's history says once why it didn't go back.
+      if (!ask || !(error instanceof QueueRepositoryError) || error.code !== "unknown_destination_rig") throw error;
+      const note = `${ANSWER_NOT_RETURNED_PREFIX} ${create.destinationSession} references an unknown rig, so the answer is kept on ${ask.qitemId}`;
+      this.db.transaction(() => {
+        verifyBeforeCreate?.();
+        if (!this.answerNotReturned(ask.qitemId)) {
+          this.transitionLog.append({ qitemId: ask.qitemId, state: this.getById(ask.qitemId)?.state ?? ask.state, actorSession: "daemon@system", transitionNote: note });
+        }
+      })();
+      return ask;
+    }
+  }
+
+  /** Why an ask's answer was kept on it instead of going back to its source (createHumanAnswer), or null. */
+  answerNotReturned(qitemId: string): string | null {
+    return this.transitionLog.listForQitem(qitemId).find((t) => t.transitionNote?.startsWith(ANSWER_NOT_RETURNED_PREFIX))?.transitionNote ?? null;
   }
 
   /** Every answer this person returned to the ask (one per park), oldest first: after close, a replay finds the one its
@@ -5302,11 +5324,14 @@ export class QueueRepository {
       : `reply from ${actor}, a registered person, on ${asked}'s ask; not answered by ${asked}`;
     const placed = this.placeTypedReply(item, decision);
     if (placed) transitionNote += `; ${placed}`;
+    // An answer kept on the ask (its source's rig isn't known here) has no reply row to carry it, so the ask keeps it.
+    const kept = this.answerNotReturned(item.qitemId) !== null;
     return this.updateInTransactionalContext({
       qitemId: item.qitemId,
       actorSession: actor,
       state: "done",
       closureReason: "no-follow-on",
+      ...(kept ? { resolution: decision } : {}),
       transitionNote,
       ownerNotificationKind: "human-decision-resolved",
       identityProvenance: identity.provenance,
