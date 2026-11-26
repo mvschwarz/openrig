@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { z } from "zod";
 import type { NodeInventoryEntry } from "./types.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
+import { isPoolAgent } from "./seat-standby.js";
 
 export type ReaperActivity = Pick<NonNullable<ReturnType<SeatActivityService["getSeatStateBySession"]>>,
   "activity" | "needsInput" | "backgroundWork" | "seq">;
@@ -24,6 +25,7 @@ export function reapEligibility(db: Database.Database, seat: NodeInventoryEntry,
   const eligible = activity?.activity === "idle-at-prompt" && activity.needsInput.count === 0 && !activity.backgroundWork
     && inbox === 0 && seat.runtime !== "terminal" && seat.nodeKind === "agent"
     && seat.restoreOutcome !== "awaiting-decision" && seat.startupStatus === "ready" && seat.lifecycleState === "running"
-    && session?.origin === "launched" && session.status === "running" && !!generation && !!seat.canonicalSessionName;
+    && session?.origin === "launched" && session.status === "running" && !!generation && !!seat.canonicalSessionName
+    && !isPoolAgent(db, seat.nodeId);
   return { eligible, snapshot, session, generation: generation?.generation_uuid ?? null, activitySeq: activity?.seq ?? 0 };
 }

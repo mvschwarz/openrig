@@ -1222,6 +1222,7 @@ export class QueueRepository {
   private outbox: OutboxHandler | undefined;
   /** #2829 slice 1 — cold-start notifier, late-wired by startup after the restore orchestrator exists. */
   private wakeWithoutReceiverNotifier: ((destinationSession: string, drainPass?: object) => void) | undefined;
+  private standbyWake?: (destination: string, owed: () => boolean) => Promise<void> | undefined;
   // A first clear may recover durable refusals observed before startup. Later clears need
   // a new positive refusal/attention episode, so a returning prompt cannot spin retries.
   private readonly promptRecoveryState = new Map<string, boolean>();
@@ -1581,6 +1582,10 @@ export class QueueRepository {
    * the drain's skip branch and the unroutable send classification both land here. */
   attachWakeWithoutReceiverNotifier(notifier: (destinationSession: string, drainPass?: object) => void): void {
     this.wakeWithoutReceiverNotifier = notifier;
+  }
+
+  attachStandbyWake(wake: NonNullable<QueueRepository["standbyWake"]>): void {
+    this.standbyWake = wake;
   }
 
   /** The one transition-write classifier. It consumes structured state/action facts only. */
@@ -2143,6 +2148,11 @@ export class QueueRepository {
     const eligible = (entry: OutboxEntry): boolean => {
       if (opts?.stopRequested?.() || opts?.eligible && !opts.eligible(entry)) return false;
       if (entry.deliveryState === "pending" || !this.wakeHasNoReceiver(entry.destinationSession, coldStartPass)) return true;
+      const qitemId = entry.auditPointer;
+      if (qitemId) this.standbyWake?.(entry.destinationSession, () => {
+        const row = this.getById(qitemId);
+        return !opts?.stopRequested?.() && row?.state === "pending" && row.destinationSession === entry.destinationSession;
+      });
       skipped.set(entry.outboxId, entry.destinationSession);
       return false;
     };
@@ -2503,6 +2513,15 @@ export class QueueRepository {
     /** An explicit notification, which passes a rig's delivery drain (here, and if a hook bridge queues it). */
     explicit = false,
   ): Promise<WakeAttemptOutcome> {
+    const owed = () => {
+      const row = this.getById(qitemId);
+      return !!row && isBlockerLive(row.state) && row.destinationSession === destinationSession;
+    };
+    const starting = this.standbyWake?.(destinationSession, owed);
+    if (starting) {
+      await starting;
+      if (!owed()) return { classified: "failed", nudgeResult: "failed:queue-work-no-longer-owed" };
+    }
     // DEFECT FIX (S1-class, 3 live specimens): a virtual
     // @external destination has NO pane — the queue row ITSELF is the gateway
     // subsystem's input (the Slack connector polls human-destined rows and its own

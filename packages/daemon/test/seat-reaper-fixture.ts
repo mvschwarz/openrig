@@ -17,8 +17,8 @@ export function fixture() {
   db.exec(`INSERT INTO rigs(id,name) VALUES ('r','test');
     INSERT INTO nodes(id,rig_id,logical_id,runtime,cwd) VALUES ('a','r','worker','pi','/fixture');
     INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES ('b','a','worker@test','%1');
-    INSERT INTO sessions(id,node_id,session_name,status,origin,startup_status,resume_token)
-      VALUES ('s','a','worker@test','running','launched','ready','/fixture/session.jsonl');
+    INSERT INTO sessions(id,node_id,session_name,status,origin,startup_status,resume_token,resume_type)
+      VALUES ('s','a','worker@test','running','launched','ready','/fixture/session.jsonl','pi_session_file');
     INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('g','a',1,'g1','fresh');`);
   let at = 0;
   const settings: SeatReaperSettings = { enabled: true, observe: false, idleThresholdMinutes: 60,

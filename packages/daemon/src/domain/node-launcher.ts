@@ -60,6 +60,7 @@ interface LaunchOpts {
   /** Launch into this pane of the seat's existing session (named by `sessionName`) instead of a new session: its process
    *  is ended in place and a shell started there, so the pane and its scrollback stay. */
   keepPane?: string;
+  standby?: import("./seat-standby.js").StandbyStop;
   /** `sessionName` is the name this seat was bound to (restore keeps it). It is launched under that name even outside
    *  OpenRig's naming pattern, as an adopted seat's own tmux session name is, when boundSessionNameProblem finds none. */
   keepsBoundSessionName?: boolean;
@@ -266,7 +267,7 @@ export class NodeLauncher {
       return { ok: false, code: "selection_changed", message: "The selected node or history changed before launch." };
     }
     const tmuxResult = opts?.keepPane
-      ? await this.takeOverPane(sessionName, opts.keepPane, sessionCwd, openRigEnv, node.id)
+      ? await this.takeOverPane(sessionName, opts.keepPane, sessionCwd, openRigEnv, node.id, opts.standby)
       // #3253: the launch mode is passed only when there is one, so a launch without it calls createSession as before.
       : opts?.processLimitsMode
         ? await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv, { processLimitsMode: opts.processLimitsMode })
@@ -421,7 +422,8 @@ export class NodeLauncher {
   /** A kept pane's takeover, as a handover's cutover does it: its process ends in place (the pane survives it, with its
    *  scrollback), then a shell starts in it with this launch's environment, for the runtime to launch into. Nothing is
    *  touched when the pane isn't in the session. */
-  private async takeOverPane(sessionName: string, pane: string, cwd: string | undefined, env: Record<string, string>, nodeId: string):
+  private async takeOverPane(sessionName: string, pane: string, cwd: string | undefined, env: Record<string, string>, nodeId: string,
+    standby?: import("./seat-standby.js").StandbyStop):
     Promise<{ ok: true; warnings?: string[]; processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
       | { ok: false; code: string; message: string; retryable?: boolean; processLimits?: import("../adapters/tmux.js").SeatProcessLimitsProblem }> {
     let panes: Array<{ id: string }> = [];
@@ -435,8 +437,15 @@ export class NodeLauncher {
     await this.tmuxAdapter.seatProcessLimitsRecoveryPlan?.(nodeId);
     // The guard resolves the selected seat before writing to its immutable pane id.
     const inputTarget = this.tmuxAdapter.deliveryGuard ? nodeId : pane;
-    const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget);
-    if (!ended.ok) return { ok: false, code: "pane_process_not_ended", message: ended.message };
+    if (standby) {
+      if (standby.nodeId !== nodeId || standby.session !== sessionName || standby.pane !== pane
+        || await this.tmuxAdapter.standbyPaneIdentity(standby, true) !== standby.identity) {
+        return { ok: false, code: "pane_not_found", message: "The recorded standby pane is not the same dead pane; nothing was started." };
+      }
+    } else {
+      const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget);
+      if (!ended.ok) return { ok: false, code: "pane_process_not_ended", message: ended.message };
+    }
     const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
     const respawned = await this.tmuxAdapter.respawnPane(inputTarget, shell, { ...(cwd ? { cwd } : {}), env, processLimitsMode: "recovery" });
     if (!respawned.ok) {

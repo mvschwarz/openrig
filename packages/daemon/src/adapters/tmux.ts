@@ -2632,6 +2632,23 @@ export class TmuxAdapter {
       + `\`${tmuxOnDaemonServer()} kill-session -t ${shellQuote(`=${name}`)}\` and run the command again.` };
   }
 
+  /** A standby witness names the same pane on the same server, not merely a reusable pane id. */
+  async standbyPaneIdentity(target: { session: string; pane: string; nodeId: string }, dead: boolean): Promise<string | null> {
+    const { session, pane, nodeId } = target;
+    try {
+      const out = (await this.run(["tmux", "display-message", "-p", "-t", exactTarget(pane, "pane"),
+        "#{session_id}|#{pid}|#{start_time}|#{pane_id}|#{pane_dead}|#{session_name}|#{session_windows}|#{window_panes}"])).trim();
+      const [id, pid, start, foundPane, ended, name, windows, panes] = out.split("|");
+      if (!id || !/^\$\d+$/.test(id) || !pid || !/^\d+$/.test(pid) || !start || !/^\d+$/.test(start)
+        || foundPane !== pane || ended !== (dead ? "1" : "0") || name !== session || windows !== "1" || panes !== "1"
+        || await this.unprovenSeatSession(session, id, nodeId)) return null;
+      return `${id}|${pid}|${start}|${pane}`;
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      return null;
+    }
+  }
+
   /** Keep effect checks outside command catches so a selection refusal retains its code and phase. */
   private async killSessionUnchecked(name: string, beforeEffect?: () => void | Promise<void>, phase?: (value: StopPhase) => void,
     server?: { pid: string; start: string }): Promise<TmuxResult> {

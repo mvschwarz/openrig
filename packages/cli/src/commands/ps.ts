@@ -69,6 +69,7 @@ export interface NodeEntry {
   remoteControl?: { sessionId: string | null; observedAt: string } | null;
   sessionStatus: string | null;
   intentionallyStopped?: boolean;
+  standbyStopped?: true;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: string;
   /** The conversation outcome restore or handover recorded for the current occupant: `resumed` when a restore's resume
@@ -239,6 +240,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "remoteControl",
   "sessionStatus",
   "intentionallyStopped",
+  "standbyStopped",
   "startupStatus",
   "restoreOutcome",
   "oriented",
@@ -817,7 +819,8 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // else null (documented FR-4 fallback — not a fabricated timestamp).
       lastActivity: n.agentActivity?.sampledAt ?? n.startupCompletedAt ?? null,
     };
-    if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
+  if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
+  if (n.standbyStopped) compact.standbyStopped = true;
     // #3513: only a served observation; its time says when it was last seen.
     if (n.remoteControl) compact.remoteControl = { sessionId: n.remoteControl.sessionId, observedAt: n.remoteControl.observedAt };
     // The served identity evidence (verdict, reason, observation time) and the registry's recorded
@@ -1047,7 +1050,7 @@ activeCount, hasWorkCount, attentionCount, status, lifecycleState, uptime,
 latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
 podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, configuredAccount, communityHarness, launchWrapper, model, sessionStatus,
-intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
+intentionallyStopped, standbyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, resumeCommandLabel, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
 agentActivity, activityState, needsAttention, arbitratedNeedsInput, needsInputEvidence,

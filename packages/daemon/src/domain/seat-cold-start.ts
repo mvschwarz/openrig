@@ -36,6 +36,7 @@ import type Database from "better-sqlite3";
 import { parseSessionName } from "./session-name.js";
 import type { RigSpec } from "./types.js";
 import type { SeatDeliveryGuard } from "./seat-delivery-guard.js";
+import { isPoolAgent, readStandbyStop, type StandbyStop } from "./seat-standby.js";
 
 /** Minimum time between cold-start attempts for one seat. */
 export const COLD_START_MIN_INTERVAL_MS = 60_000;
@@ -168,7 +169,7 @@ export interface SeatColdStartDeps {
   db: Database.Database;
   deliveryGuard: Pick<SeatDeliveryGuard, "lifecycle">;
   /** The existing single-seat launch door (`rig launch`): resumes or fresh-primes per restore policy. */
-  launchSingleNode: (rigId: string, logicalId: string) => Promise<ColdStartLaunchResult>;
+  launchSingleNode: (rigId: string, logicalId: string, standby?: StandbyStop) => Promise<ColdStartLaunchResult>;
   /** Three-state tmux probe; the same adapter the queue's transport uses. Cold start may
    * proceed only on positive absence — present and transport_unavailable both refuse. */
   probeSession: (sessionName: string) => Promise<import("../adapters/tmux.js").SessionProbe>;
@@ -208,6 +209,46 @@ export class SeatColdStarter {
       if (started) started.catch(() => { /* attempt() records its own failures */ });
     } catch (err) {
       this.log(`notify failed for ${destinationSession}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  wakeStandby(destinationSession: string, workStillOwed: () => boolean): Promise<void> | undefined {
+    const parsed = parseSessionName(destinationSession);
+    if (parsed.kind !== "canonical" || !workStillOwed()) return undefined;
+    const seat = this.resolveSeat(parsed.member, parsed.rig, destinationSession);
+    if (!seat) return undefined;
+    const existing = this.inFlight.get(seat.nodeId);
+    const standby = readStandbyStop(this.deps.db, seat.nodeId);
+    if (!standby) return undefined;
+    if (existing) return existing;
+    const pending = this.resumeStandby(seat, standby, workStillOwed).finally(() => this.inFlight.delete(seat.nodeId));
+    this.inFlight.set(seat.nodeId, pending);
+    return pending;
+  }
+
+  private async resumeStandby(seat: SeatRow, standby: StandbyStop, workStillOwed: () => boolean): Promise<void> {
+    try {
+      await this.deps.deliveryGuard.lifecycle([seat.nodeId], async () => {
+        const current = readStandbyStop(this.deps.db, seat.nodeId);
+        const recipe = this.deps.getNodeLaunchRecipe(seat.nodeId);
+        const isCurrent = recipe?.rigSpec.pods.some(pod => pod.members.some(member => `${pod.id}.${member.id}` === seat.logicalId));
+        if (!isCurrent || isPoolAgent(this.deps.db, seat.nodeId) || !workStillOwed() || current?.identity !== standby.identity || current.sessionId !== standby.sessionId
+          || this.ledgerRefuses(seat.nodeId, this.currentTime())) return;
+        this.record(seat.nodeId, "launching", "in_flight", this.currentTime().toISOString());
+        let outcome: ColdStartLaunchOutcome;
+        try {
+          outcome = classifyColdStartLaunch(seat.logicalId, await this.deps.launchSingleNode(seat.rigId, seat.logicalId, current));
+        } catch (error) {
+          if (!(error instanceof Error)) throw error;
+          outcome = { kind: "failed", error: error.message };
+        }
+        const label = "error" in outcome ? `${outcome.kind}:${outcome.error}` : outcome.kind;
+        this.record(seat.nodeId, label, outcome.kind === "resumed" ? "succeeded" : "failed", this.currentTime().toISOString());
+        this.log(`${seat.logicalId}: standby ${label}`);
+      });
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      this.log(`${seat.logicalId}: standby wake refused: ${error.message}`);
     }
   }
 
@@ -384,6 +425,7 @@ export class SeatColdStarter {
 
   /** WHO stopped the seat decides whether new work may wake it (maintainer term 1). */
   private stopRefusal(seat: SeatRow): string | null {
+    if (readStandbyStop(this.deps.db, seat.nodeId)) return "recorded standby requires live queued work";
     const stop = classifyColdStartStop(this.deps.db, seat.nodeId);
     if (stop.kind === "intentional") {
       return stop.operator

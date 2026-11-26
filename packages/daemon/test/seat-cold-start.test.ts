@@ -113,6 +113,17 @@ function fixture(opts?: FixtureOptions): Fixture {
 const flush = async (): Promise<void> => { for (let i = 0; i < 10; i++) await new Promise(resolve => setTimeout(resolve, 0)); };
 
 describe("SeatColdStarter (#2829 slice 1)", () => {
+  it("starts a recorded standby in its preserved pane without a live peer", async () => {
+    const f = fixture({ intentionallyStopped: true });
+    f.db.prepare("INSERT INTO events (rig_id,node_id,type,payload) VALUES ('r1','n1','session.stopped',?)").run(JSON.stringify({
+      sessionId: "s1", standbyPane: "$1|42|100|%1", operator: "daemon:seat-reaper", reason: "idle_reap",
+    }));
+    f.setLiveSessions(["dev-impl@fleet"]);
+    const owed = () => true;
+    await f.starter.wakeStandby?.("dev-impl@fleet", owed);
+    expect(f.launches).toHaveLength(1);
+    f.db.close();
+  });
   it("cold-starts an eligible dormant seat of a running rig through the single-seat door", async () => {
     const f = fixture();
     f.starter.notify("dev.impl@fleet");

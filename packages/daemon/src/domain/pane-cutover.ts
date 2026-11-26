@@ -25,14 +25,19 @@ export async function terminatePaneInPlace(
   timing: PaneCutoverTiming,
   label = "Retiree",
   inputTarget = paneId,
+  beforeEffect?: () => Promise<void>,
 ): Promise<PaneTerminationResult> {
   const failures: string[] = [];
+  await beforeEffect?.();
   const remain = await tmux.setRemainOnExit(paneId, true);
+  if (beforeEffect && !remain.ok) return { ok: false, message: remain.message };
   if (!remain.ok) failures.push(`remain-on-exit: ${remain.message}`);
+  await beforeEffect?.();
   const term = await tmux.signalPaneProcess(inputTarget, "TERM");
   if (!term.ok) failures.push(`TERM: ${term.message}`);
   if (await waitPaneDead(tmux, paneId, timing)) return { ok: true, path: "graceful" };
   // Graceful window elapsed — force-kill (the pinned degraded path).
+  await beforeEffect?.();
   const kill = await tmux.signalPaneProcess(inputTarget, "KILL");
   if (!kill.ok) failures.push(`KILL: ${kill.message}`);
   if (await waitPaneDead(tmux, paneId, timing)) return { ok: true, path: "forced" };

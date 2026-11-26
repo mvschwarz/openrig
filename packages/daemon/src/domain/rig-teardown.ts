@@ -133,7 +133,7 @@ export class RigTeardownOrchestrator {
     const currentLiveGuidanceTargets = () => this.liveGuidanceTargets(rigId);
 
     // 2. Get latest session per node
-    const liveSessions = this.getLatestLiveSessions(rigId);
+    const liveSessions = this.deps.sessionRegistry.getLatestLiveSessions(rigId, true);
 
     // 3. Check if already stopped
     if (liveSessions.length === 0) {
@@ -177,7 +177,8 @@ export class RigTeardownOrchestrator {
         // A live namesake cannot supply resume metadata for an archived row.
         // Keep that row's own token in the snapshot, just as the kill below
         // leaves the other owner's session alone.
-        const refreshableSessions = archived.archived_at === null ? liveSessions : liveSessions.filter(
+      const running = liveSessions.filter(session => session.status !== "exited");
+      const refreshableSessions = archived.archived_at === null ? running : running.filter(
           session => findOtherSessionOwner(this.db, session.sessionName, session.nodeId, { ignoreArchived: true }) === null,
         );
         await this.deps.resumeMetadataRefresher.refresh(refreshableSessions);
