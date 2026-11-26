@@ -1518,6 +1518,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           this.fs.mkdirp(nodePath.dirname(collectorDest));
           this.fs.copyFile(this.collectorAssetPath, collectorDest, { atomicOnly: true });
         } catch { /* the existing copy keeps serving; the next poll retries */ }
+        // Only migrate the settings once a readable instance copy holds the shipped bytes: a staging failure
+        // must not install a command for a missing copy and remove the working legacy collector with it.
+        // The legacy settings and file stay as they are, and the next poll retries the copy.
+        let staged: string | null = null;
+        try { staged = this.fs.exists(collectorDest) ? this.fs.readFile(collectorDest) : null; } catch { staged = null; }
+        if (staged !== shipped) return;
       }
     } else return;
 

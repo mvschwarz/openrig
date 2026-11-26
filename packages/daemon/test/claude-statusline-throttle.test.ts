@@ -281,7 +281,7 @@ describe("the throttled status line in a launch (#3416 item 3)", () => {
     expect(folder("[]")).toEqual({ note: expect.stringContaining("isn't a settings object") });
   });
 
-  it.each(["owned legacy", "user wrapper"])("cleans up a legacy file only when the launch repoints its owned command: %s", (kind) => {
+  it.each(["owned legacy", "user wrapper"])("repoints the owned command but leaves the legacy file for the settings poll: %s", (kind) => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "statusline-migration-")); roots.push(cwd);
     const stateDir = path.join(cwd, "instance");
     const legacyDir = path.join(cwd, ".openrig");
@@ -302,8 +302,10 @@ describe("the throttled status line in a launch (#3416 item 3)", () => {
     if (kind === "owned legacy") {
       expect(result).toHaveProperty("statusLine.padding", 2);
       expect(collectorCommandScriptPath((result as { statusLine: { command: string } }).statusLine.command)).toBe(contextCollectorPath(stateDir));
-      expect(fs.existsSync(legacy)).toBe(false);
-      expect(fs.existsSync(legacyDir)).toBe(false);
+      // The throttle only builds the launch's --settings value; the settings poll removes the legacy file once
+      // it has repointed `.claude/settings.local.json`, so a failed launch never strands the settings on a missing file.
+      expect(fs.readFileSync(legacy, "utf8")).toBe("// older collector\n");
+      expect(fs.existsSync(legacyDir)).toBe(true);
     } else {
       expect(result).toHaveProperty("note");
       expect(fs.readFileSync(legacy, "utf8")).toBe("// older collector\n");

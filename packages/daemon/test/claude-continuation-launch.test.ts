@@ -126,7 +126,7 @@ describe("rewriteLegacyCollectorSettings", () => {
     expect(JSON.parse(rewritten[0]!.slice("--settings=".length)).statusLine.command).toBe(throttledCurrent);
   });
 
-  it.each(["owned legacy", "user wrapper"])("cleans up a legacy file only when replay repoints its owned command: %s", (kind) => {
+  it.each(["owned legacy", "user wrapper"])("rewrites the owned command but leaves the legacy file for the settings poll: %s", (kind) => {
     const folder = mkdtempSync(join(tmpdir(), "continuation-collector-"));
     try {
       const legacyDir = join(folder, ".openrig");
@@ -141,8 +141,10 @@ describe("rewriteLegacyCollectorSettings", () => {
 
       if (kind === "owned legacy") {
         expect(JSON.parse(rewritten[1]!).statusLine.command).toBe(managedClaudeNodeCommand("node", contextCollectorPath(stateDir), contextDir, providerDir));
-        expect(existsSync(script)).toBe(false);
-        expect(existsSync(legacyDir)).toBe(false);
+        // The rewrite only changes launch arguments; the settings poll removes the legacy file once it has
+        // repointed `.claude/settings.local.json`, so a failed launch never strands the settings on a missing file.
+        expect(readFileSync(script, "utf8")).toBe("// older collector\n");
+        expect(existsSync(legacyDir)).toBe(true);
       } else {
         expect(rewritten).toEqual(args);
         expect(readFileSync(script, "utf8")).toBe("// older collector\n");

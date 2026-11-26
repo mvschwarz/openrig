@@ -61,10 +61,21 @@ export function collectorCommandScriptPath(command: string): string | null {
   return null;
 }
 
+/** The managed throttle wrapper throttledCollectorCommand builds: a shell one-liner that checks a sidecar stamp
+ *  (`f=<sidecar base>`, `p=$(cat)`, `o=1; s=; u=`, `"$f.throttle"`) and pipes the input to the collector. A user's
+ *  own pipeline that merely ends in the collector (for example `printf '{}' | node …/context-collector.cjs`) has
+ *  none of this preamble, so it stays rejected: only OpenRig's own throttle form counts as a repointed command. */
+export function isManagedThrottledCollectorCommand(command: string): boolean {
+  if (!command.startsWith("f=") || !command.includes("p=$(cat)") || !command.includes("o=1; s=; u=")
+    || !command.includes('"$f.throttle"')) return false;
+  return collectorCommandScriptPath(command) !== null;
+}
+
 /** After repointing an owned command, take back the legacy cwd file it named, regardless of its bytes.
  *  User wrappers, other folders' collectors and symlinks are left alone. Cleanup is best-effort and never recursive. */
 export function removeRepointedLegacyCollector(cwd: string, command: unknown): void {
-  if (typeof command !== "string" || !isOwnedCollectorCommand(command)) return;
+  if (typeof command !== "string"
+    || (!isOwnedCollectorCommand(command) && !isManagedThrottledCollectorCommand(command))) return;
   const script = collectorCommandScriptPath(command);
   const legacy = nodePath.resolve(cwd, ".openrig", "context-collector.cjs");
   if (!script || nodePath.resolve(cwd, script) !== legacy) return;

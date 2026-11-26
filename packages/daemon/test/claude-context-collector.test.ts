@@ -912,7 +912,7 @@ describe("re-seating the collector from a read-only asset", () => {
     });
   }
 
-  it("skips an identical read-only copy, but plain copyFileSync cannot overwrite it after an asset change", () => {
+  it("skips an identical read-only copy and leaves the old copy when an asset change cannot be staged", () => {
     if (process.getuid?.() === 0) return; // root ignores file modes
     const asset = join(root, "asset.cjs");
     writeFileSync(asset, "// v1\n");
@@ -923,10 +923,13 @@ describe("re-seating the collector from a read-only asset", () => {
     expect(() => adapter.ensureContextCollector({ cwd })).not.toThrow();
     chmodSync(asset, 0o644);
     writeFileSync(asset, "// v2\n");
-    expect(() => adapter.ensureContextCollector({ cwd })).toThrow(/EACCES/);
+    // A copy that cannot be staged leaves the poll alone: provisioning does not throw, the old copy keeps
+    // serving, and the settings are not migrated to a copy that does not hold the shipped bytes.
+    expect(() => adapter.ensureContextCollector({ cwd })).not.toThrow();
+    expect(readFileSync(contextCollectorPath(join(root, "state")), "utf8")).toBe("// v1\n");
   });
 
-  it.skipIf(process.getuid?.() === 0)("updates a writable collector in a readonly directory", () => {
+  it.skipIf(process.getuid?.() === 0)("leaves the collector alone when its directory is read-only", () => {
     const asset = join(root, "asset.cjs");
     writeFileSync(asset, "// v1\n"); chmodSync(asset, 0o644);
     const cwd = join(root, "seat");
@@ -936,9 +939,11 @@ describe("re-seating the collector from a read-only asset", () => {
     chmodSync(parent, 0o555);
     try {
       writeFileSync(asset, "// v2\n");
-      adapter.ensureContextCollector({ cwd });
-      adapter.ensureContextCollector({ cwd });
-      expect(readFileSync(join(parent, "context-collector.cjs"), "utf8")).toBe("// v2\n");
+      // Staging into a read-only directory fails, so the copy is left as it is and the next poll retries:
+      // provisioning does not throw, the old copy keeps serving, and no staging is left behind.
+      expect(() => adapter.ensureContextCollector({ cwd })).not.toThrow();
+      expect(() => adapter.ensureContextCollector({ cwd })).not.toThrow();
+      expect(readFileSync(join(parent, "context-collector.cjs"), "utf8")).toBe("// v1\n");
       expect(statSync(parent).mode & 0o777).toBe(0o555);
       expect(readdirSync(parent).filter(f => f.includes(".tmp"))).toEqual([]);
     } finally { chmodSync(parent, 0o755); }

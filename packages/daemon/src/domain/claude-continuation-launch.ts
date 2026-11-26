@@ -5,7 +5,7 @@ import { readNativeProcessLaunch } from "./native-process-arguments.js";
 import type { ClaudeAutoMode } from "./claude-auto-mode.js";
 import { ownClaudeSettings, type ClaudeSettingsSeat } from "../adapters/claude-settings-transport.js";
 import { shellQuote } from "../adapters/shell-quote.js";
-import { collectorCommandScriptPath, removeRepointedLegacyCollector } from "./claude-owned-settings.js";
+import { collectorCommandScriptPath } from "./claude-owned-settings.js";
 import { contextCollectorPath } from "./telemetry-state-paths.js";
 
 /** Transient argv/config selector only; no general environment values or positional startup input. */
@@ -158,7 +158,9 @@ export function rewriteLegacyCollectorSettings(args: string[], options: { cwd: s
     const json = JSON.stringify(next);
     if (inline) result[at] = `--settings=${json}`;
     else result[at + 1] = json;
-    removeRepointedLegacyCollector(options.cwd, command);
+    // No legacy cleanup here: this only rewrites launch arguments, it does not write the seat's settings file.
+    // The legacy file goes away when the settings poll repoints `.claude/settings.local.json` to the instance
+    // collector — deleting it now would leave the persisted settings naming a missing file if this launch fails.
   });
   return result;
 }

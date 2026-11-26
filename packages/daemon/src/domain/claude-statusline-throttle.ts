@@ -19,7 +19,7 @@ import nodePath from "node:path";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { contextCollectorPath, contextUsageDirectory, providerUsageDirectory, telemetrySidecarFilename } from "./telemetry-state-paths.js";
 import { managedClaudeNodeCommand } from "./claude-activity-hooks.js";
-import { isOwnedCollectorCommand, removeRepointedLegacyCollector } from "./claude-owned-settings.js";
+import { isOwnedCollectorCommand } from "./claude-owned-settings.js";
 
 /** The shortest interval worth a check: one second, the resolution of `date +%s`. */
 export const STATUSLINE_THROTTLE_MIN_SECONDS = 1;
@@ -157,6 +157,8 @@ export function throttledStatusLineForLaunch(input: ThrottledStatusLineInput): {
     contextDir, providerUsageDirectory(input.stateDir));
   const statusLine = { ...current, type: "command",
     command: throttledCollectorCommand({ collectorCommand: collector, contextDir, sessionName: input.sessionName, seconds: input.seconds }) };
-  removeRepointedLegacyCollector(input.cwd, own);
+  // No legacy cleanup here: this only builds the launch's --settings value, it does not write the seat's settings
+  // file. The legacy file goes away when the settings poll repoints `.claude/settings.local.json` to the instance
+  // collector — deleting it now would leave the persisted settings naming a missing file if this launch fails.
   return { statusLine };
 }

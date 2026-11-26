@@ -38,7 +38,7 @@ describe("isShippedCollectorBytes", () => {
 });
 
 describe("removeRepointedLegacyCollector", () => {
-  it.each(["owned legacy", "relative legacy", "another cwd", "instance copy", "user wrapper"])("uses only the repointed command's ownership: %s", (kind) => {
+  it.each(["owned legacy", "relative legacy", "managed throttled", "another cwd", "instance copy", "user wrapper"])("uses only the repointed command's ownership: %s", (kind) => {
     const cwd = mkdtempSync(join(tmpdir(), "repointed-collector-"));
     roots.push(cwd);
     const dir = join(cwd, ".openrig");
@@ -49,11 +49,14 @@ describe("removeRepointedLegacyCollector", () => {
       : kind === "instance copy" ? join(cwd, "state", "claude-context-collector", "context-collector.cjs")
       : kind === "relative legacy" ? "./.openrig/context-collector.cjs" : legacy;
     const owned = managedClaudeNodeCommand("node", script, "/context", "/provider");
-    const command = kind === "user wrapper" ? `printf '{}' | ${owned}` : owned;
+    const command = kind === "user wrapper" ? `printf '{}' | ${owned}`
+      : kind === "managed throttled"
+        ? throttledCollectorCommand({ collectorCommand: owned, contextDir: "/context", sessionName: "dev", seconds: 30 })
+        : owned;
 
     removeRepointedLegacyCollector(cwd, command);
 
-    if (kind === "owned legacy" || kind === "relative legacy") {
+    if (kind === "owned legacy" || kind === "relative legacy" || kind === "managed throttled") {
       expect(existsSync(legacy)).toBe(false);
       expect(existsSync(dir)).toBe(false);
     } else {
