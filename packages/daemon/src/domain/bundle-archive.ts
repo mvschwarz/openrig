@@ -33,6 +33,17 @@ export async function pack(stagingDir: string, outputPath: string): Promise<stri
   // Collect all files in deterministic order (alphabetical)
   const allFiles = walkFilesSync(stagingDir).sort();
 
+  // A bundle that deliberately carries harness login files (--include-login-files)
+  // is the one case where the archive itself holds raw credentials: create it
+  // owner-only from the first byte. Ordinary bundles keep the umask's mode,
+  // because they are made to be shared and installed elsewhere.
+  const carriesLoginFiles = allFiles.some((relative) => isHarnessLoginPath(relative));
+  if (carriesLoginFiles && fs.existsSync(outputPath)) {
+    // Tighten an existing target before its bytes are replaced, so a failure
+    // here leaves the previous archive and its digest untouched.
+    fs.chmodSync(outputPath, 0o600);
+  }
+
   // Pack with deterministic settings
   await tar.create(
     {
@@ -41,6 +52,7 @@ export async function pack(stagingDir: string, outputPath: string): Promise<stri
       cwd: stagingDir,
       portable: true, // Omits machine-specific owner metadata
       mtime: new Date("2026-01-01T00:00:00Z"), // Fixed mtime for determinism
+      ...(carriesLoginFiles ? { mode: 0o600 } : {}),
     },
     allFiles,
   );
