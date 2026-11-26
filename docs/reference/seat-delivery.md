@@ -195,17 +195,20 @@ typing mode. Plain tmux is not prevented.
 
 ### Files read during managed restore
 
-Launch settings constructed by OpenRig include read allowances for its restore
-files. These also cover Markdown files under the
-installed daemon's own `specs` directory, including a role file named by a restore
-map. OpenRig grants both the named and resolved directory paths when the install
-uses a symlink. It does not move the files or rewrite saved restore maps.
+A managed restore no longer stops at a permission prompt to read OpenRig's own
+role file or other shipped spec files. A role file from your own spec root still
+asks.
 
-These allowances grant reads only. They preserve the selected native mode and
-existing deny/ask rules, and do not grant access to arbitrary custom spec roots.
-An already running Claude process keeps its launch settings. Fresh launches and
-resumes that use current OpenRig settings get the added allowance. A continuation
-that preserves captured native arguments keeps those earlier allowances.
+The launch settings OpenRig builds for a Claude seat allow reading its restore
+files. They also allow reading Markdown files under the installed daemon's own
+`specs` directory, where a restore map can name a seat's role file. OpenRig grants
+the directory both where it's named and where it resolves, when the install uses a
+symlink. It doesn't move the files or rewrite saved restore maps.
+
+These allowances are reads only. The seat's native mode and its existing deny and
+ask rules still apply, and custom spec roots aren't included. A Claude seat that's
+already running gets this at its next fresh launch, resume or fork. A continuation
+that keeps its captured native arguments keeps the earlier allowances.
 
 ### Deliberate interaction and existing input
 

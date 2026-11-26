@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { runningShippedSpecsRoot } from "./builtin-startup-files.js";
 
 export interface RestoreReadContext {
   openrigHome: string | null | undefined;
@@ -91,9 +91,10 @@ export function withManagedRestoreReads(args: string[], context: RestoreReadCont
   const seat = context.session.replace(/[^a-zA-Z0-9_.@-]/g, "_");
   const extra = postCompactExtraSetting(context.extraInstructionFile);
   const files = [
-    // A restore map may name its original installed role file. Read the package's own Markdown specs without moving
+    // A restore map may name its original installed role file, else the restore stops at a native Read prompt. Read the
+    // package's own Markdown specs, the root seats' role paths are re-anchored to (runningShippedSpecsRoot), without moving
     // that file or changing saved maps; native deny/ask still wins, and no other install files or writes are granted.
-    ...spellings(fileURLToPath(new URL("../../specs/", import.meta.url))).map(root => `${root}/**/*.md`),
+    ...spellings(runningShippedSpecsRoot()).map(root => `${root}/**/*.md`),
     ...spellings(context.openrigHome).flatMap(home => [
       `${home}/compaction/restore-pending/${seat}.json`,
       `${home}/plugins/openrig-core/skills/refocusing/SKILL.md`,
