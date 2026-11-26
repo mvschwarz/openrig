@@ -31,6 +31,16 @@ export function runSyncSiteWhenSlow<T>(site: string, fn: () => T): T {
 }
 
 /**
+ * Offers one already-measured synchronous span to the configured recorder, only when it reached the slow threshold, so a
+ * call on the hottest path (every SQLite statement) adds nothing until it is slow. Measurement only: no recorder or a
+ * throwing recorder changes nothing for the caller.
+ */
+export function recordSlowSyncSite(site: string, durationMs: number, outcome: "ok" | "failed"): void {
+  if (!(durationMs >= SLOW_OPERATION_THRESHOLD_MS)) return;
+  try { recorder?.recordSlowSync?.(site, durationMs, outcome); } catch { /* the recorder reports its own health */ }
+}
+
+/**
  * Async twin of runSyncSite: instruments a NON-blocking site through the
  * recorder's async `runStage` seam (falls back to a bare call when no recorder
  * is configured). Use this for sites whose work must NOT block the event loop
