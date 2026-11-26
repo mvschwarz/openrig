@@ -48,6 +48,8 @@ interface WorldOptions {
   installed?: boolean;
   probe?: (session: string) => Awaited<ReturnType<TmuxAdapter["probeSession"]>> | "throws" | undefined;
   panePid?: (session: string) => number | null;
+  /** tmux's #{pane_dead} for the session's pane (default: alive). */
+  paneDead?: (session: string) => boolean;
   processTable?: "throws";
   seatRecords?: "throws";
 }
@@ -80,6 +82,7 @@ function world(options: WorldOptions = {}) {
       return probed ?? { state: "present" as const };
     },
     getPanePid: async (session: string) => (options.panePid ? options.panePid(session) : panePids.get(session) ?? null),
+    isPaneDead: async (session: string) => options.paneDead?.(session) ?? false,
     getPaneCommand: async () => "bash",
     getSessionEnv: async () => undefined,
     sendShellCommand: vi.fn(async () => ({ ok: true })),
@@ -214,6 +217,16 @@ describe("#3385: no codex plugin add for a Codex home while a seat runs the inst
     expect(w.adds()).toEqual([]);
     expect(cached(w.daemonHome)).toEqual([OLDER]);
     expect(w.waits()[0]).toContain("Couldn't tell whether dev-a@r is running there, so it counts as running.");
+  });
+
+  // A pane tmux kept after its process exited (remain-on-exit) still names that pid, which is no longer in the process table:
+  // tmux says it's dead, so the seat runs no Codex and holds nothing. A live pid the table missed still holds (above).
+  it("a seat whose pane tmux kept after its process exited holds nothing, and the upgrade installs", async () => {
+    const w = world({ seats: [{ nodeId: "a", session: "dev-a@r", pane: "shell" }], panePid: () => 4242, paneDead: () => true });
+    await w.adapter.ensureCodexCorePluginAtBoot(true);
+    expect(w.adds()).toHaveLength(1);
+    expect(cached(w.daemonHome)).toEqual([VERSION]);
+    expect(w.waits()).toEqual([]);
   });
 
   it("OpenRig's seat records that can't be read hold the upgrade too", async () => {

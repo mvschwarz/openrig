@@ -650,7 +650,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       const panePid = await this.tmux.getPanePid(session);
       if (!panePid) return "unknown";
       const rows = await table();
-      if (!rows.some((row) => row.pid === panePid)) return "unknown";
+      // A pane tmux keeps after its process exited (remain-on-exit, as the pane cutover leaves it) still reports that pid.
+      // tmux says when the pane is dead: then its seat runs no Codex. A live pid the table missed stays unknown.
+      if (!rows.some((row) => row.pid === panePid)) return (await this.tmux.isPaneDead(session)) ? "stopped" : "unknown";
       return paneRunsCodex(rows, panePid) ? "running" : "stopped";
     } catch {
       return "unknown";
