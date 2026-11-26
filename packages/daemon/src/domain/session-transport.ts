@@ -4645,6 +4645,23 @@ export class SessionTransport {
           });
           if (paneVeto.state === "needs_input" && paneVeto.reason === "selection_prompt") return paneVeto;
         }
+        // A community harness's own hook script needn't post every dialog it shows (`activity_hooks` can leave out
+        // Notification), so after any fresh hook short of a permission request its pane gets the read the hookless
+        // path below gives it: a picker or permission prompt on screen refuses, and a draft stays the delivery guard's.
+        if ((hookActivity.state === "idle" || hookActivity.state === "running" || hookActivity.state === "unknown") && communityHarness) {
+          const paneVeto = await probeSessionActivity({
+            communityHarness, communityHarnessSendProbe: true,
+            composerSnapshot,
+            sessionName: input.sessionName,
+            runtime: input.runtime,
+            attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
+            tmuxAdapter: this.tmuxAdapter,
+            now,
+            captureObserver: privateInput ? undefined : this.captureObserver,
+            binding,
+          });
+          if (paneVeto.state === "needs_input" && (paneVeto.reason === "selection_prompt" || paneVeto.reason === "permission_prompt")) return paneVeto;
+        }
         return hookActivity;
       }
       // OPR.0.4.3.28 Part A — a stale-but-latest `idle` hook (older than the 15s
