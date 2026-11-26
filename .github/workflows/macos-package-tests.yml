@@ -90,8 +90,10 @@ jobs:
           # Same system bytes, nonprivileged mode; no system file is changed.
           /usr/bin/install -m 0755 /bin/ps "$suite_root/bin/ps"
           # Only this job's temporary sockets (including tmux) are reachable.
+          # The daemon suite runs with three Vitest workers (Vitest reads VITEST_MAX_WORKERS over its config); the cli
+          # suite keeps Vitest's default.
           env -i HOME="$suite_root/home" PATH="$PATH" TMPDIR="$suite_root" TMUX_TMPDIR="$suite_root" \
-            CI=true TERM=xterm-256color \
+            CI=true TERM=xterm-256color ${{ matrix.package == 'daemon' && 'VITEST_MAX_WORKERS=3' || '' }} \
             sandbox-exec -D IPC_ROOT="$suite_root" -p '(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))(allow network-outbound (subpath (param "IPC_ROOT")))' \
             /bin/bash -s "${{ matrix.package }}" <<'SUITE'
           set -euo pipefail
