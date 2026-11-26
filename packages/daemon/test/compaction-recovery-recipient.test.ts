@@ -82,6 +82,8 @@ describe("who receives a recovery notice", () => {
       expect(row).toMatchObject({ destinationSession: PERSON });
       expect(row!.summary).not.toContain("no capable");
       expect(row!.body).toContain(`owner@rr can't act on it now: ${EVIDENCE}`);
+      expect(row!.body).toContain("The delegating parent owner@rr can't act now, so this notice goes to the registered person.");
+      expect(row!.body).not.toContain("No eligible independent delegating parent");
     } finally { db.close(); }
   });
 
@@ -92,7 +94,7 @@ describe("who receives a recovery notice", () => {
       const [row] = noticesAbout(queue, "writer@rr");
       expect(row).toMatchObject({ destinationSession: "receiver@rr" });
       expect(row!.body).toContain("owner@rr can't act on it now");
-      expect(row!.body).toContain("This is a receiver fallback");
+      expect(row!.body).toContain("This is a receiver fallback, since the delegating parent owner@rr can't act now and the registered person couldn't be resolved; it isn't the person's selection.");
     } finally { db.close(); }
   });
 
@@ -172,6 +174,7 @@ describe("a notice already with a recipient that becomes unable", () => {
       moveNoticesFromUnableRecipient(db, queue, "owner@rr", unableSet("owner@rr"));
       moveNoticesFromUnableRecipient(db, queue, "owner@rr", unableSet("owner@rr"));
       expect(queue.getById(row!.qitemId)).toMatchObject({ destinationSession: "owner@rr", state: "pending" });
+      expect(queue.getById(row!.qitemId)!.summary).toMatch(/^Managed restore for writer@rr: [^;]*; no capable recovery recipient$/);
       const notes = queue.listTransitions(row!.qitemId).map((t) => t.transitionNote).filter((n) => n?.includes("No capable recovery recipient"));
       expect(notes).toHaveLength(1);
     } finally { db.close(); }
@@ -209,7 +212,8 @@ describe("what the preparation notice carries", () => {
     try {
       await reportPreparationFailure(db, queue, prep("writer@rr", { mapPath: current, context: { usedPercentage: 97, sampledAt: "2026-11-25T21:00:00Z" } }));
       const body = noticesAbout(queue, "writer@rr")[0]!.body;
-      expect(body).toContain("Latest context sample: 97% used, sampled 2026-11-25T21:00:00Z.");
+      expect(body).toContain("Latest context sample: 97% used of the context window Claude Code reports, sampled 2026-11-25T21:00:00Z.");
+      expect(body).toContain("wait for the next automatic attempt, though waiting has already failed 3 times");
       expect(body).toContain(`Newest complete restore map: ${older} (attempt a1, written ${new Date(1_000_000).toISOString()}).`);
       expect(body).toContain("rig compact 'writer@rr' --skip-map once");
       expect(body).toContain("an automatic attempt always needs a complete map");

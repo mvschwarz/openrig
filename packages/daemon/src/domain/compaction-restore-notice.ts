@@ -64,6 +64,8 @@ function recoveryRecipient(db: Database.Database, queue: QueueRepository, sessio
     return false;
   };
   const parent = defaultResolveOrchestrator(db, session);
+  // A parent passed over for evidence that it can't act exists: the notes say so rather than "no parent".
+  const parentUnable = (): boolean => parent !== null && unableAgent === parent;
   if (parent && capable(parent)) {
     const receiver = resolveDefaultReceiver(db, () => parent);
     return { session: parent, kind: "agent", note: `Recovery owner: delegating parent ${parent}; recorded state ${receiver.state}${receiver.recorded && receiver.recorded !== receiver.state ? ` (${receiver.recorded})` : ""}. Notices may wait; ownership does not establish delivery or pickup.` };
@@ -79,13 +81,13 @@ function recoveryRecipient(db: Database.Database, queue: QueueRepository, sessio
       receiver = resolveDefaultReceiver(db, () => ({ session: null, problem }));
     }
     if (receiver.session && capable(receiver.session)) return { session: receiver.session, kind: "agent",
-      note: `${reasons.join("; ")}. Recovery owner: ${describeDefaultReceiver(receiver)} This is a receiver fallback, not the person's selection. This records ownership, not delivery or pickup.` };
+      note: `${reasons.join("; ")}. Recovery owner: ${describeDefaultReceiver(receiver)} This is a receiver fallback${parentUnable() ? `, since the delegating parent ${parent} can't act now and the registered person couldn't be resolved; it isn't` : ", not"} the person's selection. This records ownership, not delivery or pickup.` };
     if (unableAgent) return { session: unableAgent, kind: "agent", unresolved: true,
       note: `No capable recovery recipient could be established: ${reasons.join("; ")}. This notice stays addressed to ${unableAgent} only so it remains visible. That is not acceptance: nobody able to act on it has been reached.` };
     throw error;
   }
   return { session: person, kind: "human",
-    note: `${reasons.length ? `${reasons.join("; ")}. ` : ""}No eligible independent delegating parent could be resolved, so this notice goes to the registered person.` };
+    note: `${reasons.length ? `${reasons.join("; ")}. ` : ""}${parentUnable() ? `The delegating parent ${parent} can't act now` : "No eligible independent delegating parent could be resolved"}, so this notice goes to the registered person.` };
 }
 
 /** The newest restore map under the seat's preparation folder that ends with its own attempt's completion marker (from
@@ -207,7 +209,7 @@ export async function reportPreparationFailure(db: Database.Database, queue: Que
   const seat = shellQuote(failure.sessionName);
   const used = failure.context?.usedPercentage;
   const context = typeof used === "number"
-    ? `Latest context sample: ${used}% used${failure.context?.sampledAt ? `, sampled ${failure.context.sampledAt}` : ", sample time unknown"}.`
+    ? `Latest context sample: ${used}% used of the context window Claude Code reports${failure.context?.sampledAt ? `, sampled ${failure.context.sampledAt}` : ", sample time unknown"}.`
     : "Latest context sample: unknown.";
   // A person's notice names no local path, as the other notices to a person don't.
   const map = newestCompleteMap(failure.mapPath, failure.sessionName);
@@ -216,7 +218,7 @@ export async function reportPreparationFailure(db: Database.Database, queue: Que
       : "No complete restore map reads in the seat's preparation folder on the OpenRig host."
     : map ? `Newest complete restore map: ${map.mapPath} (attempt ${map.attemptId}, written ${map.writtenAt}).`
       : `No complete restore map reads under ${path.dirname(path.dirname(failure.mapPath))}.`;
-  const choices = `Existing recovery choices, for the recipient to decide: wait, since automatic preparation retries on its own after its retry wait, and an automatic attempt always needs a complete map; or, after rig compact ${seat} --cancel if a preparation is still active, run rig compact ${seat} --skip-map once, a manual request that sends /compact without a map, keeps the target, idle and permission checks, and is followed by OpenRig's restore request asking the seat for its newest restore map.`;
+  const choices = `Existing recovery choices, for the recipient to decide: wait for the next automatic attempt, though waiting has already failed ${failure.endedAttempts} times: an automatic attempt always needs a complete map, so it helps only if the seat can still write one; or, after rig compact ${seat} --cancel if a preparation is still active, run rig compact ${seat} --skip-map once, a manual request that sends /compact without a map, keeps the target, idle and permission checks, and is followed by OpenRig's restore request asking the seat for its newest restore map.`;
   await queue.create({ qitemId, sourceSession: failure.sessionName,
     destinationSession: recipient.session,
     summary: recipient.unresolved ? `${summary}${NO_CAPABLE_RECIPIENT}` : summary,
@@ -246,6 +248,15 @@ export function moveNoticesFromUnableRecipient(db: Database.Database, queue: Que
     }
     if (recipient.unresolved || physicalSessionName(db, recipient.session) === seat) {
       noteOnce(queue, item, `${label}: ${recipient.note}`);
+      // Its face says so too, as a notice created with no capable recipient does (a summary change is recorded with its own note).
+      if (recipient.unresolved && item.summary && !item.summary.endsWith(NO_CAPABLE_RECIPIENT)) {
+        try {
+          queue.update({ qitemId: item.qitemId, actorSession: "system:compaction", expectState: item.state,
+            summary: `${item.summary}${NO_CAPABLE_RECIPIENT}`, transitionNote: `${label}: marked as having no capable recovery recipient` });
+        } catch (error) {
+          if ((error as { code?: unknown }).code !== "qitem_state_changed") throw error;
+        }
+      }
       continue;
     }
     try {

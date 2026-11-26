@@ -4,17 +4,18 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { AUTO_PREP_WAIT_MS_DEFAULT, ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE, type PreparationFailure } from "../src/domain/claude-compaction-enforcer.js";
 import type { SessionTransport } from "../src/domain/session-transport.js";
+import { TerminalPolicyRefusal } from "../src/domain/terminal-policy.js";
 const homes: string[] = [];
 afterEach(() => { for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true }); });
 const input = { sessionName: "writer@test", runtime: "claude-code", usedPercentage: 90 };
-function fixture() {
+function fixture(extra: Record<string, unknown> = {}) {
   let clock = 10000, generation = "g1", restarts = 0;
   const home = mkdtempSync(join(tmpdir(), "prep-notice-")); homes.push(home);
   const send = vi.fn(async (): Promise<any> => { clock++; return { ok: false, sent: false, inputPhase: "not_reached", reason: "draft_input_busy" }; });
   const notice = vi.fn(async (_failure: PreparationFailure) => {});
   const policy = { enabled: true, thresholdPercent: 80, preCompactInstruction: "Write a map.", compactInstruction: "" };
   const opts = { openrigHome: home, now: () => clock, resolveOccupantGeneration: () => generation,
-    autoRetryAfterStopMs: 1, onPreparationFailure: notice };
+    autoRetryAfterStopMs: 1, onPreparationFailure: notice, ...extra };
   const transport = { send, waitUntilIdle: vi.fn(async () => ({ ok: true })) } as unknown as SessionTransport;
   let e = new ClaudeCompactionEnforcer({ resolveClaudeCompactionPolicy: () => policy } as any, transport, opts);
   return { get e() { return e; }, send, notice, advance: (n = 2) => { clock += n; },
@@ -124,6 +125,27 @@ it("unsent and delivered-incomplete attempts share one run, and an attempt still
   });
   await f.e.maybeAutoCompact(input);
   expect(f.notice).toHaveBeenCalledWith(expect.objectContaining({ endedAttempts: 3, delivered: true }));
+});
+
+it("an attempt that ended while its send was still pending, as across a daemon stop, interrupts the run like an uncertain send", async () => {
+  let refuse = false;
+  const f = fixture({ terminalPolicies: { check: () => { if (refuse) throw new TerminalPolicyRefusal("openrig" as never, "compaction" as never); } } });
+  const at = { ...input, nodeId: "writer-node" };
+  await end(f); await end(f);
+  let stopped!: () => void; const midSend = new Promise<void>((resolve) => { stopped = resolve; });
+  f.send.mockImplementationOnce(async (_session: string, _text: string, opts: { beforeWrite: () => void }) => {
+    opts.beforeWrite(); // the prompt is being written: from here its delivery is pending
+    f.advance(); refuse = true; await f.e.maybeAutoCompact(at); // later, a poll stops the attempt during the send
+    stopped(); return new Promise(() => {}); // and the daemon stops before the send's result is recorded
+  });
+  void f.e.maybeAutoCompact(at); await midSend;
+  const third = f.e.getPreparationState(input.sessionName)!;
+  const file = join(dirname(third.mapPath), COMPACTION_RECORD_FILE);
+  expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({ phase: "ended", delivery: "pending", reason: "terminal_policy_refused" });
+  refuse = false; f.restart(); await f.e.maybeAutoCompact(at);
+  expect(f.notice).not.toHaveBeenCalled();
+  expect(f.e.recoveryInability(input.sessionName)).toBeNull();
+  expect(JSON.parse(readFileSync(file, "utf8")).preparationFailures).toBeUndefined();
 });
 
 it("a delivered request whose map completes interrupts the run", async () => {

@@ -2431,9 +2431,10 @@ export class ClaudeCompactionEnforcer {
     // #2799 counted only attempts that sent nothing. A delivered request whose map never completed (preparation_incomplete)
     // is the context wall itself, so it counts too: a sent command is not recovery. A delivered attempt's other endings, an
     // uncertain send, a held map and the stops below interrupt the run; a request still in flight or waiting for its map
-    // decides nothing yet.
+    // decides nothing yet. An attempt that ended while its send was still pending (stopped during the send, its result
+    // never recorded, as across a daemon stop) has an unknown delivery, so it interrupts like an uncertain send.
     const ended = r.phase === "ended";
-    const delivery = r.delivery === "not_sent" || r.delivery === "pending" ? "open"
+    const delivery = r.delivery === "not_sent" || (r.delivery === "pending" && !ended) ? "open"
       : r.delivery === "delivered" && (!ended || r.reason === "preparation_incomplete") ? "open" : "interrupted";
     const interrupted = this.pendingPreCompactPrep.get(input.sessionName)?.cancelled || !policy.enabled || input.usedPercentage == null || input.usedPercentage < policy.thresholdPercent
       || r.mode !== "automatic" || generation === null || generation !== r.occupantGeneration

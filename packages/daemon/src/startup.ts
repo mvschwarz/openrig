@@ -3116,6 +3116,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { ContextMonitor } = await import("./domain/context-monitor.js");
   const { ClaudeCompactionEnforcer } = await import("./domain/claude-compaction-enforcer.js");
   // Who can act on a recovery notice: an agent whose own managed compaction this enforcer records as failing can't.
+  // Called only from later polls and notices, after compactionEnforcer (next line) is initialized; a constructor-time call would hit its TDZ.
   const recoveryInability = (session: string): string | null => compactionEnforcer ? recordedRecoveryInability(db, compactionEnforcer, session) : null;
   const compactionEnforcer = deps.sessionTransport
     ? new ClaudeCompactionEnforcer(
