@@ -7,7 +7,7 @@ import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
 import type { RuntimeAdapter, NodeBinding, ReadinessResult, ForkSource } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode } from "./runtime-adapter.js";
-import { communityHarnessAdapter } from "../adapters/community-harness-runtime-adapter.js";
+import { communityHarnessAdapter, launchedCommunityHarness } from "../adapters/community-harness-runtime-adapter.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { isShellForeground } from "./shell-classifier.js";
@@ -102,6 +102,11 @@ export type SuccessorLaunchResult =
       tmuxPane: string;
       resumeToken?: string;
       resumeType?: string;
+      /** A community harness's conversation reported by its launcher, or named by OpenRig and passed to it. Absent for a
+       *  token read from the runtime itself (a built-in's, or Pi RPC's session file). */
+      resumeProvenance?: "launcher" | "passed";
+      /** The community harness this successor was launched for, with its preset's runner declaration at launch. */
+      communityHarness?: { app: string; runner: boolean | "pi-rpc" };
       appliedLaunch?: AppliedLaunchObservation;
       /** The launch's frozen executable and whether it is a #! script (Claude managed launches, #2341). */
       launchedExecutable?: { path: string; isScript: boolean };
@@ -273,10 +278,12 @@ export class SuccessorSessionLauncher {
     }
 
     const binding = successorBinding(input.node, departingSession, pane.id, cwd, input.occupantGeneration);
-    // A built-in target has its adapter in the map; a community harness's comes from its installed preset.
-    const adapter = input.node.runtime ? (this.runtimeAdapters[input.node.runtime] ?? communityHarnessAdapter(this.runtimeAdapters, input.node.runtime)) : undefined;
+    // The adapter is resolved before anything ends, and the launch uses exactly this one. With none, the launch would
+    // refuse after the retiree had ended; it refuses here instead, with the retiree untouched.
+    const adapter = this.adapterFor(input.node.runtime);
+    if (!adapter) return { ok: false, code: "successor_runtime_unsupported", step: "create_successor", message: noAdapter(input.node.runtime), replacementStarted: false };
     let preflightWarnings: string[] = [];
-    if (adapter?.preflightLaunch) {
+    if (adapter.preflightLaunch) {
       try {
         const checked = await adapter.preflightLaunch(binding);
         if (!checked.ok) return { ok: false, code: "successor_preflight_failed", step: "create_successor",
@@ -351,7 +358,9 @@ export class SuccessorSessionLauncher {
     //    not repointed. When the harness launch was already sent and only readiness failed, the pane is NOT left as
     //    a bare shell: the successor may still come up there, unadopted (#2985). The failure says so, so the caller
     //    can tell the operator that a retry would end it.
-    const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource, input.occupantGeneration, undefined, binding);
+    // A community harness's successor records the harness and its preset's runner declaration as launched (at commit).
+    const communityHarness = launchedCommunityHarness(adapter);
+    const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource, input.occupantGeneration, undefined, binding, adapter);
     if (!started.ok) {
       return { ok: false, code: started.code, step: "start_agent", message: started.message, replacementStarted: true,
         tmuxPane: pane.id, ...limitsNotice, ...(started.launched ? { successorLaunched: true, retireeExit: terminated.path,
@@ -378,6 +387,8 @@ export class SuccessorSessionLauncher {
       tmuxPane: pane.id,
       resumeToken: started.resumeToken,
       resumeType: started.resumeType,
+      ...(started.resumeProvenance ? { resumeProvenance: started.resumeProvenance } : {}),
+      ...(communityHarness ? { communityHarness } : {}),
       appliedLaunch: started.appliedLaunch,
       ...(started.launchedExecutable ? { launchedExecutable: started.launchedExecutable } : {}),
       ...(started.activityGrantId ? { activityGrantId: started.activityGrantId } : {}),
@@ -462,16 +473,12 @@ export class SuccessorSessionLauncher {
     launchGeneration?: string | null,
     staged?: StagedLaunch,
     preparedBinding?: NodeBinding,
-  ): Promise<{ ok: true; activityGrantId?: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[]; launchedExecutable?: { path: string; isScript: boolean } }
+    /** The adapter a handover already resolved and preflighted; a staged switch resolves its target here. */
+    resolvedAdapter?: RuntimeAdapter,
+  ): Promise<{ ok: true; activityGrantId?: string; resumeToken?: string; resumeType?: string; resumeProvenance?: "launcher" | "passed"; appliedLaunch?: AppliedLaunchObservation; notes?: string[]; launchedExecutable?: { path: string; isScript: boolean } }
     | { ok: false; code: string; message: string; launched?: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; launchedExecutable?: { path: string; isScript: boolean } }> {
-    const adapter = node.runtime ? (this.runtimeAdapters[node.runtime] ?? communityHarnessAdapter(this.runtimeAdapters, node.runtime)) : undefined;
-    if (!adapter) {
-      return {
-        ok: false,
-        code: "successor_runtime_unsupported",
-        message: `No runtime adapter for "${node.runtime ?? "unknown"}"; a live successor cannot be launched for this seat.`,
-      };
-    }
+    const adapter = resolvedAdapter ?? this.adapterFor(node.runtime);
+    if (!adapter) return { ok: false, code: "successor_runtime_unsupported", message: noAdapter(node.runtime) };
 
     // Transient binding for the adapter launch/readiness probe — the successor
     // is unmanaged, so there is no persisted binding row (id/updatedAt are inert
@@ -507,10 +514,12 @@ export class SuccessorSessionLauncher {
     // composer at commit with provenance "scrape" (B2, launched modes).
     let resumeToken: string | undefined;
     let resumeType: string | undefined;
+    let resumeProvenance: "launcher" | "passed" | undefined;
     const trimmed = launch.resumeToken?.trim();
     if (trimmed) {
       resumeToken = trimmed;
       resumeType = launch.resumeType;
+      resumeProvenance = launch.resumeProvenance;
     }
     const launchedExecutable = launch.launchedExecutable ? { launchedExecutable: launch.launchedExecutable } : {};
     const appliedLaunch = launch.appliedLaunch ? { appliedLaunch: launch.appliedLaunch } : {};
@@ -553,7 +562,13 @@ export class SuccessorSessionLauncher {
       };
     }
 
-    return { ok: true, resumeToken, resumeType, ...(launch.activityGrantId ? { activityGrantId: launch.activityGrantId } : {}), appliedLaunch: launch.appliedLaunch, ...launchedExecutable, ...(notes?.length ? { notes } : {}) };
+    return { ok: true, resumeToken, resumeType, ...(resumeProvenance ? { resumeProvenance } : {}), ...(launch.activityGrantId ? { activityGrantId: launch.activityGrantId } : {}), appliedLaunch: launch.appliedLaunch, ...launchedExecutable, ...(notes?.length ? { notes } : {}) };
+  }
+
+  /** A built-in runtime's adapter from the map; a community harness's from its installed preset. A handover of a seat with
+   *  no recorded harness selection launches its installed preset as before; what it launched is recorded at commit. */
+  private adapterFor(runtime: string | null): RuntimeAdapter | undefined {
+    return runtime ? (this.runtimeAdapters[runtime] ?? communityHarnessAdapter(this.runtimeAdapters, runtime)) : undefined;
   }
 
   /**
@@ -656,6 +671,10 @@ function successorBinding(node: SuccessorNode, tmuxSession: string, tmuxPane: st
       ...(node.launchWrapper?.length ? { launchWrapper: node.launchWrapper } : {}),
       ...(bindingOverrides ?? {}),
   };
+}
+
+function noAdapter(runtime: string | null): string {
+  return `No runtime adapter for "${runtime ?? "unknown"}"; a live successor cannot be launched for this seat.`;
 }
 
 function compactEnv(input: Record<string, string | undefined>): Record<string, string> {

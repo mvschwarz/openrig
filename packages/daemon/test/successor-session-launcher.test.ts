@@ -651,13 +651,39 @@ describe("SuccessorSessionLauncher", () => {
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });
 
-  it("no runtime adapter for the seat's runtime → structured failure, preserved seat NOT killed", async () => {
+  // 0.7.24: with no adapter the launch was refused only after the retiree had ended. It is known before, so it's refused there.
+  it.each(["codex", "synth", null])("no runtime adapter for the seat's runtime (%s) → refused before the retiree is touched", async runtime => {
     const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
     const noAdapter = new SuccessorSessionLauncher(tmux, discoveryRepo, { newId: () => "01ABCDEFG", runtimeAdapters: {}, exitPollMs: 1, exitTimeoutMs: 5 });
-    const res = await noAdapter.createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
-    expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_runtime_unsupported" });
+    const onReplacementStarted = vi.fn();
+    const res = await noAdapter.createSuccessor({ node: { id: "n", runtime, cwd: "/w" }, departingSessionName: "a@r", onReplacementStarted });
+    expect(res).toMatchObject({ ok: false, step: "create_successor", code: "successor_runtime_unsupported", replacementStarted: false });
+    expect(setRemainOnExit).not.toHaveBeenCalled();
+    expect(signalPaneProcess).not.toHaveBeenCalled();
+    expect(respawnPane).not.toHaveBeenCalled();
+    expect(onReplacementStarted).not.toHaveBeenCalled();
     expect(killSession).not.toHaveBeenCalled();
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
+  });
+
+  // 0.7.24: a community harness's adapter is made anew at each lookup, so the launch must use the one its preflight passed.
+  it("launches with exactly the adapter it preflighted, and returns the launch's conversation provenance", async () => {
+    const made: Array<{ preflightLaunch: ReturnType<typeof vi.fn>; launchHarness: ReturnType<typeof vi.fn> }> = [];
+    const runtimeAdapters = {} as Record<string, RuntimeAdapter>;
+    Object.defineProperty(runtimeAdapters, "synth", { enumerable: true, get: () => {
+      const made1 = { runtime: "synth", checkReady, preflightLaunch: vi.fn(async () => ({ ok: true as const })),
+        launchHarness: vi.fn(async () => ({ ok: true, resumeToken: "chat-1", resumeType: "community:synth", resumeProvenance: "launcher" })) };
+      made.push(made1);
+      return made1 as unknown as RuntimeAdapter;
+    } });
+    const tmux = { listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    const subject = new SuccessorSessionLauncher(tmux, discoveryRepo, { runtimeAdapters, readinessTimeoutMs: 50, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5 });
+    const result = await subject.createSuccessor({ node: { id: "node-1", runtime: "synth", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
+    expect(result).toMatchObject({ ok: true, resumeToken: "chat-1", resumeType: "community:synth", resumeProvenance: "launcher" });
+    const preflighted = made.filter(adapter => adapter.preflightLaunch.mock.calls.length > 0);
+    expect(preflighted).toHaveLength(1);
+    expect(preflighted[0]!.launchHarness).toHaveBeenCalledTimes(1);
+    expect(made.flatMap(adapter => adapter.launchHarness.mock.calls)).toHaveLength(1);
   });
 
   it("respawn-pane failure → structured create_successor failure (no kill, no candidate)", async () => {
