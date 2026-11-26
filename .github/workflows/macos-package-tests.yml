@@ -15,11 +15,21 @@ on:
 permissions:
   contents: read
 
-# No concurrency group, at the workflow or the job: GitHub keeps one pending run per group and a newer one replaces it,
-# so any shared group would let a later run, even another approval of the same head, replace a waiting approval run.
+# Same-head approvals wait without replacing the only pending coverage. Other events/manuals are isolated.
+# A per-PR cancel-in-progress group would let delayed or irrelevant events cancel the useful newer head.
+concurrency:
+  group: >-
+    macos-package-tests-${{ github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association) && github.event.review.commit_id == github.event.pull_request.head.sha && format('pr-{0}-{1}', github.event.pull_request.number, github.event.review.commit_id) || format('run-{0}', github.run_id) }}
+  queue: max
+  cancel-in-progress: false
 
 jobs:
   plan:
+    # Only the Linux planner may cancel obsolete runs; test jobs retain contents:read alone.
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -35,6 +45,8 @@ jobs:
         with:
           node-version: 22
       - id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/ci-macos-ready-plan.mjs
 
   package-tests:
