@@ -520,7 +520,7 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
       .toMatchObject({ ok: false, code: "settings_drift", detail: { differs: ["config tools.web_search"] } });
     // Unchanged guidance adds nothing to the note.
     const same = await world().service.restartInPlace({ seatRef: SEAT, plan: true });
-    expect((same as { settings: { note: string } }).settings.note).not.toContain("launch guidance");
+    expect((same as { settings: { note: string } }).settings.note).not.toContain("developer_instructions");
   });
 
   it.each(["earlier-openrig-guidance", "person-chosen-guidance"])("reports the observed %s override changing through the real resume builder", async (value) => {
