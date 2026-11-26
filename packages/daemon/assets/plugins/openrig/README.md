@@ -49,9 +49,8 @@ new chat in the same process (after `/clear`) still gets the earlier chat's task
     in the shell.
 - **What the hooks do:** they read only the addresses recorded under your chat's key, from OpenRig's own record, and
   check them for new tasks every 15 seconds: in Claude Code for up to two hours after each turn, in Codex while the
-  session lasts. In Claude Code, a chat with no such address stops after its first read, and a read that fails (OpenRig
-  stopped, say) stops it until the next turn; in Codex, a read that fails is tried again after a longer wait each time,
-  up to five minutes. In Claude Code, a new task wakes your agent between turns, not in the middle of one. In Codex, the
+  session lasts. In Claude Code, a chat with no such address stops after its first read. In both, a read that fails (OpenRig
+  restarting, say) is tried again after a longer wait each time, up to five minutes. In Claude Code, a new task wakes your agent between turns, not in the middle of one. In Codex, the
   hooks queue the task for the chat with `codex queue`, which starts a turn when the chat is idle. Each task names its
   sender as OpenRig recorded it, so your agent can see it's from the team it handed work to.
 - **What they don't do:** they type nothing into any terminal, and they change nothing in OpenRig: they run `node` and

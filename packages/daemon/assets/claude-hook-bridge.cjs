@@ -17,8 +17,8 @@
 //                         issued to this conversation from OpenRig's own record (the rows tagged with this conversation's key,
 //                         see conversationKey), poll their pending tasks, and write the ones not yet shown in this session,
 //                         each with its sender as the daemon recorded it, to stderr and exit 2, which wakes Claude. Exits 0
-//                         when the conversation has no such address, when OpenRig can't be read (the next turn's Stop
-//                         reads again), when superseded by a newer waiter, or at its deadline.
+//                         when the conversation has no such address, when superseded by a newer waiter, or at its
+//                         deadline. A read that fails is tried again after a longer wait each time.
 //   conversation-turn     Claude Code UserPromptSubmit: mark that a turn is running, so a waiter never wakes into it.
 //   codex-start           Codex SessionStart (async): start one detached watcher for this session and exit 0. A Codex hook
 //                         can't start a turn itself; `codex queue` can.
@@ -486,8 +486,10 @@ function conversationTurn({ input = {}, deps = {} } = {}) {
 
 /** Claude Code SessionStart and Stop (`asyncRewake`). Returns the exit code: 2 after writing tasks, or the no-`rig`
  *  notice, 0 otherwise. Only a conversation that handed work over with an address of its own waits: those addresses come
- *  from its own turns, and each turn's Stop starts a new waiter that reads them again. So a read that finds none, or that
- *  fails (a stopped daemon, say), ends this waiter rather than polling for two hours. */
+ *  from its own turns, and each turn's Stop starts a new waiter that reads them again. So a read that finds none ends
+ *  this waiter rather than polling for two hours. A read that fails (a daemon restarting, say) doesn't: a conversation
+ *  that handed work over is waiting for its team precisely because no turn is coming, so it's tried again after a
+ *  longer wait each time, as the Codex watcher does, until the deadline. */
 async function conversationWaiter({ input = {}, out = process.stderr, deps = {} } = {}) {
   const env = deps.env ?? process.env;
   if (inSeat(env)) return 0;
@@ -511,6 +513,9 @@ async function conversationWaiter({ input = {}, out = process.stderr, deps = {} 
   // The key ends with the conversation's claude pid: a waiter whose Claude Code has exited (killed with its terminal, say,
   // which needn't end its hooks) stops rather than polling to its deadline.
   const claudePid = Number(key.slice(key.lastIndexOf(":") + 1));
+  // Consecutive failed reads: each waits twice as long as the one before, up to RETRY_MAX_MS.
+  let failures = 0;
+  const retryIn = () => Math.min(CONVERSATION_POLL_MS * 2 ** failures, RETRY_MAX_MS);
   while (now() < deadline) {
     if (state.read("waiter.json", {}).pid !== me.pid) { state.log("superseded"); return 0; }
     if (!(deps.alive ?? alive)(claudePid)) { state.log("stopped: the conversation's claude process ended"); return 0; }
@@ -519,7 +524,13 @@ async function conversationWaiter({ input = {}, out = process.stderr, deps = {} 
     const current = routes();
     if (current && current.size === 0) { state.log("no address under this conversation's key: nothing to wait for until a turn hands work over"); return 0; }
     const fresh = current && freshTasks(current, state, rig);
-    if (!fresh) { state.log("stopped: OpenRig couldn't be read; the next turn's waiter reads again"); return 0; }
+    if (!fresh) {
+      failures += 1;
+      state.log(`OpenRig couldn't be read, trying again in ${retryIn() / 1000} s`);
+      await wait(retryIn());
+      continue;
+    }
+    failures = 0;
     if (fresh.length > 0) {
       if (!(await writeAll(out, renderConversationTasks(fresh)))) return 0;
       markShown(state, fresh);

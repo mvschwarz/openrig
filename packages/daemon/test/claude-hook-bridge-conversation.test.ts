@@ -150,23 +150,24 @@ describe("the conversation waiter (Claude Code)", () => {
     expect(readFileSync(stateFile("wake.log"), "utf8")).toMatch(/no address under this conversation's key/);
   });
 
-  it("stops when OpenRig can't be read (its addresses or their tasks), rather than reading again every 15 seconds", async () => {
+  it("keeps waiting when OpenRig can't be read (its addresses or their tasks), after a longer wait each time, and still wakes for the task", async () => {
     const { rig: answers } = fakeRig({ goals: [goal()], pending: [question()] });
-    for (const [label, rig, reads] of [
-      ["the addresses", () => null, 1],
-      ["the tasks at an address", (args: string[]) => args[2] === "--tag" ? answers(args) : null, 2],
+    for (const [label, fails] of [
+      ["the addresses", (args: string[]) => args[2] === "--tag"],
+      ["the tasks at an address", (args: string[]) => args[2] === "--destination"],
     ] as const) {
       rmSync(join(data, "conversations"), { recursive: true, force: true });
-      const calls: string[][] = [];
-      let slept = 0;
-      const c = clock();
+      let failing = 3;
+      const sleeps: number[] = [];
+      let t = 1_000_000;
       const s = sink();
+      // Three failed reads (a daemon restarting, say), then OpenRig answers and the team's task is there.
       expect(await bridge.conversationWaiter({ input, out: s.out, deps: { env: env(), alive: () => true, key: KEY,
-        rig: (args: string[]) => { calls.push(args); return rig(args); }, now: c.now, sleep: async () => { slept += 1; await c.sleep(); } } }), label).toBe(0);
-      expect(calls, label).toHaveLength(reads);
-      expect(slept, label).toBe(0);
-      expect(s.text(), label).toBe("");
-      expect(readFileSync(stateFile("wake.log"), "utf8"), label).toMatch(/stopped: OpenRig couldn't be read/);
+        rig: (args: string[]) => (fails(args) && failing-- > 0 ? null : answers(args)),
+        now: () => t, sleep: async (ms: number) => { sleeps.push(ms); t += ms; } } }), label).toBe(2);
+      expect(sleeps, label).toEqual([30_000, 60_000, 120_000]);
+      expect(s.text(), label).not.toBe("");
+      expect(readFileSync(stateFile("wake.log"), "utf8"), label).toMatch(/OpenRig couldn't be read, trying again in 30 s/);
     }
   });
 
