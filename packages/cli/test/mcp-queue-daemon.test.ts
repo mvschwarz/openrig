@@ -33,9 +33,12 @@ describe("MCP queue tools on the daemon's queue routes", () => {
   let server: ServerType;
   let url: string;
   const closers: Array<() => Promise<void>> = [];
-  const saved = { home: process.env.OPENRIG_HOME, session: process.env.OPENRIG_SESSION_NAME };
+  const saved = { home: process.env.OPENRIG_HOME, session: process.env.OPENRIG_SESSION_NAME, node: process.env.OPENRIG_NODE_ID, legacyNode: process.env.RIGGED_NODE_ID };
 
   beforeEach(async () => {
+    // Outside any seat OpenRig launched, whatever runs these tests: a case that wants one sets OPENRIG_NODE_ID itself.
+    delete process.env.OPENRIG_NODE_ID;
+    delete process.env.RIGGED_NODE_ID;
     // Every migration, as an installed daemon has: the queue routes read columns the reduced test schema lacks.
     db = createDb(":memory:");
     migrate(db, ALL_MIGRATIONS);
@@ -68,6 +71,8 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     fs.rmSync(shared, { recursive: true, force: true });
     if (saved.home === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = saved.home;
     if (saved.session === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = saved.session;
+    if (saved.node === undefined) delete process.env.OPENRIG_NODE_ID; else process.env.OPENRIG_NODE_ID = saved.node;
+    if (saved.legacyNode === undefined) delete process.env.RIGGED_NODE_ID; else process.env.RIGGED_NODE_ID = saved.legacyNode;
   });
 
   /** An MCP connection whose server runs as `seat`, the way a desktop app's MCP entry sets it once. */
@@ -429,5 +434,70 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     expect(repo.getById(question.qitemId)).toMatchObject({ state: "done", resolution: "Yes, exclude all four" });
     expect(repo.listTransitions(question.qitemId).slice(-2).map((t) => t.actorSession)).toEqual([address, address]);
     expect(repo.getById(work.qitemId)?.state).toBe("pending");
+  });
+
+  /** The plugin's stdio server in a conversation whose key is `key`, as `rig mcp serve` derives it. */
+  async function conversationServer(key: string) {
+    const mcp = createMcpServer(new DaemonClient(url), { conversationKey: () => key });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "conversation", version: "1.0.0" });
+    await mcp.connect(serverTransport);
+    await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await mcp.close(); });
+    return client;
+  }
+  const createdId = (result: unknown): string =>
+    JSON.parse((result as { content: Array<{ text: string }> }).content[0]!.text).qitemId as string;
+
+  // Slice 15 for 0.7.25: a person's own conversation hears its team's questions even when its MCP entry names a seat for
+  // its tools. Its create gets the issued route by default, with the configured seat still the sender; it acts as that
+  // address on a question sent there; and an explicit returnRoute still decides.
+  it("gives an outside conversation with a configured seat its issued return route by default, and lets it act as that address", async () => {
+    const seat = "cursor@team";
+    const mine = await conversationServer("claude:conversation-1:4242");
+    process.env.OPENRIG_SESSION_NAME = seat;
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const created = await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Add the feature" } });
+    expect(created.isError).toBeFalsy();
+    const work = repo.getById(createdId(created))!;
+    expect(work).toMatchObject({ sourceSession: seat, returnRouteBasis: "issued" });
+    expect(work.returnRoute).toMatch(/^conversation-[0-9a-f]{12}@kernel$/);
+    expect(work.tags?.some((tag) => tag.endsWith(":claude:conversation-1:4242"))).toBe(true);
+
+    const question = await repo.create({ sourceSession: "dev-build@team", destinationSession: work.returnRoute!, body: "Exclude all four files?" });
+    expect((await mine.callTool({ name: "rig_queue_claim", arguments: { qitemId: question.qitemId } })).isError).toBeFalsy();
+    expect((await mine.callTool({ name: "rig_queue_update",
+      arguments: { qitemId: question.qitemId, state: "done", closureReason: "no-follow-on", resolution: "Yes, exclude all four" } })).isError).toBeFalsy();
+    expect(repo.getById(question.qitemId)).toMatchObject({ state: "done", resolution: "Yes, exclude all four" });
+    expect(repo.listTransitions(question.qitemId).slice(-2).map((t) => t.actorSession)).toEqual([work.returnRoute, work.returnRoute]);
+
+    const own = await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Another", returnRoute: "self" } });
+    expect(repo.getById(createdId(own))).toMatchObject({ returnRoute: seat, returnRouteBasis: "caller" });
+  });
+
+  // Under a seat OpenRig launched (OPENRIG_NODE_ID in the server's env, as Claude Code passes it on), a configured seat is
+  // that seat's own tool identity: no default route, with or without a configured seat, since the hooks never read an issued
+  // address there, and the server acts as itself, never as an issued address. An explicit auto still issues one.
+  it("gives no default return route under a seat OpenRig launched, configured or not, and an explicit auto still issues one", async () => {
+    const mine = await conversationServer("claude:conversation-1:4242");
+    process.env.OPENRIG_NODE_ID = "01KXTESTNODE";
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    for (const seat of ["dev-build@team", undefined]) {
+      if (seat) process.env.OPENRIG_SESSION_NAME = seat; else delete process.env.OPENRIG_SESSION_NAME;
+      const created = await mine.callTool({ name: "rig_queue_create", arguments: { destination: IMPL, body: `From ${seat ?? "no seat"}` } });
+      expect(created.isError).toBeFalsy();
+      const row = repo.getById(createdId(created))!;
+      expect(row.returnRoute ?? null).toBeNull();
+      expect(row.tags?.some((tag) => tag.endsWith(":claude:conversation-1:4242")) ?? false).toBe(false);
+    }
+
+    process.env.OPENRIG_SESSION_NAME = "dev-build@team";
+    const explicit = await mine.callTool({ name: "rig_queue_create", arguments: { destination: IMPL, body: "Explicit", returnRoute: "auto" } });
+    const issued = repo.getById(createdId(explicit))!;
+    expect(issued).toMatchObject({ sourceSession: "dev-build@team", returnRouteBasis: "issued" });
+    expect(issued.returnRoute).toMatch(/^conversation-[0-9a-f]{12}@kernel$/);
+    const question = await repo.create({ sourceSession: IMPL, destinationSession: issued.returnRoute!, body: "Which one?" });
+    await mine.callTool({ name: "rig_queue_update", arguments: { qitemId: question.qitemId, state: "done", closureReason: "no-follow-on", resolution: "This one" } });
+    expect(repo.listTransitions(question.qitemId).map((t) => t.actorSession)).not.toContain(issued.returnRoute);
   });
 });

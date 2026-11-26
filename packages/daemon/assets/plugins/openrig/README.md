@@ -32,18 +32,18 @@ on an OpenRig team load `openrig-core` instead.
 ## How the team's questions reach your chat
 
 When your agent hands the team work with an address of its own (`returnRoute` `auto` on `rig_queue_create`, the default
-in Claude Code when the plugin has no seat, or `rig queue create --return-route auto`), OpenRig gives that work an address
+in Claude Code, or `rig queue create --return-route auto`), OpenRig gives that work an address
 for your chat and records it with a key for the chat. In Claude Code the key is the chat's own `claude` process, so a
 new chat in the same process (after `/clear`) still gets the earlier chat's tasks, and one resumed in a new process
 (`claude --resume`) doesn't get them by itself. In Codex it's the session id Codex gives its commands and hooks.
 
 - **Which setups they cover:**
-  - **Claude Code with the plugin's OpenRig seat left blank:** `rig_queue_create` gives the work an address of its own
-    by default.
+  - **Claude Code:** `rig_queue_create` gives the work an address of its own by default, whether the plugin's OpenRig
+    seat is set or blank. With a seat set, the seat stays the work's sender. Work handed over with `returnRoute: "self"`
+    sends the team's questions to the seat's own address instead, which the hooks don't watch, so your agent finds them
+    only when it checks (`rig_queue_list` with `owned`). In one of OpenRig's own seats there's no such default: that seat
+    has its own delivery.
   - **`rig queue create --return-route auto` in the shell,** in Claude Code or Codex.
-  - **With a seat set:** only work handed over with `returnRoute: "auto"` on `rig_queue_create`. Without it, the team's
-    questions go to the seat's own address, which the hooks don't watch, so your agent finds them only when it checks
-    (`rig_queue_list` with `owned`).
   - **Not yet: Codex through the MCP server.** Codex may not give the server the session id the key comes from, so its
     handovers get no key and nothing wakes for them. In Codex, hand work over with `rig queue create --return-route auto`
     in the shell.
@@ -90,8 +90,8 @@ claude plugin install openrig@openrig-app
 ```
 
 Set the plugin's **OpenRig seat** to your address (`/plugin`, then configure): type the address into the row, then save.
-Pressing Enter on the empty row closes it with no change. Then start a new session. With a seat set, the hooks bring in
-the team's questions only for work handed over with `returnRoute: "auto"` (see "Which setups they cover" above).
+Pressing Enter on the empty row closes it with no change. Then start a new session. With a seat set, the hooks still
+bring in the team's questions about work your agent hands over (see "Which setups they cover" above).
 
 **Codex**
 
