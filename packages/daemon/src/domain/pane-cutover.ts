@@ -18,6 +18,11 @@ export type PaneTerminationResult = { ok: true; path: "graceful" | "forced" } | 
  * graceful TERM, and a bounded-timeout KILL as the degraded fallback. It leaves `remain-on-exit` on: the
  * caller decides when the pane no longer needs holding. Timing alone proves nothing about what the runtime
  * saved before it exited.
+ *
+ * `beforeEffect` re-verifies the caller's pane identity before each step, and `standbyWitness` makes the
+ * signalling call itself re-read it as late as possible (its guarded tmux reads run first). The signal is
+ * still a separate OS exec after that read, so a tmux server replaced in that final interval is a residual
+ * window no reader can close; it is accepted, as the audit's tmux identity checks are.
  */
 export async function terminatePaneInPlace(
   tmux: PaneCutoverTmux,
@@ -26,6 +31,7 @@ export async function terminatePaneInPlace(
   label = "Retiree",
   inputTarget = paneId,
   beforeEffect?: () => Promise<void>,
+  standbyWitness?: { target: { session: string; pane: string; nodeId: string }; identity: string },
 ): Promise<PaneTerminationResult> {
   const failures: string[] = [];
   await beforeEffect?.();
@@ -33,12 +39,12 @@ export async function terminatePaneInPlace(
   if (beforeEffect && !remain.ok) return { ok: false, message: remain.message };
   if (!remain.ok) failures.push(`remain-on-exit: ${remain.message}`);
   await beforeEffect?.();
-  const term = await tmux.signalPaneProcess(inputTarget, "TERM");
+  const term = await tmux.signalPaneProcess(inputTarget, "TERM", ...(standbyWitness ? [standbyWitness] : []));
   if (!term.ok) failures.push(`TERM: ${term.message}`);
   if (await waitPaneDead(tmux, paneId, timing)) return { ok: true, path: "graceful" };
   // Graceful window elapsed — force-kill (the pinned degraded path).
   await beforeEffect?.();
-  const kill = await tmux.signalPaneProcess(inputTarget, "KILL");
+  const kill = await tmux.signalPaneProcess(inputTarget, "KILL", ...(standbyWitness ? [standbyWitness] : []));
   if (!kill.ok) failures.push(`KILL: ${kill.message}`);
   if (await waitPaneDead(tmux, paneId, timing)) return { ok: true, path: "forced" };
   const detail = failures.length > 0 ? ` Tmux failures: ${failures.join("; ")}.` : "";

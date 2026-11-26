@@ -2429,7 +2429,7 @@ export class SeatLifecycleService {
           }
           await beforeEffect?.();
           began = true;
-        });
+        }, { target, identity });
       if (result.ok && await this.tmuxAdapter.standbyPaneIdentity(target, true) === identity) return { ok: true };
       return { ok: false, code: "standby_unconfirmed", message: result.ok ? "The stopped pane could not be verified." : result.message, stopPhase: "kill_attempted" };
     } catch (error) {

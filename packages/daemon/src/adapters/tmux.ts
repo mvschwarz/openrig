@@ -2901,23 +2901,52 @@ export class TmuxAdapter {
   /** Seat-handover cutover: signal the pane's foreground process (the retiree) — `TERM` for the graceful
    *  exit-in-place, `KILL` for the bounded-timeout force fallback. Resolves the pane pid then `kill`s it;
    *  an unresolvable pid is a structured, non-throwing failure.
+   *  With `standbyWitness` (a standby stop), the pane's identity is read again here — after guardedInput's tmux
+   *  reads — and a changed pane is refused. The signal also goes to the pane tty's foreground process group,
+   *  where a Pi/Claude runner lives as the interactive shell's job: signalling only the shell would orphan it.
+   *  The kill is still a separate exec, so a server replaced between that read and it stays a residual window.
    *  Stays on the shell-string path deliberately: this is a Unix `kill`,
    *  not a multiplexer command (Windows needs taskkill — named follow-up). */
-  async signalPaneProcess(paneId: string, signal: "TERM" | "KILL"): Promise<TmuxResult> {
-    return this.guardedInput(paneId, (pane, beforeWrite) => this.signalPaneProcessUnchecked(pane, signal, beforeWrite));
+  async signalPaneProcess(paneId: string, signal: "TERM" | "KILL",
+    standbyWitness?: { target: { session: string; pane: string; nodeId: string }; identity: string }): Promise<TmuxResult> {
+    return this.guardedInput(paneId, (pane, beforeWrite) =>
+      this.signalPaneProcessUnchecked(pane, signal, beforeWrite, standbyWitness));
   }
 
-  private async signalPaneProcessUnchecked(paneId: string, signal: "TERM" | "KILL", beforeWrite: () => void): Promise<TmuxResult> {
-    const pid = await this.getPanePid(paneId);
-    if (pid == null) {
-      return { ok: false, code: "pane_pid_unavailable", message: `Could not resolve the pane pid for "${paneId}".` };
-    }
+  private async signalPaneProcessUnchecked(paneId: string, signal: "TERM" | "KILL", beforeWrite: () => void,
+    standbyWitness?: { target: { session: string; pane: string; nodeId: string }; identity: string }): Promise<TmuxResult> {
     try {
+      if (standbyWitness && await this.standbyPaneIdentity(standbyWitness.target, false) !== standbyWitness.identity) {
+        return { ok: false, code: "guard_target_changed", message: `"${paneId}" is no longer the standby pane verified before the stop; nothing was killed.` };
+      }
+      const pid = await this.getPanePid(paneId);
+      if (pid == null) {
+        return { ok: false, code: "pane_pid_unavailable", message: `Could not resolve the pane pid for "${paneId}".` };
+      }
       beforeWrite();
+      if (standbyWitness) await this.signalForegroundGroup(pid, signal);
       await this.exec(`kill -${signal} ${pid}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
+    }
+  }
+
+  /** A pane's tty foreground process group, read from the pane's own process: null when no tty has one, or `ps`
+   *  can't be read. The pane pid signal still covers the shell, so an unreadable group is not a failure. */
+  private async signalForegroundGroup(panePid: number, signal: "TERM" | "KILL"): Promise<void> {
+    let group: number | null = null;
+    try {
+      const parsed = Number.parseInt((await this.run(["ps", "-o", "tpgid=", "-p", String(panePid)])).trim(), 10);
+      group = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+    } catch { /* no ps, or it can't read this pid: the pane pid itself is still signalled */ }
+    if (group === null) return;
+    try {
+      await this.exec(`kill -${signal} -${group}`);
+    } catch (err) {
+      // A group already gone (the graceful TERM took the runner with it) is not a failure; any other refusal is,
+      // since a runner may still be in it.
+      if (!/no such process/i.test(err instanceof Error ? err.message : String(err))) throw err;
     }
   }
 

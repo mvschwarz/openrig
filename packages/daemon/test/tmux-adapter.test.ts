@@ -1786,6 +1786,46 @@ describe("TmuxAdapter", () => {
   });
 
   describe("signalPaneProcess", () => {
+    const witness = { target: { session: "worker@test", pane: "%3", nodeId: "a" }, identity: "$1|42|100|%3" };
+    /** The real adapter's standby witness reads, with only the pane pid and foreground group controlled. */
+    const witnessExec = (calls: string[], tpgid: string, identity = "$1|42|100|%3|0|worker@test|1|1") => vi.fn<ExecFn>(async cmd => {
+      calls.push(cmd);
+      if (cmd.includes("#{session_windows}")) return identity + "\n";
+      if (cmd.includes("show-environment")) return "OPENRIG_NODE_ID=a\n";
+      if (cmd.includes("#{pane_pid}")) return "4242\n";
+      if (cmd.includes("tpgid")) return tpgid;
+      return "";
+    });
+
+    it.each(["TERM", "KILL"] as const)("signals the runner's own process group with standby %s, then the pane pid", async signal => {
+      const calls: string[] = [];
+      const adapter = new TmuxAdapter(witnessExec(calls, " 4300\n"));
+
+      const result = await adapter.signalPaneProcess("%3", signal, witness);
+
+      expect(result.ok).toBe(true);
+      expect(calls.indexOf(`kill -${signal} -4300`)).toBeLessThan(calls.indexOf(`kill -${signal} 4242`));
+    });
+
+    it("keeps the pane pid signal when the tty has no foreground group", async () => {
+      const calls: string[] = [];
+      const adapter = new TmuxAdapter(witnessExec(calls, "-1\n"));
+
+      expect(await adapter.signalPaneProcess("%3", "TERM", witness)).toEqual({ ok: true });
+      expect(calls).toContain("kill -TERM 4242");
+      expect(calls.some(cmd => cmd.startsWith("kill -TERM -"))).toBe(false);
+    });
+
+    it.each(["TERM", "KILL"] as const)("refuses standby %s when the pane changed before the signal", async signal => {
+      const exec = witnessExec([], " 4300\n", "$1|43|101|%3|0|worker@test|1|1");
+      const adapter = new TmuxAdapter(exec);
+
+      const result = await adapter.signalPaneProcess("%3", signal, witness);
+
+      expect(result).toMatchObject({ ok: false, code: "guard_target_changed" });
+      expect(exec.mock.calls.some(([cmd]) => cmd.startsWith("kill "))).toBe(false);
+    });
+
     it("sends the given signal to the pane's foreground pid (graceful TERM / fallback KILL)", async () => {
       const calls: string[] = [];
       const exec = vi.fn<ExecFn>(async (cmd: string) => { calls.push(cmd); return cmd.includes("pane_pid") ? "4242\n" : ""; });
