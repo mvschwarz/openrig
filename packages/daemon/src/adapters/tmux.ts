@@ -2937,7 +2937,8 @@ export class TmuxAdapter {
   private async signalForegroundGroup(panePid: number, signal: "TERM" | "KILL"): Promise<void> {
     let group: number | null = null;
     try {
-      const parsed = Number.parseInt((await this.run(["ps", "-o", "tpgid=", "-p", String(panePid)])).trim(), 10);
+      // Plain `ps`, NOT the tmux-targeted run(): server args would land in ps's argv.
+      const parsed = Number.parseInt((await this.exec(`ps -o tpgid= -p ${String(panePid)}`)).trim(), 10);
       group = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
     } catch { /* no ps, or it can't read this pid: the pane pid itself is still signalled */ }
     if (group === null) return;

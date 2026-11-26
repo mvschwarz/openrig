@@ -1804,7 +1804,10 @@ describe("TmuxAdapter", () => {
       const result = await adapter.signalPaneProcess("%3", signal, witness);
 
       expect(result.ok).toBe(true);
-      expect(calls.indexOf(`kill -${signal} -4300`)).toBeLessThan(calls.indexOf(`kill -${signal} 4242`));
+      const groupIndex = calls.indexOf(`kill -${signal} -4300`);
+      const pidIndex = calls.indexOf(`kill -${signal} 4242`);
+      expect(groupIndex).toBeGreaterThanOrEqual(0);
+      expect(groupIndex).toBeLessThan(pidIndex);
     });
 
     it("keeps the pane pid signal when the tty has no foreground group", async () => {
