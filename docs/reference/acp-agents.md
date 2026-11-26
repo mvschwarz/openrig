@@ -232,7 +232,7 @@ The team's questions reach you only as a registered person: an `<id>@external` a
 so at your first prompt, and your work is still sent.
 
 **In Zed**, open Agent Settings, go to External Agents, choose `Add Agent`, then `Add Custom Agent`. Zed opens your
-`settings.json` at its `agent_servers` entry; make it:
+`settings.json` at its `agent_servers` entry; add OpenRig there:
 
 ```json
 "agent_servers": {
@@ -242,8 +242,8 @@ so at your first prompt, and your work is still sent.
 
 **In T3 Code**, open Settings, then Providers, and choose `Add provider`, `Show more`, then `Local ACP command`. Enter
 `rig` as the executable, then add each argument on its own row, in order: `acp`, `serve`, `--to` and `lead@my-team`.
-T3 Code passes them as written, with no shell, so one row holding the whole command won't work. Name it OpenRig, add
-the instance, and choose OpenRig when you start a thread.
+T3 Code passes them as written, with no shell, so one row holding the whole command won't work. Choose `Next`, set
+`Label` to OpenRig and choose `Add instance`, then choose OpenRig when you start a thread.
 
 Other apps take the same command and arguments wherever they configure a custom ACP agent. If an app can't find `rig`,
 give its full path instead: `command -v rig` prints it.
