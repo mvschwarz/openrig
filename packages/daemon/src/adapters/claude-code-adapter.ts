@@ -592,6 +592,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!enterResult.ok) {
         return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
       }
+      // Readiness proves the fork's Claude by this launch, as it proves a fresh one: by the fork's own --session-id in the
+      // pane's foreground process. Without the record, a Claude that runs as a child of a shell (a launch the pane's shell
+      // sources in a subshell, or a claude alias or function) reads as a shell that isn't idle, and readiness waited until
+      // it timed out while the fork ran.
+      this.autoLaunches.set(binding.nodeId, { binding, token: forkSessionId, executable: managed?.executable,
+        scriptLaunch: managed?.executableIsScript });
       // As with a fresh launch, nothing is read back from Claude's session files: a same-name
       // file can belong to an earlier occupant or another seat sharing the config directory.
       return { ok: true, resumeToken: forkSessionId, resumeType: "claude_id", appliedLaunch, ...launchedExecutable, ...launchNotes() };
