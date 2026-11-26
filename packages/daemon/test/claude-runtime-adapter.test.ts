@@ -135,6 +135,37 @@ it("shares a poll's Claude idle-shell listings without collapsing each two-sampl
   expect(reads).toBe(4);
 });
 
+// A fork handover's successor whose Claude runs as a child of a non-interactive inner shell (a launch the pane's shell
+// sourced in a subshell, or a claude alias or function): the pane reads `bash`, the inner shell holds the foreground, and the
+// screen has Claude's prompt but not its header. Readiness proves it by the fork's own --session-id, as it does a fresh launch,
+// and a Claude naming another conversation there isn't this fork.
+it.each([
+  ["the fork's own session id", true],
+  ["another conversation's session id", false],
+] as const)("readiness of a forked Claude under an inner shell, when it names %s", async (_case, own) => {
+  const forkId = "11111111-2222-4333-8444-555555555555";
+  const named = own ? forkId : "99999999-8888-4777-8666-555555555555";
+  const startedAt = "Sat Jan  1 12:00:00 2000";
+  const rows = [
+    { pid: 100, ppid: 1, pgid: 100, tpgid: 200, executableName: "bash", command: "-bash", startedAt },
+    { pid: 200, ppid: 100, pgid: 200, tpgid: 200, executableName: "bash", command: "/bin/bash", startedAt },
+    { pid: 300, ppid: 200, pgid: 200, tpgid: 200, executableName: "claude",
+      command: `claude --permission-mode acceptEdits --resume parent --fork-session --session-id ${named} --name seat`, startedAt },
+  ];
+  const tmux = mockTmux();
+  tmux.getPaneCommand = vi.fn(async () => "bash");
+  tmux.capturePaneContent = vi.fn(async () => "earlier output\n❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)");
+  tmux.listPanes = vi.fn(async () => [{ id: "%1" }]) as unknown as TmuxAdapter["listPanes"];
+  tmux.getPanePid = vi.fn(async () => 100);
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), listProcesses: async () => rows, sessionIdFactory: () => forkId });
+  const binding = { ...makeBinding(), tmuxPane: "%1" };
+  expect(await adapter.launchHarness(binding, { name: "seat", forkSource: { kind: "native_id", value: "parent" } }))
+    .toMatchObject({ ok: true, resumeToken: forkId });
+  const ready = await adapter.checkReady(binding);
+  if (own) expect(ready).toMatchObject({ ready: true });
+  else expect(ready).toMatchObject({ ready: false, code: "awaiting_runtime" });
+});
+
 it("reduces enumerations for a sequential poll of Claude idle shells", async () => {
   const rows = Array.from({ length: 90 }, (_, i) => ({
     pid: 1000 + i, ppid: 1, pgid: 1000 + i, tpgid: 1000 + i,
@@ -1214,21 +1245,34 @@ describe("Claude Code runtime adapter", () => {
       command: "claude --permission-mode acceptEdits --resume abc-123 --name dev-impl@test-rig" };
     const occupied = [{ ...pane, tpgid: 11 }, launchScript, claude];
     const tui = ["Claude Code v2.1.89", "❯ Ready", "  ? for shortcuts"].join("\n");
+    // A staged launch's script name, and the line the pane's shell shows once it reads the launch (after its prompt).
+    const launchName = "openrig-tmux-send-4242-0f0e0d0c-1111-4222-8333-444455556666.txt";
+    const typed = `( . '/tmp/${launchName}' )`;
     // 30 polls of 200 ms: the bound this test gives the wait (the daemon passes runtime.readiness_timeout_seconds).
     const WAIT_MS = 6_000;
 
     // `screen(read)` is the pane text on the nth capture; `rows(read)` the process list at that point.
     // `command(read)`, when given, is the pane's foreground command before the nth capture.
-    const run = async (opts: { screen?: (read: number) => string; rows?: (read: number) => typeof occupied; paneCommand?: string; command?: (read: number) => string; readinessTimeoutMs?: number; autoDrive?: boolean } = {}) => {
+    // `launchScript.readAt`, when given: the launch goes as a staged script (sendShellCommand, as in production), which the
+    // pane's shell reads before the nth capture (never, when undefined); the tmux adapter says whether it's still unread,
+    // and gives the exact line it typed to run the script (`typed`), which the pane shows once the shell reads it.
+    const run = async (opts: { screen?: (read: number) => string; rows?: (read: number) => typeof occupied; paneCommand?: string; command?: (read: number) => string; readinessTimeoutMs?: number; autoDrive?: boolean; launchScript?: { readAt?: number } } = {}) => {
       let reads = 0;
       const tmux = mockTmux();
+      const staged = opts.launchScript;
+      if (staged) {
+        tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+        tmux.stagedLaunchUnread = vi.fn((target: string) => target === "r01-impl" && (staged.readAt === undefined || reads < staged.readAt));
+        tmux.stagedLaunchTypedLine = vi.fn((target: string) => (target === "r01-impl" ? typed : undefined));
+      }
       (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => opts.command?.(reads) ?? opts.paneCommand ?? "sh");
       (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async () => (opts.screen ?? (() => ""))(reads++));
       (tmux as unknown as { getPanePid: unknown }).getPanePid = vi.fn(async () => 10);
       const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, autoDriveProviderPrompts: opts.autoDrive, readinessTimeoutMs: "readinessTimeoutMs" in opts ? opts.readinessTimeoutMs : WAIT_MS,
-        listProcesses: () => (opts.rows ?? (() => occupied))(reads) });
+        listProcesses: () => (opts.rows ?? (() => occupied))(reads),
+        ...(staged ? { seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never } : {}) });
       const result = await adapter.launchHarness({ ...makeBinding(), tmuxPane: "%1" }, { name: "dev-impl@test-rig", resumeToken: "abc-123" });
-      return { result, reads, tmux };
+      return { result, reads, tmux, adapter };
     };
 
     it("doesn't end the wait on Claude's process alone, and lets it stand with a note when the longer wait ends", async () => {
@@ -1370,6 +1414,215 @@ describe("Claude Code runtime adapter", () => {
       expect((result as { error: string }).error).toContain("resume-selection prompt");
       // Ended at the prompt, not at the bound.
       expect(reads).toBeLessThan(25);
+    });
+
+    // Reported on 0.7.18: a single-seat launch returned "pane returned to shell" while, a moment later, the original
+    // conversation was running in the new pane. A new pane's shell still running its startup files holds the terminal
+    // alone, as an idle shell does, so both of the idle-shell samples agree; it reads the launch only when it's done.
+    describe("a shell that hasn't read the launch yet", () => {
+      const shellOnly = () => [pane];
+
+      it("isn't reported back at its shell: the resume it then starts is marked resumed", async () => {
+        const { result, reads } = await run({ launchScript: { readAt: 24 }, command: (read) => (read < 24 ? "zsh" : "claude"),
+          rows: (read) => (read < 24 ? shellOnly() : occupied), screen: (read) => (read < 24 ? "" : tui) });
+        expect(result, JSON.stringify({ error: (result as { error?: string }).error, recovery: (result as { recovery?: string }).recovery }))
+          .toMatchObject({ ok: true, resumeToken: "abc-123" });
+        expect(reads).toBeGreaterThan(24);
+      });
+
+      it("keeps the launch and its token when the shell still hasn't read it at the end of the wait", async () => {
+        const { result } = await run({ launchScript: {}, paneCommand: "zsh", rows: shellOnly });
+        expect(result, JSON.stringify({ error: (result as { error?: string }).error, recovery: (result as { recovery?: string }).recovery }))
+          .toMatchObject({ ok: false, recovery: "attention_required",
+          error: "Claude resume did not finish within 6s; Claude may still be starting, so the launch was kept" });
+      });
+
+      // An earlier launch's "No conversation found" can still be on screen in a reused pane. While the staged launch is
+      // unread Claude hasn't run, so that text isn't this launch's: no fresh retry abandons the stored conversation.
+      const earlierNotFound = "No conversation found with session ID: old-1\nzsh$ ";
+      it("doesn't retry fresh on an earlier launch's \"No conversation found\" while the launch is unread: the launch is kept", async () => {
+        const { result } = await run({ launchScript: {}, paneCommand: "zsh", rows: shellOnly, screen: () => earlierNotFound });
+        expect(result, JSON.stringify({ error: (result as { error?: string }).error, recovery: (result as { recovery?: string }).recovery }))
+          .toMatchObject({ ok: false, recovery: "attention_required",
+          error: "Claude resume did not finish within 6s; Claude may still be starting, so the launch was kept" });
+      });
+
+      it("resumes when the shell then reads the launch past an earlier launch's \"No conversation found\"", async () => {
+        const { result } = await run({ launchScript: { readAt: 24 }, command: (read) => (read < 24 ? "zsh" : "claude"),
+          rows: (read) => (read < 24 ? shellOnly() : occupied), screen: (read) => (read < 24 ? earlierNotFound : tui) });
+        expect(result, JSON.stringify({ error: (result as { error?: string }).error, recovery: (result as { recovery?: string }).recovery }))
+          .toMatchObject({ ok: true, resumeToken: "abc-123" });
+      });
+
+      it("retries fresh on this launch's own \"No conversation found\", printed after an earlier launch's", async () => {
+        const { result } = await run({ launchScript: { readAt: 24 }, paneCommand: "zsh", rows: shellOnly,
+          screen: (read) => (read < 24 ? earlierNotFound : `${earlierNotFound}${typed}\nNo conversation found with session ID: abc-123\nzsh$ `) });
+        expect(result).toMatchObject({ ok: false, recovery: "retry_fresh", missingConversation: true });
+      });
+
+      // #3843 r2: the report is placed by this launch's own typed line, not by how many reports are on screen. Only one
+      // below the last line showing the launch's script name is this launch's; one above it is an earlier launch's.
+      describe("an earlier launch's \"No conversation found\" is told apart by the launch's typed line", () => {
+        // A shell already at its prompt reads the launch before the first poll, so it's never seen unread.
+        it("a shell that read the launch before the first poll: an earlier report above its typed line isn't this launch's", async () => {
+          const { result } = await run({ launchScript: { readAt: 0 }, paneCommand: "claude", screen: () => `${earlierNotFound}${typed}\n${tui}` });
+          expect(result, JSON.stringify(result)).toMatchObject({ ok: true, resumeToken: "abc-123" });
+        });
+
+        it("a shell that read the launch before the first poll: a report below its typed line is this launch's", async () => {
+          const { result } = await run({ launchScript: { readAt: 0 }, paneCommand: "zsh", rows: shellOnly,
+            screen: () => `${earlierNotFound}${typed}\nNo conversation found with session ID: abc-123\nzsh$ ` });
+          expect(result).toMatchObject({ ok: false, recovery: "retry_fresh", missingConversation: true });
+        });
+
+        // Readiness after the launch judges the report the same way: the startup orchestrator's wait calls checkReady, which
+        // reads the pane again, so an earlier report above the typed line mustn't fail a seat that resumed below it.
+        it("readiness after the launch: an earlier report above the typed line doesn't fail the resumed seat", async () => {
+          const { result, adapter } = await run({ launchScript: { readAt: 0 }, paneCommand: "claude", screen: () => `${earlierNotFound}${typed}\n${tui}` });
+          expect(result).toMatchObject({ ok: true, resumeToken: "abc-123" });
+          const ready = await adapter.checkReady({ ...makeBinding(), tmuxPane: "%1" });
+          expect(ready, JSON.stringify(ready)).toMatchObject({ ready: true });
+        });
+
+        it("readiness after the launch: a report below the typed line is still this launch's", async () => {
+          const { adapter } = await run({ launchScript: { readAt: 0 }, paneCommand: "zsh", rows: shellOnly,
+            screen: () => `${earlierNotFound}${typed}\nNo conversation found with session ID: abc-123\nzsh$ ` });
+          const ready = await adapter.checkReady({ ...makeBinding(), tmuxPane: "%1" });
+          expect(ready, JSON.stringify(ready)).toMatchObject({ ready: false, code: "no_conversation_found" });
+        });
+
+        // The restore path resumes through ClaudeResumeAdapter, so this adapter holds no launch of its own for the seat; the
+        // tmux adapter's record of the line it staged still places the report.
+        it("readiness for a resume another adapter staged: an earlier report above its typed line doesn't fail it, and with no staged line the report stands", async () => {
+          const tmux = mockTmux();
+          tmux.stagedLaunchUnread = vi.fn(() => false);
+          tmux.stagedLaunchTypedLine = vi.fn((target: string) => (target === "r01-impl" ? typed : undefined));
+          (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
+          (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(`${earlierNotFound}${typed}\n${tui}`);
+          (tmux as unknown as { getPanePid: unknown }).getPanePid = vi.fn(async () => 10);
+          const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => occupied });
+          const ready = await adapter.checkReady({ ...makeBinding(), tmuxPane: "%1" });
+          expect(ready, JSON.stringify(ready)).toMatchObject({ ready: true });
+          tmux.stagedLaunchTypedLine = vi.fn(() => undefined);
+          const unplaced = await adapter.checkReady({ ...makeBinding(), tmuxPane: "%1" });
+          expect(unplaced, JSON.stringify(unplaced)).toMatchObject({ ready: false, code: "no_conversation_found" });
+        });
+
+        it("an earlier report still above the typed line is waited past while Claude starts below it", async () => {
+          // The launch script is still starting Claude, with nothing drawn below the typed line yet.
+          const { result } = await run({ launchScript: { readAt: 0 }, rows: () => [{ ...pane, tpgid: 11 }, launchScript],
+            screen: () => `${earlierNotFound}${typed}\n` });
+          expect(result, JSON.stringify(result)).toMatchObject({ ok: false, recovery: "attention_required",
+            error: "Claude resume did not finish within 6s; Claude may still be starting, so the launch was kept" });
+        });
+
+        // The reviewer's cells (review50-r2, reviewer-count-edges.patch), with the typed line the pane shows once the
+        // shell has read the launch.
+        it("an old report that scrolled out (or was replaced), then this launch's own report below its typed line: retried fresh", async () => {
+          const { result, reads } = await run({ launchScript: { readAt: 4 },
+            command: read => read < 4 ? "zsh" : "claude", rows: read => read < 4 ? shellOnly() : occupied,
+            screen: read => read < 2 ? earlierNotFound : read < 4 ? "starting..." : `zsh$ ${typed}\nNo conversation found with session ID: abc-123` });
+          expect(result, JSON.stringify({ result, reads })).toMatchObject({ ok: false, recovery: "retry_fresh", missingConversation: true });
+        });
+
+        it("a redraw that reprints the old report twice above the typed line isn't this launch's report", async () => {
+          const { result, reads } = await run({ launchScript: { readAt: 4 },
+            command: read => read < 4 ? "zsh" : "claude", rows: read => read < 4 ? shellOnly() : occupied,
+            screen: read => read < 2 ? earlierNotFound : read < 4 ? "starting..." : read < 6 ? `${earlierNotFound}${earlierNotFound}${typed}\n` : tui });
+          expect(result, JSON.stringify({ result, reads })).toMatchObject({ ok: true, resumeToken: "abc-123" });
+        });
+
+        it("a redraw that reprints the old report once above the typed line still reaches the ready screen", async () => {
+          const { result } = await run({ launchScript: { readAt: 4 },
+            command: read => read < 4 ? "zsh" : "claude", rows: read => read < 4 ? shellOnly() : occupied,
+            screen: read => read < 2 ? earlierNotFound : read < 4 ? "starting..." : read < 6 ? `${earlierNotFound}${typed}\n` : tui });
+          expect(result).toMatchObject({ ok: true, resumeToken: "abc-123" });
+        });
+
+        it("two launches in one pane: the second doesn't take the first one's report for its own", async () => {
+          const lines = ["aaaaaaaa", "bbbbbbbb"].map(id => `( . '/tmp/openrig-tmux-send-4242-${id}-1111-4222-8333-444455556666.txt' )`);
+          const first = `zsh$ ${lines[0]}\nNo conversation found with session ID: old-1\nzsh$ `;
+          let launches = 0;
+          const tmux = mockTmux();
+          tmux.sendShellCommand = vi.fn(async () => { launches++; return { ok: true as const }; });
+          tmux.stagedLaunchUnread = vi.fn(() => false);
+          tmux.stagedLaunchTypedLine = vi.fn(() => lines[launches - 1]);
+          (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => (launches === 1 ? "zsh" : "claude"));
+          (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async () =>
+            (launches === 1 ? first : `${first}${lines[1]}\n${tui}`));
+          (tmux as unknown as { getPanePid: unknown }).getPanePid = vi.fn(async () => 10);
+          const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, readinessTimeoutMs: WAIT_MS,
+            listProcesses: () => (launches === 1 ? shellOnly() : occupied),
+            seatLaunchEnvironment: { command: async (_session: string, command: string) => command } as never });
+          const binding = { ...makeBinding(), tmuxPane: "%1" };
+          expect(await adapter.launchHarness(binding, { name: "dev-impl@test-rig", resumeToken: "old-1" }))
+            .toMatchObject({ ok: false, recovery: "retry_fresh", missingConversation: true });
+          expect(await adapter.launchHarness(binding, { name: "dev-impl@test-rig", resumeToken: "abc-123" }))
+            .toMatchObject({ ok: true, resumeToken: "abc-123" });
+          expect(launches).toBe(2);
+        });
+
+        // review50-r2 (reviewer-tests.patch): the script's name in output isn't the typed line, so it moves nothing.
+        it("reviewer anchor: a later message naming the script doesn't hide this launch's missing report", async () => {
+          const { result, reads } = await run({ launchScript: { readAt: 0 }, paneCommand: "claude",
+            screen: () => `${typed}\nNo conversation found with session ID: abc-123\ndiagnostic: ${launchName} finished\nzsh$ ` });
+          expect(result, JSON.stringify({ result, reads })).toMatchObject({ ok: false, recovery: "retry_fresh", missingConversation: true });
+        });
+
+        it("reviewer anchor: the script's name in output alone leaves whose report it is unknown", async () => {
+          const { result, reads } = await run({ launchScript: { readAt: 0 }, paneCommand: "claude",
+            screen: () => `diagnostic: ${launchName}\nNo conversation found with session ID: old-1` });
+          expect(result, JSON.stringify({ result, reads })).toMatchObject({ ok: false, recovery: "attention_required" });
+        });
+
+        it("reviewer anchor: a typed line split inside the script's name still places this launch's report", async () => {
+          const wrap = typed.replace(launchName, launchName.slice(0, 23) + "\n" + launchName.slice(23));
+          const { result } = await run({ launchScript: { readAt: 0 }, paneCommand: "claude",
+            screen: () => `${wrap}\nNo conversation found with session ID: abc-123` });
+          expect(result).toMatchObject({ ok: false, recovery: "retry_fresh", missingConversation: true });
+        });
+
+        // Whose report it is can't be told without the typed line: never a missing conversation, never an earlier one.
+        it("a report with the typed line out of view keeps the wait, and ends in the launch-kept result while Claude runs", async () => {
+          const { result, reads } = await run({ launchScript: { readAt: 0 }, paneCommand: "claude",
+            screen: () => "No conversation found with session ID: abc-123\n" });
+          expect(result, JSON.stringify(result)).toEqual({
+            ok: false,
+            probe: probeEvidence,
+            error: "Claude resume did not finish within 6s; Claude may still be starting, so the launch was kept",
+            recovery: "attention_required",
+            evidence: "No conversation found with session ID: abc-123\n",
+          });
+          expect(reads).toBe(31);
+        });
+
+        it("a report with the typed line out of view at a proven idle shell ends as the return to the shell, not a missing conversation", async () => {
+          const { result } = await run({ launchScript: { readAt: 0 }, paneCommand: "zsh", rows: shellOnly,
+            screen: () => "No conversation found with session ID: abc-123\nzsh$ " });
+          expect(result).toEqual({
+            ok: false,
+            probe: probeEvidence,
+            error: "Claude resume failed: pane returned to shell instead of entering Claude",
+            recovery: "retry_fresh",
+          });
+        });
+      });
+
+      // Controls: once the shell has read the launch, its verdicts are as before.
+      it("a shell that read the launch and is back at its prompt still reports the return", async () => {
+        const { result } = await run({ launchScript: { readAt: 0 }, paneCommand: "zsh", rows: shellOnly });
+        expect(result).toEqual({
+          ok: false,
+          probe: probeEvidence,
+          error: "Claude resume failed: pane returned to shell instead of entering Claude",
+          recovery: "retry_fresh",
+        });
+      });
+
+      it("an ordinary resume the shell reads at once is marked resumed", async () => {
+        const { result } = await run({ launchScript: { readAt: 0 }, paneCommand: "claude", screen: () => tui });
+        expect(result).toMatchObject({ ok: true, resumeToken: "abc-123" });
+      });
     });
 
     it("reports a return to the shell when the pane is back at its shell by the end of the wait", async () => {

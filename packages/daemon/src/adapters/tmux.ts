@@ -1,9 +1,9 @@
 import type { InputReadDiagnostic } from "../domain/input-read-diagnostic.js";
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../domain/seat-delivery-guard.js";
-import { writeFile as fsWriteFile, unlink as fsUnlink, readFile as fsReadFile } from "node:fs/promises";
+import { writeFile as fsWriteFile, unlink as fsUnlink, readFile as fsReadFile, mkdir as fsMkdir } from "node:fs/promises";
 import { accessSync, statSync, constants as fsConstants } from "node:fs";
-import { tmpdir } from "node:os";
-import { join as pathJoin, isAbsolute as pathIsAbsolute } from "node:path";
+import { join as pathJoin, isAbsolute as pathIsAbsolute, dirname as pathDirname, resolve as pathResolve } from "node:path";
+import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import type { TerminalServerObservation } from "../domain/terminal-server-reachability.js";
@@ -15,6 +15,21 @@ import type { TmuxControlExec } from "./tmux-control.js";
 import { tmuxOnDaemonServer } from "./tmux-server.js";
 import { TMUX_SERVER_LIMIT_PREFIX, TMUX_SERVER_NO_SESSION_BUS, TMUX_SERVER_SESSION_BUS } from "../tmux-server-start.js";
 import { SEAT_SCOPE_SLICE, rigSeatSlice } from "./seat-slice.js";
+import { readProcessTableCensusNow } from "../domain/process-table.js";
+
+export interface StandbyProcesses {
+  readonly pid: number;
+  readonly startedAt: string;
+  readonly group: number;
+  readonly rootGroup: number;
+  readonly members: ReadonlyMap<number, string>;
+}
+
+export interface StandbySignalWitness {
+  readonly target: { session: string; pane: string; nodeId: string };
+  readonly identity: string;
+  readonly processes: StandbyProcesses;
+}
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
@@ -50,7 +65,7 @@ export type ArgvExecFn = (argv: string[]) => Promise<string>;
 /**
  * Injectable file/buffer operations for terminal payloads and launch environments.
  * Split out so tests can observe temp-file writes and unique-name generation
- * without touching the real filesystem; production wires node fs + os.tmpdir.
+ * without touching the real filesystem; production wires node fs + tmuxStagingDir().
  */
 export interface TmuxFileOps {
   writeFile(path: string, content: string, options?: { mode: number; flag: "wx" }): Promise<void>;
@@ -75,11 +90,22 @@ export function isStagedSendScriptPath(path: string): boolean {
   return path.startsWith("/") && SEND_SCRIPT_NAME.test(path.split("/").pop() ?? "");
 }
 
+/** Where the files tmux and a pane's shell later read or run (launch scripts, environment files, buffers) are staged:
+ *  `run/tmux-staging` in the OpenRig home, created with mode 0700 when a file is written. A relative home is resolved
+ *  against the daemon's cwd, as `run/seat-bin` is, because tmux and the pane's shell read the path from their own cwd. */
+export function tmuxStagingDir(): string {
+  return pathResolve(getDefaultOpenRigPath(pathJoin("run", "tmux-staging")));
+}
+
 export function defaultTmuxFileOps(): TmuxFileOps {
   return {
-    writeFile: (p, content, options) => fsWriteFile(p, content, { encoding: "utf8", ...options }),
+    // The folder is made where the file is written, inside each caller's error handling.
+    writeFile: async (p, content, options) => {
+      await fsMkdir(pathDirname(p), { recursive: true, mode: 0o700 });
+      await fsWriteFile(p, content, { encoding: "utf8", ...options });
+    },
     unlink: (p) => fsUnlink(p),
-    tmpName: () => pathJoin(tmpdir(), `${SEND_SCRIPT_PREFIX}${process.pid}-${randomUUID()}${SEND_SCRIPT_SUFFIX}`),
+    tmpName: () => pathJoin(tmuxStagingDir(), `${SEND_SCRIPT_PREFIX}${process.pid}-${randomUUID()}${SEND_SCRIPT_SUFFIX}`),
     bufferName: () => `openrig_${process.pid}_${randomUUID().replace(/-/g, "")}`,
   };
 }
@@ -693,6 +719,9 @@ function processLimitsNotAppliedResult(error: SeatProcessLimitsNotApplied, left?
 /** What a capped launch's new-session prints: its pane, its session's immutable id and its server (pid, start time). */
 const CREATED_IDENTITY_FORMAT = "#{pane_id} #{session_id} #{pid} #{start_time}";
 type CreatedIdentity = { pane: string; session: string; server: { pid: string; start: string } };
+/** #3901: the terminal a pane is in: its session (name and immutable id) and the tmux server holding it (pid and start
+ *  time). Names and ids repeat on a replaced server; the server's pid and start time don't. */
+export type PaneTerminal = { sessionName: string; sessionId: string; server: { pid: string; start: string } };
 /** The identity a capped new-session printed, or null when it printed something else (or nothing). */
 function createdIdentity(printed: string): CreatedIdentity | null {
   const m = /^(%\d+) (\$\d+) (\d+) (\d+)$/.exec(printed);
@@ -2306,7 +2335,7 @@ export class TmuxAdapter {
    * buffer leaks. Unique temp + buffer names per call keep parallel `rig up`
    * seats from colliding.
    */
-  async sendText(target: string, text: string, beforeInput?: () => void, options?: { bracketed?: boolean; beforePaste?: () => Promise<void> }): Promise<TmuxResult> {
+  async sendText(target: string, text: string, beforeInput?: () => void, options?: { bracketed?: boolean; beforePaste?: (pane: string) => Promise<void> }): Promise<TmuxResult> {
     return this.guardedInput(target, (pane, beforeWrite) => {
       const guard = this.deliveryGuard;
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
@@ -2316,8 +2345,9 @@ export class TmuxAdapter {
         // checks pass; they then aren't run a second time.
         beforePaste: async () => {
           // This send's own checks can wait (a conversation lookup, an input capture), so they run first, and the
-          // guard's checks run last (#3076). A check that refuses leaves a leftover's record for the next delivery.
-          await options?.beforePaste?.();
+          // guard's checks run last (#3076). A check that refuses leaves a leftover's record for the next delivery. It is
+          // told the pane the text goes to (#3901).
+          await options?.beforePaste?.(pane);
           const checks = async () => { beforeWrite(); beforeInput?.(); };
           // The synchronous checks run again just before the key: the guard's re-read awaits after `checks`.
           const enter = async () => { beforeWrite(); beforeInput?.(); return (await this.sendKeysUnchecked(pane, ["Enter"])).ok; };
@@ -2385,6 +2415,30 @@ export class TmuxAdapter {
     return this.guardedInput(target, () => this.sendShellCommandUnchecked(target, command, beforeInput, options));
   }
 
+  /** The script sendShellCommand last staged a launch in, per target, with the line it typed to run it, kept after its
+   *  shell reads it until the next launch sent to that target replaces it (or goes inline and removes it). */
+  private readonly stagedLaunches = new Map<string, { path: string; typed: string; read: boolean }>();
+
+  /** Whether the shell in `target` has yet to read the launch sendShellCommand last staged there. The script removes
+   *  itself as its first step, so while it is still there the shell hasn't started the launch: a new pane's shell can
+   *  still be running its startup files, and its pane reads as an idle shell meanwhile. False when nothing was staged
+   *  for the target, or the script is gone or can't be read. */
+  stagedLaunchUnread(target: string): boolean {
+    const staged = this.stagedLaunches.get(target);
+    if (!staged || staged.read) return false;
+    try { if (statSync(staged.path).isFile()) return true; } catch { /* gone (the shell read it), or unreadable: no evidence */ }
+    staged.read = true;
+    return false;
+  }
+
+  /** The exact line sendShellCommand typed into `target` to run the launch it last staged there: `( . '<script>' )`,
+   *  `/bin/sh '<script>'` or the fish form. It names the script, unique to that launch, so it marks the line the pane's
+   *  shell read: output below the last place it shows came after the launch. Undefined when the last launch sent there
+   *  went inline (nothing staged), or none was sent. */
+  stagedLaunchTypedLine(target: string): string | undefined {
+    return this.stagedLaunches.get(target)?.typed;
+  }
+
   /** Stage or send a launch while leaving a consumed script's cleanup to the receiving shell. */
   private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
     const commandBytes = Buffer.byteLength(command, "utf8");
@@ -2434,6 +2488,7 @@ export class TmuxAdapter {
       }
       // The receiver now owns removal. Unlinking here races shell startup.
       created = false;
+      if (path) this.stagedLaunches.set(target, { path, typed: invocation, read: false }); else this.stagedLaunches.delete(target);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -2444,14 +2499,15 @@ export class TmuxAdapter {
     }
   }
 
-  async sendKeys(target: string, keys: string[], beforeInput?: () => void, options?: { beforeKeys?: () => Promise<void> }): Promise<TmuxResult> {
+  async sendKeys(target: string, keys: string[], beforeInput?: () => void, options?: { beforeKeys?: (pane: string) => Promise<void> }): Promise<TmuxResult> {
     return this.guardedInput(target, async (pane, beforeWrite) => {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
       const submit = keys.some(isSubmitKey);
       const check = async () => {
         // The caller's checks can wait (a conversation lookup), so they run first and the guard's input read runs
-        // last, as in sendText (#3076): input typed while they wait is seen, and a key is not sent onto it.
-        if (options?.beforeKeys) await options.beforeKeys();
+        // last, as in sendText (#3076): input typed while they wait is seen, and a key is not sent onto it. They are told
+        // the pane the keys go to (#3901).
+        if (options?.beforeKeys) await options.beforeKeys(pane);
         if (this.deliveryGuard?.needsInputCheck(identity)) await this.deliveryGuard.beforeInput(identity, submit);
       };
       await check();
@@ -2583,12 +2639,11 @@ export class TmuxAdapter {
     if (this.deliveryGuard) {
       const result = await this.guardedInput(name, async (pane, beforeWrite, nodeId) => {
         // The session id and its server (pid and start time) in one read, so the effects below can be held to both.
-        const stdout = await this.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}|#{pid}|#{start_time}"],
-          `tmux display-message -p -t ${shellQuote(pane)} '#{session_id}|#{pid}|#{start_time}'`);
-        const [sessionId = "", pid = "", start = ""] = stdout.trim().split("|");
-        if (!/^\$\d+$/.test(sessionId) || !/^\d+$/.test(pid) || !/^\d+$/.test(start)) {
+        const terminal = await this.readPaneTerminal(pane);
+        if (!terminal) {
           return { ok: false, code: "guard_target_unknown", message: "Cannot establish immutable session identity; no session killed." };
         }
+        const { sessionId, server: { pid, start } } = terminal;
         if (nodeId) {
           const unproven = await this.unprovenSeatSession(name, sessionId, nodeId);
           if (unproven) return unproven;
@@ -2607,6 +2662,24 @@ export class TmuxAdapter {
     if (beforeEffect) return { ok: false, code: "guard_unavailable", message: "Checked stop requires the delivery guard.", stopPhase };
     const result = await this.killSessionUnchecked(name, undefined, phase => { stopPhase = phase; });
     return result.ok ? result : { ...result, stopPhase };
+  }
+
+  /** The terminal a pane is in, in one read: its session's name and immutable id, and the tmux server holding it (pid and
+   *  start time). A failed read throws; an unparseable one is null. */
+  private async readPaneTerminal(pane: string): Promise<PaneTerminal | null> {
+    const format = "#{session_id}|#{pid}|#{start_time}|#{session_name}";
+    const stdout = await this.run(["tmux", "display-message", "-p", "-t", pane, format],
+      `tmux display-message -p -t ${shellQuote(pane)} '${format}'`);
+    const [sessionId = "", pid = "", start = "", ...name] = stdout.replace(/\r?\n$/, "").split("|");
+    if (!/^\$\d+$/.test(sessionId) || !/^\d+$/.test(pid) || !/^\d+$/.test(start)) return null;
+    return { sessionId, sessionName: name.join("|"), server: { pid, start } };
+  }
+
+  /** #3901: the terminal `pane` is in now (killSession's own identity read), or null when it can't be read. A caller holds
+   *  later effects on that pane to it: a replaced tmux server reuses session names and pane ids for other terminals, but
+   *  not its pid and start time. */
+  async paneTerminal(pane: string): Promise<PaneTerminal | null> {
+    try { return await this.readPaneTerminal(exactTarget(pane, "pane")); } catch { return null; }
   }
 
   /** The session a seat's stop would end is the seat's own: every session OpenRig creates for a seat carries its node's
@@ -2874,8 +2947,8 @@ export class TmuxAdapter {
   }
 
   /** Signal one process by pid. signalPaneProcess signals the pane's root, which in a shell-backed pane is
-   *  the shell, not the runtime running under it. Unix `kill`, like signalPaneProcess. */
-  async signalPid(pid: number, signal: "TERM" | "KILL"): Promise<TmuxResult> {
+   *  the shell, not the runtime running under it; signalPaneRuntime reaches the runtime. Unix `kill`, like signalPaneProcess. */
+  async signalPid(pid: number, signal: "TERM" | "HUP" | "KILL"): Promise<TmuxResult> {
     if (!Number.isInteger(pid) || pid <= 1) return { ok: false, code: "invalid_pid", message: `Refusing to signal pid ${pid}.` };
     try {
       await this.exec(`kill -${signal} ${pid}`);
@@ -2898,50 +2971,87 @@ export class TmuxAdapter {
     }
   }
 
-  /** Seat-handover cutover: signal the pane's foreground process (the retiree) — `TERM` for the graceful
-   *  exit-in-place, `KILL` for the bounded-timeout force fallback. Resolves the pane pid then `kill`s it;
-   *  an unresolvable pid is a structured, non-throwing failure.
-   *  With `standbyWitness` (a standby stop), the pane's identity is read again here — after guardedInput's tmux
-   *  reads — and a changed pane is refused. The signal also goes to the pane tty's foreground process group,
-   *  where a Pi/Claude runner lives as the interactive shell's job: signalling only the shell would orphan it.
-   *  The kill is still a separate exec, so a server replaced between that read and it stays a residual window.
+  /** Seat-handover cutover: signal the pane's ROOT process (`#{pane_pid}`): the retiree only when it is the pane's own
+   *  process; in a shell-backed pane it is the shell (#3901: signalPaneRuntime reaches the agent under it). `TERM` and
+   *  `KILL` for the pane-level stop, `HUP` to end a shell left at its prompt once its agent has exited. Resolves the pane
+   *  pid then `kill`s it; an unresolvable pid is a structured, non-throwing failure. `paneChanged` (#3901), when given,
+   *  is awaited after the pid read and before the `kill`: true refuses the signal (guard_target_changed), for a pane the
+   *  caller positively saw in another session or on another server than it first read it in. A caller that can't tell
+   *  answers false, and the signal goes with this method's own checks.
    *  Stays on the shell-string path deliberately: this is a Unix `kill`,
    *  not a multiplexer command (Windows needs taskkill — named follow-up). */
-  async signalPaneProcess(paneId: string, signal: "TERM" | "KILL",
-    standbyWitness?: { target: { session: string; pane: string; nodeId: string }; identity: string }): Promise<TmuxResult> {
-    return this.guardedInput(paneId, (pane, beforeWrite) =>
-      this.signalPaneProcessUnchecked(pane, signal, beforeWrite, standbyWitness));
+  async signalPaneProcess(paneId: string, signal: "TERM" | "HUP" | "KILL",
+    check?: ((pane: string) => Promise<boolean>) | StandbySignalWitness): Promise<TmuxResult> {
+    return this.guardedInput(paneId, (pane, beforeWrite) => this.signalPaneProcessUnchecked(pane, signal, beforeWrite, check));
   }
 
-  private async signalPaneProcessUnchecked(paneId: string, signal: "TERM" | "KILL", beforeWrite: () => void,
-    standbyWitness?: { target: { session: string; pane: string; nodeId: string }; identity: string }): Promise<TmuxResult> {
-    try {
-      if (standbyWitness && await this.standbyPaneIdentity(standbyWitness.target, false) !== standbyWitness.identity) {
-        return { ok: false, code: "guard_target_changed", message: `"${paneId}" is no longer the standby pane verified before the stop; nothing was killed.` };
-      }
-      const pid = await this.getPanePid(paneId);
-      if (pid == null) {
-        return { ok: false, code: "pane_pid_unavailable", message: `Could not resolve the pane pid for "${paneId}".` };
+  /** #3901: signal one process in a seat's pane (its agent, which in a shell-backed pane runs under the shell), through
+   *  the same guard as signalPaneProcess. The target resolves to the seat's own pane; `stillThatProcess` then re-reads,
+   *  for that pane, that the pid is still the process the caller observed (a reused pid, or another occupant, is refused);
+   *  the guard's synchronous check runs last, right before the `kill`. */
+  async signalPaneRuntime(paneTarget: string, pid: number, signal: "TERM" | "KILL",
+    stillThatProcess: (pane: string) => Promise<boolean>): Promise<TmuxResult> {
+    return this.guardedInput(paneTarget, async (pane, beforeWrite) => {
+      if (!await stillThatProcess(pane)) {
+        return { ok: false, code: "process_changed", message: `pid ${pid} is no longer the agent observed in pane ${pane}; nothing was signalled.` };
       }
       beforeWrite();
-      if (standbyWitness) await this.signalForegroundGroup(pid, signal);
-      await this.exec(`kill -${signal} ${pid}`);
+      return this.signalPid(pid, signal);
+    });
+  }
+
+  private async signalPaneProcessUnchecked(paneId: string, signal: "TERM" | "HUP" | "KILL", beforeWrite: () => void,
+    check?: ((pane: string) => Promise<boolean>) | StandbySignalWitness): Promise<TmuxResult> {
+    const pid = await this.getPanePid(paneId);
+    if (pid == null) {
+      return { ok: false, code: "pane_pid_unavailable", message: `Could not resolve the pane pid for "${paneId}".` };
+    }
+    const standby = typeof check === "object" ? check : undefined;
+    const current = standby ? await this.observeStandbyProcesses(paneId) : null;
+    if (standby && (!current || current.pid !== pid || pid !== standby.processes.pid || current.startedAt !== standby.processes.startedAt
+      || current.rootGroup !== standby.processes.rootGroup
+      || (current.group !== standby.processes.group && current.group !== current.rootGroup))) {
+      return { ok: false, code: "standby_process_unconfirmed", message: "The selected standby runner could not be re-verified." };
+    }
+    const paneChanged = standby ? paneId !== standby.target.pane || await this.standbyPaneIdentity(standby.target, false) !== standby.identity
+      : typeof check === "function" && await check(paneId);
+    if (paneChanged) {
+      return { ok: false, code: "guard_target_changed", message: `Pane "${paneId}" is no longer in the tmux session and server it was first read in; nothing was signalled.` };
+    }
+    try {
+      beforeWrite();
+      if (current && signal !== "HUP") await this.signalForegroundGroup(current.group, signal);
+      if (!current || current.group !== current.rootGroup || signal === "HUP") await this.exec(`kill -${signal} ${pid}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
     }
   }
 
-  /** A pane's tty foreground process group, read from the pane's own process: null when no tty has one, or `ps`
-   *  can't be read. The pane pid signal still covers the shell, so an unreadable group is not a failure. */
-  private async signalForegroundGroup(panePid: number, signal: "TERM" | "KILL"): Promise<void> {
-    let group: number | null = null;
-    try {
-      // Plain `ps`, NOT the tmux-targeted run(): server args would land in ps's argv.
-      const parsed = Number.parseInt((await this.exec(`ps -o tpgid= -p ${String(panePid)}`)).trim(), 10);
-      group = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
-    } catch { /* no ps, or it can't read this pid: the pane pid itself is still signalled */ }
-    if (group === null) return;
+  standbyProcessCensus(): ReturnType<typeof readProcessTableCensusNow> {
+    return readProcessTableCensusNow();
+  }
+
+  async observeStandbyProcesses(paneId: string): Promise<StandbyProcesses | null> {
+    const pid = await this.getPanePid(paneId);
+    if (pid === null || pid <= 1) return null;
+    const census = await this.standbyProcessCensus().catch(() => null);
+    const root = census?.rows.find(row => row.pid === pid);
+    if (!census || !root || root.state === "Z" || !Number.isSafeInteger(root.tpgid) || root.tpgid <= 1) return null;
+    const foreground = census.rows.filter(row => row.pgid === root.tpgid && row.state !== "Z");
+    if (!foreground.some(row => row.tpgid === root.tpgid)) return null;
+    return { pid, startedAt: root.startedAt, group: root.tpgid, rootGroup: root.pgid,
+      members: new Map(foreground.map(row => [row.pid, row.startedAt])) };
+  }
+
+  async standbyProcessesGone(processes: StandbyProcesses): Promise<boolean> {
+    const census = await this.standbyProcessCensus().catch(() => null);
+    return census !== null && census.permissionHiddenPids.length === 0 && !census.rows.some(row => row.state !== "Z"
+      && (row.pgid === processes.group || processes.members.get(row.pid) === row.startedAt
+        || (row.pid === processes.pid && row.startedAt === processes.startedAt)));
+  }
+
+  private async signalForegroundGroup(group: number, signal: "TERM" | "KILL"): Promise<void> {
     try {
       await this.exec(`kill -${signal} -${group}`);
     } catch (err) {

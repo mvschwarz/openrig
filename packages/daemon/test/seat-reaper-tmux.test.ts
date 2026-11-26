@@ -28,7 +28,7 @@ it.each([false, true])("exercises real isolated tmux without an agent provider (
     const f = fixture(); f.settings.observe = observe;
     f.db.prepare("UPDATE bindings SET tmux_pane=?").run(pane);
     const tmux = new TmuxAdapter(async command => {
-      if (!/^kill -(TERM|KILL) \d+$/.test(command)) throw Error("argv execution required");
+      if (!/^kill -(TERM|KILL) -?\d+$/.test(command)) throw Error("argv execution required");
       return (await exec("sh", ["-c", command], { timeout: 10_000 })).stdout;
     }, undefined,
       async argv => {

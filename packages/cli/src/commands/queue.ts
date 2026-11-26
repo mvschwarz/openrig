@@ -13,6 +13,7 @@ import { shellQuote } from "../cross-host-executor.js";
 import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer } from "../host-registry.js";
 import { loadHostBindings } from "../host-bindings.js";
 import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
+import { CONVERSATION_KEY_TAG_PREFIX, conversationKey, conversationKeyTag } from "@openrig/daemon/conversation-key";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
@@ -39,10 +40,19 @@ export interface DeliveryVerifyDeps {
   now?: () => number;
 }
 
+/** Tags a caller gave for a row, less any `conversation-key:` tag: that key is OpenRig's own record of which conversation
+ *  handed work over (slice 15), which the openrig plugin's hooks read, so only the key this command derives is recorded. A
+ *  given one (another conversation's, copied off a row) is dropped, never refused. */
+function withoutConversationKeys(tags: string[]): string[] {
+  return tags.filter((tag) => !tag.startsWith(CONVERSATION_KEY_TAG_PREFIX));
+}
+
 export interface QueueDeps extends StatusDeps {
   deliveryVerify?: DeliveryVerifyDeps;
   /** The host registry `--host` resolves against on the verbs that name an existing row; tests give their own. */
   hostRegistryLoader?: () => ReturnType<typeof loadHostRegistry>;
+  /** The key of the conversation this command runs in (`@openrig/daemon/conversation-key`); tests give their own. */
+  conversationKey?: () => string | null;
 }
 
 interface DeliveryResultBase {
@@ -1467,7 +1477,12 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // Atom 6b snapshot provenance: record WHERE the body came from so the
       // handoff stays auditable even if the pack is edited later.
       if (opts.bodyContext) fromFlags.push(`body-context:${opts.bodyContext}`);
-      const merged = [...fromFlags, ...fromTagsArg];
+      // With --return-route auto on this host's daemon, the issued address is recorded with this conversation's key, so the
+      // openrig plugin's hooks find it in OpenRig's own record and wake the conversation when a task arrives there. No key
+      // (not run from Claude Code or Codex), no tag: nothing wakes, and no other conversation reads the address.
+      const local = hostResolved.hostId === undefined || hostResolved.hostId === "local";
+      const key = opts.returnRoute?.trim() === "auto" && local ? (deps.conversationKey ?? conversationKey)() : null;
+      const merged = [...withoutConversationKeys([...fromFlags, ...fromTagsArg]), ...(key ? [conversationKeyTag(key)] : [])];
       const seen = new Set<string>();
       const dedupedTags = merged.filter((t) => { if (seen.has(t)) return false; seen.add(t); return true; });
       const tags = dedupedTags.length > 0 ? dedupedTags : undefined;
@@ -1594,9 +1609,15 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               console.error(`Return route: ${route}, carried from the routed work you hold. This work's questions and its seats' prompts ` +
                 `(not choice dialogs) go to that conversation as tasks.`);
             } else {
-              console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks; read them with ` +
-                `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
-                (created.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
+              // Slice 15: the wording proven in place on real runs: check the address at each wake, first, and start the wait
+              // where the app wakes on a background command's end. Not where the openrig plugin's hooks run: they're a wake
+              // already, and the wait would be a second one for the same task (#3964).
+              console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks. ` +
+                `At each wake, before anything else, check that address first: OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
+                (created.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : ".") +
+                ` Where the openrig plugin's hooks run, they bring these tasks by themselves. Elsewhere, where your app wakes you when a background ` +
+                `command ends, start this wait in the background now, and again after you handle each task: ` +
+                `until OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending --json 2>/dev/null | grep -q '"qitemId"'; do sleep 20; done`);
             }
           }
           // An ask to a shared channel was accepted; nothing there will answer it (0.7.3).
@@ -1818,6 +1839,28 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
     });
 
   cmd
+    .command("relay-answer <qitemId>")
+    .description("Record a person's verbatim answer given elsewhere and return it when the ask is fully answered")
+    .requiredOption("--attributed-to <person>", "The person who actually answered (a human seat or @external address), e.g. reader@external")
+    .requiredOption("--channel <channel>", "Where the person gave the answer")
+    .requiredOption("--text <text>", "The person's verbatim words")
+    .option("--question-id <id>", "Exact question ID (required for a structured ask)")
+    .option("--option-id <id>", "Exact option ID, when they chose an option")
+    .option("--answered-at <iso>", "When the person answered, only if known")
+    .option("--json", "JSON output for agents")
+    .action(async (qitemId: string, opts: { attributedTo: string; channel: string; text: string; questionId?: string; optionId?: string; answeredAt?: string; json?: boolean }) => {
+      if (!requireSeatSession("actor")) return;
+      const { json, ...submission } = opts;
+      await withClient(getDeps(), async (client) => {
+        const res = await client.post<{ replyQitemId: string | null; unanswered: string[] }>(`/api/queue/${encodeURIComponent(qitemId)}/relayed-answer`, submission);
+        if (res.status >= 400 || !res.data) return printQueueItemResult(client, qitemId, json ?? false, res.data, res.status);
+        if (json) console.log(JSON.stringify(res.data));
+        else if (res.data.replyQitemId) console.log(`RELAYED answer returned as ${res.data.replyQitemId}`);
+        else console.log(`RELAYED answer recorded; still open: ${res.data.unanswered.join(", ")}`);
+      });
+    });
+
+  cmd
     .command("tag <qitemId>")
     .description("Add tags to a qitem in any state, changing nothing else: its existing tags stay, a tag it already has adds nothing, and a closed row stays closed. The tags added are recorded on the row's history with who added them. Tags are never removed or rewritten.")
     .requiredOption("--add <tag>", "A tag to add, exact and case-sensitive; repeat for several (commas are literal)", (value: string, previous: string[] = []) => [...previous, value], [] as string[])
@@ -2026,7 +2069,8 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       // this so the idle-gate watchdog's predicate has a producer.
       const explicitTags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : [];
       const gateTags = opts.gate ? [`gate:${opts.gate}`] : [];
-      const mergedTags = [...gateTags, ...explicitTags];
+      // The new item keeps the work's return route, so it takes no conversation's key from here (only OpenRig records one).
+      const mergedTags = withoutConversationKeys([...gateTags, ...explicitTags]);
       const seenTags = new Set<string>();
       const dedupedTags = mergedTags.filter((t) => { if (seenTags.has(t)) return false; seenTags.add(t); return true; });
       const tags = dedupedTags.length > 0 ? dedupedTags : undefined;
@@ -2131,7 +2175,8 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       // this so the idle-gate watchdog's predicate has a producer.
       const explicitTags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : [];
       const gateTags = opts.gate ? [`gate:${opts.gate}`] : [];
-      const mergedTags = [...gateTags, ...explicitTags];
+      // The new item keeps the work's return route, so it takes no conversation's key from here (only OpenRig records one).
+      const mergedTags = withoutConversationKeys([...gateTags, ...explicitTags]);
       const seenTags = new Set<string>();
       const dedupedTags = mergedTags.filter((t) => { if (seenTags.has(t)) return false; seenTags.add(t); return true; });
       const tags = dedupedTags.length > 0 ? dedupedTags : undefined;
@@ -2167,8 +2212,9 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--session <session>", "Caller's session name (defaults to OPENRIG_SESSION_NAME)")
     .option("--recent-limit <n>", "How many recent active qitems to include", "25")
     .option("--work-candidates", "Also list labelled work candidates (tags, handoff ancestry, held and next work) for the refocus packet")
+    .option("--held-work", "With nothing in progress, also list held (blocked) and pending rows with their resolved mission and slice, as heldAndPendingWork, for refocus")
     .option("--json", "JSON output for agents")
-    .action(async (opts: { session?: string; recentLimit: string; workCandidates?: boolean; json?: boolean }) => {
+    .action(async (opts: { session?: string; recentLimit: string; workCandidates?: boolean; heldWork?: boolean; json?: boolean }) => {
       const session = resolveCurrentSession(opts.session, "session");
       if (!session) return;
       const deps = getDeps();
@@ -2177,6 +2223,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         recentLimit: opts.recentLimit,
       });
       if (opts.workCandidates) params.set("candidates", "1");
+      if (opts.heldWork) params.set("held", "1");
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/whoami?${params.toString()}`);
         printResult(opts.json ?? false, res.data, res.status);

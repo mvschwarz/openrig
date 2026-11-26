@@ -1,6 +1,6 @@
 {
   "name": "openrig",
-  "version": "0.7.21",
+  "version": "0.7.23",
   "description": "Work with your OpenRig team from your coding agent: hand it work, follow that work, answer its questions and read what it returns.",
   "author": {
     "name": "Mike Schwarz",
@@ -11,10 +11,11 @@
   "license": "Apache-2.0",
   "keywords": ["openrig", "agents", "team", "delegation", "mcp"],
   "skills": "./skills",
+  "hooks": "./hooks/claude.json",
   "mcpServers": {
     "openrig": {
-      "command": "rig",
-      "args": ["mcp", "serve", "--front-door"],
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/run-rig.cjs", "mcp", "serve", "--front-door"],
       "env": {
         "OPENRIG_SESSION_NAME": "${user_config.seat}"
       }

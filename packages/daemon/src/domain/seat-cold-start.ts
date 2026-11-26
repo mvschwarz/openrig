@@ -193,11 +193,11 @@ export interface SeatColdStartLedgerRow {
   last_outcome: string;
   consecutive_failures: number;
   last_success_at: string | null;
+  standby_stop_seq: number | null;
 }
 
 export class SeatColdStarter {
-  private readonly inFlight = new Map<string, Promise<void>>();
-  private readonly standbyInFlight = new Map<string, Promise<boolean>>();
+  private readonly inFlight = new Map<string, { standbyStopSeq?: number; pending: Promise<boolean> }>();
   private readonly evaluations = new Map<string, number>();
   private readonly drainEvaluations = new WeakMap<object, Map<string, number>>();
 
@@ -218,12 +218,17 @@ export class SeatColdStarter {
     if (parsed.kind !== "canonical" || !workStillOwed()) return undefined;
     const seat = this.resolveSeat(parsed.member, parsed.rig, destinationSession);
     if (!seat) return undefined;
-    const existing = this.standbyInFlight.get(seat.nodeId);
-    if (existing) return existing;
+    const existing = this.inFlight.get(seat.nodeId);
     const standby = readStandbyStop(this.deps.db, seat.nodeId);
+    if (existing?.standbyStopSeq !== undefined && (!standby || existing.standbyStopSeq === standby.stopSeq)) return existing.pending;
     if (!standby) return undefined;
-    const pending = this.resumeStandby(seat, standby, workStillOwed).finally(() => this.standbyInFlight.delete(seat.nodeId));
-    this.standbyInFlight.set(seat.nodeId, pending);
+    if (existing) return existing.pending.then(() => this.wakeStandby(destinationSession, workStillOwed) ?? false);
+    return this.trackAttempt(seat.nodeId, () => this.resumeStandby(seat, standby, workStillOwed), standby.stopSeq);
+  }
+
+  private trackAttempt(nodeId: string, attempt: () => Promise<boolean>, standbyStopSeq?: number): Promise<boolean> {
+    const pending = Promise.resolve().then(attempt).finally(() => this.inFlight.delete(nodeId));
+    this.inFlight.set(nodeId, { standbyStopSeq, pending });
     return pending;
   }
 
@@ -233,20 +238,10 @@ export class SeatColdStarter {
         const current = readStandbyStop(this.deps.db, seat.nodeId);
         const recipe = this.deps.getNodeLaunchRecipe(seat.nodeId);
         const isCurrent = recipe?.rigSpec.pods.some(pod => pod.members.some(member => `${pod.id}.${member.id}` === seat.logicalId));
-        if (!isCurrent || isPoolAgent(this.deps.db, seat.nodeId) || !workStillOwed() || current?.identity !== standby.identity || current.sessionId !== standby.sessionId
-          || this.ledgerRefuses(seat.nodeId, this.currentTime())) return false;
-        this.record(seat.nodeId, "launching", "in_flight", this.currentTime().toISOString());
-        let outcome: ColdStartLaunchOutcome;
-        try {
-          outcome = classifyColdStartLaunch(seat.logicalId, await this.deps.launchSingleNode(seat.rigId, seat.logicalId, current));
-        } catch (error) {
-          if (!(error instanceof Error)) throw error;
-          outcome = { kind: "failed", error: error.message };
-        }
-        const label = "error" in outcome ? `${outcome.kind}:${outcome.error}` : outcome.kind;
-        this.record(seat.nodeId, label, outcome.kind === "resumed" ? "succeeded" : "failed", this.currentTime().toISOString());
-        this.log(`${seat.logicalId}: standby ${label}`);
-        return outcome.kind === "resumed";
+        if (!isCurrent || isPoolAgent(this.deps.db, seat.nodeId) || !workStillOwed() || current?.stopSeq !== standby.stopSeq
+          || current.identity !== standby.identity || current.sessionId !== standby.sessionId
+          || this.ledgerRefuses(seat.nodeId, this.currentTime(), current.stopSeq)) return false;
+        return this.launchAttempt(seat, current);
       });
     } catch (error) {
       if (!(error instanceof Error)) throw error;
@@ -260,7 +255,7 @@ export class SeatColdStarter {
   }
 
   /** Joins concurrent notifications for the same node into one launch attempt; undefined when the address is not a resolvable seat. */
-  private start(destinationSession: string, drainPass?: object): Promise<void> | undefined {
+  private start(destinationSession: string, drainPass?: object): Promise<boolean> | undefined {
     const parsed = parseSessionName(destinationSession);
     if (parsed.kind !== "canonical") return undefined;
     const evaluations = drainPass ? this.drainEvaluations.get(drainPass) ?? new Map<string, number>() : this.evaluations;
@@ -273,10 +268,8 @@ export class SeatColdStarter {
     const seat = this.resolveSeat(parsed.member, parsed.rig, destinationSession);
     if (!seat) return undefined;
     const existing = this.inFlight.get(seat.nodeId);
-    if (existing) return existing;
-    const attempt = this.attempt(seat).finally(() => this.inFlight.delete(seat.nodeId));
-    this.inFlight.set(seat.nodeId, attempt);
-    return attempt;
+    if (existing) return existing.pending;
+    return this.trackAttempt(seat.nodeId, async () => { await this.attempt(seat); return false; });
   }
 
   /** Resolve a canonical destination address to exactly one seat row of one unarchived rig. */
@@ -328,15 +321,7 @@ export class SeatColdStarter {
         // Claim the attempt window BEFORE the (slow) launch. The in-memory join above covers
         // simultaneous arrivals; this row covers a second drain pass, a ladder retry, or a
         // restart mid-launch, so one dormant seat still gets exactly one launch per window.
-        this.record(seat.nodeId, "launching", "in_flight", now.toISOString());
-        const result = await this.deps.launchSingleNode(seat.rigId, seat.logicalId);
-        const outcome = classifyColdStartLaunch(seat.logicalId, result);
-        const success = outcome.kind === "resumed" || outcome.kind === "fresh_primed" || outcome.kind === "already_running";
-        const label = outcome.kind === "failed" || outcome.kind === "awaiting_decision"
-          ? `${outcome.kind}:${outcome.error}`
-          : outcome.kind;
-        this.record(seat.nodeId, label, success ? "succeeded" : "failed", this.currentTime().toISOString());
-        this.log(`${seat.logicalId}: ${label}`);
+        await this.launchAttempt(seat);
       });
       } catch (err) {
         // #3173 review: a refusal the guard raises BEFORE the launch callback runs (a draft
@@ -357,6 +342,22 @@ export class SeatColdStarter {
       this.record(seat.nodeId, "failed:exception", "failed", this.currentTime().toISOString());
       this.log(`${seat.logicalId}: attempt threw: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  private async launchAttempt(seat: SeatRow, standby?: StandbyStop): Promise<boolean> {
+    this.record(seat.nodeId, "launching", "in_flight", this.currentTime().toISOString(), standby?.stopSeq);
+    let outcome: ColdStartLaunchOutcome;
+    try {
+      outcome = classifyColdStartLaunch(seat.logicalId, await this.deps.launchSingleNode(seat.rigId, seat.logicalId, standby));
+    } catch (error) {
+      if (!standby || !(error instanceof Error)) throw error;
+      outcome = { kind: "failed", error: error.message };
+    }
+    const success = outcome.kind === "resumed" || (!standby && (outcome.kind === "fresh_primed" || outcome.kind === "already_running"));
+    const label = "error" in outcome ? `${outcome.kind}:${outcome.error}` : outcome.kind;
+    this.record(seat.nodeId, label, success ? "succeeded" : "failed", this.currentTime().toISOString());
+    this.log(`${seat.logicalId}: ${standby ? "standby " : ""}${label}`);
+    return success;
   }
 
   /** Every maintainer-term gate; each refusal is a no-op (the queue keeps today's semantics). */
@@ -449,7 +450,7 @@ export class SeatColdStarter {
   /** Durable ledger: the attempt window opens at launch, then records the outcome.
    *  `in_flight` leaves the failure count alone: a crash mid-launch is neither a launch nor
    *  a proven failure, and the interval alone already prevents a second launch in the window. */
-  private record(nodeId: string, outcome: string, state: "in_flight" | "succeeded" | "failed" | "refused", iso: string): void {
+  private record(nodeId: string, outcome: string, state: "in_flight" | "succeeded" | "failed" | "refused", iso: string, standbyStopSeq?: number): void {
     const existing = this.deps.db.prepare("SELECT * FROM seat_cold_starts WHERE node_id = ?").get(nodeId) as SeatColdStartLedgerRow | undefined;
     const failures = state === "succeeded" ? 0
       : state === "failed" ? (existing?.consecutive_failures ?? 0) + 1
@@ -457,18 +458,21 @@ export class SeatColdStarter {
       : (existing?.consecutive_failures ?? 0);
     const success = state === "succeeded";
     if (existing) {
-      this.deps.db.prepare("UPDATE seat_cold_starts SET last_attempt_at = ?, last_outcome = ?, consecutive_failures = ?, last_success_at = COALESCE(?, last_success_at) WHERE node_id = ?")
-        .run(iso, outcome, failures, success ? iso : null, nodeId);
+      this.deps.db.prepare(`UPDATE seat_cold_starts SET last_attempt_at = ?, last_outcome = ?, consecutive_failures = ?,
+        last_success_at = COALESCE(?, last_success_at), standby_stop_seq = COALESCE(?, standby_stop_seq) WHERE node_id = ?`)
+        .run(iso, outcome, failures, success ? iso : null, standbyStopSeq ?? null, nodeId);
     } else {
-      this.deps.db.prepare("INSERT INTO seat_cold_starts (node_id, last_attempt_at, last_outcome, consecutive_failures, last_success_at) VALUES (?, ?, ?, ?, ?)")
-        .run(nodeId, iso, outcome, failures, success ? iso : null);
+      this.deps.db.prepare(`INSERT INTO seat_cold_starts (node_id, last_attempt_at, last_outcome, consecutive_failures,
+        last_success_at, standby_stop_seq) VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(nodeId, iso, outcome, failures, success ? iso : null, standbyStopSeq ?? null);
     }
   }
 
   /** Ledger gates: a too-recent attempt, or too many consecutive failures. */
-  ledgerRefuses(nodeId: string, now: Date): "interval" | "failures" | null {
+  ledgerRefuses(nodeId: string, now: Date, standbyStopSeq?: number): "interval" | "failures" | "standby_attempted" | null {
     const row = this.deps.db.prepare("SELECT * FROM seat_cold_starts WHERE node_id = ?").get(nodeId) as SeatColdStartLedgerRow | undefined;
     if (!row) return null;
+    if (standbyStopSeq !== undefined && row.standby_stop_seq === standbyStopSeq) return "standby_attempted";
     // R6: a failed or awaiting-decision attempt is never retried on a timer. The cap clears
     // only when the seat is observed running (eligible()'s observed_running reset, which a
     // person's manual launch also produces) or a launch succeeds — not by quiet-window expiry.

@@ -36,6 +36,9 @@ import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { buildQueueTransfer } from "../src/domain/queue-transfer-export.js";
 import { QueueTransferStaging } from "../src/domain/queue-transfer-staging.js";
+import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { readStandbyStop } from "../src/domain/seat-standby.js";
 
 const RIG = "pi-continuity";
 const SEAT_SESSION = "dev-impl@pi-continuity";
@@ -161,8 +164,44 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
     sessionRegistry.updateBinding(implNodeId, { attachmentType: "tmux", tmuxSession: SEAT_SESSION, tmuxPane: "%1" });
     eventBus.emit({ type: "session.stopped", rigId, nodeId: implNodeId, sessionId, sessionName: SEAT_SESSION,
       operator: "daemon:seat-reaper", reason: "idle_reap", standbyPane: identity });
-    return { nodeId: implNodeId, sessionId, session: SEAT_SESSION, pane: "%1", identity };
+    const standby = readStandbyStop(db, implNodeId);
+    if (!standby) throw new Error("fixture did not record standby");
+    return standby;
   }
+
+  it.each(["rig down", "rig seat stop"])("does not wake a standby seat after %s", async stop => {
+    recordStandby();
+    expect(readStandbyStop(db, implNodeId)).not.toBeNull();
+    const tmux = tmuxWithLivePeer();
+    tmux.deliveryGuard = deliveryGuard;
+    const present = new Set([SEAT_SESSION, PEER_SESSION]);
+    tmux.probeSession = async name => ({ state: present.has(name) ? "present" : "absent" });
+    tmux.killSession = async name => { present.delete(name); return { ok: true }; };
+    const deps = { db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux };
+    if (stop === "rig down") {
+      const teardown = new RigTeardownOrchestrator({ ...deps, snapshotCapture });
+      expect(await teardown.teardown(rigId, { force: true })).toMatchObject({ errors: [], sessionsKilled: 2 });
+    } else {
+      expect(await new SeatLifecycleService(deps).stopSeat({ seatRef: SEAT_SESSION, reason: "stay off" })).toMatchObject({ ok: true });
+      expect(present.has(PEER_SESSION)).toBe(true);
+    }
+    expect(readStandbyStop(db, implNodeId)).toBeNull();
+
+    const launch = vi.fn(async () => ({ ok: false }));
+    const cold = new SeatColdStarter({ db, deliveryGuard, probeSession: tmux.probeSession,
+      getNodeLaunchRecipe: recipeWithColdStart, launchSingleNode: launch });
+    const transport = { deliveryTarget: (name: string) => resolveGuardTarget(db, name),
+      send: async () => ({ ok: false as const, sent: false, error: "no receiver" }) };
+    const queue = new QueueRepo(db, eventBus, { transport });
+    queue.attachOutbox(new OutboxHandler(db));
+    queue.attachStandbyWake(cold.wakeStandby.bind(cold));
+    const row = await queue.create({ sourceSession: "operator@external", destinationSession: SEAT_SESSION, body: "work" });
+    await queue.drainPendingWakeIntents();
+
+    expect(queue.getById(row.qitemId)?.state).toBe("pending");
+    expect(launch).not.toHaveBeenCalled();
+    expect(ledger()).toBeUndefined();
+  });
 
   it("records the restore attempt when standby resume needs attention", async () => {
     const standby = recordStandby();

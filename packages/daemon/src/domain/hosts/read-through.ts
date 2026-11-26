@@ -36,8 +36,10 @@ export const READ_THROUGH_TIMEOUT_MS = 5_000;
 // `/*` matches one-or-more tail segments. v1 = the MVP read screens
 // (topology / project / library / dashboard-ps) exactly.
 //
-// DELIBERATE EXCLUSIONS (recorded, not oversights): /api/queue/* (queue is
-// the MH-3 lane — MH-1's queue-negative boundary, read included for now);
+// DELIBERATE EXCLUSIONS (recorded, not oversights): other /api/queue/*
+// reads (only the explicit open-human-updates GET below is included);
+// GET /api/queue/attention-aggregate bypasses this middleware because
+// its handler selects its host.
 // /api/files/* (local FS discovery; the twin derives remote missions from
 // the host-keyed slice list instead); /api/slices/:name/proof-asset/*
 // (binary — the raw transport is text-only by design);
@@ -68,6 +70,7 @@ export const READ_THROUGH_ALLOWLIST = [
   // target keep its origin host — the detail read crosses the edge with the
   // same GET discipline as the reads above (origin shape stays the law).
   "/api/scopes/slice",
+  "/api/queue/open-human-updates",
 ] as const;
 
 export function isReadThroughPath(path: string): boolean {
@@ -89,6 +92,9 @@ const MH3_BOUNDARY_MESSAGE =
  *  passes everything else through untouched. */
 export function hostReadThrough() {
   return async (c: Context, next: Next) => {
+    // This handler selects its target before aggregation. Raw forwarding would
+    // strip host and make the origin aggregate its subscriptions instead.
+    if (c.req.method === "GET" && c.req.path === "/api/queue/attention-aggregate") return next();
     const hostParam = c.req.query("host");
     // local / absent host param short-circuits to the existing handler. 51-09
     // incr 2: the daemon's OWN self-host id resolves home too (a distinct

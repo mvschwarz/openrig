@@ -61,6 +61,59 @@ export function readerActions(db: Database.Database, streamItemId: string): { cu
   return { current: [...latest.values()].sort((a, b) => a.actionId.localeCompare(b.actionId)), history };
 }
 
+export interface ReaderActionsQuery {
+  mode?: "history" | "current";
+  streamItemIds?: string[];
+  hintTag?: string;
+  sourceSession?: string;
+  readerSession?: string;
+  action?: ReaderActionKind;
+  since?: string;
+  until?: string;
+  afterActionId?: string;
+  limit?: number;
+}
+
+/** Read the same retained records as readerActions, in bounded action-id order.
+ * Current is selected across the whole item/reader history BEFORE action/time/page filters. */
+export function listReaderActions(db: Database.Database, query: ReaderActionsQuery = {}) {
+  const mode = query.mode ?? "history";
+  const limit = Math.min(500, Math.max(1, Math.trunc(query.limit ?? 200)));
+  const ids = query.streamItemIds ? [...new Set(query.streamItemIds)] : undefined;
+  const where: string[] = [];
+  const params: string[] = [];
+  if (mode === "current") where.push(`NOT EXISTS (
+    SELECT 1 FROM stream_reader_actions newer
+    WHERE newer.stream_item_id = a.stream_item_id AND newer.reader_session = a.reader_session
+      AND newer.action_id > a.action_id)`);
+  if (ids) {
+    where.push("a.stream_item_id IN (SELECT value FROM json_each(?))");
+    params.push(JSON.stringify(ids));
+  }
+  if (query.hintTag !== undefined) {
+    where.push("EXISTS (SELECT 1 FROM json_each(item.hint_tags) WHERE value = ?)");
+    params.push(query.hintTag);
+  }
+  for (const [column, value, operator] of [
+    ["item.source_session", query.sourceSession, "="], ["a.reader_session", query.readerSession, "="],
+    ["a.action", query.action, "="], ["a.acted_at", query.since, ">="], ["a.acted_at", query.until, "<="],
+    ["a.action_id", query.afterActionId, ">"],
+  ] as const) {
+    if (value !== undefined) { where.push(`${column} ${operator} ?`); params.push(value); }
+  }
+  // No archive filter; the left join also retains orphaned history when no item-metadata filter is requested.
+  const rows = db.prepare(`SELECT a.* FROM stream_reader_actions a
+    LEFT JOIN stream_items item ON item.stream_item_id = a.stream_item_id
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    ORDER BY a.action_id LIMIT ?`).all(...params, limit + 1) as Row[];
+  const hasMore = rows.length > limit;
+  const items = rows.slice(0, limit).map(toAction);
+  const present = ids ? new Set((db.prepare("SELECT stream_item_id FROM stream_items WHERE stream_item_id IN (SELECT value FROM json_each(?))")
+    .all(JSON.stringify(ids)) as Array<{ stream_item_id: string }>).map(r => r.stream_item_id)) : null;
+  return { mode, items, limit, hasMore, nextAfterActionId: hasMore ? items.at(-1)!.actionId : null,
+    missingStreamItemIds: ids?.filter(id => !present!.has(id)) ?? [], historyScope: "retained" as const };
+}
+
 export function recordReaderAction(db: Database.Database, input: { streamItemId: string; readerSession: string; action: string;
   workQitemId?: string | null; duplicateOf?: string | null; reason?: string | null }, nowIso = new Date().toISOString()) {
   const action = input.action as ReaderActionKind;

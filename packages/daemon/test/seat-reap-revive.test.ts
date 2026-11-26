@@ -12,21 +12,38 @@ import { classifyColdStartStop } from "../src/domain/seat-cold-start.js";
 // seat through the REAL checked-stop path (only OS terminal effects replaced), and cold
 // start must read that exact stop as revivable; a human stop on the same seat must not be.
 
-function wiring(f: ReturnType<typeof fixture>) {
+function wiring(f: ReturnType<typeof fixture>, processState: "gone" | "unknown" | "survives" | "regrouped" | "exit unknown" = "gone") {
+  let dead = false;
   const tmux = new TmuxAdapter(async command => {
     if (command.includes("has-session")) return "";
     if (command.includes("list-panes")) return "%1|0|/fixture|120|40|1";
     if (command.includes("show-environment")) return "OPENRIG_NODE_ID=a";
     if (command.includes("kill-session")) return "";
     if (command.includes("detach-client")) return "";
+    if (command.includes("set-option")) return "";
+    if (command === "kill -TERM -4300") return "";
+    if (command === "kill -TERM 4242") { dead = true; return ""; }
+    if (command.includes("#{session_windows}")) return `$7|4242|1700000000|%1|${Number(dead)}|worker@test|1|1`;
+    if (command.includes("#{pane_pid}")) return "4242";
+    if (command.includes("#{pane_dead}")) return String(Number(dead));
     if (command.startsWith("tmux display-message")) return "$7|4242|1700000000";
     throw Error(`unexpected command ${command}`);
   });
+  tmux.standbyProcessCensus = async () => {
+    if (processState === "unknown" || (dead && processState === "exit unknown")) throw new Error("process table unavailable");
+    const common = { tpgid: 4300, startedAt: "fixture", executableName: "fixture", command: "fixture" };
+    return { permissionHiddenPids: [], rows: [
+      ...(!dead ? [{ ...common, pid: 4242, ppid: 1, pgid: 4242 }] : []),
+      ...(!dead || processState === "survives" || processState === "regrouped"
+        ? [{ ...common, pid: 4300, ppid: dead ? 1 : 4242, pgid: dead && processState === "regrouped" ? 4400 : 4300 }] : []),
+    ] };
+  };
   const guard = new SeatDeliveryGuard(f.db, name => resolveGuardTarget(f.db, name));
   tmux.deliveryGuard = guard;
   const lifecycle = new SeatLifecycleService({ db: f.db, rigRepo: new RigRepository(f.db),
-    sessionRegistry: new SessionRegistry(f.db), eventBus: f.bus, tmuxAdapter: tmux });
-  return { guard, lifecycle };
+    sessionRegistry: new SessionRegistry(f.db), eventBus: f.bus, tmuxAdapter: tmux,
+    inPlaceRestartTiming: { timeoutMs: 100, sleep: async () => {} } });
+  return { guard, lifecycle, tmux };
 }
 
 it("a reaper stop is recorded generation-exactly and classifies as revivable", async () => {
@@ -43,6 +60,17 @@ it("a reaper stop is recorded generation-exactly and classifies as revivable", a
   // And cold start reads it as reclaimable, not as an operator decision.
   expect(classifyColdStartStop(f.db, "a")).toMatchObject({ kind: "daemon_reclaim",
     operator: "daemon:seat-reaper", reason: "idle_reap" });
+});
+
+it.each(["unknown", "survives", "regrouped", "exit unknown"] as const)("does not record standby when runner observation is %s", async state => {
+  const f = fixture();
+  const { lifecycle } = wiring(f, state);
+  const pre = lifecycle.stopPrecondition("worker@test");
+  if (!("expected" in pre)) throw new Error("fixture missing stop selection");
+  const result = await lifecycle.stopSeat({ seatRef: "worker@test", expected: pre.expected,
+    operator: "daemon:seat-reaper", reason: "idle_reap" });
+  expect(result.ok).toBe(false);
+  expect(f.bus.replayAll(0)).not.toContainEqual(expect.objectContaining({ type: "session.stopped" }));
 });
 
 it("a human stop of the same seat is never revivable", async () => {

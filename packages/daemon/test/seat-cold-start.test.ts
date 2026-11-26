@@ -120,9 +120,22 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     }));
     f.setLiveSessions(["dev-impl@fleet"]);
     const owed = () => true;
-    await f.starter.wakeStandby?.("dev-impl@fleet", owed);
+    await Promise.all([f.starter.wakeStandby("dev-impl@fleet", owed), f.starter.wakeStandby("dev.impl@fleet", owed)]);
     expect(f.launches).toHaveLength(1);
     f.db.close();
+  });
+  it("does not attempt the same standby stop again after the pacing window and a restart", async () => {
+    const f = fixture({ intentionallyStopped: true });
+    try {
+      f.db.prepare("INSERT INTO events (rig_id,node_id,type,payload) VALUES ('r1','n1','session.stopped',?)").run(JSON.stringify({
+        sessionId: "s1", standbyPane: "$1|42|100|%1", operator: "daemon:seat-reaper", reason: "idle_reap",
+      }));
+      f.deps.launchSingleNode = vi.fn(async () => ({ ok: false, code: "standby_changed" }));
+      await f.starter.wakeStandby("dev-impl@fleet", () => true);
+      const restarted = new SeatColdStarter({ ...f.deps, now: () => new Date(Date.now() + 120_000) });
+      await restarted.wakeStandby("dev.impl@fleet", () => true);
+      expect(f.deps.launchSingleNode).toHaveBeenCalledTimes(1);
+    } finally { f.db.close(); }
   });
   it("cold-starts an eligible dormant seat of a running rig through the single-seat door", async () => {
     const f = fixture();

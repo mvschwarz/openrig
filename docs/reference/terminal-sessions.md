@@ -116,7 +116,9 @@ to follow its inherited sizing again.
 A Herdr tile's pin is OpenRig's own: the window is `manual` with the seat's size
 recorded in its `@openrig-pin-width` and `@openrig-pin-height` options, and
 hooks on the seat's session fit it to a focused client and give that size back on blur or
-detach. The pin stays after the view closes, since a Herdr restart brings tiles
+detach. The tile also gives the size back itself when it closes, however it
+closes, since tmux doesn't read the seat's hook for a client that exits on a
+hangup. The pin stays after the view closes, since a Herdr restart brings tiles
 back without a new open. To unpin a seat, drop the window's setting and
 OpenRig's record together (with the daemon's server flags):
 `tmux set-window-option -t <window> -u window-size \; set-window-option -t <window> -u @openrig-pin-width \; set-window-option -t <window> -u @openrig-pin-height`.
@@ -235,7 +237,10 @@ hand or by Rex after an app restart, is caught up within about ten seconds, or w
 five minutes when no Rex tile was showing the seat before.
 Rarely, a report can arrive in the middle of tmux's own output and garble part of a
 Rex tile until it redraws. When OpenRig doesn't know a seat's activity,
-the tile shows none rather than idle. OpenRig writes these reports only to the
+the tile shows none rather than idle. OpenRig writes its status as its own record
+(`id=openrig`), so a status the agent reports itself, with its message and any other
+records, stays alongside it, and OpenRig's clear removes only its own record.
+OpenRig writes these reports only to the
 tmux clients attached to the seat that identify themselves as Rex, so other
 terminals attached to the seat get nothing and no tmux option changes.
 
@@ -253,6 +258,69 @@ before retrying. `rig terminal status` gives Rex about a second to answer.
 ## herdr-app
 
 `--provider herdr-app` opens the view in the herdr-app window you run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same when that window is answering (finding the socket file is how OpenRig guesses you are in a herdr-app window, and whether the window is reachable is checked by asking it). `--window` always asks for a new desktop window. See [OpenRig views in herdr-app](herdr-app.md).
+
+## Orca (experimental)
+
+```sh
+# From within an Orca terminal, use that terminal's workspace:
+rig terminal open saved:kernel --provider orca
+
+# From another macOS shell, select an existing workspace explicitly:
+rig terminal open future-rig --provider orca --orca-workspace 'path:/path/to/worktree' --json
+```
+
+This experimental provider is macOS-only and was tested with **Orca 1.4.263**.
+Run it on the same Mac and under the same account as the running OpenRig daemon
+and Orca desktop. Register the [Orca CLI](https://orca.dev/docs/cli/reference)
+in Orca's settings if needed, and use `orca worktree ps --json` to find workspace
+selectors. The OpenRig for Orca plugin and Herdr are not required.
+
+By default, the view opens in the calling Orca terminal's workspace, even if
+its shell has changed directories. Pass `--orca-workspace` to choose another
+existing local workspace, or to run the command from outside Orca.
+
+It never creates a worktree or launches an agent. It opens one Orca tab per
+view page and splits it into panes for the existing local seats, preserving
+read-only views. Closing the Orca tab does not stop the seats. The provider is
+CLI-only: it does not change setup, provider selection defaults, or the daemon
+API. Remote seats and remote Orca workspaces are not supported.
+
+OpenRig does not pass `--focus` when creating a tab, but Orca may activate the
+tab when it splits a multi-seat page. A connected Orca pane confirms placement,
+not a working tmux view; check the tab in Orca. If the CLI, required commands,
+or workspace cannot be confirmed during preflight, no tab is opened. If a tab
+or split is unconfirmed after opening starts, inspect Orca before retrying.
+The CLI never retries a create or split automatically. `--window`, `--all`,
+`--follow`, named sessions, `--expected-plan`, and provider-specific
+`terminal status` or `close` are not supported for Orca yet.
+
+### Orca CLI compatibility
+
+The public CLI reference documents the worktree and terminal commands. The
+following details come from Orca **1.4.263**'s CLI help, bundled guide
+(`orca skills get orca-cli`), and runtime JSON replies. Recheck them when
+updating this integration:
+
+- **Local runtime:** The tested commands use `--environment local` to override
+  paired-runtime settings. The public reference shows `--host local` for host
+  selection, but Orca 1.4.263 rejects it on `status` and `worktree show`, and
+  `terminal create`, `split`, and `show` advertise `--environment`, not
+  `--host`. If the required local selector is unavailable or rejected,
+  OpenRig reports a CLI compatibility problem and does not try an unpinned
+  runtime.
+- **Workspace identity:** For the default lookup, OpenRig uses
+  `ORCA_WORKSPACE_ID` (or `ORCA_WORKTREE_ID` if unset) and passes the exact
+  `folder:<id>` or `id:<worktree-id>` selector to `worktree show`. Orca's
+  `current` and `active` selectors follow the shell's current directory, so
+  OpenRig does not use them for this default. `worktree show` supplies `id`,
+  `hostId`, and, for Git worktrees when available, `identity.key` and
+  `identity.executionHostId`. Tab creation uses the resolved `folder:`,
+  `identity:`, or `id:` selector.
+- **Reply metadata:** `_meta.runtimeId` keeps all calls on the same Orca
+  runtime. `status` supplies `app.running`, `app.desktopWindowStatus` and
+  `runtime.reachable`. The terminal replies supply `handle`, `tabId` and
+  `worktreeId`, plus `executionHostId` and `hostPlatform` where available;
+  `terminal show` supplies `connected` and `orphaned` for pane confirmation.
 
 ## HTTP API
 
@@ -280,7 +348,7 @@ to reuse an intact live workspace without rewriting an existing ownership record
 desktop `--window` with Herdr installed (opening one Herdr window once Herdr is
 preflighted, then applying per-rig workspaces), or `--provider tmux --window`
 (opening one tagged `openrig-view-<id>` tmux session per non-empty rig with an
-`@openrig_rig_viewer` nonce). `herdr-app`, `cmux`, and `rex` return
+`@openrig_rig_viewer` nonce). `herdr-app`, `cmux`, `rex`, and `orca` return
 `unsupported_provider`; plain `tmux` without `--window` returns
 `tmux_requires_window`. Seats on remote hosts (`host != null`) are reported under
 `skipped` when `TerminalService` receives hosted rows (the current single-host

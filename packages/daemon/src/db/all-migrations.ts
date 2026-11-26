@@ -1,14 +1,26 @@
+import { networkBindingProvidersSchema } from "./migrations/191_network_binding_providers.js";
 import { nodeKeepAliveSchema } from "./migrations/181_node_keep_alive.js";
 import { sessionStopAttemptSchema } from "./migrations/180_session_stop_attempt.js";
 import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js";
 import { nodeStatuslineThrottleSchema } from "./migrations/176_node_statusline_throttle.js";
 import { seatPoolSchema } from "./migrations/178_seat_pool.js";
 import { remoteControlObservationsSchema } from "./migrations/179_remote_control_observations.js";
+import { queueRelayedAnswersSchema } from "./migrations/186_queue_relayed_answers.js";
 import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_staging.js";
 import { seatReapStateSchema } from "./migrations/191_seat_reap_state.js";
+import { seatColdStartStandbyStopSchema } from "./migrations/200_seat_cold_start_standby_stop.js";
+import { workflowRunTitleSchema } from "./migrations/194_workflow_run_title.js";
+import { workflowStartOperationsSchema } from "./migrations/195_workflow_start_operations.js";
+import { queueItemEvidenceRefRootsSchema } from "./migrations/196_queue_item_evidence_ref_roots.js";
+import { queueItemsNativePermissionIndexSchema } from "./migrations/199_queue_items_native_permission_index.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
+import { providerAccountRefsSchema } from "./migrations/187_provider_account_refs.js";
+import { providerAccountAssignmentsSchema } from "./migrations/188_provider_account_assignments.js";
 import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";
+import { communityHarnessRuntimeSwitchesSchema } from "./migrations/179_community_harness_runtime_switches.js";
+import { networkRequestsSchema } from "./migrations/184_network_requests.js";
+
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
@@ -378,7 +390,18 @@ export const ALL_MIGRATIONS: Migration[] = [
   sessionStopAttemptSchema,
   nodeKeepAliveSchema,
   queueItemsBlockedOnIndexSchema,
+  queueRelayedAnswersSchema,
   queueItemsScanIndexesSchema,
+  providerAccountRefsSchema,
+  providerAccountAssignmentsSchema,
   rigSeatSliceSchema,
   seatReapStateSchema,
+  communityHarnessRuntimeSwitchesSchema,
+  networkBindingProvidersSchema,
+  workflowRunTitleSchema,
+  workflowStartOperationsSchema,
+  networkRequestsSchema,
+  queueItemEvidenceRefRootsSchema,
+  queueItemsNativePermissionIndexSchema,
+  seatColdStartStandbyStopSchema,
 ];

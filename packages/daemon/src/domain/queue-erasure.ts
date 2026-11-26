@@ -271,7 +271,7 @@ function scrubRows(st: Statements, ids: string[], nowIso: string): void {
     }
   }
   st.get(`UPDATE queue_items SET body = '', summary = NULL, resolution = NULL, tags = NULL, blocked_on = NULL,
-      chain_of_record = NULL, evidence_ref = NULL, human_detail = NULL, human_questions = NULL, human_answers = NULL,
+      chain_of_record = NULL, evidence_ref = NULL, evidence_ref_roots = NULL, human_detail = NULL, human_questions = NULL, human_answers = NULL, relayed_answers = NULL,
       delegated_decision = NULL, last_nudge_input_box = NULL, content_erased_at = @now WHERE qitem_id IN ${IDS}`).run({ ...params, now: nowIso });
   for (const table of ["queue_transitions", "queue_transitions_archive"]) {
     st.get(`UPDATE ${table} SET transition_note = NULL, identity_principal = NULL WHERE qitem_id IN ${IDS}`).run(params);

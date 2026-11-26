@@ -1,4 +1,6 @@
 import { physicalSessionName } from "../session-registry.js";
+import { sessionRigOf } from "../session-name.js";
+import { RigRepository } from "../rig-repository.js";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -75,6 +77,10 @@ export class OperatingPostureService {
     /** Configured workspace.catalog_path; <workspace>/workspace.yaml when unset. */
     private readonly catalogPath?: () => string | undefined) {}
 
+  private rigRepo?: RigRepository;
+  /** Rig-name reads go through the repository's own lookups, archived rows included or not. */
+  private get rigs(): RigRepository { return this.rigRepo ??= new RigRepository(this.db); }
+
   /** The project a declared former id names now (#3261): the catalogued project that declares it, or, for a workspace
    *  with its own project.yaml and no catalog, that project. Null for any other id. `declaredIn` is the file that says so. */
   private formerIds(): FormerIdLookup {
@@ -95,10 +101,18 @@ export class OperatingPostureService {
 
   context(input: OperatorContextReadContext): OperatingContext {
     const ctx: OperatingContext = { ...input, phase: { value: null, source: null }, sources: [] };
+    // An id resolves exactly. A name resolves as other rig-name reads do (#174): archived rigs of that name count only when
+    // no live one has it. When it still isn't one rig, the candidates are named so one can be chosen by id.
     const rigIdentity = (value: string) => {
-      const rigs = this.db.prepare("SELECT id FROM rigs WHERE id = ? OR name = ?").all(value, value) as Array<{ id: string }>;
-      if (rigs.length !== 1) throw new Error("rig identity missing or ambiguous: " + value);
-      return rigs[0]!.id;
+      const byId = this.db.prepare("SELECT id FROM rigs WHERE id = ?").get(value) as { id: string } | undefined;
+      if (byId) return byId.id;
+      const live = this.rigs.findUnarchivedRigsByName(value);
+      if (live.length === 1) return live[0]!.id;
+      const candidates = live.length ? live : this.rigs.findRigsByName(value);
+      if (candidates.length === 1) return candidates[0]!.id;
+      if (!candidates.length) throw new Error("no rig named or with id " + value);
+      throw new Error("rig name " + value + " matches " + candidates.length + (live.length ? " live rigs" : " archived rigs and no live one")
+        + "; name one by id: " + candidates.map(rig => rig.id).join(", "));
     };
     for (const value of Object.values(input)) if (value !== undefined && !value.trim()) throw new Error("empty scope identity");
     if (ctx.rigId) ctx.rigId = rigIdentity(ctx.rigId);
@@ -114,12 +128,19 @@ export class OperatingPostureService {
       return current.id;
     };
     if (ctx.projectId) ctx.projectId = currentProject(ctx.projectId);
+    const workstreamNames: Array<{ value: string; source: string }> = [];
     const merge = (key: keyof OperatorContextReadContext, raw: unknown, source: string) => {
       if (raw === undefined || raw === null) return;
       if (typeof raw !== "string" || !raw.trim()) throw new Error("invalid " + key + " from " + source);
       let value: string = raw;
       if (key === "rigId") value = rigIdentity(value);
       if (key === "projectId") value = currentProject(value);
+      if (key === "workstreamId") {
+        // Spellings of a workstream (directory name, SPEC id) are compared once the slice resolves, not as strings.
+        workstreamNames.push({ value, source });
+        ctx.workstreamId ??= value; ctx.sources.push(source);
+        return;
+      }
       if (ctx[key] && ctx[key] !== value) throw new Error("conflicting " + key + " from " + source);
       ctx[key] = value; ctx.sources.push(source);
     };
@@ -127,8 +148,9 @@ export class OperatingPostureService {
       const parts = ctx.workstreamId.split("/");
       if (parts.length !== 3) throw new Error("use project/mission/slice-id workstream identity");
       merge("projectId", parts[0], "workstream qualifier"); merge("missionId", parts[1], "workstream qualifier");
-      ctx.workstreamId = parts[2];
+      ctx.workstreamId = parts[2] || undefined;
     }
+    if (ctx.workstreamId) workstreamNames.push({ value: ctx.workstreamId, source: "input" });
     let destination: string | null = null;
     if (ctx.qitemId) {
       const row = this.db.prepare("SELECT tags, destination_session FROM queue_items WHERE qitem_id = ?").get(ctx.qitemId) as { tags: string | null; destination_session: string } | undefined;
@@ -150,8 +172,10 @@ export class OperatingPostureService {
         merge("rigId", workflow.bound_rig, "workflow:" + workflow.instance_id);
         ctx.phase = { value: workflow.step_id, source: "workflow:" + workflow.instance_id + "/frontier/" + ctx.qitemId };
       }
-      if (row.destination_session.includes("@")) merge("rigId", row.destination_session.slice(row.destination_session.lastIndexOf("@") + 1), "queue:" + ctx.qitemId + "/destination");
-      if (!ctx.projectId && !ctx.missionId) throw new Error("qitem project/mission linkage is missing");
+      // A seat's address names its rig; a person's (<person>@external) names none.
+      const destinationRig = sessionRigOf(row.destination_session);
+      if (destinationRig) merge("rigId", destinationRig, "queue:" + ctx.qitemId + "/destination");
+      if (!ctx.projectId && !ctx.missionId) throw new Error("this item has no project or mission tag, so no work scope says what its operating posture is");
     }
     if (ctx.rigId) {
       ctx.sources.push("rig:" + ctx.rigId);
@@ -203,10 +227,17 @@ export class OperatingPostureService {
         if (!ctx.phase.value) ctx.phase = { value: phase, source: missionPath };
         ctx.sources.push(missionPath);
         if (ctx.workstreamId) {
-          requiredSegment(ctx.workstreamId, "workstream");
           const slices = inside(projectRoot, join(missionRoot, "slices"));
+          // Every spelling must name the same authored slice; a different slice is a conflict.
+          const nodes = new Map<string, string>();
+          for (const name of workstreamNames) {
+            requiredSegment(name.value, "workstream");
+            const named = resolveWorkNodeDirs(slices, name.value);
+            if (named.length !== 1) throw new Error("workstream must resolve to one authored slice");
+            if (!nodes.has(named[0]!.dir)) nodes.set(named[0]!.dir, name.source);
+          }
+          if (nodes.size > 1) throw new Error("conflicting workstreamId from " + [...nodes.values()].join(" and "));
           const matches = resolveWorkNodeDirs(slices, ctx.workstreamId);
-          if (matches.length !== 1) throw new Error("workstream must resolve to one authored slice");
           const specPath = join(inside(projectRoot, join(slices, matches[0]!.dir)), "SPEC.md");
           ctx.paths.workstream = dirname(specPath);
           const spec = readFileSync(specPath, "utf8");
@@ -251,7 +282,8 @@ export class OperatingPostureService {
       return { posture: b.mode as "human-led" | "delegated", source: "binding", context,
         binding: { id: b.id, scope: resolved.resolvedScope, setAt: b.setAt, evidence: b.record.evidence_citation },
         reason: "Explicit operating posture at the most specific applicable scope.", grantsAuthority: false };
-    } catch (error) { return unknown(String(error), context); }
+    // The reason is shown as a sentence (the Feed, rig mode effective), not as an exception.
+    } catch (error) { return unknown(error instanceof Error ? error.message : String(error), context); }
   }
 
   /** Canonicalize only deliberate operating-posture writes; legacy ergonomic modes keep their contract. */

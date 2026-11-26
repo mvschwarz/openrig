@@ -132,7 +132,7 @@ import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
 import { probeSessionActivity, SessionTransport, inspectComposerInput, draftDeliveryAllows, readDraftDeliverySetting } from "./domain/session-transport.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
-import { hookOrPaneActivity, nodeExecutorConfirmedStopped } from "./domain/node-inventory.js";
+import { nodeExecutorConfirmedStopped, readCurrentSeatActivity, readSeatActivityAsRigPs } from "./domain/node-inventory.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
 import { WakeResolveService, WAKE_SESSIONS_SQL } from "./domain/wake-resolve-service.js";
@@ -162,7 +162,6 @@ import {
 } from "./domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
 import { SeatReaperService } from "./domain/seat-reaper-service.js";
-import { SeatLifecycleService } from "./domain/seat-lifecycle-service.js";
 import { deriveResumeToken } from "./domain/resume-token-capture.js";
 import { KeepAliveSupervisor } from "./domain/keep-alive-supervisor.js";
 import {
@@ -180,6 +179,8 @@ import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
 import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
 import { makeSeatPoolExecutor, seatPoolQueueEffects } from "./domain/seat-pool-executor.js";
+import { SeatLifecycleService } from "./domain/seat-lifecycle-service.js";
+import { convergeOp } from "./domain/topology-converge.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
@@ -230,6 +231,7 @@ import { restoreExistingRigUnattended } from "./domain/existing-rig-restore.js";
 import { lstatLinkInfo } from "./domain/restore-guidance.js";
 import { managedBlockRecords } from "./domain/managed-block-records.js";
 import { noticeHarnessNotStarted } from "./domain/harness-not-started-notice.js";
+import { noticeRosterReady } from "./domain/roster-ready-notice.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -467,6 +469,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const topologyValidateRig = makeTopologyDestinationCheck({
     findRigsByName: (name) => rigRepo.findRigsByName(name),
     loadHumanRegistry: () => loadHumanRegistry(),
+    db,
   });
   // Seat absence in positively known local topology is advice, never admission
   // authority. Keep every typed destination intact, including adopted aliases.
@@ -744,13 +747,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // the attention reconciler exists, so a reading before then waits for the next change.
   let restoredSeatActivity: ((sessionName: string, state: string | undefined) => void) | undefined;
   let rexSeatActivity: ((sessionName: string, current: import("./domain/terminal/rex-agent-status.js").SeatActivity) => void) | undefined;
-  const currentSeatActivity = (sessionName: string) => {
-    const runtime = sessionRegistry.findResumeContextByName(sessionName)?.runtime ?? null;
-    const structural = seatStructuralActivityService.getStructuralActivity(sessionName);
-    const resolved = hookOrPaneActivity(agentActivityStore.getLatestForNode({ sessionName,
-      order: runtime === "claude-code" ? "source" : "arrival" }), structural, false, runtime);
-    return { activity: resolved?.activity ?? null, runtime, structural };
-  };
+  const currentSeatActivity = (sessionName: string) => readCurrentSeatActivity({ hooks: agentActivityStore,
+    structural: seatStructuralActivityService, runtimeOf: (s) => sessionRegistry.findResumeContextByName(s)?.runtime ?? null }, sessionName);
   const retryPromptWakes = (sessionName: string) => {
     const { activity, runtime, structural } = currentSeatActivity(sessionName);
     const state = activity?.state;
@@ -990,7 +988,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   let persistedFreshPodLaunch: RestoreOrchestratorDeps["freshLaunch"];
   let persistedFreshPodLaunchAvailable: ((rigId: string, nodeId: string) => boolean) | undefined;
   let persistedSeatSkillSelection: RestoreOrchestratorDeps["seatSkillSelection"];
+  let persistedClaudeFragmentSelection: RestoreOrchestratorDeps["resolveClaudeFragments"];
   let persistedArmSeatContinuity: RestoreOrchestratorDeps["armContinuity"];
+  const resolveClaudeFragments: NonNullable<RestoreOrchestratorDeps["resolveClaudeFragments"]> = async (rigId, nodeId) =>
+    persistedClaudeFragmentSelection
+      ? persistedClaudeFragmentSelection(rigId, nodeId)
+      : { ok: false, reason: "the pod instantiator is not ready" };
 
   const restoreOrchestrator = new RestoreOrchestrator({
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
@@ -1006,6 +1009,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     seatSkillSelection: async (rigId, nodeId) => persistedSeatSkillSelection
       ? persistedSeatSkillSelection(rigId, nodeId)
       : { ok: false, reason: "the pod instantiator is not ready" },
+    resolveClaudeFragments,
     armContinuity: async (rigId, nodeId) => persistedArmSeatContinuity ? persistedArmSeatContinuity(rigId, nodeId) : null,
     harnessNotStartedNotice: (input) => noticeHarnessNotStarted(db, queueRepoInstance, input),
   });
@@ -1154,7 +1158,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { PodRigInstantiator } = await import("./domain/rigspec-instantiator.js");
   const { reconcileSkillLoadout } = await import("./domain/skill-catalog.js");
   const { StartupOrchestrator } = await import("./domain/startup-orchestrator.js");
-  const { ClaudeCodeAdapter } = await import("./adapters/claude-code-adapter.js");
+  const { ClaudeCodeAdapter, replaceClaudeFragment } = await import("./adapters/claude-code-adapter.js");
   // P20 — the projection manifest: record-at-apply so the projector can later
   // discriminate a stale re-projection (safe overwrite) from an operator edit (protect).
   const { ProjectionManifestStore } = await import("./domain/projection-manifest-store.js");
@@ -1174,7 +1178,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { PiRuntimeAdapter } = await import("./adapters/pi-runtime-adapter.js");
   const { OmpRuntimeAdapter } = await import("./adapters/omp-runtime-adapter.js");
 
-  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter, readFile: (p: string) => fs.readFileSync(p, "utf-8") });
+  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter,
+    readFile: (p: string) => fs.readFileSync(p, "utf-8"), resolveClaudeFragments });
   const runtimeSettings = new ContextPackSettingsStore().resolveConfig();
   const claudeCollectorAssetPath = nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs");
   // #2456: the adapters' guidance writes check and keep OpenRig's record of each managed block.
@@ -1185,7 +1190,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   } catch (error) {
     console.warn("Could not stage the Codex activity relay; using the shipped relay:", error);
   }
-  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, restoreReadPolicy, hookBridgeLaunch: (nodeId: string, executable?: string) => hookBridge.launchWanted(nodeId, executable), statuslineThrottleLaunch: (nodeId: string) => rigRepo.getNodeStatuslineThrottle(nodeId), fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: claudeCollectorAssetPath, autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), managedBlockRecords: guidanceBlockRecords, recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
+  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, restoreReadPolicy, hookBridgeLaunch: (nodeId: string, executable?: string) => hookBridge.launchWanted(nodeId, executable), statuslineThrottleLaunch: (nodeId: string) => rigRepo.getNodeStatuslineThrottle(nodeId), fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, replaceFragment: replaceClaudeFragment, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: claudeCollectorAssetPath, autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), managedBlockRecords: guidanceBlockRecords, readProjectionHash: (targetPath) => projectionManifestStore.lastHash(targetPath), recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
   const codexAdapter = new CodexRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, prepareTeamWorkspace, prepareSeatFolder, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, seatHome: (nodeId: string, ignoreAccountHome?: boolean) => seatRuntimeHome(db, nodeId, "codex", ignoreAccountHome).home, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, codexLoginShell: readCodexLoginShell, activityRelayPath: codexActivityRelayPath ?? nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveCorePluginDir: () => vendoredCorePluginDir(), resolveCorePluginSelected: (nodeId: string) => Boolean(seatCodexCorePluginDir({ id: nodeId, runtime: "codex" }, db)), resolveHooksEnabled: async () => {
     const { SettingsStore } = await import("./domain/user-settings/settings-store.js");
     return new SettingsStore().resolveOne("runtime.codex.hooks_enabled").value as boolean;
@@ -1397,6 +1402,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const podInstantiator = new PodRigInstantiator({
     db, rigRepo, podRepo,
+    rosterReadyNotice: (rigId, sessions) => noticeRosterReady(queueRepoInstance, rigId, sessions),
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
     adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter, runnerGrants }),
@@ -1426,6 +1432,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   persistedFreshPodLaunch = (rigId, nodeId, launchOpts) => podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts);
   persistedFreshPodLaunchAvailable = (rigId, nodeId) => podInstantiator.canLaunchPersistedFresh(rigId, nodeId);
   persistedSeatSkillSelection = (rigId, nodeId) => podInstantiator.seatSkillSelection(rigId, nodeId);
+  persistedClaudeFragmentSelection = podInstantiator.seatClaudeFragments;
   // A start that is not the first (a restore, a fresh launch) arms the seat's continuity notice the way the first start does:
   // the strategy as the spec says today, reconciled by the seat's stable session name (one job, never a duplicate).
   persistedArmSeatContinuity = async (rigId, nodeId) => {
@@ -1751,6 +1758,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         legacyProviderUsageDirectory(OPENRIG_HOME),
       ),
       agentActivityStore,
+      // #3625: the plan and apply read each seat's activity as rig ps shows it: a live hook, else the cached pane reading,
+      // with fresh terminal motion lifting idle or unknown to running.
+      seatActivity: (sessionName: string) => readSeatActivityAsRigPs({ hooks: agentActivityStore, structural: seatStructuralActivityService,
+        motion: seatActivityService, runtimeOf: (s) => sessionRegistry.findResumeContextByName(s)?.runtime ?? null }, sessionName),
       // A Claude seat switch checks what would outrank the seat's own token before it stops anything.
       claudePrecedence: (nodeId: string, opts?: { storedLogin?: boolean }) => claudeManagedLaunch.credentialPrecedence(nodeId, opts),
       // Slice 01: Codex and Claude usage windows, off unless provider.usage_windows is on (read per call). The native
@@ -1918,8 +1929,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           ? (transcriptsPath ?? getCompatibleOpenRigPath("transcripts"))
           : getCompatibleOpenRigPath("transcripts"),
         exec: execDep,
-        chatSearchFn: (rigId: string, pattern: string) =>
-          chatRepoForAsk.searchChat(rigId, pattern).map((m) => ({
+        chatSearchFn: (rigId: string, keywords: string[]) =>
+          chatRepoForAsk.searchChat(rigId, keywords).map((m) => ({
             sender: m.sender,
             body: m.body,
             createdAt: m.createdAt,
@@ -2625,8 +2636,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // not run it and nothing registers a seat-pool job: the job stays unarmed until the activation change adds the
     // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start. The policy hands each
     // evaluation to the executor, composed with the queue, the outbox's held messages, the delivery guard's custody,
-    // the seats' activity and the rig's events; it runs only through the policy.
+    // the seats' activity and the rig's events, the drain's effects (the delivery guard's lifecycle lease, the
+    // `auto-rehydrate` capture and the checked seat stop), and the add: the model member as the export writes it, and the
+    // member add of `rig add` (convergeOp over this daemon's instantiator); it runs only through the policy.
     const seatPoolSlots = new SeatPoolSlotsRepository(db);
+    const seatPoolStops = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter });
     const seatPoolExecutor = makeSeatPoolExecutor({
       db,
       rigRepo,
@@ -2638,6 +2652,24 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       seatState: (nodeId) => seatActivityService.getSeatState(nodeId),
       custody: (nodeIds, fn) => deliveryGuard.custody(nodeIds, fn),
       now: () => new Date(),
+      drain: {
+        lifecycle: (nodeIds, fn) => deliveryGuard.lifecycle(nodeIds, fn),
+        // The refresh rig down runs before its snapshot, for the session the drain stops.
+        refresh: async ({ rigId, sessionId }) => {
+          await resumeMetadataRefresher.refresh(sessionRegistry.getLatestLiveSessions(rigId).filter((s) => s.sessionId === sessionId));
+        },
+        capture: (rigId) => ({ snapshotId: snapshotCapture.captureSnapshot(rigId, "auto-rehydrate").id }),
+        stopSeat: async ({ seatRef, reason, expected, recheck }) => {
+          const stopped = await seatPoolStops.stopSeat({ seatRef, reason, operator: null, expected, ...(recheck ? { recheck } : {}) });
+          if (stopped.ok) return { ok: true, ...(stopped.alreadyDown ? { alreadyDown: true as const, ...(stopped.message ? { message: stopped.message } : {}) } : {}) };
+          return { ok: false, code: stopped.code, message: stopped.message, ...(stopped.partialEffect ? { partialEffect: true } : {}) };
+        },
+      },
+      add: {
+        exportMember: (rigId, modelNodeId) => rigSpecExporter.exportedRawMemberFromNode(rigId, modelNodeId),
+        converge: (rigId, op, rigRoot, opts) => convergeOp({ instantiator: podInstantiator }, rigId, op, rigRoot, opts),
+        makeFolder: (folder) => { fs.mkdirSync(folder, { recursive: true }); },
+      },
     });
     const seatPoolPolicy = makeSeatPoolPolicy({ cycle: (job) => seatPoolExecutor.cycle(job) });
     void seatPoolPolicy;
@@ -3245,6 +3277,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       home: effectiveOpenRigHome,
       queueRepo: queueRepoInstance,
       resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract, effectiveOpenRigHome),
+      filesAllowlist: () => deps.filesAllowlist ?? [],
       log: (m) => console.log(`[gateway] ${m}`),
     }),
     log: (m) => console.log(`[gateway] ${m}`),

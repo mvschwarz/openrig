@@ -1,5 +1,5 @@
 import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode } from "../domain/claude-continuation-launch.js";
-import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
+import { compactionPacketLaunchEnv, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { transportClaudeSettings } from "./claude-settings-transport.js";
 import { claudeMcpArgs } from "../domain/claude-mcp.js";
@@ -17,17 +17,18 @@ import type {
   HarnessLaunchResult,
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
-import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
-import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, claudeTrustPromptDrawing, claudeTrustPromptFocus, hasClaudeDrawnInput } from "../domain/native-resume-probe.js";
+import type { ClaudeFragmentEntry, ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
+import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, claudeTrustPromptDrawing, claudeTrustPromptFocus, hasClaudeDrawnInput, noConversationFoundOwner } from "../domain/native-resume-probe.js";
 import { resumeProbeEvidence } from "../domain/native-resume-probe-evidence.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProcesses, listNativeProcessesOrThrow, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
-import { isPerSeatRoleGuidance, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
+import { isPerSeatRoleGuidance, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE } from "../domain/managed-blocks.js";
 import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
-import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
+import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix, commandEnvPrefix } from "./claude-resume-launch.js";
 import { shellQuote, shellWord } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, managedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
-import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
+import { isOwnedCollectorCommand, removeOwnedClaudeSettings, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
+import { type ClaudeJsonFragmentType } from "../domain/types.js";
 import { throttledStatusLineForLaunch } from "../domain/claude-statusline-throttle.js";
 import { insideMissingFolder, isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { claudeStrictTrustRoot } from "../domain/claude-git-trust-root.js";
@@ -42,6 +43,8 @@ import { recordUnchangedSeatSkillFollowing, recordSeatSkillFollowing, recordSeat
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
   writeFile(path: string, content: string): void;
+  /** Compare the observed target before replacing its bytes on the managed refresh path. */
+  replaceFragment?(path: string, content: string, previous: string | null, cwd: string): void;
   exists(path: string): boolean;
   mkdirp(path: string): void;
   copyFile(src: string, dest: string): void;
@@ -153,6 +156,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /** P20 — called after a projected file is written to a target, so the manifest
    *  records what we last wrote (→ operator-vs-stale discrimination). No-op by default. */
   private recordProjection: (targetPath: string, content: string) => void;
+  private readProjectionHash: (targetPath: string) => string | null;
   /** #2456: OpenRig's record of what it last wrote in each managed guidance block (startup wires the daemon's). */
   private managedBlockRecords: ManagedBlockRecords | undefined;
 
@@ -186,6 +190,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     /** P20 — record-at-apply hook (startup wires it to the projection manifest store).
      *  Absent → no-op (the manifest stays empty → discrimination safe-degrades to P17). */
     recordProjection?: (targetPath: string, content: string) => void;
+    readProjectionHash?: (targetPath: string) => string | null;
     /** #2456: with it, every guidance block this adapter writes is checked against the record and recorded; absent, the
      *  plain merge, as before. */
     managedBlockRecords?: ManagedBlockRecords;
@@ -208,6 +213,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.activityRelayPath = deps.activityRelayPath ?? null;
     this.claudeHooksManifestPath = deps.claudeHooksManifestPath ?? null;
     this.recordProjection = deps.recordProjection ?? (() => {});
+    this.readProjectionHash = deps.readProjectionHash ?? (() => null);
     this.managedBlockRecords = deps.managedBlockRecords;
   }
 
@@ -227,7 +233,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const warnings: string[] = [];
     const skipped: string[] = [];
     const failed: Array<{ effectiveId: string; error: string }> = [];
-
     for (const entry of plan.entries) {
       try {
         if (entry.classification === "no_op") {
@@ -238,7 +243,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           skipped.push(entry.effectiveId);
           continue;
         }
-        const didProject = this.projectEntry(entry, binding.cwd, binding.claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, warnings, binding.seatSkillsRoot, binding.seatSkillsRefused);
+        const didProject = this.projectEntry(entry, binding, warnings, plan.skipUnavailableClaudeFragmentSources);
         if (didProject) {
           projected.push(entry.effectiveId);
         } else {
@@ -248,7 +253,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         failed.push({ effectiveId: entry.effectiveId, error: (err as Error).message });
       }
     }
-
     // Activity-hook reconciliation is driven from this ALWAYS-RUN seam (not a
     // per-entry projection): a profile that REMOVES the resource emits no entry,
     // so the strip/disable branch must fire off the plan's ABSENCE — not off an
@@ -283,6 +287,81 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     return { projected, skipped, failed, ...(warnings.length ? { warnings } : {}) };
+  }
+
+  /** Stage every fragment for a target before writing it once. A source that fails must not leave a partial merge. */
+  refreshRuntimeFragments(entries: ClaudeFragmentEntry[], binding: NodeBinding): ProjectionResult {
+    const projected: string[] = [];
+    const skipped: string[] = [];
+    const warnings: string[] = [];
+    for (const type of ["claude_mcp_fragment", "claude_settings_fragment"] as const) {
+      const group = entries.filter(entry => entry.resourceType === type);
+      if (group.length === 0) continue;
+      const ids = group.map(entry => entry.effectiveId);
+      const target = claudeFragmentTarget(binding.cwd, type);
+      const keep = (why: string, nextStep = "") => {
+        skipped.push(...ids);
+        warnings.push(`Claude fragments ${ids.join(", ")} were skipped for ${target}: ${why}. The file was left intact.${nextStep}`);
+      };
+      if (insideMissingFolder(target, binding.cwd, this.folderPresent)) {
+        keep("the seat's working folder is missing");
+        continue;
+      }
+      let fragments: Record<string, unknown>[];
+      try {
+        fragments = group.map(entry => this.readJsonObjectStrict(entry.absolutePath));
+      } catch {
+        keep("a source was not a readable JSON object");
+        continue;
+      }
+      let previous: string | null;
+      let existing: Record<string, unknown>;
+      try {
+        previous = this.fs.exists(target) ? this.fs.readFile(target) : null;
+        const parsed: unknown = previous?.trim() ? JSON.parse(previous) : {};
+        if (!isPlainObject(parsed)) throw new Error("Invalid target");
+        existing = parsed;
+      } catch {
+        keep("the target was not a readable JSON object");
+        continue;
+      }
+      const merged = fragments.reduce(mergeJsonObjects, existing);
+      const before = fragmentRecordContent(type, existing);
+      const after = fragmentRecordContent(type, merged);
+      if (previous !== null && before === after) {
+        projected.push(...ids);
+        continue;
+      }
+      let lastHash: string | null;
+      try {
+        lastHash = this.readProjectionHash(target);
+      } catch {
+        keep("the last projection record couldn't be read");
+        continue;
+      }
+      const edited = lastHash !== null && (previous === null || lastHash !== hashContent(before));
+      if (edited) {
+        keep("local edits differ from the last OpenRig projection");
+        continue;
+      }
+      if (lastHash === null && !keepsExistingJson(existing, merged)) {
+        keep("OpenRig has no write record and the refresh would replace existing values",
+          " Review the target and source. To apply the spec values, start the seat fresh.");
+        continue;
+      }
+      try {
+        this.fs.mkdirp(nodePath.dirname(target));
+        const content = JSON.stringify(merged, null, 2);
+        if (this.fs.replaceFragment) this.fs.replaceFragment(target, content, previous, binding.cwd);
+        else this.fs.writeFile(target, content);
+      } catch {
+        keep("the replacement file couldn't be written safely");
+        continue;
+      }
+      projected.push(...ids);
+      this.recordFragmentProjection(target, after, warnings);
+    }
+    return { projected, skipped, failed: [], ...(warnings.length ? { warnings } : {}) };
   }
 
   async deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding, sendInteractiveText?: (text: string) => Promise<void>): Promise<StartupDeliveryResult> {
@@ -494,14 +573,16 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
       const forkSessionId = this.sessionIdFactory();
-      const launchArgs = transportClaudeSettings(permissionArgs(forkSessionId), settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
+      const forkArgs = permissionArgs(forkSessionId);
+      const packetEnv = compactionPacketLaunchEnv(forkArgs, { openrigHome: this.stateDir, nativeSessionId: forkSessionId });
+      const launchArgs = transportClaudeSettings(forkArgs, settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
       const permissionMode = permissionArg(launchArgs);
       const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
-        "--resume", parentId, "--fork-session", "--session-id", forkSessionId, "--name", opts.name])
+        "--resume", parentId, "--fork-session", "--session-id", forkSessionId, "--name", opts.name], packetEnv)
         // The non-managed command text is parsed by the pane shell, so the
         // parent id needs the same quoting as --model/--effort above (and as
         // the codex fork path) — a hostile id must not leave --resume.
-        : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${shellWord(opts.name)}`;
+        : `${commandEnvPrefix(packetEnv)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${shellWord(opts.name)}`;
       const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
         : await sendClassic(cmd);
       if (!textResult.ok) {
@@ -511,6 +592,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!enterResult.ok) {
         return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
       }
+      // Readiness proves the fork's Claude by this launch, as it proves a fresh one: by the fork's own --session-id in the
+      // pane's foreground process. Without the record, a Claude that runs as a child of a shell (a launch the pane's shell
+      // sources in a subshell, or a claude alias or function) reads as a shell that isn't idle, and readiness waited until
+      // it timed out while the fork ran.
+      this.autoLaunches.set(binding.nodeId, { binding, token: forkSessionId, executable: managed?.executable,
+        scriptLaunch: managed?.executableIsScript });
       // As with a fresh launch, nothing is read back from Claude's session files: a same-name
       // file can belong to an earlier occupant or another seat sharing the config directory.
       return { ok: true, resumeToken: forkSessionId, resumeType: "claude_id", appliedLaunch, ...launchedExecutable, ...launchNotes() };
@@ -521,16 +608,19 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     let nativeArgs = resumedClaudeArguments(opts.resumeToken ? binding.claudeLaunch : undefined, ["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
       ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture, autoMode.block ?? null, settingsSeat);
     const sentNative = !!managed || !!(opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable);
+    // The packet variable follows the grant this launch sends: a continuation sends the running Claude's arguments.
+    const packetEnv = compactionPacketLaunchEnv(sentNative ? nativeArgs : launchArgs,
+      { openrigHome: this.stateDir, nativeSessionId: opts.resumeToken ?? generatedSessionId! });
     if (sentNative) nativeArgs = transportClaudeSettings(nativeArgs, settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
     else launchArgs = transportClaudeSettings(launchArgs, settingsSeat, tokenWarnings, binding.claudeLaunch?.args);
     const permissionMode = permissionArg(launchArgs);
-    const cmd = managed ? managed.command(nativeArgs, opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
-      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${shellWord(opts.name)}`
-      : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${shellWord(opts.name)}`;
+    const cmd = managed ? managed.command(nativeArgs, { ...(opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : {}), ...packetEnv }) : opts.resumeToken
+      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${commandEnvPrefix(packetEnv)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${shellWord(opts.name)}`
+      : `${commandEnvPrefix(packetEnv)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${shellWord(opts.name)}`;
 
     const configPrefix = binding.claudeLaunch?.configDir != null && this.seatLaunchEnvironment ? `CLAUDE_CONFIG_DIR=${shellQuote(binding.claudeLaunch.configDir)} ` : "";
     const classicCommand = configPrefix + (opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable
-      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}exec ${wrapperPrefix}${shellQuote(binding.claudeExecutable)} ${nativeArgs.map(shellQuote).join(" ")}` : cmd);
+      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${commandEnvPrefix(packetEnv)}exec ${wrapperPrefix}${shellQuote(binding.claudeExecutable)} ${nativeArgs.map(shellQuote).join(" ")}` : cmd);
     if (!managed && binding.claudeLaunch?.configDir !== undefined && !configPrefix) tokenWarnings.push("This classic launch cannot privately apply the captured config selector; ordinary pane selection is used.");
     tokenWarnings.push(...continuationChoiceNotes(binding.claudeLaunch, posture, model));
     // Recorded from the arguments actually sent: captured continuation arguments carry the running process's settings.
@@ -557,7 +647,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess };
     this.autoLaunches.set(binding.nodeId, launch);
     if (opts.resumeToken) {
-      const verification = await this.verifyResumeLaunch(binding);
+      // A launch sent through sendShellCommand (managed, or classic with the seat's launch environment) went as a staged
+      // script, run by the line it typed; that line marks this launch in the pane. One typed inline has none.
+      const launchLine = managed || this.seatLaunchEnvironment ? this.tmux.stagedLaunchTypedLine?.(binding.tmuxSession) : undefined;
+      const verification = await this.verifyResumeLaunch(binding, launchLine);
       // The process readiness pinned first, if it observed one: the caller records it, not a later read.
       const launchedProcess = launch.process ? { launchedProcess: { ...launch.process } } : {};
       if (!verification.ok) return { ...verification, ...launchedProcess };
@@ -585,7 +678,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const listProcesses = options?.observationPass
       ? options.observationPass.lister(this.listProcesses ?? listNativeProcessesOrThrow, this.listProcesses ?? listNativeProcesses)
       : this.listProcesses;
-    const historyProbe = await this.assessManagedProbe(binding, paneCommand, paneContent, options, listProcesses);
+    let historyProbe = await this.assessManagedProbe(binding, paneCommand, paneContent, options, listProcesses);
+    // A "No conversation found" above the line that ran the pane's current launch is an earlier launch's (the rule both
+    // resume verifiers use), so readiness judges what this launch drew below that line. The tmux adapter keeps that line
+    // for whichever adapter staged the launch; with none (an inline launch, or a daemon restart since), the report stands.
+    const typedLine = historyProbe.code === "no_conversation_found" ? this.tmux.stagedLaunchTypedLine?.(binding.tmuxSession) : undefined;
+    if (typedLine) {
+      const report = noConversationFoundOwner(paneContent, { typedLine, unread: this.tmux.stagedLaunchUnread?.(binding.tmuxSession) === true });
+      if (report.owner === "earlier" && report.since !== undefined) {
+        historyProbe = await this.assessManagedProbe(binding, paneCommand, report.since, options, listProcesses);
+      }
+    }
     const probe = await this.assessFreshInPlaceProbe(binding, historyProbe);
 
     // A script-launched Claude reads as `sh` until the script hands over the foreground, so the label alone
@@ -756,6 +859,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    *  nothing under it; Claude, or a launch script about to start it, is a slow resume. */
   private async paneReturnedToShell(binding: NodeBinding, paneCommand: string | null): Promise<boolean> {
     if (!paneCommand || !SHELL_COMMANDS.has(paneCommand)) return false;
+    // A shell that hasn't read the launch yet (a new pane's shell still running its startup files) holds the terminal
+    // with nothing under it exactly as one Claude returned to does. The launch's own script, still there, tells them apart.
+    if (binding.tmuxSession && this.tmux.stagedLaunchUnread?.(binding.tmuxSession)) return false;
     if (!binding.tmuxPane) return true;
     const observed = await observeClaudeDelivery({ target: binding.tmuxPane, tmux: this.tmux, listProcesses: this.listProcesses },
       { unknownKeepsIdle: false });
@@ -796,7 +902,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       ? "absent" : "unknown";
   }
 
-  private async verifyResumeLaunch(binding: NodeBinding): Promise<HarnessLaunchResult> {
+  private async verifyResumeLaunch(binding: NodeBinding, launchLine?: string): Promise<HarnessLaunchResult> {
     const tmuxSession = binding.tmuxSession!;
     // A quick window, then a longer one only while the boot is still in progress, as the Codex adapter does it.
     // The longer one is the readiness setting less the quick window, as a number of polls counted from here; it is per
@@ -811,13 +917,20 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // was confirmed (once: a frame drawn before Claude took the Enter still shows the prompt).
     let trustMoved = false;
     let trustEntered = false;
+    // Only a "No conversation found" below this launch's typed line is this launch's (noConversationFoundOwner). An earlier
+    // launch's is set aside, and the screen this launch has drawn below that line is judged instead. One that can't be
+    // placed (any, while the launch is unread; one whose typed line isn't in view) keeps the wait going like a start in
+    // progress, bounded as before.
+    const notFoundOwner = (content: string) => noConversationFoundOwner(content,
+      { typedLine: launchLine, unread: this.tmux.stagedLaunchUnread?.(tmuxSession) === true });
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
       const paneContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
-      const probe = await this.assessManagedProbe(binding, paneCommand, paneContent);
+      let probe = await this.assessManagedProbe(binding, paneCommand, paneContent);
+      const report = probe.code === "no_conversation_found" ? notFoundOwner(paneContent) : undefined;
 
-      if (probe.code === "no_conversation_found") {
+      if (report?.owner === "this") {
         return {
           ok: false,
           probe: await resumeProbeEvidence(probe, paneContent, this.tmux, tmuxSession),
@@ -826,6 +939,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           missingConversation: true,
         };
       }
+      const drawn = report?.owner === "earlier" ? report.since : undefined;
+      const screen = drawn ?? paneContent;
+      if (drawn !== undefined) probe = await this.assessManagedProbe(binding, paneCommand, drawn);
+      const heldReport = probe.code === "no_conversation_found";
 
       // A foreground Claude alone is a running process, not a resumed conversation: keep polling for its screen or its
       // "No conversation found" through the window (and a longer wait, below), and accept it at the final read if that's
@@ -859,11 +976,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         // On "No, exit" the selection moves down once (the two options wrap: a second Down would go back) and the next
         // polls wait to see the focus on "Yes". A screen with no key to send (another option set, no cursor, a focus
         // that never reaches "Yes") gets no confirmation; in the longer wait it ends at once, as without the auto-drive.
-        const focus = claudeTrustPromptFocus(paneContent);
+        const focus = claudeTrustPromptFocus(screen);
         const key = focus === "yes" && !trustEntered ? "Enter" : focus === "no" && !trustMoved ? "Down" : null;
         if (!key) {
           // A prompt still being drawn (its heading, no options yet) keeps the wait, as the gated-grants backstop's does.
-          if (slowStart && !trustMoved && !trustEntered && !claudeTrustPromptDrawing(paneContent)) {
+          if (slowStart && !trustMoved && !trustEntered && !claudeTrustPromptDrawing(screen)) {
             slowStart = false;
             break;
           }
@@ -882,7 +999,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
       // Only a boot in progress (no verdict, no gate, a label that proves nothing) is worth waiting for; a real
       // gate (login, trust or MCP approval, auto-mode identity) won't clear itself.
-      const booting = probe.code === "awaiting_runtime" || probe.code === "returned_to_shell";
+      const booting = heldReport || probe.code === "awaiting_runtime" || probe.code === "returned_to_shell";
       // A foreground Claude alone keeps the longer wait going too, to its end, as in the quick window: a resume of a
       // missing conversation is one until it reports that and exits. It isn't a boot for the checks below, so its process
       // label never reads as a ready screen there.
@@ -893,7 +1010,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // A start in progress can't have drawn Claude's ready screen. One that has, with its lineage unproven, keeps
       // main's result whenever it draws: at the window's end, or at any poll of the longer wait.
       const looksReady = (attempt === windowAttempts - 1 || slowStart) && booting
-        && assessNativeResumeProbe({ runtime: "claude-code", paneCommand, paneContent,
+        && assessNativeResumeProbe({ runtime: "claude-code", paneCommand, paneContent: screen,
           claudeAutoIdentityVerified: true, claudeResumeIdentityVerified: true }).status === "resumed";
       if (slowStart && looksReady && await this.paneOccupant(binding, true) === "another") {
         slowStart = false;
@@ -928,7 +1045,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const finalCommand = await this.tmux.getPaneCommand(tmuxSession);
     const finalContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
-    const finalProbe = await this.assessManagedProbe(binding, finalCommand, finalContent);
+    let finalProbe = await this.assessManagedProbe(binding, finalCommand, finalContent);
+    // The last read places a missing-conversation report as the loop does.
+    const finalReport = finalProbe.code === "no_conversation_found" ? notFoundOwner(finalContent) : undefined;
+    const finalDrawn = finalReport?.owner === "earlier" ? finalReport.since : undefined;
+    const finalScreen = finalDrawn ?? finalContent;
+    if (finalDrawn !== undefined) finalProbe = await this.assessManagedProbe(binding, finalCommand, finalDrawn);
 
     if (finalProbe.status === "resumed") {
       return finalProbe.foregroundOnly ? { ok: true, warnings: [CLAUDE_PROCESS_ONLY_RESUME] } : { ok: true };
@@ -952,8 +1074,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       };
     }
 
-    // The wait can end on the read that first shows Claude's missing-conversation report.
-    if (finalProbe.code === "no_conversation_found") {
+    // The wait can end on the read that first shows this launch's missing-conversation report.
+    if (finalReport?.owner === "this") {
       return {
         ok: false,
         probe: probeEvidence,
@@ -980,8 +1102,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     // The occupant can change after the last check in the loop, so the end of the wait looks once more, with the screen
     // judged as in the loop: a different occupant (or a ready-looking screen on a readable list) keeps main's result.
-    if (slowStart && (finalProbe.code === "awaiting_runtime" || finalProbe.code === "returned_to_shell")
-      && await this.paneOccupant(binding, assessNativeResumeProbe({ runtime: "claude-code", paneCommand: finalCommand, paneContent: finalContent,
+    // A report it couldn't place is judged as a start in progress, as in the loop.
+    if (slowStart && (finalProbe.code === "no_conversation_found" || finalProbe.code === "awaiting_runtime" || finalProbe.code === "returned_to_shell")
+      && await this.paneOccupant(binding, assessNativeResumeProbe({ runtime: "claude-code", paneCommand: finalCommand, paneContent: finalScreen,
         claudeAutoIdentityVerified: true, claudeResumeIdentityVerified: true }).status === "resumed") !== "another") {
       // Claude, or the script about to start it, may still be coming up. Keep the launch and its resume token for
       // a person (or the reconciler) rather than failing a seat that may be running. Never `resumed` from this.
@@ -1000,7 +1123,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /** A folder reads as present unless the filesystem can say it isn't (insideMissingFolder). */
   private readonly folderPresent = (path: string): boolean => this.fs.folderPresent?.(path) ?? true;
 
-  private projectEntry(entry: ProjectionEntry, cwd: string, managedBlockFile: ClaudeManagedBlockFile, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string): boolean {
+  private projectEntry(entry: ProjectionEntry, binding: NodeBinding, warnings: string[], skipUnavailableFragmentSource = false): boolean {
+    const { cwd, claudeManagedBlockFile: managedBlockFile = DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, seatSkillsRoot, seatSkillsRefused } = binding;
     // A seat folder this machine doesn't have isn't recreated to project into it (insideMissingFolder). A skill in the
     // seat's own skill storage lies outside it and still goes. Activity hooks are reconciled (and reported) by project().
     if (!(entry.category === "runtime_resource" && entry.resourceType === "claude_activity_hooks")) {
@@ -1012,7 +1136,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       }
     }
     // A skipped fragment is reported skipped; it never falls through to the generic extensions copy.
-    const handled = entry.category === "runtime_resource" ? this.applyRuntimeResource(entry, cwd, warnings) : false;
+    const handled = entry.category === "runtime_resource" ? this.applyRuntimeResource(entry, cwd, warnings, skipUnavailableFragmentSource) : false;
     if (handled) return handled === true;
 
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
@@ -1141,12 +1265,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /** true when applied, "skipped" when handled but not applied, false when this isn't a resource it handles. */
-  private applyRuntimeResource(entry: ProjectionEntry, cwd: string, warnings: string[]): boolean | "skipped" {
+  private applyRuntimeResource(entry: ProjectionEntry, cwd: string, warnings: string[], skipUnavailableFragmentSource: boolean): boolean | "skipped" {
     switch (entry.resourceType) {
       case "claude_settings_fragment":
-        return this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".claude", "settings.local.json"), warnings) || "skipped";
       case "claude_mcp_fragment":
-        return this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".mcp.json"), warnings) || "skipped";
+        return this.mergeJsonFragment(entry.absolutePath, claudeFragmentTarget(cwd, entry.resourceType), entry.resourceType,
+          warnings, skipUnavailableFragmentSource) || "skipped";
       case "claude_activity_hooks":
         // Handled (no generic .claude/extensions copy): the relay asset is
         // delivered + the settings hooks reconciled by reconcileClaudeActivityHooks
@@ -1160,8 +1284,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /** Merge a JSON fragment into a project file. An existing target that can't be read, or isn't a JSON object (it
    *  doesn't parse, or it holds an array or a single value), belongs to its owner: it's left as it is, nothing is
    *  merged, and a warning says so. Returns whether the fragment was applied. */
-  private mergeJsonFragment(sourcePath: string, targetPath: string, warnings: string[]): boolean {
-    const fragment = this.readJsonObjectStrict(sourcePath);
+  private mergeJsonFragment(sourcePath: string, targetPath: string, type: ClaudeJsonFragmentType, warnings: string[], skipUnavailableSource: boolean): boolean {
+    let fragment: Record<string, unknown>;
+    try {
+      fragment = this.readJsonObjectStrict(sourcePath);
+    } catch (error) {
+      if (!skipUnavailableSource) throw error;
+      warnings.push(`Kept ${targetPath} as it is. The saved Claude fragment source at ${sourcePath} was not a readable JSON object.`);
+      return false;
+    }
     // The reasons are fixed text: a parser message can quote the file's content.
     const leave = (reason: string) => {
       warnings.push(`Left ${targetPath} as it is: ${reason}. The fragment ${sourcePath} wasn't applied; once the file is fixed, the next fresh launch applies it (resuming or restoring the session doesn't).`);
@@ -1183,7 +1314,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const merged = mergeJsonObjects(existing, fragment);
     this.fs.mkdirp(nodePath.dirname(targetPath));
     this.fs.writeFile(targetPath, JSON.stringify(merged, null, 2));
+    this.recordFragmentProjection(targetPath, fragmentRecordContent(type, merged), warnings);
     return true;
+  }
+
+  private recordFragmentProjection(target: string, content: string, warnings: string[]): void {
+    try { this.recordProjection(target, content); }
+    catch { warnings.push(`Claude fragments for ${target}: OpenRig couldn't save the projection record for the next refresh.`); }
   }
 
   /**
@@ -1523,6 +1660,59 @@ interface ActivityHookOutcome {
 
 function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function claudeFragmentTarget(cwd: string, type: ClaudeJsonFragmentType): string {
+  return nodePath.resolve(cwd, type === "claude_mcp_fragment" ? ".mcp.json" : ".claude/settings.local.json");
+}
+
+/** Leave the old bytes intact if preparing the replacement fails or the target changed while we prepared it. */
+export function replaceClaudeFragment(path: string, content: string, previous: string | null, cwd: string): void {
+  const directory = fs.realpathSync.native(nodePath.dirname(path));
+  const relative = nodePath.relative(fs.realpathSync.native(cwd), directory);
+  if (relative === ".." || relative.startsWith(`..${nodePath.sep}`) || nodePath.isAbsolute(relative)) {
+    throw new Error("Fragment target is outside the seat's working folder");
+  }
+  const target = nodePath.join(directory, nodePath.basename(path));
+  const previousFile = fs.lstatSync(target, { throwIfNoEntry: false });
+  if (previousFile && (!previousFile.isFile() || previousFile.nlink !== 1)) throw new Error("Fragment target is not a private regular file");
+  const temporary = nodePath.join(directory, `.openrig-fragment-${randomUUID()}`);
+  const fd = fs.openSync(temporary, "wx", 0o600);
+  try {
+    try {
+      fs.writeFileSync(fd, content, "utf8");
+      if (previousFile) fs.fchmodSync(fd, previousFile.mode & 0o777);
+    } finally { fs.closeSync(fd); }
+    const current = fs.lstatSync(target, { throwIfNoEntry: false });
+    if (previousFile?.dev !== current?.dev || previousFile?.ino !== current?.ino
+        || (current ? fs.readFileSync(target, "utf8") : null) !== previous) {
+      throw new Error("Fragment target changed before replacement");
+    }
+    // The check and rename are separate operations. An external edit between them can be overwritten.
+    fs.renameSync(temporary, target);
+  } catch (error) {
+    try { fs.rmSync(temporary, { force: true }); } catch { /* The original error explains why the refresh failed. */ }
+    throw error;
+  }
+}
+
+/** These settings are reconciled by launch and removed by down, independently of fragment projection. */
+function fragmentRecordContent(type: ClaudeJsonFragmentType, value: Record<string, unknown>): string {
+  const content = type === "claude_settings_fragment" ? structuredClone(value) : value;
+  if (type === "claude_settings_fragment") removeOwnedClaudeSettings(content);
+  return JSON.stringify(content, (_key, item: unknown) =>
+    isPlainObject(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+}
+
+/** With no recorded projection, only add values. An overlapping value is the user's until proven otherwise. */
+function keepsExistingJson(existing: unknown, next: unknown): boolean {
+  if (isPlainObject(existing) && isPlainObject(next)) {
+    return Object.entries(existing).every(([key, value]) => Object.hasOwn(next, key) && keepsExistingJson(value, next[key]));
+  }
+  if (Array.isArray(existing) && Array.isArray(next)) {
+    return existing.length <= next.length && existing.every((value, index) => keepsExistingJson(value, next[index]));
+  }
+  return Object.is(existing, next);
 }
 
 function mergeJsonObjects(base: Record<string, unknown>, fragment: Record<string, unknown>): Record<string, unknown> {

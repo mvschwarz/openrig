@@ -44,7 +44,7 @@ import type { NotifyRegister } from "../event-bus.js";
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
-import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, type QueueRepository, type QueueItem } from "../queue-repository.js";
+import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, QueueRepositoryError, type QueueRepository, type QueueItem } from "../queue-repository.js";
 import { askBackRoute, terminalAnswerMeaning } from "../receiver-context.js";
 import type { PersistedEvent } from "../types.js";
 import {
@@ -54,7 +54,7 @@ import {
 } from "./mission-control-action-log.js";
 import { isHumanSeatSessionRef } from "../session-name.js";
 import { humanAnswerText, formatHumanAnswers, unansweredQuestions, type HumanAnswers } from "../human-questions.js";
-import { runnerPermissionOrigin } from "../runner-permissions.js";
+import { nativeAnswerReach, nativePermissionHook, runnerPermissionOrigin } from "../runner-permissions.js";
 
 /** The terminal's act, which names no responder: the generic human seat the web UI also records, read as explicitly
  *  unattributed, never a person. */
@@ -290,6 +290,7 @@ export class MissionControlWriteContract {
             tier: source.tier ?? undefined,
             summary: source.summary,
             evidenceRef: source.evidenceRef,
+            evidenceRefRoots: source.evidenceRefRoots,
             tags: source.tags
               ? [...source.tags, `mission-control:${input.verb}`]
               : [`mission-control:${input.verb}`],
@@ -625,6 +626,33 @@ export class MissionControlWriteContract {
         `qitem ${input.qitemId} isn't an ask to ${input.actorSession}, so ${input.actorSession} can't answer it.`, { qitemId: input.qitemId });
     }
     const before = snapshotQitem(ask);
+    if (ask.relayedAnswers) {
+      const afterCommit: Array<() => void> = [];
+      let result;
+      try {
+        result = this.eventBus.withNotifyEnvelope(register => {
+          input.appSubmission?.verify();
+          const receipt = this.queueRepo.writeRelayedAnswer({ qitemId: ask.qitemId, actorSession: input.actorSession,
+            identityProvenance: input.identityProvenance ?? undefined, nudge: input.notify,
+            direct: { questionId: input.questionId, optionId: input.optionId, text: input.decision, primaryUser } },
+          { register, afterCommit: wake => { afterCommit.push(wake); } });
+          input.appSubmission?.checkpoint(receipt.item);
+          return this.recordAnswer(input, before, input.decision ?? input.optionId ?? "", {
+            outcome: receipt.unplaced || receipt.unanswered.length ? "recorded" : "answered",
+            unanswered: (ask.humanQuestions ?? []).filter(q => receipt.unanswered.includes(q.id)).map(q => q.question),
+            ...(receipt.unplaced ? { message: `Reply returned to ${ask.sourceSession} as ${receipt.replyQitemId} without changing any answer.` }
+              : receipt.corrected ? { message: `Direct correction returned to ${ask.sourceSession} as ${receipt.replyQitemId}. The relay remains in history.` } : {}),
+          }, receipt.replyQitemId, undefined, register);
+        });
+      } catch (err) {
+        if (err instanceof QueueRepositoryError && err.code === "relayed_answer_refused") {
+          throw new MissionControlWriteContractError("answer_not_recorded", err.message);
+        }
+        throw err;
+      }
+      for (const wake of afterCommit) wake();
+      return result;
+    }
     const questions = ask.humanQuestions ?? [];
     const existing = this.queueRepo.getHumanAnswer(input.qitemId, input.actorSession, { primaryUser });
     if (existing && (ask.state === "pending" || ask.state === "done")) {
@@ -659,8 +687,13 @@ export class MissionControlWriteContract {
     const other = this.queueRepo.committedAnswerFromAnother(input.qitemId, input.actorSession);
     if (other) this.answeredByAnother(input, other, primaryUser);
     if (ask.state !== "pending") {
+      // A seat's own native prompt that ended: say how, in the words its record keeps (answered in the terminal, or too late).
+      const ended = nativePermissionHook(ask) && ask.state === "canceled"
+        ? this.queueRepo.listTransitions(ask.qitemId).map((t) => t.transitionNote ?? "").reverse()
+          .find((note) => note.startsWith("runner-permission-withdrawn") || note.startsWith("runner-permission-stale")) : undefined;
       throw new MissionControlWriteContractError("qitem_already_terminal",
-        `qitem ${input.qitemId} is ${ask.state}, not waiting on an answer (it may already be answered), so nothing was recorded or sent.`,
+        ended ? `Too late: ${ended.replace(/^runner-permission-(?:withdrawn|stale) reason=[^:]*: /, "")} Nothing was recorded or sent.`
+          : `qitem ${input.qitemId} is ${ask.state}, not waiting on an answer (it may already be answered), so nothing was recorded or sent.`,
         { qitemId: input.qitemId, state: ask.state });
     }
     const chose = input.questionId !== undefined || input.optionId !== undefined;
@@ -669,9 +702,14 @@ export class MissionControlWriteContract {
     // recorded answers, never a bare close.
     const resume = !chose && !words && questions.length > 0 && unansweredQuestions(questions, ask.humanAnswers ?? {}).length === 0;
     const answersReply = (answers: HumanAnswers) => `${formatHumanAnswers(questions, answers).join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(answers)}\nIn reply to: ${input.qitemId} (its humanAnswers field holds the same)`;
+    const keptBefore = this.queueRepo.keptAnswer(input.qitemId);
     let reply: string;
     let wrote = false; // whether this call changed the ask before the return below awaits
-    if (chose) {
+    if (keptBefore) {
+      // An interrupted close already committed this answer. Do not record a later choice or send replacement words.
+      if (keptBefore.actorSession !== input.actorSession) this.keptByAnother(input, keptBefore.actorSession, primaryUser);
+      reply = keptBefore.words;
+    } else if (chose) {
       // A partial app choice has no asynchronous return seam: choice + immutable receipt + audit + events commit
       // under the same envelope. An injected audit failure rolls back the choice too.
       if (input.appSubmission && unansweredQuestions(questions, { ...(ask.humanAnswers ?? {}), [input.questionId ?? ""]: input.optionId ?? "" }).length > 0) {
@@ -751,13 +789,20 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId });
     }
     const replyId = returned.qitemId;
+    // An ask whose source's rig isn't known here keeps its first answer on itself (createHumanAnswer): whose it is, and the
+    // words. Say where it went.
+    const kept = replyId === input.qitemId ? this.queueRepo.keptAnswer(input.qitemId) : null;
     input.appSubmission?.verify();
-    // Two people answering at once: one answer returns, and the other is told whose it was.
+    // Two people answering at once: one answer returns (or is kept), and the other is told whose it was.
+    if (kept && kept.actorSession !== input.actorSession) this.keptByAnother(input, kept.actorSession, primaryUser);
     if (replyId !== input.qitemId && returned.sourceSession !== input.actorSession) this.answeredByAnother(input, returned, primaryUser);
     // A runner's permission ask is its own answer record (no reply row comes back), so typed words are the person's own.
-    const decision = chose || resume
+    // A kept answer is this person's first one, as their returned row would be.
+    const decision = kept ? kept.words : chose || resume
       ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ")
       : returned.qitemId === input.qitemId ? words : humanAnswerText(returned.body);
+    // Their earlier answer is the one kept, so different words now weren't recorded: they're told so.
+    const superseded = kept !== null && ((chose && keptBefore !== null) || (!chose && !resume && words !== kept.words));
     // #2446: on a runner's permission ask (no reply row), a call that changed nothing before the await above (typed words,
     // or a choice whose set was already complete) still has its first write ahead, and the await let other requests in, so
     // a guarded answer compares its revision again here, with no await before the close. A call that wrote was compared
@@ -771,7 +816,8 @@ export class MissionControlWriteContract {
       input,
       before,
       decision,
-      { outcome: "answered", unanswered: [] },
+      { outcome: "answered", unanswered: [],
+        ...(kept ? { message: `${superseded ? `Your earlier answer is kept on ${input.qitemId}, so this one wasn't recorded.` : `Your answer is kept on ${input.qitemId}.`} It couldn't go back to ${ask.sourceSession}: this OpenRig doesn't know that seat's rig, and the ask's history says so.` } : {}) },
       replyId,
       {
         primaryUser,
@@ -781,11 +827,22 @@ export class MissionControlWriteContract {
             "answer_not_closed",
             runnerPermissionOrigin(ask)
               ? `Your answer is kept on ${input.qitemId}, but it couldn't be passed to its receiving agent just now, and nothing ran. Answer again, or decide directly: rig seat decide-permission ${input.qitemId} --option <id>.`
+              : kept ? `${superseded ? "Your earlier answer" : "Your answer"} is kept on ${input.qitemId}, but it didn't close: it changed meanwhile.${superseded ? " This one wasn't recorded." : ""}`
               : `The answer went back to ${ask.sourceSession} as ${replyId}, but qitem ${input.qitemId} didn't close: it changed meanwhile.`,
             { qitemId: input.qitemId, replyQitemId: replyId },
           ),
       },
     );
+  }
+
+  /** Another person's answer is already kept on the ask (its source's rig isn't known here): settle the ask with it if it's
+   *  still pending (the repository closes it as theirs), then tell this person who answered and that theirs wasn't recorded. */
+  private keptByAnother(input: MissionControlActionInput, answeredBy: string, primaryUser: boolean): never {
+    const ask = this.queueRepo.getById(input.qitemId);
+    if (ask?.state === "pending") this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision: "", primaryUser });
+    throw new MissionControlWriteContractError("qitem_already_terminal",
+      `${answeredBy} already answered qitem ${input.qitemId}; their answer is kept on it, since this OpenRig doesn't know its source's rig. ${input.actorSession}'s answer wasn't recorded or sent.`,
+      { qitemId: input.qitemId, answeredBy });
   }
 
   /** Another person's committed return already answers the ask: settle the ask with it if it's still pending (the
@@ -839,7 +896,7 @@ export class MissionControlWriteContract {
         }
         after = this.queueRepo.getById(input.qitemId);
         // A runner's permission request isn't closed by an answer: it's handed to the receiving agent, or kept. Say which.
-        const runnerNotice = !answer.message && after && runnerPermissionOrigin(after) ? runnerAnswerNotice(after) : undefined;
+        const runnerNotice = !answer.message && after && runnerPermissionOrigin(after) ? runnerAnswerNotice(after, this.db) : undefined;
         if (runnerNotice) finalAnswer = { ...answer, message: runnerNotice };
         const actionId = ulid();
         appResult = {
@@ -1021,8 +1078,17 @@ function verbToClosure(input: MissionControlActionInput): ClosureMapping {
 
 /** What became of a person's answer on a runner's permission request: handed to the receiving agent, or kept (the
  *  person's own receipt says why). Undefined for a request the answer closed (no agent wired here). */
-function runnerAnswerNotice(ask: QueueItem): string | undefined {
+function runnerAnswerNotice(ask: QueueItem, db: Database.Database): string | undefined {
+  // A seat's own native prompt, answered with a choice or a plain yes or no: the person's own answer, sent as they gave it.
+  // When the seat's hook isn't reading the ask (killed outright, say), the answer is still theirs, but it hasn't reached the prompt.
+  if (ask.state === "done" && nativePermissionHook(ask)) {
+    const { notReached } = nativeAnswerReach(db, ask);
+    if (notReached) return `Your answer on ${ask.qitemId} is recorded as yours. ${notReached}`;
+    return `Your answer on ${ask.qitemId} is recorded as yours, and goes to ${ask.sourceSession}'s own prompt as soon as its permission hook reads it. The prompt is also open in the seat's terminal, and the first answer counts; the request's record says when the hook took yours.`;
+  }
   if (ask.state === "handed-off" && ask.handedOffTo) {
+    // A seat's own prompt, answered in words: the record keeps them as theirs, and the decision as the agent's judgment.
+    if (nativePermissionHook(ask)) return `Your words on ${ask.qitemId} went to ${ask.handedOffTo}, the receiving agent, which judges whether this exact action meets them. Its decision is recorded as its judgment, not your own answer, with your words as you gave them. ${ask.sourceSession}'s prompt waits until then, and is also open in the seat's terminal.`;
     return `Your answer on ${ask.qitemId} went to ${ask.handedOffTo}, the receiving agent, which decides. The runner waits until then; nothing has run. A note to you says the agent's recorded state.`;
   }
   if (ask.state === "pending" || ask.state === "in-progress" || ask.state === "blocked") {

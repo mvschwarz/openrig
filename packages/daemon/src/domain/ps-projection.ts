@@ -50,8 +50,7 @@ export interface PsEntry {
    */
   hasWorkCount: number;
   status: "running" | "partial" | "stopped";
-  /** Folded from members not explicitly stopped. Empty rigs and rigs whose
-   * members are all intentionally stopped derive `stopped`. */
+  /** Folded from members not explicitly stopped or in standby. An empty fold derives `stopped`. */
   lifecycleState: RigLifecycleState;
   uptime: string | null;
   latestSnapshot: string | null;
@@ -74,6 +73,8 @@ export interface PsEntry {
    * pass as `lifecycleState` — no extra probes.
    */
   attentionCount: number;
+  /** With `seats: true` only: the rig's seat session names, from the same inventory pass (no extra reads). */
+  seats?: string[];
 }
 
 export { seatNeedsAttention, arbitratedNeedsInputSignal } from "./node-inventory.js";
@@ -110,14 +111,14 @@ export function deriveRigLifecycleState(nodeStates: NodeLifecycleState[]): RigLi
 }
 
 /** Shared display rollup for ps and the rig summaries consumed by the TUI.
- * Intentionally stopped seats remain in process counts and node diagnostics. */
+ * Explicitly stopped and standby seats remain visible in node diagnostics and totals. */
 export function deriveRigLifecycleFromInventory(
   inventory: readonly NodeInventoryEntry[],
   assignedWorkCount: (entry: NodeInventoryEntry) => number,
 ): RigLifecycleState {
   return deriveRigLifecycleState(
     inventory.filter((entry) => {
-      if (entry.intentionallyStopped) return false;
+      if (entry.intentionallyStopped || entry.standbyStopped) return false;
       const work = assignedWorkCount(entry);
       return !(isUnlaunchedHeldWithoutWork(entry, work) && !seatNeedsAttention(entry, null, null, work));
     }).map((entry) => entry.lifecycleState),
@@ -183,7 +184,7 @@ export class PsProjectionService {
     this.periodicSnapshotIntervalSeconds = intervalSeconds;
   }
 
-  getEntries(filter?: RigArchiveFilter): PsEntry[] {
+  getEntries(filter?: RigArchiveFilter, opts?: { seats?: boolean }): PsEntry[] {
     // OPR.0.3.3.19 - default excludes archived rigs at the projection layer
     // (NOT client-side). Explicit includeArchived/archivedOnly opt in.
     const cond = archiveWhereClause("r.archived_at", filter);
@@ -338,6 +339,7 @@ export class PsProjectionService {
         periodicSnapshotIntervalSeconds: this.periodicSnapshotIntervalSeconds,
         autoPeriodicSnapshotCount: r.auto_periodic_count,
         attentionCount,
+        ...(opts?.seats ? { seats: inventory.flatMap((node) => node.canonicalSessionName ? [node.canonicalSessionName] : []) } : {}),
       };
     });
   }

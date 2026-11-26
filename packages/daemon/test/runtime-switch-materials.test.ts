@@ -220,6 +220,92 @@ describe("a runtime switch plans the successor from the seat's own agent spec", 
     expect(() => plan(seat("codex"), "codex", "claude-code")).toThrow(/agent spec \(impl\) wasn't found where its last launch read it/);
   });
 
+  // A seat's `local:` ref names its spec by the rig root, which isn't recorded. The seat's saved startup context is the
+  // only other witness, and it doesn't carry the owner root of every file — an agent with no startup files leaves none.
+  // These read the `local:` ref itself: absolute remainders directly, relative ones against the rig root a launch found.
+  describe("a `local:` agent_ref whose saved startup context has no owner root", () => {
+    /** The seat's saved context, minus anything that would carry the agent folder from the spec's own files. */
+    const contextless = (node: Node, from: SwitchRuntime): ParsedStartupContext => {
+      const saved = savedContext(node, from);
+      saved.resolvedStartupFiles = [];
+      saved.plan.entries = [];
+      return saved;
+    };
+    const planFrom = (node: Node, from: SwitchRuntime) =>
+      planRuntimeSwitchMaterials({ db, node, rigName: "seat-rig", canonicalSession: "dev-impl@seat-rig", runtime: "claude-code", explicit: {},
+        saved: contextless(node, from), openrigHome: home, resolution: { homedir: tmp, skillsRoot: nodePath.join(tmp, "no-catalog") } });
+
+    it("resolves an absolute remainder without a recorded rig root", () => {
+      const node = seat("codex");
+      node.agentRef = `local:${agentDir}`;
+      expect(planFrom(node, "codex").resolvedSpec?.name).toBe("impl");
+    });
+
+    it("resolves a relative remainder against the rig.yaml a launch read it from", () => {
+      // The rig root is the nearest ancestor carrying a rig.yaml; the seat's cwd sits below it.
+      writeFileSync(nodePath.join(tmp, "rig", "rig.yaml"), "version: \"0.2\"\nname: seat-rig\npods: []\n");
+      const node = seat("codex");
+      node.cwd = nodePath.join(tmp, "rig", "project");
+      mkdirSync(node.cwd, { recursive: true });
+      expect(planFrom(node, "codex").resolvedSpec?.name).toBe("impl");
+    });
+
+    it("refuses a relative remainder that names no spec under the anchor, rather than searching elsewhere", () => {
+      writeFileSync(nodePath.join(tmp, "rig", "rig.yaml"), "version: \"0.2\"\nname: seat-rig\npods: []\n");
+      const node = seat("codex");
+      node.cwd = nodePath.join(tmp, "rig", "project");
+      mkdirSync(node.cwd, { recursive: true });
+      node.agentRef = "local:agents/missing";
+      expect(() => planFrom(node, "codex"))
+        .toThrow(/agent spec \(impl\) wasn't found where its last launch read it/);
+    });
+
+    it("resolves against the root the rig recorded, not a project's own rig.yaml", () => {
+      // The project carries its own rig.yaml with a same-named agents/impl: only the recorded root may decide.
+      const project = nodePath.join(tmp, "project");
+      mkdirSync(nodePath.join(project, "agents", "impl"), { recursive: true });
+      writeFileSync(nodePath.join(project, "rig.yaml"), "version: \"0.2\"\nname: nested\npods: []\n");
+      writeFileSync(nodePath.join(project, "agents", "impl", "agent.yaml"), "name: impl\nversion: \"1.0.0\"\nstartup:\n  files: []\n  actions: []\n");
+      const node = seat("codex");
+      node.cwd = project;
+      const materials = planRuntimeSwitchMaterials({ db, node, rigName: "seat-rig", canonicalSession: "dev-impl@seat-rig",
+        runtime: "claude-code", explicit: {}, saved: contextless(node, "codex"), rigRoot: nodePath.join(tmp, "rig"),
+        openrigHome: home, resolution: { homedir: tmp, skillsRoot: nodePath.join(tmp, "no-catalog") } });
+      // The recorded root's spec wins; the project copy never stands in.
+      expect(materials.resolvedSpec?.name).toBe("impl");
+      expect(nodePath.isAbsolute(nodePath.join(tmp, "rig", "agents", "impl"))).toBe(true);
+    });
+  });
+
+  // A community harness takes no startup files, so `send_text` material must not be queued into its handover. The
+  // identity line still travels (it is what the seat needs); a seat's own role file does not.
+  it("queues no send_text startup material for a community harness target", () => {
+    const node = seat("codex");
+    const saved = savedContext(node, "codex");
+    const materials = planRuntimeSwitchMaterials({ db, node, rigName: "seat-rig", canonicalSession: "dev-impl@seat-rig",
+      runtime: "cursor", explicit: {}, saved, openrigHome: home,
+      resolution: { homedir: tmp, skillsRoot: nodePath.join(tmp, "no-catalog") } });
+    expect(materials.firstTurn).toContain("Identity:");
+    expect(materials.firstTurn).not.toContain("The implementer's role");
+    expect(materials.firstTurn).not.toContain("Read your queue first.");
+  });
+
+  // The saved startup context is what a launch actually read the spec from, so a `local:` ref must not add a second
+  // candidate beside it: two roots that pass the same name check read as ambiguous and refuse a switch that used to work.
+  it("a nested rig.yaml does not add a second candidate to a source the saved context already names", () => {
+    // The seat's cwd carries its own rig.yaml, so the ref would resolve to a copy under project/agents/impl whose spec
+    // name matches. The saved context names the real source; the copy must not be read as a second answer.
+    const project = nodePath.join(tmp, "rig", "project");
+    mkdirSync(project, { recursive: true });
+    writeFileSync(nodePath.join(project, "rig.yaml"), "version: \"0.2\"\nname: nested\npods: []\n");
+    const nested = nodePath.join(project, "agents", "impl");
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(nodePath.join(nested, "agent.yaml"), "name: impl\nversion: \"1.0.0\"\nstartup:\n  files: []\n  actions: []\n");
+    const node = seat("codex");
+    node.cwd = project;
+    expect(plan(node, "codex", "claude-code").resolvedSpec?.name).toBe("impl");
+  });
+
   // #2456: the switch's preparation writes the successor's guidance through the target adapter, as a start does. A block
   // OpenRig wrote is refreshed from its changed source, and one a person edited since is kept.
   describe("the preparation and a managed guidance block OpenRig wrote (#2456)", () => {

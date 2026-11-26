@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { TmuxAdapter, defaultTmuxFileOps, escapeTmuxCommandSeparator } from "../src/adapters/tmux.js";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, resolve } from "node:path";
+import { TmuxAdapter, defaultTmuxFileOps, escapeTmuxCommandSeparator, isStagedSendScriptPath, tmuxStagingDir } from "../src/adapters/tmux.js";
 import type { ExecFn, TmuxResult, TmuxFileOps, ArgvExecFn } from "../src/adapters/tmux.js";
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
 
@@ -1786,20 +1789,21 @@ describe("TmuxAdapter", () => {
   });
 
   describe("signalPaneProcess", () => {
-    const witness = { target: { session: "worker@test", pane: "%3", nodeId: "a" }, identity: "$1|42|100|%3" };
+    const witness = { target: { session: "worker@test", pane: "%3", nodeId: "a" }, identity: "$1|42|100|%3",
+      processes: { pid: 4242, startedAt: "fixture", group: 4300, rootGroup: 4242, members: new Map([[4300, "fixture"]]) } };
     /** The real adapter's standby witness reads, with only the pane pid and foreground group controlled. */
-    const witnessExec = (calls: string[], tpgid: string, identity = "$1|42|100|%3|0|worker@test|1|1") => vi.fn<ExecFn>(async cmd => {
+    const witnessExec = (calls: string[], identity = "$1|42|100|%3|0|worker@test|1|1") => vi.fn<ExecFn>(async cmd => {
       calls.push(cmd);
       if (cmd.includes("#{session_windows}")) return identity + "\n";
       if (cmd.includes("show-environment")) return "OPENRIG_NODE_ID=a\n";
       if (cmd.includes("#{pane_pid}")) return "4242\n";
-      if (cmd.includes("tpgid")) return tpgid;
       return "";
     });
 
     it.each(["TERM", "KILL"] as const)("signals the runner's own process group with standby %s, then the pane pid", async signal => {
       const calls: string[] = [];
-      const adapter = new TmuxAdapter(witnessExec(calls, " 4300\n"));
+      const adapter = new TmuxAdapter(witnessExec(calls));
+      adapter.observeStandbyProcesses = async () => witness.processes;
 
       const result = await adapter.signalPaneProcess("%3", signal, witness);
 
@@ -1810,18 +1814,21 @@ describe("TmuxAdapter", () => {
       expect(groupIndex).toBeLessThan(pidIndex);
     });
 
-    it("keeps the pane pid signal when the tty has no foreground group", async () => {
+    it("does not signal only the pane pid when the foreground group is unproven", async () => {
       const calls: string[] = [];
-      const adapter = new TmuxAdapter(witnessExec(calls, "-1\n"));
+      const adapter = new TmuxAdapter(witnessExec(calls));
+      adapter.standbyProcessCensus = async () => ({ permissionHiddenPids: [], rows: [
+        { pid: 4242, ppid: 1, pgid: 4242, tpgid: -1, executableName: "sh", startedAt: "fixture", command: "sh" },
+      ] });
 
-      expect(await adapter.signalPaneProcess("%3", "TERM", witness)).toEqual({ ok: true });
-      expect(calls).toContain("kill -TERM 4242");
-      expect(calls.some(cmd => cmd.startsWith("kill -TERM -"))).toBe(false);
+      expect(await adapter.signalPaneProcess("%3", "TERM", witness)).toMatchObject({ ok: false, code: "standby_process_unconfirmed" });
+      expect(calls.some(cmd => cmd.startsWith("kill "))).toBe(false);
     });
 
     it.each(["TERM", "KILL"] as const)("refuses standby %s when the pane changed before the signal", async signal => {
-      const exec = witnessExec([], " 4300\n", "$1|43|101|%3|0|worker@test|1|1");
+      const exec = witnessExec([], "$1|43|101|%3|0|worker@test|1|1");
       const adapter = new TmuxAdapter(exec);
+      adapter.observeStandbyProcesses = async () => witness.processes;
 
       const result = await adapter.signalPaneProcess("%3", signal, witness);
 
@@ -1866,5 +1873,49 @@ describe("TmuxAdapter pane-local options (in-place restart)", () => {
       "tmux set-option -p -u -t %1 remain-on-exit",
       "tmux set-option -p -t %1 remain-on-exit on",
     ]);
+  });
+});
+
+describe("staged files", () => {
+  // Every file the adapter stages (launch scripts, environment files, the scope marker, private configs, paste buffers)
+  // takes its name from tmpName.
+  it("are staged in the OpenRig home's runtime folder, created owner-only, and keep their mode and cleanup", async () => {
+    const home = mkdtempSync(join(tmpdir(), "tmux-staging-home-"));
+    vi.stubEnv("OPENRIG_HOME", home);
+    try {
+      const files = defaultTmuxFileOps();
+      const file = files.tmpName();
+      expect(dirname(file)).toBe(join(home, "run", "tmux-staging"));
+      expect(tmuxStagingDir()).toBe(dirname(file));
+      expect(isStagedSendScriptPath(file)).toBe(true);
+      // The folder is made by the write, inside the caller's error handling.
+      expect(existsSync(dirname(file))).toBe(false);
+      await files.writeFile(file, "exec true\n", { mode: 0o600, flag: "wx" });
+      expect(statSync(dirname(file)).mode & 0o777).toBe(0o700);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      await files.unlink(file);
+      expect(existsSync(file)).toBe(false);
+      expect(files.tmpName()).not.toBe(file);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("are staged at an absolute path when the OpenRig home is given relative, as run/seat-bin resolves it", async () => {
+    const home = mkdtempSync(join(tmpdir(), "tmux-staging-relative-"));
+    vi.stubEnv("OPENRIG_HOME", relative(process.cwd(), home));
+    try {
+      const files = defaultTmuxFileOps();
+      const file = files.tmpName();
+      expect(dirname(file)).toBe(resolve(home, "run", "tmux-staging"));
+      expect(isStagedSendScriptPath(file)).toBe(true);
+      await files.writeFile(file, "exec true\n", { mode: 0o600, flag: "wx" });
+      expect(existsSync(file)).toBe(true);
+      await files.unlink(file);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

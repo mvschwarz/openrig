@@ -187,6 +187,23 @@ describe("Codex pre-paste observability through the real delivery path", () => {
     expect(f.bodies.a).toBe("");
   });
 
+  it("the held message's summary names the empty composer and the viewport hold, not an unknown composer", async () => {
+    const f = await codexDelivery();
+    const result = await f.send("D1", d1Envelope, f.options);
+    expect(result).toMatchObject({ outcome: "retained", reason: "draft_input_unknown", inputReadFailure: { status: "empty", reason: "paste_viewport" } });
+    const id = result.outboxIds![0]!;
+    // The message is the receipt's own recorded explanation: the transport's prefix, then the guard's words.
+    const summary = { id, state: "held", reason: "draft_input_unknown", inputRead: { status: "empty", reason: "paste_viewport",
+      message: "Failed to send text to 'worker@test': OpenRig couldn't confirm the complete message would stay visible in this Codex viewport. Open a larger terminal or shorten the message, then retry this request; nothing was pasted." } };
+    expect(f.guarded.lookup(id)).toEqual(summary);
+    // The held-messages surface a person or agent reads serves the same summary.
+    const listed = await (await f.app.request("/api/seat/held-messages/worker@test")).json() as { items: Array<{ delivery?: unknown }> };
+    expect(listed.items.map(item => item.delivery)).toEqual([summary]);
+    // A retired record reads as retired, with nothing claimed as still owed.
+    f.outbox.retire(id, "human@test", "read the viewport hold");
+    expect(f.guarded.lookup(id)).toEqual({ id, state: "held", reason: "message_retired" });
+  });
+
   it.each(["draft-aware", "openrig-urgent"])("submits a fitting full envelope once (%s)", async mode => {
     const f = await codexDelivery(mode, { width: 160, height: 45 });
     expect(await f.send("fits", d1Envelope, f.options)).toMatchObject({ ok: true, sent: true });
@@ -455,6 +472,38 @@ describe("current draft-aware delivery through the real transport", () => {
       expect(f.submissions).toEqual([]);
       expect(f.bodies.a).toBe(text);
     });
+
+  // A Claude seat whose Remote Control connection failed keeps its "/rc failed" row under the footer, below the update
+  // banner, before and after our paste. Through the real transport and guard, one owned paste is submitted; a near miss
+  // or the selected indicator gets no paste and no Enter.
+  const underRemoteControl = (f: ReturnType<typeof fixture>, text: string, indicator: string) => vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+    const staged = f.bodies.a === text;
+    const snapshot = frame(staged ? "[Pasted text #1 +2 lines]" : f.bodies.a ?? "");
+    snapshot.screen = snapshot.screen.replace("? for shortcuts\n",
+      `${staged ? "paste again to expand" : "⏵⏵ bypass permissions on · 1 shell · ↓ to manage"}\n✔ Update installed · /restart to apply\n${indicator}\n`);
+    return snapshot;
+  });
+
+  it.each(["/rc failed", "/rc reconnecting", "/rc connecting…", "/rc active"])("submits one owned paste above Claude's %j indicator", async indicator => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = "first line\nsecond line\nlast line";
+    underRemoteControl(f, text, indicator);
+    const result = await f.send("remote-control-row", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+    expect(f.writes.filter(write => write.startsWith("paste:"))).toHaveLength(1);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toHaveLength(1);
+  });
+
+  it.each(["/rc failed · Enter to view", "/rc disconnected", "\x1b[7m/rc failed\x1b[27m"])("holds a send under %j with no paste and no Enter", async indicator => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = "first line\nsecond line\nlast line";
+    underRemoteControl(f, text, indicator);
+    const result = await f.send("remote-control-near-miss", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_unknown" });
+    expect(f.submissions).toEqual([]);
+    expect(f.writes.filter(write => write.startsWith("paste:") || write.startsWith("keys:"))).toEqual([]);
+  });
 
   // D04 at full width (Claude 2.1.322 and 2.1.323, 200x50, as banked): the paste hint and the auto-update failure share
   // the footer row under an empty input box, before any paste of ours.
@@ -779,9 +828,10 @@ describe("current draft-aware delivery through the real transport", () => {
     f.bodies.a = condition === "unknown" ? null : "unfinished human request";
     const reason = condition === "unknown" ? "draft_input_unknown" : "draft_input_busy";
     const sleep = vi.fn((ms: number) => f.advance(ms)); f.hooks.sleep = sleep; // a wait, if any, reaches its deadline
-    expect(await f.send("held-claude", "incoming message", { waitForIdleMs: 60000, verify: false })).toMatchObject({
-      outcome: "retained", sent: false, reason, outboxIds: [expect.any(String)],
-    });
+    const held = await f.send("held-claude", "incoming message", { waitForIdleMs: 60000, verify: false });
+    expect(held).toMatchObject({ outcome: "retained", sent: false, reason, outboxIds: [expect.any(String)] });
+    // An unknown composer and a real draft summarize exactly as before: no input-read detail is added.
+    expect(f.guarded.lookup(held.outboxIds![0]!)).toEqual({ id: held.outboxIds![0], state: "held", reason });
     expect(sleep).not.toHaveBeenCalled();
     expect(f.writes).toEqual([]);
     expect(f.outbox.heldForNode("a").items[0]).toMatchObject({ body: "incoming message", deliveryState: "retained" });

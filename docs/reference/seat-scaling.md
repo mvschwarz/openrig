@@ -1,12 +1,12 @@
 # Managed seat scaling (idle-seat reaping)
 
 The daemon can reclaim the memory of a seat that has been provably idle for hours.
-It does this by **stopping** the seat through the existing checked-stop path — never
-by deleting anything. This is the local half of the architecture described in
-[mvschwarz/openrig#2829](https://github.com/mvschwarz/openrig/issues/2829): idle
-seats are reaped here and cold-started back on demand by a separate change
-(queue-driven cold start). That return path is **not** part of this feature, so
-reaping stays behind a disabled-by-default kill switch until it lands.
+Part 1 of [mvschwarz/openrig#2829](https://github.com/mvschwarz/openrig/issues/2829)
+stops the runner while keeping its tmux pane and conversation. New queued work
+can resume that exact conversation in the same pane. A person's `rig seat stop`
+or `rig down` keeps the seat off; queued work does not undo either command.
+Reaping remains disabled by default. Part 2's idle-stop policy changes are not
+shipped here; the eligibility and configuration below still apply.
 
 The reaper is conservative by construction: it reaps only when every predicate
 below holds continuously for the whole threshold, and any doubt (unknown
@@ -51,16 +51,18 @@ For each eligible seat, after the threshold elapses:
    pointer, nothing is stopped.
 2. **Checked stop.** `stopPrecondition` is read and its `expected` tuple is
    carried unchanged into the checked stop with operator `daemon:seat-reaper` and
-   reason `idle_reap`. Every existing refusal is honored. On `stop_uncertain` the
+   reason `idle_reap`. Standby is recorded only after the selected runner is gone
+   and the original pane is verified dead. On `stop_uncertain` the
    pass ends at once, the seat is marked `attention_required`, and the seat is
    never retried blind.
 3. **Receipt.** A second `seat.reaped` event with `phase: "effect"` records the
    stop result, its `stopPhase`, and whether the reap consumed the breaker
    budget.
 
-Nothing is deleted: the session row, the session file, the seat's state directory
-and the workspace all survive. Stopping a seat leaves the rig `running`; the
-recorded-intentional-stop semantics already prevent a "degraded" misread.
+The session record, conversation, pane and scrollback, state directory and
+workspace survive. `rig seat status` and `rig ps --nodes` distinguish standby from
+an explicit stop. Standby does not degrade an otherwise running rig. A rig with
+only standby seats reports zero running seats, but queued work can still resume one.
 
 ## Configuration
 
@@ -125,14 +127,10 @@ action.
 
 ## Rollout and recovery
 
-1. Keep `enabled` off until queue-driven cold start is deployed. Without a return
-   path, a reaped seat would strand addressed work until it is launched by hand.
-2. Turn the feature on for a small set of rigs with `observe` still on and confirm
+1. Turn the feature on for a small set of rigs with `observe` still on and confirm
    `would-reap-observe` receipts appear with the expected eligibility snapshots.
-3. Flip `observe` off for enforcement once the observe log is clean and the cold
-   start path exists.
+2. Turn `observe` off to enforce once those receipts match what you expect.
 
 To disable immediately, set `policies.seat_scale.enabled` to `off`; the next pass
-resets every clock. A reaped seat can be returned with the existing launch/restore
-verbs (`rig up <rig> --existing`, or a seat launch) until cold start handles it
-automatically.
+resets every clock. Work remains queued if the automatic resume cannot bring the
+seat back. Inspect the seat's status before choosing an explicit launch or restore.

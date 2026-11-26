@@ -115,14 +115,18 @@ are not yet runnable checks.
 
 `.github/workflows/tests.yml` runs on pull requests to `main` and on manual dispatch, all on
 Node 22. Each suite is its own job, so one failure doesn't hide the others. No provider
-credentials are supplied.
+credentials are supplied. The macOS `package-tests (daemon)` and `package-tests (cli)` run from
+`.github/workflows/macos-package-tests.yml` instead, for a review that approves the pull request's
+current head. A push after the approval leaves the new head waiting for those two required checks until
+it's approved again; `scripts/ci-macos-ready-plan.mjs` makes that decision. A manual dispatch runs the
+same suites under names that aren't required checks.
 
 | Job | Runner | What it does |
 |---|---|---|
 | `build-and-package` | ubuntu | `npm ci` and `npm run build`. Then `npm pack --dry-run` for cli, daemon and tui, with each file list uploaded as the `pack-lists` artifact. The job only records the lists; reviewers read them. |
 | `typecheck` | ubuntu | `npm run lint` |
 | `repo-checks` | ubuntu | `npm run test:repo` |
-| `package-tests` | matrix (fail-fast off): `daemon`, `cli` on macOS; `tui`, `ui` on ubuntu | Installs tmux, runs `npm ci` and `npm run build`, then `npm run test -w packages/<pkg>` under `env -i` with a scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR`. On macOS, a `sandbox-exec` profile blocks outbound network except localhost and the job's own socket directory, and `scripts/ci-macos-process-probe.mjs` runs first. On ubuntu, the suite runs as the unprivileged runner user in a network namespace with loopback only, as in `linux-seat-environment`. A network namespace does not confine pathname Unix sockets, so this is not the macOS sandbox. Each leg reports as `package-tests (<pkg>)`. |
+| `package-tests` | matrix (fail-fast off): `daemon`, `cli` on macOS (`macos-package-tests.yml`, after an approval of the head); `tui`, `ui` on ubuntu | Installs tmux, runs `npm ci` and `npm run build`, then `npm run test -w packages/<pkg>` under `env -i` with a scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR`. On macOS, a `sandbox-exec` profile blocks outbound network except localhost and the job's own socket directory, and `scripts/ci-macos-process-probe.mjs` runs first; the macOS daemon leg also passes `VITEST_MAX_WORKERS=3`. On ubuntu, the suite runs as the unprivileged runner user in a network namespace with loopback only, as in `linux-seat-environment`. A network namespace does not confine pathname Unix sockets, so this is not the macOS sandbox. Each leg reports as `package-tests (<pkg>)`. |
 | `daemon-ubuntu` | ubuntu | The full daemon suite again, beside the unchanged macOS `package-tests (daemon)`, under the same Linux confinement as the ubuntu `package-tests` legs. It adds evidence and replaces no macOS coverage. The job installs only apt's tmux: when that tmux predates control mode (3.7c), or zsh or ksh is absent, those tests skip, and when `/bin/sh` does not expand `~` in `PATH` (dash does not), that test skips too. `scripts/ci-vitest-summary.mjs` writes the counts to the job summary, then failed files and each failed, skipped or todo test with its file and line, up to 300 rows per section; the uploaded `daemon-ubuntu-results` artifact holds that summary and the complete vitest JSON report. Runs on pull requests and manual dispatch. |
 | `linux-seat-environment` | ubuntu | Builds all packages, then runs `seat-env-parent-session.integration.test.ts` with real CLI, daemon, tmux and stub seats. A network namespace has loopback only; tests run as the unprivileged runner user under `env -i` with scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR`. Runs on pull requests and manual dispatch, like `package-tests`. |
 | `installed-scenario` | ubuntu | `bash scripts/run-pr-scenarios.sh` (fifteen container runs, described below). Uploads `dist/pr-scenarios/` as `installed-scenario-evidence`, including on failure. |

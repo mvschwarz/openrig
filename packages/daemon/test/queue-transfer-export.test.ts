@@ -36,7 +36,7 @@ it("matches the migrated queue and source history column inventories", () => {
     queue_transitions_archive: [...QUEUE_TRANSFER_COLUMNS.queue_transitions, "archived_at"] })) {
     expect(db.prepare<[], { name: string }>(`PRAGMA table_info(${table})`).all().map(row => row.name).sort()).toEqual([...columns].sort());
   }
-  expect(QUEUE_TRANSFER_COLUMNS.queue_items).toHaveLength(38);
+  expect(QUEUE_TRANSFER_COLUMNS.queue_items).toHaveLength(40);
 });
 
 it("refuses an unreconciled source and an incomplete explicit ID selection", () => {
@@ -58,6 +58,17 @@ it("preserves source history and verbatim routes without copying outside work or
     missionControlActions: [expect.objectContaining({ actionId: "action-a", reason: "audit reason", identityProvenance: "transport:v1" })] })]);
   expect(Object.keys(result).sort()).toEqual(["createdAt", "erasedIds", "erasedRigs", "format", "origin", "rows", "scope", "transferId"]);
   expect(result.origin).not.toHaveProperty("generation");
+});
+
+it("archives the evidence authority verbatim and removes it for scrubbed content", () => {
+  seed();
+  db.prepare("UPDATE queue_items SET evidence_ref = ?, evidence_ref_roots = ? WHERE qitem_id = ?")
+    .run("/fixture/chart.png", '["proof"]', "qitem-a");
+  expect(readQueueTransfer(db, { kind: "qitems", names: ["qitem-a"] }).rows[0])
+    .toMatchObject({ evidenceRef: "/fixture/chart.png", evidenceRefRoots: '["proof"]' });
+  db.exec("UPDATE queue_items SET content_erased_at = 'scrub time' WHERE qitem_id = 'qitem-a'");
+  expect(readQueueTransfer(db, { kind: "qitems", names: ["qitem-a"] }).rows[0])
+    .toMatchObject({ evidenceRef: null, evidenceRefRoots: null });
 });
 
 it("includes all erasure receipts when exporting the whole host", () => {

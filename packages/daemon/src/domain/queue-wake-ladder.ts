@@ -12,6 +12,7 @@ import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
 import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
+import { nativeAskHoldsPrompt } from "./runner-permissions.js";
 import { PROMPT_ROUTED_WORK_PREFIX, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RETURN_ROUTE_NOTE_PREFIX, isEpisodeRelay,
   promptKindFromReason, resolveEscalationReturnRoute, routeOnThisHost, type PromptKind } from "./return-route.js";
 import { isTypedGateBlocker } from "./queue-blocker.js";
@@ -1597,6 +1598,11 @@ async function advancePromptRefusals(
   }
 
   const permissionObservations = new Map<string, PermissionPromptObservation>();
+  // Every permission-hook episode tag of every prompt alert, newest alert first, read once per tick when the first clear
+  // needs it, rather than one scan of the alert rows per observed seat. A seat's pick is the first entry whose tag starts
+  // with its prefix: the newest alert (ts_created, then qitem_id, both descending) that the per-seat LIMIT 1 chose. The
+  // loop below writes only transitions (appendMarker), never a row's tags or ts_created, so the snapshot stays exact.
+  let permissionAlertTags: Array<{ qitem_id: string; value: string }> | undefined;
   try {
     for (const observation of deps.readPermissionPrompts?.() ?? []) {
       const { state } = observation;
@@ -1605,10 +1611,13 @@ async function advancePromptRefusals(
       // without reopening or changing the owner's disposition; the next prompt gets a new key.
       if (state === "clear") {
         const prefix = `${PROMPT_EPISODE_TAG}${observation.destination}|permission-hook:${observation.episode}|`;
-        const latest = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE ${PROMPT_ALERT_ROWS}
-          AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
-          AND EXISTS (SELECT 1 FROM json_each(tags) WHERE substr(value, 1, ?) = ?)
-          ORDER BY ts_created DESC, qitem_id DESC LIMIT 1`).get(PROMPT_ALERT_TAG, prefix.length, prefix) as { qitem_id: string } | undefined;
+        permissionAlertTags ??= deps.db.prepare(`SELECT q.qitem_id, j.value FROM (
+            SELECT qitem_id, tags, ts_created FROM queue_items WHERE ${PROMPT_ALERT_ROWS}
+              AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)) q, json_each(q.tags) j
+          WHERE j.type = 'text' AND substr(j.value, 1, ?) = ? AND instr(j.value, '|permission-hook:') > 0
+          ORDER BY q.ts_created DESC, q.qitem_id DESC`)
+          .all(PROMPT_ALERT_TAG, PROMPT_EPISODE_TAG.length, PROMPT_EPISODE_TAG) as Array<{ qitem_id: string; value: string }>;
+        const latest = permissionAlertTags.find(tag => tag.value.startsWith(prefix));
         const row = latest && deps.queueRepo.getById(latest.qitem_id);
         if (row && !["pending", "in-progress", "blocked"].includes(row.state)
           && !deps.queueRepo.listTransitions(row.qitemId).some(t => t.actorSession === LADDER_ACTOR && t.transitionNote === PROMPT_CLEARED_NOTE)) {
@@ -1616,6 +1625,9 @@ async function advancePromptRefusals(
         }
       }
       if (state !== "blocked" || deps.queueRepo.deliveryDrains.holds(observation.destination)) continue;
+      // The seat's own prompt is already asked through OpenRig (a native ask, slice 15), and that ask is still taking an
+      // answer: its person is being asked there, so this alert waits until the ask ends.
+      if (nativeAskHoldsPrompt(deps.db, observation.destination)) continue;
       // Each prompt is its own episode when its start is known; otherwise the occupant's prompts share one key.
       const key = `${PROMPT_EPISODE_TAG}${observation.destination}|permission-hook:${observation.episode}`
         + `${observation.prompt ? `|prompt:${observation.prompt}` : ""}|after:${clearedAlert(observation.destination)?.qitemId ?? "start"}`;
@@ -1658,6 +1670,8 @@ async function advancePromptRefusals(
   for (const work of routedPromptWork(deps.db)) {
     const dest = work.subject;
     if (deps.queueRepo.deliveryDrains.holds(dest) || readAt(dest, now.toISOString()) !== "blocked") continue;
+    // The seat's prompt is being asked through OpenRig right now (a native ask, slice 15): no relay task while it is.
+    if (nativeAskHoldsPrompt(deps.db, dest)) continue;
     const key = `${PROMPT_EPISODE_TAG}${dest}|routed-work:${work.qitemId}|after:${clearedAlert(dest)?.qitemId ?? "start"}`;
     if (closedEpisode(key)) continue;
     const row = readCandidate(work.qitemId, dest);

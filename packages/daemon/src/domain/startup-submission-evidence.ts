@@ -19,6 +19,7 @@ const PERCENT = String.raw`(?:100|[1-9]?\d)%`;
 const CONTEXT_NOTICE = String.raw`(?:(?:${PERCENT} until auto-compact|auto-compact is next|${PERCENT} context used)`
   + String.raw`(?: · \/model [A-Za-z0-9._\[\]-]+)?`
   + String.raw`|Context low \(${PERCENT} remaining\)(?: · (?:\/compact to free up space|\/model [A-Za-z0-9._\[\]-]+))?)`;
+export const CLAUDE_CLEAR_HINT = /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/;
 // Claude can leave these noninteractive warnings BELOW the input box and mode bar.
 // Recognize the complete input block, never a warning or historical prompt alone.
 export const CLAUDE_STATUS_WARNINGS = [
@@ -30,7 +31,7 @@ export const CLAUDE_STATUS_WARNINGS = [
   // #1641: Claude 2.1.293's update banner, whatever installer it names.
   /^Update available! Run: \S.*$/,
   // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
-  /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
+  CLAUDE_CLEAR_HINT,
   /^~\d+(?:\.\d+)?k uncached · \/clear to start fresh$/,
   // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30), "Restart to apply", or
   // "Restart to update" on its own row (Claude 2.1.319, #2605).
@@ -43,6 +44,11 @@ export const CLAUDE_STATUS_DECORATIONS = [
   /^current: \d+(?:\.\d+){2} · latest: \d+(?:\.\d+){2} ✔ Update installed · Restart to update$/,
   /^\/rc$/,
 ];
+// Claude's Remote Control indicator, on its own row under the mode footer, in its other unselected labels (Claude Code
+// 2.1.316 to 2.1.332): connecting, active ("/rc" above once it has been seen a few times), reconnecting and failed. The
+// footer search skips these exact rows only. A selected indicator (↓) is drawn inverse with its "· <key> view" hint, and
+// Enter opens its panel, so it is never one of them. Not in STATUS_NOTICE: no frame shows one on the paste hint's row.
+export const CLAUDE_REMOTE_CONTROL_ROWS = [/^\/rc (?:connecting…|active|reconnecting|failed)$/];
 // Only a known effort hint, context warning, or a notice the reader knows on its own row (the lists above, each
 // `^…$`) may share the paste-hint row. A wide pane draws a notice there in full; a narrow one gives it its own row,
 // skipped as a status row, so a row clipped to that width (ending in `…`) never shares the hint's (#3231). Any other

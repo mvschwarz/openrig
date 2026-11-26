@@ -27,6 +27,9 @@ it.each([false, true])("uses the real checked stop and lifecycle lease (uncertai
     if (command.includes("#{pane_pid}")) return "4343";
     throw Error(`unexpected command ${command}`);
   });
+  tmux.standbyProcessCensus = async () => ({ permissionHiddenPids: [], rows: killed ? [] : [
+    { pid: 4343, ppid: 1, pgid: 4343, tpgid: 4343, executableName: "fixture", startedAt: "fixture", command: "fixture" },
+  ] });
   const guard = new SeatDeliveryGuard(f.db, name => resolveGuardTarget(f.db, name)); tmux.deliveryGuard = guard;
   const lifecycle = new SeatLifecycleService({ db: f.db, rigRepo: new RigRepository(f.db), sessionRegistry: new SessionRegistry(f.db), eventBus: f.bus, tmuxAdapter: tmux,
     inPlaceRestartTiming: { pollMs: 1, timeoutMs: 1, sleep: async () => {} } });
@@ -36,7 +39,7 @@ it.each([false, true])("uses the real checked stop and lifecycle lease (uncertai
   for (let i = 0; i <= 60; i++) { at += 60_000; await service.tick(); }
   // Then only the reviewed tmux session is targeted, and effects match the receipt.
   expect(commands.filter(command => command.startsWith("kill -"))).toEqual(uncertain
-    ? ["kill -TERM 4343", "kill -KILL 4343"] : ["kill -TERM 4343"]);
+    ? ["kill -TERM -4343", "kill -KILL -4343"] : ["kill -TERM -4343"]);
   expect(commands.some(command => command.includes("kill-session") || command.includes("detach-client"))).toBe(false);
   expect(killed).toBe(!uncertain);
   expect(f.events()).toContainEqual(expect.objectContaining({ phase: "effect", budgetConsumed: true,
