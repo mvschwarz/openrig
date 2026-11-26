@@ -29,6 +29,20 @@ export interface DaemonClientOptions {
 export const ACTION_UNAUTHORIZED = "This daemon refused the answer without its operator bearer token, so nothing was recorded. "
   + "Start the TUI with OPENRIG_AUTH_BEARER_TOKEN set to the token this daemon runs with, then answer again.";
 
+/** The daemon answered a write with a refusal (a non-OK HTTP status), so it wrote nothing. A write that got no answer
+ *  (the connection failed) rejects with the fetch error instead: whether it landed isn't known. */
+export class DaemonWriteRefused extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+
+/** What a person reads when a dismiss fails: "nothing changed" only when the daemon refused it. */
+export function dismissFailureNotice(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return err instanceof DaemonWriteRefused
+    ? `Not dismissed, nothing changed: ${message}. The update's detail shows its current state.`
+    : `Dismiss not confirmed, the daemon didn't answer: ${message}. It may have been dismissed; the update's detail shows its current state.`;
+}
+
 export class StartupRequestError extends Error {
   constructor(readonly status: number, readonly result: Record<string, unknown>) {
     super([String(result.message ?? result.error ?? `Startup request returned HTTP ${status}`),
@@ -153,13 +167,13 @@ export class DaemonClient {
       body: JSON.stringify(body),
     });
     const parsed = await res.json().catch(() => null);
-    if (res.status === 401 && options.unauthorized) throw new Error(options.unauthorized);
+    if (res.status === 401 && options.unauthorized) throw new DaemonWriteRefused(401, options.unauthorized);
     if (!res.ok) {
       const detail = parsed && typeof parsed === "object"
         ? "error" in parsed ? ` — ${(parsed as { error: unknown }).error}`
           : "message" in parsed ? ` — ${(parsed as { message: unknown }).message}` : ""
         : "";
-      throw new Error(`daemon write failed: POST ${route} → ${res.status}${detail}`);
+      throw new DaemonWriteRefused(res.status, `daemon write failed: POST ${route} → ${res.status}${detail}`);
     }
     return parsed;
   }

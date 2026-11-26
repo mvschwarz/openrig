@@ -18,7 +18,7 @@ import { createStyle, detectColorMode } from "./theme.js";
 import { stylizeLines } from "./stylize.js";
 import { createControlSocket, defaultSocketPath, type ControlSocket } from "./socket-server.js";
 import { demoSnapshot } from "./demo-data.js";
-import { DaemonClient, launchNodeNotice } from "./daemon-client.js";
+import { DaemonClient, dismissFailureNotice, launchNodeNotice } from "./daemon-client.js";
 import { hydrateSnapshot } from "./hydrate.js";
 import { createLiveRefresh } from "./live.js";
 import { resolvePendingAddress } from "./pending-address.js";
@@ -512,8 +512,8 @@ async function run(): Promise<void> {
       const message = err instanceof Error ? err.message : String(err);
       if (action.act === "open-terminal") view.dispatch({ type: "terminal-result", view: action.view, message });
       view.dispatch({ type: "notice", message: action.act === "open-terminal" ? `Terminal view not confirmed\n${message}`
-        // A repeat or stale dismiss changes nothing; the refreshed detail shows the update's actual state.
-        : action.act === "answer" && action.verb === "dismiss" ? `Not dismissed, nothing changed: ${message}. The update's detail shows its current state.` : message });
+        // A refused dismiss changes nothing; an unanswered one may have landed. The refreshed detail shows the actual state.
+        : action.act === "answer" && action.verb === "dismiss" ? dismissFailureNotice(err) : message });
     } finally {
       if (action.act === "open-terminal") openingTerminal = false;
     }

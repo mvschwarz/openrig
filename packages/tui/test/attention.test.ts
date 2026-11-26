@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { DaemonClient } from "../src/daemon-client.js";
+import { DaemonClient, dismissFailureNotice } from "../src/daemon-client.js";
 import { hydrateSnapshot } from "../src/hydrate.js";
 import { createViewState, emptySnapshot, computeExplorerRows } from "../src/state.js";
 import { attentionLines, replyAct, answerRequest } from "../src/attention/attention-model.js";
@@ -198,6 +198,19 @@ it("dismisses an open informational update from its detail, as the terminal's ac
   expect(answerRequest(dismiss!.action as Extract<Action, { type: "act"; act: "answer" }>))
     .toEqual({ qitemId: "fyi", verb: "dismiss", actorSession: "parkingmeter@external", authority: "primary-user" });
   expect(detailOf({ ...update, dismiss: undefined }).some(l => l.action?.type === "act")).toBe(false);
+});
+
+it("says a dismiss changed nothing only when the daemon refused it, not when it got no answer", async () => {
+  const failure = async (fetchImpl: typeof fetch) => {
+    const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl });
+    return dismissFailureNotice(await client.missionControlAction({ verb: "dismiss", qitemId: "fyi", actorSession: "parkingmeter@external", authority: "primary-user" })
+      .then(() => { throw new Error("expected the dismiss to fail"); }, (err: unknown) => err));
+  };
+  const refused = await failure((async () => Response.json({ error: "qitem_already_terminal", state: "done" }, { status: 409 })) as typeof fetch);
+  expect(refused).toMatch(/^Not dismissed, nothing changed: .*409 — qitem_already_terminal/);
+  const unanswered = await failure((async () => { throw new TypeError("fetch failed"); }) as typeof fetch);
+  expect(unanswered).not.toContain("nothing changed");
+  expect(unanswered).toContain("Dismiss not confirmed, the daemon didn't answer: fetch failed. It may have been dismissed");
 });
 
 it("sends an answer act's choice or words in the one mission-control write", async () => {

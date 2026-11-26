@@ -232,9 +232,11 @@ export class MissionControlWriteContract {
         `qitem ${input.qitemId} isn't an informational update addressed to a person, so it can't be dismissed; nothing was written.`,
         { qitemId: input.qitemId, state: source.state });
     }
-    // Whose ask this settles: the person a row is parked on, else a person it's addressed to.
+    // Whose ask this settles: the person a row is parked on, else a person it's addressed to. A dismissed update is
+    // always its recipient's, whoever it's parked on.
     const parkedOn = source.state === "blocked" && source.blockedOn && isHumanSeatSessionRef(source.blockedOn) ? source.blockedOn : null;
-    const asked = parkedOn ?? (this.queueRepo.isPersonAddress(source.destinationSession) ? source.destinationSession : null);
+    const asked = input.verb === "dismiss" ? source.destinationSession
+      : parkedOn ?? (this.queueRepo.isPersonAddress(source.destinationSession) ? source.destinationSession : null);
     const acting = this.asActor(input, runnerPermissionOrigin(source) && this.queueRepo.answersAsk(source, input.actorSession) ? null : asked);
     input = acting.input;
 

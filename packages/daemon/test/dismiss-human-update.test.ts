@@ -76,6 +76,15 @@ describe("dismissing an informational update from the Feed", () => {
     expect(db.serialize()).toEqual(after);
   });
 
+  it("records a dismissed update as its recipient's, even while it's parked on another person", async () => {
+    row("parked");
+    db.prepare("UPDATE queue_items SET state = 'blocked', blocked_on = ? WHERE qitem_id = ?").run("reviewer@external", "parked");
+    expect((await act({ verb: "dismiss", qitemId: "parked", actorSession: PERSON, authority: "primary-user" })).status).toBe(200);
+    expect(audits("parked").map(a => JSON.parse(a.audit_notes_json ?? "null"))).toEqual([{ authority: "primary-user", asked: PERSON }]);
+    expect(db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id DESC LIMIT 1").get("parked"))
+      .toEqual({ transition_note: `mission-control:dismiss; by someone at the terminal OpenRig can't name (human@host), unattributed, on ${PERSON}'s update` });
+  });
+
   it("never dismisses a request: it's answered, not dismissed", async () => {
     row("ask", "decision");
     const before = db.serialize();
