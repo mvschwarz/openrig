@@ -819,8 +819,8 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // else null (documented FR-4 fallback — not a fabricated timestamp).
       lastActivity: n.agentActivity?.sampledAt ?? n.startupCompletedAt ?? null,
     };
-  if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
-  if (n.standbyStopped) compact.standbyStopped = true;
+    if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
+    if (n.standbyStopped) compact.standbyStopped = true;
     // #3513: only a served observation; its time says when it was last seen.
     if (n.remoteControl) compact.remoteControl = { sessionId: n.remoteControl.sessionId, observedAt: n.remoteControl.observedAt };
     // The served identity evidence (verdict, reason, observation time) and the registry's recorded
