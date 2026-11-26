@@ -6,18 +6,20 @@ import { recordSlowSyncSite } from "../domain/sync-site-wrap.js";
 
 /**
  * SQLite timing spans in the slow-operations log (#3895, third ask). Every statement run, exec, pragma and transaction
- * on the connection is timed; one that took at least the slow threshold (SLOW_OPERATION_THRESHOLD_MS, 250 ms) is recorded as a span named
- * `sqlite.<call>.<first SQL keyword>`, for example `sqlite.run.insert` or `sqlite.transaction`. The SQL text and its
- * values are never recorded.
+ * on the connection is timed. One that took at least SLOW_OPERATION_THRESHOLD_MS (250 ms) is recorded as a span named
+ * `sqlite.<call>.<operation>`, for example `sqlite.run.insert`, `sqlite.pragma.journal_mode` or `sqlite.transaction`.
+ * The operation is the statement's first keyword or the PRAGMA's name, and only from a fixed list (otherwise `other`),
+ * so a span never carries SQL text, values or a caller-chosen name such as a schema alias.
  *
- * A slow span also says whether the main database file was written while it ran: the site gets `.db_written`. In WAL
- * mode only a checkpoint writes the main file, so `sqlite.run.insert.db_written` is a commit that ran the automatic
- * checkpoint (its fsyncs), and `sqlite.run.insert` alone is a stall in the WAL append itself. Those are the two causes
- * measured in #3895. The check is one stat of the file, made only after a call was already slow: the file's last write
- * must come more than 10 ms after the span started, so a write just before the call (or a coarse file clock) is never
- * counted, and a checkpoint, which writes until it ends, is.
+ * A slow span also notes whether the main database file changed while it ran: the site gets `.main_file_changed` when
+ * the file's last write came more than 10 ms after the span started (one stat, made only after a call was already
+ * slow, so a write just before the call never counts). It is an observation, not a cause: any connection or process
+ * may have written the file. In WAL mode only a checkpoint writes the main file, so a slow call with the suffix ran
+ * while a checkpoint was writing. No suffix means no such write was seen: one in the first 10 ms, or a failed stat,
+ * also leaves none.
  *
- * Fast calls cost two performance.now() reads and nothing else. With no recorder configured nothing is recorded.
+ * Fast calls cost three clock reads (performance.now() twice, Date.now() once) and one wrapper call. With no recorder
+ * configured nothing is recorded.
  */
 export function withSqliteTiming(db: Database.Database): Database.Database {
   const file = db.memory ? null : db.name;
@@ -31,7 +33,7 @@ export function withSqliteTiming(db: Database.Database): Database.Database {
       return value;
     } finally {
       const durationMs = performance.now() - startedAt;
-      if (durationMs >= SLOW_OPERATION_THRESHOLD_MS) recordSlowSyncSite(site + (mainFileWrittenSince(file, startedWall) ? ".db_written" : ""), durationMs, outcome);
+      if (durationMs >= SLOW_OPERATION_THRESHOLD_MS) recordSlowSyncSite(site + (mainFileChangedSince(file, startedWall) ? ".main_file_changed" : ""), durationMs, outcome);
     }
   };
 
@@ -64,33 +66,63 @@ export function withSqliteTiming(db: Database.Database): Database.Database {
 
   const pragma = db.pragma.bind(db);
   db.pragma = ((source: string, options?: Database.PragmaOptions) =>
-    timed(`sqlite.pragma.${firstKeyword(source)}`, () => pragma(source, options))) as typeof db.pragma;
+    timed(`sqlite.pragma.${pragmaName(source)}`, () => pragma(source, options))) as typeof db.pragma;
 
   const transaction = db.transaction.bind(db);
-  // Ordinary functions, so the caller's `this` reaches the callback as better-sqlite3 documents.
+  // The driver returns four functions (default, deferred, immediate, exclusive) that each carry all four plus
+  // `database`. Each is wrapped by an ordinary function, so the caller's `this` reaches the callback, and the wrappers
+  // get the same properties, so the shape is the driver's.
   db.transaction = ((fn: (...args: unknown[]) => unknown) => {
-    const inner = transaction(fn) as unknown as Record<string, (...args: unknown[]) => unknown> & ((...args: unknown[]) => unknown);
-    const outer = function (this: unknown, ...args: unknown[]) { return timed("sqlite.transaction", () => inner.apply(this, args)); } as typeof inner;
-    for (const mode of ["deferred", "immediate", "exclusive"] as const) {
-      const variant = inner[mode]!;
-      (outer as Record<string, unknown>)[mode] = function (this: unknown, ...args: unknown[]) { return timed("sqlite.transaction", () => variant.apply(this, args)); };
-    }
-    (outer as Record<string, unknown>).default = outer;
-    return outer;
+    const native = transaction(fn) as unknown as Record<"default" | "deferred" | "immediate" | "exclusive", (...args: unknown[]) => unknown>;
+    const wrap = (variant: (...args: unknown[]) => unknown) =>
+      function (this: unknown, ...args: unknown[]) { return timed("sqlite.transaction", () => variant.apply(this, args)); };
+    const wrapped = { default: wrap(native.default), deferred: wrap(native.deferred), immediate: wrap(native.immediate), exclusive: wrap(native.exclusive) };
+    const properties = {
+      default: { value: wrapped.default }, deferred: { value: wrapped.deferred },
+      immediate: { value: wrapped.immediate }, exclusive: { value: wrapped.exclusive },
+      database: { value: db, enumerable: true },
+    };
+    for (const f of Object.values(wrapped)) Object.defineProperties(f, properties);
+    return wrapped.default;
   }) as unknown as typeof db.transaction;
 
   return db;
 }
 
-/** The SQL's first keyword, lower case, letters and underscores only (never the statement text or a value). A block
- *  comment ends at its first `*\/`, as in SQLite, so each comment matches one way and the scan stays linear. */
+const SQL_VERBS = new Set(["select", "insert", "update", "delete", "replace", "with", "values", "create", "drop",
+  "alter", "begin", "commit", "end", "rollback", "savepoint", "release", "pragma", "vacuum", "analyze", "reindex",
+  "attach", "detach", "explain"]);
+const PRAGMA_NAMES = new Set(["analysis_limit", "application_id", "auto_vacuum", "automatic_index", "busy_timeout",
+  "cache_size", "cache_spill", "case_sensitive_like", "cell_size_check", "checkpoint_fullfsync", "collation_list",
+  "compile_options", "data_version", "database_list", "defer_foreign_keys", "encoding", "foreign_key_check",
+  "foreign_key_list", "foreign_keys", "freelist_count", "fullfsync", "function_list", "hard_heap_limit",
+  "ignore_check_constraints", "incremental_vacuum", "index_info", "index_list", "index_xinfo", "integrity_check",
+  "journal_mode", "journal_size_limit", "legacy_alter_table", "locking_mode", "max_page_count", "mmap_size",
+  "module_list", "optimize", "page_count", "page_size", "pragma_list", "query_only", "quick_check",
+  "read_uncommitted", "recursive_triggers", "reverse_unordered_selects", "schema_version", "secure_delete",
+  "shrink_memory", "soft_heap_limit", "synchronous", "table_info", "table_list", "table_xinfo", "temp_store",
+  "threads", "trusted_schema", "user_version", "wal_autocheckpoint", "wal_checkpoint"]);
+
+/** Leading whitespace and comments; a block comment ends at its first `*\/`, as in SQLite, so each comment matches
+ *  one way and the scan stays linear. */
+const LEAD = String.raw`^(?:\s|--[^\n]*\n|\/\*(?:[^*]|\*+[^*\/])*\*+\/)*`;
+const FIRST_WORD = new RegExp(LEAD + String.raw`([A-Za-z_]{1,24})`);
+const PRAGMA_WORD = new RegExp(LEAD + String.raw`(?:[A-Za-z_][A-Za-z0-9_]{0,63}\s*\.\s*)?([A-Za-z_]{1,24})`);
+
+/** The statement's first keyword, lower case, when it is a known SQL verb; otherwise `other`. */
 export function firstKeyword(source: string): string {
-  const match = /^(?:\s|--[^\n]*\n|\/\*(?:[^*]|\*+[^*\/])*\*+\/)*([A-Za-z_]{1,24})/.exec(source);
-  return match ? match[1]!.toLowerCase() : "other";
+  const word = FIRST_WORD.exec(source)?.[1]?.toLowerCase();
+  return word && SQL_VERBS.has(word) ? word : "other";
 }
 
-/** True when the main database file was last written more than 10 ms after the span started. */
-function mainFileWrittenSince(file: string | null, startedWall: number): boolean {
+/** The PRAGMA's name (after an optional `schema.`, which is never kept), when it is a known PRAGMA; otherwise `other`. */
+export function pragmaName(source: string): string {
+  const word = PRAGMA_WORD.exec(source)?.[1]?.toLowerCase();
+  return word && PRAGMA_NAMES.has(word) ? word : "other";
+}
+
+/** True when the main database file was last written more than 10 ms after the span started (by anyone). */
+function mainFileChangedSince(file: string | null, startedWall: number): boolean {
   if (!file) return false;
   try { return statSync(file).mtimeMs > startedWall + 10; } catch { return false; }
 }

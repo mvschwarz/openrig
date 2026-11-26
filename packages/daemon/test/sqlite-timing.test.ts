@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { createDb } from "../src/db/connection.js";
-import { firstKeyword } from "../src/db/sqlite-timing.js";
+import Database from "better-sqlite3";
+import { firstKeyword, pragmaName } from "../src/db/sqlite-timing.js";
 import { configureSyncSiteRecorder } from "../src/domain/sync-site-wrap.js";
 
 // SQLite timing spans in the slow-operations log (#3895, third ask). A fake recorder takes every record it is offered;
@@ -104,7 +105,7 @@ describe("SQLite timing spans", () => {
     d.close();
   });
 
-  it("marks a slow call that wrote the main database file (a checkpoint) with .db_written", async () => {
+  it("marks a slow call during which the main database file changed (a checkpoint) with .main_file_changed", async () => {
     const d = db(true);
     d.prepare("INSERT INTO t (v) VALUES (?)").run("x");
     d.pragma("wal_checkpoint(TRUNCATE)");
@@ -114,11 +115,11 @@ describe("SQLite timing spans", () => {
     d.prepare("INSERT INTO t (v) SELECT 'a' || hold_ms(260)").run();
     // A slow call that checkpoints: the WAL's pages are copied into the main file while it runs.
     d.exec("SELECT hold_ms(260); PRAGMA wal_checkpoint(TRUNCATE)");
-    expect(spans.map((s) => s.site)).toEqual(["sqlite.run.insert", "sqlite.exec.select.db_written"]);
+    expect(spans.map((s) => s.site)).toEqual(["sqlite.run.insert", "sqlite.exec.select.main_file_changed"]);
     d.close();
   });
 
-  it("does not mark a slow read with .db_written for a checkpoint just before it", () => {
+  it("does not mark a slow read with .main_file_changed for a checkpoint just before it", () => {
     const d = db(true);
     d.prepare("INSERT INTO t (v) VALUES (?)").run("x");
     record();
@@ -139,6 +140,24 @@ describe("SQLite timing spans", () => {
     d.close();
   });
 
+  it("keeps the driver's transaction shape: every mode carries every mode, default and database", () => {
+    const d = db();
+    const tx = d.transaction(() => 1) as unknown as Record<string, unknown> & (() => number);
+    const native = new Database(":memory:").transaction(() => 1) as unknown as Record<string, unknown>;
+    const modes = ["default", "deferred", "immediate", "exclusive"] as const;
+    for (const m of modes) {
+      const f = tx[m] as Record<string, unknown> & (() => number);
+      expect(f.database).toBe(d);
+      expect(f.default).toBe(tx);
+      for (const n of modes) expect(f[n]).toBe(tx[n]);
+      expect(f()).toBe(1);
+    }
+    expect(tx.default).toBe(tx);
+    expect(Object.keys(tx)).toEqual(Object.keys(native));   // only database is enumerable, as in the driver
+    expect((tx.immediate as Record<string, () => number>).deferred()).toBe(1);
+    d.close();
+  });
+
   it("does nothing without a recorder", () => {
     const d = db();
     expect(d.prepare("SELECT hold_ms(260) AS h").get()).toEqual({ h: 260 });
@@ -148,8 +167,8 @@ describe("SQLite timing spans", () => {
   it("takes only the first keyword", () => {
     expect(firstKeyword("  insert into t values (1)")).toBe("insert");
     expect(firstKeyword("-- c\n/* d */\nWITH x AS (SELECT 1) SELECT * FROM x")).toBe("with");
-    expect(firstKeyword("journal_mode = WAL")).toBe("journal_mode");
-    expect(firstKeyword("wal_checkpoint(TRUNCATE)")).toBe("wal_checkpoint");
+    expect(firstKeyword("journal_mode = WAL")).toBe("other");   // not a statement verb
+    expect(firstKeyword("seat_private_name SELECT")).toBe("other");   // an unknown word is never kept
     expect(firstKeyword("")).toBe("other");
     expect(firstKeyword("(SELECT 1)")).toBe("other");
     expect(firstKeyword("/* a */ ( /* b */ SELECT 1")).toBe("other");   // a comment ends at its first */
@@ -157,10 +176,40 @@ describe("SQLite timing spans", () => {
     expect(firstKeyword("/* a * b */ update t")).toBe("update");
   });
 
+  it("names a PRAGMA by its own name, never a schema alias or an unknown word", () => {
+    expect(pragmaName("journal_mode = WAL")).toBe("journal_mode");
+    expect(pragmaName("wal_checkpoint(TRUNCATE)")).toBe("wal_checkpoint");
+    expect(pragmaName("seat_private_schema.wal_checkpoint(FULL)")).toBe("wal_checkpoint");
+    expect(pragmaName(" /* c */ main . user_version")).toBe("user_version");
+    expect(pragmaName("seat_private_schema")).toBe("other");
+    expect(pragmaName("seat_private_schema.seat_private_value")).toBe("other");
+    expect(pragmaName("")).toBe("other");
+  });
+
+  it("records a slow PRAGMA on an aliased schema by the PRAGMA's name only", () => {
+    const d = db(true);
+    const dir = dirs[dirs.length - 1]!;
+    const other = join(dir, "other.db");
+    const holder = new Database(other);
+    holder.pragma("journal_mode = WAL");
+    holder.exec("CREATE TABLE x (v TEXT)");
+    d.exec(`ATTACH DATABASE '${other}' AS seat_private_schema`);
+    holder.exec("BEGIN IMMEDIATE; INSERT INTO x VALUES ('held')");   // a writer, so a FULL checkpoint waits
+    d.pragma("busy_timeout = 300");
+    record();
+    d.pragma("seat_private_schema.wal_checkpoint(FULL)");
+    holder.exec("ROLLBACK");
+    holder.close();
+    expect(spans.map((s) => s.site)).toEqual(["sqlite.pragma.wal_checkpoint"]);
+    expect(JSON.stringify(spans)).not.toContain("seat_private");
+    d.close();
+  });
+
   it("scans comment-heavy SQL in linear time", () => {
     const started = performance.now();
     expect(firstKeyword("/*x*/".repeat(5000) + "(")).toBe("other");
     expect(firstKeyword("/*x*/".repeat(5000) + "select")).toBe("select");
+    expect(pragmaName("/*x*/".repeat(5000) + "(")).toBe("other");
     expect(performance.now() - started).toBeLessThan(100);
   });
 });
