@@ -279,8 +279,8 @@ by OpenRig's tests, so check the harness's own processes after `rig down`. Each 
 
 **Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats). It says
 so before anything changes. To move a running seat to or from an installed harness, use
-`rig seat set-runtime <seat> --runtime <harness>`: it starts a new conversation with a handover, and a harness
-successor's conversation is recorded for a later resume.
+`rig seat set-runtime <seat> --runtime <harness> --reason <text>`: it starts a new conversation with a handover. A later
+resume of a harness successor's conversation works only when that harness's preset declares `resume`.
 
 ## An example: Cursor
 
