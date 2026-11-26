@@ -1,7 +1,7 @@
 // The MCP queue tools against the daemon's real queue routes, over HTTP, through the real DaemonClient: a seat
 // configured once (OPENRIG_SESSION_NAME in the MCP server's env) hands a task to another seat and reads the
 // answer back by the task's id. Nothing in the tool calls names the sender.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +17,9 @@ import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
 import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
+import { RigRepository } from "../../daemon/src/domain/rig-repository.js";
+import { SessionRegistry } from "../../daemon/src/domain/session-registry.js";
+import { RunnerPermissions } from "../../daemon/src/domain/runner-permissions.js";
 import { DaemonClient } from "../src/client.js";
 import { createMcpServer } from "../src/mcp-server.js";
 
@@ -280,5 +283,66 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     expect(refused.isError).toBe(true);
     expect(refused.structured).toMatchObject({ ok: false, code: "not-a-decision", status: 409 });
     expect((await desk("rig_queue_show", { qitemId })).data.item).toMatchObject({ state: "pending", delegatedDecision: null });
+  });
+
+  // Slice 15 (claude9 and claude10's F1): the person's own conversation, with no seat, answers a seat's Claude Code
+  // permission ask through the plugin's MCP tools, as `rig seat decide-permission` does in a shell.
+  it("answers a seat's own permission ask with rig_seat_decide_permission, as the person's relayed answer, the first answer counts, and an orphaned ask says it hasn't reached the prompt", async () => {
+    const rigs = new RigRepository(db);
+    const node = rigs.addNode(rigs.createRig("team").id, "dev.build", { runtime: "claude-code" });
+    const sessions = new SessionRegistry(db);
+    sessions.updateStatus(sessions.registerSession(node.id, "dev-build@team").id, "running");
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const route = "conversation-0123456789ab@kernel";
+    const work = await repo.create({ sourceSession: "someone outside a seat", destinationSession: "dev-build@team", body: "Add the feature",
+      returnRoute: route, returnRouteBasis: "issued", nudge: false });
+    repo.update({ qitemId: work.qitemId, actorSession: "dev-build@team", state: "in-progress" });
+    // The seat's PermissionRequest hook submits its prompt (the route's own service, as permission-answer.cjs reaches it).
+    const permissions = new RunnerPermissions({ db, queueRepo: repo, eventBus: new EventBus(db), humanRegistry: () => ({ ok: true, entities: [] }) as never,
+      ownerOf: () => null, currentGeneration: (id) => sessions.currentOccupantTenure(id)?.generationUuid ?? null });
+    const submitted = await permissions.submit({ nodeId: node.id, sessionName: "dev-build@team", generation: sessions.currentOccupantTenure(node.id)!.generationUuid }, {
+      nativeRef: "claude-session-1", turnId: "invocation-1", requestId: "invocation-1", nativeHook: "claude-code", holdSeconds: 86400,
+      action: { tool: "Bash", input: { command: "git commit -m 'Add the feature'" }, agent: null }, toolCall: { title: "Bash", kind: "Bash" },
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] });
+    expect(submitted).toMatchObject({ ok: true, askedOf: route });
+    const askId = (submitted as { askId: string }).askId;
+
+    // The plugin's server in a raw Claude Code conversation: no seat.
+    delete process.env.OPENRIG_SESSION_NAME;
+    const mcp = createMcpServer(new DaemonClient(url));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "conversation", version: "1.0.0" });
+    await mcp.connect(serverTransport);
+    await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await mcp.close(); });
+    const decided = await client.callTool({ name: "rig_seat_decide_permission", arguments: { askId, option: "allow", relay: true, personSaid: "Yes, commit it" } });
+    expect(decided.isError).toBeFalsy();
+    expect(decided.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow",
+      native: { hook: "claude-code", answeredAs: "person", by: "someone outside a seat", said: "Yes, commit it" } });
+    const again = await client.callTool({ name: "rig_seat_decide_permission", arguments: { askId, option: "deny", relay: true, personSaid: "no" } });
+    expect(again.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow", native: { unchanged: true } });
+    const unknown = await client.callTool({ name: "rig_seat_decide_permission", arguments: { askId: "qitem-runner-permission-000000000000000000000000", option: "allow" } });
+    expect(unknown.isError).toBe(true);
+    expect(unknown.structuredContent).toMatchObject({ ok: false, code: "not_found", status: 404 });
+    // Its hook was reading (it had just submitted), so the reply said nothing of the kind below.
+    expect((decided.structuredContent as { native: Record<string, unknown> }).native).not.toHaveProperty("notReached");
+
+    // The seat's next prompt, whose hook was then killed outright: two minutes on, an answer is recorded and the tool's reply
+    // says plainly that it hasn't reached the seat's prompt.
+    const next = await permissions.submit({ nodeId: node.id, sessionName: "dev-build@team", generation: sessions.currentOccupantTenure(node.id)!.generationUuid }, {
+      nativeRef: "claude-session-1", turnId: "invocation-2", requestId: "invocation-2", nativeHook: "claude-code", holdSeconds: 86400,
+      action: { tool: "Bash", input: { command: "git push origin feature" }, agent: null }, toolCall: { title: "Bash", kind: "Bash" },
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 2 * 60_000);
+      const orphaned = await client.callTool({ name: "rig_seat_decide_permission",
+        arguments: { askId: (next as { askId: string }).askId, option: "allow", relay: true, personSaid: "yes" } });
+      expect(orphaned.isError).toBeFalsy();
+      expect(orphaned.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow",
+        native: { answeredAs: "person", notReached: expect.stringContaining("It hasn't reached dev-build@team's prompt") } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -818,6 +818,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_queue_decide", routes: ["POST /api/queue/:qitemId/delegated-decision"], effect: "destructive", access: "work" },
   { tool: "rig_queue_handoff", routes: ["POST /api/queue/:qitemId/handoff"], effect: "destructive", access: "work" },
   { tool: "rig_queue_unclaim", routes: ["POST /api/queue/:qitemId/unclaim"], effect: "destructive", access: "work" },
+  { tool: "rig_seat_decide_permission", routes: ["POST /api/activity/permission-requests/:askId/decide"], effect: "destructive", access: "work" },
 ];
 
 /** How a member works its inbox, and asks a person while keeping the work: one versioned text, carried in this server's
@@ -2935,6 +2936,33 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const denied = await itemOutOfScope(qitemId, "owner");
         if (denied) return denied;
         return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/unclaim`, { reason }), undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 37. rig_seat_decide_permission — answer a seat's permission ask, the route `rig seat decide-permission` uses
+  if (offered("rig_seat_decide_permission")) server.registerTool(
+    "rig_seat_decide_permission",
+    {
+      description: "Answer a seat's permission ask (qitem-runner-permission-…) with one of the options it offers, as rig seat decide-permission does. Show your person the exact action first. A plain yes or no is their own answer: set relay and pass their exact words in personSaid. For their words or a condition, decide whether this exact action meets them, with reason and personSaid. An ask already answered, ended in the seat's terminal, or stale comes back as it is, and nothing is decided. A reply with native.notReached is recorded but hasn't reached the seat's prompt (its hook isn't reading the ask): tell your person what it says.",
+      inputSchema: z.object({
+        askId: z.string().describe("The ask's id (qitem-runner-permission-…)"),
+        option: z.string().describe("One of the ask's options, by its id: allow or deny for a seat's own Claude Code prompt"),
+        relay: z.boolean().optional().describe("A seat's own prompt only: the person chose this option themselves and you pass it on exactly; recorded as their answer, not your decision"),
+        personSaid: z.string().optional().describe("The person's own words, exactly as they gave them"),
+        reason: z.string().optional().describe("Why, recorded with the decision (say what the person meant)"),
+      }),
+      annotations: DESTRUCTIVE,
+    },
+    async ({ askId, option, relay, personSaid, reason }) => {
+      try {
+        const denied = await itemOutOfScope(askId);
+        if (denied) return denied;
+        return mapResult(await client.post(`/api/activity/permission-requests/${encodeURIComponent(askId)}/decide`, {
+          optionId: option, reason: reason ?? "", ...(personSaid !== undefined ? { personSaid } : {}), ...(relay ? { relay: true } : {}),
+        }), undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }

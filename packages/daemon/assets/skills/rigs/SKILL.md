@@ -30,7 +30,8 @@ if the person asks. Give what they want built to OpenRig's operator (step 2) ins
   following its successors) and check the seats.
 - **Don't send them to attach** to a seat's terminal to answer, and with no display (headless or SSH) they answer here
   too: don't tell the operator they'll answer in its pane unless they chose that. Bring the prompt here. If the
-  operator or a seat sent it to you, record their words and let that sender pass them on; otherwise send their choice
+  operator or a seat sent it to you, record their words and let that sender pass them on; if it's a seat's own ask
+  (`qitem-runner-permission-…`), answer that ask, not the seat's terminal (step 2); otherwise send their choice
   yourself, with `rig send`, not raw tmux keys into a seat's terminal. If your own app refuses that send (an auto-mode
   check, say), tell them what it refused and why, and let them choose: approve it there, or answer in the team's
   terminals the operator opened. Don't retry it another way.
@@ -435,14 +436,24 @@ commands; if the two ever differ, this step is right.
   `rig_queue_list` with `destination` set to your address, which needs no seat): a prompt OpenRig or the team
   already sent you is there as its own task, so answer it there. Put `OPENRIG_SESSION_NAME=<address>` in front of
   every `rig` command you run for this work, so OpenRig records it as this conversation's, not as someone outside a seat. Then check `rig ps --nodes --rig <rig>` for a
-  seat stopped at a prompt, and repeat both checks while you wait for a seat's result, so a prompt that appears after
-  your last check still reaches them. Show the person each one, with any others waiting, one line each (seat,
-  exact action, the choices offered), and the whole prompt when they ask. If a question about that prompt is already
+  seat stopped at a prompt. Repeat both checks each time a wake brings you a task or the person talks to you, not in a
+  loop: the plugin's wake comes only when your turn ends, so while the team works, end your turn rather than watching
+  the seats. Show the person each one, with any others waiting, one line each (seat, exact action, the choices
+  offered), and the whole prompt when they ask. If a question about that prompt is already
   open at your address (the operator or a team seat sent it), use that one: record their words on it, and its sender
   passes them on, not you (on OpenRig's own task about it, you pass them on). Once you've recorded them, that prompt stays its sender's to answer even while the seat
   still shows it: don't ask about it again or send anything for it unless the prompt changes or the sender asks you
-  again. For a commit, also say whether the team's review has run; they may be expecting one. Before sending their choice, capture that
-  seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt:
+  again. For a commit, also say whether the team's review has run; they may be expecting one. A Claude Code seat's own
+  prompt in work you handed over gets its own ask at your address (`qitem-runner-permission-…`) within seconds, even
+  when you saw the prompt first: answer that ask, with
+  `OPENRIG_SESSION_NAME=<address> rig seat decide-permission <ask> --option allow --relay --person-said '<their words>'`
+  (or `--option deny`) for a plain yes or no, or the plugin's `rig_seat_decide_permission`, and as its text says for
+  words or a condition. It takes their answer for as long as the prompt stays open. Don't type into the seat for it:
+  that answers it in the terminal, ends the ask, and needs their exception for a terminal command. If the reply says it
+  hasn't reached the prompt, the seat's hook stopped reading the ask: tell them, and answer that prompt in the seat like
+  one with no ask. A prompt with no ask
+  (a choice menu, a Codex seat's prompt, a seat on another machine) you answer in the seat: before sending their choice,
+  capture that seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt:
   `rig send <seat>@<rig> "<key>" --dangerously-interact --reason 'task <id>: <their choice, in their words>'`, with
   the goal's task ID (leave out `task <id>:` when there's no task), where `<key>` is the digit or letter that capture
   shows for their choice, never their words: the text is typed as keys, and a letter can pick a menu's shortcut. Keep

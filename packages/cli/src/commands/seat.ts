@@ -1237,8 +1237,10 @@ Examples:
     .argument("<request>", "The permission request's id (qitem-runner-permission-…), as the row handed to you names it")
     .requiredOption("--option <id>", "One of the options the agent offered, by its id")
     .option("--reason <text>", "Why, recorded with the decision (say what the person meant)")
+    .option("--person-said <words>", "The person's own words, exactly as they gave them, recorded with the decision")
+    .option("--relay", "A seat's own prompt only: the person chose this option themselves, and you pass it on exactly; recorded as their answer, not your decision")
     .option("--json", "JSON output for agents")
-    .description("Decide a runner seat's permission request that its person answered: one of the agent's offered options")
+    .description("Decide a seat's permission request that its person answered: one of the offered options")
     .addHelpText("after", `
 When a person answers a runner seat's permission request, with a click or in their own
 words, the request goes to this host's receiving agent to decide while the runner waits.
@@ -1247,14 +1249,28 @@ then gives its agent. It's recorded as an agent's decision, not the person's, wi
 deciding seat and the reason. A request that's already decided, withdrawn or stale is
 reported as it is, and nothing is written. See docs/reference/harness-runner-contract.md,
 section 7.
-Example:
-  rig seat decide-permission qitem-runner-permission-0123abcd --option allow --reason "they said go ahead"`)
-    .action(async (request: string, opts: { option: string; reason?: string; json?: boolean }) => {
-      type Decided = { ok?: boolean; state?: string; optionId?: string; code?: string; error?: string };
+
+A seat's own Claude Code prompt can come to you the same way, when your conversation
+handed the seat the work it's running. Show your person the exact action, then:
+- a plain yes or no is their own answer: pass it on with --relay and --person-said;
+- for words or a condition, decide whether this exact action meets them, with --reason
+  and --person-said. A deny takes their words back to the seat's agent; it's recorded as
+  your judgment, not their no. If you can't tell what they meant, ask them again.
+An answer after the prompt was answered in the seat's terminal, or after its window,
+is too late and isn't sent. If the seat's permission hook isn't reading the ask (it was
+stopped), the answer is recorded and the reply says it hasn't reached the prompt.
+Examples:
+  rig seat decide-permission qitem-runner-permission-0123abcd --option allow --reason "they said go ahead"
+  rig seat decide-permission qitem-runner-permission-4567cdef --option allow --relay --person-said "yes"
+  rig seat decide-permission qitem-runner-permission-4567cdef --option deny --reason "it writes to main" --person-said "only on a branch"`)
+    .action(async (request: string, opts: { option: string; reason?: string; personSaid?: string; relay?: boolean; json?: boolean }) => {
+      type Decided = { ok?: boolean; state?: string; optionId?: string; code?: string; error?: string;
+        native?: { why?: string; message?: string; by?: string; unchanged?: boolean; notReached?: string } };
       let res: { status: number; data: Decided };
       try {
         res = await new DaemonClient().post<Decided>(`/api/activity/permission-requests/${encodeURIComponent(request.trim())}/decide`,
-          { optionId: opts.option.trim(), reason: opts.reason ?? "" });
+          { optionId: opts.option.trim(), reason: opts.reason ?? "",
+            ...(opts.personSaid !== undefined ? { personSaid: opts.personSaid } : {}), ...(opts.relay ? { relay: true } : {}) });
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;
@@ -1268,6 +1284,19 @@ Example:
       }
       if (opts.json) return;
       const state = res.data.state;
+      const native = res.data.native;
+      if (native) {
+        const line = (...parts: Array<string | undefined>) => parts.filter((part) => part).join(" ");
+        // notReached: the seat's hook isn't reading the ask (killed outright, say), so the recorded answer hasn't reached the prompt.
+        console.log(native.unchanged && (state === "answered" || state === "refused")
+          ? line(`Already answered${native.by ? ` by ${native.by}` : ""}: nothing was decided now.`, native.message, native.notReached)
+          : state === "answered" ? line(`Decided: ${res.data.optionId}.`, native.message,
+            native.notReached ?? "The seat's prompt gets it when its hook reads it, unless it was answered in the terminal first.")
+          : state === "withdrawn" || state === "stale" ? `Too late, nothing was decided: the request is ${state}${native.why === "answered_in_terminal" ? ", already answered in the seat's terminal"
+            : native.why === "answer_window_ended" ? ", past its window; the prompt is waiting in the seat's terminal" : native.why ? ` (${native.why})` : ""}.`
+          : `Nothing was decided: the request is ${state}.`);
+        return;
+      }
       console.log(state === "answered" ? `Decided: ${res.data.optionId}. A runner waiting on the request gets it now; one that isn't gets it at its next read.`
         : state === "refused" ? "Decided: refused. A runner waiting on the request gets the refusal now; one that isn't gets it at its next read."
         : `Nothing was decided: the request is ${state}.`);

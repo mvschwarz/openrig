@@ -90,6 +90,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/permission-answer.cjs\"",
+            "timeout": 86430
+          }
+        ]
       }
     ],
     "Elicitation": [
