@@ -484,8 +484,9 @@ export class SeatLifecycleService {
     const preset = isCommunityHarnessRuntime(runtime) ? loadCommunityHarnessPreset(runtime) : undefined;
     const declaration = preset?.ok ? preset.preset.modelCatalog : undefined;
     if (!declaration) {
+      const diagnostic = preset?.ok ? preset.modelCatalogDiagnostic : preset?.diagnostic;
       return { ok: true as const, seat, runtime, saved,
-        catalog: { status: "unavailable" as const, reason: "No supported local catalog for this seat's runtime." } };
+        catalog: { status: "unavailable" as const, ...(diagnostic ?? { reason: "No supported local catalog for this seat's runtime." }) } };
     }
     const observedAt = new Date().toISOString();
     const { runtimeVersion } = declaration;
