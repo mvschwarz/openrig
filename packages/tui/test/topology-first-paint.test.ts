@@ -63,7 +63,8 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 describe("Topology's first paint on a busy daemon", () => {
   it("draws the rig's seats while health and the queue lists are still being read, then fills them in", async () => {
-    const daemon = slowDaemon();
+    const daemon = slowDaemon((route) => route === "/api/queue/hosted-members"
+      ? Promise.resolve(new Response(JSON.stringify({ members: [{ seat: "helper@myrig", status: "unknown" }] }), { status: 200 })) : null);
     let firstPaint: { snapshot: FleetSnapshot; calls: string[]; inFlight: boolean } | undefined;
     const live = createLiveRefresh({
       hydrate: (page, signal, first) => hydrateSnapshot(daemon.client.forPage(page, signal), undefined, null, null, "myrig", { ...view(() => live.snapshot()), ...RIG_TABLE }, { firstPaint: first }),
@@ -91,6 +92,8 @@ describe("Topology's first paint on a busy daemon", () => {
       .lines.join("\n");
     expect(screen).toMatch(/dev +· impl/);
     expect(screen).toContain("Pending · read after the rigs and seats");
+    expect(screen).toContain("Connected assistants: pending");
+    expect(screen).not.toContain("check-in unavailable");
     expect(screen).not.toContain("rigs read failed");
 
     // The held reads answer late; the page fills in and the first paint's marks go away.
@@ -102,6 +105,31 @@ describe("Topology's first paint on a busy daemon", () => {
     expect(settled.queueCoverage).toBe("complete");
     expect(settled.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => agent.name)).toEqual(["dev.impl"]);
     expect(live.load()).toMatchObject({ inFlight: false, settled: true, stale: false });
+    const settledScreen = renderScreen(view(() => settled), settled, { cols: 160, rows: 40, nowMs: Date.now(), colorMode: "none", load: live.load() }).lines.join("\n");
+    expect(settledScreen).toContain("helper@myrig");
+    expect(settledScreen).not.toContain("Connected assistants: pending");
+    live.close();
+  });
+
+  it.each(["http", "timeout"])("replaces pending connected assistants with a named late %s failure", async (failure) => {
+    const daemon = slowDaemon((route) => route !== "/api/queue/hosted-members" ? null
+      : failure === "http" ? Promise.resolve(new Response("{}", { status: 404 }))
+      : Promise.reject(new DOMException("held read timed out", "TimeoutError")));
+    const live = createLiveRefresh({
+      hydrate: (page, signal, first) => hydrateSnapshot(daemon.client.forPage(page, signal), undefined, null, null, "myrig", RIG_TABLE, { firstPaint: first }),
+      onFrame: () => {}, now: () => Date.now(),
+    });
+    const done = live.refresh();
+    await live.answered();
+    const screen = () => renderScreen(view(() => live.snapshot()), live.snapshot(), { cols: 160, rows: 40, nowMs: Date.now(), colorMode: "none", load: live.load() }).lines.join("\n");
+    expect(screen()).toContain("Connected assistants: pending");
+    daemon.release();
+    await done;
+    expect(screen()).toContain("Connected assistants: check-in unavailable");
+    expect(screen()).toContain(failure === "http" ? "this daemon doesn't serve it" : "held read timed out");
+    expect(screen()).not.toContain("Connected assistants: pending");
+    expect(live.snapshot().hosts[0]!.rigs[0]!.pods[0]!.agents.map((a) => a.name)).toEqual(["dev.impl"]);
+    live.close();
   });
 
   it("keeps the rigs when the slow health read then fails, and names only that read", async () => {

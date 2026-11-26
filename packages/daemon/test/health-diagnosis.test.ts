@@ -122,6 +122,26 @@ it("reads the census without projecting non-owned topical rows, and still refuse
   expect(() => t.service.list()).toThrow("health_diagnosis_census_truncated");
 });
 
+it("keeps exact census membership and newest-first order across the id range", async () => {
+  const t = setup(); const p = t.policy.read().policy;
+  t.policy.apply({ ...p, diagnosis: { ...p.diagnosis, enabled: true, owner: "owner@rig" } }, "actor@rig");
+  const original = (await t.service.evaluate("actor@rig", true)).actions[0]!.qitemId;
+  const packet = JSON.parse(t.queue.getById(original)!.body);
+  t.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run("2026-09-02T00:00:00Z", original);
+  const insert = t.db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body, tags)
+    VALUES (?, ?, ?, 'peer@rig', 'owner@rig', 'done', ?, ?)`);
+  const add = (id: string, date: string, tags: string[], findingId?: string) => {
+    const body = findingId ? JSON.stringify({ ...packet, finding: { ...packet.finding, id: findingId } }) : "not an occurrence";
+    insert.run(id, date, date, body, JSON.stringify(tags));
+  };
+  add("qitem-health-diagnosis-a", "2026-09-03T00:00:00Z", ["health-diagnosis"], "a");
+  add("qitem-health-diagnosis-Ω", "2026-09-01T00:00:00Z", ["health-diagnosis"], "Ω");
+  for (const id of ["qitem-health-diagnosis", "qitem-health-diagnosis.extra", "qitem-topical"])
+    add(id, "2026-09-04T00:00:00Z", ["health-diagnosis"]);
+  add("qitem-health-diagnosis-no-tag", "2026-09-04T00:00:00Z", ["health-diagnosis-extra"]);
+  expect(t.service.list(false).map(o => o.row.qitemId)).toEqual(["qitem-health-diagnosis-a", original, "qitem-health-diagnosis-Ω"]);
+});
+
 it.each(["markdown", "null", "schema", "finding-id", "authority", "presentedAt"])("refuses corrupt owned occurrence state (%s) instead of hiding or certifying it", async (defect) => {
   const t = setup(); const p = t.policy.read().policy;
   t.policy.apply({ ...p, diagnosis: { ...p.diagnosis, enabled: true, owner: "owner@rig" } }, "actor@rig");

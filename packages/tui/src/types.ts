@@ -104,6 +104,8 @@ export interface HostNode {
   /** Why the connected assistants couldn't be read (an older daemon, a failed read, an unusable answer); absent when
    *  they were read or not asked for. */
   connectedAssistantsUnavailable?: string;
+  /** This local table's first paint deferred its connected-assistant read. */
+  connectedAssistantsPending?: boolean;
 }
 
 /** A connected assistant's check-in as this daemon reports it. */

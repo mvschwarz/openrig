@@ -610,6 +610,7 @@ export async function hydrateSnapshot(
   // only this daemon's, never a remote host's.
   const listsAssistants = !viewContext || (viewContext.section === "topology" && viewContext.viewTab === "table"
     && (topologyLeaf?.kind === "host" || topologyLeaf?.kind === "rig"));
+  const connectedAssistantsPending = firstPaint && listsAssistants && !remoteDrill;
   const connectedAssistants = readNow(listsAssistants && !remoteDrill)
     ? await client.hostedMembers().then(connectedAssistantsOf,
       (error: unknown) => ({ unavailable: `the read failed: ${error instanceof Error ? error.message : String(error)}` }))
@@ -727,6 +728,7 @@ export async function hydrateSnapshot(
     displayName: ownName && ownName !== "localhost" ? ownName : undefined,
     reachable: true,
     rigs: rigs.sort(byRigName),
+    ...(connectedAssistantsPending ? { connectedAssistantsPending: true } : {}),
     ...(connectedAssistants ? "unavailable" in connectedAssistants
       ? { connectedAssistantsUnavailable: connectedAssistants.unavailable } : { connectedAssistants: connectedAssistants.assistants } : {}),
   };
