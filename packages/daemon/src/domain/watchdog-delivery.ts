@@ -111,7 +111,7 @@ export function makeWatchdogDeliver(deps: {
       // The seat lease can delay input. Refuse a frozen payload if the transfer changed which rows it can name.
       const notificationCurrent = () => (source.members ?? [source]).every(({ jobId }) =>
         deps.notificationCurrent?.(jobId) !== false && (deps.resolveSharedParkReminder?.(jobId) ?? null) === sharedReminder);
-      if (!notificationCurrent()) return { status: "failed", sent: false, inputPhase: "not_reached" };
+      if (!notificationCurrent()) return { status: "failed", sent: false, inputPhase: "not_reached", error: "no longer current: closed or transferred" };
       const checkTerminal = () => {
         if (source.policy === PARKED_OWNER_POLICY_NAME && deps.isTerminalSeat?.(targetSession))
           throw new DeliveryGuardError("terminal_seat", "A terminal seat cannot consume an automated parked-owner reminder; route its obligation to an agent seat. No input was written.");
