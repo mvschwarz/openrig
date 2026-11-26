@@ -223,8 +223,9 @@ test('only one structured outcome is allowed amid human-readable logs', () => {
 const hookOf = context => ({ rawOutput: JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: context } }), additionalContext: context });
 
 test('refocus admission requires the emitted packet context: held work when healthy, held-as-current when seeded', () => {
-  const heldContext = '## WORK TRACE\nCONTEXT FROM HELD AND PENDING WORK — nothing is in progress, and every held and pending row (1 held, 0 pending) resolves to this slice.\n'
-    + 'intent: Trace the exact held work\n\nHELD WORK (blocked; this is not next):\n- refocus-baton — parked — blocked on external:scenario-release — continuation: none recorded';
+  const heldContext = '## WORK TRACE\nCONTEXT FROM HELD AND PENDING WORK — nothing is in progress, and every held and pending row (1 held, 0 pending; 1 OpenRig notice set aside) resolves to this slice.\n'
+    + 'intent: Trace the exact held work\n\nHELD WORK (blocked; this is not next):\n- refocus-baton — parked — blocked on external:scenario-release — continuation: none recorded\n'
+    + 'POSSIBLE NEXT WORK (pending; no order implied):\n- qitem-roster-ready-example — Team roster is ready';
   const passResult = { scenario: 'refocus-parked-baton', verdict: 'PASS' };
   const green = { mode: 'healthy', caseName: 'refocus-parked', scenarioSha256: 'a'.repeat(64), result: passResult, records: [passResult],
     hook: hookOf(heldContext), seed: { class: 'parked-baton-as-current', enabled: false }, fault: null };
@@ -233,6 +234,10 @@ test('refocus admission requires the emitted packet context: held work when heal
     heldContext.replace('HELD WORK', 'held'),
     heldContext + '\nWORK FROM QUEUE EVIDENCE — tag mission:regression + slice:SCN.1 on row refocus-baton',
     heldContext.replace('CONTEXT FROM HELD AND PENDING WORK', 'Your work'),
+    // The roster notice must be there and listed, and must not stop the slice settling.
+    heldContext.replace('qitem-roster-ready-', 'qitem-other-'),
+    heldContext.replace('; 1 OpenRig notice set aside', ''),
+    heldContext + '\nHeld and pending work is context, not current work, and does not settle one mission (a row names no mission).',
   ]) assert.throws(() => verifyRun('healthy', 0, { ...green, hook: hookOf(context) }, 'refocus-parked'));
 
   const context = '## WORK TRACE\nWORK FROM QUEUE EVIDENCE — tag mission:regression + slice:SCN.1 on row refocus-baton\nintent: Trace the exact held work';
@@ -254,13 +259,15 @@ test('refocus admission requires the emitted packet context: held work when heal
 
 test('the packet-off control admits the parked row only as labelled context', () => {
   const result = { scenario: 'refocus-parked-baton-packet-off', verdict: 'PASS' };
-  const context = '## WORK TRACE\nCONTEXT FROM HELD AND PENDING WORK — nothing is in progress, and every held and pending row (1 held, 0 pending) resolves to this slice.\n'
-    + 'intent: Trace the exact held work\n\nHELD WORK (blocked; this is not next):\n- refocus-baton — parked — blocked on external:scenario-release';
+  const context = '## WORK TRACE\nCONTEXT FROM HELD AND PENDING WORK — nothing is in progress, and every held and pending row (1 held, 0 pending; 1 OpenRig notice set aside) resolves to this slice.\n'
+    + 'intent: Trace the exact held work\n\nHELD WORK (blocked; this is not next):\n- refocus-baton — parked — blocked on external:scenario-release\n'
+    + 'POSSIBLE NEXT WORK (pending; no order implied):\n- qitem-roster-ready-example — Team roster is ready';
   const pass = { mode: 'healthy', caseName: 'refocus-parked-off', scenarioSha256: 'a'.repeat(64), result, records: [result], fault: null, hook: hookOf(context) };
   verifyPassingRun(0, pass, 'refocus-parked-off');
   const fallback = 'FALLBACK — no current typed baton (…)\nThe work root is not evidence of a current mission';
   for (const bad of [fallback, context + '\n' + fallback, context + '\nWORK FROM QUEUE EVIDENCE — tag mission:regression + slice:SCN.1 on row refocus-baton',
-    context.replace('CONTEXT FROM HELD AND PENDING WORK', 'Your work'), 'no label']) {
+    context.replace('CONTEXT FROM HELD AND PENDING WORK', 'Your work'), context.replace('qitem-roster-ready-', 'qitem-other-'),
+    context + '\nHeld and pending work is context, not current work, and does not settle one mission (a row names no mission).', 'no label']) {
     assert.throws(() => verifyPassingRun(0, { ...pass, hook: hookOf(bad) }, 'refocus-parked-off'));
   }
 });

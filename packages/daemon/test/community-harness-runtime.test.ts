@@ -323,6 +323,44 @@ describe("the community harness adapter", () => {
     }
   });
 
+  // 0.7.24: a handover asks the preflight before it ends the predecessor. It refuses exactly what a launch refuses before
+  // starting anything, by the same code, and starts nothing itself; what only a launch can tell, it passes.
+  it.each([
+    ["the preset is gone", "", "missing", ["wrapper"], undefined],
+    ["a wrapper without the seat launch environment", "", "present", ["wrapper"], undefined],
+    ["a runner without launch_wrapper support", "runner: true\nlaunch_result: true\n", "present", ["wrapper"], () => ["/resolved/wrapper"]],
+    ["a wrapper that doesn't resolve", "", "present", ["missing-wrapper"], () => { throw new Error("missing wrapper"); }],
+    ["a healthy preset with a wrapper", "", "present", ["wrapper"], () => ["/resolved/wrapper"]],
+    ["a healthy preset", "launch_result: true\n", "present", undefined, undefined],
+  ] as const)("its preflight refuses what its launch refuses before starting anything: %s", async (name, declares, preset, launchWrapper, resolve) => {
+    const dir = presets(preset === "present" ? { "synth.yaml": GOOD + declares } : {});
+    const { tmux } = adapter(dir);
+    const command = vi.fn(async (_session: string, program: string) => program);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir, launchResultRoot: () => join(dir, "results"),
+      launchResultWait: { timeoutMs: 0 }, ...(resolve ? { seatLaunchEnvironment: { command, resolveLaunchWrapper: resolve } } : {}) });
+    const seat = { ...binding, ...(launchWrapper ? { launchWrapper: [...launchWrapper] } : {}) };
+    const checked = await app.preflightLaunch(seat);
+    expect(tmux.sendShellCommand).not.toHaveBeenCalled();
+    const launched = await app.launchHarness(seat, { name: "w@r" });
+    if (checked.ok) {
+      expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
+    } else {
+      expect(launched).toEqual({ ok: false, error: checked.error });
+      expect(tmux.sendShellCommand).not.toHaveBeenCalled();
+    }
+    expect(checked.ok).toBe(name.startsWith("a healthy"));
+  });
+
+  it("a contained harness's preflight refuses a launch wrapper as its launch does, and needs its environment operations", async () => {
+    const tmux = { hasSession: vi.fn(async () => true), getPaneCommand: vi.fn(async () => "node"), sendShellCommand: vi.fn(async () => ({ ok: true as const })) };
+    const contained = new CommunityHarnessRuntimeAdapter("openshell-claude", { tmux, environmentStartup: { launch: vi.fn() } as unknown as EnvironmentStartup });
+    expect(await contained.preflightLaunch({ ...binding, launchWrapper: ["wrapper"] })).toEqual({ ok: false, error: "launch_wrapper unavailable; no agent started." });
+    expect(await contained.launchHarness({ ...binding, launchWrapper: ["wrapper"] }, { name: "w@r" })).toEqual({ ok: false, error: "launch_wrapper unavailable; no agent started." });
+    expect(await contained.preflightLaunch(binding)).toEqual({ ok: true });
+    const unavailable = new CommunityHarnessRuntimeAdapter("openshell-claude", { tmux });
+    await expect(unavailable.preflightLaunch(binding)).rejects.toThrow("OpenShell environment operations are unavailable");
+  });
+
   it.each(["plain", "reported", "named", "resume", "runner"])("refuses wrapped %s command failures before recording any input or identity", async mode => {
     const declarations = mode === "runner" ? "runner: true\nlaunch_result: true\nlaunch_wrapper: true\n"
       : mode === "reported" ? "launch_result: true\n" : mode === "plain" ? "" : "names_conversation: true\nresume: true\n";

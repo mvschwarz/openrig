@@ -23,16 +23,11 @@ describe("bin-wrapper", () => {
     }
   });
 
-  it.skipIf(!module.getCompileCacheDir || !module.enableCompileCache).each([
-    { args: [], interactive: false, explicitCache: false, expected: false },
-    { args: ["--version"], interactive: false, explicitCache: false, expected: true },
-    { args: [], interactive: false, explicitCache: true, expected: true },
-    { args: [], interactive: true, explicitCache: false, expected: true },
-  ])("compile cache for args=$args, interactive=$interactive, explicitCache=$explicitCache", ({ args, interactive, explicitCache, expected }) => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-bin-cache-"));
-    const dist = path.join(tempDir, "dist");
+  /** The wrapper transpiled into a package whose entries print whether the compile cache is on, and where. */
+  function stageWrapper(root: string): string {
+    const dist = path.join(root, "dist");
     fs.mkdirSync(dist);
-    fs.writeFileSync(path.join(tempDir, "package.json"), '{ "type": "module" }');
+    fs.writeFileSync(path.join(root, "package.json"), '{ "type": "module" }');
     const wrapper = path.join(dist, "bin-wrapper.js");
     const source = fs.readFileSync(new URL("../src/bin-wrapper.ts", import.meta.url), "utf8");
     const { outputText } = ts.transpileModule(source, {
@@ -48,13 +43,30 @@ describe("bin-wrapper", () => {
       fs.writeFileSync(path.join(dist, helper.replace(/\.ts$/, ".js")), helperOutput);
     }
     const report = `import { getCompileCacheDir } from "node:module";
-export async function runProgram() { console.log(JSON.stringify({ enabled: !!getCompileCacheDir() })); }
+export async function runProgram() { console.log(JSON.stringify({ enabled: !!getCompileCacheDir(), dir: getCompileCacheDir() ?? null })); }
 `;
     fs.writeFileSync(path.join(dist, "index.js"), report + "export function createProgram() { return {}; }\n");
     fs.writeFileSync(path.join(dist, "lazy-program.js"), report + "export async function createLazyProgram() { return {}; }\n");
-    const env = { ...process.env, TMPDIR: tempDir };
+    return wrapper;
+  }
+
+  function cacheEnv(root: string, home: string): NodeJS.ProcessEnv {
+    const env = { ...process.env, TMPDIR: root, OPENRIG_HOME: home };
     delete env.NODE_DISABLE_COMPILE_CACHE;
     delete env.NODE_COMPILE_CACHE;
+    delete env.RIGGED_HOME;
+    return env;
+  }
+
+  it.skipIf(!module.getCompileCacheDir || !module.enableCompileCache).each([
+    { args: [], interactive: false, explicitCache: false, expected: false },
+    { args: ["--version"], interactive: false, explicitCache: false, expected: true },
+    { args: [], interactive: false, explicitCache: true, expected: true },
+    { args: [], interactive: true, explicitCache: false, expected: true },
+  ])("compile cache for args=$args, interactive=$interactive, explicitCache=$explicitCache", ({ args, interactive, explicitCache, expected }) => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-bin-cache-"));
+    const wrapper = stageWrapper(tempDir);
+    const env = cacheEnv(tempDir, tempDir);
     if (explicitCache) env.NODE_COMPILE_CACHE = path.join(tempDir, "explicit-cache");
     // Set stream flags before the wrapper loads; front-door.test.ts covers a real PTY launch.
     const nodeArgs = interactive
@@ -62,7 +74,32 @@ export async function runProgram() { console.log(JSON.stringify({ enabled: !!get
       : [];
     const result = spawnSync(process.execPath, [...nodeArgs, wrapper, ...args], { env, encoding: "utf8", timeout: 5000 });
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ enabled: expected });
+    expect(JSON.parse(result.stdout).enabled).toBe(expected);
+  });
+
+  it.skipIf(!module.getCompileCacheDir || !module.enableCompileCache)("keeps the compile cache in the OpenRig home's runtime folder, created owner-only, not the temp folder", () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-bin-cache-"));
+    const wrapper = stageWrapper(tempDir);
+    const home = path.join(tempDir, "home");
+    fs.mkdirSync(home);
+    const result = spawnSync(process.execPath, [wrapper, "--version"], { env: cacheEnv(tempDir, home), encoding: "utf8", timeout: 5000 });
+    expect(result.status, result.stderr).toBe(0);
+    const cache = path.join(home, "run", "compile-cache");
+    const { dir } = JSON.parse(result.stdout) as { dir: string | null };
+    expect([cache, path.join(fs.realpathSync(home), "run", "compile-cache")].some(p => dir?.startsWith(p)), String(dir)).toBe(true);
+    expect(fs.statSync(cache).mode & 0o777).toBe(0o700);
+    expect(fs.existsSync(path.join(tempDir, "node-compile-cache"))).toBe(false);
+  });
+
+  it.skipIf(!module.getCompileCacheDir || !module.enableCompileCache)("leaves the cache off, and creates nothing, when the OpenRig home doesn't exist yet", () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-bin-cache-"));
+    const wrapper = stageWrapper(tempDir);
+    const home = path.join(tempDir, "not-yet");
+    const result = spawnSync(process.execPath, [wrapper, "--version"], { env: cacheEnv(tempDir, home), encoding: "utf8", timeout: 5000 });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ enabled: false, dir: null });
+    expect(fs.existsSync(home)).toBe(false);
+    expect(fs.existsSync(path.join(tempDir, "node-compile-cache"))).toBe(false);
   });
 
   it("resolves the real dist entry from a symlinked wrapper path", () => {

@@ -148,7 +148,7 @@ async function run(): Promise<void> {
   const selectedRigName = (): string | null =>
     view.get().drill.find((part) => part.kind === "rig")?.name ?? null;
   const live = client
-    ? createLiveRefresh({ scopeKey: () => pageReadKey(view.get()), hydrate: (page, signal) => hydrateSnapshot(client.forPage(page, signal), reviewCache, view.get().scopesMission, selectedSliceDirectory(), selectedRigName(), view.get()), onFrame: () => draw(), now: () => Date.now() })
+    ? createLiveRefresh({ scopeKey: () => pageReadKey(view.get()), hydrate: (page, signal, firstPaint) => hydrateSnapshot(client.forPage(page, signal), reviewCache, view.get().scopesMission, selectedSliceDirectory(), selectedRigName(), view.get(), { firstPaint }), onFrame: () => draw(), now: () => Date.now() })
     : null;
   let motionTimer: NodeJS.Timeout | null = null;
   // S19 AM-R18 — the open view updates ITSELF: oracle pushes drive the refresh owner.
@@ -197,12 +197,15 @@ async function run(): Promise<void> {
     if (defaultFeedChecked || !client) return;
     defaultFeedChecked = true;
     if (inputRevision !== 0) return;
-    void client.humanAttention(null, "default").then((read) => {
-      if (!opensOnDefaultFeed(read as AttentionRead | null, view.get(), inputRevision === 0)) return;
-      view.dispatch({ type: "jump", section: "needs" });
-      draw();
-      void live?.refresh();
-    }, () => {});
+    // After the page's first answer: on a busy daemon this read takes seconds, and Topology's reads would wait behind it.
+    void (live ? live.answered() : Promise.resolve())
+      .then(() => inputRevision === 0 ? client.humanAttention(null, "default") : null)
+      .then((read) => {
+        if (!opensOnDefaultFeed(read as AttentionRead | null, view.get(), inputRevision === 0)) return;
+        view.dispatch({ type: "jump", section: "needs" });
+        draw();
+        void live?.refresh();
+      }, () => {});
   }
   function commandContext() {
     return currentCommandContext(startup && startup.state.connection !== "up" ? "unverified" : crashCartOpts.daemonState ?? null);

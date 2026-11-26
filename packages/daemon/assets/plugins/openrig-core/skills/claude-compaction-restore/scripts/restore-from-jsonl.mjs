@@ -23,7 +23,44 @@ function stripBinary(text) {
     (m) => `[base64 omitted: ~${m.length} bytes]`);
   return s;
 }
-const DEFAULT_OUT = process.platform === "win32" ? path.join(os.tmpdir(), "claude-compaction-restore") : "/tmp/claude-compaction-restore";
+// Where packets go without --out (the PreCompact hook gives none, so this is the one place it's decided). The folder is
+// created owner-only by writeOutputs:
+// 1. OPENRIG_COMPACTION_OUT_ROOT, an explicit root (the test suites' own folder);
+// 2. OPENRIG_COMPACTION_PACKET_ROOT: the OpenRig home's packet folder, which a seat's launch names when it grants the seat
+//    reads of its own packets there;
+// 3. without it (a seat launched before packets moved into the OpenRig home, whose grant names only the old /tmp folder),
+//    the `packets` folder in the seat's launch project's OpenRig compaction folder, beside its restore maps: a seat reads its own working
+//    directory without a grant. The compaction folder ignores itself in Git, as the daemon makes it for the maps;
+//    without OpenRig's ignore file there, or a folder it can write, it's
+// 4. the OpenRig home's packet folder.
+function defaultOutRoot(env = process.env) {
+  if (env.OPENRIG_COMPACTION_OUT_ROOT) return env.OPENRIG_COMPACTION_OUT_ROOT;
+  const granted = env.OPENRIG_COMPACTION_PACKET_ROOT;
+  if (granted && path.isAbsolute(granted)) return granted;
+  return launchProjectPackets(env)
+    ?? path.join(env.OPENRIG_HOME || env.RIGGED_HOME || path.join(os.homedir(), ".openrig"), "run", "compaction-restore");
+}
+
+function launchProjectPackets(env) {
+  const project = env.OPENRIG_SEAT_PROJECT_DIR || env.CLAUDE_PROJECT_DIR;
+  if (!project || !path.isAbsolute(project) || !fs.existsSync(project)) return null;
+  try {
+    const compaction = path.join(project, ".openrig", "compaction");
+    fs.mkdirSync(compaction, { recursive: true });
+    const ignore = path.join(compaction, ".gitignore");
+    try {
+      fs.writeFileSync(ignore, "*\n", { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      if (error.code !== "EEXIST" || !fs.lstatSync(ignore).isFile() || fs.readFileSync(ignore, "utf8") !== "*\n") return null;
+    }
+    const packets = path.join(compaction, "packets");
+    fs.mkdirSync(packets, { recursive: true, mode: 0o700 });
+    fs.accessSync(packets, fs.constants.W_OK | fs.constants.X_OK);
+    return packets;
+  } catch {
+    return null;
+  }
+}
 
 function nativeFiles(root, maxDepth, suffix) {
   const files = [];
@@ -42,7 +79,7 @@ function nativeFiles(root, maxDepth, suffix) {
 function parseArgs(argv) {
   const args = {
     jsonl: null,
-    out: DEFAULT_OUT,
+    out: null,
     cwd: process.cwd(),
     json: false,
     tailBytes: 0,
@@ -515,7 +552,9 @@ function nowIso() {
 function writeOutputs(summary, outRoot, staging) {
   const stamp = nowIso().replace(/[:.]/g, "-");
   const base = path.join(outRoot, `${summary.sessionId ?? "unknown-session"}-${stamp}`);
-  fs.mkdirSync(base, { recursive: true });
+  // Owner-only: a packet holds an extract of the conversation.
+  fs.mkdirSync(outRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(base, { recursive: true, mode: 0o700 });
 
   const outputPaths = {
     dir: base,
@@ -544,8 +583,9 @@ async function main() {
 
   // The two text files are written while the transcript is read, before the packet's folder is named (its session id
   // comes from the transcript), so they start in a staging folder beside it. Packet readers match `<session id>-*`.
-  const outRoot = path.resolve(args.out);
-  fs.mkdirSync(outRoot, { recursive: true });
+  const outRoot = path.resolve(args.out ?? defaultOutRoot());
+  // Owner-only from its first creation: the staging folder below is made inside it.
+  fs.mkdirSync(outRoot, { recursive: true, mode: 0o700 });
   // A handled stop part way still removes the staging folder: SIGTERM (the PreCompact hook's time limit) exits 143, and
   // SIGINT (a person's Ctrl-C on the manual route) exits 130. A stop that can't be handled (SIGKILL) or a failed removal
   // can still leave it.

@@ -54,7 +54,7 @@ import {
 } from "./mission-control-action-log.js";
 import { isHumanSeatSessionRef } from "../session-name.js";
 import { humanAnswerText, formatHumanAnswers, unansweredQuestions, type HumanAnswers } from "../human-questions.js";
-import { runnerPermissionOrigin } from "../runner-permissions.js";
+import { nativeAnswerReach, nativePermissionHook, runnerPermissionOrigin } from "../runner-permissions.js";
 
 /** The terminal's act, which names no responder: the generic human seat the web UI also records, read as explicitly
  *  unattributed, never a person. */
@@ -290,6 +290,7 @@ export class MissionControlWriteContract {
             tier: source.tier ?? undefined,
             summary: source.summary,
             evidenceRef: source.evidenceRef,
+            evidenceRefRoots: source.evidenceRefRoots,
             tags: source.tags
               ? [...source.tags, `mission-control:${input.verb}`]
               : [`mission-control:${input.verb}`],
@@ -686,8 +687,13 @@ export class MissionControlWriteContract {
     const other = this.queueRepo.committedAnswerFromAnother(input.qitemId, input.actorSession);
     if (other) this.answeredByAnother(input, other, primaryUser);
     if (ask.state !== "pending") {
+      // A seat's own native prompt that ended: say how, in the words its record keeps (answered in the terminal, or too late).
+      const ended = nativePermissionHook(ask) && ask.state === "canceled"
+        ? this.queueRepo.listTransitions(ask.qitemId).map((t) => t.transitionNote ?? "").reverse()
+          .find((note) => note.startsWith("runner-permission-withdrawn") || note.startsWith("runner-permission-stale")) : undefined;
       throw new MissionControlWriteContractError("qitem_already_terminal",
-        `qitem ${input.qitemId} is ${ask.state}, not waiting on an answer (it may already be answered), so nothing was recorded or sent.`,
+        ended ? `Too late: ${ended.replace(/^runner-permission-(?:withdrawn|stale) reason=[^:]*: /, "")} Nothing was recorded or sent.`
+          : `qitem ${input.qitemId} is ${ask.state}, not waiting on an answer (it may already be answered), so nothing was recorded or sent.`,
         { qitemId: input.qitemId, state: ask.state });
     }
     const chose = input.questionId !== undefined || input.optionId !== undefined;
@@ -866,7 +872,7 @@ export class MissionControlWriteContract {
         }
         after = this.queueRepo.getById(input.qitemId);
         // A runner's permission request isn't closed by an answer: it's handed to the receiving agent, or kept. Say which.
-        const runnerNotice = !answer.message && after && runnerPermissionOrigin(after) ? runnerAnswerNotice(after) : undefined;
+        const runnerNotice = !answer.message && after && runnerPermissionOrigin(after) ? runnerAnswerNotice(after, this.db) : undefined;
         if (runnerNotice) finalAnswer = { ...answer, message: runnerNotice };
         const actionId = ulid();
         appResult = {
@@ -1048,8 +1054,17 @@ function verbToClosure(input: MissionControlActionInput): ClosureMapping {
 
 /** What became of a person's answer on a runner's permission request: handed to the receiving agent, or kept (the
  *  person's own receipt says why). Undefined for a request the answer closed (no agent wired here). */
-function runnerAnswerNotice(ask: QueueItem): string | undefined {
+function runnerAnswerNotice(ask: QueueItem, db: Database.Database): string | undefined {
+  // A seat's own native prompt, answered with a choice or a plain yes or no: the person's own answer, sent as they gave it.
+  // When the seat's hook isn't reading the ask (killed outright, say), the answer is still theirs, but it hasn't reached the prompt.
+  if (ask.state === "done" && nativePermissionHook(ask)) {
+    const { notReached } = nativeAnswerReach(db, ask);
+    if (notReached) return `Your answer on ${ask.qitemId} is recorded as yours. ${notReached}`;
+    return `Your answer on ${ask.qitemId} is recorded as yours, and goes to ${ask.sourceSession}'s own prompt as soon as its permission hook reads it. The prompt is also open in the seat's terminal, and the first answer counts; the request's record says when the hook took yours.`;
+  }
   if (ask.state === "handed-off" && ask.handedOffTo) {
+    // A seat's own prompt, answered in words: the record keeps them as theirs, and the decision as the agent's judgment.
+    if (nativePermissionHook(ask)) return `Your words on ${ask.qitemId} went to ${ask.handedOffTo}, the receiving agent, which judges whether this exact action meets them. Its decision is recorded as its judgment, not your own answer, with your words as you gave them. ${ask.sourceSession}'s prompt waits until then, and is also open in the seat's terminal.`;
     return `Your answer on ${ask.qitemId} went to ${ask.handedOffTo}, the receiving agent, which decides. The runner waits until then; nothing has run. A note to you says the agent's recorded state.`;
   }
   if (ask.state === "pending" || ask.state === "in-progress" || ask.state === "blocked") {

@@ -1,7 +1,7 @@
 import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
 import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js";
 import { claudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "../domain/claude-auto-mode.js";
-import { restoreSessionUserHome, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
+import { compactionPacketLaunchEnv, restoreSessionUserHome, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { transportClaudeSettings } from "./claude-settings-transport.js";
 import { claudeMcpArgs, type ClaudeMcp } from "../domain/claude-mcp.js";
@@ -12,7 +12,7 @@ import { throttledStatusLineForLaunch } from "../domain/claude-statusline-thrott
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { shellQuote } from "./shell-quote.js";
-import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
+import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix, commandEnvPrefix } from "./claude-resume-launch.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
 import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, noConversationFoundOwner } from "../domain/native-resume-probe.js";
 import { verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
@@ -164,16 +164,19 @@ export class ClaudeResumeAdapter {
       catch { return { ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." }; }
     }
     let nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture, autoMode.block ?? null, settingsSeat);
-    if (managed || (continuation?.args && executable)) nativeArgs = transportClaudeSettings(nativeArgs, settingsSeat, tokenWarnings, continuation?.args);
+    const sentNative = !!managed || !!(continuation?.args && executable);
+    // The packet variable follows the grant this resume sends: a continuation sends the running Claude's arguments.
+    const packetEnv = compactionPacketLaunchEnv(sentNative ? nativeArgs : launchArgs, { openrigHome: this.options.openrigHome, nativeSessionId: resumeToken! });
+    if (sentNative) nativeArgs = transportClaudeSettings(nativeArgs, settingsSeat, tokenWarnings, continuation?.args);
     else launchArgs = transportClaudeSettings(launchArgs, settingsSeat, tokenWarnings, continuation?.args);
     const permissionMode = posture + launchArgs.map(arg => ` ${shellQuote(arg)}`).join("");
-    const cmd = managed ? managed.command(nativeArgs, claudeResumeLaunchEnv(resumeToken!))
-      : `${claudeResumeLaunchPrefix(resumeToken!)}${claudeClassicRendererEnvPrefix(process.env)}${executable ? `exec ${wrapperPrefix}${shellQuote(executable)}${script ? ` ${shellQuote(script)}` : ""}` : "claude"} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(resumeToken!)}`;
+    const cmd = managed ? managed.command(nativeArgs, { ...claudeResumeLaunchEnv(resumeToken!), ...packetEnv })
+      : `${claudeResumeLaunchPrefix(resumeToken!)}${commandEnvPrefix(packetEnv)}${claudeClassicRendererEnvPrefix(process.env)}${executable ? `exec ${wrapperPrefix}${shellQuote(executable)}${script ? ` ${shellQuote(script)}` : ""}` : "claude"} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(resumeToken!)}`;
 
     const configPrefix = continuation?.configDir != null && this.options.seatLaunchEnvironment ? `CLAUDE_CONFIG_DIR=${shellQuote(continuation.configDir)} ` : "";
     const generationPrefix = occupantGeneration ? `OPENRIG_OCCUPANT_GENERATION=${shellQuote(occupantGeneration)} ` : "";
     const classicCommand = generationPrefix + configPrefix + (continuation?.args && executable
-      ? `${claudeResumeLaunchPrefix(resumeToken!)}exec ${wrapperPrefix}${shellQuote(executable)}${script ? ` ${shellQuote(script)}` : ""} ${nativeArgs.map(shellQuote).join(" ")}` : cmd);
+      ? `${claudeResumeLaunchPrefix(resumeToken!)}${commandEnvPrefix(packetEnv)}exec ${wrapperPrefix}${shellQuote(executable)}${script ? ` ${shellQuote(script)}` : ""} ${nativeArgs.map(shellQuote).join(" ")}` : cmd);
     if (!managed && continuation?.configDir !== undefined && !configPrefix) tokenWarnings.push("This classic launch cannot privately apply the captured config selector; ordinary pane selection is used.");
     tokenWarnings.push(...continuationChoiceNotes(continuation, posture, model));
     // Recorded from the arguments actually sent: captured continuation arguments carry the running process's settings.

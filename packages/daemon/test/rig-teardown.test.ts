@@ -35,6 +35,7 @@ import { RigLifecycleService } from "../src/domain/rig-lifecycle-service.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
+import { Pane, bash, claude, claudePane, codexPane, timing as exitTiming } from "./fixtures/runtime-exit-pane.js";
 
 
 function mockTmux(killResult?: { ok: boolean; code?: string; message?: string }): TmuxAdapter {
@@ -566,6 +567,129 @@ describe("RigTeardownOrchestrator", () => {
     await td.teardown(rigId, { force: true });
 
     expect(tmux.killSession).toHaveBeenCalled();
+  });
+
+  describe("#3901: each agent exits through its own shutdown before its terminal closes", () => {
+    function seedSeat(runtime: string, opts: { claimed?: boolean } = {}): { rigId: string; nodeId: string } {
+      const rig = rigRepo.createRig("test-rig");
+      const node = rigRepo.addNode(rig.id, "dev", { runtime, cwd: tmpDir });
+      const session = opts.claimed ? sessionRegistry.registerClaimedSession(node.id, "r01-dev") : sessionRegistry.registerSession(node.id, "r01-dev");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateBinding(node.id, { tmuxSession: "r01-dev", tmuxPane: "%1" });
+      return { rigId: rig.id, nodeId: node.id };
+    }
+    function teardownWith(pane: Pane, marker: string | undefined, opts: { kill?: { ok: boolean; code?: string; message?: string } } = {}) {
+      const tmux = { ...mockTmux(), ...pane.tmux(), getSessionEnv: vi.fn(async () => marker),
+        killSession: vi.fn(async () => { pane.effects.push("kill-session"); return opts.kill ?? { ok: true }; }) } as unknown as TmuxAdapter;
+      // As the daemon wires it: a claimed session is released, as rig unclaim does.
+      const releaseClaimedSession = vi.fn(async () => ({ ok: true as const }));
+      return { tmux, td: new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture: mockSnapshotCapture(db),
+        eventBus, listProcesses: pane.list, runtimeExitTiming: exitTiming, releaseClaimedSession }) };
+    }
+
+    it("TERMs a Claude Code seat's agent, then closes its terminal, and reports it graceful", async () => {
+      const { rigId, nodeId } = seedSeat("claude-code");
+      const pane = claudePane();
+      const { td } = teardownWith(pane, nodeId);
+      const result = await td.teardown(rigId);
+      expect(result.runtimeExits).toEqual([{ session: "r01-dev", path: "graceful", detail: expect.stringMatching(/^Claude Code exited on TERM in /) }]);
+      expect(pane.effects).toEqual(["TERM 200", "kill-session"]);
+      expect(result).toMatchObject({ sessionsKilled: 1, errors: [] });
+    });
+
+    it("a Codex seat exits through /exit before its terminal closes", async () => {
+      const { rigId, nodeId } = seedSeat("codex");
+      const pane = codexPane();
+      const result = await teardownWith(pane, nodeId).td.teardown(rigId);
+      expect(result.runtimeExits).toEqual([{ session: "r01-dev", path: "graceful", detail: expect.stringMatching(/^Codex exited through \/exit in /) }]);
+      expect(pane.effects).toEqual(["type /exit (keys)", "keys Enter", "kill-session"]);
+    });
+
+    it("an unresponsive agent is killed at the end of its window, reported forced, and its terminal still closes", async () => {
+      const { rigId, nodeId } = seedSeat("claude-code");
+      const pane = claudePane();
+      pane.runtimeIgnores.add("TERM");
+      const result = await teardownWith(pane, nodeId).td.teardown(rigId);
+      expect(result.runtimeExits).toEqual([{ session: "r01-dev", path: "forced", detail: "Claude Code didn't exit within 0.0 s of TERM and was killed." }]);
+      expect(pane.effects).toEqual(["TERM 200", "KILL 200", "kill-session"]);
+    });
+
+    it("--force closes the terminals at once, with no exit step and nothing reported", async () => {
+      const { rigId, nodeId } = seedSeat("claude-code");
+      const pane = claudePane();
+      const { tmux, td } = teardownWith(pane, nodeId);
+      const result = await td.teardown(rigId, { force: true });
+      expect(result.runtimeExits).toBeUndefined();
+      expect(tmux.signalPaneRuntime).not.toHaveBeenCalled();
+      expect(pane.effects).toEqual(["kill-session"]);
+    });
+
+    it.each([["another seat's marker", "other-node"], ["no marker", undefined]])("a session with %s isn't signalled", async (_case, marker) => {
+      const { rigId } = seedSeat("claude-code");
+      const pane = claudePane();
+      const { tmux, td } = teardownWith(pane, marker);
+      const result = await td.teardown(rigId);
+      expect(result.runtimeExits).toBeUndefined();
+      expect(tmux.signalPaneRuntime).not.toHaveBeenCalled();
+    });
+
+    // X-F3: an entry says only what the exit step saw of the agent; the terminal's stop has its own result.
+    it("an agent whose end wasn't seen, in a terminal whose stop fails, is reported unverified, and the failed stop is the stop's own", async () => {
+      const { rigId, nodeId } = seedSeat("claude-code");
+      // An agent the shell holds stopped in the background can't be identified as the pane's agent.
+      const pane = new Pane([bash(100), { ...claude(), tpgid: 100 }]);
+      const result = await teardownWith(pane, nodeId, { kill: { ok: false, code: "unknown", message: "tmux refused" } }).td.teardown(rigId);
+      expect(result.runtimeExits).toEqual([{ session: "r01-dev", path: "unverified",
+        detail: "Claude Code couldn't be identified in the pane, so it wasn't sent its own exit." }]);
+      expect(result).toMatchObject({ sessionsKilled: 0, errors: ["Kill failed for session 'r01-dev': tmux refused"] });
+      expect(JSON.stringify(result.runtimeExits)).not.toMatch(/terminal was closed|was stopped/i);
+    });
+
+    // X-F4: the exit step reads the pane's session and server with the marker, and holds each effect to them.
+    it("a pane in another session than the seat's (by the live read) isn't signalled", async () => {
+      const { rigId, nodeId } = seedSeat("claude-code");
+      const pane = claudePane();
+      pane.session = "someone-else";
+      const { tmux, td } = teardownWith(pane, nodeId);
+      const result = await td.teardown(rigId);
+      expect(result.runtimeExits).toBeUndefined();
+      expect(tmux.signalPaneRuntime).not.toHaveBeenCalled();
+    });
+
+    it("a server replaced after the marker read leaves the agent there alone: reported unverified", async () => {
+      const { rigId, nodeId } = seedSeat("claude-code");
+      const pane = claudePane();
+      const { tmux, td } = teardownWith(pane, nodeId);
+      (tmux.getSessionEnv as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        pane.server = { pid: "4001", start: "1764061290" };
+        return nodeId;
+      });
+      const result = await td.teardown(rigId);
+      expect(pane.effects).toEqual(["refused TERM 200", "kill-session"]);
+      expect(result.runtimeExits).toEqual([{ session: "r01-dev", path: "unverified", detail: "Claude Code's pane is no longer in the tmux session and server "
+        + "it was first read in (the server may have been replaced), so nothing more was sent to it." }]);
+    });
+
+    it("a terminal unreadable after the marker read: the agent isn't signalled, its entry is unverified, and the stop goes on", async () => {
+      const { rigId, nodeId } = seedSeat("claude-code");
+      const pane = claudePane();
+      const { tmux, td } = teardownWith(pane, nodeId);
+      (tmux.getSessionEnv as ReturnType<typeof vi.fn>).mockImplementation(async () => { pane.server = null; return nodeId; });
+      const result = await td.teardown(rigId);
+      expect(pane.effects).toEqual(["refused TERM 200", "kill-session"]);
+      expect(result.runtimeExits).toEqual([{ session: "r01-dev", path: "unverified",
+        detail: "Claude Code wasn't signalled: its terminal (tmux session and server) couldn't be read just before it." }]);
+      expect(result).toMatchObject({ sessionsKilled: 1, errors: [] });
+    });
+
+    it("a session OpenRig didn't launch (claimed) isn't signalled", async () => {
+      const { rigId, nodeId } = seedSeat("claude-code", { claimed: true });
+      const pane = claudePane();
+      const { tmux, td } = teardownWith(pane, nodeId);
+      const result = await td.teardown(rigId);
+      expect(result.runtimeExits).toBeUndefined();
+      expect(tmux.signalPaneRuntime).not.toHaveBeenCalled();
+    });
   });
 
   // T8: Nonexistent rig
@@ -1762,12 +1886,13 @@ describe.skipIf(process.platform === "win32")("rig down leaves a terminal it can
   const NAME = "dev-impl@owned";
   const exec = promisify(execFile);
 
-  async function harness(hook?: (argv: string[], tmux: (...a: string[]) => Promise<string>) => Promise<void>) {
+  async function harness(hook?: (argv: string[], tmux: (...a: string[]) => Promise<string>) => Promise<void>,
+    shell: (command: string) => Promise<string> = async () => { throw new Error("unexpected shell execution"); }) {
     // Short socket path for macOS sockaddr_un, no inherited server, no config.
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "rd-"));
     const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home, TMUX_TMPDIR: home, SHELL: "/bin/sh" };
     const tmux = async (...args: string[]) => (await exec("tmux", ["-L", "own", "-f", "/dev/null", ...args], { env, timeout: 5000 })).stdout.trim();
-    const adapter = new TmuxAdapter(async () => { throw new Error("unexpected shell execution"); }, undefined, async (argv) => {
+    const adapter = new TmuxAdapter(shell, undefined, async (argv) => {
       const out = (await exec(argv[0]!, argv.slice(1), { env, timeout: 5000 })).stdout;
       await hook?.(argv, tmux);
       return out;
@@ -1987,10 +2112,12 @@ describe.skipIf(process.platform === "win32")("rig down leaves a terminal it can
 
   it("a server replaced between reading the seat's marker and stopping it leaves the new terminal alone", async () => {
     let replaced = false;
+    let markerReads = 0;
     const h = await harness(async (argv, tmux) => {
-      // Just after the marker is read on the seat's server, that server is replaced, and another terminal takes the name and
-      // the old ids.
-      if (replaced || !argv.includes("show-environment")) return;
+      // Just after the stop's own marker read (by the session's immutable id) on the seat's server, that server is replaced,
+      // and another terminal takes the name and the old ids. (#3901's exit step reads the same marker, by the same id,
+      // first: that is the next test's window.)
+      if (replaced || !argv.includes("show-environment") || !argv.some((arg) => /^\$\d+$/.test(arg)) || ++markerReads < 2) return;
       replaced = true;
       await tmux("kill-server");
       await tmux("new-session", "-d", "-s", NAME, "sleep 301");
@@ -2005,6 +2132,39 @@ describe.skipIf(process.platform === "win32")("rig down leaves a terminal it can
         + "(the server may have been replaced); nothing was detached or killed."]);
       expect(await h.tmux("list-panes", "-t", `=${NAME}:`, "-F", "#{session_id} #{pane_id}")).toBe("$0 %0");
       expect(h.db.prepare("SELECT status FROM sessions WHERE id=?").get(session.id)).toEqual({ status: "running" });
+    } finally { await h.close(); }
+  });
+
+  // #3901 (X-F4): the agent's own exit reads the seat's terminal before the stop does. A server replaced just after that
+  // first marker read, by another terminal with the seat's name and the old ids running an agent the exit would recognise,
+  // gets nothing from it: no signal and no keys, and its agent keeps running.
+  it("a server replaced just after the agent exit's first marker read leaves the new terminal's agent alone", async () => {
+    const signalled: string[] = [];
+    let replaced = false;
+    let agent = "";
+    const h = await harness(async (argv, tmux) => {
+      if (replaced || !argv.includes("show-environment")) return;
+      replaced = true;
+      await tmux("kill-server");
+      await tmux("new-session", "-d", "-s", NAME, `exec ${shellQuote(agent)} -e ${shellQuote("setTimeout(() => {}, 301000)")}`);
+    }, async (command) => {
+      signalled.push(command);
+      return (await exec("/bin/sh", ["-c", command], { timeout: 5000 })).stdout;
+    });
+    try {
+      // A foreground executable named claude. Use this Node, since a multicall sleep (e.g. uutils) rejects a renamed argv[0].
+      agent = path.join(h.home, "claude");
+      fs.copyFileSync(fs.realpathSync(process.execPath), agent);
+      fs.chmodSync(agent, 0o755);
+      await h.tmux("new-session", "-d", "-s", NAME, "-e", `OPENRIG_NODE_ID=${h.node.id}`, `${shellQuote(agent)} -e ${shellQuote("setTimeout(() => {}, 300000)")}`);
+      await h.bind();
+      const result = await h.teardown();
+      expect(replaced).toBe(true);
+      expect(signalled).toEqual([]);
+      expect(result.runtimeExits).toEqual([{ session: NAME, path: "unverified", detail: expect.stringMatching(/no longer in the tmux session and server it was first read in/) }]);
+      // The new terminal and its agent are still there; the stop left it running too (it doesn't carry the seat's marker).
+      expect(await h.tmux("list-panes", "-t", `=${NAME}:`, "-F", "#{pane_dead} #{pane_current_command}")).toBe("0 claude");
+      expect(result.sessionsKilled).toBe(0);
     } finally { await h.close(); }
   });
 });

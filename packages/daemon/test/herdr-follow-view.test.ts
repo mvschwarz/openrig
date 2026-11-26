@@ -13,6 +13,7 @@ import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { codexTwoRowComposer } from "./fixtures/codex-two-row-composer.js";
 import { tileAttachArgv078, tileAttachArgv079, tileAttachArgv0710 } from "../src/domain/terminal/earlier-tile-attach.js";
 import { pinnedTileAttachArgv } from "../src/domain/terminal/tile-attach.js";
+import { pinnedTileAttachArgv0723 } from "../src/domain/terminal/earlier-tile-attach-0723.js";
 
 const roots: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -727,14 +728,17 @@ describe("follow views kept from an earlier release", () => {
         .toEqual(current.map(t => t.paneCommand));
     });
 
-  it("with Herdr's pinned tiles, a kept 0.7.10 sizing follow view is kept and names the explicit reopen step", async () => {
+  it.each([
+    ["0.7.10 sizing", (seat: string) => tileAttachArgv0710("/usr/bin/tmux", ["-S", "/tmp/follow-seats.sock"], seat, false)],
+    // 0.7.23's pinned tile, before its script gave the size back itself: still OpenRig's own, so it gets the same step.
+    ["0.7.23 pinned", (seat: string) => pinnedTileAttachArgv0723("/usr/bin/tmux", ["-S", "/tmp/follow-seats.sock"], seat)],
+  ] as const)("with Herdr's pinned tiles, a kept %s follow view is kept and names the explicit reopen step", async (_label, earlier) => {
     const f = fixture();
     f.setTransform(view => ({ ...view, opened: view.opened.map(p => {
       const attachArgv = pinnedTileAttachArgv(p.attachArgv![5]!, p.attachArgv!.slice(6), p.attachArgv![4]!);
       return { ...p, attachArgv, paneCommand: attachArgv.map(quote).join(" ") };
     }) }));
     expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
-    const earlier = (seat: string) => tileAttachArgv0710("/usr/bin/tmux", ["-S", "/tmp/follow-seats.sock"], seat, false);
     const canvasFile = path.join(path.dirname(path.dirname(f.journal())), "canvas.json");
     const canvas = JSON.parse(readFileSync(canvasFile, "utf8"));
     for (const tile of canvas.tiles) { tile.target.attachArgv = earlier(tile.seat); tile.target.paneCommand = tile.target.attachArgv.map(quote).join(" "); }

@@ -49,7 +49,7 @@ export interface ChatSearchResult {
 interface HistoryQueryOpts {
   transcriptsRoot: string;
   exec: ExecDep;
-  chatSearchFn?: (rigId: string, pattern: string) => ChatSearchResult[];
+  chatSearchFn?: (rigId: string, keywords: string[]) => ChatSearchResult[];
   /** root of per-session provider JSONL (Claude): ~/.claude/projects. Injectable for tests. */
   claudeProjectsRoot?: string;
 }
@@ -136,7 +136,7 @@ const SEAT_LARGE_FILE_BYTES = 25 * 1024 * 1024; // 25 MB
 export class HistoryQuery {
   private readonly transcriptsRoot: string;
   private readonly exec: ExecDep;
-  private readonly chatSearchFn?: (rigId: string, pattern: string) => ChatSearchResult[];
+  private readonly chatSearchFn?: (rigId: string, keywords: string[]) => ChatSearchResult[];
   private readonly claudeProjectsRoot: string;
 
   constructor(opts: HistoryQueryOpts) {
@@ -430,8 +430,7 @@ export class HistoryQuery {
     if (!this.chatSearchFn) return [];
     const keywords = extractLiteralKeywords(question);
     if (keywords.length === 0) return [];
-    const pattern = keywords.join("|");
-    return this.chatSearchFn(rigId, pattern);
+    return this.chatSearchFn(rigId, keywords);
   }
 
   private getLogFiles(dir: string): string[] {

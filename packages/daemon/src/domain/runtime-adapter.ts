@@ -1,6 +1,6 @@
 import { isPerSeatRoleStartupFile } from "./managed-blocks.js";
 import type { Binding, StartupFile } from "./types.js";
-import type { ProjectionPlan } from "./projection-planner.js";
+import type { ClaudeFragmentEntry, ProjectionPlan } from "./projection-planner.js";
 import type { ClaudeResumeRotation } from "./native-process-lineage.js";
 
 // -- Bridge type: NodeBinding extends Binding with cwd --
@@ -284,6 +284,9 @@ export interface RuntimeAdapter {
 
   /** Project resources from a projection plan to the runtime target locations. */
   project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult>;
+
+  /** Refresh opted-in fragments before a native start without replaying unrelated projection. */
+  refreshRuntimeFragments?(entries: ClaudeFragmentEntry[], binding: NodeBinding): ProjectionResult;
 
   /** Deliver startup files. Claude's post-launch path can reuse the orchestrator's checked send.
    * The adapter still owns file reads, ordering, provisioning and required/optional errors. */

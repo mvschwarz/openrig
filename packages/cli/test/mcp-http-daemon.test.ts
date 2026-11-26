@@ -29,6 +29,10 @@ import { MissionControlActionLog } from "../../daemon/src/domain/mission-control
 import { loadHumanRegistry, type HumanFragment } from "../../daemon/src/domain/gateway/human-registry.js";
 import { makeQueuePorts } from "../../daemon/src/domain/gateway/slack/queue-access.js";
 import { buildOutboundMessage } from "../../daemon/src/domain/gateway/slack/message.js";
+import { subsystemSlackDeliver } from "../../daemon/src/domain/gateway/slack/slack-delivery.js";
+import { toPayload } from "../../daemon/src/domain/gateway/slack/outbound-driver.js";
+import { SeenStore } from "../../daemon/src/domain/gateway/slack/state-store.js";
+import type { FetchImpl } from "../../daemon/src/domain/gateway/slack/slack-api.js";
 import { mcpCommand } from "../src/commands/mcp.js";
 import { addGrant, McpHttpConfigError, revokeGrant, startMcpHttpServer, withGrantsLock, rotateGrant, type McpHttpOptions } from "../src/mcp-http.js";
 import { setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
@@ -58,8 +62,8 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     db = createDb(":memory:");
     migrate(db, ALL_MIGRATIONS);
     home = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-"));
-    shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-shared-")));
-    otherShared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-acct-b-")));
+    shared = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-shared-")));
+    otherShared = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-acct-b-")));
     process.env.OPENRIG_HOME = home;
     // The env seat a local caller is declared as; an authenticated caller must never act as it.
     process.env.OPENRIG_SESSION_NAME = "env-seat@elsewhere";
@@ -495,6 +499,209 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     expect(rows()).toBe(3);
   });
 
+  describe("a scoped grant's evidence file reaches Slack only within its own roots", () => {
+    const ANA = "human-ana@external";
+    const NOT_ATTACHED = "The evidence file isn't attached: it's outside the files its sender may share.";
+    let outside: string;
+    let deliveries = 0;
+    beforeEach(() => {
+      people = [{ entityId: "human-ana", class: "human", displayName: "Ana", address: ANA,
+        connectorBindings: [{ kind: "slack", connectorRef: "primary", secretsRef: "unused", role: "primary", handle: "UANA" }], prefs: { deliveryClass: "A" } }];
+      outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-outside-")));
+      closers.push(async () => fs.rmSync(outside, { recursive: true, force: true }));
+    });
+    /** A fixture file with recognizable bytes. */
+    const file = (dir: string, name: string, text: string) => { const p = path.join(dir, name); fs.writeFileSync(p, text); return p; };
+    const allowlist = () => [{ name: "proof", canonicalPath: shared }, { name: "acct-b", canonicalPath: otherShared }];
+    /** The grant's own item from Ana, claimed, then parked on her with this evidence through the MCP update. */
+    async function parkWithEvidence(call: Awaited<ReturnType<typeof connect>>, seatName: string, evidenceRef: string) {
+      const row = await repo.create({ sourceSession: ANA, destinationSession: seatName, summary: "Review the chart", body: "Is the chart right?", nudge: false } as never);
+      expect((await call("rig_queue_claim", { qitemId: row.qitemId })).isError).toBe(false);
+      const parked = await call("rig_queue_update", { qitemId: row.qitemId, state: "blocked", blockedOn: ANA, summary: "Is this chart right?", evidenceRef });
+      expect(parked.isError).toBe(false);
+      return row.qitemId as string;
+    }
+    /** Ana's ask through the Slack projection and payload the connector uses, delivered to a fake Slack: what was posted,
+     *  and the exact bytes of every upload. */
+    async function deliverAsk(qitemId: string, onPost?: () => void, recordedPayload?: ReturnType<typeof toPayload>) {
+      const ports = makeQueuePorts(repo, { loadHumanRegistry: () => ({ ok: true as const, entities: people ?? [] }), sharedChannels: () => [] });
+      const ask = (await ports.listHumanAlerts({ minimumLevel: "NOTICE" })).find((item) => item.qitemId === qitemId);
+      expect(ask).toBeDefined();
+      const posted: string[] = [];
+      const uploaded: Buffer[] = [];
+      const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+      const fetchImpl: FetchImpl = async (url, init) => {
+        if (url.endsWith("chat.postMessage")) { posted.push(String(init?.body ?? "")); onPost?.(); return json({ ok: true, ts: "9000.1" }); }
+        if (url.endsWith("files.getUploadURLExternal")) return json({ ok: true, upload_url: "https://files.slack.invalid/put/1", file_id: "F1" });
+        if (url === "https://files.slack.invalid/put/1") { uploaded.push(Buffer.from(init?.body as Uint8Array)); return new Response("ok", { status: 200 }); }
+        if (url.endsWith("files.completeUploadExternal")) return json({ ok: true });
+        return json({ ok: true });
+      };
+      // Each delivery is its own connector run's decision, so a later read is a fresh delivery, not a repeat of the first.
+      const run = ++deliveries;
+      const store = (name: string) => new SeenStore(path.join(home, `${qitemId}-${run}-${name}.jsonl`));
+      const deliver = subsystemSlackDeliver({
+        botToken: "xoxb-EXAMPLE-fake", channel: "C-TEST", sourceLabel: "team", fetchImpl,
+        delivered: store("delivered"), attempted: store("attempted"), outboundSeen: store("seen"),
+        filesAllowlist: allowlist, log: () => {},
+      } as never);
+      const out = await deliver({ kind: "outbound_decision", decisionId: `d-${qitemId}-${run}`, op: "post_message", entityBindingRef: "human-ana#slack",
+        payload: recordedPayload ?? toPayload(ask!) } as never);
+      expect(out.ok).toBe(true);
+      return { posted, uploaded, ask: ask! };
+    }
+
+    it("with no roots, a file outside them isn't uploaded; the ask and its evidence pointer still post", async () => {
+      const secret = file(outside, "private.pdf", "OUTSIDE-BYTES");
+      const call = await connect((await listen()).url, await grant("grok"));
+      const qitemId = await parkWithEvidence(call, "grok@team", secret);
+      const { posted, uploaded } = await deliverAsk(qitemId);
+      expect(uploaded.map((b) => b.toString())).toEqual([]);
+      expect(posted).toHaveLength(1);
+      expect(posted[0]).toContain("Is this chart right?");
+      // The post says plainly that the file isn't attached, and the item keeps its evidence pointer.
+      expect(posted[0]).toContain(NOT_ATTACHED);
+      expect(repo.getById(qitemId)!.evidenceRef).toBe(secret);
+    });
+
+    it("a file in a root the grant names uploads, byte for byte", async () => {
+      const chart = file(shared, "chart.png", "PROOF-CHART-BYTES");
+      const call = await connect((await listen()).url, await grant("grok", { roots: ["proof"] }));
+      const { uploaded, posted } = await deliverAsk(await parkWithEvidence(call, "grok@team", chart));
+      expect(uploaded.map((b) => b.toString())).toEqual(["PROOF-CHART-BYTES"]);
+      expect(posted[0]).not.toContain(NOT_ATTACHED);
+    });
+
+    it("a shared root the grant doesn't name is excluded, though the daemon shares it", async () => {
+      const other = file(otherShared, "statement.pdf", "ACCT-B-BYTES");
+      const call = await connect((await listen()).url, await grant("grok", { roots: ["proof"] }));
+      const qitemId = await parkWithEvidence(call, "grok@team", other);
+      expect(repo.getById(qitemId)!.evidenceRefRoots).toEqual(["proof"]);
+      const { posted, uploaded } = await deliverAsk(qitemId);
+      expect(uploaded).toEqual([]);
+      expect(posted).toHaveLength(1);
+      expect(posted[0]).toContain(NOT_ATTACHED);
+    });
+
+    it("a link in a permitted root is judged by its real target when the file is read, not when it was named", async () => {
+      const inside = file(shared, "real-chart.png", "IN-ROOT-BYTES");
+      const secret = file(outside, "private.png", "OUTSIDE-BYTES");
+      const link = path.join(shared, "chart.png");
+      fs.symlinkSync(secret, link);
+      const call = await connect((await listen()).url, await grant("grok", { roots: ["proof"] }));
+      const qitemId = await parkWithEvidence(call, "grok@team", link);
+      // Out of the root at the read: not uploaded, and the ask still posts.
+      const first = await deliverAsk(qitemId);
+      expect(first.uploaded).toEqual([]);
+      expect(first.posted).toHaveLength(1);
+      // Retargeted inside the root before a later read: that read follows it, and only to the in-root file.
+      fs.rmSync(link);
+      fs.symlinkSync(inside, link);
+      expect((await deliverAsk(qitemId)).uploaded.map((b) => b.toString())).toEqual(["IN-ROOT-BYTES"]);
+      // And back out again: the next read refuses it.
+      fs.rmSync(link);
+      fs.symlinkSync(secret, link);
+      expect((await deliverAsk(qitemId)).uploaded).toEqual([]);
+    });
+
+    it("an attributed owner grant has no root limit, as before", async () => {
+      const identity = path.join(home, "identity.sqlite");
+      const idDb = createDb(identity);
+      idDb.exec("CREATE TABLE self_host_identity (singleton INTEGER PRIMARY KEY, host_id TEXT)");
+      idDb.prepare("INSERT INTO self_host_identity VALUES (1, 'owner-fixture')").run();
+      idDb.close();
+      vi.stubEnv("OPENRIG_DB", identity);
+      setSelfHostId("owner-fixture");
+      closers.push(async () => { vi.unstubAllEnvs(); });
+      const local = file(outside, "owner.png", "OWNER-BYTES");
+      const call = await connect((await listen()).url, await grant("boss", { owner: true }));
+      const qitemId = await parkWithEvidence(call, "boss@team", local);
+      expect(db.prepare("SELECT identity_principal AS who FROM queue_transitions WHERE qitem_id = ? AND identity_principal IS NOT NULL").all(qitemId))
+        .toContainEqual({ who: JSON.stringify({ source: "file", id: "boss" }) });
+      expect(repo.getById(qitemId)!.evidenceRefRoots).toBeUndefined();
+      expect((await deliverAsk(qitemId)).uploaded.map((b) => b.toString())).toEqual(["OWNER-BYTES"]);
+    });
+
+    it("a request through the adapter that names a caller but not its roots records none, never a local writer", async () => {
+      const secret = file(outside, "private.pdf", "OUTSIDE-BYTES");
+      seat("team", "grok");
+      const row = await repo.create({ sourceSession: ANA, destinationSession: "grok@team", summary: "Review", body: "b", nudge: false } as never);
+      const headers = { "Content-Type": "application/json", "X-OpenRig-Session": "grok@team", "X-OpenRig-Principal": JSON.stringify({ source: "file", id: "grok" }) };
+      expect((await fetch(`${daemonUrl}/api/queue/${row.qitemId}/claim`, { method: "POST", headers, body: "{}" })).status).toBeLessThan(300);
+      expect((await fetch(`${daemonUrl}/api/queue/${row.qitemId}/update`, { method: "POST", headers,
+        body: JSON.stringify({ state: "blocked", blockedOn: ANA, summary: "Is this right?", evidenceRef: secret }) })).status).toBeLessThan(300);
+      expect(repo.getById(row.qitemId)!.evidenceRefRoots).toEqual([]);
+      expect((await deliverAsk(row.qitemId)).uploaded).toEqual([]);
+    });
+
+    it("later changes, alerts and replays keep the writer's limit: only a new reference takes its own writer's", async () => {
+      const secret = file(outside, "private.pdf", "OUTSIDE-BYTES");
+      const call = await connect((await listen()).url, await grant("grok"));
+      const qitemId = await parkWithEvidence(call, "grok@team", secret);
+      const firstAsk = (await deliverAsk(qitemId)).ask;
+      // The person answers; the grant takes it up again and parks it a second time, naming no evidence: a new alert,
+      // still limited to the grant's (no) roots.
+      const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
+      await contract.act({ verb: "resolve", qitemId, actorSession: ANA, decision: "Which axis?", notify: true } as never);
+      expect((await call("rig_queue_update", { qitemId, state: "blocked", blockedOn: ANA, summary: "The y axis: is it right?" })).isError).toBe(false);
+      expect(repo.getById(qitemId)).toMatchObject({ evidenceRef: secret, evidenceRefRoots: [] });
+      expect((await deliverAsk(qitemId)).uploaded).toEqual([]);
+      // A local seat's later note on the row, naming no evidence, changes nothing about it.
+      repo.update({ qitemId, actorSession: "lead@team", transitionNote: "Looked at it." } as never);
+      expect(repo.getById(qitemId)!.evidenceRefRoots).toEqual([]);
+      // The first ask's recorded decision, replayed: its payload carries the same limit.
+      expect(toPayload(firstAsk).evidenceRefRoots).toEqual([]);
+      // A trusted local writer that names the reference itself records its own (no root limit): a deliberate selection.
+      repo.update({ qitemId, actorSession: "lead@team", state: "blocked", blockedOn: ANA, summary: "The y axis: is it right?", evidenceRef: secret,
+        transitionNote: "Attaching it myself." } as never);
+      expect(repo.getById(qitemId)!.evidenceRefRoots).toBeUndefined();
+      expect((await deliverAsk(qitemId)).uploaded.map(b => b.toString())).toEqual(["OUTSIDE-BYTES"]);
+      // A durable decision saved before that rewrite still uses its original authority on an actual delivery.
+      const replay = JSON.parse(JSON.stringify(toPayload(firstAsk)));
+      expect((await deliverAsk(qitemId, undefined, replay)).uploaded).toEqual([]);
+    });
+
+    it.each(["route", "handoff"] as const)("mission-control %s copies the reference without promoting its writer", async (verb) => {
+      const evidence = file(outside, "handoff.pdf", "OUTSIDE-BYTES");
+      const call = await connect((await listen()).url, await grant("grok"));
+      const qitemId = await parkWithEvidence(call, "grok@team", evidence);
+      const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
+      const result = await contract.act({ verb, qitemId, actorSession: ANA, destinationSession: "lead@team", notify: false });
+      const successor = result.createdQitemId!;
+      repo.update({ qitemId: successor, actorSession: "lead@team", state: "blocked", blockedOn: ANA, summary: "Please check the inherited chart" } as never);
+      const outcome = await deliverAsk(successor);
+      expect(outcome.uploaded).toEqual([]);
+      expect(outcome.posted[0]).toContain(NOT_ATTACHED);
+      expect(repo.getById(successor)).toMatchObject({ evidenceRef: evidence, evidenceRefRoots: [] });
+    });
+
+    it("the attachment note describes the actual read if a link changes while the post awaits Slack", async () => {
+      const inside = file(shared, "original.png", "IN-ROOT-BYTES");
+      const outsideFile = file(outside, "later.png", "OUTSIDE-BYTES");
+      const link = path.join(shared, "moving.png");
+      fs.symlinkSync(inside, link);
+      const call = await connect((await listen()).url, await grant("grok", { roots: ["proof"] }));
+      const qitemId = await parkWithEvidence(call, "grok@team", link);
+      const outcome = await deliverAsk(qitemId, () => { fs.unlinkSync(link); fs.symlinkSync(outsideFile, link); });
+      const bytes = outcome.uploaded.map(b => b.toString());
+      expect(bytes).not.toContain("OUTSIDE-BYTES");
+      // A checked snapshot may be sent, or a later read may skip it: the visible note must match that decision.
+      expect(outcome.posted[0].includes(NOT_ATTACHED)).toBe(bytes.length === 0);
+    });
+
+    it("a trusted local seat's evidence anywhere still uploads, as before", async () => {
+      const local = file(outside, "screenshot.png", "LOCAL-SEAT-BYTES");
+      seat("team", "lead");
+      const row = await repo.create({ sourceSession: ANA, destinationSession: "lead@team", summary: "Check the screenshot", body: "b", nudge: false } as never);
+      const lead = new DaemonClient(daemonUrl, { sessionName: "lead@team" });
+      expect((await lead.post(`/api/queue/${row.qitemId}/claim`, {})).status).toBeLessThan(300);
+      expect((await lead.post(`/api/queue/${row.qitemId}/update`, { state: "blocked", blockedOn: ANA, summary: "Is this screenshot right?", evidenceRef: local })).status).toBeLessThan(300);
+      const { uploaded, posted } = await deliverAsk(row.qitemId);
+      expect(uploaded.map((b) => b.toString())).toEqual(["LOCAL-SEAT-BYTES"]);
+      expect(posted[0]).not.toContain(NOT_ATTACHED);
+    });
+  });
+
   it("stops a revoked grant at its next request and keeps its records", async () => {
     const alice = await grant("alice");
     const served = await listen();
@@ -606,27 +813,77 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     expect(JSON.parse(fs.readFileSync(tokenFile, "utf8")).principals.map((grant: { name: string }) => grant.name)).toEqual(["bob"]);
   });
 
+  async function runToken(args: string[]): Promise<string> {
+    const cmd = mcpCommand();
+    cmd.commands.find(command => command.name() === "token")?.commands
+      .find(command => command.name() === args[0])?.exitOverride();
+    const out: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...line: unknown[]) => { out.push(line.join(" ")); });
+    try { await cmd.parseAsync(["token", ...args], { from: "user" }); } finally { log.mockRestore(); }
+    return out.join("\n");
+  }
+
   it("rig mcp token add, list and revoke: the token is shown once and only its hash is kept, in a file only its owner reads", async () => {
-    const run = async (args: string[]) => {
-      const out: string[] = [];
-      const log = console.log;
-      console.log = (...line: unknown[]) => { out.push(line.join(" ")); };
-      try { await mcpCommand().parseAsync(["token", ...args], { from: "user" }); } finally { console.log = log; }
-      return out.join("\n");
-    };
-    const added = await run(["add", "dana", "--seat", "dana@team", "--rig", "team", "--root", "proof"]);
+    const added = await runToken(["add", "dana", "--seat", "dana@team", "--rig", "team", "--root", "proof"]);
     const token = added.split("\n")[1]!;
     expect(token).toMatch(/^orm_/);
     const stored = fs.readFileSync(tokenFile, "utf8");
     expect(stored).not.toContain(token);
     expect(JSON.parse(stored).principals[0]).toMatchObject({ name: "dana", seat: "dana@team", rigs: ["team"], roots: ["proof"], owner: false });
+    expect(JSON.parse(stored).principals[0]).not.toHaveProperty("objects");
     expectPrivateFile(tokenFile);
-    const listed = await run(["list"]);
+    const listed = await runToken(["list"]);
     expect(listed).toContain("dana: seat dana@team");
     expect(listed).not.toContain(JSON.parse(stored).principals[0].tokenSha256);
-    expect(await run(["revoke", "dana"])).toContain("Revoked dana");
+    expect(await runToken(["revoke", "dana"])).toContain("Revoked dana");
     expect(JSON.parse(fs.readFileSync(tokenFile, "utf8")).principals).toEqual([]);
   });
+
+  it.each([false, true])("uses only the allowed tools from token add with front-door mode %s", async frontDoor => {
+    for (const name of ["limited", "legacy", "lead"]) seat("team", name);
+    const legacyToken = await grant("legacy");
+    const added = await runToken(["add", "limited", "--seat", "limited@team", "--rig", "team",
+      "--allow", "queue:list,show", "--allow", "team:list", "--allow", "queue:show"]);
+    const token = added.split("\n")[1]!;
+    const { grants } = JSON.parse(await runToken(["list", "--json"]));
+    expect(grants).toEqual([expect.objectContaining({ name: "legacy" }),
+      expect.objectContaining({ name: "limited", objects: { queue: ["list", "show"], team: ["list"] } })]);
+    expect(grants[0]).not.toHaveProperty("objects");
+    expect(grants[1]).not.toHaveProperty("tokenSha256");
+
+    const { url } = await listen({ frontDoor });
+    const limited = await connect(url, token);
+    expect((await limited.client.listTools()).tools.map(tool => tool.name).sort())
+      .toEqual(["rig_queue_list", "rig_queue_show", "rig_team"]);
+    expect((await limited("rig_queue_list")).isError).toBe(false);
+    await expect(limited("rig_queue_create", { destination: "lead@team", body: "outside the allowance" }))
+      .rejects.toThrow(/rig_queue_create/);
+    expect(rows()).toBe(0);
+
+    const legacy = await connect(url, legacyToken);
+    expect((await legacy.client.listTools()).tools.map(tool => tool.name)).toContain("rig_queue_create");
+    expect((await legacy("rig_queue_create", { destination: "lead@team", body: "legacy grant" })).isError).toBe(false);
+    expect(rows()).toBe(1);
+  });
+
+  it.each(["queue", "queue:", "queue:list,", "queue:list:show", "queue:missing", "constructor:list"])(
+    "rejects --allow %s before rewriting the grant file", async allowance => {
+      await grant("legacy");
+      const before = fs.readFileSync(tokenFile);
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const priorExit = process.exitCode;
+      try {
+        expect(await runToken(["add", "invalid", "--seat", "invalid@team", "--allow", allowance])).toBe("");
+        expect(process.exitCode).toBe(1);
+        expect(error).toHaveBeenCalledWith(expect.stringContaining("--allow"));
+        expect(fs.readFileSync(tokenFile)).toEqual(before);
+      } finally {
+        process.exitCode = priorExit;
+        error.mockRestore();
+      }
+    },
+  );
+
   describe("a configured caller resolver", () => {
     const credential = "opaque-local-credential";
     const profile = () => ({ ok: true as const, seat: "caller@team",

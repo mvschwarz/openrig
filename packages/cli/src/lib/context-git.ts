@@ -137,7 +137,7 @@ function selectPack(checkout: string, pack: string, target: string, libraryRoot:
   const manifest = parseYaml(readFileSync(join(source, "manifest.yaml"), "utf8")) as { files: Array<{ path: string }> };
   for (const file of ["manifest.yaml", ...manifest.files.map((f) => f.path)]) {
     const from = join(source, file);
-    git(checkout, ["ls-files", "--error-unmatch", "--", relative(checkout, from)]);
+    git(checkout, ["--literal-pathspecs", "ls-files", "--error-unmatch", "--", relative(checkout, from)]);
     if (!lstatSync(from).isFile()) throw new Error(`Declared context input is not a regular file: ${from}. Staging retained at ${staging}`);
     mkdirSync(dirname(join(staging, file)), { recursive: true });
     copyFileSync(from, join(staging, file));
@@ -179,7 +179,7 @@ export function inspectGitContext(target: string) {
         status: git(checkout, ["status", "--porcelain"]), conflicts: git(checkout, ["diff", "--name-only", "--diff-filter=U"]),
         upstream, ahead: counts?.[0] ?? null, behind: counts?.[1] ?? null,
         selectedRevisionMatches: revision === selected.revision,
-        selectedPackDiff: git(checkout, ["diff", "--stat", selected.revision, "--", selected.pack]),
+        selectedPackDiff: git(checkout, ["--literal-pathspecs", "diff", "--stat", selected.revision, "--", selected.pack]),
       },
       remoteAvailability: "UNVERIFIED; inspect uses local refs, update explicitly fetches",
       consumption: "UNVERIFIED; selection is readable context, not evidence that an agent read or used it",

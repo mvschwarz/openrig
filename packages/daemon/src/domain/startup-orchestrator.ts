@@ -13,7 +13,7 @@ import type {
   ProjectionResult, StartupDeliveryResult, ForkSource, ReadinessResult,
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
-import type { ProjectionPlan } from "./projection-planner.js";
+import { isClaudeFragmentEntry, type ProjectionPlan, type ResolveClaudeFragments } from "./projection-planner.js";
 import { hasVerifiedStartupProof, issueStartupChallenge, STARTUP_PROOF_INSTRUCTION_LINE } from "./startup-proof.js";
 import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
@@ -29,8 +29,7 @@ import { SettingsStore } from "./user-settings/settings-store.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { observeClaudeResumeLaunch, verifyPaneEmptyShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
-import { CommunityHarnessRuntimeAdapter } from "../adapters/community-harness-runtime-adapter.js";
-import { PiCommunityRuntimeAdapter } from "../adapters/pi-community-runtime-adapter.js";
+import { CommunityHarnessRuntimeAdapter, launchedCommunityHarness } from "../adapters/community-harness-runtime-adapter.js";
 import { join } from "node:path";
 import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
@@ -182,6 +181,8 @@ export interface StartupInput {
   resolvedStartupFiles: ResolvedStartupFile[];
   startupActions: StartupAction[];
   isRestore: boolean;
+  /** Existing-seat fresh launch: resolve these Claude fragment types through today's agent spec. */
+  refreshClaudeFragments?: boolean;
   /**
    * OPR.0.7.0.13: a fresh relaunch's decisions about the seat's own skills (seatSkillReplay): saved skill entries and
    * startup skill files that this start must not project or install again. They stay in the saved startup context.
@@ -268,6 +269,7 @@ interface StartupOrchestratorDeps {
   readinessSettings?: Pick<SettingsStore, "resolveOne">;
   /** Process observation for a Claude resume launch's own record of its process (#1077). */
   listProcesses?: NativeProcessLister;
+  resolveClaudeFragments?: ResolveClaudeFragments;
 }
 
 /**
@@ -300,6 +302,7 @@ export class StartupOrchestrator {
   private sessionTransport: SessionTransport;
   private readinessSettings: Pick<SettingsStore, "resolveOne">;
   private listProcesses: NativeProcessLister | undefined;
+  private readonly resolveClaudeFragments?: ResolveClaudeFragments;
 
   constructor(deps: StartupOrchestratorDeps) {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("StartupOrchestrator: sessionRegistry must share the same db handle");
@@ -312,6 +315,7 @@ export class StartupOrchestrator {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.readinessSettings = deps.readinessSettings ?? new SettingsStore();
     this.listProcesses = deps.listProcesses;
+    this.resolveClaudeFragments = deps.resolveClaudeFragments;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
     this.sessionTransport = new SessionTransport({
       db: deps.db,
@@ -460,12 +464,43 @@ export class StartupOrchestrator {
     // replay plan, not a newly selected profile with activity hooks removed.
     // RestoreOrchestrator already reconciled the saved activity selection before
     // native resume. Fresh launches still project empty plans to support removal.
+    let projectionPlan = input.plan;
+    if (input.continueFreshStartup && input.adapter.runtime === "claude-code") {
+      // The native start already had its chance to refresh these files. A context continuation must not rewrite them.
+      projectionPlan = { ...input.plan, entries: input.plan.entries.filter(entry => !isClaudeFragmentEntry(entry)) };
+    } else if (input.refreshClaudeFragments && input.adapter.runtime === "claude-code" && !input.adapter.environment && this.resolveClaudeFragments) {
+      const saved = input.plan.entries.filter(isClaudeFragmentEntry);
+      const otherEntries = input.plan.entries.filter(entry => !isClaudeFragmentEntry(entry));
+      const current: Awaited<ReturnType<ResolveClaudeFragments>> = await this.resolveClaudeFragments(input.rigId, input.binding.nodeId)
+        .catch(() => ({ ok: false as const, reason: "could not resolve today's selection" }));
+      if (current.ok) {
+        const entries = [...otherEntries, ...current.entries];
+        for (const entry of saved) {
+          if (!current.entries.some(candidate => candidate.resourceType === entry.resourceType && candidate.effectiveId === entry.effectiveId)) {
+            warnings.push(`Claude fragment ${entry.effectiveId} is no longer selected. Previously merged values were left in place.`);
+          }
+        }
+        projectionPlan = { ...input.plan, entries };
+        input = { ...input, plan: projectionPlan };
+      } else if (!current.missingRecipe || saved.length > 0) {
+        const warning = "Today's Claude fragment selection couldn't be resolved.";
+        if (current.missingRecipe && saved.length > 0) {
+          warnings.push(`${warning} This seat has no launch recipe. Trying its saved Claude fragments.`);
+          projectionPlan = { ...input.plan, skipUnavailableClaudeFragmentSources: true };
+        } else {
+          if (saved.length > 0) {
+            projectionPlan = { ...input.plan, entries: otherEntries };
+          }
+          warnings.push(`${warning} Check the seat's agent spec and launch recipe before launching again.`);
+        }
+      }
+    }
     let projectionResult: ProjectionResult;
     if (!(input.preserveStartupContext && input.adapter.runtime === "claude-code" && input.plan.entries.length === 0)) try {
       const skip = input.replaySkip;
       const projectedPlan = skip && skip.entryIds.size > 0
-        ? { ...input.plan, entries: input.plan.entries.filter((e) => !(e.category === "skill" && skip.entryIds.has(e.effectiveId))) }
-        : input.plan;
+        ? { ...projectionPlan, entries: projectionPlan.entries.filter((e) => !(e.category === "skill" && skip.entryIds.has(e.effectiveId))) }
+        : projectionPlan;
       projectionResult = await input.adapter.project(projectedPlan, input.binding);
       warnings.push(...(projectionResult.warnings ?? []));
       if (projectionResult.failed.length > 0) {
@@ -627,10 +662,10 @@ export class StartupOrchestrator {
     // preset declares a runner is recorded with it, so activity follows the occupant as launched, not a later edit:
     // only a harness launch samples it, and a continuation that launches nothing keeps what was recorded.
     // A protocol: pi-rpc preset runs under OpenRig's hosted Pi-protocol runner, and its launch records that protocol.
-    if (input.adapter instanceof CommunityHarnessRuntimeAdapter || input.adapter instanceof PiCommunityRuntimeAdapter) {
-      const runner = input.adapter instanceof PiCommunityRuntimeAdapter ? "pi-rpc" as const : input.adapter.runner();
-      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, input.adapter.runtime,
-        input.skipHarnessLaunch ? undefined : runner); }
+    const communityHarness = launchedCommunityHarness(input.adapter);
+    if (communityHarness) {
+      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, communityHarness.app,
+        input.skipHarnessLaunch ? undefined : communityHarness.runner); }
       catch (err) { errors.push(`Couldn't record the community harness selection: ${(err as Error).message}`); return this.fail(input, "failed", errors); }
     }
 

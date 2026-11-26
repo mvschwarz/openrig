@@ -415,9 +415,9 @@ export function buildPostCompactRestorePrompt(input: {
   if (input.transcriptPath) {
     pieces.push(`If the marker is missing and you have no restore map, rebuild a packet from this Claude JSONL transcript: ${input.transcriptPath}.`);
   } else if (input.sessionId) {
-    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot()}${path.sep} for session id ${input.sessionId}.`);
+    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot(input.openrigHome)}/ for session id ${input.sessionId}.`);
   } else {
-    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot()}${path.sep} for this Claude session.`);
+    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot(input.openrigHome)}/ for this Claude session.`);
   }
   const inlineInstruction = input.postCompactInstruction?.trim();
   const instructionFilePath = postCompactExtraSetting(input.postCompactInstructionFilePath, input.openrigHome, input.userHome);

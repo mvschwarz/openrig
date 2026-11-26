@@ -128,6 +128,11 @@ describe("C1 header parsing", () => {
     expect(crlf.mediaRefs).toEqual(["drawer-right.png"]);
   });
 
+  it("keeps proof images before a horizontal rule after empty frontmatter", () => {
+    const proof = "---\n---\n![result](result.png)\n\n---\nNotes";
+    expect(parseC1Header(proof, "proof/qa.md", NOW).mediaRefs).toEqual(["result.png"]);
+  });
+
   it("captures body media refs (markdown images + video tags), excluding http", () => {
     const a = parseC1Header(
       '---\nartifact_type: qa\nverdict: PASS\n---\n\n![shot](drawer-right.png)\n<video src="playing.webm"></video>\n![ext](https://x/y.png)\n',

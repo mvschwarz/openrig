@@ -96,6 +96,10 @@ if [ -d "$DAEMON_DIR/assets" ]; then
   SUBSTANCE_SURFACE_ROOTS+=("daemon/assets")
 fi
 
+# Codex installs the openrig plugin from its own root, made here from the shared folder (the script says why, and when
+# the root goes away).
+node "$REPO_ROOT/scripts/build-codex-plugin.mjs" "$DAEMON_DIR/assets/plugins/openrig" "$CLI_DIR/daemon/assets/plugins/openrig-codex"
+
 if [ -d "$DAEMON_DIR/specs" ]; then
   # OPR.0.5.6.12 LP-7 — the specs tree is copied wholesale into the npm
   # artifact, so scan the actual filesystem input (including untracked build

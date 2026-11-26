@@ -365,6 +365,58 @@ describe("Down CLI", () => {
     expect(exitCode).toBeUndefined();
   });
 
+  // #3901: how each agent ended before its terminal closed.
+  it("says which agents exited through their own shutdown and which were stopped by a signal, and why", async () => {
+    responseOverride = {
+      status: 200,
+      body: {
+        rigId: "rig-1", sessionsKilled: 3, snapshotId: null, deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],
+        runtimeExits: [
+          { session: "dev-impl@rig-1", path: "graceful", detail: "Claude Code exited on TERM in 0.4 s." },
+          { session: "dev-qa@rig-1", path: "graceful", detail: "Codex exited through /exit in 0.5 s." },
+          { session: "dev-lead@rig-1", path: "forced", detail: "Codex was ended with TERM, which doesn't run its own shutdown, because /exit couldn't be used: its input box held text." },
+        ],
+      },
+    };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
+    });
+    expect(logs).toContain("Exited through its own shutdown, or had already exited: dev-impl@rig-1, dev-qa@rig-1.");
+    expect(logs).toContain("Stopped without its own shutdown: dev-lead@rig-1. Codex was ended with TERM, which doesn't run its own shutdown, because /exit couldn't be used: its input box held text.");
+    expect(exitCode).toBeUndefined();
+  });
+
+  // #3901 (X-F3): an exit that wasn't seen is said as such; only the stop's own result says whether a terminal closed.
+  const unverifiedDown = {
+    rigId: "rig-1", sessionsKilled: 0, snapshotId: null, deleted: false, deleteBlocked: false, alreadyStopped: false,
+    errors: ["Kill failed for session 'dev-impl@rig-1': tmux refused"],
+    runtimeExits: [{ session: "dev-impl@rig-1", path: "unverified", detail: "Claude Code couldn't be identified in the pane, so it wasn't sent its own exit." }],
+  };
+
+  it("an agent whose end wasn't seen, in a terminal whose stop failed, is said as unverified, never as stopped", async () => {
+    responseOverride = { status: 200, body: unverifiedDown };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Agent's exit not confirmed: dev-impl@rig-1. Claude Code couldn't be identified in the pane, so it wasn't sent its own exit.");
+    expect(output).toContain("Rig rig-1: 0 session(s) killed");
+    expect(output).toContain("  warning: Kill failed for session 'dev-impl@rig-1': tmux refused");
+    expect(output).not.toMatch(/Stopped without its own shutdown|terminal was closed/);
+    expect(exitCode).toBe(2);
+  });
+
+  it("--json keeps the unverified exit and the failed stop apart", async () => {
+    responseOverride = { status: 200, body: unverifiedDown };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1", "--json"]);
+    });
+    const parsed = JSON.parse(logs.join(""));
+    expect(parsed.runtimeExits).toEqual(unverifiedDown.runtimeExits);
+    expect(parsed).toMatchObject({ sessionsKilled: 0, errors: unverifiedDown.errors });
+    expect(exitCode).toBe(2);
+  });
+
   it("names each file in a Claude seat's cwd that still holds OpenRig's additions, and keeps the exit code", async () => {
     const kept = "/work/project/.openrig/context-collector.cjs: not the shipped collector's bytes, so it was kept";
     responseOverride = {

@@ -815,6 +815,53 @@ describe("trace-to-root with nothing in progress — held and pending work as co
     }
   });
 
+  // OpenRig's own notice to a seat (the roster-ready one a freshly built rig sends) names no mission and isn't the seat's
+  // work toward one, so it doesn't stop the rows that are from settling one mission. It's still listed.
+  const rosterNotice = (sourceSession = "daemon@kernel", tags: string[] = ["roster-ready", "rig:rig-1"]): Row =>
+    ({ qitemId: "qitem-roster-ready-0123456789abcdef0123", state: "pending", summary: "Team roster is ready", tags, sourceSession });
+
+  it("sets OpenRig's own notice aside when deciding whether held and pending work settles one mission, and still lists it", () => {
+    const w = world();
+    const result = plain(w, heldWork(w, [parked(["mission:release-a", "slice:12-refocus"]), rosterNotice()]));
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain(`## WORK TRACE\n${CONTEXT}, and every held and pending row (1 held, 0 pending; 1 OpenRig notice set aside) `
+      + "resolves to this slice.");
+    expect(result.stdout).toContain("intent: Refocus knows the work");
+    expect(result.stdout).toContain("POSSIBLE NEXT WORK (pending; no order implied):\n- qitem-roster-ready-0123456789abcdef0123 — Team roster is ready");
+    expect(result.stdout).not.toContain("does not settle one mission");
+    // On the work-packet path too.
+    const packed = packet(w, [parked(["mission:release-a", "slice:12-refocus"]), rosterNotice()]);
+    expect(packed.status, packed.stdout + packed.stderr).toBe(0);
+    expect(packed.stdout).toContain(`${CONTEXT}, and every held and pending row (1 held, 0 pending; 1 OpenRig notice set aside)`);
+  });
+
+  it("keeps daemon-relayed mission-less work in the mission decision and lists it", () => {
+    const w = world();
+    const relayed: Row = { qitemId: "qitem-net-work", state: "pending", sourceSession: "daemon@kernel",
+      summary: "From assistant@team via network hub: Review a different project", tags: ["network-binding:b1", "network-hub-item:h1"] };
+    for (const result of [plain(w, heldWork(w, [parked(["mission:release-a"]), relayed])),
+      packet(w, [parked(["mission:release-a"]), relayed])]) {
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout).toContain("does not settle one mission (a row names no mission)");
+      expect(result.stdout).not.toContain(CONTEXT);
+      expect(result.stdout).toContain("- qitem-net-work — From assistant@team via network hub: Review a different project");
+    }
+  });
+
+  it("still leaves the choice open for a mission-less row a seat sent, and counts an OpenRig row that names a mission", () => {
+    const w = world();
+    const fromSeat = plain(w, heldWork(w, [parked(["mission:release-a"]), rosterNotice("lead@team")]));
+    expect(fromSeat.stdout).toContain("does not settle one mission (a row names no mission)");
+    expect(fromSeat.stdout).not.toContain(CONTEXT);
+    const scoped = plain(w, heldWork(w, [parked(["mission:release-a"]), rosterNotice("daemon@kernel", ["mission:release-b"])]));
+    expect(scoped.stdout).toContain("does not settle one mission (the rows name different missions)");
+    // Only notices alone: nothing names a mission, as with no rows that do.
+    const alone = plain(w, heldWork(w, [rosterNotice()]));
+    expect(alone.status, alone.stdout + alone.stderr).toBe(0);
+    expect(alone.stdout).not.toContain(CONTEXT);
+    expect(alone.stdout).toContain("- qitem-roster-ready-0123456789abcdef0123 — Team roster is ready");
+  });
+
   it("keeps a mission found only through a fallback missions root partial, and says so on the row", () => {
     const w = world();
     const reason = "project:ghost is not in the project catalogue; used configured root";

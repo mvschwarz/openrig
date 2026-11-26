@@ -227,3 +227,28 @@ export function resolveAllowedDirectory(
   }
   return resolved;
 }
+
+/**
+ * The real file an absolute path names inside one of these roots. The path is placed under a root as written, the
+ * artifact planner's rule (queue-artifact.ts underSharedRoot), and that root's real-target containment applies
+ * (resolveAllowedFile), so a link inside the root that leads out of it doesn't qualify. Throws FilePathSafetyError when no
+ * root holds it.
+ */
+export function resolveAllowedAbsoluteFile(allowlist: AllowlistRoot[], absolutePath: string): string {
+  let escape: FilePathSafetyError | null = null;
+  for (const root of allowlist) {
+    const inside = path.relative(root.canonicalPath, absolutePath);
+    if (!inside || inside === ".." || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) continue;
+    try {
+      return resolveAllowedFile(allowlist, root.name, inside);
+    } catch (err) {
+      if (!(err instanceof FilePathSafetyError)) throw err;
+      escape = err;
+    }
+  }
+  throw escape ?? new FilePathSafetyError(
+    "path_escape",
+    `'${absolutePath}' is not under any of the roots ${allowlist.map((r) => r.name).join(", ") || "(none)"}.`,
+    { absolutePath, roots: allowlist.map((r) => r.name) },
+  );
+}

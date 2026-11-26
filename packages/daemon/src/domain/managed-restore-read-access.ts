@@ -2,12 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { homedir, tmpdir } from "node:os";
 
-/** Match the shipped compaction hook's output-root selection. */
-export function compactionPacketRoot(): string {
-  return path.resolve(process.env.OPENRIG_COMPACTION_OUT_ROOT
-    || (process.platform === "win32" ? path.join(tmpdir(), "claude-compaction-restore") : "/tmp/claude-compaction-restore"));
-}
-
 export interface RestoreReadContext {
   openrigHome: string | null | undefined;
   session: string;
@@ -47,6 +41,42 @@ export async function restoreSessionUserHome(terminal: { getSessionEnv?: (sessio
   } catch { /* The observation is optional on legacy transports. */ }
   return undefined;
 }
+
+/** Where Claude's PreCompact hook writes restore packets: the OpenRig home's runtime folder, created owner-only.
+ *  OPENRIG_COMPACTION_OUT_ROOT overrides it. The read grant and the enforcer's restore request name it through this, and a
+ *  launch whose grant covers it hands it to the seat's hooks in OPENRIG_COMPACTION_PACKET_ROOT. */
+export function compactionPacketRoot(openrigHome: string): string {
+  return path.resolve(process.env.OPENRIG_COMPACTION_OUT_ROOT || path.join(openrigHome, "run", "compaction-restore"));
+}
+
+/** The launch variable that names the packet folder a seat's launch grants it reads in. `restore-from-jsonl.mjs` writes
+ *  the seat's packets there. A seat without it (launched before packets moved into the OpenRig home, or with no packet
+ *  grant) gets them beside its restore maps in its launch project, which it reads without a grant. It's set by the
+ *  launch, not a setting, and its value is absolute, so the seat writes where the grant names whatever its working
+ *  directory. */
+export const COMPACTION_PACKET_ROOT_ENV = "OPENRIG_COMPACTION_PACKET_ROOT";
+
+/** The packet variable for a launch whose one --settings value, as sent, grants this conversation's packet files in the
+ *  packet folder at every spelling; otherwise none. Read from the arguments actually sent: a relaunch that keeps the
+ *  running Claude's arguments keeps that Claude's grant, which may predate the folder. A --settings file reads as no
+ *  grant, so that seat gets its packets in its launch project, which needs none. */
+export function compactionPacketLaunchEnv(args: readonly string[], context: { openrigHome: string | null | undefined; nativeSessionId: string }): Record<string, string> {
+  if (!context.openrigHome) return {};
+  const at = args.findIndex(arg => arg === "--settings" || arg.startsWith("--settings="));
+  const value = at < 0 ? undefined : args[at] === "--settings" ? args[at + 1] : args[at]!.slice("--settings=".length);
+  let allow: unknown;
+  try { allow = (JSON.parse(value ?? "") as { permissions?: { allow?: unknown } }).permissions?.allow; } catch { return {}; }
+  if (!Array.isArray(allow)) return {};
+  const root = compactionPacketRoot(context.openrigHome);
+  const granted = spellings(root)
+    .every(packets => allow.includes(`Read(/${packets}/${context.nativeSessionId}-*/restore-instructions.md)`));
+  return granted ? { [COMPACTION_PACKET_ROOT_ENV]: root } : {};
+}
+
+/** Where restore packets went by default before they moved into the OpenRig home. With no OPENRIG_COMPACTION_OUT_ROOT, a
+ *  seat whose restore marker still names a packet there keeps reading its own packet's files without a new approval; an
+ *  explicit root was used before as it is now. */
+const PREVIOUS_PACKET_ROOT = process.platform === "win32" ? path.join(tmpdir(), "claude-compaction-restore") : "/tmp/claude-compaction-restore";
 
 // These are permission patterns, not shell arguments. Keep literal path components
 // literal; only the attempt/timestamp segment below is a wildcard.
@@ -98,7 +128,8 @@ export function withManagedRestoreReads(args: string[], context: RestoreReadCont
   // Fresh/fork launches know their own UUID. Never grant the fork parent's or
   // another seat's packet directory; a legacy name is not a packet identity.
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(context.nativeSessionId)) {
-    for (const packets of spellings(compactionPacketRoot())) {
+    const previous = process.env.OPENRIG_COMPACTION_OUT_ROOT ? [] : spellings(PREVIOUS_PACKET_ROOT);
+    for (const packets of [...spellings(compactionPacketRoot(context.openrigHome)), ...previous]) {
       for (const file of ["restore-instructions.md", "restore-summary.json", "transcript.txt", "transcript-narrative.txt", "touched-files.md"]) {
         files.push(`${packets}/${context.nativeSessionId}-*/${file}`);
       }

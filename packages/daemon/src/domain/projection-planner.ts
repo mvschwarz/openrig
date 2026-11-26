@@ -2,7 +2,7 @@ import nodePath from "node:path";
 import { resourceDirectoryPath } from "./resource-directory-name.js";
 import * as os from "node:os";
 import { OPENRIG_HOME } from "../openrig-compat.js";
-import type { SkillOnRestore, SkillResource, StartupBlock } from "./types.js";
+import { isClaudeJsonFragmentType, type ClaudeJsonFragmentType, type RuntimeResource, type SkillOnRestore, type SkillResource, type StartupBlock } from "./types.js";
 import { classifyResourceProjection } from "./conflict-detector.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "./profile-resolver.js";
 import type { ResourceCollision } from "./agent-resolver.js";
@@ -38,15 +38,26 @@ export interface ProjectionEntry {
    *    and projects only when its runtime-specific manifest is present
    */
   pluginType?: "claude" | "codex" | "auto";
-  /** Skills only, set when the resource says `on_restore: follow_source`: a restore that keeps the seat's
-   *  conversation takes this skill's source as it is then, instead of the saved copy. */
+  /** Set for skills and supported Claude fragments that explicitly follow today's source. */
   onRestore?: SkillOnRestore;
 }
+
+export type ClaudeFragmentEntry = ProjectionEntry & { category: "runtime_resource"; resourceType: ClaudeJsonFragmentType };
+
+export function isClaudeFragmentEntry(entry: ProjectionEntry): entry is ClaudeFragmentEntry {
+  return entry.category === "runtime_resource" && isClaudeJsonFragmentType(entry.resourceType);
+}
+
+export type ResolveClaudeFragments = (rigId: string, nodeId: string) => Promise<
+  { ok: true; entries: ClaudeFragmentEntry[] } | { ok: false; reason: string; missingRecipe?: true }
+>;
 
 export interface ProjectionPlan {
   runtime: string;
   cwd: string;
   entries: ProjectionEntry[];
+  /** An older seat without a launch recipe can still apply its readable saved Claude fragments. */
+  skipUnavailableClaudeFragmentSources?: boolean;
   startup: StartupBlock;
   conflicts: ProjectionEntry[];
   noOps: ProjectionEntry[];
@@ -161,7 +172,11 @@ export function planProjection(input: ProjectionInput): PlanResult {
       }
 
       if (catKey === "runtimeResources") {
-        entry.resourceType = (qr.resource as { type?: string }).type;
+        const resource = qr.resource as RuntimeResource;
+        entry.resourceType = resource.type;
+        if (resource.runtime === "claude-code" && isClaudeJsonFragmentType(resource.type) && resource.onRestore === "follow_source") {
+          entry.onRestore = "follow_source";
+        }
       }
 
       if (catKey === "plugins") {

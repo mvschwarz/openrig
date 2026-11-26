@@ -112,6 +112,16 @@ describe("Git context selections preserve author work", () => {
     expect(existsSync(join(result.installedAt, "private-unrelated.txt"))).toBe(false);
   });
 
+  it.skipIf(process.platform === "win32")("can select and inspect a pack whose name begins with a colon", () => {
+    const f = fixture();
+    const pack = ":guide";
+    renameSync(join(f.checkout, f.pack), join(f.checkout, pack));
+    commit(f.checkout, "move pack");
+    const selection = addGitContext(f.checkout, { checkout: true, pack }, join(f.home, "second"));
+    writeFileSync(join(f.checkout, pack, "local.md"), "changed\n");
+    expect(inspectGitContext(selection.installedAt).checkout.selectedPackDiff).toContain("local.md");
+  });
+
   it("rejects escaped pack paths, symlinks and unsafe destination refs", () => {
     const f = fixture();
     expect(() => addGitContext(f.checkout, { checkout: true, pack: "../outside", name: "escape" }, f.root)).toThrow(/relative/);

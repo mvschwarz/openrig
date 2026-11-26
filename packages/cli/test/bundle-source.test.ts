@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import type { StatusDeps } from "../src/commands/status.js";
 import { DaemonClient } from "../src/client.js";
 import { PodBundleAssembler } from "../../daemon/src/domain/pod-bundle-assembler.js";
-import { parseGitHubBundleLink, selectGitHubBundleSource, prepareGitHubBundle, importGitHubBundle, bundleIdentityLines, bundleGit, authoredCompatibility } from "../src/lib/bundle-source.js";
+import { parseGitHubBundleLink, selectGitHubBundleSource, prepareGitHubBundle, importGitHubBundle, bundleIdentityLines, bundleGit, authoredCompatibility, writeBundleBuildReceipt } from "../src/lib/bundle-source.js";
 
 const state = vi.hoisted(() => ({ host: undefined as string | undefined, origin: "local-instance", remote: "local-instance" }));
 vi.mock("../src/local-origin.js", () => ({ readLocalOrigin: () => state.origin }));
@@ -24,6 +24,23 @@ describe("GitHub bundle source", () => {
     state.host = undefined; state.origin = "local-instance"; state.remote = "local-instance";
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  it("writes a private receipt, tightening an existing file while retaining supplied source and commit", () => {
+    const file = path.join(root, "build.json");
+    fs.writeFileSync(file, "old"); fs.chmodSync(file, 0o644);
+    const source = selectGitHubBundleSource(URL, refs);
+    expect(writeBundleBuildReceipt(file, "/tmp/team.rigbundle", { archiveHash: "hash", source }, { sourceHost: "builder-machine", authorSession: "builder@demo" })).toBeUndefined();
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toMatchObject({ archiveHash: "hash", source: { ...source, resolvedCommit: A }, provenance: { sourceHost: "builder-machine", authorSession: "builder@demo" } });
+  });
+
+  it("reports a failed receipt write without changing the archive", () => {
+    const archive = path.join(root, "team.rigbundle"); fs.writeFileSync(archive, "archive-bytes");
+    const warning = writeBundleBuildReceipt(path.join(root, "missing", "build.json"), archive, { error: "Creation failed" });
+    expect(warning).toContain("creation result is unchanged");
+    expect(warning).not.toContain("Bundle created");
+    expect(fs.readFileSync(archive, "utf8")).toBe("archive-bytes");
+  });
 
   it.each([
     [URL, A, "main", "rigs/dev"],
@@ -279,6 +296,17 @@ describe("GitHub bundle source", () => {
     const body = f.post.mock.calls[0]![1];
     if (includeLoginFiles) expect(body.includeLoginFiles).toBe(true);
     else expect(body).not.toHaveProperty("includeLoginFiles");
+  });
+
+  it("keeps GitHub source public and builder identity only in its private receipt", async () => {
+    const f = fixture();
+    const identity = { sourceHost: "builder-machine", authorSession: "builder@demo" };
+    await importGitHubBundle(URL, f.deps, { provenance: { notes: "Credit the authors" }, buildProvenance: identity }, f.prepare);
+    expect(f.post.mock.calls[0]![1].provenance).toEqual({ notes: "Credit the authors", source: f.prepared.source });
+    expect(f.post.mock.calls[0]![1]).not.toHaveProperty("buildProvenance");
+    const receipt = path.join(root, "build.json");
+    expect(JSON.parse(fs.readFileSync(receipt, "utf8"))).toMatchObject({ source: f.prepared.source, provenance: identity });
+    expect(fs.statSync(receipt).mode & 0o777).toBe(0o600);
   });
 
   it("uses one create, passes authored minima and source, then cleans only settled input", async () => {
