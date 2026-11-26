@@ -259,7 +259,8 @@ and effective modes and retains the text `Typing guard: on (hold)` for hold.
 
 A held send immediately returns `outcome: "retained"`, `sent: false`, its exact
 reason and the saved attempt's `outboxIds`. No automatic
-retry is scheduled. `rig send` to several seats and `rig broadcast` print a held
+retry is scheduled, except for a message held only for a draft (see "Messages held
+for a draft" below). `rig send` to several seats and `rig broadcast` print a held
 recipient as `retained, not delivered; inspect with rig seat held-messages`, never
 as sent, and their summary adds the held count (`1/3 delivered, 1 held`). A held
 recipient alone doesn't make the command fail. The reasons are:
@@ -292,7 +293,7 @@ refusal nor retries an attempt; missing metadata cannot establish which check
 caused a historical refusal.
 
 Clearing a draft, changing modes or restarting does not flush saved messages or
-callbacks. To try again, send a current request: it rechecks the recipient and input.
+callbacks, except a message held only for a draft (below). To try again, send a current request: it rechecks the recipient and input.
 A caller abort before paste cancels input; after a write may have started, the
 result preserves that uncertainty rather than claiming nothing was sent.
 
@@ -308,10 +309,12 @@ preserving evidence; it does not deliver a message or close queue work.
 A seat holds one message per sender, so one sender can't fill its held quota and
 drop everyone else's messages. A sender's newest held message retires its earlier
 ones at that seat into itself (`retired_by: outbox@system`, reason `coalesced into
-<id>`), in every mode, `draft-aware` included. The newest names them: `rig seat
+<id>`), in every mode, `draft-aware` included, except a message held only for a
+draft, which keeps its own outcome (below). The newest names them: `rig seat
 held-messages` shows `coalesced: { count, outboxIds }` on it, and each coalesced
-record stays readable with `--id`. Held messages are never replayed (a `draft-aware`
-queue wake's bounded retry, below, delivers only an entry still held), so this changes
+record stays readable with `--id`. Held messages are never replayed, except a message
+held only for a draft (below), and a `draft-aware` queue wake's bounded retry, below,
+delivers only an entry still held, so this changes
 no delivery. A `draft-aware` attempt takes its sender's place only once it settles
 as held; one that is then delivered leaves the held messages as they are. A queue
 wake to a `draft-aware` seat counts its sender's held message there as room, by the
@@ -325,6 +328,36 @@ watchdog's reminders (one per job), and an unattributed sender.
 
 A backlog held before this change clears at that sender's next held message to the
 seat, or at once with `rig seat retire-held-message`.
+
+**Messages held for a draft.** In `draft-aware` mode, a plain message from an agent
+or a person that is held only because the input showed a draft (`draft_input_busy`,
+`draft_input_unknown` or `draft_input_changed`) is marked when it's first held, and
+its result says it goes once the input is clear.
+
+- When the seat is idle with `draft-aware` still on, marked messages are sent oldest
+  first, each through the same guarded delivery. That delivery reads the input again
+  and holds the message again if it still isn't clear.
+- Each message keeps its own outcome, and the pass stops at the first one that isn't
+  delivered. A delivered or uncertain message is never sent again. A drain or a
+  pending restore stops the pass until it clears.
+- A message held for an earlier occupant of the seat stays held and listed. Later
+  messages for the current occupant still go.
+- Marked messages aren't coalesced by the one-per-sender rule above. Instead, one
+  sender keeps at most five at a seat. Past that, its oldest is coalesced into the
+  newest (`coalesced into <id>`, readable with `--id`), and the sender's result names
+  it.
+- At a full quota, a new message takes its sender's place as above. A message that
+  can't be held at all says the seat's held quota is full.
+- Not marked, so held as above:
+  - messages held before this behaviour;
+  - `hold`-mode messages;
+  - other held reasons;
+  - queue wakes, which have their own retry;
+  - messages from OpenRig's own senders (the daemon, `system:*` actors, watchdogs).
+- Leaving `draft-aware` (to `off` or `hold`) leaves marked messages held until it's on
+  again.
+- Releasing `hold` tells the seat once what was held, with `rig seat held-messages`.
+  Nothing held is typed.
 
 ### Claude hook bridge (opt-in)
 
