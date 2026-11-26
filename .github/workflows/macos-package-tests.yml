@@ -21,6 +21,7 @@ on:
 permissions:
   contents: read
 
+# Cancellation does not change the two required suite names.
 # Same-head approvals wait without replacing the only pending coverage. Other events/manuals are isolated.
 # A per-PR cancel-in-progress group would let delayed or irrelevant events cancel the useful newer head.
 concurrency:
