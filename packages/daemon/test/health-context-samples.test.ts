@@ -244,3 +244,81 @@ describe("the writer invariant the memo relies on", () => {
     expect(erasure).toMatch(/for \(const \{ table, where, byRigId \} of RIG_RECORDS\)[\s\S]{0,800}DELETE FROM \$\{table\}/);
   });
 });
+
+
+describe("memo reads outside committed named-seat windows", () => {
+  const project = (rows: ReturnType<ContextSampleMemo["read"]>) => rows.map(({ id, nodeId, sampledAt, capturedAt, usedPercentage }) =>
+    ({ id, nodeId, sampledAt, capturedAt, usedPercentage }));
+  const fixture = () => {
+    const db = new Database(":memory:"); migrate(db, ALL_MIGRATIONS);
+    const memo = new ContextSampleMemo(db), start = "2026-11-25T00:00:00.000Z", at = "2026-11-25T01:00:00.000Z";
+    const insert = (percent: number) => db.prepare(`INSERT INTO usage_samples (lane, seat_session, node_id, captured_at, sampled_at, used_percentage)
+      VALUES ('context', 'seat@rig', 'node', ?, ?, ?)`).run(at, at, percent).lastInsertRowid;
+    const original = (key: string) => project(queryUsageSeries(db, { seatSession: key, lane: "context", sinceIso: start, limit: 10_000 }));
+    return { db, memo, start, insert, original };
+  };
+
+  it("does not keep observations of a rolled-back row when its uncommitted id is reused", () => {
+    const f = fixture(); let rolledBack: number | bigint = 0;
+    try {
+      expect(() => f.db.transaction(() => {
+        rolledBack = f.insert(95);
+        expect(f.db.inTransaction).toBe(true);
+        expect(project(f.memo.read("seat@rig", f.start))).toEqual(f.original("seat@rig"));
+        throw new Error("fixture rollback after read");
+      })()).toThrow("fixture rollback after read");
+      expect(f.insert(10)).toBe(rolledBack);
+      expect(project(f.memo.read("seat@rig", f.start))).toEqual(f.original("seat@rig"));
+    } finally { f.db.close(); }
+  });
+
+  it("keeps the original empty-seat filter semantics after a later append", () => {
+    const f = fixture();
+    try {
+      expect(project(f.memo.read("", f.start))).toEqual([]);
+      f.insert(40);
+      expect(project(f.memo.read("", f.start))).toEqual(f.original(""));
+    } finally { f.db.close(); }
+  });
+});
+
+
+describe("memo fallback and lifetime boundaries", () => {
+  it.each([10_000, 10_001])("matches the original page at %i samples", (n) => {
+    const db = new Database(":memory:"); migrate(db, ALL_MIGRATIONS);
+    try {
+      const insert = db.prepare(`INSERT INTO usage_samples (lane, seat_session, node_id, captured_at, used_percentage)
+        VALUES ('context', 'seat@rig', 'node', '2026-11-25T01:00:00.000Z', ?)`);
+      db.transaction(() => { for (let i = 0; i < n; i++) insert.run(i % 100); })();
+      const memo = new ContextSampleMemo(db), bound = "2026-11-25T00:00:00.000Z";
+      const expected = queryUsageSeries(db, { seatSession: "seat@rig", lane: "context", sinceIso: bound, limit: 10_000 });
+      const project = (rows: ReturnType<ContextSampleMemo["read"]>) => rows.map(({ id, nodeId, sampledAt, capturedAt, usedPercentage }) =>
+        ({ id, nodeId, sampledAt, capturedAt, usedPercentage }));
+      const prepare = db.prepare.bind(db); let fullReads = 0;
+      vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+        if (/ORDER BY captured_at ASC, id ASC\s+LIMIT/.test(sql)) fullReads += 1;
+        return prepare(sql);
+      }) as typeof db.prepare);
+      expect(project(memo.read("seat@rig", bound))).toEqual(project(expected));
+      fullReads = 0;
+      expect(project(memo.read("seat@rig", bound))).toEqual(project(expected));
+      expect(fullReads).toBe(n === 10_000 ? 0 : 1);
+    } finally { db.close(); }
+  });
+
+  it("drops a seat omitted from a pass and keeps database instances separate", () => {
+    const a = new Database(":memory:"), b = new Database(":memory:");
+    try {
+      for (const db of [a, b]) migrate(db, ALL_MIGRATIONS);
+      const memoA = new ContextSampleMemo(a), memoB = new ContextSampleMemo(b), bound = "2026-11-25T00:00:00.000Z";
+      a.exec(`INSERT INTO usage_samples (lane, seat_session, captured_at, used_percentage)
+        VALUES ('context', 'seat@rig', '2026-11-25T01:00:00.000Z', 95)`);
+      memoA.startPass(); expect(memoA.read("seat@rig", bound)).toHaveLength(1); memoA.endPass();
+      expect(memoB.read("seat@rig", bound)).toEqual([]);
+      memoA.startPass(); memoA.endPass();
+      const prepare = vi.spyOn(a, "prepare");
+      expect(memoA.read("seat@rig", bound)).toHaveLength(1);
+      expect(prepare.mock.calls.some(([sql]) => /ORDER BY captured_at ASC, id ASC\s+LIMIT/.test(sql))).toBe(true);
+    } finally { a.close(); b.close(); }
+  });
+});

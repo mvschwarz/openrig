@@ -5,13 +5,13 @@
 // over the window, then just the rows added since. Anything it can't account for takes the original read.
 //
 // It's exact because of how usage_samples is written (usage-samples-store.ts): rows are only appended, with AUTOINCREMENT
-// ids that are never reused, or deleted by retention and erasure. A deleted row leaves the kept rows outnumbering the
+// committed ids that are never reused, or deleted by retention and erasure. A deleted row leaves the kept rows outnumbering the
 // window's count, which forces the original read. A row rewritten in place would keep its id and the count, and this
 // would keep serving its old values, so a writer that rewrites samples must change this reader too.
 import type Database from "better-sqlite3";
 import { queryUsageSeries, type UsageSeriesRow } from "./usage-series.js";
 
-/** The page the live source asks queryUsageSeries for. A window this full takes the original read. */
+/** The page the live source asks queryUsageSeries for. A larger window takes the original read. */
 export const CONTEXT_SAMPLE_LIMIT = 10_000;
 /** A bound as toISOString writes it, the only kind the live source passes. usage-series.ts' capturedAtBound returns
  *  such a bound unchanged, so this memo's plain `captured_at >= ?` selects what the original read selects. */
@@ -47,7 +47,9 @@ export class ContextSampleMemo {
     this.seen.add(seatSession);
     const original = (): ContextSample[] =>
       queryUsageSeries(this.db, { seatSession, lane: "context", sinceIso: startedAt, limit: CONTEXT_SAMPLE_LIMIT });
-    if (!CANONICAL_INSTANT.test(startedAt)) return original();
+    // An empty filter means all seats to queryUsageSeries, not one empty-named seat. Transactional reads can observe
+    // rows whose ids are reused after rollback, so only committed, named-seat windows are kept between reads.
+    if (!seatSession || !CANONICAL_INSTANT.test(startedAt) || this.db.inTransaction) return original();
     let counted: { n: number; maxId: number | null };
     try {
       const statements = this.prepared();

@@ -7,8 +7,8 @@
 // destructive upsert stays the point-in-time lane; this store is its
 // over-time twin.
 //
-// A READER RELIES ON THIS: rows here are only appended (AUTOINCREMENT ids, never
-// reused) or deleted (retention, erasure). health-context-samples.ts keeps each
+// A READER RELIES ON THIS: rows here are only appended (committed AUTOINCREMENT
+// ids are never reused) or deleted (retention, erasure). health-context-samples.ts keeps each
 // live seat's window between /api/health reads and fetches only rows with a
 // higher id. A writer that rewrites a sample in place must change that reader too.
 //
