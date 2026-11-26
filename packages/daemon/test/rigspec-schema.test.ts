@@ -16,7 +16,7 @@ const VALID_RIG = {
         sync_triggers: ["pre_compaction", "manual"],
       },
       members: [
-        { id: "impl", agent_ref: "local:agents/impl", profile: "tdd", runtime: "claude-code", cwd: ".", model: "sonnet" },
+        { id: "impl", agent_ref: "local:agents/impl", profile: "tdd", runtime: "claude-code", cwd: ".", model: "claude-sonnet-5-5" },
         { id: "qa", agent_ref: "local:agents/qa", profile: "reviewer", runtime: "codex", cwd: "." },
       ],
       edges: [
