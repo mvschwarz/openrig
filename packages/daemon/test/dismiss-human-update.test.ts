@@ -76,6 +76,15 @@ describe("dismissing an informational update from the Feed", () => {
     expect(db.serialize()).toEqual(after);
   });
 
+  it.each(["failed", "denied", "canceled"])("never dismisses a %s update: it's already closed, and nothing is written", async (closed) => {
+    row("fyi");
+    db.prepare("UPDATE queue_items SET state = ? WHERE qitem_id = ?").run(closed, "fyi");
+    const before = db.serialize();
+    expect(await act({ verb: "dismiss", qitemId: "fyi", actorSession: PERSON, authority: "primary-user" }))
+      .toMatchObject({ status: 409, body: { error: "qitem_already_terminal", state: closed } });
+    expect(db.serialize()).toEqual(before);
+  });
+
   it("records a dismissed update as its recipient's, even while it's parked on another person", async () => {
     row("parked");
     db.prepare("UPDATE queue_items SET state = 'blocked', blocked_on = ? WHERE qitem_id = ?").run("reviewer@external", "parked");

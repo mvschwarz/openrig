@@ -44,7 +44,7 @@ import type { NotifyRegister } from "../event-bus.js";
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
-import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, QueueRepositoryError, type QueueRepository, type QueueItem } from "../queue-repository.js";
+import { isBlockerLive, isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, QueueRepositoryError, type QueueRepository, type QueueItem } from "../queue-repository.js";
 import { askBackRoute, terminalAnswerMeaning } from "../receiver-context.js";
 import type { PersistedEvent } from "../types.js";
 import {
@@ -226,6 +226,12 @@ export class MissionControlWriteContract {
     }
 
     const source = this.requireMutableQitem(input.qitemId);
+    // Dismiss closes only an open update: a failed, denied or canceled one is already closed, and stays as it is.
+    if (input.verb === "dismiss" && !isBlockerLive(source.state)) {
+      throw new MissionControlWriteContractError("qitem_already_terminal",
+        `qitem ${input.qitemId} is already closed (state=${source.state}), so it can't be dismissed; nothing was written.`,
+        { qitemId: input.qitemId, state: source.state });
+    }
     // Dismiss closes only an informational update addressed to a person; a request is answered, never dismissed.
     if (input.verb === "dismiss" && (source.humanIntent !== "update" || !isHumanSeatSessionRef(source.destinationSession))) {
       throw new MissionControlWriteContractError("not_an_update",

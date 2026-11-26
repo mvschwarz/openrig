@@ -200,7 +200,7 @@ it("dismisses an open informational update from its detail, as the terminal's ac
   expect(detailOf({ ...update, dismiss: undefined }).some(l => l.action?.type === "act")).toBe(false);
 });
 
-it("says a dismiss changed nothing only when the daemon refused it, not when it got no answer", async () => {
+it("says a dismiss changed nothing only when the daemon refused it, not when it failed or got no answer", async () => {
   const failure = async (fetchImpl: typeof fetch) => {
     const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl });
     return dismissFailureNotice(await client.missionControlAction({ verb: "dismiss", qitemId: "fyi", actorSession: "parkingmeter@external", authority: "primary-user" })
@@ -211,6 +211,10 @@ it("says a dismiss changed nothing only when the daemon refused it, not when it 
   const unanswered = await failure((async () => { throw new TypeError("fetch failed"); }) as typeof fetch);
   expect(unanswered).not.toContain("nothing changed");
   expect(unanswered).toContain("Dismiss not confirmed, the daemon didn't answer: fetch failed. It may have been dismissed");
+  // A 500 can follow a committed write (the daemon failed after it), so it isn't read as "nothing changed".
+  const failed = await failure((async () => Response.json({ error: "internal" }, { status: 500 })) as typeof fetch);
+  expect(failed).not.toContain("nothing changed");
+  expect(failed).toMatch(/^Dismiss not confirmed, the daemon failed while answering: .*500 — internal\. It may have been dismissed/);
 });
 
 it("sends an answer act's choice or words in the one mission-control write", async () => {

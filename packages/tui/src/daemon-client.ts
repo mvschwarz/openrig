@@ -29,18 +29,21 @@ export interface DaemonClientOptions {
 export const ACTION_UNAUTHORIZED = "This daemon refused the answer without its operator bearer token, so nothing was recorded. "
   + "Start the TUI with OPENRIG_AUTH_BEARER_TOKEN set to the token this daemon runs with, then answer again.";
 
-/** The daemon answered a write with a refusal (a non-OK HTTP status), so it wrote nothing. A write that got no answer
- *  (the connection failed) rejects with the fetch error instead: whether it landed isn't known. */
+/** The daemon answered a write with a non-OK HTTP status. A 4xx is a refusal: it wrote nothing. A 5xx may follow a
+ *  committed write (the daemon failed after it), so whether it landed isn't known. A write that got no answer (the
+ *  connection failed) rejects with the fetch error instead, also unknown. */
 export class DaemonWriteRefused extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
 
-/** What a person reads when a dismiss fails: "nothing changed" only when the daemon refused it. */
+/** What a person reads when a dismiss fails: "nothing changed" only when the daemon refused it (a 4xx). */
 export function dismissFailureNotice(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
-  return err instanceof DaemonWriteRefused
-    ? `Not dismissed, nothing changed: ${message}. The update's detail shows its current state.`
-    : `Dismiss not confirmed, the daemon didn't answer: ${message}. It may have been dismissed; the update's detail shows its current state.`;
+  if (err instanceof DaemonWriteRefused && err.status < 500) {
+    return `Not dismissed, nothing changed: ${message}. The update's detail shows its current state.`;
+  }
+  const why = err instanceof DaemonWriteRefused ? "the daemon failed while answering" : "the daemon didn't answer";
+  return `Dismiss not confirmed, ${why}: ${message}. It may have been dismissed; the update's detail shows its current state.`;
 }
 
 export class StartupRequestError extends Error {
