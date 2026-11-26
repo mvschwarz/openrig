@@ -99,11 +99,12 @@ it("shows late history on a retained fence without changing the exact reconcilia
   const late = source.repo.transitionLog.listForQitem("qitem-a").at(-1);
   expect(late?.transitionNote).toContain("Late answer for the new owner");
 
-  expect(await (await source.request(statusPath)).json()).toEqual(cleanStatus);
-  const fresh = await readStatus();
-  expect(await fresh.json()).toMatchObject({ transfers: [{ fenced: ["qitem-a"], postReconciliationLateReports: [
+  const supplemented = await (await readStatus()).json();
+  expect(supplemented).toMatchObject({ transfers: [{ fenced: ["qitem-a"], postReconciliationLateReports: [
     { qitemId: "qitem-a", currentState: "canceled", ownerItem: "qitem-a@target", transitions: [late] },
   ] }] });
+  // No operator bearer: the supplement follows the status read like the rest of queue history.
+  expect(await (await source.request(statusPath)).json()).toEqual(supplemented);
   expect(await (await reconcileRequest()).json()).toEqual({ ...report, replayed: true });
   expect(source.repo.getById("qitem-a")).toMatchObject({ state: "canceled", closureReason: "superseded", closureTarget: "qitem-a@target" });
   expect(source.repo.transferFence("qitem-a")).toEqual(fence);

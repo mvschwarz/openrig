@@ -71,7 +71,7 @@ function verifyRestoredActivation(db: Database.Database, record: TransferActivat
     missingRows, stateMismatch, missingHistory, missingErasedRigs, ...(archive ? {} : { recordsUnavailable: true }) };
 }
 
-export function transferStatus(db: Database.Database, digest?: string, includeHistory = true) {
+export function transferStatus(db: Database.Database, digest?: string) {
   assertTransferSchema(db);
   const records = db.prepare<[string | null, string | null], { id: string; archiveDigest: string; kind: string; actor: string; recordedAt: string;
     destinationHostId: string; receipt: string | null; result: string | null }>(`SELECT record_id AS id, archive_digest AS archiveDigest, kind, actor, recorded_at AS recordedAt,
@@ -87,7 +87,7 @@ export function transferStatus(db: Database.Database, digest?: string, includeHi
   const fence = db.prepare<[string], { id: string; reconciledAt: string | null; outcome: string | null }>(`SELECT qitem_id AS id,
     reconciled_at AS reconciledAt, reconcile_outcome AS outcome
     FROM queue_transfer_relinquished WHERE record_id = ? ORDER BY qitem_id`);
-  const history = includeHistory ? new QueueTransitionLog(db) : null;
+  const history = new QueueTransitionLog(db);
   const liveState = db.prepare<[string], QueueState>(`SELECT state FROM queue_items WHERE qitem_id = ? AND content_erased_at IS NULL`).pluck();
   const transfers = [...groups.values()].flatMap(group => {
     const first = group[0];
@@ -101,7 +101,7 @@ export function transferStatus(db: Database.Database, digest?: string, includeHi
     const receipt = relinquished?.receipt ? parseReceipt(JSON.parse(relinquished.receipt)) : null;
     const priorReports = reconciliation && "lateReports" in reconciliation && Array.isArray(reconciliation.lateReports) ? reconciliation.lateReports : [];
     const priorById = new Map(priorReports.filter(isTransferObject).map(row => [row.qitemId, row]));
-    const postReconciliationLateReports = history && receipt && reconciliation ? fences.flatMap(({ id, reconciledAt, outcome }) => {
+    const postReconciliationLateReports = receipt && reconciliation ? fences.flatMap(({ id, reconciledAt, outcome }) => {
       if (!reconciledAt) return [];
       const currentState = liveState.get(id);
       if (!currentState) return [];
