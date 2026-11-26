@@ -481,6 +481,8 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
   answer, the question and the options, and the person is told once who decides and in what recorded state.
 - **The runner keeps reading `pending`.** The agent decides with `rig seat decide-permission <askId> --option <id>
   --reason "…"` (`POST <base>/api/activity/permission-requests/<askId>/decide` with `{"optionId", "reason"}`).
+  - A team seat named as `agents.operator_session` runs it with no prompt. Any other team Claude seat asks its person
+    first, so a seat can't approve its own waiting tool call.
   - It accepts only an option the agent offered.
   - It records an agent's decision: who decided, why, and the person's words.
   - A request that's no longer pending comes back as it is, and nothing is written.
@@ -586,6 +588,77 @@ its pane. That covers:
   change.
 - **A person's answer is recorded on the ask itself,** and a default permit as the stream item above. That item lasts as
   long as stream retention keeps it. A permit the runner decides on its own is in its pane only.
+
+### A seat's own Claude Code prompt (native asks)
+
+A Claude Code seat that loads the `openrig-core` plugin answers its own permission prompt through the same route. The
+plugin's `permission-answer.cjs` is a synchronous `PermissionRequest` hook, separate from the passive relay. It submits
+the prompt as a native ask (`"nativeHook": "claude-code"`, with the tool and its exact input as `action`) and waits for an
+answer for as long as the prompt is open, up to 24 hours.
+
+Claude Code's own dialog stays open in the terminal the whole time (checked on Claude Code 2.1.330), and whichever answer
+comes first counts. So waiting costs the person at the terminal nothing, and a person's answer to a prompt that's still
+open is carried however long it took to reach them. The hook ends sooner whenever the prompt does (below), and when the
+Claude Code that started it is gone. Claude Code 2.1.330 caps a hook's `timeout` only at 2^31-1 ms (about 24 days); the
+plugin's is 24 hours and 30 seconds. A native ask differs from a runner's request only where a default would decide for
+the person:
+
+| Situation | What happens |
+|---|---|
+| **Someone can be asked** | In order: the person chosen for the seat (`rig seat set-permissions-to`); else the return route of the work the seat is running (the person's own conversation, as `rig queue create --return-route auto` issued it): the one route its open work carries or, when that work comes from several conversations, the route of its newest in-progress work, else of its newest open work, when that route is on this host; else the default person. The reply is `{"ok": true, "askId", "created", "askedOf", "answerBy"}`. |
+| **No one can be asked**, or the seat chose `--deny` | `{"ok": true, "state": "not_asked", "reason"}`. Nothing is decided: no permit, no refusal, and the prompt carries on in the terminal. |
+| **A person picks an offered option, or replies just yes or no** (Feed, Steering's Approve or Deny, the TUI, Slack) | Their own answer. It closes the ask as theirs, with no receiving agent in between and no second confirmation. |
+| **A person answers in other words** | The receiving agent judges the exact action against them, as for a runner: allow when it meets them, deny with their words when it doesn't, recorded as its judgment, not their no. Words it can't read are asked back. |
+| **The person's own conversation owns the ask** | Its agent shows them the exact action, then runs `rig seat decide-permission <askId> --option allow\|deny` (or calls the MCP tool `rig_seat_decide_permission`, which takes the same answer), never typing into the seat for it. A plain yes or no takes `--relay --person-said "<their words>"` and is recorded as relayed by that agent, with their words as it reports them: unconfirmed, since OpenRig didn't get that answer from the person. Words or a condition take `--reason` and `--person-said`, and are recorded as the agent's judgment. The decider is the conversation's address: `OPENRIG_SESSION_NAME=<address>` in a shell, and, through the MCP tool with no seat, the address OpenRig issued under that conversation's own key. |
+| **Closed without an answer** | `unanswered`: never a permit. A queue close is never an approval. |
+| **The prompt is answered in the terminal** | A No or Esc ends the hook, which withdraws the ask (`answered_in_terminal`). A Yes lets the tool run; when its exact call completes (the relay's `PostToolBatch` fingerprints), the ask is withdrawn the same way. A later answer through OpenRig reads as too late. |
+| **The window ends, or the seat restarts** | After 24 hours the hook withdraws the ask (`answer_window_ended`), and the prompt waits in the terminal. A Claude Code that's gone without ending the hook (killed, say) makes it withdraw the ask as `answered_in_terminal`. An earlier occupant's ask reads `stale`. An answer after either is too late, and nothing is sent. |
+| **The hook was killed outright** (an OOM kill, say) while Claude Code lives on | Nothing withdraws the ask, so it stays open until its window ends, and nothing takes an answer to the prompt. An answer is still recorded, and nothing is refused, but the reply says plainly that it hasn't reached the prompt (`native.notReached`), because the hook hasn't read the ask for a minute. The prompt may still be open in the terminal: check the seat. |
+
+- **The first answer wins.** A second `rig seat decide-permission` on an answered ask returns it as it is, with
+  `native.unchanged: true`, and writes nothing.
+- **What reaches Claude Code:** `allow` for Allow once, or `deny` with a one-line `message`. The message says whose answer
+  it is (a relay reads unconfirmed) and whose words it carries. A remembered choice ("don't ask again") is only in the terminal. The hook never
+  sends `updatedPermissions`, `updatedInput`, `interrupt` or a mode change, and it has no `onFailure`.
+- **The exact action** is shown on the ask before anything is stored. A command appears as its text, any other tool's
+  input as JSON. Text matching the transcript route's credential patterns is shown as `[REDACTED]`, and the display is cut
+  at 4000 characters, with the ask saying so when either happens. The request Claude Code runs is unchanged.
+- **The record keeps four things apart:**
+  - the answer (the decision on the ask);
+  - the hook taking it (`runner-permission-taken-by-hook`, recorded before the hook returns it);
+  - Claude Code applying it, which OpenRig doesn't see;
+  - the tool call completing (`runner-permission-tool-completed`).
+
+  A completion is matched by content: the conversation, the actor, the tool and the exact input. Claude Code's permission
+  request has no tool-call id, so an identical call in the same conversation can't be told apart.
+- **A read** of a native ask adds `native`, which can hold:
+  - `hook`;
+  - `answeredAs` and `by`, who decided. `person` is the person's own answer as OpenRig received it from them (Feed,
+    Steering, the TUI, Slack). `relayed` is an agent's `--relay`: its report that this is the person's answer, which
+    OpenRig didn't get from them, so it stays unconfirmed. `agent` is an agent's judgment on their words. Neither `--relay`
+    nor the caller's session (attribution, not proof of a person) ever makes an answer read `person`, and a relay of an
+    answer already recorded changes nothing. An ask closed as denied any other way has no `answeredAs`, only who closed it;
+  - `said`, the person's words as OpenRig received them, and `reported`, the words the deciding agent says they gave
+    (`--person-said`), kept apart when they differ;
+  - `message`, what a deny tells Claude;
+  - `why`, why it ended;
+  - `taken` and `toolCompleted`;
+  - on an answer the hook hasn't taken, `hookLastRead`, when the hook last read the ask (it reads again at least every
+    25 seconds while it waits), and, once it hasn't for a minute, `notReached`: the plain words saying the answer hasn't
+    reached the prompt. `rig seat decide-permission` prints them, the MCP tool returns them, and a person's own answer
+    in Steering or the TUI gets them in its receipt. The daemon notes the reads in memory, so a restarted daemon knows
+    only those since it started.
+- **While a native ask is taking an answer** (up to 24 hours), the wake ladder holds that seat's permission-prompt alert
+  and its relay task to the routed conversation. The ask is already that conversation's question about the prompt. The
+  alert's relay would put the same question there a second time, with text telling it to type keys into the seat, and
+  keys typed there answer the prompt in the terminal and end the ask. Once the ask ends (its prompt ended in the
+  terminal, the seat restarted, or 24 hours passed), they go on as before. A hook killed outright leaves its ask open, so
+  the hold lasts until the window ends; an answer meanwhile says it hasn't reached the prompt.
+- **A conversation that isn't listening:** an ask to the person's own conversation reaches it through the `openrig`
+  plugin's waiter, which listens for about two hours after each of its turns (its hooks' 7200-second timeout). A prompt
+  after that waits for the person's next turn there, with the seat's prompt alert held, until they come back or the ask's
+  24 hours end. The prompt stays open in the seat's terminal throughout.
+- **Runner and ACP requests are unchanged:** their defaults, reads and decisions are exactly as above.
 
 ## 8. Resume: exactly the same conversation, or say honestly that you couldn't
 

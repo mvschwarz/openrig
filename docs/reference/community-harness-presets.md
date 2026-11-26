@@ -277,8 +277,11 @@ Copy the launcher and the preset for your mode, and maintain them as your own.
 processes, a gateway say, may keep running after it. OpenRig doesn't stop them, and whether they survive isn't exercised
 by OpenRig's tests, so check the harness's own processes after `rig down`. Each preset's limits say what to expect.
 
-**Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats) and
-switching harness on a running seat. Each says so before anything changes.
+**Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats). It says
+so before anything changes. To move a running single-pane seat to or from an installed harness, use
+`rig seat set-runtime <seat> --runtime <target> --reason <text>`, where the target is the harness's name, or `codex`,
+`claude-code` or `pi` to move off it. It starts a new conversation with a handover. A later resume of a harness
+successor's conversation works only when that harness's preset declares `resume`.
 
 ## An example: Cursor
 
