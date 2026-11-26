@@ -1297,6 +1297,7 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | `rig scope slice ls` | — | `--mission <name>`<br>`--state <state>`<br>`--json` |
 | `rig scope slice show <slice-path>` | — | `--mission <name>`<br>`--json` |
 | `rig scope slice create <mission> <slug>` | — | `--template <kind>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--execution-depends-on <dot-id...>`<br>`--readme-only`<br>`--json` |
+| `rig scope slice set <slice>` | — | `--mission <name>`<br>`--owner <component=member@rig...>`<br>`--clear-owner <component...>`<br>`--execution-depends-on <dot-id...>`<br>`--clear-execution-depends-on`<br>`--json` |
 | `rig scope slice ship <slice-path> <release-mission>` | — | `--mission <name>`<br>`--json` |
 | `rig scope slice close <slice-path>` | — | `--reason <reason>` **required**<br>`--in-place`<br>`--note <text>`<br>`--mission <name>`<br>`--json` |
 | `rig scope slice move <slice-path> <dest-mission>` | — | `--mission <name>`<br>`--json` |
@@ -1309,6 +1310,7 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | `rig scope mission ls` | — | `--json` |
 | `rig scope mission show <mission>` | — | `--json` |
 | `rig scope mission create <name>` | — | `--template <kind>`<br>`--id <dot-id>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--no-notes`<br>`--no-mission-notes`<br>`--json` |
+| `rig scope mission set <mission>` | — | `--wave <id>`<br>`--slices <dot-ids>`<br>`--lane <name>`<br>`--status <word>`<br>`--json` |
 | `rig scope mission graph <mission>` | — | `--json` |
 | `rig scope mission progress <mission>` | — | `--add <text>`<br>`--set <text>`<br>`--current-state <text>`<br>`--section <heading>`<br>`--status <status>`<br>`--json` |
 | `rig scope mission repair <mission>` | — | `--json` |

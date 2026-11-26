@@ -24,8 +24,8 @@
 // WorkflowSpecCache; { specGraph: null } when declared but not cached;
 // null when nothing is declared.
 
-import { Hono } from "hono";
-import { parseDocument, isScalar } from "yaml";
+import { Hono, type Context } from "hono";
+import { servedMissionStatus, writeMissionStatus, type ManifestEditOutcome } from "../domain/scope/manifest-editor.js";
 import { createProofPolicyRead, readMissionReadiness, readSliceReadiness } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -107,74 +107,50 @@ export function missionsRoutes(): Hono {
   // storytelling preview gates on this so completed missions disappear from
   // the band. The daemon is the audit-trail surface; the UI maintains
   // an optimistic local mirror via localStorage so the hide is instant.
-  app.post("/:missionId/complete", (c) => {
-    const indexer = c.get("sliceIndexer" as never) as SliceIndexer | undefined;
-    if (!indexer) {
-      return c.json({ error: "slices_indexer_unavailable" }, 503);
+  app.post("/:missionId/complete", async (c) => setStatus(c, "complete", "mission_complete_write_failed"));
+
+  // #3616 — any authored status word, written by the same writer as complete. `rig scope mission set --status` sends
+  // the mission folder it resolved (`missionPath`), so a mission found under a named workspace is the one written.
+  app.post("/:missionId/status", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as { status?: unknown };
+    const status = typeof body.status === "string" ? body.status.trim() : "";
+    if (!status || /[\r\n]/.test(status)) {
+      return c.json({ error: "status_required", message: "status must be one non-empty line" }, 400);
     }
-    const missionId = c.req.param("missionId");
-    // Only the folder is needed: a cold list() would rebuild queue membership for
-    // every slice before this write could run.
-    const missionPath = indexer.missionPath(missionId);
-    if (!missionPath) {
-      return c.json({ error: "mission_not_found", missionId }, 404);
-    }
-    try {
-      writeMissionStatusComplete(missionPath);
-    } catch (err) {
-      return c.json(
-        {
-          error: "mission_complete_write_failed",
-          missionId,
-          message: (err as Error).message,
-        },
-        500,
-      );
-    }
-    // VM-005 B1 (narrow C-vii exception): the write succeeded — drop the
-    // authored-status sidecar cache so the very next /api/slices read serves
-    // the new word (read-after-write coherence). Any future daemon
-    // mission-status mutation route calls this same method.
-    indexer.invalidateMissionStatusCache();
-    return c.json({ missionId, status: "complete" });
+    return setStatus(c, status, "mission_status_write_failed");
   });
 
   return app;
 }
 
-/** Complete the status owner used by mission/proof reads. Legacy missions keep
- *  their node-file frontmatter; authored manifests keep their other fields and comments. */
-function writeMissionStatusComplete(missionPath: string): void {
-  const manifestPath = path.join(missionPath, "mission.yaml");
-  if (fs.existsSync(manifestPath)) {
-    const document = parseDocument(fs.readFileSync(manifestPath, "utf8"));
-    if (document.errors.length) throw document.errors[0];
-    const status = document.getIn(["metadata", "status"], true);
-    if (isScalar(status)) status.value = "complete";
-    else document.setIn(["metadata", "status"], "complete");
-    fs.writeFileSync(manifestPath, document.toString());
-    return;
+async function setStatus(c: Context, status: string, failure: string): Promise<Response> {
+  const indexer = c.get("sliceIndexer" as never) as SliceIndexer | undefined;
+  if (!indexer) {
+    return c.json({ error: "slices_indexer_unavailable" }, 503);
   }
-  // Mutate the node file the mission actually has; only a mission with neither gets a new one, and
-  // a new one is authored under the current name.
-  const resolved = resolveNodeFile(missionPath);
-  const readmePath = resolved ?? path.join(missionPath, "SPEC.md");
-  let body = resolved ? fs.readFileSync(resolved, "utf-8") : "";
-  const fmMatch = body.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (fmMatch) {
-    const fmInner = fmMatch[1] ?? "";
-    const statusLineRegex = /^\s*status\s*:\s*[^\r\n]*$/m;
-    let newFm: string;
-    if (statusLineRegex.test(fmInner)) {
-      newFm = fmInner.replace(statusLineRegex, "status: complete");
-    } else {
-      newFm = fmInner.trimEnd() + "\nstatus: complete";
-    }
-    body = body.replace(fmMatch[0], `---\n${newFm}\n---`);
-  } else {
-    body = `---\nstatus: complete\n---\n${body}`;
+  const missionId = c.req.param("missionId")!;
+  const named = (await c.req.json().catch(() => ({})) as { missionPath?: unknown }).missionPath;
+  // Only the folder is needed: a cold list() would rebuild queue membership for
+  // every slice before this write could run.
+  // A named folder must be that mission's: absolute, a directory, and named for it.
+  const missionPath = typeof named === "string"
+    ? (path.isAbsolute(named) && path.basename(named) === missionId && fs.statSync(named, { throwIfNoEntry: false })?.isDirectory() ? named : null)
+    : indexer.missionPath(missionId);
+  if (!missionPath) {
+    return c.json({ error: "mission_not_found", missionId, ...(typeof named === "string" ? { missionPath: named } : {}) }, 404);
   }
-  fs.writeFileSync(readmePath, body);
+  let outcome: ManifestEditOutcome;
+  try {
+    outcome = writeMissionStatus(missionPath, status);
+  } catch (err) {
+    return c.json({ error: failure, missionId, message: (err as Error).message }, 500);
+  }
+  // VM-005 B1 (narrow C-vii exception): the write succeeded — drop the
+  // authored-status sidecar cache so the very next /api/slices read serves
+  // the new word (read-after-write coherence). Every daemon
+  // mission-status mutation route calls this same method.
+  indexer.invalidateMissionStatusCache();
+  return c.json({ missionId, missionPath, status, outcome, served: servedMissionStatus(missionPath) });
 }
 
 /** Derive the mission folder's absolute path from any slice's

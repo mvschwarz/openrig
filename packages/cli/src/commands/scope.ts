@@ -180,6 +180,27 @@ function slugify(raw: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+/** Build-order edges name sibling slices by dot-ID under their mission, never the slice itself. One rule for
+ *  `slice create` and `slice set`, so both write the same edges. */
+function validateSliceDependencies(id: string, missionId: string, lists: Array<[flag: string, ids: string[]]>, consequence: string): void {
+  for (const [flag, ids] of lists) for (const dependency of ids) {
+    if (dependency === id) {
+      throw new ScopeCliError({
+        fact: `Slice ${id} cannot depend on itself.`,
+        consequence,
+        action: `Use a different sibling slice ID, or omit ${flag}.`,
+      });
+    }
+    if (!isSliceDotId(dependency) || !dependency.startsWith(`${missionId}.`)) {
+      throw new ScopeCliError({
+        fact: `Dependency "${dependency}" is not a sibling slice dot-ID under ${missionId}.`,
+        consequence,
+        action: `Use a sibling ID shaped like ${missionId}.<n>, or omit ${flag}.`,
+      });
+    }
+  }
+}
+
 function sliceManifestRef(missionPath: string, slicePath: string): string {
   return path.relative(missionPath, path.join(slicePath, "slice.yaml")).split(path.sep).join("/");
 }
@@ -388,22 +409,7 @@ function buildSliceCreateCommand(): Command {
         let sliceFolder: string;
         let sliceAbs: string;
         for (;;) {
-          for (const [flag, ids] of dependencyLists) for (const dependency of ids) {
-            if (dependency === id) {
-              throw new ScopeCliError({
-                fact: `Slice ${id} cannot depend on itself.`,
-                consequence: "Slice not created.",
-                action: `Use a different sibling slice ID, or omit ${flag}.`,
-              });
-            }
-            if (!isSliceDotId(dependency) || !dependency.startsWith(`${missionId}.`)) {
-              throw new ScopeCliError({
-                fact: `Dependency "${dependency}" is not a sibling slice dot-ID under ${missionId}.`,
-                consequence: "Slice not created.",
-                action: `Use a sibling ID shaped like ${missionId}.<n>, or omit ${flag}.`,
-              });
-            }
-          }
+          validateSliceDependencies(id, missionId, dependencyLists, "Slice not created.");
           sliceFolder = `${pad2(nn)}-${slug}`;
           sliceAbs = path.join(mission.absPath, "slices", sliceFolder);
           if (fs.existsSync(sliceAbs)) {
@@ -494,6 +500,214 @@ function buildSliceCreateCommand(): Command {
         fail(err, json, out);
       }
     });
+}
+
+// ---------------------------------------------------------------------
+// rig scope slice set / rig scope mission set (#3616)
+// ---------------------------------------------------------------------
+
+/** The manifest writer and the execution view's own reader, loaded only by the setters that need them. */
+const scopeManifest = () => import("@openrig/daemon/scope-manifest");
+
+type ScopeManifest = Awaited<ReturnType<typeof scopeManifest>>;
+
+/** Edits one manifest with the shared writer; a file it can't edit is named, and nothing was written. */
+function editScopeManifest(editor: ScopeManifest, file: string, edit: Parameters<ScopeManifest["editManifest"]>[1]): "written" | "unchanged" {
+  try {
+    return editor.editManifest(file, edit);
+  } catch (err) {
+    if (!(err instanceof editor.ManifestEditError)) throw err;
+    throw new ScopeCliError({ fact: `${err.message}.`, consequence: "Nothing was written.", action: "Fix the file, then run this again." });
+  }
+}
+
+function idListOption(raw: unknown): string[] {
+  return [...new Set(String(raw).split(",").map((id) => id.trim()).filter(Boolean))];
+}
+
+function buildSliceSetCommand(): Command {
+  return new Command("set")
+    .description("Set a slice's planned owners or build-order edges in its slice.yaml, keeping everything else in the file, then show what the execution view reads")
+    .argument("<slice>", "Slice path (absolute, relative-to-substrate, or NN-slug)")
+    .option("--mission <name>", "Hint mission when the slice is just NN-slug")
+    .option("--owner <component=member@rig...>", "A component's planned owner in sdlc.components[] (planned metadata the execution view shows, not a queue assignment)")
+    .option("--clear-owner <component...>", "Remove a component's planned owner")
+    .option("--execution-depends-on <dot-id...>", "Replace execution.depends_on, the build-order edges proof readiness reads, with these sibling slice dot-IDs")
+    .option("--clear-execution-depends-on", "Remove execution.depends_on")
+    .option("--json", "Machine-readable output")
+    .action(async (target: string, opts, command) => {
+      const out = makeStdout();
+      const json = Boolean(opts.json);
+      try {
+        const owners = ((opts.owner ?? []) as string[]).map((raw) => {
+          const at = raw.indexOf("=");
+          const [component, owner] = [raw.slice(0, Math.max(at, 0)).trim(), raw.slice(at + 1).trim()];
+          if (at < 0 || !component || !owner) {
+            throw new ScopeCliError({ fact: `--owner "${raw}" is not <component>=<member>@<rig>.`, consequence: "Nothing was written.", action: "Pass --owner <component>=<member>@<rig>, for example --owner build=dev-impl@my-rig." });
+          }
+          return { component, owner };
+        });
+        const clearOwners = (opts.clearOwner ?? []) as string[];
+        const dependsOn = Array.isArray(opts.executionDependsOn) ? [...new Set(opts.executionDependsOn as string[])] : undefined;
+        const clearDependsOn = Boolean(opts.clearExecutionDependsOn);
+        if (dependsOn && clearDependsOn) {
+          throw new ScopeCliError({ fact: "--execution-depends-on and --clear-execution-depends-on were both passed.", consequence: "Nothing was written.", action: "Pass one of them." });
+        }
+        if (!owners.length && !clearOwners.length && !dependsOn && !clearDependsOn) {
+          throw new ScopeCliError({ fact: "Nothing to set.", consequence: "Nothing was written.", action: "Pass --owner, --clear-owner, --execution-depends-on or --clear-execution-depends-on." });
+        }
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, strictOverride: true, targetPath: target });
+        const slice = findSlice(missionsRoot, target, opts.mission ?? null);
+        const manifestPath = path.join(slice.absPath, "slice.yaml");
+        if (!fs.existsSync(manifestPath)) {
+          throw new ScopeCliError({ fact: `Slice ${slice.missionName}/${slice.name} has no slice.yaml, where these fields are read from.`, consequence: "Nothing was written.", action: "Add its slice.yaml (rig scope slice create writes one for a new slice), then run this again." });
+        }
+        if (dependsOn) {
+          if (!slice.id) {
+            throw new ScopeCliError({ fact: `Slice ${slice.missionName}/${slice.name} declares no dot-ID, so its sibling edges can't be checked.`, consequence: "Nothing was written.", action: "Add its id to the slice's SPEC.md frontmatter, then run this again." });
+          }
+          validateSliceDependencies(slice.id, ensureMissionId(findMission(missionsRoot, slice.missionName), missionsRoot),
+            [["--execution-depends-on", dependsOn]], "Nothing was written.");
+        }
+        const editor = await scopeManifest();
+        const ownerless: string[] = [];
+        const outcome = editScopeManifest(editor, manifestPath, (doc) => {
+          for (const { component, owner } of owners) editor.setPlannedOwner(doc, component, owner);
+          for (const component of clearOwners) if (!editor.clearPlannedOwner(doc, component)) ownerless.push(component);
+          if (dependsOn) editor.setExecutionDependsOn(doc, dependsOn);
+          if (clearDependsOn) editor.setExecutionDependsOn(doc, null);
+        });
+        // What the execution view now reads for this slice, from its own reader.
+        const arrangement = editor.readPlannedArrangement(missionsRoot, slice.missionName);
+        const served = arrangement.state === "valid" ? arrangement.slices.find((entry) => entry.dir === slice.name) ?? null : null;
+        const lines = [`slice.yaml ${outcome}: ${manifestPath}`];
+        for (const component of ownerless) lines.push(`No planned owner to clear for component ${component}.`);
+        if (arrangement.state === "missing") lines.push(`The execution view reads no arrangement for mission ${slice.missionName}: it has no mission.yaml.`);
+        else if (arrangement.state === "malformed") lines.push(`The execution view can't read mission ${slice.missionName}'s arrangement (${arrangement.warning}), so it shows none of these fields.`);
+        else if (!served) lines.push(`The execution view doesn't read this slice.yaml: the slice isn't an active member of mission ${slice.missionName}'s composition.`);
+        else {
+          lines.push(`Planned owners, as the execution view reads them: ${served.plannedOwners.map((p) => `${p.component} → ${p.owner}`).join(", ") || "none"}`);
+          lines.push(`Build-order edges (execution.depends_on): ${served.dependsOn ? served.dependsOn.join(", ") || "none (recorded as [])" : "not recorded"}`);
+        }
+        // Edges are proof readiness's to read: say what it now makes of them, a cycle or an unknown sibling included.
+        const readinessIssues = dependsOn || clearDependsOn ? editor.readMissionReadiness(findMission(missionsRoot, slice.missionName).absPath).issues : [];
+        for (const issue of readinessIssues) lines.push(`Proof readiness can't read this mission's edges now: ${issue}`);
+        if (owners.length) lines.push("A planned owner is metadata for the execution view: no queue row is assigned.");
+        emit(out, {
+          ok: true,
+          slice: { mission: slice.missionName, name: slice.name, id: slice.id, path: slice.absPath },
+          manifest: manifestPath,
+          outcome,
+          ownerless,
+          readinessIssues,
+          served: arrangement.state === "valid" ? served : { state: arrangement.state, ...(arrangement.state === "malformed" ? { warning: arrangement.warning } : {}) },
+        }, json, lines);
+      } catch (err) {
+        fail(err, json, out);
+      }
+    });
+}
+
+function buildMissionSetCommand(): Command {
+  return new Command("set")
+    .description("Set a mission's waves in its mission.yaml or its status, keeping everything else in the file, then show what the readers now serve")
+    .argument("<mission>", "Mission name")
+    .option("--wave <id>", "The wave to set in arrangement.waves (added when absent; its other keys and the other waves are kept)")
+    .option("--slices <dot-ids>", "Comma-separated slice dot-IDs for --wave")
+    .option("--lane <name>", "Set this lane of a lane-shaped --wave instead of its own slices list")
+    .option("--status <word>", "metadata.status; active and release-candidate count toward project readiness. A label, not proof of completion")
+    .option("--json", "Machine-readable output")
+    .action(async (missionName: string, opts, command) => {
+      const out = makeStdout();
+      const json = Boolean(opts.json);
+      try {
+        const wave = typeof opts.wave === "string" ? opts.wave.trim() : undefined;
+        const status = typeof opts.status === "string" ? opts.status.trim() : undefined;
+        if (wave === undefined && status === undefined) {
+          throw new ScopeCliError({ fact: "Nothing to set.", consequence: "Nothing was written.", action: "Pass --wave <id> --slices <ids>, or --status <word>." });
+        }
+        if ((wave === undefined) !== (opts.slices === undefined) || (opts.lane !== undefined && wave === undefined) || wave === "") {
+          throw new ScopeCliError({ fact: "--wave and --slices go together (with --lane for a lane-shaped wave).", consequence: "Nothing was written.", action: "Pass --wave <id> --slices <ids>, adding --lane <name> for one lane." });
+        }
+        if (status === "" || (status && /[\r\n]/.test(status))) {
+          throw new ScopeCliError({ fact: "--status must be one non-empty word or line.", consequence: "Nothing was written.", action: "Pass --status <word>, for example --status active." });
+        }
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, strictOverride: true });
+        const mission = findMission(missionsRoot, missionName);
+        const manifestPath = path.join(mission.absPath, "mission.yaml");
+        const editor = await scopeManifest();
+        const lines: string[] = [];
+        const payload: Record<string, unknown> = { ok: true, mission: mission.name, path: mission.absPath };
+        if (wave !== undefined) {
+          if (!fs.existsSync(manifestPath)) {
+            throw new ScopeCliError({ fact: `Mission ${mission.name} has no mission.yaml, where waves are read from (arrangement.waves).`, consequence: "Nothing was written.", action: "Add its mission.yaml (rig scope mission create writes one for a new mission), then run this again." });
+          }
+          const slices = idListOption(opts.slices);
+          const lane = typeof opts.lane === "string" ? opts.lane.trim() : undefined;
+          let shapeConflict: string | undefined;
+          const outcome = editScopeManifest(editor, manifestPath, (doc) => { shapeConflict = editor.setWave(doc, wave, slices, lane).shapeConflict; });
+          if (shapeConflict) {
+            throw new ScopeCliError({ fact: shapeConflict, consequence: "mission.yaml was not changed.", action: lane ? "Drop --lane to set the wave's own slices list." : "Name the lane with --lane <name>." });
+          }
+          lines.push(`mission.yaml ${outcome}: ${manifestPath}`);
+          // Where the execution view now places each slice, from its own reader.
+          const arrangement = editor.readPlannedArrangement(missionsRoot, mission.name);
+          const notes: string[] = [];
+          if (arrangement.state === "valid") {
+            const placed = arrangement.slices.filter((entry) => entry.wave === wave).map((entry) => entry.id ?? entry.dir);
+            lines.push(`Wave ${wave}, as the execution view reads it: ${placed.join(", ") || "no slices"}`);
+            for (const id of slices) {
+              const entry = arrangement.slices.find((candidate) => candidate.id === id);
+              if (!entry) notes.push(`${id} matches no active slice's dot-ID in this mission, so the view places nothing for it.`);
+              else if (entry.wave !== wave) notes.push(`${id} names wave ${entry.wave} in its own slice.yaml execution.wave, which the view reads first.`);
+            }
+            payload.wave = { id: wave, outcome, slices: placed };
+          } else {
+            notes.push(`The execution view can't read this mission's arrangement${arrangement.state === "malformed" ? ` (${arrangement.warning})` : ""}, so it shows no waves.`);
+            payload.wave = { id: wave, outcome, served: arrangement };
+          }
+          lines.push(...notes, "A wave is composition for the execution view, not dispatch: no queue row is created.");
+          (payload.wave as Record<string, unknown>).notes = notes;
+        }
+        if (status !== undefined) {
+          const written = await writeStatusThroughDaemon(editor, mission, status);
+          const served = written.served;
+          lines.push(`Status ${written.outcome}${written.via === "here" ? ` (written here: ${written.reason}; a running daemon's slice list can show the earlier word for up to a minute)` : ""}.`);
+          lines.push(`Status, as the readers now serve it: ${served.status ?? "none"}. ${served.countsTowardReadiness ? "It counts toward project readiness." : "It doesn't count toward project readiness (only active and release-candidate do)."} A status is a label: readiness is judged separately.`);
+          payload.status = { requested: status, ...written };
+        }
+        emit(out, payload, json, lines);
+      } catch (err) {
+        fail(err, json, out);
+      }
+    });
+}
+
+/** A status goes through the daemon, which writes it with the same writer and refreshes the slice list's cached word.
+ *  A daemon that doesn't answer, or predates the route, leaves it to be written here. */
+async function writeStatusThroughDaemon(editor: ScopeManifest, mission: MissionInfo, status: string): Promise<{
+  outcome: "written" | "unchanged"; via: "daemon" | "here"; reason?: string; served: { status: string | null; countsTowardReadiness: boolean };
+}> {
+  const here = (reason: string) => {
+    let outcome: "written" | "unchanged";
+    try {
+      outcome = editor.writeMissionStatus(mission.absPath, status);
+    } catch (err) {
+      if (!(err instanceof editor.ManifestEditError)) throw err;
+      throw new ScopeCliError({ fact: `${err.message}.`, consequence: "Nothing was written.", action: "Fix the file, then run this again." });
+    }
+    return { outcome, via: "here" as const, reason, served: editor.servedMissionStatus(mission.absPath) };
+  };
+  const daemon = await getDaemonStatus(realDeps());
+  if (!daemonMayAnswer(daemon)) return here("no daemon answered");
+  const res = await new DaemonClient(getDaemonUrl(daemon)).post<Record<string, unknown>>(
+    `/api/missions/${encodeURIComponent(mission.name)}/status`, { status, missionPath: mission.absPath });
+  const data = (res.data ?? {}) as { error?: string; message?: string; outcome?: "written" | "unchanged"; served?: { status: string | null; countsTowardReadiness: boolean } };
+  if (res.status < 400 && data.outcome && data.served) return { outcome: data.outcome, via: "daemon", served: data.served };
+  if (typeof data.error === "string") {
+    throw new ScopeCliError({ fact: `The daemon didn't write the status (${data.error}): ${data.message ?? "no detail"}.`, consequence: "Nothing was written.", action: "Fix the named issue and run this again." });
+  }
+  return here("the running daemon has no status route; it predates this command");
 }
 
 // ---------------------------------------------------------------------
@@ -2566,6 +2780,7 @@ export function scopeCommand(): Command {
   slice.addCommand(buildSliceLsCommand());
   slice.addCommand(buildSliceShowCommand());
   slice.addCommand(buildSliceCreateCommand());
+  slice.addCommand(buildSliceSetCommand());
   slice.addCommand(buildSliceShipCommand());
   slice.addCommand(buildSliceCloseCommand());
   slice.addCommand(buildSliceMoveCommand());
@@ -2581,6 +2796,7 @@ export function scopeCommand(): Command {
   mission.addCommand(buildMissionShowCommand());
   mission.addCommand(buildMissionCreateCommand());
   mission.addCommand(buildMissionParentCommand());
+  mission.addCommand(buildMissionSetCommand());
   mission.addCommand(buildMissionGraphCommand());
   mission.addCommand(buildMissionProgressCommand());
   mission.addCommand(buildMissionRepairCommand());

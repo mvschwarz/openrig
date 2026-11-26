@@ -374,3 +374,72 @@ describe("VM-005 B1 — read-after-write coherence at the daemon's own API", () 
     expect(indexer.missionAuthoredStatuses()["relx"]).toEqual({ authoredStatus: "complete" });
   });
 });
+
+// #3616 — `rig scope mission set --status` writes any status word with the complete writer, through the daemon, so
+// the slice list's cached word is refreshed; it names the mission folder it resolved.
+describe("POST /api/missions/:missionId/status", () => {
+  const post = (app: Hono, id: string, body: unknown) => app.request(`/api/missions/${id}/status`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const authored = (root: string, id: string, status: string) => {
+    const mission = path.join(root, id), slice = path.join(mission, "slices", "intro");
+    fs.mkdirSync(slice, { recursive: true });
+    fs.writeFileSync(path.join(mission, "SPEC.md"), "# Mission\n");
+    fs.writeFileSync(path.join(slice, "slice.yaml"), "kind: slice\n");
+    fs.writeFileSync(path.join(slice, "SPEC.md"), "# Intro\n");
+    fs.writeFileSync(path.join(mission, "mission.yaml"), `kind: mission\nmetadata:\n  name: ${id}\n  status: ${status} # comment kept\ncomposition:\n  slices:\n    - ref: slices/intro/slice.yaml\n      order: 1\n`);
+    return mission;
+  };
+
+  it("writes the word, refreshes the slice list's cached word, and returns what the readers now serve", async () => {
+    const mission = authored(missionsRoot, "authored", "planned");
+    const app = buildAppWithSlices(indexer);
+    const primed = await (await app.request("/api/slices?filter=all")).json() as SidecarBody;
+    expect(primed.missions.authored!.authoredStatus).toBe("planned");
+    const res = await post(app, "authored", { status: "active" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ missionId: "authored", missionPath: mission, status: "active", outcome: "written",
+      served: { status: "active", countsTowardReadiness: true } });
+    const hot = await (await app.request("/api/slices?filter=all")).json() as SidecarBody;
+    expect(hot.missions.authored!.authoredStatus).toBe("active");
+    expect(fs.readFileSync(path.join(mission, "mission.yaml"), "utf8")).toContain("status: active # comment kept");
+    expect(await (await post(app, "authored", { status: "active" })).json()).toMatchObject({ outcome: "unchanged" });
+  });
+
+  it("writes the folder it's named, which needn't be under this daemon's roots, and only a folder named for the mission", async () => {
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "missions-elsewhere-"));
+    try {
+      const mission = authored(elsewhere, "named", "planned");
+      const app = buildApp(indexer);
+      const wrong = await post(app, "other", { status: "active", missionPath: mission });
+      expect(wrong.status).toBe(404);
+      expect(fs.readFileSync(path.join(mission, "mission.yaml"), "utf8")).toContain("status: planned");
+      const res = await post(app, "named", { status: "release-candidate", missionPath: mission });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ missionPath: mission, served: { status: "release-candidate", countsTowardReadiness: true } });
+    } finally {
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it("needs one non-empty line of status, and writes nothing otherwise", async () => {
+    const mission = authored(missionsRoot, "authored", "planned");
+    const app = buildApp(indexer);
+    for (const body of [{}, { status: "  " }, { status: "active\nkind: x" }]) {
+      const res = await post(app, "authored", body);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "status_required" });
+    }
+    expect(fs.readFileSync(path.join(mission, "mission.yaml"), "utf8")).toContain("status: planned # comment kept");
+  });
+
+  it("leaves a mission.yaml it can't parse as it was, and says so", async () => {
+    const mission = authored(missionsRoot, "authored", "planned");
+    const broken = "kind: mission\nmetadata: [unclosed\n";
+    fs.writeFileSync(path.join(mission, "mission.yaml"), broken);
+    const res = await post(buildApp(indexer), "authored", { status: "active", missionPath: mission });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ error: "mission_status_write_failed", message: expect.stringContaining("it can't be parsed") });
+    expect(fs.readFileSync(path.join(mission, "mission.yaml"), "utf8")).toBe(broken);
+  });
+});
