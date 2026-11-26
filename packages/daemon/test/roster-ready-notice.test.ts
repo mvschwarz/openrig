@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { noticeRosterReady } from "../src/domain/roster-ready-notice.js";
+import { isRosterReadyNotice, noticeRosterReady } from "../src/domain/roster-ready-notice.js";
+import { OPENRIG_SENDER } from "../src/lib/pane-envelope.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -14,6 +15,22 @@ describe("roster-ready notice", () => {
     expect(calls[0]!.qitemId).toBe(calls[2]!.qitemId);
     expect(calls[0]!.qitemId).not.toBe(calls[1]!.qitemId);
     expect(calls[0]!.body).toContain("rig whoami");
+  });
+
+  it("is OpenRig's own information-only row: nothing in it asks for a claim, a command or a file", async () => {
+    const create = vi.fn().mockResolvedValue({});
+    await noticeRosterReady({ create }, "rig-one", ["a@team"]);
+    const [input] = create.mock.calls[0]!;
+    // The kind: a plain queue row from OpenRig, woken as OpenRig, that the notice predicate recognises.
+    expect(input).toMatchObject({ sourceSession: OPENRIG_SENDER, destinationSession: "a@team", wakeTrigger: "openrig",
+      tags: ["roster-ready", "rig:rig-one"] });
+    expect(input).not.toHaveProperty("closureRequiredAt");
+    expect(isRosterReadyNotice({ qitem_id: input.qitemId, source_session: input.sourceSession })).toBe(true);
+    // The text: says it's information, names nothing to do, and offers no roster verb or file to reach for.
+    expect(input.summary).toBe("Team seats and edges recorded (information only)");
+    expect(input.body).toMatch(/^Information only; there's nothing to do for this row\./);
+    expect(input.body).toContain("It needs no claim, file or follow-up");
+    expect(`${input.summary}\n${input.body}`).not.toMatch(/roster|\bRun\b/i);
   });
 
   it("reports a failed record while still attempting other seats", async () => {
