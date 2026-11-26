@@ -677,7 +677,8 @@ function buildMissionSetCommand(): Command {
             // A wave written above stays written, so "Nothing was written" would be false.
             const wave = payload.wave as { id: string; outcome: string } | undefined;
             if (err instanceof ScopeCliError && wave?.outcome === "written") {
-              throw new ScopeCliError({ fact: err.fact, consequence: `The status was not written. Wave ${wave.id} was: ${manifestPath}.`, action: err.action });
+              const statusOutcome = err.consequence === "Nothing was written." ? "The status was not written." : err.consequence;
+              throw new ScopeCliError({ fact: err.fact, consequence: `${statusOutcome} Wave ${wave.id} was: ${manifestPath}.`, action: err.action });
             }
             throw err;
           }
@@ -720,7 +721,8 @@ async function writeStatusThroughDaemon(editor: ScopeManifest, mission: MissionI
   if (typeof data.error === "string") {
     throw new ScopeCliError({ fact: `The daemon didn't write the status (${data.error}): ${data.message ?? "no detail"}.`, consequence: "Nothing was written.", action: "Fix the named issue and run this again." });
   }
-  return here(`the running daemon answered ${res.status} without a result`);
+  throw new ScopeCliError({ fact: `The running daemon answered ${res.status} without a status result.`,
+    consequence: "No local fallback was written; the daemon's write outcome is unknown.", action: "Check the daemon's response before trying again." });
 }
 
 // ---------------------------------------------------------------------

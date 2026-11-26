@@ -6,7 +6,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { isMap, isScalar, isSeq, parseDocument, stringify, type Document, type YAMLMap, type YAMLSeq } from "yaml";
 import { resolveNodeFile } from "./node-file.js";
-import { parseFrontmatter } from "../slices/slice-indexer.js";
 import { readMissionReadiness } from "../proof/judgments.js";
 
 export type ManifestEditOutcome = "written" | "unchanged";
@@ -127,7 +126,8 @@ export function setWave(doc: Document, id: string, slices: readonly string[], la
     else return { shapeConflict: `Wave ${id}'s lanes are not a mapping of lane names to lists.` };
     return {};
   }
-  if (isMap(lanes) && !wave.has("slices")) {
+  if (wave.has("lanes")) {
+    if (!isMap(lanes)) return { shapeConflict: `Wave ${id}'s lanes are not a mapping of lane names to lists.` };
     const names = lanes.items.map((pair) => String(isScalar(pair.key) ? pair.key.value : pair.key));
     return { shapeConflict: `Wave ${id} is lane-shaped (lanes: ${names.join(", ") || "none"}), and a slices list beside them would hide them.` };
   }
@@ -151,25 +151,50 @@ export function writeMissionStatus(missionPath: string, status: string): Manifes
   const resolved = resolveNodeFile(missionPath);
   const nodePath = resolved ?? path.join(missionPath, "SPEC.md");
   const original = resolved ? fs.readFileSync(resolved, "utf-8") : "";
-  // Written as YAML writes it, so a `: ` or a leading `#` is quoted and the node file stays readable to its YAML readers
-  // (parseFrontmatter strips the quotes). Function replacements keep `$` patterns in the status and the frontmatter literal.
-  // No block scalars: a status such as `---` stays on its one line, so a rerun replaces all of it.
-  const line = `status: ${stringify(status, { lineWidth: 0, blockQuote: false }).trimEnd()}`;
   let body = original;
-  const fmMatch = body.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (fmMatch) {
-    const fmInner = fmMatch[1] ?? "";
-    // The top-level field only (a nested `status:` under another key stays as it is), and only on its own line: an empty
-    // `status:` must not take the next field with it.
-    const statusLineRegex = /^status[ \t]*:[^\r\n]*$/m;
-    const newFm = statusLineRegex.test(fmInner) ? fmInner.replace(statusLineRegex, () => line) : `${fmInner.trimEnd()}\n${line}`;
-    body = body.replace(fmMatch[0], () => `---\n${newFm}\n---`);
-  } else {
-    body = `---\n${line}\n---\n${body}`;
+  try {
+    const frontmatter = legacyFrontmatter(original);
+    const doc = frontmatter?.doc ?? parseDocument("");
+    const style = { ...asAuthored(original), blockQuote: false as const };
+    const before = doc.toString(style);
+    // Keep the one-line quoting of the status writer, including document separators such as `---`.
+    const statusNode = parseDocument(stringify(status, { lineWidth: 0, blockQuote: false })).contents;
+    const node = doc.get("status", true);
+    if (isScalar(node) && node.value === status) return "unchanged";
+    if (isScalar(node) && isScalar(statusNode)) { node.value = status; node.type = statusNode.type; }
+    else doc.set("status", statusNode);
+    const after = doc.toString(style);
+    if (frontmatter && after === before) return "unchanged";
+    body = `---\n${after.trimEnd()}\n---${frontmatter ? original.slice(frontmatter.end) : `\n${original}`}`;
+  } catch (err) {
+    throw new ManifestEditError(nodePath, err instanceof Error ? err.message : String(err));
   }
   if (resolved && body === original) return "unchanged";
   writeAtomically(nodePath, body);
   return "written";
+}
+
+/** Parse only the YAML header; the Markdown body never goes through a YAML serializer. */
+function legacyFrontmatter(text: string): { doc: Document; end: number } | null {
+  const match = text.match(/^---\r?\n((?:[\s\S]*?\r?\n)?)---(?=\r?\n|$)/);
+  if (!match) {
+    if (/^---\r?\n/.test(text)) throw new Error("the YAML frontmatter has no closing delimiter");
+    return null;
+  }
+  const doc = parseDocument(match[1]!);
+  if (doc.errors.length) throw new Error(`it can't be parsed (${doc.errors[0]!.message})`);
+  if (doc.contents !== null && !isMap(doc.contents)) throw new Error("the YAML frontmatter is not a mapping");
+  return { doc, end: match[0].length };
+}
+
+/** The top-level authored word, with YAML quoting, comments and nesting interpreted as the writer does. */
+export function readLegacyMissionStatus(missionPath: string): string | null {
+  const nodePath = resolveNodeFile(missionPath);
+  if (!nodePath) return null;
+  try {
+    const value = legacyFrontmatter(fs.readFileSync(nodePath, "utf8"))?.doc.get("status");
+    return typeof value === "string" && value.length > 0 ? value : null;
+  } catch { return null; }
 }
 
 /** The status a mission's readers now serve: `metadata.status` as project readiness reads it, else (a legacy mission)
@@ -177,7 +202,5 @@ export function writeMissionStatus(missionPath: string, status: string): Manifes
 export function servedMissionStatus(missionPath: string): { status: string | null; countsTowardReadiness: boolean } {
   const fromManifest = readMissionReadiness(missionPath).historicalStatus;
   if (fromManifest !== null) return { status: fromManifest, countsTowardReadiness: ["active", "release-candidate"].includes(fromManifest) };
-  const nodePath = resolveNodeFile(missionPath);
-  const value = nodePath ? parseFrontmatter(fs.readFileSync(nodePath, "utf8"))["status"] : undefined;
-  return { status: typeof value === "string" && value.length > 0 ? value : null, countsTowardReadiness: false };
+  return { status: readLegacyMissionStatus(missionPath), countsTowardReadiness: false };
 }

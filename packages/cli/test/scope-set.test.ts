@@ -285,3 +285,28 @@ describe("rig scope mission set --status", () => {
     expect(YAML.parse(fs.readFileSync(missionFile(), "utf8")).arrangement.waves).toContainEqual({ id: "w1", slices: ["OPR.1.0.0.1"] });
   });
 });
+
+
+describe("QA: an indeterminate daemon response is not permission to write locally", () => {
+  it.each([500, 503, 200])("reports a %s response without a status result and leaves the manifest untouched", async status => {
+    daemon.status = { state: "running", healthy: true, pid: 1234, port: 7433 };
+    daemon.reply = () => ({ status, data: {} });
+    const before = fs.readFileSync(missionFile(), "utf8");
+    const result = await run(["mission", "set", "release-1.0.0", "--status", "active"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("without a status result");
+    expect(fs.readFileSync(missionFile(), "utf8")).toBe(before);
+  });
+
+  it("retains an unknown status outcome while naming a wave already written", async () => {
+    daemon.status = { state: "running", healthy: true, pid: 1234, port: 7433 };
+    daemon.reply = () => ({ status: 500, data: {} });
+    const result = await run(["mission", "set", "release-1.0.0", "--wave", "w1", "--slices", "OPR.1.0.0.1", "--status", "active"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("the daemon's write outcome is unknown");
+    expect(result.stderr).toContain(`Wave w1 was: ${missionFile()}`);
+    const written = YAML.parse(fs.readFileSync(missionFile(), "utf8"));
+    expect(written.metadata.status).toBe("planned");
+    expect(written.arrangement.waves.some((wave: { id: string }) => wave.id === "w1")).toBe(true);
+  });
+});

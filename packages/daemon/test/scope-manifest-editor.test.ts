@@ -6,6 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import YAML from "yaml";
+import { readMissionStatus } from "../src/routes/missions.js";
 import {
   ManifestEditError,
   clearPlannedOwner,
@@ -232,5 +233,77 @@ describe("mission status", () => {
     expect(fs.readFileSync(path.join(missionPath, "README.md"), "utf8")).toBe("---\nid: OPR.9\nstatus: \"---\"\n---\n# Legacy\n");
     expect(writeMissionStatus(missionPath, "---")).toBe("unchanged");
     expect(servedMissionStatus(missionPath).status).toBe("---");
+  });
+});
+
+
+describe("QA: legacy YAML status edits and ambiguous wave shapes", () => {
+  it.each(["|", ">"])("replaces a legacy block status without leaving its continuation: %s", style => {
+    const missionPath = path.join(dir, "legacy");
+    const original = `---\nid: OPR.9\nstatus: ${style} # old label\n  waiting on the builder\nnotes: keep me\n---\n# Legacy body\n`;
+    const at = file("legacy/SPEC.md", original);
+    expect(writeMissionStatus(missionPath, "active")).toBe("written");
+    const text = fs.readFileSync(at, "utf8");
+    expect(YAML.parse(text.split("---\n")[1]!)).toEqual({ id: "OPR.9", status: "active", notes: "keep me" });
+    expect(text).toContain("# old label");
+    expect(text.endsWith("---\n# Legacy body\n")).toBe(true);
+    expect(writeMissionStatus(missionPath, "active")).toBe("unchanged");
+  });
+
+  it("edits a quoted top-level status once, retaining a nested status", () => {
+    const missionPath = path.join(dir, "legacy");
+    const at = file("legacy/SPEC.md", '---\n"status": planned\nmetadata:\n  status: nested\n---\n# Legacy\n');
+    writeMissionStatus(missionPath, "active");
+    expect(YAML.parse(fs.readFileSync(at, "utf8").split("---\n")[1]!)).toEqual({ status: "active", metadata: { status: "nested" } });
+  });
+
+  it.each(["status: [unterminated", "- planned\n- active"])("leaves unreadable or non-mapping legacy frontmatter untouched: %s", yaml => {
+    const missionPath = path.join(dir, "legacy");
+    const original = `---\n${yaml}\n---\n# Legacy\n`;
+    const at = file("legacy/SPEC.md", original);
+    expect(() => writeMissionStatus(missionPath, "active")).toThrow(ManifestEditError);
+    expect(fs.readFileSync(at, "utf8")).toBe(original);
+  });
+
+  it.each(["[a, b]", "invalid", "{ ui: [one] }\n      slices: [old]"])("does not write slices beside an existing lanes field: %s", lanes => {
+    const original = `arrangement:\n  waves:\n    - id: w1\n      lanes: ${lanes}\n`;
+    const at = file("mission.yaml", original);
+    let conflict: string | undefined;
+    expect(editManifest(at, doc => { conflict = setWave(doc, "w1", ["new"]).shapeConflict; })).toBe("unchanged");
+    expect(conflict).toBeTruthy();
+    expect(fs.readFileSync(at, "utf8")).toBe(original);
+  });
+});
+
+
+describe("QA: legacy status readers use the same YAML field as the writer", () => {
+  it("does not rewrite the bytes or mtime of an already selected quoted status", () => {
+    const missionPath = path.join(dir, "legacy");
+    const original = '---\nstatus: "active" # retain author style\n---\n# Body\n';
+    const at = file("legacy/SPEC.md", original);
+    const before = fs.statSync(at).mtimeMs;
+    expect(writeMissionStatus(missionPath, "active")).toBe("unchanged");
+    expect(fs.readFileSync(at, "utf8")).toBe(original);
+    expect(fs.statSync(at).mtimeMs).toBe(before);
+  });
+
+  it.each(['status: planned # keep this comment', '"status": planned\nmetadata:\n  status: nested'])("serves the newly written top-level word: %s", frontmatter => {
+    const missionPath = path.join(dir, "legacy");
+    file("legacy/SPEC.md", `---\n${frontmatter}\n---\n# Legacy\n`);
+    writeMissionStatus(missionPath, "active");
+    expect(YAML.parse(fs.readFileSync(path.join(missionPath, "SPEC.md"), "utf8").split("---\n")[1]!).status).toBe("active");
+    expect(servedMissionStatus(missionPath).status).toBe("active");
+    expect(readMissionStatus(missionPath)).toBe("active");
+  });
+
+  it("can add a status to an empty YAML header, and preserves an unterminated one", () => {
+    const missionPath = path.join(dir, "legacy");
+    const at = file("legacy/SPEC.md", "---\n---\n# Body\n");
+    expect(writeMissionStatus(missionPath, "active")).toBe("written");
+    expect(fs.readFileSync(at, "utf8")).toBe("---\nstatus: active\n---\n# Body\n");
+    const incomplete = "---\nstatus: planned\n# no closing delimiter\n";
+    fs.writeFileSync(at, incomplete);
+    expect(() => writeMissionStatus(missionPath, "active")).toThrow(ManifestEditError);
+    expect(fs.readFileSync(at, "utf8")).toBe(incomplete);
   });
 });

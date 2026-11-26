@@ -25,7 +25,7 @@
 // null when nothing is declared.
 
 import { Hono, type Context } from "hono";
-import { servedMissionStatus, writeMissionStatus, type ManifestEditOutcome } from "../domain/scope/manifest-editor.js";
+import { readLegacyMissionStatus, servedMissionStatus, writeMissionStatus, type ManifestEditOutcome } from "../domain/scope/manifest-editor.js";
 import { createProofPolicyRead, readMissionReadiness, readSliceReadiness } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -169,12 +169,7 @@ function computeMissionPath(slice: SliceListEntry): string {
  *  the field is absent. Powers the durable storytelling-filter for
  *  Getting Started complete-and-hide. */
 export function readMissionStatus(missionPath: string): string | null {
-  const readmePath = resolveNodeFile(missionPath);
-  if (!readmePath) return null;
-  const raw = fs.readFileSync(readmePath, "utf-8");
-  const fm = parseSimpleFrontmatter(raw);
-  const value = fm["status"];
-  return typeof value === "string" && value.length > 0 ? value : null;
+  return readLegacyMissionStatus(missionPath);
 }
 
 /** V0.3.1 slice 13 walk-item 7 — parse `workflow_spec` from the mission
