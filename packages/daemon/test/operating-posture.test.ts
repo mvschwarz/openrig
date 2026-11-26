@@ -24,6 +24,7 @@ import { healthAuthority } from "../src/domain/health-context.js";
 import { adaptQueueTransitionEvidence, boundHealthEvidence, deriveHealthSourceFreshness } from "../src/domain/health-projection.js";
 import { rigModeRoutes } from "../src/routes/rig-mode.js";
 import { healthRoutes } from "../src/routes/health.js";
+import { attentionRoutes } from "../src/routes/attention.js";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => cleanup.splice(0).reverse().forEach(f => f()));
@@ -431,4 +432,86 @@ it("resolves a workspace's former id from its own project.yaml when there's no c
   expect(result).toMatchObject({ posture: "delegated", binding: { id: "project:alpha" }, context: { projectId: "alpha", workstreamId: "alpha/release/work-1" } });
   expect(result.context!.sources).toContain(join(realpathSync(t.home), "project.yaml") + "#former-id=old-alpha");
   expect(JSON.parse((t.db.prepare("SELECT tags FROM queue_items WHERE qitem_id = 'renamed'").get() as { tags: string }).tags)).toContain("project:old-alpha");
+});
+
+// #3945: a request addressed to a person (<person>@external) has no rig. Its posture reads from its work scope, and no
+// rig identity is looked up for the address.
+it("reads a person-addressed request's posture from its work, never from the address as a rig", async () => {
+  const t = await setup();
+  await t.queue.create({ qitemId: "to-person", sourceSession: "author@demo", destinationSession: "pat@external", body: "Decide", tags: ["project:alpha", "mission:release"], nudge: false });
+  const read = t.service.resolve({ qitemId: "to-person" });
+  expect(read).toMatchObject({ posture: "human-led", source: "product-default", context: { projectId: "alpha", missionId: "release" } });
+  expect(read.context?.rigId).toBeUndefined();
+  // One with no project or mission is still unknown, and says why in plain words, not as a rig fault.
+  await t.queue.create({ qitemId: "to-person-unlinked", sourceSession: "author@demo", destinationSession: "pat@external", body: "Decide", nudge: false });
+  const unlinked = t.service.resolve({ qitemId: "to-person-unlinked" });
+  expect(unlinked.posture).toBe("unknown");
+  expect(unlinked.reason).not.toMatch(/rig identity|^Error:/);
+  expect(unlinked.reason).toContain("no project or mission");
+});
+
+// #3946: archived rigs keep their names. A name resolves to the one live rig that has it; an id still resolves exactly;
+// a name only archived rigs have is reported with their ids to choose from.
+it("resolves a rig name to its live rig when archived rigs share the name, and names the candidates when it can't", async () => {
+  const t = await setup();
+  const old = [t.rigs.createRig("strategic"), t.rigs.createRig("strategic")];
+  for (const rig of old) t.rigs.archiveRig(rig.id);
+  const live = t.rigs.createRig("strategic");
+  expect(t.service.resolve({ rigId: "strategic" })).toMatchObject({ posture: "human-led", source: "product-default", context: { rigId: live.id } });
+  expect(t.service.resolve({ rigId: old[0]!.id })).toMatchObject({ posture: "human-led", context: { rigId: old[0]!.id } });
+  expect((await t.put("delegated", "rig", "strategic")).status).toBe(200);
+  expect(t.service.resolve({ rigId: live.id })).toMatchObject({ posture: "delegated", binding: { id: "rig:" + live.id } });
+  const security = [t.rigs.createRig("security"), t.rigs.createRig("security")];
+  for (const rig of security) t.rigs.archiveRig(rig.id);
+  const archivedOnly = t.service.resolve({ rigId: "security" });
+  expect(archivedOnly.posture).toBe("unknown");
+  for (const rig of security) expect(archivedOnly.reason).toContain(rig.id);
+  expect(archivedOnly.reason).toContain("archived");
+  // Two live rigs with one name stay ambiguous, named the same way.
+  const twins = [t.rigs.createRig("twin"), t.rigs.createRig("twin")];
+  const ambiguous = t.service.resolve({ rigId: "twin" });
+  expect(ambiguous.posture).toBe("unknown");
+  for (const rig of twins) expect(ambiguous.reason).toContain(rig.id);
+});
+
+it("shows a person's request and its work posture in the Feed detail", async () => {
+  const t = await setup();
+  await t.queue.create({ qitemId: "feed-person", sourceSession: "author@demo", destinationSession: "pat@external", body: "Choose the release", tags: ["project:alpha", "mission:release"], nudge: false });
+  const feed = new Hono();
+  feed.use("*", async (c, next) => {
+    c.set("queueRepo" as never, t.queue);
+    c.set("operatingPosture" as never, t.service);
+    await next();
+  });
+  feed.route("/api/attention", attentionRoutes());
+  const read = async () => (await (await feed.request("/api/attention?item=queue:feed-person")).json()).detail;
+  const initial = await read();
+  expect(initial.lines).toContain("Choose the release");
+  expect(initial.lines.find((line: string) => line.startsWith("Posture:"))).toBe("Posture: human-led · No explicit operating posture at this resolved scope; the product default is human-led.");
+  expect((await t.put("delegated", "mission", "alpha/release")).status).toBe(200);
+  expect((await read()).lines).toContain("Posture: delegated · Explicit operating posture at the most specific applicable scope.");
+});
+
+it("reads and sets the live rig by name through the same HTTP route as its exact id", async () => {
+  const t = await setup();
+  for (let i = 0; i < 2; i++) t.rigs.archiveRig(t.rigs.createRig("strategic").id);
+  const live = t.rigs.createRig("strategic");
+  const effective = async (rig: string) => (await (await t.app.request("/api/rig-mode/effective?rig=" + rig)).json()).operatingPosture;
+  const byId = await effective(live.id);
+  expect(byId.posture).toBe("human-led");
+  expect(await effective("strategic")).toEqual(byId);
+  expect((await t.put("delegated", "rig", "strategic")).status).toBe(200);
+  expect(await effective("strategic")).toEqual(await effective(live.id));
+  expect((await effective(live.id)).binding.id).toBe("rig:" + live.id);
+});
+
+it("keeps a sole archived rig addressable by name when no live rig has that name", async () => {
+  const t = await setup();
+  const archived = t.rigs.createRig("retired");
+  t.rigs.archiveRig(archived.id);
+  const byId = t.service.resolve({ rigId: archived.id });
+  expect(byId.posture).toBe("human-led");
+  expect(t.service.resolve({ rigId: "retired" })).toEqual(byId);
+  expect((await t.put("delegated", "rig", "retired")).status).toBe(200);
+  expect(t.service.resolve({ rigId: archived.id }).binding?.id).toBe("rig:" + archived.id);
 });
