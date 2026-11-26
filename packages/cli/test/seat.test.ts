@@ -130,7 +130,9 @@ describe("seat typing guard commands", () => {
   it.each([
     { origin: "launched", line: "Origin: launched by OpenRig" },
     { origin: "claimed", line: "Origin: adopted (origin=claimed): OpenRig didn't launch this session, so stop, restart and clean refuse it" },
-    { origin: null, line: null },
+    { origin: null, line: "Origin: unknown" },
+    { origin: undefined, line: null },
+    { origin: "unreadable", line: "Origin: unknown" },
   ])("#4003: seat status names the seat's origin ($origin)", async ({ origin, line }) => {
     const human = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: { ...STATUS, origin } }, []))
       .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));

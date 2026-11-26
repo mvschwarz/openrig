@@ -235,9 +235,9 @@ export class SeatStatusService {
     if (!file) return {};
     let session: GuidanceSession | null = null;
     try {
-      const row = db.prepare("SELECT origin, created_at, startup_completed_at FROM sessions WHERE node_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      const row = db.prepare("SELECT origin, created_at, startup_completed_at FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
         .get(entry.nodeId) as { origin: string; created_at: string | null; startup_completed_at: string | null } | undefined;
-      if (row) session = { origin: row.origin === "claimed" ? "claimed" : "launched", createdAt: row.created_at, startupCompletedAt: row.startup_completed_at };
+      if (row && (row.origin === "claimed" || row.origin === "launched")) session = { origin: row.origin, createdAt: row.created_at, startupCompletedAt: row.startup_completed_at };
     } catch { /* no session to place the blocks against: they read unknown */ }
     return { guidance: readGuidanceProjection({ db, file, runtime: entry.runtime, session }) };
   }
@@ -254,9 +254,9 @@ export class SeatStatusService {
    *  refuse those); null with no session, or when the record can't be read. */
   private sessionOrigin(nodeId: string): "launched" | "claimed" | null {
     try {
-      const row = this.rigRepo.db.prepare("SELECT origin FROM sessions WHERE node_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      const row = this.rigRepo.db.prepare("SELECT origin FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
         .get(nodeId) as { origin: string | null } | undefined;
-      return row ? (row.origin === "claimed" ? "claimed" : "launched") : null;
+      return row?.origin === "claimed" || row?.origin === "launched" ? row.origin : null;
     } catch { return null; }
   }
 

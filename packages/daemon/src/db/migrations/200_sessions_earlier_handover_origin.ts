@@ -1,22 +1,36 @@
 import type { Migration } from "../migrate.js";
 
-/** #4003: before 0.7.9, a handover OpenRig launched (fresh, fork or rebuild) registered its successor through the
- *  adoption path, so the session reads origin=claimed, and stop, restart, clean and `rig down` treat it as a session
- *  OpenRig didn't launch. From 0.7.9 such a successor is recorded as launched (#2440). This records the earlier ones the
- *  same way: the seat's latest session, origin claimed and not released (detached), whose node's last handover completed
- *  as fresh, forked or rebuilt, created no later than a minute after that handover completed. The successor is registered
- *  in the handover's own commit, so a session adopted later is newer; an unreadable time leaves the row as it is.
- *  The same rule names this case at the refusals that remain (SeatLifecycleService.earlierHandoverRefusal). Data only. */
+/** The pre-0.7.9 successor registration and its handover tenure were written together. A timestamp window alone is not
+ *  identity: a later adoption can be inside it. Require the current handover tenure, one uniquely matching registration
+ *  at its SQLite boot timestamp, and the completed launched handover. Missing, unreadable or ambiguous evidence proves
+ *  nothing. Keep this SELECT shared with the explanation for an earlier successor that was subsequently released.
+ *  A registration crossing a SQLite second boundary is deliberately not repaired without an exact retained link. */
+export const earlierHandoverSuccessorQuery = `
+  SELECT s.id AS session_id, n.id AS node_id, n.continuity_outcome, n.handover_at
+    FROM nodes n JOIN sessions s ON s.node_id = n.id
+    JOIN occupant_tenures t ON t.node_id = n.id
+   WHERE n.handover_result = 'complete' AND n.continuity_outcome IN ('fresh', 'forked', 'rebuilt')
+     AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
+     AND t.generation_ordinal = (SELECT MAX(t2.generation_ordinal) FROM occupant_tenures t2 WHERE t2.node_id = n.id)
+     AND t.kind = 'handover'
+     -- These are retained instants, not SQLite relative values such as 'now'.
+     AND s.created_at GLOB '????-??-??[ T]??:??:??*'
+     AND t.boot_at GLOB '????-??-??[ T]??:??:??*'
+     AND n.handover_at GLOB '????-??-??[ T]??:??:??*'
+     AND julianday(s.created_at) = julianday(t.boot_at)
+     -- handover_at has milliseconds; SQLite's registration/boot timestamps truncate to seconds.
+     AND julianday(t.boot_at) BETWEEN julianday(n.handover_at) - 1.0 / 86400.0 AND julianday(n.handover_at) + 60.0 / 86400.0
+     AND NOT EXISTS (SELECT 1 FROM sessions other WHERE other.node_id = n.id AND other.id != s.id
+       AND julianday(other.created_at) = julianday(t.boot_at))
+`;
+
+/** #4003: apply #2440's launched origin to the earlier successors its own records establish. Data only, once by full
+ *  migration name. A genuinely adopted session, or one whose origin cannot be established, keeps origin=claimed. */
 export const sessionsEarlierHandoverOriginSchema: Migration = {
   name: "200_sessions_earlier_handover_origin.sql",
   sql: `
     UPDATE sessions SET origin = 'launched'
      WHERE origin = 'claimed' AND status != 'detached'
-       AND id IN (
-         SELECT s.id FROM sessions s JOIN nodes n ON n.id = s.node_id
-          WHERE n.handover_result = 'complete' AND n.continuity_outcome IN ('fresh', 'forked', 'rebuilt')
-            AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.created_at DESC, s2.rowid DESC LIMIT 1)
-            AND julianday(s.created_at) <= julianday(n.handover_at) + 60.0 / 86400.0
-       );
+       AND id IN (SELECT session_id FROM (${earlierHandoverSuccessorQuery}));
   `,
 };

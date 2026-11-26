@@ -281,7 +281,7 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Rig: ${status.rig_name}`);
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
-  if (status.origin) console.log(`Origin: ${status.origin === "claimed" ? "adopted (origin=claimed): OpenRig didn't launch this session, so stop, restart and clean refuse it" : "launched by OpenRig"}`);
+  if (status.origin !== undefined) console.log(`Origin: ${status.origin === "claimed" ? "adopted (origin=claimed): OpenRig didn't launch this session, so stop, restart and clean refuse it" : status.origin === "launched" ? "launched by OpenRig" : "unknown"}`);
   if (status.nativeInput?.unresolved?.length) {
     console.log(`Native request evidence: ${terminalJson(status.nativeInput.unresolved)}`);
     if (status.nativeInput.recovery) console.log(status.nativeInput.recovery);
@@ -1885,9 +1885,10 @@ underlying tmux session, including any remaining shell. Closing only its
 viewing window leaves the tmux session running. rig down <rig> leaves a
 session OpenRig didn't start running.
 A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 was recorded as
-adopted; OpenRig launched it, and the upgrade to this version records it as
-launched, so it stops like any other seat. rig seat status shows each seat's
-origin. Stopping ends that agent's session and any work in progress:
+adopted. Where retained handover records identify its successor unambiguously,
+the upgrade records it as launched, so it stops like any other launched seat.
+Missing or ambiguous records keep the adopted origin. rig seat status shows
+each seat's recorded origin. Stopping ends that agent's session and any work in progress:
 check it first (rig capture <seat>) and stop only a seat you own or were asked to
 stop. rig seat launch <seat> --fresh --reason <text> starts
 a fresh occupant there; it does not resume the stopped conversation.

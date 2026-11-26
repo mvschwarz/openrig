@@ -1,3 +1,4 @@
+import { earlierHandoverSuccessorQuery } from "../db/migrations/200_sessions_earlier_handover_origin.js";
 import { validateStatuslineThrottle } from "./claude-statusline-throttle.js";
 import { communityHarnessOf, isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
@@ -2803,17 +2804,11 @@ export class SeatLifecycleService {
     return row ?? null;
   }
 
-  /** From 0.7.9 a fresh, fork or rebuild handover records its successor as launched (#2440), and migration 200 records the
-   *  earlier ones that way at upgrade (#4003). One still reading claimed here was released (detached) since. Name that case
-   *  rather than suggest `rig unclaim`, which would end OpenRig's management. Only the handover's own successor counts:
-   *  registered in its commit, so created no later than a minute after it completed, the rule migration 200 applies; a
-   *  session adopted later is newer and gets the ordinary routes. */
+  /** Migration 200 repairs established earlier successors. A released one still reads claimed; explain that case only
+   *  from the same positive evidence, never merely because this node had some earlier handover. */
   private earlierHandoverRefusal(nodeId: string, session: { id: string; session_name: string }, refuses: string): SeatRefusal | null {
-    if (this.latestSession(nodeId)?.id !== session.id) return null;
     const handover = this.db.prepare(
-      `SELECT n.continuity_outcome, n.handover_at FROM nodes n JOIN sessions s ON s.id = ? AND s.node_id = n.id
-        WHERE n.id = ? AND n.handover_result = 'complete' AND n.continuity_outcome IN ('fresh', 'forked', 'rebuilt')
-          AND julianday(s.created_at) <= julianday(n.handover_at) + 60.0 / 86400.0`,
+      `SELECT continuity_outcome, handover_at FROM (${earlierHandoverSuccessorQuery}) WHERE session_id = ? AND node_id = ?`,
     ).get(session.id, nodeId) as { continuity_outcome: string; handover_at: string | null } | undefined;
     if (!handover) return null;
     return {

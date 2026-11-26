@@ -636,6 +636,7 @@ describe("SeatLifecycleService", () => {
     db.prepare("UPDATE nodes SET continuity_outcome = ?, handover_result = 'complete', handover_at = ? WHERE id = ?")
       .run(outcome, "2026-11-01T10:00:00.000Z", nodeId);
     db.prepare("UPDATE sessions SET created_at = '2026-11-01 10:00:00' WHERE node_id = ?").run(nodeId);
+    db.prepare("UPDATE occupant_tenures SET kind = 'handover', boot_at = '2026-11-01 10:00:00' WHERE node_id = ?").run(nodeId);
   }
 
   it.each(["fresh", "forked", "rebuilt"])("a seat handed over (%s) before 0.7.9 is refused as that case, never pointed at rig unclaim", async (outcome) => {
