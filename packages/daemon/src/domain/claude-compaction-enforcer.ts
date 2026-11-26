@@ -4,7 +4,7 @@ import { TerminalPolicyRefusal } from "./terminal-policy.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { CAPTURE_READABLE_BUDGET_MS, SEND_READINESS_FRESHNESS_MS, type SessionTransport, type SendResult } from "./session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
-import { postCompactExtraSetting } from "./managed-restore-read-access.js";
+import { compactionPacketRoot, postCompactExtraSetting } from "./managed-restore-read-access.js";
 import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import * as os from "node:os";
@@ -412,9 +412,9 @@ export function buildPostCompactRestorePrompt(input: {
   if (input.transcriptPath) {
     pieces.push(`If the marker is missing and you have no restore map, rebuild a packet from this Claude JSONL transcript: ${input.transcriptPath}.`);
   } else if (input.sessionId) {
-    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under /tmp/claude-compaction-restore/ for session id ${input.sessionId}.`);
+    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot(input.openrigHome)}/ for session id ${input.sessionId}.`);
   } else {
-    pieces.push("If the marker is missing and you have no restore map, inspect the newest matching packet under /tmp/claude-compaction-restore/ for this Claude session.");
+    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot(input.openrigHome)}/ for this Claude session.`);
   }
   const inlineInstruction = input.postCompactInstruction?.trim();
   const instructionFilePath = input.postCompactInstructionFilePath?.trim();
