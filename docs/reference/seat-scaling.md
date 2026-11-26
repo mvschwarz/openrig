@@ -1,12 +1,14 @@
 # Managed seat scaling (idle-seat reaping)
 
 The daemon can reclaim the memory of a seat that has been provably idle for hours.
-It does this by **stopping** the seat through the existing checked-stop path — never
-by deleting anything. This is the local half of the architecture described in
-[mvschwarz/openrig#2829](https://github.com/mvschwarz/openrig/issues/2829): idle
-seats are reaped here and cold-started back on demand by a separate change
-(queue-driven cold start). That return path is **not** part of this feature, so
-reaping stays behind a disabled-by-default kill switch until it lands.
+It does this by **stopping** the seat into standby through the existing checked-stop
+path — never by deleting anything. A standby stop keeps the conversation, the session
+file and the pane: the seat has no running process, and it starts again in its exact
+conversation when real queued work (a qitem, a handoff, or a timed wake attached to
+real parked work) reaches it. This is the stop-and-start pair described in
+[mvschwarz/openrig#2829](https://github.com/mvschwarz/openrig/issues/2829), built on
+the queue-driven cold start. Reaping stays behind a disabled-by-default kill switch;
+the standby return path and seat status are part of this feature.
 
 The reaper is conservative by construction: it reaps only when every predicate
 below holds continuously for the whole threshold, and any doubt (unknown
