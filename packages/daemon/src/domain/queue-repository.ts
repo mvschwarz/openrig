@@ -89,7 +89,7 @@ import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
-import { isEpisodeRelay, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RELAY_TAG } from "./return-route.js";
+import { isEpisodeRelay, isIssuedConversationAddress, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RELAY_TAG } from "./return-route.js";
 import { runnerPermissionOrigin } from "./runner-permissions.js";
 import { isHostPairingAsk } from "./hosts/pairing-ask.js";
 import { renderRelayedAnswers, type DirectAnswer, type RelayJournal, type RelayAnswerWrite, type RelayedAnswerReceipt, type ReturnedRelayAnswer } from "./relayed-answers.js";
@@ -6400,7 +6400,14 @@ export class QueueRepository {
       hostedWake: (dest) => this.hostedWakeFn(dest),
       isHostedMember: (dest) => this.hostedMemberFn(dest),
       hostedCheckIn: (dest) => this.hostedMemberCheckIn(dest),
+      isIssuedConversation: (dest) => this.isIssuedConversation(dest),
     });
+  }
+
+  /** Whether OpenRig issued this address to a person's own conversation here (#3964): its work waits for that conversation
+   *  to read it, as a polling hosted member's does. An unreadable record reads false, so the address stays reported. */
+  isIssuedConversation(destination: string): boolean {
+    return this.hasReturnRouteColumn && isIssuedConversationAddress(this.db, destination);
   }
 
   /** OPR.0.5.6.14 — terminal transport is a CAPABILITY, not topology presence.
