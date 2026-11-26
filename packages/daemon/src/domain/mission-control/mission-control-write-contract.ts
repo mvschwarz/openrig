@@ -226,6 +226,12 @@ export class MissionControlWriteContract {
     }
 
     const source = this.requireMutableQitem(input.qitemId);
+    // Dismiss closes only an informational update addressed to a person; a request is answered, never dismissed.
+    if (input.verb === "dismiss" && (source.humanIntent !== "update" || !isHumanSeatSessionRef(source.destinationSession))) {
+      throw new MissionControlWriteContractError("not_an_update",
+        `qitem ${input.qitemId} isn't an informational update addressed to a person, so it can't be dismissed; nothing was written.`,
+        { qitemId: input.qitemId, state: source.state });
+    }
     // Whose ask this settles: the person a row is parked on, else a person it's addressed to.
     const parkedOn = source.state === "blocked" && source.blockedOn && isHumanSeatSessionRef(source.blockedOn) ? source.blockedOn : null;
     const asked = parkedOn ?? (this.queueRepo.isPersonAddress(source.destinationSession) ? source.destinationSession : null);
@@ -947,9 +953,10 @@ export class MissionControlWriteContract {
     // The terminal names no responder, whatever it claims and whoever is registered: the act is unattributed.
     const actor = UNNAMED_PRIMARY_USER;
     const auditNotes = { ...input.auditNotes, authority: "primary-user", asked };
+    const row = input.verb === "dismiss" ? "update" : "ask";
     const note = !asked || asked === actor ? ""
-      : actor === UNNAMED_PRIMARY_USER ? `; by someone at the terminal OpenRig can't name (${UNNAMED_PRIMARY_USER}), unattributed, on ${asked}'s ask`
-      : `; by ${actor}, the primary user at the terminal, on ${asked}'s ask`;
+      : actor === UNNAMED_PRIMARY_USER ? `; by someone at the terminal OpenRig can't name (${UNNAMED_PRIMARY_USER}), unattributed, on ${asked}'s ${row}`
+      : `; by ${actor}, the primary user at the terminal, on ${asked}'s ${row}`;
     return { input: { ...input, actorSession: actor, auditNotes }, note };
   }
 
@@ -1016,6 +1023,12 @@ function verbToClosure(input: MissionControlActionInput): ClosureMapping {
         closureReason: "blocked_on",
         closureTarget: input.reason!,
         blockedOn: input.reason!,
+      };
+    case "dismiss":
+      return {
+        state: "done",
+        closureReason: "no-follow-on",
+        closureTarget: input.reason ?? "dismissed",
       };
     case "drop":
       return {

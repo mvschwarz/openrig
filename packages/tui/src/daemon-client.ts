@@ -491,8 +491,8 @@ export class DaemonClient {
       headers: { ...this.actionHeaders, "Content-Type": "application/json" }, body: JSON.stringify({ request, decision }), signal: AbortSignal.timeout(10_000) });
     return { status: res.status, body: await res.json().catch(() => null) as Record<string, unknown> | null };
   }
-  /** The mission-control write Steering uses to answer a request (POST /api/mission-control/action). */
-  missionControlAction(input: { verb: "approve" | "answer" | "resolve"; qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string; authority?: "primary-user" }) {
+  /** The mission-control write Steering uses to answer a request, or to dismiss an update (POST /api/mission-control/action). */
+  missionControlAction(input: { verb: "approve" | "answer" | "resolve" | "dismiss"; qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string; authority?: "primary-user" }) {
     return this.post("/api/mission-control/action", input, { headers: this.actionHeaders, unauthorized: ACTION_UNAUTHORIZED }) as Promise<{ verb: string; qitemId: string; closedQitem: unknown;
       answer?: { outcome: "recorded" | "answered"; unanswered: string[]; message?: string } }>;
   }

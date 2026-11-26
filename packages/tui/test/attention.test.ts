@@ -182,6 +182,24 @@ it("answers a question ask from its request view: an act per open option, reply 
   expect(replyAct(read, null, "words")).toMatchObject({ type: "notice" });
 });
 
+it("dismisses an open informational update from its detail, as the terminal's act; a closed one offers nothing", () => {
+  const update = { id: "queue-update:fyi", kind: "update" as const, summary: "Build finished", unblocks: null, urgency: "routine", at: "2026-11-20T12:00:00Z",
+    scope: "instance · project unknown", project: null, source: "/api/queue/fyi", recipient: "parkingmeter@external", dismiss: { actorSession: "parkingmeter@external" } };
+  const detailOf = (item: AttentionItem) => {
+    const snap: FleetSnapshot = { ...emptySnapshot(), attentionRead: { scope: "instance", readAt: update.at, items: [item], sources: [], detail: { item, lines: ["State: pending"], files: [] }, detailError: null } };
+    const view = createViewState({ instanceId: "attention-dismiss", getSnapshot: () => snap });
+    view.dispatch({ type: "attention-open", id: item.id });
+    return attentionLines(view.get(), snap, 200);
+  };
+  const lines = detailOf(update);
+  const dismiss = lines.find(l => l.action?.type === "act");
+  expect(dismiss?.text).toContain("Dismiss update as human@host (unattributed) on parkingmeter@external's behalf (closes it; not approval, proof of delivery or a reply)");
+  expect(dismiss?.action).toEqual({ type: "act", act: "answer", qitemId: "fyi", verb: "dismiss", actorSession: "parkingmeter@external" });
+  expect(answerRequest(dismiss!.action as Extract<Action, { type: "act"; act: "answer" }>))
+    .toEqual({ qitemId: "fyi", verb: "dismiss", actorSession: "parkingmeter@external", authority: "primary-user" });
+  expect(detailOf({ ...update, dismiss: undefined }).some(l => l.action?.type === "act")).toBe(false);
+});
+
 it("sends an answer act's choice or words in the one mission-control write", async () => {
   const bodies: unknown[] = [];
   const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async (_url, init) => {

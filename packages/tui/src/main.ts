@@ -500,7 +500,8 @@ async function run(): Promise<void> {
       } else if (action.act === "answer") {
         const result = await client.missionControlAction(answerRequest(action));
         const actor = actingAs(snapshot.attentionRead, action.actorSession);
-        view.dispatch({ type: "notice", message: action.verb === "resolve" ? `Resolved ${action.qitemId} as ${actor}: it's unparked for its owner, with your decision.`
+        view.dispatch({ type: "notice", message: action.verb === "dismiss" ? `Dismissed ${action.qitemId} as ${actor}: the update is closed; its body and history stay in its record.`
+          : action.verb === "resolve" ? `Resolved ${action.qitemId} as ${actor}: it's unparked for its owner, with your decision.`
           : action.verb === "approve"
           // A runner's permission request says what became of the answer: handed to its receiving agent, or kept.
           ? result.answer?.message ?? `Approved ${action.qitemId} as ${actor}: the request is closed on its own row.`
@@ -510,7 +511,9 @@ async function run(): Promise<void> {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (action.act === "open-terminal") view.dispatch({ type: "terminal-result", view: action.view, message });
-      view.dispatch({ type: "notice", message: action.act === "open-terminal" ? `Terminal view not confirmed\n${message}` : message });
+      view.dispatch({ type: "notice", message: action.act === "open-terminal" ? `Terminal view not confirmed\n${message}`
+        // A repeat or stale dismiss changes nothing; the refreshed detail shows the update's actual state.
+        : action.act === "answer" && action.verb === "dismiss" ? `Not dismissed, nothing changed: ${message}. The update's detail shows its current state.` : message });
     } finally {
       if (action.act === "open-terminal") openingTerminal = false;
     }
