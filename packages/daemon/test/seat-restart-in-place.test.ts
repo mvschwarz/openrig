@@ -502,14 +502,14 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     expect((kept as { settings: { note: string } }).settings.note).toContain("effort included");
   });
 
-  it("doesn't count OpenRig's own launch guidance as drift: the resume carries the current guidance, and the plan says so", async () => {
-    // The running Codex started with OpenRig's earlier guidance (as before an upgrade); the relaunch builds the current one.
+  it("doesn't refuse a changed developer_instructions override, and reports that it is not preserved", async () => {
+    // The running Codex started with earlier guidance; this in-place relaunch does not rebuild it.
     const earlier = `-m gpt-5.5 -c developer_instructions="earlier-openrig-guidance" -s workspace-write resume ${TOKEN}`;
     const w = world({ runningArgs: earlier });
     const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
     expect(plan).toMatchObject({ ok: true });
     expect((plan as { settings: { note: string } }).settings.note)
-      .toContain("OpenRig's launch guidance (developer_instructions) has changed since this Codex started, such as after an OpenRig upgrade");
+      .toContain("The observed developer_instructions command-line override changes on restart");
     expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "adopt the new openrig-core" }))
       .toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
     // A setting someone chose still refuses beside it, and the guidance isn't named.
@@ -521,6 +521,30 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     // Unchanged guidance adds nothing to the note.
     const same = await world().service.restartInPlace({ seatRef: SEAT, plan: true });
     expect((same as { settings: { note: string } }).settings.note).not.toContain("launch guidance");
+  });
+
+  it.each(["earlier-openrig-guidance", "person-chosen-guidance"])("reports the observed %s override changing through the real resume builder", async (value) => {
+    const w = world({ realResumeBuilder: "without_env",
+      runningArgv: ["/usr/local/bin/codex", "-m", "gpt-5.5", "-s", "workspace-write", "-c", "check_for_update_on_startup=false",
+        "-c", `developer_instructions=${JSON.stringify(value)}`, "resume", TOKEN] });
+    const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(plan).toMatchObject({ ok: true });
+    const restarted = await w.service.restartInPlace({ seatRef: SEAT, reason: "adopt the updated installation" });
+    expect(restarted).toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    expect((restarted as { settings: { note: string } }).settings.note).toBe((plan as { settings: { note: string } }).settings.note);
+    expect(w.launches).toHaveLength(1);
+    expect(w.launches[0]!.command).not.toContain("developer_instructions");
+    expect(w.launches[0]!.resumeToken).toBe(TOKEN);
+    expect((plan as { settings: { note: string } }).settings.note).toContain("The observed developer_instructions command-line override changes on restart");
+    expect((plan as { settings: { note: string } }).settings.note).not.toContain("resume carries the current guidance");
+  });
+
+  it.each(["developer_instructions_extra", "prefix_developer_instructions", "developer_instructions.nested"])("still compares the distinct config key %s", async (key) => {
+    const w = world({ runningArgv: ["/usr/local/bin/codex", "-m", "gpt-5.5", "-s", "workspace-write",
+      "-c", 'developer_instructions="earlier-openrig-guidance"', "-c", `${key}="keep-me"`, "resume", TOKEN] });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true }))
+      .toMatchObject({ ok: false, code: "settings_drift", detail: { differs: [`config ${key}`] } });
+    expect(w.launches).toEqual([]);
   });
 
   it("refuses drift in home and cwd, naming each", async () => {

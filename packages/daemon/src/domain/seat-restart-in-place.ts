@@ -577,12 +577,13 @@ export class CodexInPlaceRestart {
     };
     effort.changes = effort.running !== effort.relaunch;
     const applyChoice = effort.changes && effort.source === "seat_choice";
-    // OpenRig's own launch guidance isn't a setting anyone chose: OpenRig builds `-c developer_instructions` from the
-    // seat's startup blocks, and sends none when a Codex config layer sets one. A relaunch carries the current guidance,
-    // as `rig up --existing` does, so an upgrade's new guidance never refuses the restart.
-    const guidanceChanges = settingsDrift(effective, relaunched).includes(OPENRIG_GUIDANCE_DRIFT);
+    // Managed launches use `-c developer_instructions` for startup guidance, but observed argv doesn't prove its author:
+    // a manual resume can carry a person's override too. This restart doesn't rebuild startup guidance or preserve that
+    // override. Let the restart proceed, and name the change in its plan/result instead of claiming ownership or retention.
+    const changedSettings = settingsDrift(effective, relaunched);
+    const guidanceChanges = changedSettings.includes(DEVELOPER_INSTRUCTIONS_DRIFT);
     const drift = [
-      ...settingsDrift(effective, relaunched).filter((key) => (key !== "effort" || !applyChoice) && key !== OPENRIG_GUIDANCE_DRIFT),
+      ...changedSettings.filter((key) => (key !== "effort" || !applyChoice) && key !== DEVELOPER_INSTRUCTIONS_DRIFT),
       ...(facts.cwd && facts.cwd !== cwd ? ["cwd"] : []),
       ...(relaunchHome !== codexHome ? ["codex home"] : []),
     ];
@@ -610,7 +611,7 @@ export class CodexInPlaceRestart {
         note: (applyChoice
           ? `The restart keeps the settings the running Codex uses (effective), except effort: it sends the seat's saved effort choice ${effort.relaunch} in place of ${effort.running ?? "no flag"}. Other saved choices are shown, not applied.`
           : "The restart keeps the settings the running Codex uses (effective), effort included. Saved choices for the next managed launch are shown, not applied.")
-          + (guidanceChanges ? " OpenRig's launch guidance (developer_instructions) has changed since this Codex started, such as after an OpenRig upgrade; the resume carries the current guidance, as rig up --existing does." : "") },
+          + (guidanceChanges ? " The observed developer_instructions command-line override changes on restart; it is not preserved. This in-place restart does not rebuild startup guidance. Use rig down, then rig up --existing for the normal restore path." : "") },
       codexHome,
       codexNoDaemonFlag: running.daemonOptOut
         ? { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." }
@@ -1101,8 +1102,8 @@ export function parseEffectiveSettings(argv: string[]): EffectiveSettings {
   return settings;
 }
 
-/** OpenRig's own launch guidance, as settingsDrift names it: never a setting the restart keeps. */
-const OPENRIG_GUIDANCE_DRIFT = "config developer_instructions";
+/** The one command-line override exempted from drift refusal; its ownership is not inferred from its key. */
+const DEVELOPER_INSTRUCTIONS_DRIFT = "config developer_instructions";
 
 /** Which settings differ. Config overrides are named by key only; their values may be paths. */
 function settingsDrift(running: EffectiveSettings, relaunch: EffectiveSettings): string[] {
