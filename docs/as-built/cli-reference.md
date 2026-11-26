@@ -325,7 +325,7 @@ runtime.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig bundle` | — | — |
-| `rig bundle create <spec>` | — | `-o, --output <path>` **required**<br>`--name <name>`<br>`--bundle-version <ver>`<br>`--include-login-files`<br>`--include-packages <refs...>`<br>`--rig-root <root>`<br>`--context-pack <dir>` (repeatable)<br>`--project-dir <dir>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--notes <text>`<br>`--min-daemon-version <ver>`<br>`--min-cli-version <ver>`<br>`--allow-drift`<br>`--json` |
+| `rig bundle create <spec>` | — | `-o, --output <path>` **required**<br>`--name <name>`<br>`--bundle-version <ver>`<br>`--include-login-files`<br>`--include-packages <refs...>`<br>`--rig-root <root>`<br>`--context-pack <dir>` (repeatable)<br>`--project-dir <dir>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--notes <text>`<br>`--include-builder-identity`<br>`--min-daemon-version <ver>`<br>`--min-cli-version <ver>`<br>`--allow-drift`<br>`--json` |
 | `rig bundle configurations <spec>` | — | `--json` |
 | `rig bundle inspect <path>` | — | `--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--json` |
 | `rig bundle install <path>` | — | `--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--non-interruptive`<br>`--no-non-interruptive`<br>`--plan`<br>`--yes`<br>`--target <root>`<br>`--cwd <path>`<br>`--skip-version-check`<br>`--force`<br>`--json` |
@@ -478,7 +478,7 @@ do not establish connectivity to a live peer.
 | `rig mcp` | — | — |
 | `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>`<br>`--front-door`<br>`--task-destination <seat>` |
 | `rig mcp token` | — | — |
-| `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner`<br>`--person <entity_id>` |
+| `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner`<br>`--allow <object:actions>` (repeatable)<br>`--person <entity_id>` |
 | `rig mcp token list` | — | `--json` |
 | `rig mcp token revoke <name>` | — | — |
 
@@ -653,7 +653,7 @@ As with the other stages that have no automatic work, work a reader linked with 
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig terminal` | — | — |
-| `rig terminal open [view]` | — | `--all`<br>`--provider <name>`<br>`--session <name>`<br>`--window`<br>`--app-home <dir>`<br>`--expected-plan <id>`<br>`--follow`<br>`--no-follow`<br>`--max-tiles <count>`<br>`--pin <seats...>`<br>`--unpin <seats...>`<br>`--suppress <seats...>`<br>`--unsuppress <seats...>`<br>`--suppression-ms <ms>`<br>`--grace-ms <ms>`<br>`--focus-retention-ms <ms>`<br>`--json` |
+| `rig terminal open [view]` | — | `--all`<br>`--provider <name>`<br>`--orca-workspace <selector>`<br>`--session <name>`<br>`--window`<br>`--app-home <dir>`<br>`--expected-plan <id>`<br>`--follow`<br>`--no-follow`<br>`--max-tiles <count>`<br>`--pin <seats...>`<br>`--unpin <seats...>`<br>`--suppress <seats...>`<br>`--unsuppress <seats...>`<br>`--suppression-ms <ms>`<br>`--grace-ms <ms>`<br>`--focus-retention-ms <ms>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
 | `rig terminal close [view]` | — | `--all`<br>`--provider <name>`<br>`--session <name>`<br>`--app-home <dir>`<br>`--json` |
 | `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--app-home <dir>`<br>`--json` |
@@ -686,7 +686,7 @@ herdr-app views (`--provider herdr-app`, plain `rig terminal open <view>` inside
 | `rig workflow revise <instanceId>` | — | `--apply`<br>`--expected-version <number>`<br>`--expected-digest <sha256>`<br>`--operation-key <key>`<br>`--actor-session <session>`<br>`--reason <text>`<br>`--json` |
 | `rig workflow operation <key>` | — | `--json` |
 | `rig workflow instantiate-lifecycle <missionPath>` | — | `--operation-key <key>` **required**<br>`--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--json` |
-| `rig workflow instantiate <specPath>` | — | `--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--pod <name>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--tags <tags>`<br>`--json` |
+| `rig workflow instantiate <specPath>` | — | `--root-objective <text>` **required**<br>`--title <text>`<br>`--created-by <session>` **required**<br>`--operation-key <key>`<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--pod <name>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--tags <tags>`<br>`--json` |
 | `rig workflow project` | — | `--instance <id>` **required**<br>`--current-packet <qitem-id>` **required**<br>`--exit <kind>` **required**<br>`--actor-session <session>` (only when the caller's session can't be derived)<br>`--result-note <text>`<br>`--evidence-ref <ref>`<br>`--wait-for-proof <scope>`<br>`--blocked-on <ref>`<br>`--next-owner <session>`<br>`--acceptance-candidate <identity>`<br>`--acceptance-verdict <verdict>`<br>`--acceptance-evidence-ref <path>`<br>`--json` |
 | `rig workflow list` | — | `--status <s>`<br>`--json` |
 | `rig workflow specs` | — | `--json` |
@@ -931,7 +931,7 @@ It drives the maintained OpenShell reference; see the [OpenShell example](../ref
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig provider` | — | — |
-| `rig provider status` | — | `--json`<br>`--refresh`<br>`--provider <p>`<br>`--claude-token-file <path>`<br>`--credential-label <label>`<br>`--all-hosts`<br>`--hosts <ids>` |
+| `rig provider status` | — | `--json`<br>`--refresh`<br>`--provider <p>`<br>`--claude-token-file <path>`<br>`--credential-label <label>`<br>`--all-hosts`<br>`--hosts <ids>`<br>`--host <id>` |
 | `rig provider accounts` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider bindings` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
@@ -939,6 +939,11 @@ It drives the maintained OpenShell reference; see the [OpenShell example](../ref
 | `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>`<br>`--token-file <path>`<br>`--api-key-file <path>`<br>`--stored-login`<br>`--force-unsafe`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--reason <text>`<br>`--model <id>`<br>`--codex-config-profile <name>`<br>`--dry-run`<br>`--json` |
 | `rig provider moves` | — | `--seat <seat>`<br>`--limit <n>`<br>`--json` |
 | `rig provider moves report` | — | `--file <path>` **required**<br>`--to <seat>` **required**<br>`--follows <qitemId>`<br>`--evidence-ref <ref>`<br>`--json` |
+| `rig provider account` | — | — |
+| `rig provider account add <label>` | — | `--provider <p>`<br>`--token-file <path>`<br>`--api-key-file <path>`<br>`--codex-home <dir>`<br>`--login <name>`<br>`--host <id>`<br>`--json` |
+| `rig provider account list` | — | `--provider <p>`<br>`--host <id>`<br>`--json` |
+| `rig provider account remove <label>` | — | `--provider <p>`<br>`--host <id>`<br>`--json` |
+| `rig provider assign <rig>` | — | `--provider <p>`<br>`--account <label>`<br>`--include-overrides`<br>`--account-home <dir>`<br>`--apply`<br>`--plan <digest>`<br>`--host <id>`<br>`--json` |
 
 ### usage
 
@@ -1185,7 +1190,7 @@ for producer/consumer wiring and launch-scoped state lifetime.
 | `rig seat set-effort <seat>` | — | `--effort <level>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-statusline-throttle <seat>` | — | `--seconds <n>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-permissions-to <seat>` | — | `--to <person>`<br>`--clear`<br>`--deny`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
-| `rig seat decide-permission <request>` | — | `--option <id>` **required**<br>`--reason <text>`<br>`--json` |
+| `rig seat decide-permission <request>` | — | `--option <id>` **required**<br>`--reason <text>`<br>`--person-said <words>`<br>`--relay`<br>`--json` |
 | `rig seat effort <seat>` | — | `--json` |
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-runtime <seat>` | — | `--runtime <runtime>`<br>`--reason <text>`<br>`--model <id>`<br>`--effort <level>`<br>`--codex-config-profile <name>`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--token-file <path>`<br>`--account-label <label>`<br>`--permission-mode <mode>`<br>`--confirm-timeout <seconds>`<br>`--dry-run`<br>`--confirm <switch-id>`<br>`--note <text>`<br>`--recover`<br>`--json` |

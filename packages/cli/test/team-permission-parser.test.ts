@@ -70,4 +70,12 @@ describe("team hook agrees with real CLI dispatch", () => {
     expect(observed.error).toBe("commander.helpDisplayed"); expect(observed.calls).toEqual([]);
     expect(observed.output).toContain("Usage:"); expect(observed.decision).toBe("allow");
   });
+  // An answer to a seat's permission prompt is an explicit permission choice: a team agent's own `decide-permission`
+  // asks its person, so a seat can't approve its own waiting tool call under the Bash(rig:*) allowance.
+  it.each([
+    "rig seat decide-permission qitem-runner-permission-0123abcd --option allow",
+    "rig seat decide-permission qitem-runner-permission-0123abcd --option allow --relay --person-said yes",
+  ])("asks before a team agent answers a permission ask: %s", command => {
+    expect(decide(command, policy)).toBe("ask");
+  });
 });

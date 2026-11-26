@@ -18,7 +18,7 @@ import type { RigRepository } from "./rig-repository.js";
 import type { NodeWithBinding } from "./types.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { seatPoolModelOfJob, type SeatPoolModel } from "./seat-pool-registration.js";
-import type { SeatPoolSlot, SeatPoolSlotsRepository } from "./seat-pool-slots.js";
+import { readAttemptOutcome, type SeatPoolSlot, type SeatPoolSlotsRepository } from "./seat-pool-slots.js";
 import { parsePoolBlock, type SeatPoolSpec, type StoredSeatPool } from "./seat-pool-spec.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { seatLaunchAdditionPathsForNode } from "./seat-launch-additions.js";
@@ -47,14 +47,26 @@ import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 //
 // An add reserves a new `<member>-s<n>` slot, issues it with an operation id, and, after the lease is released, adds the
 // member through the same converge path as `rig add`, from the model member as the export writes it (without
-// `pool`, `id`, `label`, `cwd` and `session_source`, and with `keep_alive: false`). The cycle does not wait for the launch: it reports
-// the add in flight, and the settlement writes the outcome to the slot row (the agent runs: `live`; no node was created:
-// the row goes and frees the number). A later cycle reports what settled.
+// `pool`, `id`, `label`, `cwd` and `session_source`, and with `keep_alive: false`). Just before the issue, under the same
+// lease, the cycle reads the stored block, the job and the holds again and plans again with the reservation counted: a
+// lower `max`, `drain: true`, any other change to the block, a hold or surplus that reaches the reservation cancels it
+// (`cancelled: not issued`), with no operation row and no call. The cycle does not wait for the launch: it reports the add
+// in flight, and the settlement writes the outcome to the slot row, by the node's latest session: running and ready, the
+// slot is `live`; exited, or the node's executor confirmed stopped, the slot is `drained` with a reuse hold and never tried
+// again (`not_running`, with what was observed); no node was created, the row goes and frees the number (`no_node`);
+// anything else stays issued and `unknown`, and is read again every cycle. A later cycle reports what settled.
+//
+// The attempts in flight in this process are kept in memory. A cycle settles under the custody lease what no process is
+// running any more: a `reserved` row is cancelled; an `issued` one that is not in flight here (an add cut off by a daemon
+// restart, or one left `unknown`) is read again through its operation id, by replaying `reserveOperation` with what the
+// add was issued on. No node recorded: the row goes (`not launched (interrupted before create)`); a node: settled by the
+// same rule as above. The add is never issued again.
 //
 // The whole pool is held, and nothing moves, drains or is added, while the job is not `active`, while the stored block
 // can't be read, while the model node is gone (or has no canonical session), and from the rig's latest `rig.stopped`
 // until a later `restore.completed`, whatever its result. The cause goes in the job's notes. Bringing agents back is not
-// done here; while a slot is `drained`, no new number is added.
+// done here; while a slot is `drained` (one drained by the pool, or an add that settled not running), no new number is
+// added.
 
 /** What one move returns: moved, or refused with the queue's code. */
 export type SeatPoolMoveResult = { ok: true } | { ok: false; code: string; message: string };
@@ -99,7 +111,7 @@ export interface SeatPoolExecutorDeps {
   db: Database.Database;
   rigRepo: Pick<RigRepository, "getNodePool" | "getNodeLaunchRecipe" | "getRig">;
   slots: Pick<SeatPoolSlotsRepository, "forModel" | "setPhase" | "stopOutcome" | "get" | "reserveAdd" | "issueAttempt"
-    | "recordAttemptNode" | "settleAdd" | "recordAttemptOutcome" | "removeAddWithoutNode">;
+    | "recordAttemptNode" | "settleAdd" | "settleAddNotRunning" | "recordAttemptOutcome" | "removeAddWithoutNode" | "cancelReservedAdd">;
   jobsRepo: Pick<WatchdogJobsRepository, "getById">;
   queue: SeatPoolQueue;
   /** Messages held for a node in the outbox (OutboxHandler.heldCount). */
@@ -372,22 +384,52 @@ function unreadableAdvisory(error: string): string {
   return `the stored pool block can't be read (${error}); the pool is held until the block is fixed, and nothing is removed`;
 }
 
-/** How a slot's attempt is reported. Reserved or issued: in flight. Settled: the add settled running. */
-interface AttemptView { id: string; status: "in_flight" | "running" | "no_node"; message?: string; code?: string }
+/**
+ * How an add's attempt is reported, in `attempt.status`, never as a stop: `in_flight` (reserved or issued, its call not
+ * settled), `cancelled` (not issued), `running`, `no_node` (no node was created), `not_running` (a node that does not run,
+ * with what was `observed`: its latest session `exited`, or its executor confirmed stopped, `probe_absent`) and
+ * `unknown` (issued, with a node whose result can't be told yet; read again every cycle).
+ */
+interface AttemptView {
+  id: string;
+  status: "in_flight" | "cancelled" | "running" | "no_node" | "not_running" | "unknown";
+  observed?: "exited" | "probe_absent";
+  message?: string;
+  code?: string;
+}
 
 function inFlight(attemptId: string): AttemptView {
   return { id: attemptId, status: "in_flight", message: `in flight (attempt ${attemptId})` };
 }
 
+const CANCELLED_NOT_ISSUED = "cancelled: not issued";
+const INTERRUPTED_BEFORE_CREATE = "not launched (interrupted before create)";
+
+/** A slot's attempt as its row records it: an issued attempt with an `unknown` outcome is reported so, and a settled one
+ *  by the status its outcome kept (a settled add with no such status settled running). */
+function attemptView(slot: SeatPoolSlot): AttemptView | undefined {
+  if (slot.attemptId === null || slot.attemptState === null) return undefined;
+  const outcome = readAttemptOutcome(slot.attemptOutcome);
+  const text = (key: string) => (typeof outcome[key] === "string" ? { [key]: outcome[key] as string } : {});
+  if (slot.attemptState === "settled") {
+    if (outcome["status"] !== "not_running") return { id: slot.attemptId, status: "running" };
+    return {
+      id: slot.attemptId, status: "not_running",
+      ...(outcome["observed"] === "exited" || outcome["observed"] === "probe_absent" ? { observed: outcome["observed"] } : {}),
+      ...text("code"), ...text("message"),
+    };
+  }
+  if (slot.attemptState === "issued" && outcome["status"] === "unknown") {
+    return { id: slot.attemptId, status: "unknown", ...text("code"), ...text("message") };
+  }
+  return inFlight(slot.attemptId);
+}
+
 function slotsView(slots: readonly SeatPoolSlot[]): Array<{ slotNumber: number; nodeId: string | null; phase: SeatPoolPhase; attempt?: AttemptView }> {
-  return slots.map((slot) => ({
-    slotNumber: slot.slotNumber,
-    nodeId: slot.nodeId,
-    phase: slot.phase,
-    ...(slot.attemptId === null || slot.attemptState === null
-      ? {}
-      : { attempt: slot.attemptState === "settled" ? { id: slot.attemptId, status: "running" as const } : inFlight(slot.attemptId) }),
-  }));
+  return slots.map((slot) => {
+    const attempt = attemptView(slot);
+    return { slotNumber: slot.slotNumber, nodeId: slot.nodeId, phase: slot.phase, ...(attempt ? { attempt } : {}) };
+  });
 }
 
 /** The interim rule until drained slots come back: no new number while one is `drained`. Reported for the add only. */
@@ -426,6 +468,63 @@ function addCallOutcome(outcome: AddMemberOutcome): AddCallOutcome {
     ok: true, status: node.status, nodeId: node.nodeId,
     ...(node.error ? { error: node.error } : {}), ...(node.sessionName ? { sessionName: node.sessionName } : {}),
   };
+}
+
+/** What an add with a node settles as, from the add call's outcome (null when it is not known: the add was cut off) and
+ *  the node's latest session. */
+type AddSettlement =
+  | { status: "running"; sessionId: string }
+  | { status: "not_running"; observed: "exited" | "probe_absent"; code?: string; message?: string }
+  | { status: "unknown"; code: string; message: string };
+
+/**
+ * The one rule an add with a node settles by, in the cycle that ran it and in a later cycle (or process) that reads it
+ * again. Exited, or the node's executor confirmed stopped: not running, never retried. Running or idle with startup
+ * `ready`: running, unless the call is known to have returned anything but a launch (a failed launch whose session
+ * still runs is not settled here). Anything else (startup not ready, no session, another status): unknown.
+ */
+function classifyAdd(
+  call: AddCallOutcome | null,
+  latest: { id: string; status: string; startupStatus: string | null } | null,
+  confirmedStopped: boolean,
+): AddSettlement {
+  const failure = call === null ? {}
+    : call.ok ? (call.error ? { message: call.error } : {})
+    : { code: call.code, message: call.message };
+  if (latest?.status === "exited") return { status: "not_running", observed: "exited", ...failure };
+  if (confirmedStopped) return { status: "not_running", observed: "probe_absent", ...failure };
+  if (latest === null) return { status: "unknown", code: "no_session", message: "unknown: the node has no session yet" };
+  const evidence = `latest session ${latest.status}, startup ${latest.startupStatus ?? "unknown"}`;
+  if (latest.status === "running" || latest.status === "idle") {
+    if (call !== null && !(call.ok && call.status === "launched")) {
+      return { status: "unknown", code: call.ok ? `node_${call.status}` : call.code, message: `unknown: the add returned ${call.ok ? call.status : call.code}; ${evidence}` };
+    }
+    if (latest.startupStatus === "ready") return { status: "running", sessionId: latest.id };
+  }
+  return { status: "unknown", code: "not_settled", message: `unknown: ${evidence}` };
+}
+
+/** The add call's outcome an `unknown` attempt kept on its row, or null when the call never returned. */
+function keptCall(slot: SeatPoolSlot): AddCallOutcome | null {
+  const call = readAttemptOutcome(slot.attemptOutcome)["call"];
+  if (call === null || typeof call !== "object" || Array.isArray(call)) return null;
+  const c = call as Record<string, unknown>;
+  if (c["ok"] === true && typeof c["status"] === "string" && typeof c["nodeId"] === "string") return c as unknown as AddCallOutcome;
+  if (c["ok"] === false && typeof c["code"] === "string" && typeof c["message"] === "string") return c as unknown as AddCallOutcome;
+  return null;
+}
+
+/** What an add was issued on (`attempt_basis`), or null when the row's basis can't be read. */
+function issuedBasis(text: string | null): { targets: string[]; body: string } | null {
+  if (text === null) return null;
+  try {
+    const parsed = JSON.parse(text) as { targets?: unknown; body?: unknown };
+    return Array.isArray(parsed.targets) && parsed.targets.every((t) => typeof t === "string") && typeof parsed.body === "string"
+      ? { targets: parsed.targets as string[], body: parsed.body }
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -501,8 +600,93 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
 
   /** The adds started and not settled yet. */
   const pending = new Set<Promise<void>>();
+  /** The attempt ids this process issued and whose call has not settled yet. An `issued` row that is not here is no
+   *  process's any more: an add cut off by a daemon restart, or one whose result was unknown when its call returned. */
+  const inFlightAttempts = new Set<string>();
   /** model node id → what settled since that model's last report. */
   const settled = new Map<string, SettledAdd[]>();
+  const reportSettled = (modelNodeId: string, entry: SettledAdd) => settled.set(modelNodeId, [...(settled.get(modelNodeId) ?? []), entry]);
+
+  /** An add with a node, settled by its latest session (classifyAdd). Running: `live`. Not running: `drained`, with a
+   *  reuse hold. Unknown: it stays issued, with what was read kept on its row. What settled is returned for the report;
+   *  nothing while unknown, or when the row no longer holds the attempt. */
+  const settleWithNode = (
+    add: { slotId: string; slotNumber: number; logicalId: string; attemptId: string; nodeId: string },
+    call: AddCallOutcome | null,
+    latest: { id: string; status: string; startupStatus: string | null } | null,
+  ): SettledAdd | null => {
+    const settlement = classifyAdd(call, latest, deps.confirmedStopped(add.nodeId));
+    const entry = (attempt: AttemptView): SettledAdd => ({ slotNumber: add.slotNumber, logicalId: add.logicalId, nodeId: add.nodeId, attempt });
+    if (settlement.status === "running") {
+      return deps.slots.settleAdd(add.slotId, add.attemptId, {
+        outcome: JSON.stringify(call ?? { replayed: true }),
+        result: JSON.stringify({ nodeId: add.nodeId, sessionId: settlement.sessionId }), at: at(),
+      }) ? entry({ id: add.attemptId, status: "running" }) : null;
+    }
+    if (settlement.status === "not_running") {
+      const seen = {
+        observed: settlement.observed,
+        ...(settlement.code !== undefined ? { code: settlement.code } : {}),
+        ...(settlement.message !== undefined ? { message: settlement.message } : {}),
+      };
+      // The reuse hold: the launch's status or code (`not_running` when the call never returned), what was observed, and
+      // the launch's error when there is one.
+      const error = call === null ? undefined : call.ok ? call.error : call.message;
+      const hold = {
+        code: call === null ? "not_running" : call.ok ? call.status : call.code,
+        observed: settlement.observed,
+        ...(error !== undefined ? { error } : {}),
+      };
+      return deps.slots.settleAddNotRunning(add.slotId, add.attemptId, {
+        outcome: JSON.stringify({ status: "not_running", ...seen, call }), hold: JSON.stringify(hold), at: at(),
+      }) ? entry({ id: add.attemptId, status: "not_running", ...seen }) : null;
+    }
+    deps.slots.recordAttemptOutcome(add.slotId, add.attemptId,
+      JSON.stringify({ status: "unknown", code: settlement.code, message: settlement.message, call }));
+    return null;
+  };
+
+  /** The model's logical id, for the `<model>-s<n>` of a slot read back from its row. */
+  const logicalIdOf = (modelNodeId: string, slotNumber: number): string => {
+    const row = deps.db.prepare("SELECT logical_id FROM nodes WHERE id = ?").get(modelNodeId) as { logical_id: string } | undefined;
+    return `${row?.logical_id ?? modelNodeId}-s${slotNumber}`;
+  };
+
+  /**
+   * An add attempt no process is running any more, settled from its row, under the custody lease. Reserved: cancelled.
+   * Issued: read again by replaying `reserveOperation` with what it was issued on, which never runs the add again; with
+   * no node recorded the row goes, otherwise the node settles it by the same rule as the call that ran it. An operation
+   * id with no row is not replayed (that would reserve it anew): unknown, as is any replay that is not one.
+   */
+  const settleLeftover = (modelNodeId: string, slot: SeatPoolSlot): SettledAdd | null => {
+    const attemptId = slot.attemptId!;
+    const logicalId = logicalIdOf(modelNodeId, slot.slotNumber);
+    if (slot.attemptState === "reserved") {
+      return deps.slots.cancelReservedAdd(slot.slotId, attemptId)
+        ? { slotNumber: slot.slotNumber, logicalId, attempt: { id: attemptId, status: "cancelled", message: CANCELLED_NOT_ISSUED, code: "interrupted_before_issue" } }
+        : null;
+    }
+    const unknown = (code: string, message: string): null => {
+      deps.slots.recordAttemptOutcome(slot.slotId, attemptId, JSON.stringify({ status: "unknown", code, message, call: keptCall(slot) }));
+      return null;
+    };
+    const basis = issuedBasis(slot.attemptBasis);
+    if (basis === null) return unknown("basis_unreadable", "unknown: what the add was issued on can't be read");
+    if (!deps.db.prepare("SELECT 1 FROM operation_correlations WHERE operation_id = ?").get(attemptId)) {
+      return unknown("operation_missing", "unknown: the add's operation id has no record");
+    }
+    const replayed = reserveOperation(deps.db, attemptId, "member.add", basis.targets, basis.body);
+    if (replayed.state !== "replay") return unknown(`operation_${replayed.state}`, `unknown: replaying the add's operation id gave ${replayed.state}`);
+    const operation = replayed.operation;
+    if (slot.nodeId === null) {
+      if (operation.nodeIds.length > 0) return unknown("node_not_recorded", "unknown: the operation recorded a node the slot does not have");
+      return deps.slots.removeAddWithoutNode(slot.slotId, attemptId)
+        ? { slotNumber: slot.slotNumber, logicalId, attempt: { id: attemptId, status: "no_node", code: "interrupted_before_create", message: INTERRUPTED_BEFORE_CREATE } }
+        : null;
+    }
+    const latest = operation.current.nodes.find((node) => node.id === slot.nodeId)?.latestSession ?? null;
+    return settleWithNode({ slotId: slot.slotId, slotNumber: slot.slotNumber, logicalId, attemptId, nodeId: slot.nodeId }, keptCall(slot), latest);
+  };
 
   /** Why the model member gives no agent, read from the model node itself (the export leaves these out silently), or null. */
   const addRefusal = (rigId: string, modelNodeId: string): string | null => {
@@ -525,9 +709,9 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
 
   /** The add's call, after the lease, and its settlement on the slot row. Never rejects. */
   const runAdd = async (modelNodeId: string, add: IssuedAdd): Promise<void> => {
-    const report = (entry: SettledAdd) => settled.set(modelNodeId, [...(settled.get(modelNodeId) ?? []), entry]);
+    const report = (entry: SettledAdd) => reportSettled(modelNodeId, entry);
+    let outcome: AddCallOutcome | undefined;
     try {
-      let outcome: AddCallOutcome | undefined;
       if (add.folder !== null) {
         try { deps.add!.makeFolder(add.folder); } catch (error) { outcome = { ok: false, code: "cwd_unavailable", message: errorMessage(error) }; }
       }
@@ -553,7 +737,6 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       // The node decides, never the code alone: an add can fail after it created its node.
       const slot = deps.slots.get(add.slotId);
       if (!slot || slot.attemptId !== add.attemptId) return; // its row went with a node deleted by hand
-      const stored = JSON.stringify(outcome);
       if (slot.nodeId === null) {
         deps.slots.removeAddWithoutNode(add.slotId, add.attemptId);
         const code = outcome.ok ? "node_not_recorded" : outcome.code;
@@ -564,18 +747,18 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         return;
       }
       const latest = add.operation.read().current.nodes.find((node) => node.id === slot.nodeId)?.latestSession ?? null;
-      const runs = outcome.ok && outcome.status === "launched" && latest !== null
-        && (latest.status === "running" || latest.status === "idle") && latest.startupStatus === "ready";
-      if (runs && deps.slots.settleAdd(add.slotId, add.attemptId, {
-        outcome: stored, result: JSON.stringify({ nodeId: slot.nodeId, sessionId: latest!.id }), at: deps.now().toISOString(),
-      })) {
-        report({ slotNumber: add.slotNumber, logicalId: add.logicalId, nodeId: slot.nodeId, attempt: { id: add.attemptId, status: "running" } });
-        return;
-      }
-      // A node that does not run (or not yet) is not settled here: the attempt stays issued, with its outcome kept.
-      deps.slots.recordAttemptOutcome(add.slotId, add.attemptId, stored);
+      // An unknown result stays issued; once this call is over, a later cycle reads it again.
+      const entry = settleWithNode({ ...add, nodeId: slot.nodeId }, outcome, latest);
+      if (entry) report(entry);
     } catch (error) {
+      // The call's outcome stays on the row, so the cycle that reads this attempt again settles it with the call.
+      try {
+        deps.slots.recordAttemptOutcome(add.slotId, add.attemptId,
+          JSON.stringify({ status: "unknown", code: "settle_failed", message: errorMessage(error), call: outcome ?? null }));
+      } catch { /* the settle's own error is the one reported */ }
       report({ slotNumber: add.slotNumber, logicalId: add.logicalId, attempt: { ...inFlight(add.attemptId), code: "settle_failed", message: errorMessage(error) } });
+    } finally {
+      inFlightAttempts.delete(add.attemptId);
     }
   };
 
@@ -689,6 +872,21 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             };
             return;
           }
+          // The block again first: one that became unreadable while the cycle waited for custody holds the leftovers too,
+          // and they stay as they are. A block stored again with another value, or removed, still lets them settle.
+          if (blockView(deps.rigRepo.getNodePool(modelNodeId)).block === "unusable") { blockChangedNow(); return; }
+          // An add attempt no process runs any more (a reservation never issued, or an issued add not in flight in this
+          // process: cut off by a daemon restart, or left unknown), settled from its row. One in flight here is left alone.
+          for (const slot of deps.slots.forModel(modelNodeId)) {
+            if (slot.phase !== "adding" || slot.attemptKind !== "add" || slot.attemptId === null || inFlightAttempts.has(slot.attemptId)) continue;
+            const entry = settleLeftover(modelNodeId, slot);
+            if (entry) reportSettled(modelNodeId, entry);
+          }
+          // A leftover settled `not_running` here drains its slot, which starts the cooldown the plan could not see: under
+          // it, this cycle's drains wait (`drain: true` keeps its exemption).
+          const stepNow = lastDrainStep(deps.slots.forModel(modelNodeId));
+          const coolingNow = !spec.drain && stepNow !== null && stepNow !== read.lastStepAt
+            && deps.now().getTime() - Date.parse(stepNow) < spec.cooldownSeconds * 1000;
           // A drain an earlier cycle left unfinished. One whose unconfirmed stop may have had an effect (a kill was
           // attempted) is stopped again below, never captured again. Any other (its capture failed, it ended before the
           // capture, or its stop is known to have had no effect) goes back to `live`: nothing was stopped, and a later plan
@@ -751,6 +949,10 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           for (const [index, d] of drainIntents.entries()) {
             if (held || blockChanged) break;
             if (!active()) { held = JOB_STOPPED; break; }
+            if (coolingNow) {
+              for (const rest of drainIntents.slice(index)) drainSkipped({ slotNumber: rest.slotNumber, session: plannedTo(rest.slotNumber), phase: "live" }, "cooldown");
+              break;
+            }
             if (blockChangedNow()) {
               for (const rest of drainIntents.slice(index)) drainSkipped({ slotNumber: rest.slotNumber, session: plannedTo(rest.slotNumber), phase: "live" }, "pool_block_changed");
               break;
@@ -795,6 +997,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           const launchAdditionsFrom = seatLaunchAdditionPathsForNode(deps.db, modelNodeId);
           const issuedView: Array<{ slotNumber: number; logicalId: string; attempt: AttemptView }> = [];
           const notIssued: Array<{ slotNumber: number; logicalId: string; code: string }> = [];
+          const cancelled: Array<{ slotNumber: number; logicalId: string; attempt: AttemptView }> = [];
           for (let unit = 0; unit < addIntent.count; unit++) {
             if (!active()) { held = JOB_STOPPED; break; }
             // The reservation: a new number and its row in one transaction. The operation id is a UUID.
@@ -808,20 +1011,54 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             // the key out is not enough, since the add then resolves it from the agent spec's profile or defaults.
             const member = { id: memberId, ...inherited, cwd: folder ?? raw["cwd"], keep_alive: false };
 
-            // The re-check just before the issue (a lower max, drain, a hold or surplus since the plan) goes here.
+            // The re-check just before the issue, with nothing awaited since the reservation: the job, the holds and the
+            // stored block again, then a new plan with this reservation counted. A lower `max`, `drain: true`, any other
+            // change to the block, a hold, or surplus that reaches this reservation cancels it before any operation row
+            // or call, and ends this cycle's adds.
+            let stopped: SeatPoolHoldRead | undefined;
+            const recheck = (): string | null => {
+              if (!active()) return "job_stopped";
+              const holdNow = readSeatPoolHold(deps.db, rigId);
+              if (holdNow.stoppedSeq !== null) { stopped = holdNow; return "rig_stopped"; }
+              const storedSpec = deps.rigRepo.getNodePool(modelNodeId);
+              const specNow = storedSpec !== undefined && "spec" in storedSpec ? storedSpec.spec : null;
+              if (blockChangedNow()) {
+                if (specNow === null) return "pool_block_changed";
+                return specNow.max < spec.max ? "max_lowered" : specNow.drain ? "drain" : "pool_block_changed";
+              }
+              const slotsNow = deps.slots.forModel(modelNodeId);
+              const replan = planSeatPool(spec, { ...readSeatPoolState(deps, model, slotsNow), lastStepAt: lastDrainStep(slotsNow) }, deps.now().getTime());
+              return replan.intents.some((i) => i.kind === "cancel" && i.slotNumber === slot.slotNumber) ? "surplus" : null;
+            };
+            let cancelCause: string | null;
+            try {
+              cancelCause = recheck();
+            } catch (error) {
+              // A re-check that fails leaves no reservation behind: the reserved row goes before its error is raised.
+              try { deps.slots.cancelReservedAdd(slot.slotId, attemptId); } catch { /* the re-check's own error is the one raised */ }
+              throw error;
+            }
+            if (cancelCause !== null) {
+              // Reported cancelled only when its reserved row went; a row that no longer holds the reservation is reported
+              // as not issued, as the issue reports it.
+              if (deps.slots.cancelReservedAdd(slot.slotId, attemptId)) {
+                cancelled.push({ slotNumber: slot.slotNumber, logicalId, attempt: { id: attemptId, status: "cancelled", message: CANCELLED_NOT_ISSUED, code: cancelCause } });
+              } else {
+                notIssued.push({ slotNumber: slot.slotNumber, logicalId, code: "slot_changed" });
+              }
+              if (cancelCause === "job_stopped") held = JOB_STOPPED;
+              else if (stopped !== undefined) {
+                hold = stopped;
+                held = { cause: "rig stopped", seq: stopped.stoppedSeq!, message: `held: rig stopped (event ${stopped.stoppedSeq})` };
+              }
+              break;
+            }
 
-            // The issue: the job's state and the holds again, then the issued attempt, what it was issued on and the
-            // operation id, in one transaction.
+            // The issue: the issued attempt, what it was issued on and the operation id, in one transaction.
             const targets = [rigId, pod];
             const body = JSON.stringify({ member, rigRoot });
             let operation: IssuedAdd["operation"];
-            let stopped: SeatPoolHoldRead | undefined;
             try {
-              const recheck = readSeatPoolHold(deps.db, rigId);
-              if (!active() || recheck.stoppedSeq !== null) {
-                stopped = recheck;
-                throw new AddNotIssued("held");
-              }
               const eventSeq = (deps.db.prepare("SELECT MAX(seq) AS seq FROM events WHERE rig_id = ?").get(rigId) as { seq: number | null }).seq;
               const basis = JSON.stringify({ eventSeq, targets, body });
               operation = deps.db.transaction(() => {
@@ -835,14 +1072,10 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
               // failed removal does not hide the error that stopped the issue.
               try { deps.slots.removeAddWithoutNode(slot.slotId, attemptId); } catch { /* the issue's own error is the one raised */ }
               if (!(error instanceof AddNotIssued)) throw error;
-              if (stopped !== undefined) {
-                if (!active()) held = JOB_STOPPED;
-                else { hold = stopped; held = { cause: "rig stopped", seq: stopped.stoppedSeq!, message: `held: rig stopped (event ${stopped.stoppedSeq})` }; }
-                break;
-              }
               notIssued.push({ slotNumber: slot.slotNumber, logicalId, code: error.code });
               continue;
             }
+            inFlightAttempts.add(attemptId);
             issued.push({
               slotId: slot.slotId, slotNumber: slot.slotNumber, logicalId, attemptId, rigId, rigRoot, folder, launchAdditionsFrom, operation,
               op: { kind: "add_member", pod, member },
@@ -852,6 +1085,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           addNotes = {
             ...(issuedView.length ? { issued: issuedView } : {}),
             ...(notIssued.length ? { failed: notIssued } : {}),
+            ...(cancelled.length ? { cancelled } : {}),
           };
         });
       } catch (error) {
@@ -1143,7 +1377,10 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       };
       // After `pool: {}`: the job ends once every agent is drained (busy agents stay `live` until they are free).
       if (ends) {
-        return { action: "terminal", reason: "seat_pool_removed_drained", notes };
+        // What this cycle (or an earlier one) settled goes in the last report too.
+        const done = settled.get(modelNodeId);
+        settled.delete(modelNodeId);
+        return { action: "terminal", reason: "seat_pool_removed_drained", notes: done?.length ? { ...notes, settled: done } : notes };
       }
       return report(notes);
     },

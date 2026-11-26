@@ -96,8 +96,9 @@ task, without anyone asking you to check.
   tasks. Claude Code wakes you with them when a turn ends. Codex gets them as a message queued for this chat.
 - Each one says it came from OpenRig's hook bridge and names its sender as OpenRig recorded it. It's a task like any
   other: show it to the person and record their words, as below.
-- A wake comes when your turn ends. Between wakes, list this chat's tasks yourself: `rig_queue_list` with `destination`
-  set to this chat's address. `owned` and `mine` need a seat, and `destination` doesn't.
+- A wake comes only when your turn ends, so while the team works, end your turn rather than watching its seats
+  (`rig_capture`) or waiting inside the turn. Between wakes, list this chat's tasks yourself: `rig_queue_list` with
+  `destination` set to this chat's address. `owned` and `mine` need a seat, and `destination` doesn't.
 - In Claude Code the key belongs to the app's process, not the chat: after `/clear`, the new chat still gets the
   earlier one's tasks, and a chat resumed in a new process (`claude --resume`) doesn't get its earlier tasks by itself,
   so check its address each turn.
@@ -108,13 +109,31 @@ task, without anyone asking you to check.
 
 - Questions about your work come to your seat: `rig_queue_list` with `owned` lists them.
 - Show the person the question and the team's draft, in their own words where the item gives them. Then ask for an answer.
-- Record only what the person actually tells you. Claim the item (`rig_queue_claim`), then close it with
-  `rig_queue_update`: `state` `done`, `closureReason` `no-follow-on`, and exactly what the person typed in `resolution`,
-  nothing else: no label such as "The person's answer:", no quotation marks, and no notes, paths or summaries of your own.
+- Record only what the person actually tells you, on the question's own task, never with `rig_send`: a message carries
+  no return address, so the work it starts loses this chat's route, and its seats' prompts then reach no one. Claim
+  the item (`rig_queue_claim`), then close it with `rig_queue_update`: `state` `done`, `closureReason` `no-follow-on`,
+  and exactly what the person typed in `resolution`, nothing else: no label such as "The person's answer:", no
+  quotation marks, and no notes, paths or summaries of your own. With no seat, these tools act as the address OpenRig
+  issued this conversation, for a question sent there. In a shell, close it the same way, as its address:
+  `OPENRIG_SESSION_NAME=<address> rig queue update <id> --state done --closure-reason no-follow-on --resolution '<their words>'`.
   If the person isn't there to answer, leave the item open and tell them it's waiting. Never choose an answer for them.
 - A question can be a seat's permission prompt that the operator or a team seat sent you: show it with the seat, the
   exact action and the choices it offers, and record the person's words the same way. The agent that sent it passes
   their answer to the seat.
+- A seat's own Claude Code prompt in work this chat handed over comes straight from that seat as its own ask
+  (`qitem-runner-permission-…`), within seconds, even when you saw the prompt first (in a capture, or an item that says
+  its owner needs input). Answer that ask, not the seat: show the person its exact action, then record their answer
+  with `rig_seat_decide_permission` (in a shell, `rig seat decide-permission`). A plain yes or no is the person's own
+  answer: pass it on exactly, with `relay` and their words in `personSaid`. It's recorded as relayed by this chat, and
+  unconfirmed, since OpenRig doesn't get it from them. For their words or a condition, judge
+  whether that exact action meets them, and give your `reason`. Before you decide one under a standing instruction
+  of theirs ("don't ask me about test runs"), read what the command touches, such as the files a test writes, and
+  check it against what they asked to be asked about: if it's on that list, ask them. It takes their answer for as
+  long as the prompt stays open; once it's answered in the seat's terminal, an answer here is too late. Don't type into the seat for it
+  (`rig send --dangerously-interact`): that answers it in the terminal, ends the ask, and needs the person's exception
+  for a terminal command. If the reply says it hasn't reached the seat's prompt, the seat's hook stopped reading the ask:
+  tell the person, and that prompt waits in the seat's terminal like one with no ask. Only a prompt with no ask (a choice menu, a Codex seat's prompt, a seat on
+  another machine) is answered in the seat, by whoever sent you the question about it.
 - Some questions go to a registered person directly, outside your seat. Those wait for them where they already answer
   the team, such as the OpenRig TUI or Slack. You can mention that they're waiting; answering them isn't yours.
 
