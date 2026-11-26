@@ -3636,7 +3636,7 @@ export class QueueRepository {
                  resolution = ?
            WHERE qitem_id = ?`
         )
-        .run(ts, input.toSession, input.toSession, appendClosingResolution(source.resolution, input.resolution), source.qitemId);
+        .run(ts, input.toSession, input.toSession, this.handoffClosingResolution(source, input.resolution), source.qitemId);
 
       this.transitionLog.append({
         qitemId: source.qitemId,
@@ -3835,7 +3835,7 @@ export class QueueRepository {
                  resolution = ?
            WHERE qitem_id = ?`
         )
-        .run(input.terminalState, ts, input.toSession, input.closureTarget, appendClosingResolution(source.resolution, input.resolution), input.qitemId);
+        .run(input.terminalState, ts, input.toSession, input.closureTarget, this.handoffClosingResolution(source, input.resolution), input.qitemId);
 
       const note = input.transitionNote ?? `cross-host handoff to ${input.toSession}`;
       const closeTransition = this.transitionLog.append({
@@ -6796,6 +6796,20 @@ export class QueueRepository {
       const row = this.getById(qitemId);
       if (row?.state === "pending") this.promptRecoveryState.set(row.destinationSession, true);
     }
+  }
+
+  private handoffClosingResolution(source: QueueItem, outcome: string | undefined): string | null {
+    const previous = source.resolution;
+    if (previous && typeof outcome === "string" && outcome.trim() && !isBlockerLive(source.state)) {
+      // A non-live handoff does not leave the live-to-closed transition that signals an appended outcome.
+      // Keep any identifiable fallback line last, where a later reroute can replace it without touching the outcome.
+      const fallbackStart = this.fallbackLineStart(source.qitemId, previous);
+      if (fallbackStart !== null) {
+        const earlierOutcomes = previous.slice(0, Math.max(0, fallbackStart - 1));
+        return `${appendClosingResolution(earlierOutcomes, outcome)}\n${previous.slice(fallbackStart)}`;
+      }
+    }
+    return appendClosingResolution(previous, outcome);
   }
 
   /**
