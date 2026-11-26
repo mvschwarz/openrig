@@ -153,8 +153,9 @@ export interface CurrentWorkRow {
 export interface MissionsRootResolution {
   root: string | null;
   reason?: string;
-  /** The root stands in for the row's own project root, and another root could hold a mission of the same name: the
-   *  catalogue lists other project roots, or it, or the row's project in it, can't be read. Unset when the configured
+  /** The root stands in for the row's own project root (or the row names none, and the rig's project stands in), and
+   *  another root could hold a mission of the same name: the catalogue lists other project roots, or it, or the row's
+   *  project in it, can't be read. Unset when the configured
    *  root is the only root a row's mission can live in (no catalogue configured), whatever the reason says. */
   ambiguous?: boolean;
 }
@@ -198,7 +199,7 @@ interface Match {
  * Returning the set instead lets the caller refuse a genuinely conflicting row. Exact
  * duplicate strings collapse, because they are one value written twice.
  */
-function tagValues(tags: string[], prefix: string): string[] {
+export function tagValues(tags: string[], prefix: string): string[] {
   const values = tags
     .filter((t) => t.startsWith(prefix))
     .map((t) => t.slice(prefix.length).trim())
@@ -757,8 +758,9 @@ export interface RowScope {
   slicePath: string | null;
   /** Why a mission or slice the row names did not resolve here; null when everything it names did. */
   unresolved: string | null;
-  /** Why the row's tags were resolved under a root that stands in for its project's own while another root could hold
-   *  a mission of the same name (MissionsRootResolution.ambiguous); null otherwise, including when no catalogue is
+  /** Why the row's tags were resolved under a root that stands in for its project's own (or the row names none, and the
+   *  rig's project stands in) while another root could hold a mission of the same name
+   *  (MissionsRootResolution.ambiguous); null otherwise, including when no catalogue is
    *  configured and the configured root is the only one. Kept even when the mission resolved there. */
   missionsRootFallback: string | null;
 }

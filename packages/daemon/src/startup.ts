@@ -3324,7 +3324,11 @@ export async function createHerdrAppProviders(opts: {
     env: opts.hcEnv,
     ...(opts.spawnFn ? { spawnFn: opts.spawnFn } : {}),
     reconcileAll: () => {
-      for (const provider of providers.values()) void provider.reconcile().catch(() => {});
+      // What the running daemon notices (a viewer herdr-core brought back as a shell, one that ended) is reported as at
+      // start: once recorded, a later start has nothing new to report.
+      for (const provider of providers.values()) {
+        void provider.reconcile().then((notes) => { for (const note of notes) console.warn(`[herdr-app] ${note}`); }).catch(() => {});
+      }
     },
   });
   const ownWork = () => {
@@ -3370,7 +3374,8 @@ export async function createHerdrAppProviders(opts: {
         const provider = resolve({ appHome: recorded.appHome });
         if (!provider) continue;
         ownWork();
-        await provider.reconcile().catch(() => {});
+        // What changed while the daemon was down is reported here, a viewer herdr-core brought back as a shell included.
+        for (const note of await provider.reconcile().catch(() => [] as string[])) console.warn(`[herdr-app] ${note}`);
         // A gate still pending when the daemon stopped is followed again, within its recorded window.
         await provider.resumePendingGates().catch(() => {});
       } catch { /* an unreadable journal stays as it is; an open of that app home reports it */ }

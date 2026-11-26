@@ -41,6 +41,7 @@ import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
 import { describeCheckIn, readWakeOutcome, type MemberCheckIn } from "./connection-contract.js";
 import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
+import type { SeatEvidence } from "./seat-evidence.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
 export const DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS = 300;
@@ -427,6 +428,9 @@ export interface StuckSweepDeps {
   ladderSuppressionMinutes?: number;
   /** The seat's typing guard is at queue-only (#3076). Injectable for tests; default reads the seat's stored guard. */
   isQueueOnlySeat?: (session: string) => boolean;
+  /** #331: what's already known about the seat a finding names (its held messages and latest context sample), read when
+   *  the finding is written; null for a destination that isn't a seat. Absent, a finding names none of it. */
+  seatEvidence?: (session: string) => SeatEvidence | null;
 }
 
 export interface StuckSweepFindingAction {
@@ -749,7 +753,31 @@ export function custodyHeadline(rowId: string, targets: string[], ageMinutes: nu
     : `Custody not checked: no successor of ${rowId} in this store (${ageMinutes} min)`;
 }
 
-function evidenceBody(db: Database.Database, c: Candidate, personNotice = false): string {
+/** #331: what's already known about the seat a finding names, as it stood when the finding was written. These are
+ *  observations for the reader to weigh, never a cause: an unread value is unknown, and a context percentage says whether
+ *  it's used or remaining and when it was sampled, since a bare figure can't show a full context. Empty when nothing is
+ *  read for findings or the destination isn't a seat. */
+function seatEvidenceLines(session: string, read: StuckSweepDeps["seatEvidence"], now: Date): string {
+  if (!read) return "";
+  let evidence: SeatEvidence | null;
+  try { evidence = read(session); } catch { evidence = { heldMessages: null, context: null }; }
+  if (!evidence) return "";
+  const held = evidence.heldMessages === null ? "unknown (couldn't be read)"
+    : evidence.heldMessages === 0 ? "none" : `${evidence.heldMessages} (rig seat held-messages ${session})`;
+  const c = evidence.context;
+  const percent = (value: number) => `${Math.round(value * 10) / 10}%`;
+  const parts = c && c.availability === "known"
+    ? [c.usedPercentage !== null ? `${percent(c.usedPercentage)} used` : null, c.remainingPercentage !== null ? `${percent(c.remainingPercentage)} remaining` : null]
+      .filter((part): part is string => part !== null)
+    : [];
+  const context = parts.length === 0 || !c ? `unknown${c?.reason ? ` (${c.reason})` : ""}`
+    : `${parts.join(", ")}, ${c.sampledAt ? `sampled ${c.sampledAt}` : "sample time unknown"}${c.source ? ` from ${c.source}` : ""}${c.fresh ? "" : ", not fresh"}`;
+  return `seat ${session} as known at ${now.toISOString()} (observations, not a diagnosis):\n` +
+    `- messages held for it: ${held}\n` +
+    `- context: ${context}\n`;
+}
+
+function evidenceBody(db: Database.Database, c: Candidate, personNotice = false, seatEvidence = ""): string {
   if (c.verificationTargets?.length) {
     const checks = c.verificationTargets
       .map((target) => `- ${target}\n  ${verificationCommand(target)}\n` +
@@ -777,6 +805,7 @@ function evidenceBody(db: Database.Database, c: Candidate, personNotice = false)
     `age: ${c.ageMinutes} min\n` +
     `last transition: ${lastTransitionLine(db, c.row.qitemId)}\n` +
     `why: ${c.why}\n` +
+    seatEvidence +
     (personNotice
       ? `This is a notice from OpenRig, not a task for you: ${c.row.qitemId} is waiting for ${c.row.destinationSession}, which couldn't ` +
         `be woken (why, above). It reaches ${c.row.destinationSession} only when a wake lands there, and the sweep closes this notice ` +
@@ -1858,7 +1887,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             && stillStuck(c)) { // the new reason must still hold on the row as it is now
             const marker = "\n\n--- Original finding (historical) ---\n";
             const original = sharedRow.body.includes(marker) ? sharedRow.body.split(marker, 2)[1]! : sharedRow.body;
-            const body = evidenceBody(deps.db, c) + marker + original;
+            const body = evidenceBody(deps.db, c, false, seatEvidenceLines(c.row.destinationSession, deps.seatEvidence, now)) + marker + original;
             const summary = findingTitle(c.kind, c.row.qitemId, c.ageMinutes);
             deps.db.prepare("UPDATE queue_items SET body = ?, summary = ? WHERE qitem_id = ? AND body = ? AND summary = ? AND state IN ('pending', 'in-progress', 'blocked')")
               .run(body, summary, shared.qitemId, sharedRow.body, sharedRow.summary);
@@ -1919,7 +1948,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           // finding's source (the workflow-exception precedent), except on a person's notice about their own row.
           sourceSession: personNotice ? STUCK_SWEEP_SESSION : c.row.sourceSession,
           destinationSession: noticeTo ?? now_.route,
-          body: evidenceBody(deps.db, now_, personNotice) + (routeNotes.has(c.row.qitemId) ? `\nescalation route: ${routeNotes.get(c.row.qitemId)}` : ""),
+          body: evidenceBody(deps.db, now_, personNotice, seatEvidenceLines(now_.row.destinationSession, deps.seatEvidence, now))
+            + (routeNotes.has(c.row.qitemId) ? `\nescalation route: ${routeNotes.get(c.row.qitemId)}` : ""),
           summary: now_.verificationTargets
             ? custodyHeadline(c.row.qitemId, now_.verificationTargets, now_.ageMinutes)
             : personNotice
@@ -1970,7 +2000,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             await createFinding({ ...input, destinationSession: target, sourceSession: c.row.sourceSession, humanIntent: undefined,
               summary: personNotice ? findingTitle(c.kind, c.row.qitemId, now_.ageMinutes) : input.summary,
               tags: input.tags.filter((tag) => tag !== ESCALATION_HOP_TAG || live.row.tags?.includes(tag)),
-              body: `${evidenceBody(deps.db, live)}\nOriginal finding destination ${now_.route} references a missing rig. This finding goes to the originating agent.` });
+              body: `${evidenceBody(deps.db, live, false, seatEvidenceLines(live.row.destinationSession, deps.seatEvidence, now))}\nOriginal finding destination ${now_.route} references a missing rig. This finding goes to the originating agent.` });
             othersMayHaveRun();
             continue;
           } catch (err) {

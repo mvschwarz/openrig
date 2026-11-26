@@ -36,6 +36,8 @@ import {
   deriveRole,
   deriveWorkCandidates,
   listProjectMissions,
+  resolveWorkNodeDirs,
+  tagValues,
   evaluateCreateScope,
   skippedCreateScopeAdvisory,
   toCreateScopeAdvisory,
@@ -45,7 +47,7 @@ import {
   type RoleOrientation,
 } from "../domain/current-work.js";
 import { listProjects, namesProject, projectCatalogPaths, projectIds as projectIdsOf } from "../domain/workspace/project-read.js";
-import { inferCatalogProject, ProjectReadError, readProjectCatalog, rigFromSession, selectCatalogProject } from "../domain/workspace/project-catalog.js";
+import { catalogRigClaims, inferCatalogProject, ProjectReadError, readProjectCatalog, rigFromSession, selectCatalogProject } from "../domain/workspace/project-catalog.js";
 import { physicalSessionName } from "../domain/session-registry.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
@@ -1600,10 +1602,31 @@ export function queueRoutes(): Hono {
         } else workProject = unselected(error);
       }
     }
+    // A row that names a mission but no project is read in the one healthy catalog project this seat's rig is associated
+    // with (workspace.yaml `projects[].rigs`, the rule inferCatalogProject applies), labelled as inferred, never as the
+    // row's own declaration: the project the rig selects, or the only catalog entry when that entry lists this rig. Any
+    // other selection (an only entry that doesn't list the rig, the seat's folder, the only unclaimed entry), none, or an
+    // unhealthy entry keeps the configured root, as before.
+    const rigName = rigFromSession(session);
+    const rigProject = workProject && "root" in workProject && (workProject.selectedBy === "rig"
+      || (workProject.selectedBy === "single" && rigName && catalogPath
+        && catalogRigClaims(catalogPath).claims.get(workProject.id)?.includes(rigName))) ? workProject.id : null;
+    const rigProjectRoot = rigProject ? projectMissionsRoots.get(rigProject) : undefined;
+    const inferredRoot = rigProject && rigProjectRoot?.root && !rigProjectRoot.error ? rigProjectRoot.root : null;
     const currentWorkRoot: MissionsRootResolver = (row: CurrentWorkRow) => {
-      const projectIds = [...new Set((row.tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim()))
-        .filter((tag) => tag.startsWith("project:") && tag.slice("project:".length).trim())
-        .map((tag) => tag.slice("project:".length).trim()))];
+      const projectTags = (row.tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim()))
+        .filter((tag) => tag.startsWith("project:"));
+      const projectIds = [...new Set(projectTags.map((tag) => tag.slice("project:".length).trim()).filter(Boolean))];
+      // It stands in for the row's own project, and the configured root could hold a mission of the same name: ambiguous,
+      // so a held or pending row's scope carries the label too.
+      if (projectTags.length === 0 && inferredRoot) {
+        // A row that resolves under the configured root today, and whose mission the inferred root doesn't hold, keeps
+        // the configured root, unlabelled as before: two roots in a fixed order, never a search for the mission.
+        const missions = tagValues(row.tags ?? [], "mission:");
+        if (missionsRoot && missions.length === 1 && resolveWorkNodeDirs(inferredRoot, missions[0]!).length === 0
+          && resolveWorkNodeDirs(missionsRoot, missions[0]!).length === 1) return { root: missionsRoot };
+        return { root: inferredRoot, reason: `project ${rigProject} inferred from this seat's rig; the row names no project; add project:<id> to the row to name it`, ambiguous: true };
+      }
       if (projectIds.length === 0) return { root: missionsRoot };
       // Whether another root could hold a same-named mission when the configured root stands in for the row's project:
       // an unreadable catalogue can't say, and a readable one can only if it lists project roots. With no catalogue

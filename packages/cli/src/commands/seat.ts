@@ -285,9 +285,13 @@ function printHuman(status: SeatStatusResponse): void {
   }
   if (status.nativeInput?.target) console.log(`Native turn: ${terminalJson(status.nativeInput.target)}`);
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
-  // Only a runner submits permission requests; a plain seat's own prompts are its harness's.
-  if (status.permissions_to || status.runner) {
-    console.log(`Runner permission requests answered by: ${status.permissions_to === "deny" ? "no one: refused (--deny)" : status.permissions_to ?? "the default person"}`);
+  // A runner submits permission requests. A Claude Code seat that loads openrig-core has its own prompts asked of the
+  // chosen person, else its work's return route, else no one (#3992); other seats' prompts are their harness's.
+  const claudeSeat = status.runtime === "claude-code" && !status.runner;
+  if (status.permissions_to || status.runner || claudeSeat) {
+    console.log(claudeSeat
+      ? `Own permission prompts asked of (with openrig-core loaded): ${status.permissions_to === "deny" ? "no one: they stay in the terminal (--deny)" : status.permissions_to ?? "its work's return route, else no one"}`
+      : `Runner permission requests answered by: ${status.permissions_to === "deny" ? "no one: refused (--deny)" : status.permissions_to ?? "the default person"}`);
   }
   if (status.processLimits) {
     const l = status.processLimits;
@@ -1196,7 +1200,7 @@ Examples:
     .command("set-permissions-to")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--to <person>", "The registered person who answers this seat's runner permission requests instead of the default person, such as mike@external")
-    .option("--clear", "Remove the override: the default person answers again")
+    .option("--clear", "Remove the override: a runner's requests go to the default person again, and a Claude Code seat's own prompts to its work's return route, else to no one")
     .option("--deny", "Opt in to refusing every runner permission request on this seat; on a Claude Code seat, ask no one and leave its prompt in the terminal")
     .requiredOption("--reason <text>", "Audit reason recorded on the node.permissions_to_changed event")
     .option("--operator <address>", "Operator recorded on the audit event (required outside a managed seat)")
@@ -1211,7 +1215,8 @@ asked, OpenRig's default is to permit the request.
 
 On a Claude Code seat that loads openrig-core, this also chooses who is asked the
 seat's own permission prompt: the chosen person, else the return route of the work
-it's running, else the default person. There, a prompt no one can be asked isn't
+it's running. With neither, no one is asked, not even the default person, so the
+seat's usual prompt alert isn't held back. There, a prompt no one is asked isn't
 permitted, and --deny stops the question: the prompt stays in the seat's terminal,
 and nothing is refused.
 
@@ -1234,7 +1239,12 @@ Examples:
       await runLifecycleVerb("set-permissions-to", seat, body, opts, (data) => {
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         const name = `${s?.logicalId}@${s?.rigName}`;
-        const owner = (value: unknown) => value === "deny" ? "refused (--deny)" : typeof value === "string" ? value : "the default person";
+        // The receipt doesn't know the seat's kind, so with no one chosen or --deny it names both: a runner's requests and,
+        // on a Claude Code seat that loads openrig-core, its own prompts (#3992).
+        const owner = (value: unknown) => value === "deny"
+          ? "--deny (a runner's requests are refused; a Claude Code seat's own prompts stay in its terminal, asking no one)"
+          : typeof value === "string" ? value
+          : "no one chosen (a runner's requests go to the default person; a Claude Code seat's own prompts go to its work's return route, else to no one)";
         console.log(data["changed"] === false
           ? `${name}'s permission requests already go to ${owner(data["to"])}. No change recorded.`
           : `${name}'s permission requests: ${owner(data["from"])} -> ${owner(data["to"])} (audited).`);

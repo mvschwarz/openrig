@@ -511,6 +511,31 @@ function parseJsonStringList(value: unknown): string[] {
   }
 }
 
+/** #3616's read-back: a mission's planned arrangement as this view reads it (the same reader), for each active slice
+ *  of its composition. `missing` (no mission.yaml) and `malformed` are the view's own states, with its warning. */
+export function readPlannedArrangement(missionsRoot: string, mission: string):
+  | { state: "missing" }
+  | { state: "malformed"; warning: string }
+  | { state: "valid"; slices: Array<{ dir: string; id: string | null; wave: string | null; plannedOwners: Array<{ component: string; owner: string }>; dependsOn: string[] | null }> } {
+  const facts = readMissionSlices(missionsRoot, mission);
+  const arrangement = readArrangement(missionsRoot, mission, facts);
+  if (arrangement.state === "missing") return { state: "missing" };
+  if (arrangement.state === "malformed") return { state: "malformed", warning: arrangement.warning };
+  return {
+    state: "valid",
+    slices: [...arrangement.byDir].map(([dir, entry]) => {
+      const id = facts.find((slice) => slice.dir === dir)?.id;
+      return {
+        dir,
+        id: typeof id === "string" && id !== INDETERMINATE ? id : null,
+        wave: entry.wave ?? null,
+        plannedOwners: entry.plannedOwners.map(({ component, owner }) => ({ component, owner })),
+        dependsOn: entry.dependsOn ?? null,
+      };
+    }),
+  };
+}
+
 /** The manifest arrangement is optional. Missing means compatibility fallback;
  * malformed means the same fallback plus ONE named warning cell in `sources`.
  * A valid manifest becomes the ordering/wave/dependency authority. */
