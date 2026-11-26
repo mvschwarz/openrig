@@ -326,7 +326,10 @@ describe("rig capture --readable reads a small seat, then gives its window back"
     const sizes = async () => (await tmux(["list-windows", "-a", "-F", "#{session_name} #{window_width}x#{window_height}"])).split("\n").sort();
     const own = (target: string) => tmux(["show-options", "-w", "-v", "-t", target, "window-size"]);
     try {
-      await tmux(["-f", "/dev/null", "new-session", "-d", "-s", "review@rig", "-x", "18", "-y", "12", "sh -c 'while :; do clear; stty size; sleep 0.1; done'"]);
+      // Clear (scrollback too) and size go out in one write, so no read sees a blank screen between them. With a
+      // separate `clear`, a read in that gap whose history held no earlier frame captured nothing at all.
+      await tmux(["-f", "/dev/null", "new-session", "-d", "-s", "review@rig", "-x", "18", "-y", "12",
+        "sh -c 'while :; do s=$(stty size); printf \"\\033[H\\033[2J\\033[3J%s\\n\" \"$s\"; sleep 0.1; done'"]);
       await tmux(["new-session", "-d", "-s", "other", "-n", "review@rig", "-x", "90", "-y", "30", "sleep 60"]);
       const transport = await transportOver(adapter, (ms) => new Promise((r) => setTimeout(r, ms)));
 

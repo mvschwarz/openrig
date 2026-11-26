@@ -88,6 +88,17 @@ describe("release-surface parser - extract (unit)", () => {
     }
   });
 
+  it("distinguishes queue export from the standalone export command", () => {
+    const surface = extractSurfaceFromSources(["queue", "queue-export", "queue-import", "export"].map(
+      name => readSource(`src/commands/${name}.ts`),
+    ));
+    expect(surface.flags.has(`queue export${FLAG_SEP}--qitems`)).toBe(true);
+    expect(surface.commands.has("export")).toBe(true);
+    expect(surface.flags.has(`export${FLAG_SEP}--qitems`)).toBe(false);
+    expect(surface.commands.has("queue staging list")).toBe(true);
+    expect(surface.commands.has("staging list")).toBe(false);
+  });
+
   it("captures the new queue create flags", () => {
     const surface = extractSurfaceFromSources([readSource("src/commands/queue.ts")]);
     expect(surface.commands.has("queue create")).toBe(true);

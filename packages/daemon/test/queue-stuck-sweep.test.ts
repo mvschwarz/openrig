@@ -31,6 +31,8 @@ import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { nodeSessionConfirmedMissing } from "../src/domain/node-inventory.js";
+import { noticeRosterReady, rosterReadyNoticeId } from "../src/domain/roster-ready-notice.js";
+import { OPENRIG_SENDER } from "../src/lib/pane-envelope.js";
 
 const sweepMod = () => import("../src/domain/queue-stuck-sweep.js");
 
@@ -1693,6 +1695,67 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     await runSweep();
     const afterSecond = (db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n;
     expect(afterSecond).toBe(afterFirst);
+  });
+
+  // OpenRig's roster-ready notice (#3849) is information about the team, not work: no finding nags a seat into acting on
+  // it, pending, claimed or with a failed wake, and its waiting view promises no sweep. An ordinary row beside it is the control.
+  async function rosterNotice(dest = "worker@r"): Promise<string> {
+    expect(await noticeRosterReady(repo, "rig-1", [dest])).toEqual([]);
+    return rosterReadyNoticeId("rig-1", dest);
+  }
+
+  it("the roster-ready notice, unclaimed past the age, gets no finding and no promised sweep; an ordinary row does", async () => {
+    const notice = await rosterNotice();
+    const control = await mkRow();
+    ageCreated(notice, 120);
+    ageCreated(control.qitemId, 120);
+    expect(repo.waitingView(control.qitemId)!.nextBackstop.mechanism).toBe("queue-stuck-sweep:unclaimed");
+    await runSweep({ resolveOrchestrator: () => "orch@r" });
+    expect(await findingsFor(notice)).toHaveLength(0);
+    expect(await findingsFor(control.qitemId)).toHaveLength(1);
+    expect(repo.waitingView(notice)!.nextBackstop).toMatchObject({ owner: "worker@r", dueAt: null, intervalSeconds: null });
+    expect(repo.waitingView(notice)!.nextBackstop.mechanism).toMatch(/^none \(OpenRig's team notice: information only/);
+  });
+
+  it("a claimed roster-ready notice left idle gets no stalled-after-claim finding; an ordinary claimed row does", async () => {
+    const notice = await rosterNotice();
+    const control = await mkRow();
+    for (const id of [notice, control.qitemId]) {
+      repo.claim({ qitemId: id, destinationSession: "worker@r" });
+      ageClaim(id, 60);
+    }
+    expect(repo.getById(control.qitemId)!.pickup?.state).toBe("stalled-after-claim");
+    const { result } = await runSweep();
+    expect(await findingsFor(notice)).toHaveLength(0);
+    expect(await findingsFor(control.qitemId)).toEqual([expect.objectContaining({ state: "pending" })]);
+    expect(result.findings).not.toContainEqual(expect.objectContaining({ qitemId: notice }));
+    expect(repo.waitingView(notice)!.nextBackstop.mechanism).not.toContain("queue-stuck-sweep");
+  });
+
+  it("a roster-ready notice whose wake failed gets no undelivered finding; an ordinary row does", async () => {
+    const notice = await rosterNotice();
+    const control = await mkRow();
+    failNudge(notice);
+    failNudge(control.qitemId);
+    await runSweep({ resolveOrchestrator: () => "orch@r" });
+    expect(await findingsFor(notice)).toHaveLength(0);
+    expect(await findingsFor(control.qitemId)).not.toHaveLength(0);
+  });
+
+  it("an unclaimed finding filed about a roster-ready notice before this change closes, naming why", async () => {
+    // Before the exemption the sweep treated the notice as work. Model that state: file the finding while the row's
+    // source isn't OpenRig, then give it OpenRig's source as the real notice has.
+    const id = rosterReadyNoticeId("rig-1", "worker@r");
+    await repo.create({ qitemId: id, sourceSession: "sender@r", destinationSession: "worker@r", body: "notice", tags: ["roster-ready"] });
+    ageCreated(id, 120);
+    await runSweep({ resolveOrchestrator: () => "orch@r" });
+    const [finding] = await findingsFor(id);
+    expect(finding).toMatchObject({ state: "pending" });
+    db.prepare("UPDATE queue_items SET source_session = ? WHERE qitem_id = ?").run(OPENRIG_SENDER, id);
+    await runSweep({ resolveOrchestrator: () => "orch@r" });
+    expect(repo.getById(finding!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+    const closing = repo.transitionLog.listForQitem(finding!.qitemId).at(-1)!;
+    expect(closing.transitionNote).toContain("OpenRig's roster-ready notice: information about the team, not work");
   });
 
   it("DEFAULT ORCHESTRATOR RESOLUTION: production identity shapes resolve through the durable session binding — dotted logical ids, dash-form canonical sessions, no string derivation", async () => {
