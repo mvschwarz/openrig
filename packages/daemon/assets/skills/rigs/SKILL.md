@@ -140,13 +140,15 @@ person needs in their project or home folder and name that path.
     team (and in Claude Code, OpenRig's MCP tools); a session that hands the team no work gives the hooks nothing to
     read.
 
-  On their yes, run the commands from "Install" in the plugin's README (`daemon/assets/plugins/openrig/README.md` in the
+  On their yes, use the commands from "Install" in the plugin's README (`daemon/assets/plugins/openrig/README.md` in the
   installed `@openrig/cli` package), which has the details. This route uses the `rig` CLI, so leave out the README's
   seat setting and `codex mcp add`: they're for the plugin's MCP tools. On no, install nothing. Offer it once more,
   only when the team's first question reaches the person through your own check: say the plugin would have brought it
   here by itself, and that the choice is still theirs. After a second no, don't offer it again.
-  - **Claude Code:** `claude plugin marketplace add "$(npm root -g)/@openrig/cli/daemon/assets/plugins/openrig"`, then
-    `claude plugin install openrig@openrig-app`. It reports one option not yet set: that's the seat for the MCP tools,
+  - **Claude Code:** ask the person to run the two commands themselves, typing each with `!` in front, since Claude
+    Code's auto mode can refuse your own run of a plugin install:
+    `! claude plugin marketplace add "$(npm root -g)/@openrig/cli/daemon/assets/plugins/openrig"`, then
+    `! claude plugin install openrig@openrig-app`. It reports one option not yet set: that's the seat for the MCP tools,
     which this route leaves blank, so don't ask the person to set it. **Installed this way, the plugin does nothing in
     this conversation until the person types `/reload-plugins`** (you can't run it) or starts a new session. Ask for the
     reload: it keeps this conversation, and the hooks wake only the conversation that handed the work over.
@@ -383,7 +385,10 @@ commands; if the two ever differ, this step is right.
     `OPENRIG_SESSION_NAME=<address> rig queue update <id> --state done --closure-reason no-follow-on --resolution '<their words>'`,
     keeping their words in single quotes and writing each `'` in them as `'\''`, so the shell runs and changes nothing in them.
     Add no label, quotation marks or notes of your own, and don't turn their words into a yes or a no: the agent that
-    asked decides what they mean. You speak as yourself, never as the person. If they aren't there to answer, leave
+    asked decides what they mean. Through the plugin's tools with no seat, answer instead with `rig_queue_create` to the
+    question's sender, `returnRoute` `auto`, naming the question's id and giving their words. Never answer a question
+    task with `rig send` or `rig_send`: a message has no return address, so the work it starts loses your route, and its
+    seats' prompts then reach no one. You speak as yourself, never as the person. If they aren't there to answer, leave
     it open and tell them it's waiting; never answer for them.
     If the person said no to the openrig plugin once and this is the first question you bring them, end that message
     with step 1's second offer, in one line: the plugin would have brought this here by itself, and the choice is
@@ -448,7 +453,8 @@ commands; if the two ever differ, this step is right.
   when you saw the prompt first: answer that ask, with
   `OPENRIG_SESSION_NAME=<address> rig seat decide-permission <ask> --option allow --relay --person-said '<their words>'`
   (or `--option deny`) for a plain yes or no, or the plugin's `rig_seat_decide_permission`, and as its text says for
-  words or a condition. It takes their answer for as long as the prompt stays open. Don't type into the seat for it:
+  words or a condition. A relay is recorded as relayed by you, and unconfirmed, since OpenRig doesn't get it from them.
+  It takes their answer for as long as the prompt stays open. Don't type into the seat for it:
   that answers it in the terminal, ends the ask, and needs their exception for a terminal command. If the reply says it
   hasn't reached the prompt, the seat's hook stopped reading the ask: tell them, and answer that prompt in the seat like
   one with no ask. A prompt with no ask

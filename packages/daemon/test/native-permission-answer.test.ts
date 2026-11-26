@@ -181,7 +181,10 @@ describe("words and conditions go to the receiving agent, which judges the exact
   it("allows the action when it meets the person's condition, as the agent's judgment", async () => {
     const f = fixture({ decider: DECIDER });
     const askId = askIdOf(await f.submit());
-    expect(await f.answer(askId, { decision: "yes, as long as it's the docs branch" })).toMatchObject({ status: 200 });
+    // The person's receipt says what the record keeps: their words as theirs, and the decision as the agent's judgment.
+    expect(await f.answer(askId, { decision: "yes, as long as it's the docs branch" })).toMatchObject({ status: 200, body: { answer: {
+      message: `Your words on ${askId} went to ${DECIDER}, the receiving agent, which judges whether this exact action meets them. Its decision`
+        + ` is recorded as its judgment, not your own answer, with your words as you gave them. ${SEAT}'s prompt waits until then, and is also open in the seat's terminal.` } } });
     expect(f.rowsTo(DECIDER)).toBe(1);
     expect((await f.read(askId)).body).toMatchObject({ state: "pending" });
     const decided = await f.decide(askId, "allow", DECIDER, { reason: "it pushes the docs branch, which is their condition" });
@@ -259,17 +262,20 @@ describe("the person's own conversation, through the return route of the work th
     expect(ask.body).toContain("Never decide without their answer");
   });
 
-  it("records a relayed yes or no as the person's own answer, and the hook's deny carries their words", async () => {
+  // Root's F1: the conversation's agent relays its person's yes or no, which OpenRig didn't get from them. The answer takes
+  // effect as before; the record says who relayed it and that it's unconfirmed, never the person's own answer.
+  it("records a relayed yes or no as relayed by the conversation's agent, unconfirmed, and the hook's deny carries the words it reports", async () => {
     const f = fixture({ people: [] });
     await f.routedWork();
     const allowed = askIdOf(await f.submit());
     expect((await f.decide(allowed, "allow", null, { relay: true, personSaid: "yes" })).body).toMatchObject({ state: "answered",
-      optionId: "allow", native: { answeredAs: "person", by: "someone outside a seat", said: "yes" } });
+      optionId: "allow", native: { answeredAs: "relayed", by: "someone outside a seat", reported: "yes" } });
     const denied = askIdOf(await f.submit());
     const read = (await f.decide(denied, "deny", ROUTE, { relay: true, personSaid: "no, use the test script" })).body;
-    expect(read).toMatchObject({ state: "answered", optionId: "deny", native: { answeredAs: "person", by: ROUTE } });
-    expect((read.native as { message: string }).message).toBe(`Denied: the person's own answer, relayed by ${ROUTE}. The person said: "no, use the test script"`);
-    expect(f.notes(denied).at(-1)).toBe(`runner-permission-decided as the person's own answer, relayed by ${ROUTE}: deny; the person said "no, use the test script"`);
+    expect(read).toMatchObject({ state: "answered", optionId: "deny", native: { answeredAs: "relayed", by: ROUTE, reported: "no, use the test script" } });
+    expect(read.native).not.toHaveProperty("said");
+    expect((read.native as { message: string }).message).toBe(`Denied: ${ROUTE} relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). ${ROUTE} reports they said: "no, use the test script"`);
+    expect(f.notes(denied).at(-1)).toBe(`runner-permission-decided as relayed by ${ROUTE}, unconfirmed (OpenRig didn't get this answer from the person): deny; the decider reported they said "no, use the test script"`);
   });
 
   // claude8: the seat still held two review results it never claimed, on the first conversation's route, when a second
@@ -326,6 +332,114 @@ describe("the person's own conversation, through the return route of the work th
     const f = fixture({ decider: DECIDER });
     const askId = askIdOf(await f.submitRunner());
     expect(await f.decide(askId, "allow", DECIDER, { relay: true })).toMatchObject({ status: 400, body: { code: "relay_unsupported" } });
+  });
+});
+
+// Root's F1 (2026-11-26): the record keeps apart an answer OpenRig received from the person, an agent's report of the
+// person's words (--relay, --person-said), and an agent's own decision on them. Nothing is refused for it: the transport
+// session is attribution, not proof of a person, so no caller, header or missing header makes a report the person's own.
+describe("who decided what: the person's own answer, a relay and an agent's judgment stay apart", () => {
+  const UNCONFIRMED = "relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them)";
+
+  it.each([
+    ["the ask's own addressee, the conversation", ROUTE, "allow"],
+    ["a call with no seat header", null, "allow"],
+    ["a caller whose header names the registered person", PERSON, "allow"],
+    ["the seat whose prompt it is (a deny: no seat approves its own call here)", SEAT, "deny"],
+  ])("reads a relay from %s as relayed and unconfirmed, never the person's own answer", async (_case, caller, optionId) => {
+    const f = fixture({ people: ["mike"] });
+    await f.routedWork();
+    const askId = askIdOf(await f.submit());
+    const by = caller ?? "someone outside a seat";
+    const read = (await f.decide(askId, optionId, caller, { relay: true, personSaid: optionId === "allow" ? "yes" : "no" })).body;
+    // The answer takes effect as it did: only the record changed.
+    expect(read).toMatchObject({ state: "answered", optionId, native: { answeredAs: "relayed", by, reported: optionId === "allow" ? "yes" : "no" } });
+    const message = String((read.native as { message: string }).message);
+    expect(message).toBe(`${optionId === "allow" ? "Allowed once" : "Denied"}: ${by} ${UNCONFIRMED}. ${by} reports they said: "${optionId === "allow" ? "yes" : "no"}"`);
+    expect(message).not.toContain("the person's own answer");
+    expect(f.notes(askId).at(-1)).toMatch(new RegExp(`^runner-permission-decided as relayed by ${by.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, unconfirmed `));
+    expect(JSON.stringify((await f.read(askId)).body)).not.toContain('"answeredAs":"person"');
+  });
+
+  it("says so when a relay carries none of the person's words", async () => {
+    const f = fixture({ people: [] });
+    await f.routedWork();
+    const askId = askIdOf(await f.submit());
+    const read = (await f.decide(askId, "allow", ROUTE, { relay: true })).body;
+    expect(read).toMatchObject({ state: "answered", optionId: "allow", native: { answeredAs: "relayed", by: ROUTE } });
+    expect(read.native).not.toHaveProperty("said");
+    expect(read.native).not.toHaveProperty("reported");
+    expect((read.native as { message: string }).message).toBe(`Allowed once: ${ROUTE} ${UNCONFIRMED}, with none of their words.`);
+  });
+
+  it("keeps an agent's judgment on the words it reports as its judgment, with the words as its report", async () => {
+    const f = fixture({ people: [] });
+    await f.routedWork();
+    const askId = askIdOf(await f.submit());
+    const read = (await f.decide(askId, "deny", ROUTE, { reason: "it pushes to main", personSaid: "only on a branch" })).body;
+    expect(read).toMatchObject({ state: "answered", optionId: "deny", native: { answeredAs: "agent", by: ROUTE, reported: "only on a branch" } });
+    expect(read.native).not.toHaveProperty("said");
+    expect((read.native as { message: string }).message).toBe(`Not allowed: ${ROUTE}, deciding on the person's answer, judged that this exact action`
+      + ` doesn't meet it (it pushes to main). That's its judgment, not the person's own no. ${ROUTE} reports they said: "only on a branch"`);
+    expect(f.notes(askId).at(-1)).toBe(`runner-permission-decided by ${ROUTE}, an agent, not the person: deny, because "it pushes to main";`
+      + ` the decider reported they said "only on a branch"`);
+  });
+
+  it("keeps a recorded answer the person's own: a later relay of the opposite answer changes nothing", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    await f.answer(askId, { optionId: "allow" });
+    for (const caller of [DECIDER, null, PERSON]) {
+      expect((await f.decide(askId, "deny", caller, { relay: true, personSaid: "no" })).body).toMatchObject({ state: "answered", optionId: "allow",
+        native: { unchanged: true, answeredAs: "person", by: PERSON, message: `Allowed once by ${PERSON} in OpenRig: their own answer.` } });
+    }
+    expect(f.notes(askId).some((note) => note.startsWith("runner-permission-decided"))).toBe(false);
+  });
+
+  it("keeps the person's recorded words theirs when the receiving agent relays other words, and records both", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    await f.answer(askId, { decision: "only to a branch, never main" });
+    const read = (await f.decide(askId, "allow", DECIDER, { relay: true, personSaid: "yes" })).body;
+    expect(read).toMatchObject({ state: "answered", optionId: "allow",
+      native: { answeredAs: "relayed", by: DECIDER, said: "only to a branch, never main", reported: "yes" } });
+    expect((read.native as { message: string }).message).toBe(`Allowed once: ${DECIDER} ${UNCONFIRMED}.`
+      + ` The person said: "only to a branch, never main" ${DECIDER} reports they said: "yes"`);
+    // The person's own words stay on the ask they answered, apart from the decision recorded on the agent's row.
+    expect(f.queueRepo.getById(askId)!.humanAnswers).toMatchObject({ permission: { kind: "typed-reply", text: "only to a branch, never main" } });
+  });
+
+  it("keeps a kept answer's words the person's own through a direct decision on the same row", async () => {
+    const f = fixture({ decider: null });
+    const askId = askIdOf(await f.submit());
+    await f.answer(askId, { decision: "fine, but \"docs\" only; nothing else" });
+    expect((await f.read(askId)).body).toMatchObject({ state: "pending" });
+    const read = (await f.decide(askId, "allow", DECIDER, { reason: "it pushes the docs branch", personSaid: "fine, but \"docs\" only; nothing else" })).body;
+    // The decision fills the row's answer slot with its option (the shared contract); the record keeps the words as theirs.
+    expect(f.queueRepo.getById(askId)!.humanAnswers).toMatchObject({ permission: "allow" });
+    expect(read).toMatchObject({ state: "answered", optionId: "allow", native: { answeredAs: "agent", by: DECIDER, said: "fine, but \"docs\" only; nothing else" } });
+    expect(read.native).not.toHaveProperty("reported");
+  });
+
+  it("doesn't read an ask someone closed as denied as the person's own answer", async () => {
+    const f = fixture({ people: [] });
+    await f.routedWork();
+    const askId = askIdOf(await f.submit());
+    f.queueRepo.update({ qitemId: askId, actorSession: ROUTE, state: "done", closureReason: "denied", resolution: "not now" });
+    const read = (await f.read(askId)).body;
+    expect(read).toMatchObject({ state: "answered", optionId: "deny", native: { by: ROUTE, message: `Denied: ${ROUTE} closed this ask as denied in OpenRig: "not now"` } });
+    expect(read.native).not.toHaveProperty("answeredAs");
+    expect(read.native).not.toHaveProperty("said");
+  });
+
+  it("records a runner decider's --person-said as its report, beside the words the person gave", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submitRunner());
+    await f.answer(askId, { decision: "yes, but only the test file" });
+    expect((await f.decide(askId, "allow", DECIDER, { reason: "it edits the test file", personSaid: "yes" })).body).toMatchObject({ state: "answered" });
+    const decided = f.queueRepo.list({ limit: 100 }).flatMap((row) => f.notes(row.qitemId)).find((note) => note.startsWith("runner-permission-decided"))!;
+    expect(decided).toBe(`runner-permission-decided by ${DECIDER}, an agent, not the person: allow, because it edits the test file;`
+      + ` the person wrote "yes, but only the test file"; the decider reported they said "yes"`);
   });
 });
 
@@ -406,14 +520,14 @@ describe("an answer that comes after five minutes, while the same prompt is stil
   /** claude10's second late answer came 7 min 44 s after its ask (22:14:47 to 22:22:31Z): past the old window and its grace. */
   const LATE = 7 * 60_000 + 44_000;
 
-  it("carries the person's relayed yes, recorded as their own answer, and the hook takes it", async () => {
+  it("carries the person's relayed yes, recorded as relayed and unconfirmed, and the hook takes it", async () => {
     const f = fixture({ people: [] });
     await f.routedWork();
     const askId = askIdOf(await f.submit());
     later(LATE);
     expect((await f.read(askId)).body).toMatchObject({ state: "pending" });
     const decided = await f.decide(askId, "allow", ROUTE, { relay: true, personSaid: "Option 1, yes" });
-    expect(decided.body).toMatchObject({ state: "answered", optionId: "allow", native: { answeredAs: "person", by: ROUTE, said: "Option 1, yes",
+    expect(decided.body).toMatchObject({ state: "answered", optionId: "allow", native: { answeredAs: "relayed", by: ROUTE, reported: "Option 1, yes",
       hookLastRead: isoSeconds(Date.now()) } });
     // Its hook is reading the ask, so the reply reads as it always has.
     expect(decided.body.native).not.toHaveProperty("notReached");
@@ -431,7 +545,7 @@ describe("an answer that comes after five minutes, while the same prompt is stil
     const lastRead = isoSeconds(Date.now());
     later(LATE);
     const decided = (await f.decide(askId, "allow", ROUTE, { relay: true, personSaid: "yes" })).body;
-    expect(decided).toMatchObject({ ok: true, state: "answered", optionId: "allow", native: { answeredAs: "person", by: ROUTE, said: "yes", hookLastRead: lastRead } });
+    expect(decided).toMatchObject({ ok: true, state: "answered", optionId: "allow", native: { answeredAs: "relayed", by: ROUTE, reported: "yes", hookLastRead: lastRead } });
     expect((decided.native as { notReached: string }).notReached).toBe(`It hasn't reached ${SEAT}'s prompt: the seat's permission hook hasn't`
       + ` read this ask since ${lastRead}, so nothing has taken the answer there (the hook may have been stopped). Check the seat`
       + ` (rig capture ${SEAT}): if its prompt is still open, an answer in its terminal reaches it.`);
@@ -465,8 +579,8 @@ describe("an answer that comes after five minutes, while the same prompt is stil
     const askId = askIdOf(await f.submit());
     later(LATE);
     const read = (await f.decide(askId, "deny", ROUTE, { relay: true, personSaid: "No, remove the trailer" })).body;
-    expect(read).toMatchObject({ state: "answered", optionId: "deny", native: { answeredAs: "person" } });
-    expect((read.native as { message: string }).message).toBe(`Denied: the person's own answer, relayed by ${ROUTE}. The person said: "No, remove the trailer"`);
+    expect(read).toMatchObject({ state: "answered", optionId: "deny", native: { answeredAs: "relayed" } });
+    expect((read.native as { message: string }).message).toBe(`Denied: ${ROUTE} relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). ${ROUTE} reports they said: "No, remove the trailer"`);
   });
 
   it("tells a second late answer that the first one counts, and writes nothing", async () => {
@@ -516,7 +630,7 @@ describe("an answer that comes after five minutes, while the same prompt is stil
     const askId = askIdOf(await f.submit());
     later(60_000);
     expect((await f.decide(askId, "allow", ROUTE, { relay: true, personSaid: "yes" })).body).toMatchObject({ state: "answered", optionId: "allow",
-      native: { answeredAs: "person", by: ROUTE } });
+      native: { answeredAs: "relayed", by: ROUTE } });
   });
 
   // OpenRig's relay task for a seat's prompt tells the conversation to type the answer into the seat itself, so it waits for
@@ -645,7 +759,7 @@ describe("the real hook process against the real routes", () => {
     const decided = await f.decide(askId, "deny", ROUTE, { relay: true, personSaid: "no, run the test script first" });
     const { stdout } = await run;
     expect(JSON.parse(stdout)).toEqual({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny",
-      message: `Denied: the person's own answer, relayed by ${ROUTE}. The person said: "no, run the test script first"` } } });
+      message: `Denied: ${ROUTE} relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). ${ROUTE} reports they said: "no, run the test script first"` } } });
     // Decided while the hook reads: the reply reads as it always has.
     expect(decided.body).toMatchObject({ state: "answered", optionId: "deny" });
     expect(decided.body.native).not.toHaveProperty("notReached");
@@ -666,7 +780,7 @@ describe("the real hook process against the real routes", () => {
     cleanups.push(() => { vi.useRealTimers(); });
     vi.setSystemTime(Date.now() + 2 * 60_000);
     const decided = (await f.decide(askId, "allow", ROUTE, { relay: true, personSaid: "yes" })).body;
-    expect(decided).toMatchObject({ state: "answered", optionId: "allow", native: { answeredAs: "person",
+    expect(decided).toMatchObject({ state: "answered", optionId: "allow", native: { answeredAs: "relayed",
       notReached: expect.stringContaining(`It hasn't reached ${SEAT}'s prompt: the seat's permission hook hasn't read this ask since`) } });
     expect(decided.native).not.toHaveProperty("taken");
   });
@@ -734,5 +848,57 @@ describe("the daemon stopping while the hook waits", () => {
     stop();
     expect((await waiting).body).toMatchObject({ state: "pending" });
     expect(Date.now() - started).toBeLessThan(5_000);
+  });
+});
+
+// dev60-review's R1: every Claude seat's tool batch settles its native asks (up to 64 reads, one per call it names), and the
+// wake ladder asks on its ticks whether one holds the seat's prompt alert. Each read walked every row the seat ever sent
+// (3.17 s cold for Build's largest sender). Migration 199's partial index lists the native asks alone, by seat and age;
+// these cells read the plan of the statement the code itself prepares, as #3965's census cell does.
+describe("the reads on every tool batch and wake-ladder tick cover only the seat's native asks", () => {
+  const INDEX = "idx_queue_items_native_permission";
+  /** The statements prepared while `run` runs that `pick` selects. */
+  async function preparedDuring(f: ReturnType<typeof fixture>, pick: (sql: string) => boolean, run: () => unknown): Promise<string[]> {
+    const prepare = f.db.prepare.bind(f.db);
+    const seen: string[] = [];
+    const spy = vi.spyOn(f.db, "prepare").mockImplementation((sql: string) => { if (pick(sql)) seen.push(sql); return prepare(sql); });
+    try { await run(); } finally { spy.mockRestore(); }
+    return seen;
+  }
+  const plan = (f: ReturnType<typeof fixture>, sql: string, ...args: unknown[]) =>
+    (f.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args) as Array<{ detail: string }>).map((row) => row.detail).join(" | ");
+  /** A long-lived seat: many rows it sent, none of them a native ask. */
+  const history = (f: ReturnType<typeof fixture>) => {
+    const insert = f.db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body, tags)
+      VALUES (?, ?, ?, ?, 'lead@perm-rig', 'done', 'x', '["runner-permission"]')`);
+    f.db.transaction(() => { for (let i = 0; i < 500; i++) insert.run(`qitem-sent-${i}`, new Date().toISOString(), new Date().toISOString(), SEAT); })();
+  };
+
+  it("settles a tool batch through the partial index, with no scan and no sort", async () => {
+    const f = fixture();
+    history(f);
+    const askId = askIdOf(await f.submit());
+    const [sql] = await preparedDuring(f, (text) => text.includes("source_session = ? AND ts_created >= ?"), () => f.batch([{ input: { command: "ls" } }]));
+    expect(sql).toBeDefined();
+    const read = plan(f, sql!, SEAT, new Date(0).toISOString(), '%"permission-call:0123456789abcdef"%');
+    expect(read).toContain(`SEARCH queue_items USING INDEX ${INDEX} (source_session=? AND ts_created>?)`);
+    expect(read).not.toMatch(/SCAN queue_items|TEMP B-TREE/);
+    // What it settles is unchanged: the batch named another call, so the ask still waits; its own call settles it.
+    expect((await f.read(askId)).body).toMatchObject({ state: "pending" });
+    await f.batch([{}]);
+    expect((await f.read(askId)).body).toMatchObject({ state: "withdrawn", native: { why: "answered_in_terminal" } });
+  });
+
+  it("asks whether a native ask holds the seat's prompt alert through the partial index, with no scan and no sort", async () => {
+    const f = fixture();
+    history(f);
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+    await f.submit();
+    const [sql] = await preparedDuring(f, (text) => text.includes("state IN ('pending','in-progress','blocked','handed-off')"),
+      () => expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true));
+    expect(sql).toBeDefined();
+    const read = plan(f, sql!, SEAT);
+    expect(read).toContain(`SEARCH queue_items USING INDEX ${INDEX} (source_session=?)`);
+    expect(read).not.toMatch(/SCAN queue_items|TEMP B-TREE/);
   });
 });

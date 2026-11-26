@@ -77,8 +77,18 @@ const OPTION_TAG = "permission-option:";
 const TAKEN_NOTE = "runner-permission-taken-by-hook";
 /** A tool call with this ask's exact input completed in the same conversation (matched by content, not by id). */
 const COMPLETED_NOTE = "runner-permission-tool-completed";
-/** A decision recorded as the person's own answer, relayed by the agent that asked them. */
-const RELAYED_DECISION = "runner-permission-decided as the person's own answer";
+/** An agent's decision on a request (`rig seat decide-permission`), whoever records it. */
+const DECIDED_NOTE = "runner-permission-decided";
+/** A decision an agent records with `--relay`: its report that this is the person's own answer. OpenRig didn't get that
+ *  answer from the person, so it stays unconfirmed, whoever the caller is or says it is. */
+const RELAYED_DECISION = `${DECIDED_NOTE} as relayed by`;
+/** The words a native decision's note ends with, each as a JSON string: the person's own as OpenRig received them, and
+ *  what the decider reported they said. Its other text (the decider, a checked option id) can't end the note this way. */
+const QUOTED = String.raw`"(?:[^"\\]|\\.)*"`;
+const DECISION_WORDS = new RegExp(`(?:, because ${QUOTED})?(?:; the person wrote (${QUOTED}))?(?:; the decider reported they said (${QUOTED}))?$`);
+/** The rows that can be a native ask: the WHERE clause of idx_queue_items_native_permission (migration 199), repeated byte
+ *  for byte, which is what lets the planner read that small index instead of every row a seat ever sent. */
+const NATIVE_ASK_ROWS = `tags LIKE '%"${NATIVE_HOOK_TAG}%'`;
 const NATIVE_WITHDRAW_REASONS = new Set(["answer_window_ended", "answered_in_terminal"]);
 const NATIVE_HOOK_ID = /^[a-z][a-z0-9-]{0,39}$/;
 const FINGERPRINT = /^[a-f0-9]{16,64}$/;
@@ -164,6 +174,10 @@ export function nativeWindowEndedNote(item: Pick<QueueItem, "tags">): string {
 
 /** A person's words, kept whole but on one line, bounded. */
 const oneLine = (value: string): string => clip(value.replace(/\s+/g, " ").trim(), MAX_WORDS);
+/** Words a native decision's note quoted as JSON (DECISION_WORDS), or null. */
+function quoted(json: string | undefined): string | null {
+  try { return json ? String(JSON.parse(json)) || null : null; } catch { return null; }
+}
 
 /** A person's typed reply that says more than a plain yes or no: their own words, whole. */
 function typedWords(answer: unknown): string | null {
@@ -247,9 +261,16 @@ export type SubmitResult =
  *  whether the hook took the answer and the tool call later completed. */
 export type NativeReadFacts = {
   hook: string;
-  answeredAs?: "person" | "agent";
+  /** Whose answer it is: `person`, the person's own, as OpenRig received it from them (a pick, or a plain yes or no, in
+   *  Feed, Steering, the TUI or Slack); `relayed`, an agent's report that it's the person's own answer (`--relay`), which
+   *  OpenRig didn't get from them, so it's unconfirmed; `agent`, an agent's judgment on the person's words. Absent on an ask
+   *  closed as denied, which says who closed it (`by`), not whose answer it was. */
+  answeredAs?: "person" | "relayed" | "agent";
   by?: string;
+  /** The person's words as OpenRig received them from the person. */
   said?: string;
+  /** The words the decider reported the person said (`--person-said`), when they aren't `said`: its report, unconfirmed. */
+  reported?: string;
   message?: string;
   why?: string;
   taken?: boolean;
@@ -539,8 +560,8 @@ export class RunnerPermissions {
         "",
         ...(byRoute ? [
           "Ask your person, showing them the action above. Then record their answer:",
-          `- **A plain yes or no is their own answer.** Pass it on exactly, with no second confirmation: \`rig seat decide-permission ${askId} --option ${allowId} --relay --person-said "<their exact words>"\` (or \`--option ${rejectId}\`). It's recorded as their answer, relayed by you.`,
-          `- **Words or a condition** ("yes, but not on main"): judge whether this exact action meets them. If it does, \`--option ${allowId}\`; if it doesn't, \`--option ${rejectId}\`, each with \`--reason "<why>" --person-said "<their exact words>"\`. A deny takes their words back to ${seat.sessionName}'s agent so it can adapt; it's recorded as your judgment, not their no. If you can't tell what they meant, ask them again.`,
+          `- **A plain yes or no is their own answer.** Pass it on exactly, with no second confirmation: \`rig seat decide-permission ${askId} --option ${allowId} --relay --person-said "<their exact words>"\` (or \`--option ${rejectId}\`). It's recorded as relayed by you, with their words as you report them: unconfirmed, since OpenRig doesn't get it from them.`,
+          `- **Words or a condition** ("yes, but not on main"): judge whether this exact action meets them. If it does, \`--option ${allowId}\`; if it doesn't, \`--option ${rejectId}\`, each with \`--reason "<why>" --person-said "<their exact words>"\`. A deny takes their words back to ${seat.sessionName}'s agent so it can adapt; it's recorded as your judgment, not their no, with their words as you report them. If you can't tell what they meant, ask them again.`,
           "- **Never decide without their answer.** If they don't answer, leave it: the prompt waits in the seat's terminal.",
           `- **Answer here, not in ${seat.sessionName}'s terminal,** even when you see its prompt there: keys typed into the seat answer the prompt in the terminal and end this ask. The openrig plugin's \`rig_seat_decide_permission\` tool takes the same answer as the command.`,
         ] : [
@@ -786,17 +807,25 @@ export class RunnerPermissions {
     if (!offered.includes(optionId)) {
       return { ok: false, code: "invalid_option", message: `${optionId} isn't one of the options the agent offered: ${offered.join(", ") || "none recorded"}. Nothing was decided.` };
     }
-    // The person's words as they wrote them, a plain yes or no included (the record says what they said).
+    // Kept apart: what OpenRig received from the person (their words or pick on the request, placed by their own answer), and
+    // what the decider reports they said, which stays its report. Neither replaces the other, and a report never reads as
+    // their own answer: only an answer OpenRig receives from the person does.
     const typed = this.personAnswer(live) as { kind?: unknown; text?: unknown } | string | undefined;
+    const typedText = typed && typeof typed === "object" && typed.kind === "typed-reply" ? String(typed.text ?? "").trim() || null : null;
+    const received = typedText && hook ? oneLine(typedText) : typedText;
     const said = relayed.personSaid?.trim() ? oneLine(relayed.personSaid) : null;
-    const words = said ?? (typed && typeof typed === "object" && typed.kind === "typed-reply" ? String(typed.text ?? "").trim() || null : null);
+    const reported = said !== null && said !== received ? said : null;
     const why = reason ? clip(reason, MAX_AGENT_TEXT) : "";
+    // A native ask's note quotes its words as JSON, so a read can take them back from its end (DECISION_WORDS).
+    const quote = (value: string) => hook ? JSON.stringify(value) : `"${value}"`;
+    const words = `${why ? `, because ${hook ? quote(why) : why}` : ""}${received ? `; the person wrote ${quote(received)}`
+      : typeof typed === "string" ? `; the person chose ${typed}` : ""}${reported ? `; the decider reported they said ${quote(reported)}` : ""}`;
     const transitionNote = hook && relayed.relay
-      ? `${RELAYED_DECISION}, relayed by ${decider}: ${optionId}${words ? `; the person said "${oneLine(words)}"` : ""}`
-      : `runner-permission-decided by ${decider}, an agent, not the person: ${optionId}${why ? `, because ${why}` : ""}${words ? `; the person ${said ? "said" : "wrote"} "${hook ? oneLine(words) : words}"` : typeof typed === "string" ? `; the person chose ${typed}` : ""}`;
+      ? `${RELAYED_DECISION} ${decider}, unconfirmed (OpenRig didn't get this answer from the person): ${optionId}${words}`
+      : `${DECIDED_NOTE} by ${decider}, an agent, not the person: ${optionId}${words}`;
     const recorded = this.deps.queueRepo.recordPermissionDecision({ qitemId: live.qitemId, actorSession: decider, questionId: QUESTION_ID, optionId,
-      transitionNote, ...(hook ? { resolution: nativeDecisionMessage({ hook, decider, relay: relayed.relay === true,
-        denies: optionId === tagValue(asked, REJECT_TAG), words: words ? oneLine(words) : null, reason: why }) } : {}) });
+      transitionNote, ...(hook ? { resolution: nativeDecisionMessage({ decider, relay: relayed.relay === true,
+        denies: optionId === tagValue(asked, REJECT_TAG), received, reported, reason: why }) } : {}) });
     if (!recorded) return { ok: false, code: "not_recorded", message: `The decision couldn't be recorded on ${live.qitemId} (its row is ${live.state}). Nothing was decided. Read the request again.` };
     return this.read(null, askId);
   }
@@ -830,10 +859,13 @@ export class RunnerPermissions {
     const since = new Date(Date.now() - SETTLE_LOOKBACK_MS).toISOString();
     const settledHere = new Set<string>();
     let settled = 0;
+    // Every Claude seat's tool batch comes here, almost always with no native ask to find: the read covers only the seat's
+    // native asks in the lookback (the partial index), never every row the seat ever sent.
+    const candidates = this.deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE source_session = ? AND ts_created >= ?
+      AND ${NATIVE_ASK_ROWS} AND tags LIKE ? ORDER BY ts_created DESC, rowid DESC LIMIT 20`);
     for (const fingerprint of fingerprints.slice(0, 64)) {
       if (typeof fingerprint !== "string" || !FINGERPRINT.test(fingerprint)) continue;
-      const rows = this.deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE source_session = ? AND ts_created >= ? AND tags LIKE ?
-        ORDER BY ts_created DESC, rowid DESC LIMIT 20`).all(seat.sessionName, since, `%"${CALL_TAG}${fingerprint}"%`) as Array<{ qitem_id: string }>;
+      const rows = candidates.all(seat.sessionName, since, `%"${CALL_TAG}${fingerprint}"%`) as Array<{ qitem_id: string }>;
       for (const { qitem_id } of rows) {
         if (settledHere.has(qitem_id)) continue;
         const asked = this.deps.queueRepo.getById(qitem_id);
@@ -902,17 +934,24 @@ export class RunnerPermissions {
       const note = decision?.transitionNote ?? "";
       const by = decision?.actorSession ?? live.destinationSession;
       const denies = result.state === "refused" || result.optionId === tagValue(asked, REJECT_TAG);
-      const typed = live.humanAnswers?.[QUESTION_ID] as { kind?: unknown; text?: unknown } | string | undefined;
-      const typedText = typed && typeof typed === "object" && typed.kind === "typed-reply" ? oneLine(String(typed.text ?? "")) || null : null;
-      const decided = note.startsWith("runner-permission-decided");
-      const noted = note.match(/; the person (?:said|wrote) "(.*)"$/)?.[1] ?? null;
-      const words = decided ? noted : typedText ?? (live.closureReason === "denied" && live.resolution ? oneLine(live.resolution) : null);
+      const decided = note.startsWith(DECIDED_NOTE);
+      // The person's own answer only as OpenRig received it from them, on its human-answer path: never from a relay, from who
+      // the caller is or says it is, or from the row's answer slot, which a decision fills with its option too. An ask closed
+      // as denied any other way says who closed it, not whose answer it was.
+      const human = !decided && decision?.ownerNotificationKind === "human-decision-resolved";
       facts.by = by;
-      facts.answeredAs = note.startsWith(RELAYED_DECISION) || !decided ? "person" : "agent";
+      if (decided || human) facts.answeredAs = human ? "person" : note.startsWith(RELAYED_DECISION) ? "relayed" : "agent";
+      const typed = live.humanAnswers?.[QUESTION_ID] as { kind?: unknown; text?: unknown } | string | undefined;
+      const [, wrote, told] = decided ? DECISION_WORDS.exec(note) ?? [] : [];
+      const words = decided ? quoted(wrote) : human && typed && typeof typed === "object" && typed.kind === "typed-reply"
+        ? oneLine(String(typed.text ?? "")) || null : null;
+      const reported = quoted(told);
       if (words) facts.said = words;
+      if (reported) facts.reported = reported;
       const recorded = decided ? live.resolution?.split("\n").filter(Boolean).pop() ?? null : null;
       facts.message = recorded ?? (decided
-        ? nativeDecisionMessage({ hook, decider: by, relay: facts.answeredAs === "person", denies, words, reason: "" })
+        ? nativeDecisionMessage({ decider: by, relay: facts.answeredAs === "relayed", denies, received: words, reported, reason: "" })
+        : !human ? `Denied: ${by} closed this ask as denied in OpenRig${live.resolution ? `: "${oneLine(live.resolution)}"` : "."}`
         : denies ? `Denied by ${by} in OpenRig: their own answer${words && plainYesOrNo(words) !== "no" ? `. They wrote: "${words}"` : "."}`
           : `Allowed once by ${by} in OpenRig: their own answer${words && plainYesOrNo(words) !== "yes" ? `. They wrote: "${words}"` : "."}`);
       // Until the hook takes it, say whether it's reading the ask at all.
@@ -1084,16 +1123,15 @@ function nativeWithdrawText(reason: string, hook: string): string {
 }
 
 /** The one line a native decision recorded with `rig seat decide-permission` gives the harness's agent (as a deny's
- *  message) and the record: whose answer it is, the person's words, and an agent's reason. */
-function nativeDecisionMessage(input: { hook: string; decider: string; relay: boolean; denies: boolean; words: string | null; reason: string }): string {
-  const { decider, relay, denies, words, reason } = input;
-  const quoted = words ? ` The person said: "${words}"` : "";
-  if (relay) return denies
-    ? `Denied: the person's own answer, relayed by ${decider}.${quoted}`
-    : `Allowed once: the person's own answer, relayed by ${decider}.${quoted}`;
+ *  message) and the record: who decided and how (a relay stays unconfirmed: OpenRig didn't get that answer from the
+ *  person), the person's words as OpenRig received them, the words the decider reported, and an agent's reason. */
+function nativeDecisionMessage(input: { decider: string; relay: boolean; denies: boolean; received: string | null; reported: string | null; reason: string }): string {
+  const { decider, relay, denies, received, reported, reason } = input;
+  const words = `${received ? ` The person said: "${received}"` : ""}${reported ? ` ${decider} reports they said: "${reported}"` : ""}`;
+  if (relay) return `${denies ? "Denied" : "Allowed once"}: ${decider} relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them)${words ? `.${words}` : ", with none of their words."}`;
   return denies
-    ? `Not allowed: ${decider}, deciding on the person's answer, judged that this exact action doesn't meet it${reason ? ` (${reason})` : ""}. That's its judgment, not the person's own no.${quoted}`
-    : `Allowed once: ${decider}, deciding on the person's answer, judged that this exact action meets it${reason ? ` (${reason})` : ""}.${quoted}`;
+    ? `Not allowed: ${decider}, deciding on the person's answer, judged that this exact action doesn't meet it${reason ? ` (${reason})` : ""}. That's its judgment, not the person's own no.${words}`
+    : `Allowed once: ${decider}, deciding on the person's answer, judged that this exact action meets it${reason ? ` (${reason})` : ""}.${words}`;
 }
 
 /** Whether a native ask from this seat is open and still in its window: a person can answer the prompt through OpenRig
@@ -1102,8 +1140,9 @@ function nativeDecisionMessage(input: { hook: string; decider: string; relay: bo
  *  before. */
 export function nativeAskHoldsPrompt(db: Database.Database, sessionName: string, now = Date.now()): boolean {
   try {
+    // The seat's native asks only (the partial index), not every row it ever sent: the wake ladder asks this on its ticks.
     const rows = db.prepare(`SELECT tags FROM queue_items WHERE source_session = ? AND state IN ('pending','in-progress','blocked','handed-off')
-      AND tags LIKE ? ORDER BY ts_created DESC LIMIT 20`).all(sessionName, `%"${NATIVE_HOOK_TAG}%`) as Array<{ tags: string | null }>;
+      AND ${NATIVE_ASK_ROWS} ORDER BY ts_created DESC LIMIT 20`).all(sessionName) as Array<{ tags: string | null }>;
     return rows.some(({ tags }) => {
       let parsed: unknown;
       try { parsed = JSON.parse(tags ?? "[]"); } catch { return false; }

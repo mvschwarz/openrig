@@ -607,7 +607,7 @@ the person:
 | **No one can be asked**, or the seat chose `--deny` | `{"ok": true, "state": "not_asked", "reason"}`. Nothing is decided: no permit, no refusal, and the prompt carries on in the terminal. |
 | **A person picks an offered option, or replies just yes or no** (Feed, Steering's Approve or Deny, the TUI, Slack) | Their own answer. It closes the ask as theirs, with no receiving agent in between and no second confirmation. |
 | **A person answers in other words** | The receiving agent judges the exact action against them, as for a runner: allow when it meets them, deny with their words when it doesn't, recorded as its judgment, not their no. Words it can't read are asked back. |
-| **The person's own conversation owns the ask** | Its agent shows them the exact action, then runs `rig seat decide-permission <askId> --option allow\|deny` (or calls the MCP tool `rig_seat_decide_permission`, which takes the same answer), never typing into the seat for it. A plain yes or no takes `--relay --person-said "<their words>"` and is recorded as the person's own answer, relayed by that agent. Words or a condition take `--reason` and `--person-said`, and are recorded as the agent's judgment. |
+| **The person's own conversation owns the ask** | Its agent shows them the exact action, then runs `rig seat decide-permission <askId> --option allow\|deny` (or calls the MCP tool `rig_seat_decide_permission`, which takes the same answer), never typing into the seat for it. A plain yes or no takes `--relay --person-said "<their words>"` and is recorded as relayed by that agent, with their words as it reports them: unconfirmed, since OpenRig didn't get that answer from the person. Words or a condition take `--reason` and `--person-said`, and are recorded as the agent's judgment. The decider is the conversation's address: `OPENRIG_SESSION_NAME=<address>` in a shell, and, through the MCP tool with no seat, the address OpenRig issued under that conversation's own key. |
 | **Closed without an answer** | `unanswered`: never a permit. A queue close is never an approval. |
 | **The prompt is answered in the terminal** | A No or Esc ends the hook, which withdraws the ask (`answered_in_terminal`). A Yes lets the tool run; when its exact call completes (the relay's `PostToolBatch` fingerprints), the ask is withdrawn the same way. A later answer through OpenRig reads as too late. |
 | **The window ends, or the seat restarts** | After 24 hours the hook withdraws the ask (`answer_window_ended`), and the prompt waits in the terminal. A Claude Code that's gone without ending the hook (killed, say) makes it withdraw the ask as `answered_in_terminal`. An earlier occupant's ask reads `stale`. An answer after either is too late, and nothing is sent. |
@@ -616,7 +616,7 @@ the person:
 - **The first answer wins.** A second `rig seat decide-permission` on an answered ask returns it as it is, with
   `native.unchanged: true`, and writes nothing.
 - **What reaches Claude Code:** `allow` for Allow once, or `deny` with a one-line `message`. The message says whose answer
-  it is and carries the person's words. A remembered choice ("don't ask again") is only in the terminal. The hook never
+  it is (a relay reads unconfirmed) and whose words it carries. A remembered choice ("don't ask again") is only in the terminal. The hook never
   sends `updatedPermissions`, `updatedInput`, `interrupt` or a mode change, and it has no `onFailure`.
 - **The exact action** is shown on the ask before anything is stored. A command appears as its text, any other tool's
   input as JSON. Text matching the transcript route's credential patterns is shown as `[REDACTED]`, and the display is cut
@@ -631,8 +631,13 @@ the person:
   request has no tool-call id, so an identical call in the same conversation can't be told apart.
 - **A read** of a native ask adds `native`, which can hold:
   - `hook`;
-  - `answeredAs` (`person` or `agent`) and `by`;
-  - `said`, the person's words;
+  - `answeredAs` and `by`, who decided. `person` is the person's own answer as OpenRig received it from them (Feed,
+    Steering, the TUI, Slack). `relayed` is an agent's `--relay`: its report that this is the person's answer, which
+    OpenRig didn't get from them, so it stays unconfirmed. `agent` is an agent's judgment on their words. Neither `--relay`
+    nor the caller's session (attribution, not proof of a person) ever makes an answer read `person`, and a relay of an
+    answer already recorded changes nothing. An ask closed as denied any other way has no `answeredAs`, only who closed it;
+  - `said`, the person's words as OpenRig received them, and `reported`, the words the deciding agent says they gave
+    (`--person-said`), kept apart when they differ;
   - `message`, what a deny tells Claude;
   - `why`, why it ended;
   - `taken` and `toolCompleted`;
@@ -647,6 +652,10 @@ the person:
   keys typed there answer the prompt in the terminal and end the ask. Once the ask ends (its prompt ended in the
   terminal, the seat restarted, or 24 hours passed), they go on as before. A hook killed outright leaves its ask open, so
   the hold lasts until the window ends; an answer meanwhile says it hasn't reached the prompt.
+- **A conversation that isn't listening:** an ask to the person's own conversation reaches it through the `openrig`
+  plugin's waiter, which listens for about two hours after each of its turns (its hooks' 7200-second timeout). A prompt
+  after that waits for the person's next turn there, with the seat's prompt alert held, until they come back or the ask's
+  24 hours end. The prompt stays open in the seat's terminal throughout.
 - **Runner and ACP requests are unchanged:** their defaults, reads and decisions are exactly as above.
 
 ## 8. Resume: exactly the same conversation, or say honestly that you couldn't

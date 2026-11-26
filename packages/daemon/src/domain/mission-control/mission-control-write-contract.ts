@@ -1063,6 +1063,8 @@ function runnerAnswerNotice(ask: QueueItem, db: Database.Database): string | und
     return `Your answer on ${ask.qitemId} is recorded as yours, and goes to ${ask.sourceSession}'s own prompt as soon as its permission hook reads it. The prompt is also open in the seat's terminal, and the first answer counts; the request's record says when the hook took yours.`;
   }
   if (ask.state === "handed-off" && ask.handedOffTo) {
+    // A seat's own prompt, answered in words: the record keeps them as theirs, and the decision as the agent's judgment.
+    if (nativePermissionHook(ask)) return `Your words on ${ask.qitemId} went to ${ask.handedOffTo}, the receiving agent, which judges whether this exact action meets them. Its decision is recorded as its judgment, not your own answer, with your words as you gave them. ${ask.sourceSession}'s prompt waits until then, and is also open in the seat's terminal.`;
     return `Your answer on ${ask.qitemId} went to ${ask.handedOffTo}, the receiving agent, which decides. The runner waits until then; nothing has run. A note to you says the agent's recorded state.`;
   }
   if (ask.state === "pending" || ask.state === "in-progress" || ask.state === "blocked") {

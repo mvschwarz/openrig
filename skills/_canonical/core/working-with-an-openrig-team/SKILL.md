@@ -109,10 +109,16 @@ task, without anyone asking you to check.
 
 - Questions about your work come to your seat: `rig_queue_list` with `owned` lists them.
 - Show the person the question and the team's draft, in their own words where the item gives them. Then ask for an answer.
-- Record only what the person actually tells you. Claim the item (`rig_queue_claim`), then close it with
-  `rig_queue_update`: `state` `done`, `closureReason` `no-follow-on`, and exactly what the person typed in `resolution`,
-  nothing else: no label such as "The person's answer:", no quotation marks, and no notes, paths or summaries of your own.
-  If the person isn't there to answer, leave the item open and tell them it's waiting. Never choose an answer for them.
+- Record only what the person actually tells you, on the question's own task, never with `rig_send`: a message carries
+  no return address, so the work it starts loses this chat's route, and its seats' prompts then reach no one. With a
+  seat, claim the item (`rig_queue_claim`), then close it with `rig_queue_update`: `state` `done`, `closureReason`
+  `no-follow-on`, and exactly what the person typed in `resolution`, nothing else: no label such as "The person's
+  answer:", no quotation marks, and no notes, paths or summaries of your own. With no seat, close it the same way in a
+  shell, as its address:
+  `OPENRIG_SESSION_NAME=<address> rig queue update <id> --state done --closure-reason no-follow-on --resolution '<their words>'`.
+  Or answer with `rig_queue_create` to the question's sender, `returnRoute` `auto`, naming the question's id and giving
+  their words. If the person isn't there to answer, leave the item open and tell them it's waiting. Never choose an
+  answer for them.
 - A question can be a seat's permission prompt that the operator or a team seat sent you: show it with the seat, the
   exact action and the choices it offers, and record the person's words the same way. The agent that sent it passes
   their answer to the seat.
@@ -120,7 +126,8 @@ task, without anyone asking you to check.
   (`qitem-runner-permission-…`), within seconds, even when you saw the prompt first (in a capture, or an item that says
   its owner needs input). Answer that ask, not the seat: show the person its exact action, then record their answer
   with `rig_seat_decide_permission` (in a shell, `rig seat decide-permission`). A plain yes or no is the person's own
-  answer: pass it on exactly, with `relay` and their words in `personSaid`. For their words or a condition, judge
+  answer: pass it on exactly, with `relay` and their words in `personSaid`. It's recorded as relayed by this chat, and
+  unconfirmed, since OpenRig doesn't get it from them. For their words or a condition, judge
   whether that exact action meets them, and give your `reason`. It takes their answer for as long as the prompt stays
   open; once it's answered in the seat's terminal, an answer here is too late. Don't type into the seat for it
   (`rig send --dangerously-interact`): that answers it in the terminal, ends the ask, and needs the person's exception

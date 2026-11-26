@@ -1275,6 +1275,24 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     const name = ((detail.data ?? {}) as RigDetail).rig?.name;
     return scope?.rig(name) ? name as string : outOfScope(`Rig ${handle}`);
   };
+  /** With no seat, the address OpenRig issued this stdio server's own conversation (under the conversation key it derives
+   *  itself, as its creates record it), when `qitemId` is addressed there: the conversation then acts as that address, as
+   *  `OPENRIG_SESSION_NAME=<address> rig ...` does in a shell. That's attribution, not proof of a person (a relay still
+   *  reads relayed and unconfirmed). Null otherwise, or when a read fails: the call goes as before. */
+  const ownConversationAddress = async (qitemId: string): Promise<string | null> => {
+    const key = !access && !seatOf() ? options.conversationKey?.() ?? null : null;
+    if (!key) return null;
+    try {
+      if ((await client.senderIdentity()).session) return null;
+      const tag = conversationKeyTag(key);
+      const [item, issued] = await Promise.all([client.get(`/api/queue/${encodeURIComponent(qitemId)}`),
+        client.get(`/api/queue/list?${new URLSearchParams({ tag, limit: "100" }).toString()}`)]);
+      const address = item.status < 400 ? (item.data as { destinationSession?: unknown } | null)?.destinationSession : undefined;
+      const rows = issued.status < 400 && Array.isArray(issued.data) ? issued.data as Array<{ returnRoute?: unknown; returnRouteBasis?: unknown; tags?: unknown }> : [];
+      return typeof address === "string" && rows.some((row) => row.returnRoute === address && (row.returnRouteBasis === "issued"
+        || row.returnRouteBasis === "issued-actor") && Array.isArray(row.tags) && row.tags.includes(tag)) ? address : null;
+    } catch { return null; }
+  };
   const rigOutOfScope = async (handle: string): Promise<TextResult | null> => {
     if (!scope) return null;
     const name = await scopedRigName(handle);
@@ -2946,12 +2964,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_seat_decide_permission")) server.registerTool(
     "rig_seat_decide_permission",
     {
-      description: "Answer a seat's permission ask (qitem-runner-permission-…) with one of the options it offers, as rig seat decide-permission does. Show your person the exact action first. A plain yes or no is their own answer: set relay and pass their exact words in personSaid. For their words or a condition, decide whether this exact action meets them, with reason and personSaid. An ask already answered, ended in the seat's terminal, or stale comes back as it is, and nothing is decided. A reply with native.notReached is recorded but hasn't reached the seat's prompt (its hook isn't reading the ask): tell your person what it says.",
+      description: "Answer a seat's permission ask (qitem-runner-permission-…) with one of the options it offers, as rig seat decide-permission does. Show your person the exact action first. A plain yes or no is their own answer: set relay and pass their exact words in personSaid; it's recorded as relayed by you, unconfirmed, since OpenRig didn't get it from them. For their words or a condition, decide whether this exact action meets them, with reason and personSaid. With no seat, the decision names this conversation's own address when the ask is addressed to it. An ask already answered, ended in the seat's terminal, or stale comes back as it is, and nothing is decided. A reply with native.notReached is recorded but hasn't reached the seat's prompt (its hook isn't reading the ask): tell your person what it says.",
       inputSchema: z.object({
         askId: z.string().describe("The ask's id (qitem-runner-permission-…)"),
         option: z.string().describe("One of the ask's options, by its id: allow or deny for a seat's own Claude Code prompt"),
-        relay: z.boolean().optional().describe("A seat's own prompt only: the person chose this option themselves and you pass it on exactly; recorded as their answer, not your decision"),
-        personSaid: z.string().optional().describe("The person's own words, exactly as they gave them"),
+        relay: z.boolean().optional().describe("A seat's own prompt only: the person chose this option themselves and you pass it on exactly; recorded as relayed by you, not your decision, and unconfirmed"),
+        personSaid: z.string().optional().describe("The person's own words, exactly as they gave them, recorded as your report of what they said"),
         reason: z.string().optional().describe("Why, recorded with the decision (say what the person meant)"),
       }),
       annotations: DESTRUCTIVE,
@@ -2960,7 +2978,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const denied = await itemOutOfScope(askId);
         if (denied) return denied;
-        return mapResult(await client.post(`/api/activity/permission-requests/${encodeURIComponent(askId)}/decide`, {
+        // A conversation with no seat answers its own ask as the address it was issued, not as someone outside a seat.
+        const address = await ownConversationAddress(askId);
+        const decider = address ? clientFactory(client.baseUrl) : client;
+        if (address) decider.bindSender(address);
+        return mapResult(await decider.post(`/api/activity/permission-requests/${encodeURIComponent(askId)}/decide`, {
           optionId: option, reason: reason ?? "", ...(personSaid !== undefined ? { personSaid } : {}), ...(relay ? { relay: true } : {}),
         }), undefined, { structured: true });
       } catch (err) {

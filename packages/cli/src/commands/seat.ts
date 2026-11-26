@@ -1237,8 +1237,8 @@ Examples:
     .argument("<request>", "The permission request's id (qitem-runner-permission-…), as the row handed to you names it")
     .requiredOption("--option <id>", "One of the options the agent offered, by its id")
     .option("--reason <text>", "Why, recorded with the decision (say what the person meant)")
-    .option("--person-said <words>", "The person's own words, exactly as they gave them, recorded with the decision")
-    .option("--relay", "A seat's own prompt only: the person chose this option themselves, and you pass it on exactly; recorded as their answer, not your decision")
+    .option("--person-said <words>", "The person's own words, exactly as they gave them to you, recorded with the decision as your report of what they said")
+    .option("--relay", "A seat's own prompt only: the person chose this option themselves, and you pass it on exactly; recorded as relayed by you, not your decision, and unconfirmed, since OpenRig didn't get it from them")
     .option("--json", "JSON output for agents")
     .description("Decide a seat's permission request that its person answered: one of the offered options")
     .addHelpText("after", `
@@ -1252,7 +1252,9 @@ section 7.
 
 A seat's own Claude Code prompt can come to you the same way, when your conversation
 handed the seat the work it's running. Show your person the exact action, then:
-- a plain yes or no is their own answer: pass it on with --relay and --person-said;
+- a plain yes or no is their own answer: pass it on with --relay and --person-said. It's
+  recorded as relayed by you, with their words as you report them, and reads unconfirmed:
+  OpenRig didn't get it from them;
 - for words or a condition, decide whether this exact action meets them, with --reason
   and --person-said. A deny takes their words back to the seat's agent; it's recorded as
   your judgment, not their no. If you can't tell what they meant, ask them again.

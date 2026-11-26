@@ -287,7 +287,7 @@ describe("MCP queue tools on the daemon's queue routes", () => {
 
   // Slice 15 (claude9 and claude10's F1): the person's own conversation, with no seat, answers a seat's Claude Code
   // permission ask through the plugin's MCP tools, as `rig seat decide-permission` does in a shell.
-  it("answers a seat's own permission ask with rig_seat_decide_permission, as the person's relayed answer, the first answer counts, and an orphaned ask says it hasn't reached the prompt", async () => {
+  it("answers a seat's own permission ask with rig_seat_decide_permission, as relayed by the conversation and unconfirmed, the first answer counts, and an orphaned ask says it hasn't reached the prompt", async () => {
     const rigs = new RigRepository(db);
     const node = rigs.addNode(rigs.createRig("team").id, "dev.build", { runtime: "claude-code" });
     const sessions = new SessionRegistry(db);
@@ -318,7 +318,7 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     const decided = await client.callTool({ name: "rig_seat_decide_permission", arguments: { askId, option: "allow", relay: true, personSaid: "Yes, commit it" } });
     expect(decided.isError).toBeFalsy();
     expect(decided.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow",
-      native: { hook: "claude-code", answeredAs: "person", by: "someone outside a seat", said: "Yes, commit it" } });
+      native: { hook: "claude-code", answeredAs: "relayed", by: "someone outside a seat", reported: "Yes, commit it" } });
     const again = await client.callTool({ name: "rig_seat_decide_permission", arguments: { askId, option: "deny", relay: true, personSaid: "no" } });
     expect(again.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow", native: { unchanged: true } });
     const unknown = await client.callTool({ name: "rig_seat_decide_permission", arguments: { askId: "qitem-runner-permission-000000000000000000000000", option: "allow" } });
@@ -340,9 +340,53 @@ describe("MCP queue tools on the daemon's queue routes", () => {
         arguments: { askId: (next as { askId: string }).askId, option: "allow", relay: true, personSaid: "yes" } });
       expect(orphaned.isError).toBeFalsy();
       expect(orphaned.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow",
-        native: { answeredAs: "person", notReached: expect.stringContaining("It hasn't reached dev-build@team's prompt") } });
+        native: { answeredAs: "relayed", notReached: expect.stringContaining("It hasn't reached dev-build@team's prompt") } });
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // claude12's F12b: the conversation that handed the work over, with no seat, answers its seat's ask through the plugin's
+  // MCP tool. The decision names the address OpenRig issued it (under the key its own stdio server derives), as
+  // OPENRIG_SESSION_NAME=<address> does in a shell, not "someone outside a seat". That's attribution only: a relay still
+  // reads relayed and unconfirmed. Another conversation's server, whose key wasn't issued that address, isn't it.
+  it("records a seatless conversation's decision on its own ask as its issued address, never as the person's own answer", async () => {
+    const rigs = new RigRepository(db);
+    const node = rigs.addNode(rigs.createRig("team").id, "dev.build", { runtime: "claude-code" });
+    const sessions = new SessionRegistry(db);
+    sessions.updateStatus(sessions.registerSession(node.id, "dev-build@team").id, "running");
+    delete process.env.OPENRIG_SESSION_NAME;
+    const conversation = async (key: string) => {
+      const mcp = createMcpServer(new DaemonClient(url), { conversationKey: () => key });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "conversation", version: "1.0.0" });
+      await mcp.connect(serverTransport);
+      await client.connect(clientTransport);
+      closers.push(async () => { await client.close(); await mcp.close(); });
+      return client;
+    };
+    const mine = await conversation("claude:conversation-1:4242");
+    const other = await conversation("claude:conversation-2:4343");
+    // The handoff, through the same server: with no seat, OpenRig issues this conversation an address under its key.
+    expect((await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Add the feature" } })).isError).toBeFalsy();
+    const permissions = new RunnerPermissions({ db, queueRepo: new QueueRepository(db, new EventBus(db), { validateRig: () => true }), eventBus: new EventBus(db),
+      humanRegistry: () => ({ ok: true, entities: [] }) as never, ownerOf: () => null, currentGeneration: (id) => sessions.currentOccupantTenure(id)?.generationUuid ?? null });
+    const ask = async (turn: string) => {
+      const submitted = await permissions.submit({ nodeId: node.id, sessionName: "dev-build@team", generation: sessions.currentOccupantTenure(node.id)!.generationUuid }, {
+        nativeRef: "claude-session-1", turnId: turn, requestId: turn, nativeHook: "claude-code", holdSeconds: 86400,
+        action: { tool: "Bash", input: { command: `git commit -m '${turn}'` }, agent: null }, toolCall: { title: "Bash", kind: "Bash" },
+        options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] });
+      return submitted as { askId: string; askedOf: string };
+    };
+    const first = await ask("invocation-1");
+    expect(first.askedOf).toMatch(/^conversation-[0-9a-f]{12}@kernel$/);
+    const decided = await mine.callTool({ name: "rig_seat_decide_permission", arguments: { askId: first.askId, option: "allow", relay: true, personSaid: "yes" } });
+    expect(decided.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow",
+      native: { answeredAs: "relayed", by: first.askedOf, reported: "yes",
+        message: `Allowed once: ${first.askedOf} relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). ${first.askedOf} reports they said: "yes"` } });
+    // Another conversation's server can't take this conversation's address: it decides as before, outside a seat.
+    const second = await ask("invocation-2");
+    expect((await other.callTool({ name: "rig_seat_decide_permission", arguments: { askId: second.askId, option: "deny", reason: "not this one" } })).structuredContent)
+      .toMatchObject({ ok: true, state: "answered", optionId: "deny", native: { answeredAs: "agent", by: "someone outside a seat" } });
   });
 });

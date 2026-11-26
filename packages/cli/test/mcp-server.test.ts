@@ -1877,7 +1877,7 @@ describe("MCP Server", () => {
     });
     it("rig_seat_decide_permission posts to the route rig seat decide-permission uses, with the relay and the person's words", async () => {
       const postFn = vi.fn(async () => ({ status: 200, data: { ok: true, state: "answered", optionId: "allow",
-        native: { hook: "claude-code", answeredAs: "person", by: "someone outside a seat", said: "yes" } } }));
+        native: { hook: "claude-code", answeredAs: "relayed", by: "someone outside a seat", reported: "yes" } } }));
       await setup({ post: postFn });
       const relayed = await mcpClient.callTool({ name: "rig_seat_decide_permission",
         arguments: { askId: "qitem-runner-permission-abc", option: "allow", relay: true, personSaid: "yes" } });
@@ -1888,7 +1888,7 @@ describe("MCP Server", () => {
       expect(postFn.mock.calls[1]?.[0]).toBe("/api/activity/permission-requests/qitem-runner-permission-def/decide");
       expect(postFn.mock.calls[1]?.[1]).toEqual({ optionId: "deny", reason: "it pushes to main", personSaid: "only on a branch" });
       expect(relayed.isError).toBeFalsy();
-      expect(relayed.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow", native: { answeredAs: "person" } });
+      expect(relayed.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow", native: { answeredAs: "relayed" } });
       await cleanup();
     });
     it("rig_queue_handoff that times out says the outcome is unknown and how to check it before retrying", async () => {

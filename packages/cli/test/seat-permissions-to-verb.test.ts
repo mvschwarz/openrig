@@ -116,8 +116,8 @@ describe("rig seat decide-permission on a seat's own Claude Code prompt", () => 
     vi.spyOn(DaemonClient.prototype, "post").mockImplementation(async (path: string, body?: unknown) => {
       calls.push({ path, body });
       return { status: 200, data: { ok: true, state: "answered", optionId: "allow",
-        native: { hook: "claude-code", answeredAs: "person", by: "conversation-0123456789ab@kernel", said: "yes",
-          message: "Allowed once: the person's own answer, relayed by conversation-0123456789ab@kernel. The person said: \"yes\"", ...native } } } as never;
+        native: { hook: "claude-code", answeredAs: "relayed", by: "conversation-0123456789ab@kernel", reported: "yes",
+          message: "Allowed once: conversation-0123456789ab@kernel relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). conversation-0123456789ab@kernel reports they said: \"yes\"", ...native } } } as never;
     });
     const program = makeCommand({ status: 200, data: {} }, []);
     const { logs, exitCode } = await captureLogs(async () => {
@@ -131,15 +131,15 @@ describe("rig seat decide-permission on a seat's own Claude Code prompt", () => 
     const { calls, logs, exitCode } = await decide({ hookLastRead: "2026-11-25T21:49:50Z", notReached });
     expect(calls[0]).toEqual({ path: `/api/activity/permission-requests/${ASK}/decide`, body: { optionId: "allow", reason: "", personSaid: "yes", relay: true } });
     expect(exitCode).toBeUndefined();
-    expect(logs).toEqual([`Decided: allow. Allowed once: the person's own answer, relayed by conversation-0123456789ab@kernel. The person said: "yes" ${notReached}`]);
+    expect(logs).toEqual([`Decided: allow. Allowed once: conversation-0123456789ab@kernel relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). conversation-0123456789ab@kernel reports they said: "yes" ${notReached}`]);
     expect(logs.join("\n")).not.toContain("gets it when its hook reads it");
     // A second answer is told the first counts, and still that it hasn't reached the prompt.
     const again = await decide({ unchanged: true, notReached });
-    expect(again.logs).toEqual([`Already answered by conversation-0123456789ab@kernel: nothing was decided now. Allowed once: the person's own answer, relayed by conversation-0123456789ab@kernel. The person said: "yes" ${notReached}`]);
+    expect(again.logs).toEqual([`Already answered by conversation-0123456789ab@kernel: nothing was decided now. Allowed once: conversation-0123456789ab@kernel relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). conversation-0123456789ab@kernel reports they said: "yes" ${notReached}`]);
   });
 
   it("reads as before while the hook reads the ask", async () => {
     const { logs } = await decide({ hookLastRead: "2026-11-25T21:49:50Z" });
-    expect(logs).toEqual(["Decided: allow. Allowed once: the person's own answer, relayed by conversation-0123456789ab@kernel. The person said: \"yes\" The seat's prompt gets it when its hook reads it, unless it was answered in the terminal first."]);
+    expect(logs).toEqual(["Decided: allow. Allowed once: conversation-0123456789ab@kernel relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). conversation-0123456789ab@kernel reports they said: \"yes\" The seat's prompt gets it when its hook reads it, unless it was answered in the terminal first."]);
   });
 });
