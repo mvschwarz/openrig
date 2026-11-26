@@ -208,6 +208,38 @@ const WAKE_PRE_INPUT_FAILURE_TAG = "queue:wake-pre-input-failure";
  *  OpenRig's own scheduling on an agent's row (ladder retries, an auto-unpark, boot recovery, health re-presentation). */
 export type WakeTrigger = "agent" | "openrig";
 const AUTO_UNPARK_BLOCKER_TAG_PREFIX = "queue:auto-unpark:blocker-ref:";
+const autoUnparkLine = (blockerQitemId: string, qitemId: string): string =>
+  `Blocker ${blockerQitemId} resolved; parked qitem ${qitemId} is pending. Resume the recorded continuation and update the row.`;
+
+/** The text of wakes that go in one send. #3896: the unpark wakes of rows parked on one blocker name the blocker once,
+ *  then the rows, when their frozen envelopes differ only in the row (same sender, stamp and urgency); any other member
+ *  keeps its own body. Each member still records its own outcome. */
+function joinWakeBodies(members: readonly OutboxEntry[]): string {
+  const merged = new Map<string, { blocker: string; head: string; tail: string; rows: string[] }>();
+  const parts: Array<string | { key: string }> = [];
+  for (const entry of members) {
+    const blocker = entry.tags?.includes(AUTO_UNPARK_WAKE_TAG)
+      ? entry.tags.find((tag) => tag.startsWith(AUTO_UNPARK_BLOCKER_TAG_PREFIX))?.slice(AUTO_UNPARK_BLOCKER_TAG_PREFIX.length)
+      : undefined;
+    const line = blocker && entry.auditPointer ? autoUnparkLine(blocker, entry.auditPointer) : undefined;
+    const at = line ? entry.body.indexOf(line) : -1;
+    if (!blocker || !line || at === -1 || entry.body.indexOf(line, at + 1) !== -1) { parts.push(entry.body); continue; }
+    const head = entry.body.slice(0, at);
+    const tail = entry.body.slice(at + line.length);
+    const key = JSON.stringify([blocker, head, tail]);
+    const group = merged.get(key);
+    if (group) { group.rows.push(entry.auditPointer!); continue; }
+    merged.set(key, { blocker, head, tail, rows: [entry.auditPointer!] });
+    parts.push({ key });
+  }
+  return parts.map((part) => {
+    if (typeof part === "string") return part;
+    const { blocker, head, tail, rows } = merged.get(part.key)!;
+    const text = rows.length === 1 ? autoUnparkLine(blocker, rows[0]!)
+      : `Blocker ${blocker} resolved; ${rows.length} parked qitems are pending:\n${rows.map((row) => `- ${row}`).join("\n")}\nResume each row's recorded continuation and update the row.`;
+    return head + text + tail;
+  }).join("\n");
+}
 
 /** The actor on the transition routeToFallback writes; the row's own history is how a later reroute finds the line it wrote. */
 const FALLBACK_ACTOR = "system:queue-fallback";
@@ -1810,7 +1842,7 @@ export class QueueRepository {
       fromSession: input.fromSession,
       toSession: input.destinationSession,
       identityProvenance: input.identityProvenance,
-      bareBody: `Blocker ${input.blockerQitemId} resolved; parked qitem ${input.qitemId} is pending. Resume the recorded continuation and update the row.`,
+      bareBody: autoUnparkLine(input.blockerQitemId, input.qitemId),
       tags: [AUTO_UNPARK_WAKE_TAG, WAKE_TRIGGER_OPENRIG_TAG, `${AUTO_UNPARK_BLOCKER_TAG_PREFIX}${input.blockerQitemId}`, `queue:return:${input.blockerQitemId}`],
     });
   }
@@ -2032,10 +2064,10 @@ export class QueueRepository {
         })();
         released.push(entry);
       }
-      return { text: recoveryNotice(keep) + keep.map(entry => entry.body).join("\n"), outboxIds: keep.map(entry => entry.outboxId) };
+      return { text: recoveryNotice(keep) + joinWakeBodies(keep), outboxIds: keep.map(entry => entry.outboxId) };
     };
     const outcome = await this.performWakeSend(
-      qitemId, intent.destinationSession, intent.senderSession, undefined, recoveryNotice(group) + group.map(entry => entry.body).join("\n"), group.map(entry => entry.outboxId),
+      qitemId, intent.destinationSession, intent.senderSession, undefined, recoveryNotice(group) + joinWakeBodies(group), group.map(entry => entry.outboxId),
       trigger, recheckMembers,
     );
     // A bridged wake isn't confirmed, so the pass counts it as unconfirmed; its row is the bridge's to settle.
@@ -4257,8 +4289,10 @@ export class QueueRepository {
         actorSession: input.actorSession,
         transitionNote: note,
         // A note-only append does not clear the claim's retained park gate.
-        // Carry its audit pointer so a later state write can end this chain.
-        closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(input.qitemId) : undefined,
+        // Carry its audit pointer so a later state write can end this chain;
+        // on a parked row the pointer is the blocker the append leaves in place.
+        closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(input.qitemId)
+          : qitem.state === "blocked" ? qitem.blockedOn ?? undefined : undefined,
         identityProvenance: input.identityProvenance ?? null,
         identityPrincipal: input.identityPrincipal ?? null,
       });
@@ -4637,7 +4671,9 @@ export class QueueRepository {
       actorSession: input.actorSession,
       transitionNote: isReopen ? `reopen acknowledged: ${input.transitionNote}` : input.transitionNote,
       closureReason: validation.closureReason ?? undefined,
-      closureTarget: validation.closureTarget ?? undefined,
+      // A park transition logs the blocker it leaves in force, or none when the row has none: a caller's closure target
+      // never stands in for it. Only the log carries this: queue_items.closure_target above is written from validation alone.
+      closureTarget: input.state === "blocked" ? nextBlockedOn ?? undefined : validation.closureTarget ?? undefined,
       identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
       identityPrincipal: input.identityPrincipal ?? null,
       ownerNotificationKind: notification?.kind,

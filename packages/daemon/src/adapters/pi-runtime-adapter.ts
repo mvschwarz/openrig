@@ -290,14 +290,20 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
+  /** A launch wrapper this adapter can't apply, which refuses a launch before anything starts: only built-in Pi with the
+   *  seat launch environment applies one. */
+  protected unsupportedLaunchWrapper(binding: NodeBinding): string | undefined {
+    return binding.launchWrapper?.length && (this.runtime !== "pi" || !this.seatLaunchEnvironment)
+      ? "launch_wrapper support unavailable; no agent started." : undefined;
+  }
+
   async launchHarness(
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: ForkSource; beforeNativeDispatch?: () => boolean },
   ): Promise<HarnessLaunchResult> {
     const wrapped = binding.launchWrapper?.length ? binding.launchWrapper : undefined;
-    if (wrapped && (this.runtime !== "pi" || !this.seatLaunchEnvironment)) {
-      return { ok: false, error: "launch_wrapper support unavailable; no agent started." };
-    }
+    const unsupported = this.unsupportedLaunchWrapper(binding);
+    if (unsupported) return { ok: false, error: unsupported };
     if (!binding.tmuxSession) {
       return { ok: false, error: `No tmux session bound — cannot launch the ${this.runtime === "pi" ? "Pi" : "OMP"} harness` };
     }

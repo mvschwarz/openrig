@@ -4,9 +4,11 @@ import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
+import { CONVERSATION_KEY_TAG_PREFIX } from "../conversation-key-surface.js";
 
 /** How a row's return route was established:
- *  - `issued`: OpenRig issued it for this create, and the caller's own identity is still the row's source;
+ *  - `issued`: OpenRig issued it for this create (or earlier, to the conversation this create names by its key), and the
+ *    caller's own identity is still the row's source;
  *  - `issued-actor`: OpenRig issued it for a caller with no identity, so it's also the row's declared source (claimed:v1);
  *  - `caller`: the caller's own identity (`self`);
  *  - `named`: an address the caller named;
@@ -19,9 +21,34 @@ export const RETURN_ROUTE_BASES: readonly ReturnRouteBasis[] = ["issued", "issue
 export const RETURN_ROUTE_RIG = "kernel";
 
 /** The address `--return-route auto` issues for one create. It's derived from the create's own id, so an exact retry (the
- *  CLI's `--id`) and a restarted daemon issue the same address, and two creates never share one. */
+ *  CLI's `--id`) and a restarted daemon issue the same address, and two creates never share one, unless they're one
+ *  conversation's (`conversationIssuedAddress`). */
 export function issuedReturnAddress(qitemId: string): string {
   return `conversation-${createHash("sha256").update(qitemId).digest("hex").slice(0, 12)}@${RETURN_ROUTE_RIG}`;
+}
+
+/** A `conversation-key:` tag: the key of a person's own conversation (Claude Code or Codex), which only OpenRig writes,
+ *  beside the address it issued that conversation. The routes keep it only from a client on this machine. */
+export function isConversationKeyTag(tag: unknown): tag is string {
+  return typeof tag === "string" && tag.startsWith(CONVERSATION_KEY_TAG_PREFIX);
+}
+
+/** The address OpenRig already issued the conversation a create names by its key (the `conversation-key:` tag that
+ *  `rig queue create --return-route auto` and the MCP server's create record beside an issued address): the first one it
+ *  was issued. So a conversation keeps one address however often it hands work over with `auto`, and its seats' prompts
+ *  and its own wait read one route. Null when the create names no conversation, or several, when that conversation has no
+ *  address yet, or when the record can't be read: the create then issues its own. */
+export function conversationIssuedAddress(db: Database.Database, tags: unknown): string | null {
+  if (!Array.isArray(tags)) return null;
+  const keys = [...new Set(tags.filter((tag): tag is string => isConversationKeyTag(tag) && tag.length > CONVERSATION_KEY_TAG_PREFIX.length))];
+  if (keys.length !== 1) return null;
+  try {
+    const row = db.prepare(`SELECT return_route FROM queue_items WHERE return_route_basis IN ('issued', 'issued-actor')
+        AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?) ORDER BY ts_created, rowid LIMIT 1`)
+      .get(keys[0]) as { return_route: string | null } | undefined;
+    const route = row?.return_route ?? null;
+    return route && splitRoute(route).host === null && isRouteAddress(route) ? route : null;
+  } catch { return null; }
 }
 
 /** Every route note starts with this. They're delivery machinery, never someone picking the row up. */

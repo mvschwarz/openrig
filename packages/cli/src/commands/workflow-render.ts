@@ -5,7 +5,7 @@
  * through here and stay byte-identical to the shipped output.
  *
  * Shapes ported from in-repo precedent: the `rig ps` table mechanics
- * (fitCell/truncate) and the argo-get per-step tree bar (STEP / ACTOR
+ * (fitCell, shared from lib/terminal-cell) and the argo-get per-step tree bar (STEP / ACTOR
  * / EXIT / DURATION columns with status glyphs).
  *
  * Present-tolerant fields: WF-2's branch/gate additions
@@ -16,6 +16,7 @@
  */
 
 import { shellQuote } from "../cross-host-executor.js";
+import { fitCell } from "../lib/terminal-cell.js";
 
 export interface RenderInstance {
   guidance?: {lines: string[]};
@@ -135,14 +136,6 @@ const STATUS_GLYPH: Record<string, string> = {
 
 export function statusGlyph(status: string): string {
   return STATUS_GLYPH[status] ?? "●";
-}
-
-function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max - 1) + "…" : s;
-}
-
-function fitCell(value: string, width: number): string {
-  return truncate(value, width).padEnd(width);
 }
 
 /** Compact human duration between two ISO timestamps ("3s", "4m", "2h", "5d"). */

@@ -158,9 +158,9 @@ export class ChatRepository {
     return rows.reverse().map((r) => this.rowToMessage(r));
   }
 
-  searchChat(rigId: string, pattern: string): ChatMessage[] {
-    // Split pipe-joined keywords into OR conditions for SQL LIKE
-    const keywords = pattern.split("|").map((k) => k.trim()).filter(Boolean);
+  searchChat(rigId: string, pattern: string | readonly string[]): ChatMessage[] {
+    // Retain the legacy pipe-separated form for direct callers; history questions pass literal keywords.
+    const keywords = (typeof pattern === "string" ? pattern.split("|") : pattern).map((k) => k.trim()).filter(Boolean);
     if (keywords.length === 0) return [];
 
     // Keywords are literal text: escape LIKE's own wildcards and the escape character.

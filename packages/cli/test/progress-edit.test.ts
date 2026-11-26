@@ -160,8 +160,8 @@ describe("progress edits preserve fenced examples", () => {
     expect(result.content).toBe(`# Progress\n${example}\n## Rail\n- [x] Ship it\n`);
   });
 
-  it("does not update a row that exists only in a code block", () => {
-    const content = "# Progress\n## Rail\n```md\n- [ ] Example\n```\n";
+  it.each(["\n", "\r\n"])("does not update a row that exists only in a code block (%j)", (newline) => {
+    const content = ["# Progress", "## Rail", "```md", "- [ ] Example", "```", ""].join(newline);
     expect(() => setProgressRow(content, { text: "Example", status: "done" })).toThrow(/No progress row/);
   });
 
