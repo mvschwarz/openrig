@@ -1,7 +1,7 @@
 // A person answers an ask whose source names a rig this daemon doesn't know (`rig queue create --source` accepts any
 // source). There's no queue here for the answer to go back to, but the person's answer still counts once: the ask closes
 // with it, its history says the return couldn't go and why, and nothing asks the person again.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { migrate } from "../src/db/migrate.js";
@@ -51,6 +51,68 @@ function fixture() {
 }
 
 describe("a person's answer to an ask whose source names an unknown rig", () => {
+  // review-r2's reproductions (X-F1, X-F2 on 4d521168), with the kept answer read where it's now written.
+  it("keeps the first typed answer when closing the ask is interrupted, and a retry with other words closes with it", async () => {
+    const f = fixture();
+    const qitemId = await f.ask(FAR);
+    vi.spyOn(f.repo, "resolveDirectHumanReply").mockReturnValueOnce(false);
+    const first = await f.answer({ qitemId, decision: "Yes, ship it" });
+    expect(first.status).not.toBe(200);
+    expect(JSON.stringify(first.body)).toContain(`Your answer is kept on ${qitemId}, but it didn't close`);
+    // Saying it's kept is true: the words are on the ask before the close.
+    expect(f.repo.listTransitions(qitemId).some((t) => (t.transitionNote ?? "").endsWith("\nYes, ship it"))).toBe(true);
+    const retry = await f.answer({ qitemId, decision: "No, hold it" });
+    expect(retry.status).toBe(200);
+    expect(f.repo.getById(qitemId)?.resolution).toContain("Yes, ship it");
+    expect(f.repo.getById(qitemId)?.resolution).not.toContain("No, hold it");
+    expect((retry.body.answer as { message?: string }).message).toMatch(/^Your earlier answer is kept on .*, so this one wasn't recorded\./);
+  });
+
+  it("doesn't tell a second, different answer sent at the same time that it's kept", async () => {
+    const f = fixture();
+    const qitemId = await f.ask(FAR);
+    const [first, second] = await Promise.all([
+      f.answer({ qitemId, decision: "Yes, ship it" }),
+      f.answer({ qitemId, decision: "No, hold it" }),
+    ]);
+    expect(first.status).toBe(200);
+    expect(f.repo.getById(qitemId)?.resolution).toContain("Yes, ship it");
+    expect(second.status === 200 && String((second.body.answer as { message?: string })?.message).startsWith("Your answer is kept")).toBe(false);
+    expect(String((second.body.answer as { message?: string })?.message)).toMatch(/^Your earlier answer is kept/);
+  });
+
+  it("closes as the first person's answer when another person answers after it was kept", async () => {
+    const f = fixture();
+    const qitemId = await f.ask(FAR);
+    await f.repo.createHumanAnswer({ sourceSession: PERSON, destinationSession: FAR, body: "Yes, ship it", inboundReplyTo: qitemId });
+    await f.repo.createHumanAnswer({ sourceSession: "human@host", destinationSession: FAR, body: "No, hold it", inboundReplyTo: qitemId });
+    expect(f.repo.listTransitions(qitemId).filter((t) => (t.transitionNote ?? "").includes("references an unknown rig")).map((t) => t.transitionNote))
+      .toEqual([expect.stringMatching(new RegExp(`\\nanswered by: ${PERSON}\\nYes, ship it$`))]);
+    // The second person's close settles the ask as the first's, and says theirs didn't settle it.
+    expect(f.repo.resolveDirectHumanReply({ qitemId, actorSession: "human@host", decision: "No, hold it", primaryUser: true })).toBe(false);
+    const closed = f.repo.getById(qitemId);
+    expect(closed).toMatchObject({ state: "done", resolution: "Yes, ship it" });
+    expect(f.repo.listTransitions(qitemId).at(-1)?.actorSession).toBe(PERSON);
+  });
+
+  it("closes with the kept words at Slack's seam even when the close carries other words", async () => {
+    const f = fixture();
+    const qitemId = await f.ask(FAR);
+    await f.repo.createHumanAnswer({ sourceSession: PERSON, destinationSession: FAR, body: "Yes from Slack", inboundReplyTo: qitemId });
+    expect(f.repo.resolveDirectHumanReply({ qitemId, actorSession: PERSON, decision: "Something else", typedReply: true })).toBe(true);
+    expect(f.repo.getById(qitemId)).toMatchObject({ state: "done", resolution: "Yes from Slack" });
+  });
+
+  it("doesn't record another person's choice once an answer is kept on the ask", async () => {
+    const f = fixture();
+    const qitemId = await f.ask(FAR, [{ id: "q1", question: "Ship it?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] }]);
+    await f.repo.createHumanAnswer({ sourceSession: PERSON, destinationSession: FAR, body: "Yes, ship it", inboundReplyTo: qitemId });
+    expect(f.repo.recordHumanAnswer({ qitemId, actorSession: "human@host", questionId: "q1", optionId: "no", primaryUser: true }))
+      .toMatchObject({ status: "not-applicable", reason: "answered", answeredBy: PERSON });
+    // The first person's typed words sit under q1 (placed when their answer arrived); the second person's choice isn't recorded.
+    expect(f.repo.getById(qitemId)?.humanAnswers?.q1).toMatchObject({ kind: "typed-reply", text: "Yes, ship it" });
+  });
+
   it("closes the ask with their words, says on the ask why it couldn't go back, and doesn't ask them again", async () => {
     const f = fixture();
     const qitemId = await f.ask(FAR);
