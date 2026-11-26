@@ -47,6 +47,10 @@ new chat in the same process (after `/clear`) still gets the earlier chat's task
     can't tell the seat from your own chat, and the seat's work can get an address its hooks don't watch. Keep
     `OPENRIG_NODE_ID` in that server's environment.
   - **`rig queue create --return-route auto` in the shell,** in Claude Code or Codex.
+  - **Not covered: a Claude Code or Codex started from a shell where `OPENRIG_SESSION_NAME` is exported.** The hooks
+    take a chat with that variable in its environment for one of OpenRig's own seats and don't run there, so nothing
+    comes into the chat by itself, even when the MCP server gives the work an address of its own. Set the address in the
+    plugin's OpenRig seat (in Codex, with `--env` on `codex mcp add`) instead of exporting it.
   - **Not yet: Codex through the MCP server.** Codex may not give the server the session id the key comes from, so its
     handovers get no key and nothing wakes for them. In Codex, hand work over with `rig queue create --return-route auto`
     in the shell.

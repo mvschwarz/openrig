@@ -1158,7 +1158,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
    *  their environment; Codex passes it only when its entry's env_vars names it. Where a call also checks the sender, a seat
    *  the client already resolved (a pane's bound seat) counts too. With neither, this server can't tell a seat from a
    *  person's own conversation: a seat configured for its tools (OPENRIG_SESSION_NAME) is only a name. The hook bridge
-   *  reads the same variable in its own environment to stay out of seats. */
+   *  decides for itself, from its own environment: it stays out of a seat on OPENRIG_NODE_ID or OPENRIG_SESSION_NAME. */
   const inManagedSeat = (): boolean => !!readOpenRigEnv("OPENRIG_NODE_ID", "RIGGED_NODE_ID")?.trim();
   /** A tool's optional `host`: that registered http host's client and bearer, or this server's own client when none is
    *  named. A granted connection (an authenticated non-owner) reaches only the daemon serving it, so it can't name one.

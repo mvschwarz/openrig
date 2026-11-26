@@ -21,7 +21,7 @@ behave; this skill is the loop around them.
   with or without a seat, and the team's questions about it come there as tasks (below). Elsewhere they come back to the
   seat.
 - If it has no seat, you can still hand the team work. Outside Claude Code it goes as the unknown sender `rig_whoami`
-  names, with no return address. Either way, tell the person the `qitemId` and follow it with `rig_queue_show`. Recording the person's answers and listing your own work need a seat: offer to set one (the last
+  names, with no return address. Tell the person the `qitemId` and follow it with `rig_queue_show`. Recording the person's answers and listing your own work need a seat: offer to set one (the last
   section). In a shell, the `rig` command can act as that return address instead: put
   `OPENRIG_SESSION_NAME=<address>` in front of each `rig` command you run for this work (`rig queue ...`,
   `rig seat decide-permission ...`), so OpenRig records it as this chat's, not as someone outside a seat.
