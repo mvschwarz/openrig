@@ -936,3 +936,25 @@ describe("the reads on every tool batch and wake-ladder tick cover only the seat
     expect(read).not.toMatch(/SCAN queue_items|TEMP B-TREE/);
   });
 });
+
+
+describe("successive prompts for the same tool input", () => {
+  it.each(["allow", "deny"])("does not withdraw a later identical prompt when an earlier %s call resolves", async (optionId) => {
+    const f = fixture();
+    const first = askIdOf(await f.submit());
+    await f.answer(first, { optionId });
+    await f.taken(first, optionId);
+    const second = askIdOf(await f.submit());
+    expect(second).not.toBe(first);
+    expect((await f.read(second)).body.state).toBe("pending");
+    await f.batch([{}]);
+    expect((await f.read(second)).body.state).toBe("pending");
+    const earlier = (await f.read(first)).body;
+    expect(earlier).toMatchObject({ state: "answered", native: { taken: true } });
+    if (optionId === "allow") expect(earlier.native).toHaveProperty("toolCompleted", true);
+    else expect(earlier.native).not.toHaveProperty("toolCompleted");
+    // A later batch for the second call must not keep matching the first decision forever.
+    await f.batch([{}]);
+    expect((await f.read(second)).body.state).toBe("withdrawn");
+  });
+});

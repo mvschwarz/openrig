@@ -19,6 +19,7 @@ const PERCENT = String.raw`(?:100|[1-9]?\d)%`;
 const CONTEXT_NOTICE = String.raw`(?:(?:${PERCENT} until auto-compact|auto-compact is next|${PERCENT} context used)`
   + String.raw`(?: · \/model [A-Za-z0-9._\[\]-]+)?`
   + String.raw`|Context low \(${PERCENT} remaining\)(?: · (?:\/compact to free up space|\/model [A-Za-z0-9._\[\]-]+))?)`;
+export const CLAUDE_CLEAR_HINT = /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/;
 // Claude can leave these noninteractive warnings BELOW the input box and mode bar.
 // Recognize the complete input block, never a warning or historical prompt alone.
 export const CLAUDE_STATUS_WARNINGS = [
@@ -30,7 +31,7 @@ export const CLAUDE_STATUS_WARNINGS = [
   // #1641: Claude 2.1.293's update banner, whatever installer it names.
   /^Update available! Run: \S.*$/,
   // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
-  /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
+  CLAUDE_CLEAR_HINT,
   /^~\d+(?:\.\d+)?k uncached · \/clear to start fresh$/,
   // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30), "Restart to apply", or
   // "Restart to update" on its own row (Claude 2.1.319, #2605).

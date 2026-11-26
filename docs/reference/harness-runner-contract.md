@@ -481,6 +481,8 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
   answer, the question and the options, and the person is told once who decides and in what recorded state.
 - **The runner keeps reading `pending`.** The agent decides with `rig seat decide-permission <askId> --option <id>
   --reason "…"` (`POST <base>/api/activity/permission-requests/<askId>/decide` with `{"optionId", "reason"}`).
+  - A team seat named as `agents.operator_session` runs it with no prompt. Any other team Claude seat asks its person
+    first, so a seat can't approve its own waiting tool call.
   - It accepts only an option the agent offered.
   - It records an agent's decision: who decided, why, and the person's words.
   - A request that's no longer pending comes back as it is, and nothing is written.
