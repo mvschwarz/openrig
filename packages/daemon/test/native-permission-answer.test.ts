@@ -68,7 +68,9 @@ function fixture(options: { owner?: string | null; people?: string[]; decider?: 
     resolveOccupantGeneration: (id) => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
     isRegisteredOccupantGeneration: (id, generation) => sessions.isOccupantGenerationRegistered(id, generation) });
   const stream = new StreamStore(db, bus);
-  const owner = options.owner === undefined ? null : options.owner;
+  // A person is chosen for the seat unless a case says otherwise (`owner: null`): a native prompt asks the chosen person or
+  // the work's return route, never the default person by implication.
+  const owner = options.owner === undefined ? PERSON : options.owner;
   if (owner) db.prepare("UPDATE nodes SET permissions_to = ? WHERE id = ?").run(owner, node.id);
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -186,6 +188,12 @@ describe("words and conditions go to the receiving agent, which judges the exact
       message: `Your words on ${askId} went to ${DECIDER}, the receiving agent, which judges whether this exact action meets them. Its decision`
         + ` is recorded as its judgment, not your own answer, with your words as you gave them. ${SEAT}'s prompt waits until then, and is also open in the seat's terminal.` } } });
     expect(f.rowsTo(DECIDER)).toBe(1);
+    // The receiving agent is told to judge the condition itself, and to ask back only when it can't tell: a condition it
+    // can judge isn't a reason for a second round with the person.
+    const told = f.queueRepo.list({ limit: 100 }).find((row) => row.destinationSession === DECIDER)!.body;
+    expect(told).toContain("A condition is theirs to set and yours to judge: when this exact action plainly meets it, allow it; when it plainly doesn't, take the reject option with their words in your reason.");
+    expect(told).toContain("If you can't tell what they meant, or whether this exact action meets their condition, ask them back");
+    expect(told).not.toContain("unclear or conditional");
     expect((await f.read(askId)).body).toMatchObject({ state: "pending" });
     const decided = await f.decide(askId, "allow", DECIDER, { reason: "it pushes the docs branch, which is their condition" });
     expect(decided.body).toMatchObject({ state: "answered", optionId: "allow", native: { answeredAs: "agent", by: DECIDER,
@@ -225,8 +233,10 @@ describe("words and conditions go to the receiving agent, which judges the exact
 describe("no one to ask: nothing is decided, and the native prompt carries on", () => {
   it.each([
     ["no person is registered", { people: [] as string[] }],
-    ["several people are registered and none is the default", { people: ["mike", "dana"] }],
+    ["several people are registered and none is the default", { owner: null, people: ["mike", "dana"] }],
+    ["the default person is registered, but no one is chosen for the seat and its work has no return route", { owner: null, people: ["mike"] }],
     ["the seat's chosen person is no longer registered", { owner: "gone@external", people: [] as string[] }],
+    ["the chosen person is unavailable while a different default person is registered", { owner: "gone@external", people: ["mike"] }],
   ])("asks no one and permits nothing when %s", async (_case, options) => {
     const f = fixture(options);
     const submitted = await f.submit();
@@ -234,6 +244,21 @@ describe("no one to ask: nothing is decided, and the native prompt carries on", 
     expect(String(submitted.body.reason)).toMatch(/Nothing was decided: Claude Code's own prompt stays open in the seat's terminal\.$/);
     expect(f.asks()).toHaveLength(0);
     expect(f.permits()).toHaveLength(0);
+  });
+
+  it("doesn't ask the default person by implication, so the seat's prompt escalation isn't held back", async () => {
+    const f = fixture({ owner: null, people: ["mike"] });
+    const submitted = await f.submit();
+    expect(submitted).toMatchObject({ status: 200, body: { ok: true, state: "not_asked" } });
+    expect(String(submitted.body.reason)).toContain("No one is chosen for this seat (rig seat set-permissions-to) and its work carries no return route on this host, so no one is asked by implication; the prompt goes through the seat's usual escalation instead");
+    expect(f.asks()).toHaveLength(0);
+    expect(f.rowsTo(PERSON)).toBe(0);
+    // No open native ask, so the wake ladder's prompt alert and routed relay aren't held.
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+    // A runner's own request still goes to the default person, as before.
+    const runner = await f.submitRunner();
+    expect(runner).toMatchObject({ status: 200 });
+    expect(f.queueRepo.getById(askIdOf(runner))).toMatchObject({ destinationSession: PERSON });
   });
 
   it("refuses nothing on a seat whose operator opted in to refusing runner requests: the native prompt stays", async () => {
@@ -294,12 +319,12 @@ describe("the person's own conversation, through the return route of the work th
       + "it holds open work from 2 conversations, and this one's is in progress");
   });
 
-  it("takes the work in progress over newer work it hasn't started, else the newest open work, ahead of the default person", async () => {
-    const started = fixture();
+  it("takes the work in progress over newer work it hasn't started, else the newest open work", async () => {
+    const started = fixture({ owner: null });
     await started.routedWork(ROUTE);
     await started.routedWork(OTHER_ROUTE, "pending");
     expect((await started.submit()).body).toMatchObject({ askedOf: ROUTE });
-    const waiting = fixture();
+    const waiting = fixture({ owner: null });
     await waiting.routedWork(ROUTE, "pending");
     const newest = await waiting.routedWork(OTHER_ROUTE, "pending");
     const submitted = await waiting.submit();
@@ -308,11 +333,12 @@ describe("the person's own conversation, through the return route of the work th
       + "and this address is that work's return route; it holds open work from 2 conversations, and none is in progress");
   });
 
-  it("asks the default person when the work the seat is running names a conversation on another host, and a chosen person comes first", async () => {
-    const remote = fixture();
+  it("asks no one when the work the seat is running names a conversation on another host and no one is chosen, and a chosen person comes first", async () => {
+    const remote = fixture({ owner: null });
     await remote.routedWork(ROUTE, "pending");
     await remote.routedWork("conversation-0123456789ab@kernel@host-b");
-    expect((await remote.submit()).body).toMatchObject({ askedOf: PERSON });
+    expect((await remote.submit()).body).toMatchObject({ state: "not_asked" });
+    expect(remote.asks()).toHaveLength(0);
     const chosen = fixture({ owner: OTHER_PERSON, people: ["mike", "dana"] });
     await chosen.routedWork(ROUTE);
     await chosen.routedWork(OTHER_ROUTE);
@@ -347,7 +373,7 @@ describe("who decided what: the person's own answer, a relay and an agent's judg
     ["a caller whose header names the registered person", PERSON, "allow"],
     ["the seat whose prompt it is (a deny: no seat approves its own call here)", SEAT, "deny"],
   ])("reads a relay from %s as relayed and unconfirmed, never the person's own answer", async (_case, caller, optionId) => {
-    const f = fixture({ people: ["mike"] });
+    const f = fixture({ owner: null, people: ["mike"] });
     await f.routedWork();
     const askId = askIdOf(await f.submit());
     const by = caller ?? "someone outside a seat";
@@ -763,6 +789,20 @@ describe("the real hook process against the real routes", () => {
     // Decided while the hook reads: the reply reads as it always has.
     expect(decided.body).toMatchObject({ state: "answered", optionId: "deny" });
     expect(decided.body.native).not.toHaveProperty("notReached");
+  });
+
+  it("returns a conditional judgment through the real hook without calling it the person's own yes", async () => {
+    const f = fixture({ decider: DECIDER });
+    const port = await served(f);
+    const run = runHook(f, port, {});
+    const askId = await openAsk(f);
+    await f.answer(askId, { decision: "yes, as long as it is the docs branch" });
+    const decided = await f.decide(askId, "allow", DECIDER, { reason: "this exact action uses the docs branch" });
+    expect(decided.body).toMatchObject({ state: "answered", optionId: "allow", native: { answeredAs: "agent", by: DECIDER } });
+    const { stdout, code } = await run;
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } });
+    expect((await f.read(askId)).body).toMatchObject({ native: { taken: true, answeredAs: "agent", said: "yes, as long as it is the docs branch" } });
   });
 
   it("says an answer hasn't reached the prompt when the hook was killed outright while its Claude Code lives on", async () => {

@@ -1153,6 +1153,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const hostBindingsLoader = options.hostBindingsLoader ?? loadHostBindings;
   // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
   const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+  /** Whether this server runs under a seat OpenRig launched: only OpenRig's launch sets OPENRIG_NODE_ID, and its seat's
+   *  processes carry it. Claude Code passes it to the MCP servers it starts, unless CLAUDE_CODE_MCP_ALLOWLIST_ENV limits
+   *  their environment; Codex passes it only when its entry's env_vars names it. Where a call also checks the sender, a seat
+   *  the client already resolved (a pane's bound seat) counts too. With neither, this server can't tell a seat from a
+   *  person's own conversation: a seat configured for its tools (OPENRIG_SESSION_NAME) is only a name. The hook bridge
+   *  decides for itself, from its own environment: it stays out of a seat on OPENRIG_NODE_ID or OPENRIG_SESSION_NAME. */
+  const inManagedSeat = (): boolean => !!readOpenRigEnv("OPENRIG_NODE_ID", "RIGGED_NODE_ID")?.trim();
   /** A tool's optional `host`: that registered http host's client and bearer, or this server's own client when none is
    *  named. A granted connection (an authenticated non-owner) reaches only the daemon serving it, so it can't name one.
    *  The remote client is bound to this server's seat, so a write it makes there names the calling agent as its sender
@@ -1289,15 +1296,17 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       if (res.data.length < limit) return res.data;
     }
   };
-  /** With no seat, the address OpenRig issued this stdio server's own conversation (under the conversation key it derives
-   *  itself, as its creates record it), when `qitemId` is addressed there: the conversation then acts as that address, as
-   *  `OPENRIG_SESSION_NAME=<address> rig ...` does in a shell. That's attribution, not proof of a person (a relay still
+  /** The address OpenRig issued this stdio server's own conversation (under the conversation key it derives itself, as its
+   *  creates record it), when `qitemId` is addressed there: the conversation then acts as that address, as
+   *  `OPENRIG_SESSION_NAME=<address> rig ...` does in a shell, with or without a seat configured for its tools. Never under a
+   *  seat OpenRig launched (inManagedSeat), which acts as itself. That's attribution, not proof of a person (a relay still
    *  reads relayed and unconfirmed). Null otherwise, or when a read fails: the call goes as before. */
   const ownConversationAddress = async (qitemId: string): Promise<string | null> => {
-    const key = !access && !seatOf() ? options.conversationKey?.() ?? null : null;
+    const key = !access && !inManagedSeat() ? options.conversationKey?.() ?? null : null;
     if (!key) return null;
     try {
-      if ((await client.senderIdentity()).session) return null;
+      // Its sender is the seat configured for its tools, or none: any other (a pane's bound seat) isn't this conversation.
+      if ((await client.senderIdentity()).session !== seatOf()) return null;
       const tag = conversationKeyTag(key);
       const [item, rows] = await Promise.all([client.get(`/api/queue/${encodeURIComponent(qitemId)}`), issuedRows(tag)]);
       const address = item.status < 400 ? (item.data as { destinationSession?: unknown } | null)?.destinationSession : undefined;
@@ -1306,8 +1315,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     } catch { return null; }
   };
   /** The client a call on `qitemId` goes through: bound to this conversation's issued address when the item is addressed
-   *  there (ownConversationAddress), so a seatless conversation claims, closes or decides its own items as that address;
-   *  else this server's own. */
+   *  there (ownConversationAddress), so a person's own conversation claims, closes or decides its own items as that
+   *  address; else this server's own. */
   const clientFor = async (qitemId: string): Promise<DaemonClient> => {
     const address = await ownConversationAddress(qitemId);
     if (!address) return client;
@@ -1865,7 +1874,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         tier: z.string().optional().describe("Tier (as rig queue create --tier)"),
         qitemId: z.string().optional().describe("A request id you choose, unique to this request (for example qitem- and random letters), so an uncertain create can be checked by it; pass the same one to retry, never a new one (default: a new id)"),
         revises: z.string().optional().describe("The qitemId of the work this asks to revise"),
-        returnRoute: z.string().optional().describe("Where this work's questions and its seats' prompts come back to you as tasks (as rig queue create --return-route): auto issues an address for this conversation, and is the default when this connection has no seat of its own; self takes this seat's own address."),
+        returnRoute: z.string().optional().describe("Where this work's questions and its seats' prompts come back to you as tasks (as rig queue create --return-route): auto issues an address for this conversation, and is the default in a person's own Claude Code or Codex conversation whose key this server can read, even with a seat configured here, but not in a seat OpenRig launched; self takes this seat's own address."),
         alert: z.boolean().optional().describe("For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now (as rig queue create --alert). It stands out in Slack. Without it the ask still posts to Slack unless the person's Slack subscription is urgent-only, in which case it waits on Steering and the TUI"),
         host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
@@ -1971,14 +1980,19 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       // With no seat, the task goes to its destination as from the unknown sender, with the note at the top of its body.
       const note = unknownSenderNote("task");
       // Slice 15: the key of the conversation (Claude Code or Codex) that started this stdio server, on this host's daemon.
-      // A connection with no seat whose conversation has one asks for an issued return route by default, so the team's
-      // questions about this work come back to it, where the openrig plugin's hooks find them under that key; the issued
-      // address is then the row's declared sender (claimed:v1), and the note says where the questions go instead of "no
-      // return address". With no key (another app, an HTTP connection, another host's daemon) nothing could read that
-      // address, so the create keeps the unknown sender and the usual path for its questions.
-      const wantsKey = !access && !target.remote && (returnRoute === undefined ? note !== null : returnRoute.trim() === "auto");
+      // A person's own conversation with one asks for an issued return route by default, so the team's questions about this
+      // work come back to it, where the openrig plugin's hooks find them under that key. That holds with or without a seat
+      // configured for its tools: with one, the seat stays the row's sender; with none, the issued address is the row's
+      // declared sender (claimed:v1), and the note says where the questions go instead of "no return address". A seat
+      // OpenRig launched (inManagedSeat, or a sender the client already resolved that isn't the configured seat) has its
+      // own delivery, and the hooks never read an issued address there, so it gets no such default. An explicit returnRoute always decides. With no key (another app, an HTTP connection, another
+      // host's daemon, or Codex without its session id in this server's env) nothing could read that address, so the create
+      // keeps its sender and the usual path for its questions.
+      const wantsKey = !access && !target.remote && (returnRoute === undefined
+        ? !inManagedSeat() && (await client.senderIdentity()).session === seatOf()
+        : returnRoute.trim() === "auto");
       const key = wantsKey ? options.conversationKey?.() ?? null : null;
-      const route = returnRoute ?? (note && key ? "auto" : undefined);
+      const route = returnRoute ?? (key ? "auto" : undefined);
       const taskNote = note && route === "auto"
         ? note.replace(/ There's no return address: it follows this by its task id\.\]$/, " Its team's questions come back to this conversation's issued return route.]") : note;
       const sentTags = callerTags(tags, !!access?.external);
