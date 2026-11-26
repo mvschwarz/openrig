@@ -1,11 +1,12 @@
 import { statSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import type Database from "better-sqlite3";
+import { SLOW_OPERATION_THRESHOLD_MS } from "../domain/slow-op-recorder.js";
 import { recordSlowSyncSite } from "../domain/sync-site-wrap.js";
 
 /**
  * SQLite timing spans in the slow-operations log (#3895, third ask). Every statement run, exec, pragma and transaction
- * on the connection is timed; one that took at least the slow threshold (250 ms) is recorded as a span named
+ * on the connection is timed; one that took at least the slow threshold (SLOW_OPERATION_THRESHOLD_MS, 250 ms) is recorded as a span named
  * `sqlite.<call>.<first SQL keyword>`, for example `sqlite.run.insert` or `sqlite.transaction`. The SQL text and its
  * values are never recorded.
  *
@@ -28,7 +29,7 @@ export function withSqliteTiming(db: Database.Database): Database.Database {
       return value;
     } finally {
       const durationMs = performance.now() - startedAt;
-      if (durationMs >= 250) recordSlowSyncSite(site + (mainFileWrittenSince(file, startedWall) ? ".db_written" : ""), durationMs, outcome);
+      if (durationMs >= SLOW_OPERATION_THRESHOLD_MS) recordSlowSyncSite(site + (mainFileWrittenSince(file, startedWall) ? ".db_written" : ""), durationMs, outcome);
     }
   };
 
