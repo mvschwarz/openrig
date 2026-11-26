@@ -1265,11 +1265,27 @@ async function identifyLoggingDaemon(deps: LifecycleDeps, check: string): Promis
   const log = resolveLifecycleFile(deps, "daemon.log");
   if (!deps.writesOutputTo) return { why: "this CLI can't read which file a process writes" };
   let pid: unknown;
+  // The whole identity read is bounded, the body included, as stopReservedChild's is: a listener that sends its headers
+  // and then stalls is no identity. At the deadline the request is aborted, so nothing it opened outlives the decision.
+  const probe = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const res = await fetchDaemonProbe(deps, check, HEALTHZ_PROBE_TIMEOUT_MS);
-    pid = ((await res.json?.()) as { pid?: unknown } | undefined)?.pid;
+    pid = await Promise.race([
+      (async () => {
+        const res = await deps.fetch(check, { signal: probe.signal });
+        return ((await res.json?.()) as { pid?: unknown } | undefined)?.pid;
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          probe.abort(new HealthProbeTimeoutError(check));
+          reject(new HealthProbeTimeoutError(check));
+        }, HEALTHZ_PROBE_TIMEOUT_MS);
+      }),
+    ]);
   } catch (error) {
     return { why: `the listener at ${check} gave no readable answer (${error instanceof Error ? error.message : String(error)})` };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   if (!Number.isSafeInteger(pid) || (pid as number) <= 0) return { why: `the listener at ${check} names no PID` };
   const writes = deps.writesOutputTo(pid as number, log);

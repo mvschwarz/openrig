@@ -2894,6 +2894,21 @@ describe("#3953 — stop: a live daemon whose record is missing", () => {
     expect(deps.kill).not.toHaveBeenCalled();
   });
 
+  it("a listener that sends its headers and stalls before the body isn't identified: the read is bounded, aborted, and nothing is signalled", async () => {
+    const deps = unrecordedDeps();
+    const signals: AbortSignal[] = [];
+    vi.mocked(deps.fetch).mockImplementation(async (_url: string, init?: { signal?: AbortSignal }) => {
+      if (init?.signal) signals.push(init.signal);
+      return { ok: true, json: () => new Promise<unknown>(() => {}) };
+    });
+    const outcome = await stop(deps);
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/Not identified as this home's daemon: the listener at \S+ gave no readable answer \(healthz probe timed out for \S+\); no signal sent\.$/);
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(deps.kill).not.toHaveBeenCalled();
+  });
+
   it("a check just before the signal that can't read stops the daemon as identified, and the report says the check couldn't read", async () => {
     const deps = unrecordedDeps();
     vi.mocked(deps.writesOutputTo!).mockReturnValueOnce(true).mockReturnValueOnce({ failure: "lsof timed out" });
