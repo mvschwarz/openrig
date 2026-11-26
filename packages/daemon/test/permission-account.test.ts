@@ -7,13 +7,21 @@ import { claudePostureFlag } from "../src/adapters/yolo-mode.js";
 import { SeatStatusService } from "../src/domain/seat-status-service.js";
 import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../src/adapters/kernel-authority.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { readReceivingAgentSetting } from "../src/domain/queue-owner.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
+// The receiving agent as the daemon resolves it; null reads the real setting.
+const receiving = vi.hoisted(() => ({ value: null as null | { session: string | null; source?: "env" | "file" | "default" } }));
+vi.mock("../src/domain/queue-owner.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/domain/queue-owner.js")>();
+  return { ...actual, readReceivingAgentSetting: () => receiving.value ?? actual.readReceivingAgentSetting() };
+});
+
 const dbs: ReturnType<typeof createFullTestDb>[] = [];
-afterEach(() => { for (const db of dbs.splice(0)) db.close(); vi.unstubAllEnvs(); });
+afterEach(() => { for (const db of dbs.splice(0)) db.close(); vi.unstubAllEnvs(); receiving.value = null; });
 
 function seat(runtime: string, rigName = "workshop") {
   const db = createFullTestDb(); dbs.push(db);
@@ -47,14 +55,29 @@ describe("the planned permission account", () => {
     const other = rigRepo.addNode(rig.id, "dev.reviewer", { runtime: "claude-code", cwd: "/inert/project" });
     new SessionRegistry(db).registerSession(node.id, "dev-builder@workshop");
     new SessionRegistry(db).registerSession(other.id, "dev-reviewer@workshop");
-    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "dev-builder@workshop");
+    receiving.value = { session: "dev-builder@workshop", source: "file" };
     const receiver = planPermissionAccount(db, node.id, "dev-builder@workshop", "claude-code", env);
     expect(receiver.openRigAdds.claudeAsk).toEqual(TEAM_CLAUDE_ASK.filter(rule => rule !== "Bash(rig seat decide-permission:*)"));
     expect(receiver.openRigAdds.claudeAsk).toContain("Bash(rig seat set-permissions:*)");
     expect(receiver.openRigAdds.notes.join(" ")).toContain("receiving agent (agents.operator_session), so rig seat decide-permission doesn't ask here");
     const teammate = planPermissionAccount(db, other.id, "dev-reviewer@workshop", "claude-code", env);
     expect(teammate.openRigAdds.claudeAsk).toEqual(TEAM_CLAUDE_ASK);
-    expect(teammate.openRigAdds.notes.join(" ")).not.toContain("receiving agent");
+    expect(teammate.openRigAdds.notes.join(" ")).not.toContain("agents.operator_session");
+  });
+
+  it("keeps the ask listed when only the daemon's environment names the receiving agent, and says why", () => {
+    const { db, node } = seat("claude-code");
+    new SessionRegistry(db).registerSession(node.id, "dev-builder@workshop");
+    receiving.value = { session: "dev-builder@workshop", source: "env" };
+    const account = planPermissionAccount(db, node.id, "dev-builder@workshop", "claude-code", env);
+    expect(account.openRigAdds.claudeAsk).toEqual(TEAM_CLAUDE_ASK);
+    expect(account.openRigAdds.notes.join(" ")).toContain("from OPENRIG_AGENTS_OPERATOR_SESSION in its own environment");
+    expect(account.openRigAdds.notes.join(" ")).toContain("whether it's skipped depends on what the seat's rig config resolves");
+  });
+
+  it("reads the receiving agent's source from the settings store", () => {
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "dev-builder@workshop");
+    expect(readReceivingAgentSetting()).toEqual({ session: "dev-builder@workshop", source: "env" });
   });
 
   it("names the kernel default and the kernel list for a kernel Claude seat", () => {

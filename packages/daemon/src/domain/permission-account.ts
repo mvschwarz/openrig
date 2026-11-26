@@ -113,12 +113,17 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
     openRigAdds.claudeAsk = [...TEAM_CLAUDE_ASK];
     openRigAdds.notes.push("A hook asks before the listed lifecycle commands.");
     // The hook reads the same setting through the seat's own rig, at each decide-permission command.
-    const receiver = readReceivingAgentSetting().session;
-    const session = receiver ? (db.prepare("SELECT session_name FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+    const receiver = readReceivingAgentSetting();
+    const session = receiver.session ? (db.prepare("SELECT session_name FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
       .get(nodeId) as { session_name: string } | undefined)?.session_name : undefined;
-    if (receiver && session === receiver) {
-      openRigAdds.claudeAsk = openRigAdds.claudeAsk.filter(rule => !RECEIVING_AGENT_NO_ASK.includes(rule));
-      openRigAdds.notes.push(`This seat is the host's receiving agent (agents.operator_session), so rig seat decide-permission doesn't ask here: it settles the permission requests a person answered.`);
+    if (receiver.session && session === receiver.session) {
+      if (receiver.source === "env") {
+        // Set only in the daemon's environment, which the seat's own rig doesn't necessarily see: the ask stays listed.
+        openRigAdds.notes.push("The daemon reads agents.operator_session (this seat) from OPENRIG_AGENTS_OPERATOR_SESSION in its own environment. The hook skips the rig seat decide-permission ask only when the seat's own rig config names this seat, and a seat doesn't necessarily share the daemon's environment, so this plan lists the ask: whether it's skipped depends on what the seat's rig config resolves.");
+      } else {
+        openRigAdds.claudeAsk = openRigAdds.claudeAsk.filter(rule => !RECEIVING_AGENT_NO_ASK.includes(rule));
+        openRigAdds.notes.push(`This seat is the host's receiving agent (agents.operator_session), so rig seat decide-permission doesn't ask here: it settles the permission requests a person answered.`);
+      }
     }
   }
   if (planned.claudePermissions !== undefined) {
