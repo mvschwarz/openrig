@@ -1758,6 +1758,56 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(closing.transitionNote).toContain("OpenRig's roster-ready notice: information about the team, not work");
   });
 
+  // The other finding paths (verification of #3973): an overdue claim and a close handed to a successor this store can't
+  // find file nothing about the notice either; an ordinary row beside it is the control. Its wake is still retried:
+  // exempt from findings, not from delivery.
+  it("a claimed roster-ready notice past a closure deadline gets no overdue-claim finding; an ordinary row does", async () => {
+    const notice = await rosterNotice();
+    const control = await mkRow();
+    for (const id of [notice, control.qitemId]) {
+      repo.claim({ qitemId: id, destinationSession: "worker@r" });
+      makeOverdue(id);
+    }
+    const { result } = await runSweep();
+    expect(await findingsFor(notice)).toHaveLength(0);
+    expect(result.findings).toContainEqual(expect.objectContaining({ kind: "overdue-claim", qitemId: control.qitemId }));
+    expect(result.findings).not.toContainEqual(expect.objectContaining({ qitemId: notice }));
+  });
+
+  it("a roster-ready notice closed as handed to a successor this store can't find gets no custody finding; an ordinary row does", async () => {
+    const notice = await rosterNotice();
+    const control = await mkRow();
+    for (const id of [notice, control.qitemId]) {
+      repo.claim({ qitemId: id, destinationSession: "worker@r" });
+      repo.update({ qitemId: id, actorSession: "worker@r", state: "done", closureReason: "handed_off_to",
+        closureTarget: "qitem-20990101000000-deadbeef", transitionNote: "handed off to a successor not in this store" });
+    }
+    const { result } = await runSweep();
+    expect(await findingsFor(notice)).toHaveLength(0);
+    expect(await findingsFor(control.qitemId)).toHaveLength(1);
+    expect(result.findings).not.toContainEqual(expect.objectContaining({ qitemId: notice }));
+  });
+
+  it("a roster-ready notice's wake recorded unroutable before its seat's pane was bound is still retried, and files no finding", async () => {
+    const notice = await rosterNotice();
+    setNudgeResult(notice, "unroutable:no-pane", new Date(Date.now() - 10 * 60_000));
+    const classify = vi.spyOn(repo, "classifyDestinationOf").mockReturnValue({ class: "pane-bound" } as ReturnType<typeof repo.classifyDestinationOf>);
+    // Only the external wake is fake; the sweep's selection and its writes are real.
+    const deliver = vi.spyOn(repo, "deliverWakeForSuccessor").mockImplementation(async (id) => {
+      repo.recordNudgeAttempt(id, "ok");
+    });
+    try {
+      const { result } = await runSweep({ resolveOrchestrator: () => "orch@r" });
+      expect(deliver).toHaveBeenCalledWith(notice, "worker@r", true, OPENRIG_SENDER);
+      expect(repo.getById(notice)!.lastNudgeResult).toBe("ok");
+      expect(await findingsFor(notice)).toHaveLength(0);
+      expect(result.findings).not.toContainEqual(expect.objectContaining({ qitemId: notice }));
+    } finally {
+      deliver.mockRestore();
+      classify.mockRestore();
+    }
+  });
+
   it("DEFAULT ORCHESTRATOR RESOLUTION: production identity shapes resolve through the durable session binding — dotted logical ids, dash-form canonical sessions, no string derivation", async () => {
     // The live-fleet shape (review-r2 fix round): `orch-lead@r` binds a node whose
     // logical_id is `orch.lead` — the two forms are defined independently; the durable
