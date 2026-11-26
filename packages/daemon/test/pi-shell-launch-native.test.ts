@@ -91,6 +91,8 @@ setInterval(() => {}, 1000);
     const fsOps = { readFile: (p: string) => fs.readFileSync(p, "utf8"),
       writeFile: (p: string, c: string) => fs.writeFileSync(p, c),
       exists: fs.existsSync, mkdirp: (p: string) => { fs.mkdirSync(p, { recursive: true }); } };
+    // As startup wires it: the daemon's PATH reaches the runner, except on the short last-resort command.
+    const launchPath = process.env.PATH;
     try {
       if (routeServer) {
         await new Promise<void>(resolve => routeServer.listen(0, "127.0.0.1", resolve));
@@ -134,11 +136,11 @@ setInterval(() => {}, 1000);
       } : undefined;
       if (launchMode === "resume") {
         const adapter = new PiResumeAdapter(tmux, fsOps, { stateRoot, runnerEntryPath: runner },
-          { seatLaunchEnvironment, runnerGrant: optionalGrant ? async () => optionalGrant : undefined, maxWaitMs: 4000, pollMs: 25, newLaunchId: () => "attempt" });
+          { seatLaunchEnvironment, launchPath, runnerGrant: optionalGrant ? async () => optionalGrant : undefined, maxWaitMs: 4000, pollMs: 25, newLaunchId: () => "attempt" });
         const result = await adapter.resume(session, "pi_session_file", parent, cwd, model);
         expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
       } else {
-        const adapter = new PiRuntimeAdapter({ tmux, fsOps, stateRoot, runnerEntryPath: runner, seatLaunchEnvironment,
+        const adapter = new PiRuntimeAdapter({ tmux, fsOps, stateRoot, runnerEntryPath: runner, seatLaunchEnvironment, launchPath,
           runnerGrants: optionalGrant ? async () => optionalGrant : undefined,
           // The adapter polls 60 times for readiness; 100 ms each gives a loaded runner ~6 s, like the resume path's 4 s.
           sleep: () => new Promise(resolve => setTimeout(resolve, 100)), newLaunchId: () => "attempt" });

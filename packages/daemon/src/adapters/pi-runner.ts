@@ -38,7 +38,7 @@ import { OpenRouterChargeLookup, openRouterGenerationFetcher, type ChargeProvena
 import { OMP_MAX_FRAME_BYTES, OmpFrameDecoder, ompProtocolV2Limit } from "./omp-rpc-frame.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
-  PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
+  PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS, PI_RUNNER_LAUNCH_PATH_ENV,
   type PiRunnerState, type RunnerRuntime,
 } from "./pi-runner-protocol.js";
 
@@ -3128,12 +3128,18 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // OMP runs under a per-seat HOME, wrapped Pi launches hand the resolved
   // Pi binary to the wrapper, and a pi-rpc fork names its own executable
   // (--command), so a HOME-dependent launcher on PATH (a mise shim) is
-  // resolved first with the runner's own environment. Unwrapped Pi stays
-  // bare "pi".
+  // resolved first with the runner's own environment. The lookup tries the
+  // daemon's PATH first, so the seat runs the binary the daemon checked, then
+  // the pane's. Unwrapped Pi found on neither stays bare "pi".
+  const launchPath = process.env[PI_RUNNER_LAUNCH_PATH_ENV];
+  const lookupEnv = launchPath
+    ? { ...process.env, PATH: [launchPath, process.env.PATH].filter(Boolean).join(nodePath.delimiter) } : process.env;
+  const mustResolve = Boolean(args.command || runtime === "omp" || args.launchWrapper?.length);
   let command: string = args.command ?? runtime;
-  if (args.command || runtime === "omp" || args.launchWrapper?.length) {
-    const resolved = resolveRuntimeExecutable(args.command ?? runtime, process.env);
-    if (!resolved.ok) {
+  if (mustResolve || launchPath) {
+    const resolved = resolveRuntimeExecutable(command, lookupEnv);
+    if (resolved.ok) command = resolved.path;
+    else if (mustResolve) {
       console.error(`[${runtime}-runner] ERROR launch: ${resolved.error}`);
       // Record the exit for this launch so the adapter fails it now instead
       // of waiting out its readiness timeout. The durable cursor survives.
@@ -3146,7 +3152,6 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       process.exitCode = 127;
       return;
     }
-    command = resolved.path;
   }
 
   // OPR.0.7.0.2 K4: OpenRouter's charge, looked up with the key this runner forwarded to Pi, only for requests whose

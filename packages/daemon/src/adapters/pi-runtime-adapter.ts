@@ -32,7 +32,7 @@ import { guidanceFileSharedByLink } from "../domain/restore-guidance.js";
 import { observePiResourceTrust, observeOmpApprovalMode } from "../domain/permission-drift.js";
 import { insideMissingFolder } from "../domain/cwd-resolution.js";
 import {
-  piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
+  piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState, type PiRunnerLaunchOpts,
   PI_RUNNER_READY_MARKER, PI_RUNNER_ERROR_MARKER, PI_RUNNER_EXIT_MARKER,
   type PiRunnerState, type RunnerRuntime,
 } from "./pi-runner-protocol.js";
@@ -65,6 +65,8 @@ export interface PiRuntimeAdapterDeps {
   stateRootForSession?: (session: string) => string;
   /** Absolute path to the compiled pi-runner entry in the daemon dist. */
   runnerEntryPath: string;
+  /** The daemon's PATH, which its runtime probe used. The runner looks the runtime up there before the pane's PATH. */
+  launchPath?: string;
   /** Trust posture for managed launches (BR-5 — always explicit; ambient
    *  `ask` silently skips in RPC mode). Default: "no-approve" (the
    *  conservative floor; seat-level guidance/skills live in the seat's
@@ -91,6 +93,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   protected stateRoot: string;
   protected stateRootForSession: (session: string) => string;
   protected runnerEntryPath: string;
+  protected launchPath: string | undefined;
   protected trustPosture: "approve" | "no-approve";
   protected sleep: (ms: number) => Promise<void>;
   protected newLaunchId: () => string;
@@ -109,6 +112,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     this.stateRoot = deps.stateRoot;
     this.stateRootForSession = deps.stateRootForSession ?? (() => this.stateRoot);
     this.runnerEntryPath = deps.runnerEntryPath;
+    this.launchPath = deps.launchPath;
     this.trustPosture = deps.trustPosture ?? "no-approve";
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.newLaunchId = deps.newLaunchId ?? (() => randomUUID());
@@ -123,6 +127,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       stateRoot: this.stateRoot,
       stateRootForSession: this.stateRootForSession,
       runnerEntryPath: this.runnerEntryPath,
+      launchPath: this.launchPath,
       trustPosture: this.trustPosture,
       sleep: this.sleep,
       newLaunchId: this.newLaunchId,
@@ -384,7 +389,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
         : binding.nodeId ? this.seatLaunchEnvironment?.accountHome(binding.nodeId, this.runtime) : undefined;
       const preparedHome = accountHome === null && binding.nodeId
         ? this.seatLaunchEnvironment?.accountHome(binding.nodeId, this.runtime, true) : accountHome;
-      const cmd = buildPiRunnerCommand({
+      const runnerOpts: PiRunnerLaunchOpts = {
         accountHome: preparedHome ?? undefined,
         runtime: this.runtime,
         command: this.commandName,
@@ -404,13 +409,15 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
         usageFacts: this.runtime === "pi" && this.usageFactsEnabled(),
         openRouterCharge: this.runtime === "pi" && this.openRouterChargeEnabled(),
         ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
-      });
-
-      const fallback = cmd;
+      };
+      const cmd = buildPiRunnerCommand({ ...runnerOpts, launchPath: this.launchPath });
+      // The last resort, for a staging path too long to use, must stay short: it leaves out the daemon PATH and
+      // keeps the pane's own lookup, as before.
+      const fallback = buildPiRunnerCommand(runnerOpts);
       // Every Pi-protocol runtime (Pi and its pi-rpc forks) takes the seat launch environment; OMP unchanged.
       let command = this.runtime !== "omp" && this.seatLaunchEnvironment
         ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: authority?.generation ?? binding.launchGeneration, runtime: this.runtime, accountHome })
-        : fallback;
+        : cmd;
       const originalCommand = command;
       if (authority) command = authority.wrap(command);
       if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Runner launch selection changed before dispatch." };

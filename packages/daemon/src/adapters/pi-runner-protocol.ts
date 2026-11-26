@@ -273,6 +273,11 @@ export function buildPiChildEnv(
 
 // ── Command construction ─────────────────────────────────────────────────────
 
+/** Carries the daemon's PATH to the runner. A pane's login shell can reorder PATH (macOS path_helper puts
+ *  /etc/paths.d first), so without it the runner could start a different binary from the one the daemon checked.
+ *  Not in the child allowlist: the runtime's own tools keep the pane's PATH. */
+export const PI_RUNNER_LAUNCH_PATH_ENV = "OPENRIG_LAUNCH_PATH";
+
 export interface PiRunnerLaunchOpts {
   /** Explicit prepared account, never inferred from the shell environment. */
   accountHome?: string;
@@ -306,6 +311,8 @@ export interface PiRunnerLaunchOpts {
   launchId: string;
   /** Pi only: resolved launch_wrapper argv (wrapper[0] resolved to an absolute path by the daemon). */
   launchWrapper?: readonly string[];
+  /** The daemon's PATH, which its `<runtime> --version` probe used. The runner looks the runtime up there first. */
+  launchPath?: string;
 }
 
 /** The shape `rig seat set-effort` accepts for an effort level. */
@@ -322,6 +329,8 @@ export function piThinkingValue(thinking: string | null | undefined): string | u
  *  past this boundary (pi spawn, env allowlist, RPC, mirror, sidecar). */
 export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
   const parts = [
+    // env execs node, so the runner's process line still starts with "node <entry>" (the identity checks read it).
+    ...(opts.launchPath ? ["env", shellQuote(`${PI_RUNNER_LAUNCH_PATH_ENV}=${opts.launchPath}`)] : []),
     "node",
     shellQuote(opts.runnerEntryPath),
     "--session-name", shellQuote(opts.sessionName),

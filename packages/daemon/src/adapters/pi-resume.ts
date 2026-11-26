@@ -16,7 +16,7 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import type { ResumeResult } from "./claude-resume.js";
 import { piTrust, yoloEnabled } from "./yolo-mode.js";
 import {
-  piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState, type RunnerRuntime,
+  piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState, type RunnerRuntime, type PiRunnerLaunchOpts,
 } from "./pi-runner-protocol.js";
 import { observePiResourceTrust, observeOmpApprovalMode } from "../domain/permission-drift.js";
 
@@ -46,6 +46,8 @@ interface PiResumeOptions {
   usageFactsEnabled?: () => boolean;
   /** OPR.0.7.0.2 K4: whether usage.pi_openrouter_charge is on, read at each resume (absent = off). */
   openRouterChargeEnabled?: () => boolean;
+  /** The daemon's PATH, which its runtime probe used. The runner looks the runtime up there before the pane's PATH. */
+  launchPath?: string;
 }
 
 export class PiResumeAdapter {
@@ -138,7 +140,7 @@ export class PiResumeAdapter {
         return { ok: false, code: "resume_failed", message: "Pi resume needs seat identity to preserve its selected account; restore identity and retry resume." };
       }
       if (!nodeId && this.runtime === "pi" && this.options.seatLaunchEnvironment) console.warn("[pi-resume] Seat identity unavailable; account-free resume continues with best-effort routing.");
-      const cmd = buildPiRunnerCommand({
+      const runnerOpts: PiRunnerLaunchOpts = {
         accountHome,
         runtime: this.runtime,
         runnerEntryPath: this.paths.runnerEntryPath,
@@ -157,12 +159,14 @@ export class PiResumeAdapter {
         usageFacts: this.runtime === "pi" && (this.options.usageFactsEnabled?.() ?? false),
         openRouterCharge: this.runtime === "pi" && (this.options.openRouterChargeEnabled?.() ?? false),
         ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
-      });
-
-      const fallback = cmd;
+      };
+      const cmd = buildPiRunnerCommand({ ...runnerOpts, launchPath: this.options.launchPath });
+      // The last resort, for a staging path too long to use, must stay short: it leaves out the daemon PATH and
+      // keeps the pane's own lookup, as before.
+      const fallback = buildPiRunnerCommand(runnerOpts);
       let command = this.runtime === "pi" && this.options.seatLaunchEnvironment
         ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime, nodeId, accountHome, ...(authority ? { generation: authority.generation } : {}) })
-        : fallback;
+        : cmd;
       const originalCommand = command;
       if (authority) command = authority.wrap(command);
       // Short commands retain the direct path; long commands exec from a private script.
