@@ -617,18 +617,21 @@ export class OutboxHandler {
   }
 
   /** A sender's draft-held messages at a seat past DRAFT_HELD_PER_SENDER: the oldest are retired into the newest, by the
-   *  same recorded coalescing (#2430), so a clearing draft types at most that many from one sender. */
-  supersedeDraftHeld(outboxId: string): void {
+   *  same recorded coalescing (#2430), so a clearing draft types at most that many from one sender. Returns the IDs it
+   *  retired, for the sender's result. */
+  supersedeDraftHeld(outboxId: string): string[] {
     const entry = this.getById(outboxId);
-    if (entry?.deliveryState !== "retained" || !entry.guardBinding || !coalescibleSender(entry.senderSession)) return;
+    if (entry?.deliveryState !== "retained" || !entry.guardBinding || !coalescibleSender(entry.senderSession)) return [];
     const nodeId = entry.guardBinding.nodeId;
     const held = (this.db.prepare(`SELECT outbox_id FROM outbox_entries
       WHERE delivery_state='retained' AND sender_session=? AND json_extract(guard_binding,'$.nodeId')=?
         AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)
       ORDER BY ts_dispatched,rowid`)
       .all(entry.senderSession, nodeId, DRAFT_HELD_ELIGIBLE_TAG) as Array<{ outbox_id: string }>).map(row => row.outbox_id);
-    if (held.length <= DRAFT_HELD_PER_SENDER) return;
-    this.retireInto(entry.senderSession, nodeId, held[held.length - 1]!, held.slice(0, held.length - DRAFT_HELD_PER_SENDER));
+    if (held.length <= DRAFT_HELD_PER_SENDER) return [];
+    const older = held.slice(0, held.length - DRAFT_HELD_PER_SENDER);
+    this.retireInto(entry.senderSession, nodeId, held[held.length - 1]!, older);
+    return older;
   }
 
   /** Retire `older` into `newestId` (#2430's recorded coalescing): the ones already coalesced into them are repointed, so

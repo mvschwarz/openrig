@@ -2257,9 +2257,14 @@ describe("draft-held messages bounded per sender", () => {
   it("keeps one sender's newest messages, coalesces its older ones into the newest, and types only those once the draft clears", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
     const total = DRAFT_HELD_PER_SENDER + 2;
-    for (let i = 1; i <= total; i++) await f.transport.send("worker@test", `request ${i}`, { actorSession: "pm@test" });
+    const results = [];
+    for (let i = 1; i <= total; i++) results.push(await f.transport.send("worker@test", `request ${i}`, { actorSession: "pm@test" }));
     await f.transport.send("worker@test", "another sender's request", { actorSession: "qa@test" });
     const pm = rows(f, "pm@test");
+    // The send that took each older one past the bound names it to its sender; the earlier sends supersede nothing.
+    expect(results.slice(0, DRAFT_HELD_PER_SENDER).every(r => !r.warning?.includes("supersedes"))).toBe(true);
+    expect(results[DRAFT_HELD_PER_SENDER]!.warning).toContain(`This supersedes your earlier held message ${pm[0]!.outbox_id} here (past ${DRAFT_HELD_PER_SENDER} from one sender); it stays readable by ID and won't be typed.`);
+    expect(results[DRAFT_HELD_PER_SENDER + 1]!.warning).toContain(`your earlier held message ${pm[1]!.outbox_id} here`);
     // Each older one is coalesced into the message whose arrival took it past the bound, and that message names it.
     expect(pm.slice(0, 2).map(r => [r.delivery_state, r.retirement_reason]))
       .toEqual([["retired", `${COALESCED_INTO}${pm[DRAFT_HELD_PER_SENDER]!.outbox_id}`], ["retired", `${COALESCED_INTO}${pm[DRAFT_HELD_PER_SENDER + 1]!.outbox_id}`]]);
@@ -2283,6 +2288,17 @@ describe("draft-held messages bounded per sender", () => {
     expect(result.warning).toContain("rig seat held-messages worker@test");
     expect(result.warning).not.toContain("bookkeeping is unavailable");
     expect(f.submissions).toEqual([]);
+  });
+
+  it("at a full quota with a clear input, says the message was typed and doesn't ask for a retry", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "";
+    const target = f.guard.target("worker@test");
+    for (let i = 0; i < 100; i++) f.outbox.retain({ outboxId: `full-${i}`, senderSession: `other-${i}@test`, destinationSession: "worker@test", body: "held" }, target);
+    const result = await f.transport.send("worker@test", "a request typed anyway", { actorSession: "pm@test" });
+    expect(result).toMatchObject({ sent: true });
+    expect(f.submissions.filter(text => text.includes("a request typed anyway"))).toHaveLength(1);
+    expect(result.warning).toContain("held-message quota is full (100 messages or 8 MB), so no receipt was saved for this message, which was typed. Repeating it may duplicate input.");
+    expect(result.warning).not.toContain("then retry");
   });
 
   it.each(["daemon@kernel", "system:health", "watchdog@system"])("never draft-holds a message from OpenRig's own sender %s", async (sender) => {

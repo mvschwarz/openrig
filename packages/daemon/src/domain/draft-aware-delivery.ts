@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { DRAFT_HELD_ELIGIBLE_TAG, DRAFT_HELD_REASONS, HELD_QUOTA_BYTES, HELD_QUOTA_COUNT, OutboxHandler, OutboxHandlerError, type OutboxEntry } from "./outbox-handler.js";
+import { DRAFT_HELD_ELIGIBLE_TAG, DRAFT_HELD_PER_SENDER, DRAFT_HELD_REASONS, HELD_QUOTA_BYTES, HELD_QUOTA_COUNT, OutboxHandler, OutboxHandlerError, type OutboxEntry } from "./outbox-handler.js";
 import { isOpenRigSender } from "../lib/pane-envelope.js";
 
 /** OpenRig's own senders, which have their own schedules: the daemon and its subsystem actors (`isOpenRigSender`), and the
@@ -136,16 +136,18 @@ export class DraftAwareDelivery {
     if (opts.deliveryId && !opts.committedOutboxIds) result = { ...result,
       warning: [result.warning, "Delivery IDs do not deduplicate requests; this is a new input attempt."].filter(Boolean).join(" ") };
     const state = noWrite ? "retained" : result.sent === false ? "failed" : result.ok && (result.verified || !opts.verify) ? "delivered" : "indeterminate";
+    const superseded: string[] = [];
     if (recorded) {
       try {
         this.db.transaction(() => {
+          superseded.length = 0;
           for (const id of receipt.ids) {
             this.outbox.finalizeDelivery(id, state);
             if (draftHeld) {
               this.db.prepare(`UPDATE outbox_entries SET tags=json_insert(COALESCE(tags,'[]'),'$[#]',?)
                 WHERE outbox_id=? AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)`)
                 .run(DRAFT_HELD_ELIGIBLE_TAG, id, DRAFT_HELD_ELIGIBLE_TAG);
-              this.outbox.supersedeDraftHeld(id);
+              superseded.push(...this.outbox.supersedeDraftHeld(id));
             }
             this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?").run(JSON.stringify({ ...receipt, result }), id);
           }
@@ -155,13 +157,19 @@ export class DraftAwareDelivery {
       } catch { recorded = false; }
     }
     if (!recorded) {
+      const quota = `This seat's held-message quota is full (${HELD_QUOTA_COUNT} messages or ${HELD_QUOTA_BYTES / (1024 * 1024)} MB)`;
+      // "Retry" only when the guard held it and nothing was typed; otherwise repeating it may duplicate input.
       const warning = quotaFull
-        ? `This seat's held-message quota is full (${HELD_QUOTA_COUNT} messages or ${HELD_QUOTA_BYTES / (1024 * 1024)} MB), so this message wasn't saved${noWrite ? " or delivered" : ""}. Read or retire what's held (rig seat held-messages ${session}), then retry.`
+        ? noWrite
+          ? `${quota}, so this message wasn't saved or delivered. Read or retire what's held (rig seat held-messages ${session}), then retry.`
+          : `${quota}, so no receipt was saved for this message, which ${result.sent === true ? "was" : "may have been"} typed. Repeating it may duplicate input.`
         : "Delivery bookkeeping is unavailable; this result describes the input attempt, not a saved receipt. Repeating the request may duplicate input.";
       // The input was protected, but failed bookkeeping cannot claim durable custody of its message.
       if (noWrite) result = { ...result, ok: false, outcome: "failed" };
       return { ...result, warning: [result.warning, warning].filter(Boolean).join(" ") };
     }
+    // Past the per-sender bound, the sender learns which of its held messages this one superseded.
+    if (superseded.length) result = { ...result, warning: [result.warning, `This supersedes your earlier held message${superseded.length === 1 ? "" : "s"} ${superseded.join(", ")} here (past ${DRAFT_HELD_PER_SENDER} from one sender); ${superseded.length === 1 ? "it stays" : "they stay"} readable by ID and won't be typed.`].filter(Boolean).join(" ") };
     return { ...result, outboxIds: receipt.ids };
   }
 
