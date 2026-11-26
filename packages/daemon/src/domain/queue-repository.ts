@@ -2077,9 +2077,7 @@ export class QueueRepository {
     }
     const released: OutboxEntry[] = [];
     // Splitting members by level is the recheck's job; a single member has no peer to split from and already
-    // carries its own source. A fence that appears while it waits for the seat is caught instead by the send's
-    // currentness check (performWakeSend passes notificationCurrent when there is no recheck) and released below,
-    // exactly as a split group releases a member that left this send.
+    // carries its own source. The send's notificationCurrent checks its fence and intent after waiting for the seat.
     const recheckMembers: NonNullable<import("./session-transport.js").SendOpts["recheckMembers"]> | undefined = group.length < 2 ? undefined : (holds, held) => {
       const current = (entry: OutboxEntry) => entry.auditPointer && !this.transferFence(entry.auditPointer) && this.currentWakeIntent(entry);
       // Without the lead, let surviving members retry under their own admission instead of borrowing the lead's.
@@ -2703,10 +2701,12 @@ export class QueueRepository {
     }
     try {
       const admission = this.wakeAdmission(qitemId, trigger);
+      const intentId = committedOutboxIds?.[0];
       const res = await this.transport!.send(destinationSession, text, { verify: true, stampISO, actorSession: sourceSession, committedOutboxIds,
         deliveryId: committedOutboxIds ? undefined : deliveryId, auditPointer: qitemId, queueWake: true,
         ...(trigger === "openrig" ? { openrigNotice: true as const } : {}), ...(admission.urgentBy ? { urgent: { by: admission.urgentBy } } : {}),
-        ...(recheckMembers ? { recheckMembers } : { notificationCurrent: () => !this.transferFence(qitemId) }),
+        ...(recheckMembers ? { recheckMembers } : { notificationCurrent: () => !this.transferFence(qitemId)
+          && (intentId === undefined || this.currentWakeIntent({ outboxId: intentId, auditPointer: qitemId, destinationSession })) }),
         ...(explicit ? { drainExempt: true as const } : {}) });
       // OPR.0.3.2.21.FR-4(c) — wording rename: the prior literal
       // "sent-unverified" read as a failure even in the common case
