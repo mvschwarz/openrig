@@ -352,18 +352,19 @@ export async function rebindAndVerifyPaneIdentity(input: {
     return true;
   })();
   if (!published) {
-    // The periodic identity sweep (every 5 s) can store a newer verdict while this check runs. When that verdict
-    // verified the same process in the same pane, and the binding is still that pane, it confirms this check; anything
-    // else (another verdict, pane, process or binding) still supersedes it.
     const newer = identityStore.getForNode(input.nodeId);
     const binding = input.sessionRegistry.getBindingForNode(input.nodeId);
+    // A label-only sweep records the pane process in observedPid.
+    const paneOnly = newer?.evidence.observedPanePid == null;
+    const newerPaneStartedAt = paneOnly
+      ? newer?.evidence.observedPidStartedAt
+      : newer.evidence.observedPanePidStartedAt;
     const confirmed = verdict.verdict === "verified" && newer?.verdict === "verified"
       && newer.sessionName === input.sessionName && newer.evidence.registeredPane === pane.id
       && (newer.evidence.observedPanePid ?? newer.evidence.observedPid) === pid
-      && newer.evidence.observedPid === verdict.evidence.observedPid
-      && (!verdict.evidence.observedPanePidStartedAt || !newer.evidence.observedPanePidStartedAt
-        || newer.evidence.observedPanePidStartedAt === verdict.evidence.observedPanePidStartedAt)
-      && (!verdict.evidence.observedPidStartedAt || !newer.evidence.observedPidStartedAt
+      && (paneOnly || newer.evidence.observedPid === verdict.evidence.observedPid)
+      && (!paneStartedAt || !newerPaneStartedAt || paneStartedAt === newerPaneStartedAt)
+      && (paneOnly || !verdict.evidence.observedPidStartedAt || !newer.evidence.observedPidStartedAt
         || newer.evidence.observedPidStartedAt === verdict.evidence.observedPidStartedAt)
       && binding?.tmuxSession === input.sessionName && binding.tmuxPane === pane.id;
     if (!confirmed) return { ok: false, reason: "identity_unverified", detail: "A newer pane identity observation superseded this check" };

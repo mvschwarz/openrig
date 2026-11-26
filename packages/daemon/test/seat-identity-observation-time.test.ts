@@ -183,4 +183,98 @@ describe("identity verdict time belongs to its evidence sample", () => {
     // The newer verdict stays stored either way.
     expect(f.store.getForNode(f.node.id)).toMatchObject({ verdict: "verified", observedAt: time(3_000), evidence: { observedPid: newerPid } });
   });
+
+  const paneStart = "pane-start";
+  const nativeStart = "native-start";
+  const exactResumeProcesses = [
+    { pid: 42, ppid: 1, pgid: 42, tpgid: 43, executableName: "bash", command: "bash", startedAt: paneStart },
+    { pid: 43, ppid: 42, pgid: 43, tpgid: 43, executableName: "claude", command: "claude --resume conv-1",
+      argv: ["claude", "--resume", "conv-1"], startedAt: nativeStart },
+  ];
+  it.each([
+    { sweepPanePid: 42, confirmed: true },
+    { sweepPanePid: 77, confirmed: false },
+  ])("a sweep during a Claude exact-resume check, seeing pane process $sweepPanePid: confirmed=$confirmed", async ({ sweepPanePid, confirmed }) => {
+    const f = fixture();
+    let clock = 1_000, paneLists = 0;
+    const sweep = new SeatIdentityReconciler({ db, now: () => new Date(clock), tmux: {
+      listSessions: async () => [{ name: f.name }], getPanePid: async () => sweepPanePid, getPaneCommand: async () => "claude",
+      listPanes: async () => [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }],
+    } });
+    const result = await rebindAndVerifyPaneIdentity({ db, sessionRegistry: f.registry, nodeId: f.node.id,
+      sessionName: f.name, runtime: "claude-code", expectedResumeToken: "conv-1", requireExactResumeLineage: true,
+      now: () => new Date(clock),
+      tmux: {
+        listPanes: async () => {
+          // The check's pane recheck, after its process read: the periodic sweep runs and stores its newer verdict.
+          if (++paneLists === 2) { clock = 3_000; await sweep.reconcileAll(); clock = 1_000; }
+          return [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+        },
+        getPanePid: async () => 42, getPaneCommand: async () => "claude",
+      },
+      listProcesses: async () => exactResumeProcesses,
+    });
+    const newer = f.store.getForNode(f.node.id);
+    expect(newer).toMatchObject({ verdict: "verified", observedAt: time(3_000), evidence: { observedPid: sweepPanePid } });
+    expect(newer?.evidence.observedPanePid).toBeUndefined();
+    expect(result).toMatchObject(confirmed
+      ? { ok: true, pane: "%1", pid: 42, nativeProcess: { pid: 43, startedAt: nativeStart } }
+      : { ok: false, reason: "identity_unverified", detail: "A newer pane identity observation superseded this check" });
+  });
+
+  const matchingEvidence = { observedPanePid: 42, observedPid: 43, observedPanePidStartedAt: paneStart, observedPidStartedAt: nativeStart };
+  it.each([
+    {
+      process: "the same pane process alone",
+      evidence: { observedPid: 42, observedPidStartedAt: paneStart },
+      confirmed: true,
+    },
+    {
+      process: "a reused pane PID alone",
+      evidence: { observedPid: 42, observedPidStartedAt: nativeStart },
+      confirmed: false,
+    },
+    {
+      process: "the same pane and native processes",
+      evidence: matchingEvidence,
+      confirmed: true,
+    },
+    {
+      process: "a reused pane PID with the same native process",
+      evidence: { ...matchingEvidence, observedPanePidStartedAt: "new-pane-start" },
+      confirmed: false,
+    },
+    {
+      process: "the same pane process with a reused native PID",
+      evidence: { ...matchingEvidence, observedPidStartedAt: "new-native-start" },
+      confirmed: false,
+    },
+    {
+      process: "another native Claude process",
+      evidence: { observedPanePid: 42, observedPid: 99, observedCommand: "claude --resume other" },
+      confirmed: false,
+    },
+  ])("a newer verdict naming $process in the same pane: confirmed=$confirmed", async ({ evidence, confirmed }) => {
+    const f = fixture();
+    let paneLists = 0;
+    const result = await rebindAndVerifyPaneIdentity({ db, sessionRegistry: f.registry, nodeId: f.node.id,
+      sessionName: f.name, runtime: "claude-code", expectedResumeToken: "conv-1", requireExactResumeLineage: true,
+      now: () => new Date(1_000),
+      tmux: {
+        listPanes: async () => {
+          if (++paneLists === 2) {
+            f.store.upsert({ ...f.verified, observedAt: time(3_000),
+              evidence: { ...f.verified.evidence, ...evidence } });
+          }
+          return [{ id: "%1", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+        },
+        getPanePid: async () => 42, getPaneCommand: async () => "claude",
+      },
+      listProcesses: async () => exactResumeProcesses,
+    });
+    expect(f.store.getForNode(f.node.id)).toMatchObject({ verdict: "verified", observedAt: time(3_000), evidence });
+    expect(result).toMatchObject(confirmed
+      ? { ok: true, pane: "%1", pid: 42, nativeProcess: { pid: 43, startedAt: nativeStart } }
+      : { ok: false, reason: "identity_unverified", detail: "A newer pane identity observation superseded this check" });
+  });
 });
