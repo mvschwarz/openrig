@@ -100,7 +100,8 @@ export async function viewerTerminalEnv(): Promise<NodeJS.ProcessEnv | undefined
       const at = entry.indexOf("=");
       return at > 0 ? [[entry.slice(0, at), entry.slice(at + 1)]] : [];
     }));
-    return inHerdr(env) || inRex(env) || inHerdrApp(env) ? Object.fromEntries(MARKER_KEYS.flatMap(key => env[key] === undefined ? [] : [[key, env[key]]])) : undefined;
+    return inHerdr(env) || inRex(env) || inHerdrApp(env) || inHerdrCoreOnly(env)
+      ? Object.fromEntries(MARKER_KEYS.flatMap(key => env[key] === undefined ? [] : [[key, env[key]]])) : undefined;
   } catch { return undefined; }
 }
 
@@ -112,9 +113,9 @@ async function viewedFrom(viewer: () => Promise<NodeJS.ProcessEnv | undefined>):
 
 /**
  * The provider a terminal action uses from this TUI, for its preview and its open alike: Rex or cmux around this TUI;
- * else herdr-app when this TUI runs in a herdr-core terminal with a herdr-app window on this machine (or, for a shared
- * TUI, when the client viewing it does), or in a herdr-core terminal with no window here (the daemon places the view in
- * this machine's core, for a herdr-app connected to it); else Herdr. `--provider herdr-app` opens the view in the herdr-app window you
+ * else herdr-app when this TUI runs in a herdr-core terminal with a herdr-app window on this machine, or in a herdr-core
+ * terminal with no window here (the daemon places the view in this machine's core, for a herdr-app connected to it).
+ * A shared TUI does the same for the herdr-core terminal of the client viewing it. Else Herdr. `--provider herdr-app` opens the view in the herdr-app window you
  * run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same when that window is answering.
  * `--window` always asks for a new desktop window.
  */
@@ -126,6 +127,7 @@ export async function windowTarget(viewer: () => Promise<NodeJS.ProcessEnv | und
   const viewed = await viewedFrom(viewer);
   if (viewed && inRex(viewed)) return { provider: "rex" };
   if (viewed && !inHerdrPane(viewed) && inHerdrApp(viewed)) return herdrAppTarget(viewed);
+  if (viewed && !inHerdrPane(viewed) && inHerdrCoreOnly(viewed)) return { provider: "herdr-app", appHome: herdrAppHome(viewed), placement: "core" };
   return { provider: "herdr" };
 }
 

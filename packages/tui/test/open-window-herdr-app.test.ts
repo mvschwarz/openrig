@@ -44,6 +44,8 @@ describe("herdr-app as the TUI's terminal target", () => {
     // No window here: the view goes to this machine's herdr-core, and nothing about a window is inferred.
     ["a herdr-core terminal whose window socket is missing", { ...inApp(), HERDR_APP_HOME: join(appHome, "absent") }, undefined,
       { provider: "herdr-app", appHome: join(appHome, "absent"), placement: "core" }],
+    ["a shared TUI viewed from a headless herdr-core terminal", { TERM_PROGRAM: "tmux" }, { ...inApp(), HERDR_APP_HOME: join(appHome, "absent") },
+      { provider: "herdr-app", appHome: join(appHome, "absent"), placement: "core" }],
     ["an old Herdr pane, whatever else is set", { ...inApp(), HERDR_ENV: "1", HERDR_PANE_ID: "p", HERDR_SOCKET_PATH: "/h" }, undefined, { provider: "herdr" }],
     ["inside Rex", { ...inApp(), TERM_PROGRAM: "rex" }, undefined, { provider: "rex" }],
     ["any other configuration", { TERM_PROGRAM: "tmux" }, undefined, { provider: "herdr" }],

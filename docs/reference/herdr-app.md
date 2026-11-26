@@ -129,7 +129,8 @@ and views stay.
 When the daemon runs on a machine with no herdr-app window (nothing at the app home's socket) and its herdr-core
 answers, `rig terminal open <view> --provider herdr-app` places the view in that herdr-core instead. Any herdr-app
 connected to that machine shows it. The TUI does the same when it runs in a herdr-core terminal with no window on its
-machine: its preview says "Opens in this machine's herdr-core (<host>)".
+machine, and so does a shared TUI viewed from such a terminal (on Linux, where it can read the viewing terminal's
+markers): its preview says "Opens in this machine's herdr-core (<host>)".
 
 - **One space per view, one tab per seat.** Each viewer starts with herdr's own labels, `herdr.space=openrig-<view id>`
   and `herdr.tab=openrig-<cell>`, which a connected herdr-app adopts. Each tab shows its seat's label (herdr names an
@@ -148,8 +149,8 @@ machine: its preview says "Opens in this machine's herdr-core (<host>)".
   That means a view can be placed in this core, not that a window is here. A plain `rig terminal open <view>` in a
   herdr-app terminal whose window doesn't answer still opens a desktop window.
 - **Close:** `rig terminal close <rv-id>` ends the view's verified viewers straight away, with no window to wait for.
-  A connected herdr-app removes the tabs when it next refreshes; OpenRig can't see that. Closing a tab in herdr-app ends
-  its viewer, and OpenRig records that.
+  A connected herdr-app removes the tabs of the viewers OpenRig ended when it next refreshes; tabs left running stay,
+  and OpenRig can't see that window. Closing a tab in herdr-app ends its viewer, and OpenRig records that.
 
 Limits:
 - Nothing on the daemon's machine can see the window, so OpenRig never reports a view as seen.
