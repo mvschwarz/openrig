@@ -24,9 +24,10 @@ if the person asks. Give what they want built to OpenRig's operator (step 2) ins
   the team's questions come to this conversation's address (choice dialogs and other hosts keep their path), and its
   result is in the handed-over task's resolution. Set it before you promise to report back. In Claude Code and Codex,
   once the openrig plugin is installed and active (step 1), its hooks bring a task that reaches an address OpenRig
-  issued this conversation (`auto`) into it, such as the team's question; the team's result wakes nothing, and other
-  apps have no wake. So say you'll check when they ask, and each turn list your address's tasks, read the handed-over
-  task (`rig queue show <id> --full`, following its successors) and check the seats.
+  issued this conversation (`auto`) into it: the team's question, or its result when the lead or operator sends it
+  there as a task. A task closed with no result sent wakes nothing, and other apps have no wake. So say you'll check
+  when they ask, and each turn list your address's tasks, read the handed-over task (`rig queue show <id> --full`,
+  following its successors) and check the seats.
 - **Don't send them to attach** to a seat's terminal to answer, and with no display (headless or SSH) they answer here
   too: don't tell the operator they'll answer in its pane unless they chose that. Bring the prompt here. If the
   operator or a seat sent it to you, record their words and let that sender pass them on; otherwise send their choice
@@ -363,9 +364,10 @@ commands; if the two ever differ, this step is right.
     this work again. If the outcome is unknown, repeat the same command with
     `--id` and the ID from its `Queue create request ID:` line, which it prints before it sends: the same task keeps the
     same address.
-  - **Get woken when a task arrives at your address:** right after the handover, start this wait with your shell tool's
-    background option (in Claude Code versions that wake you when a background command ends), with your address in place
-    of `<address>`:
+  - **Get woken when a task arrives at your address:** skip this where the openrig plugin's hooks run (step 1): they
+    bring the task by themselves, and this wait would wake you a second time for it. Otherwise, right after the handover,
+    start this wait with your shell tool's background option (in Claude Code versions that wake you when a background
+    command ends), with your address in place of `<address>`:
 
         until OPENRIG_SESSION_NAME='<address>' rig queue list --owned --state pending --json 2>/dev/null | grep -q '"qitemId"'; do sleep 20; done
 
@@ -403,10 +405,11 @@ commands; if the two ever differ, this step is right.
     doing: wake it the same way); `indeterminate` or `still-pending` (unknown, neither failed nor delivered: check
     before you wake it again). A pending task with no wake isn't lost or done.
   - **What wakes this chat:** in Claude Code and Codex, the openrig plugin's hooks (step 1), when a task reaches an
-    address OpenRig issued it; nothing else, and nothing when the team finishes. While its work is open, start each of
-    your turns by listing your address's tasks (above), before anything else, including when the person talks to you
-    and when they come back. A Claude Desktop scheduled task can pick the team's results up on a schedule, in a fresh
-    session, not this chat. Offer it if they'd like that.
+    address OpenRig issued it: the team's questions, and its result when the lead or operator sends it there as a task.
+    A task closed with no result sent wakes nothing. Without the plugin, only the wait above does, where your app has
+    one. While its work is open, start each of your turns by listing your address's tasks (above), before anything
+    else, including when the person talks to you and when they come back. A Claude Desktop scheduled task can pick the
+    team's results up on a schedule, in a fresh session, not this chat. Offer it if they'd like that.
 - **If the operator answers with a model error,** such as "… not supported when using Codex with a ChatGPT account", its
   Codex sign-in works but that account can't run the model. OpenRig put the operator on Codex because the sign-in
   passed. Tell the person which model failed. If Claude Code is signed in, offer to move the operator to it; on their
@@ -543,7 +546,8 @@ Follow these steps by default. Only when the person declined the Codex offer abo
   included (without `-a` it shows only open items). It returns at most 100 rows unless you pass `--limit`, so on a busy
   address keep the task IDs you created, or raise `--limit`. Follow that work rather than creating it again.
   A new session doesn't carry this conversation over, and the openrig plugin's hooks don't wake it for an address an
-  earlier session was issued: check that address each turn.
+  earlier session was issued: check that address each turn. In Claude Code the hooks follow the app's process, not the
+  chat: after `/clear`, the new chat still gets the earlier one's tasks.
 - **Other ways to work with the team:** `rig send <seat>@<rig> "..."` types into an agent's terminal,
   `rig capture <seat>@<rig>` reads its screen, and `rig ps --nodes --rig <rig>` shows who's on it.
 

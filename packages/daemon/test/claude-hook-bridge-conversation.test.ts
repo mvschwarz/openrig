@@ -5,7 +5,7 @@
 // it runs is OPENRIG_RIG_BIN's, else the one on PATH, else the project's own install; with none, it says so once per session.
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -125,13 +125,49 @@ describe("the conversation waiter (Claude Code)", () => {
     }
   });
 
-  it("another conversation's key reads none of this conversation's addresses, and runs to its deadline without waking", async () => {
+  it("another conversation's key reads none of this conversation's addresses, and stops without waking", async () => {
     const { rig, calls } = fakeRig({ goals: [goal(KEY)], pending: [question()] });
     const s = sink();
     expect(await bridge.conversationWaiter({ input, out: s.out, deps: { env: env(), alive: () => true, key: OTHER_KEY, rig, waiterMs: 60_000, ...clock() } })).toBe(0);
     expect(s.text()).toBe("");
-    expect(calls.every((args) => args[2] === "--tag" && args[3] === `conversation-key:${OTHER_KEY}`)).toBe(true);
-    expect(readFileSync(stateFile("wake.log"), "utf8")).toMatch(/deadline/);
+    expect(calls).toEqual([["queue", "list", "--tag", `conversation-key:${OTHER_KEY}`, "--all", "--limit", "100", "--json"]]);
+    expect(readFileSync(stateFile("wake.log"), "utf8")).toMatch(/no address under this conversation's key/);
+  });
+
+  // #3964 review F2: every session with the plugin ran a two-hour waiter after every turn. Only a conversation that handed
+  // work over with an address of its own waits now: its addresses come from its own turns' creates, and each turn's Stop
+  // arms a fresh waiter that reads them again.
+  it("with no address under its key, stops at the first read instead of polling to its deadline", async () => {
+    const { rig, calls } = fakeRig({ goals: [] });
+    let slept = 0;
+    const c = clock();
+    const s = sink();
+    expect(await bridge.conversationWaiter({ input: { ...input, transcript_path: "/t.jsonl" }, out: s.out, deps: { env: env(), alive: () => true,
+      key: KEY, rig, now: c.now, sleep: async () => { slept += 1; await c.sleep(); }, statSize: () => 100 } })).toBe(0);
+    expect(calls).toEqual([["queue", "list", "--tag", `conversation-key:${KEY}`, "--all", "--limit", "100", "--json"]]);
+    expect(slept).toBe(0);
+    expect(s.text()).toBe("");
+    expect(readFileSync(stateFile("wake.log"), "utf8")).toMatch(/no address under this conversation's key/);
+  });
+
+  it("stops when OpenRig can't be read (its addresses or their tasks), rather than reading again every 15 seconds", async () => {
+    const { rig: answers } = fakeRig({ goals: [goal()], pending: [question()] });
+    for (const [label, rig, reads] of [
+      ["the addresses", () => null, 1],
+      ["the tasks at an address", (args: string[]) => args[2] === "--tag" ? answers(args) : null, 2],
+    ] as const) {
+      rmSync(join(data, "conversations"), { recursive: true, force: true });
+      const calls: string[][] = [];
+      let slept = 0;
+      const c = clock();
+      const s = sink();
+      expect(await bridge.conversationWaiter({ input, out: s.out, deps: { env: env(), alive: () => true, key: KEY,
+        rig: (args: string[]) => { calls.push(args); return rig(args); }, now: c.now, sleep: async () => { slept += 1; await c.sleep(); } } }), label).toBe(0);
+      expect(calls, label).toHaveLength(reads);
+      expect(slept, label).toBe(0);
+      expect(s.text(), label).toBe("");
+      expect(readFileSync(stateFile("wake.log"), "utf8"), label).toMatch(/stopped: OpenRig couldn't be read/);
+    }
   });
 
   it("takes only addresses OpenRig issued for this conversation's own creates", async () => {
@@ -201,7 +237,7 @@ describe("the conversation waiter (Claude Code)", () => {
   });
 
   it("reads the routes again only when the transcript grows, so an idle conversation costs a file size per poll", async () => {
-    const { rig, calls } = fakeRig({ goals: [] });
+    const { rig, calls } = fakeRig({ goals: [goal()], pending: [] });
     let size = 100;
     let ticks = 0;
     const c = clock();
@@ -251,9 +287,85 @@ describe("the Codex watcher", () => {
     expect(queued[0]).toContain("From dev-build@starter (transport:v1:");
     expect(calls[0]).toEqual(["queue", "list", "--tag", `conversation-key:${codexKey}`, "--all", "--limit", "100", "--json"]);
     const log = readFileSync(stateFile("wake.log", "codex"), "utf8");
-    expect(log).toMatch(/codex queue failed, tried again next tick: no daemon/);
+    expect(log).toMatch(/codex queue failed, trying again in 30 s: no daemon/);
     expect(log).toMatch(/queued for the thread \(stored, not proof it was read\): qitem-q1/);
     expect(log).toMatch(/stopped: the session ended/);
+  });
+
+  // #3964 review F2 and O3: a stopped daemon, or a `codex queue` that keeps failing, was retried every 15 seconds for as
+  // long as the session lived, each try spawning `rig` or `codex`. The watcher now waits twice as long after each failed
+  // tick, up to five minutes, and polls every 15 seconds again once a read and a queue work.
+  it("backs off when OpenRig can't be read or codex queue fails, and polls every 15 seconds again once both work", async () => {
+    const { rig: answers } = fakeRig({ goals: [goal(codexKey)], pending: [question()] });
+    let up = false;
+    let queueWorks = false;
+    const queued: string[] = [];
+    const queue = (text: string) => { if (!queueWorks) return { ok: false, detail: "codex busy" }; queued.push(text); return { ok: true, detail: "" }; };
+    const waits: number[] = [];
+    let t = 1_000_000;
+    const sleep = async (ms: number) => {
+      waits.push(ms);
+      t += ms;
+      if (waits.length === 3) up = true;
+      if (waits.length === 5) queueWorks = true;
+      if (waits.length === 7) bridge.codexEnd({ input: codexInput, deps: { env: env() } });
+    };
+    const code = await bridge.codexWatch({ sessionId: SESSION, transcriptPath: "/rollout.jsonl", deps: { env: env(),
+      rig: (args: string[]) => up ? answers(args) : null, queue, now: () => t, sleep, statSize: () => 10, pid: 77 } });
+    expect(code).toBe(0);
+    // Three failed reads, then two failed queues (the failures run on), then a queue that works, then an ordinary poll.
+    expect(waits).toEqual([30_000, 60_000, 120_000, 240_000, 300_000, 15_000, 15_000]);
+    expect(queued).toHaveLength(1);
+    const log = readFileSync(stateFile("wake.log", "codex"), "utf8");
+    expect(log).toMatch(/OpenRig couldn't be read, trying again in 30 s/);
+    expect(log).toMatch(/codex queue failed, trying again in 300 s: codex busy/);
+  });
+
+  // #3964 review R2: `codex queue --resume` (Codex 0.171.0) starts an idle thread's turn. An older Codex (0.162.1, say)
+  // rejects the flag as an unknown argument, so every call failed and the person was never woken or told. Model-free: a
+  // stub `codex` on PATH that answers as 0.162.1 does.
+  it("on a Codex whose codex queue has no --resume, queues without it for the next turn and tells the thread once", async () => {
+    const bin = join(data, "bin");
+    const sent = join(data, "sent");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(sent, { recursive: true });
+    writeFileSync(join(bin, "codex"), [
+      "#!/bin/sh",
+      `n=$(ls '${sent}' | wc -l | tr -d ' ')`,
+      'for a in "$@"; do',
+      `  if [ "$a" = "--resume" ]; then echo rejected > '${sent}'/$n.rejected; printf "error: unexpected argument '--resume' found\\n\\n  tip: a similar argument exists: '--remote'\\n" >&2; exit 2; fi`,
+      "done",
+      // queue --thread <id> --message <text>
+      `printf '%s' "$5" > '${sent}'/$n.queued`,
+      "",
+    ].join("\n"), { mode: 0o755 });
+    const pending = [question()];
+    const { rig } = fakeRig({ goals: [goal(codexKey)], pending });
+    const waits: number[] = [];
+    let t = 1_000_000;
+    const sleep = async (ms: number) => {
+      waits.push(ms);
+      t += ms;
+      if (waits.length === 2) pending.push(question({ qitemId: "qitem-q2", summary: "Which branch?" }));
+      if (waits.length === 4) bridge.codexEnd({ input: codexInput, deps: { env: env() } });
+    };
+    expect(await bridge.codexWatch({ sessionId: SESSION, transcriptPath: "/rollout.jsonl", deps: {
+      env: { ...env(), PATH: [bin, dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter) }, rig, now: () => t, sleep, statSize: () => 10, pid: 77 } })).toBe(0);
+    const files = readdirSync(sent).sort();
+    // The flag was tried once, then never again: both tasks were queued without it, with no retry or backoff.
+    expect(files).toEqual(["0.rejected", "1.queued", "2.queued"]);
+    expect(waits).toEqual([15_000, 15_000, 15_000, 15_000]);
+    const first = readFileSync(join(sent, "1.queued"), "utf8");
+    const second = readFileSync(join(sent, "2.queued"), "utf8");
+    expect(first).toMatch(/^This Codex's `codex queue` has no `--resume`/);
+    expect(first).toContain("Codex 0.171.0");
+    expect(first).toContain("- qitem-q1: May I run the test suite?");
+    expect(first).not.toMatch(/\b(must|obey|priority|system instruction|override)\b/i);
+    // Said once in the thread: the next task comes on its own.
+    expect(second).toMatch(/^This is not an error\. OpenRig's hook bridge/);
+    expect(second).toContain("- qitem-q2: Which branch?");
+    expect(second).not.toContain("--resume");
+    expect(readFileSync(stateFile("wake.log", "codex"), "utf8")).toMatch(/this codex queue has no --resume/);
   });
 
   it("stops when its Codex process is gone, though no SessionEnd came", async () => {

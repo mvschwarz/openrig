@@ -17,7 +17,8 @@
 //                         issued to this conversation from OpenRig's own record (the rows tagged with this conversation's key,
 //                         see conversationKey), poll their pending tasks, and write the ones not yet shown in this session,
 //                         each with its sender as the daemon recorded it, to stderr and exit 2, which wakes Claude. Exits 0
-//                         when superseded by a newer waiter or at its deadline.
+//                         when the conversation has no such address, when OpenRig can't be read (the next turn's Stop
+//                         reads again), when superseded by a newer waiter, or at its deadline.
 //   conversation-turn     Claude Code UserPromptSubmit: mark that a turn is running, so a waiter never wakes into it.
 //   codex-start           Codex SessionStart (async): start one detached watcher for this session and exit 0. A Codex hook
 //                         can't start a turn itself; `codex queue` can.
@@ -25,6 +26,9 @@
 //   codex-watch <session id> <transcript path>
 //                         The watcher: the same reads, and it wakes the thread with
 //                         `codex queue --thread <session id> --message … --resume` (exit 0 there means stored, not delivered).
+//                         A failed read or queue is tried again after a longer wait each time, up to five minutes. On a
+//                         Codex whose `codex queue` has no `--resume`, it queues without it, for the thread's next turn,
+//                         and says so once in the thread.
 // These modes exit at once in an OpenRig seat (OPENRIG_SESSION_NAME or OPENRIG_NODE_ID set), which keeps slice 13 and typed
 // delivery. They read OpenRig with the `rig` command, as the person's agent does: the one findRig names, which the plugin's
 // MCP launcher (scripts/run-rig.cjs) runs too. With none, they read nothing and say so once for the plugin's install, again
@@ -159,6 +163,8 @@ const CONVERSATION_POLL_MS = 15000;
 /** A conversation's routes are read again when its transcript grows (its creates happen in its turns), and at least this
  *  often. */
 const ROUTES_REFRESH_MS = 5 * 60 * 1000;
+/** A Codex watcher waits twice as long after each tick whose read or `codex queue` failed, up to this. */
+const RETRY_MAX_MS = 5 * 60 * 1000;
 /** As slice 13's waiter: its hook timeout (7200 s, the plugin's hooks file) less a margin, after which it exits 0. */
 const CONVERSATION_WAITER_MS = (7200 - 120) * 1000;
 /** A Codex watcher whose session's rollout hasn't changed for this long takes the session as gone. */
@@ -371,9 +377,10 @@ function conversationRoutes(key, rig) {
   return routes;
 }
 
+/** The pending tasks at one route; null when OpenRig couldn't be read. */
 function pendingAt(route, rig) {
   const rows = rig(["queue", "list", "--destination", route, "--state", "pending", "--limit", "50", "--json"]);
-  return Array.isArray(rows) ? rows.filter((row) => row && row.state === "pending" && row.destinationSession === route && typeof row.qitemId === "string") : [];
+  return Array.isArray(rows) ? rows.filter((row) => row && row.state === "pending" && row.destinationSession === route && typeof row.qitemId === "string") : null;
 }
 
 /** The task's sender as the daemon recorded it: the row's source, and the identity provenance its create recorded
@@ -422,8 +429,9 @@ function renderConversationTasks(fresh) {
     .join("\n\n") + "\n";
 }
 
-/** Reads this conversation's routes when its transcript has grown since the last read, or at least every ROUTES_REFRESH_MS.
- *  Without a readable transcript, every call reads. A failed read keeps the last routes and is tried again. */
+/** Reads this conversation's routes when its transcript has grown since the last read, or at least every ROUTES_REFRESH_MS,
+ *  and otherwise answers with the last ones read. Without a readable transcript, every call reads. Null when this call's
+ *  read failed: the next call reads again. */
 function routeWatch(key, transcriptPath, rig, now, statSize = (p) => fs.statSync(p).size) {
   let size = null;
   let readAt = -Infinity;
@@ -433,19 +441,23 @@ function routeWatch(key, transcriptPath, rig, now, statSize = (p) => fs.statSync
     try { current = transcriptPath ? statSize(transcriptPath) : null; } catch { current = null; }
     if (current === null || current !== size || now() - readAt >= ROUTES_REFRESH_MS) {
       const read = conversationRoutes(key, rig);
-      if (read) { routes = read; size = current; readAt = now(); }
+      if (!read) return null;
+      routes = read; size = current; readAt = now();
     }
     return routes;
   };
 }
 
-/** The pending tasks at this conversation's routes not yet shown in this session, each with its recorded sender. */
+/** The pending tasks at this conversation's routes not yet shown in this session, each with its recorded sender; null
+ *  when OpenRig couldn't be read. */
 function freshTasks(routes, state, rig) {
   if (routes.size === 0) return [];
   const shown = new Set(state.read("shown.json", []));
   const fresh = [];
   for (const [route, goal] of routes) {
-    for (const row of pendingAt(route, rig)) {
+    const pending = pendingAt(route, rig);
+    if (!pending) return null;
+    for (const row of pending) {
       if (!shown.has(row.qitemId) && !fresh.some((task) => task.row.qitemId === row.qitemId)) fresh.push({ route, goal, row });
     }
   }
@@ -473,7 +485,9 @@ function conversationTurn({ input = {}, deps = {} } = {}) {
 }
 
 /** Claude Code SessionStart and Stop (`asyncRewake`). Returns the exit code: 2 after writing tasks, or the no-`rig`
- *  notice, 0 otherwise. */
+ *  notice, 0 otherwise. Only a conversation that handed work over with an address of its own waits: those addresses come
+ *  from its own turns, and each turn's Stop starts a new waiter that reads them again. So a read that finds none, or that
+ *  fails (a stopped daemon, say), ends this waiter rather than polling for two hours. */
 async function conversationWaiter({ input = {}, out = process.stderr, deps = {} } = {}) {
   const env = deps.env ?? process.env;
   if (inSeat(env)) return 0;
@@ -502,7 +516,10 @@ async function conversationWaiter({ input = {}, out = process.stderr, deps = {} 
     if (!(deps.alive ?? alive)(claudePid)) { state.log("stopped: the conversation's claude process ended"); return 0; }
     // A turn started after this waiter: nothing is written into it, and the turn's own Stop starts the next waiter.
     if (Number(state.read("turn.json", {}).at ?? 0) > me.startedAt) { await wait(CONVERSATION_POLL_MS); continue; }
-    const fresh = freshTasks(routes(), state, rig);
+    const current = routes();
+    if (current && current.size === 0) { state.log("no address under this conversation's key: nothing to wait for until a turn hands work over"); return 0; }
+    const fresh = current && freshTasks(current, state, rig);
+    if (!fresh) { state.log("stopped: OpenRig couldn't be read; the next turn's waiter reads again"); return 0; }
     if (fresh.length > 0) {
       if (!(await writeAll(out, renderConversationTasks(fresh)))) return 0;
       markShown(state, fresh);
@@ -548,13 +565,43 @@ function codexEnd({ input = {}, deps = {} } = {}) {
   return 0;
 }
 
-/** `codex queue` stores the message for the thread and wakes it when idle (a busy thread gets it when its turn ends). */
-function codexQueue(sessionId, text, { env = process.env, spawnSync = require("node:child_process").spawnSync } = {}) {
+/** How a Codex without `--resume` on `codex queue` (0.162.1, say) answers it: an unknown argument, before doing anything. */
+const RESUME_REJECTED = /unexpected argument '--resume'|Found argument '--resume'|unrecognized (?:argument|option):? '?--resume/i;
+/** Said once in a thread whose Codex has no `--resume`, ahead of the first tasks queued without it. */
+const NO_RESUME_NOTICE = "This Codex's `codex queue` has no `--resume`, so OpenRig's hook bridge, from the openrig plugin, can "
+  + "store the team's tasks for this chat but can't start a turn for them while the chat is idle: they come in at its next "
+  + "turn, as these did. Codex 0.171.0 starts that turn by itself, so updating Codex brings them in as they arrive. The "
+  + "plugin says this once in this chat; tell the person in plain words.\n\n";
+const NO_RESUME = "no-resume.json";
+
+/** `codex queue` stores the message for the thread, and with `--resume` (Codex 0.171.0) wakes it when idle; a busy thread,
+ *  or one queued without `--resume`, gets it when its next turn ends. `resumeRejected` when this Codex refused the flag. */
+function codexQueue(sessionId, text, { env = process.env, resume = true, spawnSync = require("node:child_process").spawnSync } = {}) {
   try {
-    const result = spawnSync("codex", ["queue", "--thread", sessionId, "--message", text, "--resume"],
+    const result = spawnSync("codex", ["queue", "--thread", sessionId, "--message", text, ...(resume ? ["--resume"] : [])],
       { env, encoding: "utf8", timeout: 60000, stdio: ["ignore", "pipe", "pipe"] });
-    return { ok: !result.error && result.status === 0, detail: oneLine(result.error?.message ?? result.stderr ?? `exit ${result.status}`) };
-  } catch (error) { return { ok: false, detail: oneLine(error?.message) }; }
+    const ok = !result.error && result.status === 0;
+    return { ok, detail: oneLine(result.error?.message ?? result.stderr ?? `exit ${result.status}`),
+      resumeRejected: !ok && resume && RESUME_REJECTED.test(String(result.stderr ?? "")) };
+  } catch (error) { return { ok: false, detail: oneLine(error?.message), resumeRejected: false }; }
+}
+
+/** The watcher's `codex queue`: with `--resume` until this Codex refuses it, then without it for the rest of the watch (the
+ *  task waits for the thread's next turn), and the thread is told why once, ahead of the first tasks queued that way. */
+function codexQueuer(sessionId, state, { env = process.env, now = Date.now, run = codexQueue } = {}) {
+  let resume = true;
+  return (text, { tasks = false } = {}) => {
+    if (resume) {
+      const tried = run(sessionId, text, { env, resume: true });
+      if (!tried.resumeRejected) return tried;
+      resume = false;
+      state.log(`this codex queue has no --resume: queueing for the thread's next turn (${tried.detail})`);
+    }
+    const tell = tasks && !state.exists(NO_RESUME);
+    const sent = run(sessionId, tell ? NO_RESUME_NOTICE + text : text, { env, resume: false });
+    if (sent.ok && tell) state.write(NO_RESUME, { at: now() });
+    return sent;
+  };
 }
 
 /** The Codex watcher. Returns 0 when its session ended, its Codex process exited, a newer watcher replaced it, or its
@@ -569,7 +616,7 @@ async function codexWatch({ sessionId = "", transcriptPath = "", codexPid = 0, d
   const wait = deps.sleep ?? sleep;
   // codex-start runs the watcher in the session's folder, which stands in for Claude Code's CLAUDE_PROJECT_DIR.
   const rig = deps.rig !== undefined ? deps.rig : rigReader(env, deps.projectDir ?? process.cwd());
-  const queue = deps.queue ?? ((text) => codexQueue(sessionId, text, { env }));
+  const queue = deps.queue ?? codexQueuer(sessionId, state, { env, now });
   const statSize = deps.statSize ?? ((p) => fs.statSync(p).size);
   const me = deps.pid ?? process.pid;
   state.write("watcher.json", { pid: me, beat: now() });
@@ -580,6 +627,10 @@ async function codexWatch({ sessionId = "", transcriptPath = "", codexPid = 0, d
   const routes = routeWatch(key, transcriptPath, rig, now, statSize);
   let size = null;
   let grewAt = now();
+  // Consecutive ticks whose read or queue failed: each waits twice as long as the one before, up to RETRY_MAX_MS, so a
+  // stopped daemon or a failing `codex queue` isn't retried, with a new process each time, every 15 seconds.
+  let failures = 0;
+  const retryIn = () => Math.min(CONVERSATION_POLL_MS * 2 ** failures, RETRY_MAX_MS);
   for (;;) {
     if (state.exists("stop.json")) { state.log("stopped: the session ended"); return 0; }
     if (state.read("watcher.json", {}).pid !== me) { state.log("superseded"); return 0; }
@@ -589,17 +640,25 @@ async function codexWatch({ sessionId = "", transcriptPath = "", codexPid = 0, d
     try { current = transcriptPath ? statSize(transcriptPath) : null; } catch { current = null; }
     if (current !== size) { size = current; grewAt = now(); }
     if (now() - grewAt > CODEX_IDLE_EXIT_MS) { state.log("stopped: the session's rollout went idle"); return 0; }
-    const fresh = freshTasks(routes(), state, rig);
-    if (fresh.length > 0) {
-      const queued = queue(renderConversationTasks(fresh));
+    const read = routes();
+    const fresh = read && freshTasks(read, state, rig);
+    if (!fresh) {
+      failures += 1;
+      state.log(`OpenRig couldn't be read, trying again in ${retryIn() / 1000} s`);
+    } else if (fresh.length > 0) {
+      const queued = queue(renderConversationTasks(fresh), { tasks: true });
       if (queued.ok) {
+        failures = 0;
         markShown(state, fresh);
         state.log(`queued for the thread (stored, not proof it was read): ${fresh.map((task) => task.row.qitemId).join(",")}`);
       } else {
-        state.log(`codex queue failed, tried again next tick: ${queued.detail}`);
+        failures += 1;
+        state.log(`codex queue failed, trying again in ${retryIn() / 1000} s: ${queued.detail}`);
       }
+    } else {
+      failures = 0;
     }
-    await wait(CONVERSATION_POLL_MS);
+    await wait(retryIn());
   }
 }
 

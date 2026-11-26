@@ -8,7 +8,7 @@ import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, operatorAuthHe
 import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer, type HostRegistryLoadResult } from "./host-registry.js";
 import { loadHostBindings, type HostBindingsFile } from "./host-bindings.js";
 import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
-import { conversationKeyTag } from "@openrig/daemon/conversation-key";
+import { CONVERSATION_KEY_TAG_PREFIX, conversationKeyTag } from "@openrig/daemon/conversation-key";
 import { readOpenRigEnv } from "./openrig-compat.js";
 import { resolveRigHandle } from "./rig-handle.js";
 import { formatSeatActivity, type SeatActivityFields } from "./lib/seat-activity.js";
@@ -541,6 +541,14 @@ export const CALLER_SHAPED = /^cus-[^@][^@-]*-[^@]+@[^@]+$/;
  *  place of the body. An external caller's create can't claim them; its other tags (`workflow` and
  *  `workflow:`/`instance:` among them) are kept. */
 const OPENRIG_PROVENANCE_TAG = /^(?:founder-slack|inbound|shared-channel|gate)$|^participant:|^slack-/;
+
+/** A caller's tags as this server passes them on: without OpenRig's provenance tags from an external caller (above), and
+ *  without a `conversation-key:` tag from any caller. That key is OpenRig's own record of which conversation handed work
+ *  over (slice 15): the openrig plugin's hooks take an address issued beside it as that conversation's, so only the key a
+ *  stdio server derives itself is ever added. A dropped tag is never a refusal: the rest of the request goes on. */
+function callerTags(tags: string[] | undefined, external: boolean): string[] | undefined {
+  return tags?.filter((tag) => !tag.startsWith(CONVERSATION_KEY_TAG_PREFIX) && !(external && OPENRIG_PROVENANCE_TAG.test(tag)));
+}
 
 /** An external grant (openrig.grant/v1): a requester, narrower than a work grant. The grant's own seat is the
  *  only caller. It may hand tasks to its rigs' other seats (never a person or another host's seat, and without team/list
@@ -1932,13 +1940,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       const route = returnRoute ?? (note && key ? "auto" : undefined);
       const taskNote = note && route === "auto"
         ? note.replace(/ There's no return address: it follows this by its task id\.\]$/, " Its team's questions come back to this conversation's issued return route.]") : note;
-      const sentTags = access?.external ? tags?.filter((tag) => !OPENRIG_PROVENANCE_TAG.test(tag)) : tags;
+      const sentTags = callerTags(tags, !!access?.external);
       try {
         const res = await hostPost(target, "/api/queue/create", {
           qitemId: id, destinationSession: destination, body: taskNote ? `${taskNote}\n\n${lineage?.body ?? body}` : lineage?.body ?? body,
           ...(note && route !== "auto" ? { sourceSession: unknownSender } : {}), summary, priority, tier,
           ...(route !== undefined ? { returnRoute: route } : {}),
-          tags: key && route === "auto" ? [...(sentTags ?? []).filter((tag) => tag !== conversationKeyTag(key)), conversationKeyTag(key)] : sentTags,
+          tags: key && route === "auto" ? [...(sentTags ?? []), conversationKeyTag(key)] : sentTags,
           ...(alert ? { humanAlert: true } : {}),
           ...(lineage ? { chainOfRecord: lineage.chainOfRecord } : {}),
         });
@@ -2900,7 +2908,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       }
       try {
         return mapResult(await withRequestsAdvisory(await hostPost(target, `/api/queue/${encodeURIComponent(qitemId)}/handoff`, {
-          toSession: to, body, transitionNote: note, summary, tags, priority, evidenceRef,
+          // The new item keeps the work's return route, so a conversation's key is no caller's to give it.
+          toSession: to, body, transitionNote: note, summary, tags: callerTags(tags, !!access?.external), priority, evidenceRef,
         }), to, target.remote), undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);

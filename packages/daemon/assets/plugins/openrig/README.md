@@ -33,12 +33,25 @@ on an OpenRig team load `openrig-core` instead.
 
 When your agent hands the team work with an address of its own (`returnRoute` `auto` on `rig_queue_create`, the default
 in Claude Code when the plugin has no seat, or `rig queue create --return-route auto`), OpenRig gives that work an address
-for your chat and records it with a key for the chat. In Claude Code the key is the chat's own `claude` process; in Codex
-it's the session id Codex gives its commands and hooks.
+for your chat and records it with a key for the chat. In Claude Code the key is the chat's own `claude` process, so a
+new chat in the same process (after `/clear`) still gets the earlier chat's tasks, and one resumed in a new process
+(`claude --resume`) doesn't get them by itself. In Codex it's the session id Codex gives its commands and hooks.
 
+- **Which setups they cover:**
+  - **Claude Code with the plugin's OpenRig seat left blank:** `rig_queue_create` gives the work an address of its own
+    by default.
+  - **`rig queue create --return-route auto` in the shell,** in Claude Code or Codex.
+  - **With a seat set:** only work handed over with `returnRoute: "auto"` on `rig_queue_create`. Without it, the team's
+    questions go to the seat's own address, which the hooks don't watch, so your agent finds them only when it checks
+    (`rig_queue_list` with `owned`).
+  - **Not yet: Codex through the MCP server.** Codex may not give the server the session id the key comes from, so its
+    handovers get no key and nothing wakes for them. In Codex, hand work over with `rig queue create --return-route auto`
+    in the shell.
 - **What the hooks do:** they read only the addresses recorded under your chat's key, from OpenRig's own record, and
   check them for new tasks every 15 seconds: in Claude Code for up to two hours after each turn, in Codex while the
-  session lasts. In Claude Code, a new task wakes your agent between turns, not in the middle of one. In Codex, the
+  session lasts. In Claude Code, a chat with no such address stops after its first read, and a read that fails (OpenRig
+  stopped, say) stops it until the next turn; in Codex, a read that fails is tried again after a longer wait each time,
+  up to five minutes. In Claude Code, a new task wakes your agent between turns, not in the middle of one. In Codex, the
   hooks queue the task for the chat with `codex queue`, which starts a turn when the chat is idle. Each task names its
   sender as OpenRig recorded it, so your agent can see it's from the team it handed work to.
 - **What they don't do:** they type nothing into any terminal, and they change nothing in OpenRig: they run `node` and
@@ -48,7 +61,8 @@ it's the session id Codex gives its commands and hooks.
   folder). So an OpenRig installed inside one project is found only in sessions started there. With no `rig`, the hooks
   say once in a chat that the team's questions won't come in by themselves: once for the plugin's install, not in every
   session, and again only after a `rig` was found and then lost. Claude Code logs the MCP server's one line saying why it
-  didn't start.
+  didn't start. The hooks themselves start with the `node` on the app's PATH, or the file `OPENRIG_NODE` names: set it
+  in the environment the app starts with when `node` isn't on that PATH (a `node` from nvm, say).
 - **Why Codex asks you to trust them:** Codex runs hooks outside its sandbox, so it asks you once before they run, and
   again after the plugin changes. Until you trust them, they don't run and your agent checks only when you talk to it.
 - **When they start:** in a new session after you install the plugin, or after `/reload-plugins` in Claude Code.
@@ -77,7 +91,8 @@ claude plugin install openrig@openrig-app
 ```
 
 Set the plugin's **OpenRig seat** to your address (`/plugin`, then configure): type the address into the row, then save.
-Pressing Enter on the empty row closes it with no change. Then start a new session.
+Pressing Enter on the empty row closes it with no change. Then start a new session. With a seat set, the hooks bring in
+the team's questions only for work handed over with `returnRoute: "auto"` (see "Which setups they cover" above).
 
 **Codex**
 
@@ -93,6 +108,11 @@ codex plugin marketplace add "$(npm root -g)/@openrig/cli/daemon/assets/plugins/
 codex plugin add openrig@openrig-app
 codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --front-door
 ```
+
+The hooks don't cover handovers through this MCP server yet. For the team's questions to come into the chat by
+themselves, hand work over with `rig queue create --return-route auto` in the shell (see "Which setups they cover").
+A Codex whose `codex queue` has no `--resume` (0.162.1, say) gets the team's tasks at the chat's next turn, not while
+it's idle, and the hooks say so once in the chat; Codex 0.171.0 starts the turn by itself.
 
 - **Added before from the `openrig` folder:** Codex answers that `openrig-app` is already added from a different source.
   Run `codex plugin marketplace remove openrig-app`, then the commands above.

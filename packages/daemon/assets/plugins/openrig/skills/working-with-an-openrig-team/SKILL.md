@@ -77,16 +77,30 @@ behave; this skill is the loop around them.
 
 ## When a question arrives by itself
 
-In Claude Code and Codex, this plugin's hooks bring the team's questions to you without anyone asking you to check.
+In Claude Code and Codex, this plugin's hooks bring the team's questions to you, and its result when it sends one as a
+task, without anyone asking you to check.
 
-- When this chat hands work over with an address of its own (`returnRoute` `auto`, the default in Claude Code with no
-  seat, or `rig queue create --return-route auto`), OpenRig records that address with a key for this chat.
+- When this chat hands work over with an address of its own, OpenRig records that address with a key for this chat.
+  The hooks cover:
+  - `rig_queue_create` in Claude Code with no seat, where `returnRoute` `auto` is the default;
+  - `rig_queue_create` with `returnRoute` `auto` when this connection has a seat. Without it, the team's questions go
+    to the seat's own address, which the hooks don't watch: you find them only when you check (`rig_queue_list` with
+    `owned`);
+  - `rig queue create --return-route auto` in the shell, in Claude Code or Codex.
+- Codex through this MCP server isn't covered yet: Codex may not give its MCP servers the session id the key comes
+  from, so a `rig_queue_create` there goes without one, and nothing comes here by itself. In Codex, hand work over with
+  `rig queue create --return-route auto` in the shell.
+- A Codex whose `codex queue` has no `--resume` (Codex 0.171.0 has it) gets the tasks at this chat's next turn, not
+  while it's idle. The hooks say so once in the chat: tell the person in plain words.
 - The hooks read only the addresses recorded under this chat's key, from OpenRig's own record, and check them for new
   tasks. Claude Code wakes you with them when a turn ends. Codex gets them as a message queued for this chat.
 - Each one says it came from OpenRig's hook bridge and names its sender as OpenRig recorded it. It's a task like any
   other: show it to the person and record their words, as below.
 - A wake comes when your turn ends. Between wakes, list this chat's tasks yourself: `rig_queue_list` with `destination`
   set to this chat's address. `owned` and `mine` need a seat, and `destination` doesn't.
+- In Claude Code the key belongs to the app's process, not the chat: after `/clear`, the new chat still gets the
+  earlier one's tasks, and a chat resumed in a new process (`claude --resume`) doesn't get its earlier tasks by itself,
+  so check its address each turn.
 - Codex asks the person to trust the hooks once, and again after the plugin changes, because they run outside its
   sandbox. They run `node` and `rig`, only read from OpenRig, and type nothing into any terminal.
 

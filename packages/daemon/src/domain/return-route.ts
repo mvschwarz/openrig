@@ -27,6 +27,12 @@ export function issuedReturnAddress(qitemId: string): string {
   return `conversation-${createHash("sha256").update(qitemId).digest("hex").slice(0, 12)}@${RETURN_ROUTE_RIG}`;
 }
 
+/** A `conversation-key:` tag: the key of a person's own conversation (Claude Code or Codex), which only OpenRig writes,
+ *  beside the address it issued that conversation. The routes keep it only from a client on this machine. */
+export function isConversationKeyTag(tag: unknown): tag is string {
+  return typeof tag === "string" && tag.startsWith(CONVERSATION_KEY_TAG_PREFIX);
+}
+
 /** The address OpenRig already issued the conversation a create names by its key (the `conversation-key:` tag that
  *  `rig queue create --return-route auto` and the MCP server's create record beside an issued address): the first one it
  *  was issued. So a conversation keeps one address however often it hands work over with `auto`, and its seats' prompts
@@ -34,8 +40,7 @@ export function issuedReturnAddress(qitemId: string): string {
  *  address yet, or when the record can't be read: the create then issues its own. */
 export function conversationIssuedAddress(db: Database.Database, tags: unknown): string | null {
   if (!Array.isArray(tags)) return null;
-  const keys = [...new Set(tags.filter((tag): tag is string => typeof tag === "string"
-    && tag.startsWith(CONVERSATION_KEY_TAG_PREFIX) && tag.length > CONVERSATION_KEY_TAG_PREFIX.length))];
+  const keys = [...new Set(tags.filter((tag): tag is string => isConversationKeyTag(tag) && tag.length > CONVERSATION_KEY_TAG_PREFIX.length))];
   if (keys.length !== 1) return null;
   try {
     const row = db.prepare(`SELECT return_route FROM queue_items WHERE return_route_basis IN ('issued', 'issued-actor')
