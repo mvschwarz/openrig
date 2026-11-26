@@ -1134,9 +1134,9 @@ describe("the plugin's seat effects stay inside the seat's project", () => {
     }
   });
 
-  it("keeps one copy of the boundary check in the four scripts that have it", () => {
+  it("keeps one copy of the boundary check in the five scripts that have it", () => {
     const files = ["hooks/scripts/activity-relay.cjs", "hooks/scripts/compaction-restore-bridge.cjs", "hooks/scripts/refocus.cjs",
-      "skills/claude-compaction-restore/scripts/precompact-hook.mjs"];
+      "skills/claude-compaction-restore/scripts/precompact-hook.mjs", "hooks/scripts/permission-answer.cjs"];
     const block = (file: string) => {
       const text = readFileSync(join(scripts, file), "utf8");
       const start = text.indexOf("// --- seat project boundary");

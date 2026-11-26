@@ -10,8 +10,11 @@ import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_stag
 import { workflowRunTitleSchema } from "./migrations/194_workflow_run_title.js";
 import { workflowStartOperationsSchema } from "./migrations/195_workflow_start_operations.js";
 import { queueItemEvidenceRefRootsSchema } from "./migrations/196_queue_item_evidence_ref_roots.js";
+import { queueItemsNativePermissionIndexSchema } from "./migrations/199_queue_items_native_permission_index.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
+import { providerAccountRefsSchema } from "./migrations/187_provider_account_refs.js";
+import { providerAccountAssignmentsSchema } from "./migrations/188_provider_account_assignments.js";
 import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";
 import { communityHarnessRuntimeSwitchesSchema } from "./migrations/179_community_harness_runtime_switches.js";
 import { networkRequestsSchema } from "./migrations/184_network_requests.js";
@@ -387,6 +390,8 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueItemsBlockedOnIndexSchema,
   queueRelayedAnswersSchema,
   queueItemsScanIndexesSchema,
+  providerAccountRefsSchema,
+  providerAccountAssignmentsSchema,
   rigSeatSliceSchema,
   communityHarnessRuntimeSwitchesSchema,
   networkBindingProvidersSchema,
@@ -394,4 +399,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   workflowStartOperationsSchema,
   networkRequestsSchema,
   queueItemEvidenceRefRootsSchema,
+  queueItemsNativePermissionIndexSchema,
 ];

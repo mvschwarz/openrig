@@ -36,6 +36,7 @@ import type Database from "better-sqlite3";
 import { createLinkedSuccessorLookup, deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { recordsNoWakeRoute } from "./gateway/destination-resolver.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
+import { isRosterReadyNotice } from "./roster-ready-notice.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
 import { describeCheckIn, readWakeOutcome, type MemberCheckIn } from "./connection-contract.js";
@@ -620,6 +621,16 @@ function isFindingRow(item: QueueItem): boolean {
   return (item.tags ?? []).includes(STUCK_SWEEP_FINDING_TAG);
 }
 
+function isRosterNotice(item: QueueItem): boolean {
+  return isRosterReadyNotice({ qitem_id: item.qitemId, source_session: item.sourceSession });
+}
+
+/** Rows no finding is filed about: the sweep's own findings, which self-exclude by their stamp tag, and OpenRig's
+ *  roster-ready notice, which is information about the team, not work. Its wake is still retried like any row's. */
+function isSweepExempt(item: QueueItem): boolean {
+  return isFindingRow(item) || isRosterNotice(item);
+}
+
 /** Without OWNER history a receipt has no recipient/episode key. A simple
  * legacy park is still identifiable, but a later state write or an earlier
  * notice/reroute makes that binding unknown. Even a same-state append may be
@@ -655,6 +666,7 @@ function deliveryResolutionEvidence(
   if (["done", "failed", "denied", "canceled", "handed-off"].includes(row.state)) {
     return `source closed (${row.state})`;
   }
+  if (isRosterNotice(row)) return "source is OpenRig's roster-ready notice: information about the team, not work";
   // An agent's claim/park resolves its failed wake or unclaimed work, not the
   // separate notification owed to a person while that agent is waiting on them.
   if (kind !== "undelivered-human-notice") {
@@ -1051,7 +1063,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // Half 1 — claimed-never-closed. The claimant holds the obligation; the finding
     // routes to them.
     const overdueCandidate = (row: QueueItem): Candidate | null => {
-      if (isFindingRow(row)) return null;
+      if (isSweepExempt(row)) return null;
       return {
         kind: "overdue-claim",
         row,
@@ -1066,7 +1078,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // pickup module remains the ONE derivation rule; this only enumerates and routes.
     const stalledCandidate = (qitemId: string): Candidate | null => {
       const row = indexed(() => deps.queueRepo.getById(qitemId, { waiting: false }));
-      if (!row || isFindingRow(row)) return null;
+      if (!row || isSweepExempt(row)) return null;
       if ((row.state !== "pending" && row.state !== "in-progress") || !row.claimedAt) return null;
       const stalled = stalledPickupFinding(row);
       if (!stalled) return null;
@@ -1112,7 +1124,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // have no retry ladder: the same sweep/recovery route owns their actionable disposition.
     const parkedCandidate = (qitemId: string): Candidate | null => {
       const row = indexed(() => deps.queueRepo.getById(qitemId, { waiting: false }));
-      if (!row || isFindingRow(row)) return null;
+      if (!row || isSweepExempt(row)) return null;
       if (row.state !== "blocked" || !startsWithCI(row.lastNudgeResult, "failed:")) return null;
       const wake = deps.queueRepo.getParkWakeStatus(qitemId);
       if ((wake?.live === true && (!wake.unconsumed || wake.recoveryOwner === "queue-stuck-sweep"))
@@ -1160,7 +1172,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const polledRow = (row: QueueItem): boolean => recordsNoWakeRoute(row.lastNudgeResult) && pollsForWork(row.destinationSession);
     /** `row` comes from findUndelivered (it carries the delivery verdict). Call it after any wake retry the row needs. */
     const undeliveredCandidate = (row: QueueItem, recordSuppression: boolean): Candidate | null => {
-      if (isFindingRow(row)) return null;
+      if (isSweepExempt(row)) return null;
       const humanNotice = isHumanNotice(row);
       // A claim supersedes a retained failed wake, including on a row returned to
       // pending. Its pickup finding must not be replaced by that historical failure;
@@ -1215,7 +1227,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const cutoff = new Date(now.getTime() - ageMinutes * 60_000).toISOString();
     const unclaimedCandidate = (qitemId: string, recordSuppression: boolean): Candidate | null => {
       const row = indexed(() => deps.queueRepo.getById(qitemId, { waiting: false }));
-      if (!row || isFindingRow(row)) return null;
+      if (!row || isSweepExempt(row)) return null;
       // The query's own predicate, on the row as it is now.
       if (row.state !== "pending" || row.claimedAt || !row.destinationSession || row.tsCreated > cutoff
         || startsWithCI(row.lastNudgeResult, "failed:")) return null;
@@ -1301,7 +1313,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const custodyCandidate = (qitemId: string, hasSuccessor: (source: string, target: string) => boolean, recheck = false): Candidate | null => {
       // A recheck reads live, without the lent indexes: one row's own queries cost less than a rebuilt successor index.
       const row = recheck ? deps.queueRepo.getById(qitemId, { waiting: false }) : indexed(() => deps.queueRepo.getById(qitemId, { waiting: false }));
-      if (!row || isFindingRow(row)) return null;
+      if (!row || isSweepExempt(row)) return null;
       // The query's own predicate, on the row as it is now.
       const closed = row.state === "done" || row.state === "canceled"
         || (row.state === "handed-off" && (row.handedOffTo == null || (row.closureTarget ?? null) !== row.handedOffTo));
