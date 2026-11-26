@@ -926,6 +926,12 @@ export class ClaudeCompactionEnforcer {
     const session = input.sessionName;
     if (input.runtime !== "claude-code" || input.usedPercentage == null) return null;
     this.recoverSeat(input);
+    // The gate holds a fresh request, not the record of the one that ended: count it now, so a seat that doesn't read idle
+    // again still opens its preparation notice (sends nothing; the guarded poll's own count is then a no-op).
+    try {
+      const policy = this.settingsStore.resolveClaudeCompactionPolicy();
+      if (isValidThresholdPercent(policy.thresholdPercent)) await this.noteEndedPreparation(input, policy);
+    } catch { /* the guarded poll counts it */ }
     const ended = this.lastEnded.get(session);
     if (!ended) return null;
     const live = this.liveGeneration(session);

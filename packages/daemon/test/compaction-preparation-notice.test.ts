@@ -18,7 +18,7 @@ function fixture(extra: Record<string, unknown> = {}) {
     autoRetryAfterStopMs: 1, onPreparationFailure: notice, ...extra };
   const transport = { send, waitUntilIdle: vi.fn(async () => ({ ok: true })) } as unknown as SessionTransport;
   let e = new ClaudeCompactionEnforcer({ resolveClaudeCompactionPolicy: () => policy } as any, transport, opts);
-  return { get e() { return e; }, send, notice, advance: (n = 2) => { clock += n; },
+  return { get e() { return e; }, send, notice, transport, advance: (n = 2) => { clock += n; },
     generation: (s: string) => { generation = s; },
     restart: () => { e = new ClaudeCompactionEnforcer({ resolveClaudeCompactionPolicy: () => policy } as any, transport, { ...opts, daemonInstance: `restarted-${++restarts}` }); } };
 }
@@ -114,6 +114,16 @@ it("a delivered request whose map never completes counts toward the notice: the 
   expect(f.notice).toHaveBeenCalledTimes(1);
   expect(f.notice).toHaveBeenCalledWith(expect.objectContaining({ attemptId: last, endedAttempts: 3, reason: "preparation_incomplete", delivered: true }));
   expect(f.e.recoveryInability(input.sessionName)).toContain("ended 3 automatic attempts without /compact");
+});
+
+it("the third delivered attempt counts before the seat reads idle again: the notice opens while a fresh request waits", async () => {
+  const f = fixture();
+  await endDelivered(f); await endDelivered(f); const last = await endDelivered(f);
+  vi.mocked(f.transport.waitUntilIdle).mockResolvedValue({ ok: false } as never); // the seat at its wall doesn't read idle again
+  expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false, reason: "waiting_for_idle" });
+  expect(f.notice).toHaveBeenCalledTimes(1);
+  expect(f.notice).toHaveBeenCalledWith(expect.objectContaining({ attemptId: last, endedAttempts: 3, delivered: true }));
+  expect(f.e.getPreparationState(input.sessionName)?.attemptId).toBe(last); // no fresh request went out
 });
 
 it("unsent and delivered-incomplete attempts share one run, and an attempt still waiting for its map decides nothing", async () => {
