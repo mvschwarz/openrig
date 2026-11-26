@@ -344,6 +344,14 @@ runtime.
 |---|---|---|
 | `rig down <rig>` | — | `--delete`<br>`--force`<br>`--snapshot`<br>`--yes`<br>`--json`<br>`--host <id>` |
 
+Before closing the seats' terminals, down lets each Claude Code or Codex agent exit through its own shutdown: TERM to
+Claude Code itself, `/exit` typed into Codex only while its input box is empty with no prompt open (TERM otherwise).
+Each waits up to 3 s for the agent's exit, then sends KILL and waits up to 3 s again. The output and `runtimeExits` in
+the JSON say, per seat, what that step saw, and why: it exited through its own shutdown (`graceful`, also when no agent
+was left running), it was seen to end on a signal (`forced`), or its end wasn't seen (`unverified`). Whether each
+terminal then closed is the stop's own result: the session count and any warning (`sessionsKilled` and `errors`).
+`--force` closes the terminals at once, without that step.
+
 ### archive
 
 | Invocation | Aliases | Declared options |
@@ -1237,6 +1245,14 @@ for a discovered successor); `sourceOutcome` lists the rebuild artifacts and gap
 The legacy `continuityTransferred` field is always `false`, not a transfer verdict. A complete binding
 does not prove a lineage write: `sideEffects.provenanceRecordWritten` reads back this handover's occupant
 tenure. If it is false, inspect the daemon log; do not repeat a handover whose seat is already bound.
+
+Before the successor starts in the same pane, the previous occupant exits through its own shutdown where it has one:
+TERM to Claude Code itself (not to its pane's shell), `/exit` typed into Codex only while its input box is empty with
+no prompt open. Its exit is read from its own process: a wait of up to 3 s, then KILL and up to 3 s again; then the
+pane's shell is ended for the successor. When its exit can't be checked, the pane is stopped as before (TERM, then
+KILL), and the handover goes on. `sideEffects.departingProcess` is `ended-graceful` (its own shutdown, or no agent was
+left running) or `ended-forced` (a signal it doesn't handle, KILL, or the pane-level stop when its own exit couldn't be
+confirmed), and `sideEffects.departingProcessDetail` says which in a sentence.
 
 For Codex rebuilds, `sourceOutcome.permissions` distinguishes an emitted predecessor policy, a saved
 successor selection, and an unverified fallback. A saved `--codex-permissions` envelope wins over the

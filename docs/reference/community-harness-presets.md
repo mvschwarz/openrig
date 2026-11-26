@@ -23,6 +23,7 @@ it never reads an unsupported capability as idle, working, ready or verified.
 | Approval | no | Approvals stay in the harness's own pane. OpenRig relays none, so a person answers them there. A [runner preset](#runner-presets-runner-true) is the exception: its runner submits the agent's permission requests to OpenRig, which asks a person, and the default is permit (section 7 of the [harness and runner contract](harness-runner-contract.md)). |
 | Cancel | no | A plain preset has no live native cancellation consumer. Its own manual controls remain available; `/abort` is ordinary input unless that program defines it. An implemented runner can support the [named native command](harness-runner-contract.md#optional-run-bound-native-input-and-wake-version-1), subject to its own capability and turn mapping. `rig seat stop` and `rig down` end the seat's tmux session; work outside that pane, such as a gateway, has separate custody and lifecycle. List those limits in the preset. Restarting in place and switching harness are refused. |
 | Transport | yes | The seat is a tmux pane like any other, so `rig capture`, `rig send` and `--host` work as they do for any seat. |
+| Handover | yes | `rig seat handover <seat> --source fresh` (or `rebuild`) launches the successor from the installed preset and records the harness, its runner declaration and any declared conversation on the successor's session, so its next relaunch or restore uses them. A missing preset or a launch wrapper the preset can't apply is refused before the previous occupant is ended. Whether the harness's command starts, signs in or gets ready is known only after that: such a failure leaves the binding unchanged, possibly with an unadopted successor running in the pane, so check it with `rig capture` before acting. `--recover` adopts only Claude Code successors, and a fork handover is refused before anything changes (only Claude Code and Codex conversations can be forked). A seat bound or reconciled onto a community harness, or handed over by an earlier version, has no recorded harness, which a relaunch or restore needs; a fresh handover launches its installed preset and records it. |
 
 **Not placed:** guidance, skills and startup files (a launch warns that they weren't delivered), and the model: set it in the harness's own
 configuration, or let a launcher that opts in take the seat's declared model (`passes_model`, below).
@@ -457,6 +458,21 @@ The contributor-owned launcher reads the file and uses its harness’s supported
 OpenRig records `node.startup_first_input_passed` with the path and `submission: unconfirmed`. This says the input was passed at launch, not that the native harness submitted or read it. An uncertain launch is not permission to replay it. Readiness remains process-only. `startup_assisted` is independent: when declared, startup still requires a person’s acknowledgement, including when the first input was passed at launch.
 
 Presets without `first_input` and built-in runtimes keep their existing behavior. Older OpenRig versions reject this new field as unknown. The private input file remains for diagnostics; it can contain private startup context. A launcher that turns its contents into one argument is subject to the platform’s argument-size limit; the launcher must report a launch error rather than silently truncate the turn. The examples’ argument transport is covered with stand-ins; native unattended startup still requires qualification with the installed harness.
+
+## Declare a model catalog
+
+A format-1 preset may include advisory model choices for settings clients.
+
+```yaml
+model_catalog:
+  runtime_version: "1.2.3"
+  models:
+    - id: example/model-a
+      effort_levels: [low, high]
+    - id: example/model-b
+```
+
+Omit `runtime_version` when it is unknown and omit `effort_levels` when the preset has no per-model effort information. An explicit `models: []` declares an empty list. Missing or invalid catalog metadata makes the [seat catalog](seat-node-targeting.md#model-and-effort-catalog) unavailable and leaves preset launch behavior unchanged. Older OpenRig versions may reject `model_catalog` as an unknown field.
 
 ## Pass the seat's declared model at launch
 
