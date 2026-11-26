@@ -4294,8 +4294,10 @@ export class QueueRepository {
         actorSession: input.actorSession,
         transitionNote: note,
         // A note-only append does not clear the claim's retained park gate.
-        // Carry its audit pointer so a later state write can end this chain.
-        closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(input.qitemId) : undefined,
+        // Carry its audit pointer so a later state write can end this chain;
+        // on a parked row the pointer is the blocker the append leaves in place.
+        closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(input.qitemId)
+          : qitem.state === "blocked" ? qitem.blockedOn ?? undefined : undefined,
         identityProvenance: input.identityProvenance ?? null,
         identityPrincipal: input.identityPrincipal ?? null,
       });
@@ -4674,7 +4676,9 @@ export class QueueRepository {
       actorSession: input.actorSession,
       transitionNote: isReopen ? `reopen acknowledged: ${input.transitionNote}` : input.transitionNote,
       closureReason: validation.closureReason ?? undefined,
-      closureTarget: validation.closureTarget ?? undefined,
+      // A park transition logs the blocker it leaves in force, or none when the row has none: a caller's closure target
+      // never stands in for it. Only the log carries this: queue_items.closure_target above is written from validation alone.
+      closureTarget: input.state === "blocked" ? nextBlockedOn ?? undefined : validation.closureTarget ?? undefined,
       identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
       identityPrincipal: input.identityPrincipal ?? null,
       ownerNotificationKind: notification?.kind,
