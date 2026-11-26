@@ -417,6 +417,22 @@ describe("POST /api/missions/:missionId/status", () => {
     expect(await (await post(app, "authored", { status: "active" })).json()).toMatchObject({ outcome: "unchanged" });
   });
 
+  it("keeps a legacy commented status in lockstep across the write result, route and refreshed slice list", async () => {
+    writeMissionReadme(missionsRoot, "legacy-comment", "---\nstatus: planned # keep comment\n---\n# Mission\n");
+    writeSliceInMission(missionsRoot, "legacy-comment", "intro");
+    const app = buildAppWithSlices(indexer);
+    const primed = await (await app.request("/api/slices?filter=all")).json() as SidecarBody;
+    expect(primed.missions["legacy-comment"]!.authoredStatus).toBe("planned");
+    const response = await post(app, "legacy-comment", { status: "active" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ served: { status: "active" } });
+    const route = await (await app.request("/api/missions/legacy-comment")).json() as { status: string };
+    expect(route.status).toBe("active");
+    const hot = await (await app.request("/api/slices?filter=all")).json() as SidecarBody;
+    expect(hot.missions["legacy-comment"]!.authoredStatus).toBe("active");
+    expect(fs.readFileSync(path.join(missionsRoot, "legacy-comment", "README.md"), "utf8")).toContain("status: active # keep comment");
+  });
+
   it("writes the folder it's named, which needn't be under this daemon's roots, and only a folder named for the mission", async () => {
     const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "missions-elsewhere-"));
     try {

@@ -25,7 +25,8 @@
 // null when nothing is declared.
 
 import { Hono, type Context } from "hono";
-import { readLegacyMissionStatus, servedMissionStatus, writeMissionStatus, type ManifestEditOutcome } from "../domain/scope/manifest-editor.js";
+import { readLegacyMissionStatus } from "../domain/scope/mission-frontmatter.js";
+import { servedMissionStatus, writeMissionStatus, type ManifestEditOutcome } from "../domain/scope/manifest-editor.js";
 import { createProofPolicyRead, readMissionReadiness, readSliceReadiness } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
