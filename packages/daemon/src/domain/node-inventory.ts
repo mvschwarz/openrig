@@ -1943,6 +1943,176 @@ export function hookOrPaneActivity(
   return null;
 }
 
+/** A seat's activity now from a live hook, else the cached pane reading (hookOrPaneActivity), without terminal motion.
+ *  Capture-free. Prompt wakes read it; readSeatActivityAsRigPs adds the motion rig ps applies. */
+export function readCurrentSeatActivity(sources: {
+  hooks: Pick<AgentActivityStore, "getLatestForNode">;
+  structural: { getStructuralActivity(sessionName: string): StructuralObservation | null };
+  runtimeOf: (sessionName: string) => string | null;
+}, sessionName: string): { activity: AgentActivity | null; runtime: string | null; structural: StructuralObservation | null } {
+  const runtime = sources.runtimeOf(sessionName);
+  const structural = sources.structural.getStructuralActivity(sessionName);
+  const resolved = hookOrPaneActivity(sources.hooks.getLatestForNode({ sessionName,
+    order: runtime === "claude-code" ? "source" : "arrival" }), structural, false, runtime);
+  return { activity: resolved?.activity ?? null, runtime, structural };
+}
+
+/** A seat's activity as rig ps shows it, capture-free: the hook and the cached pane reading, with the cached terminal
+ *  motion lifting idle or unknown to running (capturelessSeatActivity), and the same placeholder for a seat with
+ *  neither. The provider plan and apply read it for each seat. One rig ps step isn't applied: rig ps reads an idle seat
+ *  as unknown when the identity reconciler's verdict says its tmux couldn't be reached (unseenIdleIsUnknown); here such
+ *  a seat still reads idle. */
+export function readSeatActivityAsRigPs(sources: {
+  hooks: Pick<AgentActivityStore, "getLatestForNode"> & Partial<Pick<AgentActivityStore, "latestUnsupersededProviderFailure">>;
+  structural: { getStructuralActivity(sessionName: string): StructuralObservation | null };
+  motion: { getSeatActivity(sessionName: string): SeatActivity | null };
+  runtimeOf: (sessionName: string) => string | null;
+  now?: () => Date;
+}, sessionName: string): AgentActivity {
+  const now = sources.now?.() ?? new Date();
+  const runtime = sources.runtimeOf(sessionName);
+  const hookActivity = sources.hooks.getLatestForNode({ sessionName, now, order: runtime === "claude-code" ? "source" : "arrival" });
+  const { activity, withMotion } = capturelessSeatActivity({ sessionName, runtime, hookActivity,
+    structural: sources.structural.getStructuralActivity(sessionName), motion: sources.motion.getSeatActivity(sessionName), now,
+    providerFailure: retainedProviderFailure(sources.hooks, { sessionName, runtime, now }, hookActivity) });
+  return activity ?? withMotion({ state: "unknown", reason: "no_runtime_hook", evidenceSource: "session_registry",
+    sampledAt: now.toISOString(), evidence: null, fallback: true });
+}
+
+/**
+ * A seat's activity from what the daemon already holds, capture-free, the way rig ps reads it: its newest hook, the
+ * cached pane reading and the cached terminal motion (needs_input > running > MOTION > idle / unknown). `activity` is
+ * null when there is no hook and no pane verdict; `withMotion` lifts whatever the caller falls back to then.
+ */
+export function capturelessSeatActivity(input: {
+  sessionName: string;
+  runtime: string | null | undefined;
+  hookActivity: AgentActivity | null | undefined;
+  structural: StructuralObservation | null;
+  motion: SeatActivity | null;
+  now: Date;
+  /** The seat's current Claude authentication or billing failure, if any (`retainedProviderFailure`, #3571). */
+  providerFailure?: AgentActivity | null;
+}): { activity: AgentActivity | null; withMotion: (activity: AgentActivity) => AgentActivity } {
+  const { sessionName, runtime, hookActivity, structural, motion } = input;
+  const sampledAt = input.now;
+
+  /**
+   * Freshness is decided HERE, at read time, from the RAW `lastActivityAt` against the request
+   * clock — NEVER from the cached `isActiveWithinWindow` boolean alone.
+   *
+   * WHY (dev50-guard HOLD on 29ad1b2b9): `SeatActivityService.pollSeat` returns null on a tmux
+   * error BEFORE it replaces or deletes the cached record, and `pollAllRunningTmuxSeats` only
+   * evicts seats that are no longer running in the DB. A seat still marked running whose tmux read
+   * keeps failing therefore KEEPS its last observation forever — including a `true`. Trusting that
+   * boolean turned an UNAVAILABLE observation into an affirmative liveness claim: ACTIVITY would
+   * report `running` indefinitely after the instrument went dark.
+   *
+   * That is this ladder's own no-fabrication rule broken in the unwatched direction. Three guards
+   * below stop motion inventing `idle` from silence; none of them stopped a dead cache inventing
+   * `running`. A silent seat and a seat we can no longer SEE are different states, and only the
+   * raw timestamp distinguishes them.
+   *
+   * Fail CLOSED when the fact cannot be aged (absent or unparseable): an un-ageable affirmative is
+   * indistinguishable from a long-dead one, so it must not become a liveness claim.
+   *
+   * The seat's OWN `silenceWindowSeconds` is the threshold — the same one the service used at poll
+   * time. No second threshold is invented here. A negative age (raw fact slightly ahead of the
+   * request clock) still reads live, preserving pollSeat's deliberate clock-skew tolerance.
+   */
+  const motionRunning = (() => {
+    if (motion?.isActiveWithinWindow !== true) return false;
+    const rawMs = motion.lastActivityAt ? Date.parse(motion.lastActivityAt) : Number.NaN;
+    if (!Number.isFinite(rawMs)) return false;
+    const ageSeconds = (sampledAt.getTime() - rawMs) / 1000;
+    return ageSeconds < motion.silenceWindowSeconds;
+  })();
+
+  /**
+   * ACTIVITY D1+D2 — precedence below, except for a current typed usage limit:
+   *
+   *     needs_input > running > MOTION > idle / unknown
+   *
+   * A current, target-bound complete idle frame is the narrow idle exception to motion below.
+   * An explicitly unsupported client version also retains unknown rather than inferring work from redraws.
+   * A generic footer or old idle capture is not completed-idle evidence; D2 remains unchanged.
+   * Live motion otherwise UPGRADES a verdict of `idle` or `unknown`; it never touches `needs_input` or an
+   * already-`running` verdict, and it never MANUFACTURES `idle`. That asymmetry is the whole
+   * safety argument, and it is what each half of the defect needs:
+   *
+   *   D1 (Codex → unknown) is COVERAGE. A Codex seat has no hook, and the structural matcher is
+   *     Claude-shaped over a fixed 8-line tail window, so a tall Codex footer pushes the real work
+   *     line out of view and the seat falls to `unknown`. Motion is a fact about bytes on the pane,
+   *     so it covers every runtime without a matcher per provider — the treadmill this avoids.
+   *   D2 (Claude → idle) is PRECEDENCE. A seat that Stopped and then RESUMED still carries the
+   *     stale positive `idle` hook as its latest, and the old early-return handed that back as
+   *     authoritative before anything else was consulted. A perfect motion source placed further
+   *     down the ladder would still have lost to it. Motion has to outrank a POSITIVE idle hook,
+   *     not merely an absent one.
+   *
+   * Why `needs_input` outranks motion: motion cannot tell "working" from "waiting at a prompt" —
+   * any per-second redraw keeps the window fresh. If motion outranked a needs_input TEXT verdict,
+   * a seat asking for permission would be relabelled `running`, and the parking watch would step
+   * over the one seat that is actually blocked.
+   *
+   * Why motion never yields `idle`: a silent window is not evidence of a quiet agent (a seat can
+   * think for a long time without printing). Deriving `idle` from silence would satisfy
+   * "not unknown" by relabelling the default, which is the closed union rotting rather than the
+   * signal improving. Silence therefore leaves the prior verdict exactly as it was.
+   */
+  const withMotion = (activity: AgentActivity, currentIdleFrame = false): AgentActivity => {
+    if (!motionRunning || activity.reason === "unrecognized_client_version" || (currentIdleFrame && activity.state === "idle")) return activity;
+    if (activity.state !== "idle" && activity.state !== "unknown") return activity;
+    return {
+      state: "running",
+      reason: "window_activity_motion",
+      evidenceSource: "terminal_activity",
+      sampledAt: motion!.lastObservedAt,
+      // The RAW `#{window_activity}` timestamp that earned the verdict — a reader can age it
+      // against their own clock and see for themselves why this seat reads running.
+      evidence: motion!.lastActivityAt ?? null,
+      runtime: runtime ?? null,
+    };
+  };
+  const lift = (activity: AgentActivity) => withMotion(activity);
+
+  // Reuse the existing cached capture. Only a complete supported idle frame, bound to this
+  // target and started in a later second than the last write, distinguishes idle redraw from resumed work.
+  // window_activity has second precision: same-second ordering is unknown. Poll/completion time is not write time.
+  const capturedMs = Date.parse(structural?.idleFrame?.captureStartedAt ?? "");
+  const motionMs = Date.parse(motion?.lastActivityAt ?? "");
+  const currentIdleFrame = structural?.state === "agent_idle"
+    && structural.idleFrame?.sessionName === sessionName
+    && structural.idleFrame?.runtime === runtime
+    && Number.isFinite(capturedMs) && capturedMs <= sampledAt.getTime()
+    && sampledAt.getTime() - capturedMs < DEFAULT_STRUCTURAL_STALE_MS
+    && (!motionRunning || (Number.isFinite(motionMs)
+      && Math.floor(capturedMs / 1000) > Math.floor(motionMs / 1000)));
+
+  // A current Claude auth or billing failure stands over the pane reading and motion, as a limit does (#3571).
+  const providerFailure = providerFailureActivity(input.providerFailure, structural, runtime);
+  if (providerFailure) return { activity: providerFailure, withMotion: lift };
+
+  // An idle hook alone still yields to motion (D2); when a current complete idle frame exists, report
+  // that frame's provenance instead.
+  const resolved = hookOrPaneActivity(hookActivity, structural,
+    motionRunning && (currentIdleFrame || structural?.reason === "unrecognized_client_version"), runtime);
+  if (resolved?.source === "hook") return { activity: withMotion(resolved.activity), withMotion: lift };
+  if (resolved?.source === "limit") return { activity: resolved.activity, withMotion: lift };
+  if (resolved?.source === "pane") return { activity: withMotion(resolved.activity, currentIdleFrame), withMotion: lift };
+
+  // No positive hook and no structural verdict. A stale/unknown hook, if one exists, is delivered
+  // HONESTLY as-is (unknown/stale) — never upgraded to a quiet-seat verdict on arrival age alone.
+  // Live motion DOES upgrade it. A demoted hook is not exotic: a seat whose agent process lacks the
+  // relay's launch environment (for example, relaunched outside the product launcher without
+  // OPENRIG_RUNTIME or an occupant generation) posts no new hooks, so its newest stored hook can be
+  // an old one from a prior tenure, read as generation_mismatch. Product-launched seats carry the
+  // generation and post resolvable hooks. Where a hook is demoted, it — not a positive idle one —
+  // is what stands between a working seat and a truthful label.
+  if (hookActivity) return { activity: withMotion(hookActivity), withMotion: lift };
+  return { activity: null, withMotion: lift };
+}
+
 export async function attachAgentActivity(
   entries: NodeInventoryEntry[],
   deps: {
@@ -2001,133 +2171,20 @@ export async function attachAgentActivity(
       ? deps.seatActivity?.getSeatActivity(entry.canonicalSessionName) ?? null
       : null;
 
-    /**
-     * Freshness is decided HERE, at read time, from the RAW `lastActivityAt` against the request
-     * clock — NEVER from the cached `isActiveWithinWindow` boolean alone.
-     *
-     * WHY (dev50-guard HOLD on 29ad1b2b9): `SeatActivityService.pollSeat` returns null on a tmux
-     * error BEFORE it replaces or deletes the cached record, and `pollAllRunningTmuxSeats` only
-     * evicts seats that are no longer running in the DB. A seat still marked running whose tmux read
-     * keeps failing therefore KEEPS its last observation forever — including a `true`. Trusting that
-     * boolean turned an UNAVAILABLE observation into an affirmative liveness claim: ACTIVITY would
-     * report `running` indefinitely after the instrument went dark.
-     *
-     * That is this ladder's own no-fabrication rule broken in the unwatched direction. Three guards
-     * below stop motion inventing `idle` from silence; none of them stopped a dead cache inventing
-     * `running`. A silent seat and a seat we can no longer SEE are different states, and only the
-     * raw timestamp distinguishes them.
-     *
-     * Fail CLOSED when the fact cannot be aged (absent or unparseable): an un-ageable affirmative is
-     * indistinguishable from a long-dead one, so it must not become a liveness claim.
-     *
-     * The seat's OWN `silenceWindowSeconds` is the threshold — the same one the service used at poll
-     * time. No second threshold is invented here. A negative age (raw fact slightly ahead of the
-     * request clock) still reads live, preserving pollSeat's deliberate clock-skew tolerance.
-     */
-    const motionRunning = (() => {
-      if (motion?.isActiveWithinWindow !== true) return false;
-      const rawMs = motion.lastActivityAt ? Date.parse(motion.lastActivityAt) : Number.NaN;
-      if (!Number.isFinite(rawMs)) return false;
-      const ageSeconds = (sampledAt.getTime() - rawMs) / 1000;
-      return ageSeconds < motion.silenceWindowSeconds;
-    })();
-
-    /**
-     * ACTIVITY D1+D2 — precedence below, except for a current typed usage limit:
-     *
-     *     needs_input > running > MOTION > idle / unknown
-     *
-     * A current, target-bound complete idle frame is the narrow idle exception to motion below.
-     * An explicitly unsupported client version also retains unknown rather than inferring work from redraws.
-     * A generic footer or old idle capture is not completed-idle evidence; D2 remains unchanged.
-     * Live motion otherwise UPGRADES a verdict of `idle` or `unknown`; it never touches `needs_input` or an
-     * already-`running` verdict, and it never MANUFACTURES `idle`. That asymmetry is the whole
-     * safety argument, and it is what each half of the defect needs:
-     *
-     *   D1 (Codex → unknown) is COVERAGE. A Codex seat has no hook, and the structural matcher is
-     *     Claude-shaped over a fixed 8-line tail window, so a tall Codex footer pushes the real work
-     *     line out of view and the seat falls to `unknown`. Motion is a fact about bytes on the pane,
-     *     so it covers every runtime without a matcher per provider — the treadmill this avoids.
-     *   D2 (Claude → idle) is PRECEDENCE. A seat that Stopped and then RESUMED still carries the
-     *     stale positive `idle` hook as its latest, and the old early-return handed that back as
-     *     authoritative before anything else was consulted. A perfect motion source placed further
-     *     down the ladder would still have lost to it. Motion has to outrank a POSITIVE idle hook,
-     *     not merely an absent one.
-     *
-     * Why `needs_input` outranks motion: motion cannot tell "working" from "waiting at a prompt" —
-     * any per-second redraw keeps the window fresh. If motion outranked a needs_input TEXT verdict,
-     * a seat asking for permission would be relabelled `running`, and the parking watch would step
-     * over the one seat that is actually blocked.
-     *
-     * Why motion never yields `idle`: a silent window is not evidence of a quiet agent (a seat can
-     * think for a long time without printing). Deriving `idle` from silence would satisfy
-     * "not unknown" by relabelling the default, which is the closed union rotting rather than the
-     * signal improving. Silence therefore leaves the prior verdict exactly as it was.
-     */
-    const withMotion = (activity: AgentActivity, currentIdleFrame = false): AgentActivity => {
-      if (!motionRunning || activity.reason === "unrecognized_client_version" || (currentIdleFrame && activity.state === "idle")) return activity;
-      if (activity.state !== "idle" && activity.state !== "unknown") return activity;
-      return {
-        state: "running",
-        reason: "window_activity_motion",
-        evidenceSource: "terminal_activity",
-        sampledAt: motion!.lastObservedAt,
-        // The RAW `#{window_activity}` timestamp that earned the verdict — a reader can age it
-        // against their own clock and see for themselves why this seat reads running.
-        evidence: motion!.lastActivityAt ?? null,
-        runtime: entry.runtime ?? null,
-      };
-    };
-
     const hookActivity = entry.canonicalSessionName ? deps.activityStore?.getLatestForNode({
       nodeId: entry.nodeId,
       sessionName: entry.canonicalSessionName,
       now: sampledAt,
       order: entry.runtime === "claude-code" ? "source" : "arrival",
     }) : null;
-    // Reuse the existing cached capture. Only a complete supported idle frame, bound to this
-    // target and started in a later second than the last write, distinguishes idle redraw from resumed work.
-    // window_activity has second precision: same-second ordering is unknown. Poll/completion time is not write time.
     const structural = entry.canonicalSessionName
       ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName) ?? null
       : null;
-    const capturedMs = Date.parse(structural?.idleFrame?.captureStartedAt ?? "");
-    const motionMs = Date.parse(motion?.lastActivityAt ?? "");
-    const currentIdleFrame = structural?.state === "agent_idle"
-      && structural.idleFrame?.sessionName === entry.canonicalSessionName
-      && structural.idleFrame?.runtime === entry.runtime
-      && Number.isFinite(capturedMs) && capturedMs <= sampledAt.getTime()
-      && sampledAt.getTime() - capturedMs < DEFAULT_STRUCTURAL_STALE_MS
-      && (!motionRunning || (Number.isFinite(motionMs)
-        && Math.floor(capturedMs / 1000) > Math.floor(motionMs / 1000)));
-
-    // A current Claude auth or billing failure stands over the pane reading and motion, as a limit does (#3571).
-    const providerFailure = providerFailureActivity(retainedProviderFailure(deps.activityStore, { nodeId: entry.nodeId,
-      sessionName: entry.canonicalSessionName, runtime: entry.runtime, now: sampledAt }, hookActivity), structural, entry.runtime);
-    if (providerFailure) return { ...entry, agentActivity: providerFailure };
-
-    // An idle hook alone still yields to motion (D2); when a current complete idle frame exists, report
-    // that frame's provenance instead.
-    const resolved = hookOrPaneActivity(hookActivity, structural,
-      motionRunning && (currentIdleFrame || structural?.reason === "unrecognized_client_version"), entry.runtime);
-    if (resolved?.source === "hook") return { ...entry, agentActivity: withMotion(resolved.activity) };
-    if (resolved?.source === "limit") return { ...entry, agentActivity: resolved.activity };
-    if (resolved?.source === "pane") return { ...entry, agentActivity: withMotion(resolved.activity, currentIdleFrame) };
-
-    // No positive hook and no structural verdict. A stale/unknown hook, if one exists, is delivered
-    // HONESTLY as-is (unknown/stale) — never upgraded to a quiet-seat verdict on arrival age alone.
-    // Live motion DOES upgrade it. A demoted hook is not exotic: a seat whose agent process lacks the
-    // relay's launch environment (for example, relaunched outside the product launcher without
-    // OPENRIG_RUNTIME or an occupant generation) posts no new hooks, so its newest stored hook can be
-    // an old one from a prior tenure, read as generation_mismatch. Product-launched seats carry the
-    // generation and post resolvable hooks. Where a hook is demoted, it — not a positive idle one —
-    // is what stands between a working seat and a truthful label.
-    if (hookActivity) {
-      return {
-        ...entry,
-        agentActivity: withMotion(hookActivity),
-      };
-    }
+    const { activity, withMotion } = capturelessSeatActivity({ sessionName: entry.canonicalSessionName ?? "", runtime: entry.runtime,
+      hookActivity, structural, motion, now: sampledAt,
+      providerFailure: retainedProviderFailure(deps.activityStore, { nodeId: entry.nodeId, sessionName: entry.canonicalSessionName,
+        runtime: entry.runtime, now: sampledAt }, hookActivity) });
+    if (activity) return { ...entry, agentActivity: activity };
 
     if (!captureFallback) {
       // CHEAP DEFAULT — no per-node tmux capture. A hook-less seat's pane-heuristic needs_input

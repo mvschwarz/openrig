@@ -1098,9 +1098,21 @@ and there's no threshold to obey.
   hand-off is needed.
 - **The Observatory is optional:** it can show readings, but you don't need it to rotate.
 
-**The unit is a Codex home, with every seat on it.** Moving some seats on a shared home to a different account, and
-moving Claude seats, aren't supported moves yet: say so instead of improvising. A Codex seat with a home of its own
-moves alone, with `rig provider switch --seat` (above).
+**The unit is a Codex home, with every seat on it.** Moving only some of the seats on a shared home to a different
+account isn't a supported move: say so instead of improvising. A Codex seat with a home of its own, or a Claude seat,
+moves alone with `rig provider switch --seat` (above).
+
+**A whole rig moves with `rig provider assign`.**
+- Add the account by label first, with `rig provider account add`.
+- `rig provider assign <rig> --provider <p> --account <label>` shows a plan and changes nothing. Seats with their own
+  choice of account are kept unless you add `--include-overrides`.
+- Apply exactly that plan with `--apply --plan <digest>`. Each seat's result is reported on its own, and nothing is
+  retried.
+- `rig provider status` then shows each seat against the rig's assignment.
+- `rig provider account remove` on a label a rig is assigned to warns, names those rigs and goes ahead. The seats keep
+  their credentials, and status shows the reference as missing until the label is added again or another account is
+  assigned.
+- The reference is rig-spec's "Assigning an account to a whole rig".
 
 0. **Load the person's account policy.**
    - It's the context pack named `account-policy`: check `rig context list` for it, then read it with
@@ -1189,10 +1201,11 @@ never run it as a form. "Whatever you think" or "skip" is an answer: write down 
    box uses about four times the tokens of the laptop; any I can't see?").
 3. **Ask how they want them used,** offering the common shape: the busiest machine gets its own subscription, the
    rest share, and one stays spare.
-4. **Ask what you may do on your own:** move a machine's Codex seats without asking; machines or seats to ask about
-   first or never move; sign-ins (may agents, and through which browser or profile, or always ask). Say what's
-   supported today: moves are by Codex home, Claude moves aren't supported yet, and a sign-in preference is used only
-   where a sign-in route and access exist.
+4. **Ask what you may do on your own:** move a machine's seats without asking; machines or seats to ask about first
+   or never move; sign-ins (may agents, and through which browser or profile, or always ask). Say what's supported
+   today: a Claude or Codex seat moves with `rig provider switch`, and a whole rig with `rig provider assign`; a Codex
+   seat moves in place only on Linux and macOS, with every seat on its Codex home; and a sign-in preference is used only where a
+   sign-in route and access exist.
 5. **Ask how to reach them** (their seat's queue, a chat channel, the Fleet app), for what, and what to do when they
    don't answer. A channel they name is a preference: check the route with `messaging-the-human`, and use a queue
    item to their seat if it isn't ready.

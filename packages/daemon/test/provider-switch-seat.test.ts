@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { authSwitch, resolveCodexHome } from "../src/domain/codex-auth.js";
-import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
+import { homeSwitchesOf, ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
 
 // `rig provider switch --seat`: one seat moves to a login saved in the Codex home it runs on (its own home with #1937,
 // or a shared one, whose peers are named). The seat's in-place restart keeps its conversation and launch settings;
@@ -19,7 +19,7 @@ function report(over: Record<string, unknown> = {}) {
   return { ok: true, planOnly: true, message: "planned", codexHome: HOME, peers: [], activity: { state: "idle", needsInput: null, detail: "" }, ...over };
 }
 
-function harness(opts: { plan?: Record<string, unknown>; run?: Record<string, unknown>; saved?: string[]; loggedIn?: boolean; saveFails?: string } = {}) {
+function harness(opts: { plan?: Record<string, unknown>; run?: Record<string, unknown>; saved?: string[]; loggedIn?: boolean; saveFails?: string; activateFails?: string } = {}) {
   const calls: string[] = [];
   const homes = new Map([[HOME, { active: opts.loggedIn === false ? null as string | null : "personal", saved: new Set(opts.saved ?? ["personal", "work"]) }]]);
   const codexLogins = {
@@ -37,6 +37,7 @@ function harness(opts: { plan?: Record<string, unknown>; run?: Record<string, un
       calls.push(`activate ${home} ${name}`);
       const h = homes.get(home);
       if (!h?.saved.has(name)) return { ok: false as const, reason: "missing_profile" };
+      if (opts.activateFails) return { ok: false as const, reason: opts.activateFails };
       h.active = name;
       return { ok: true as const };
     },
@@ -79,6 +80,22 @@ describe("rig provider switch --seat moves one seat to a login saved in the Code
     expect(r).toMatchObject({ outcome: "rebind_in_progress",
       seat: { peers: [{ ...PEER, step: 'rig seat restart dev-qa@rig --keep-conversation --reason "its Codex home moved to work"' }, OTHER] } });
     expect(r.seat!.peers[1]).not.toHaveProperty("step");
+  });
+
+  it("counts each switch that activated a login on the home, with the seat that made it; one stopped before activation isn't one", async () => {
+    const counted = () => homeSwitchesOf(HOME)?.count ?? 0;
+    const start = counted();
+    const h = harness();
+    await h.svc.switchAccount({ seat: "dev-a@rig", toAccount: "work", forceUnsafe: false }, h.seatRestart);
+    expect(homeSwitchesOf(HOME)).toEqual({ count: start + 1, seat: "dev-a@rig" });
+    const refused = harness({ saveFails: "io_error" });
+    await refused.svc.switchAccount({ seat: "dev-b@rig", toAccount: "work", forceUnsafe: false }, refused.seatRestart);
+    expect(homeSwitchesOf(HOME)).toEqual({ count: start + 1, seat: "dev-a@rig" });
+    // Saved first, but the login couldn't be activated: the home is as it was, so it isn't a switch either.
+    const notActivated = harness({ activateFails: "unsafe_path" });
+    expect(await notActivated.svc.switchAccount({ seat: "dev-c@rig", toAccount: "work", forceUnsafe: false }, notActivated.seatRestart))
+      .toMatchObject({ outcome: "failed_safely", reasons: ["login_not_activated"] });
+    expect(homeSwitchesOf(HOME)).toEqual({ count: start + 1, seat: "dev-a@rig" });
   });
 
   it("a home whose current login can't be saved first changes nothing: the switch stops before activation", async () => {
