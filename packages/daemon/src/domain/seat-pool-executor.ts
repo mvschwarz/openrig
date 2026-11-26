@@ -1154,9 +1154,13 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           }
           // A leftover settled `not_running` here drains its slot, which starts the cooldown the plan could not see: under
           // it, this cycle's drains wait (`drain: true` keeps its exemption), and so does its add, comebacks included.
-          const stepNow = lastDrainStep(deps.slots.forModel(modelNodeId));
-          const coolingNow = !spec.drain && stepNow !== null && stepNow !== read.lastStepAt
-            && deps.now().getTime() - Date.parse(stepNow) < spec.cooldownSeconds * 1000;
+          // Read again right before the add too: an add that settles `not_running` while the moves await is one more.
+          const coolingSince = () => {
+            const step = lastDrainStep(deps.slots.forModel(modelNodeId));
+            return !spec.drain && step !== null && step !== read.lastStepAt
+              && deps.now().getTime() - Date.parse(step) < spec.cooldownSeconds * 1000;
+          };
+          const coolingNow = coolingSince();
           // A drain an earlier cycle left unfinished. One whose unconfirmed stop may have had an effect (a kill was
           // attempted) is stopped again below, never captured again. Any other (its capture failed, it ended before the
           // capture, or its stop is known to have had no effect) goes back to `live`: nothing was stopped, and a later plan
@@ -1251,7 +1255,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             addNotes = { skipped: "pool_block_changed" };
             return;
           }
-          if (coolingNow) { addNotes = { skipped: "cooldown" }; return; }
+          if (coolingSince()) { addNotes = { skipped: "cooldown" }; return; }
           const comebackReady = comebackCall !== undefined;
           const comebackNotes: ComebackNote[] = [];
           /** The drained slots this cycle already looked at. */

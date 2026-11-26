@@ -188,8 +188,9 @@ function comebackWorld() {
     return realLaunch(...args);
   }) as RestoreOrchestrator["launchSingleNode"];
 
-  /** Runs between the comeback's selection and its call, with the snapshot it is about to send. */
-  const hooks: { beforeLaunch?: (snapshotId: string) => void } = {};
+  /** `beforeLaunch` runs between the comeback's selection and its call, with the snapshot it is about to send;
+   *  `afterMove`, once a row has moved, before the cycle's await on that move returns. */
+  const hooks: { beforeLaunch?: (snapshotId: string) => void; afterMove?: () => Promise<void> } = {};
   const select = vi.fn<SeatPoolComebackDeps["select"]>((rigId, nodeId, logicalId) => snapshotRepo.selectComebackSnapshot(rigId, nodeId, logicalId));
   const launch = vi.fn<SeatPoolComebackDeps["launch"]>(async (rigId, logicalId, opts) => {
     hooks.beforeLaunch?.(opts.snapshotId);
@@ -204,9 +205,17 @@ function comebackWorld() {
     panes.delete(latest.session_name);
     return { ok: true };
   });
+  const queueEffects = seatPoolQueueEffects(queue);
   const deps: SeatPoolExecutorDeps = {
     db, rigRepo, slots, jobsRepo,
-    queue: seatPoolQueueEffects(queue),
+    queue: {
+      ...queueEffects,
+      moveRow: (input) => hooks.afterMove === undefined ? queueEffects.moveRow(input) : (async () => {
+        const result = await queueEffects.moveRow(input);
+        await hooks.afterMove?.();
+        return result;
+      })(),
+    },
     heldCount: (id) => outbox.heldCount(id),
     confirmedStopped: (id) => nodeExecutorConfirmedStopped(db, id),
     seatState: (id) => activity.get(id) ?? null,
@@ -539,6 +548,69 @@ describe("seat-pool comeback: the drained agent comes back on its own node (#339
     const { settled } = await comeBack(w, m.jobId);
     expect(w.launch.mock.calls).toEqual([[m.rigId, "dev.impl-s1", { snapshotId: b }]]);
     expect(settled).toEqual([expect.objectContaining({ slotNumber: 1, nodeId: w1.nodeId, attempt: expect.objectContaining({ status: "running" }) })]);
+  });
+
+  it("An add in flight that settles `not_running` while the cycle awaits a row's move starts the cooldown before that cycle's add: the row still moves, an eligible `drained` slot does not come back in that cycle, and comes back once `cooldown_s` has passed since the settle.", async () => {
+    const w = comebackWorld();
+    const m = await w.model({ pool: { max: 3, min: 2 } });
+    const [s1, s2] = await w.serve(m, 2);
+    // only slot 1 drains: slot 2 is not idle at its prompt
+    w.activity.delete(s2!.nodeId);
+    w.rigRepo.setNodePool(m.nodeId, { spec: DRAINING });
+    const drained = await w.notesOf(m.jobId);
+    const drains = drained.drains as Array<{ slotNumber: number; outcome: string; snapshotId?: string }>;
+    expect(drains.map((d) => [d.slotNumber, d.outcome])).toEqual([[1, "drained"]]);
+    const b = drains[0]!.snapshotId!;
+
+    // slot 1 carries a reuse hold for now, so a row the busy slot 2 can't take makes the add take a new number, slot 3,
+    // whose call returns only when the test lets it
+    w.db.prepare("UPDATE seat_pool_slots SET reuse_hold = ? WHERE node_id = ?").run(JSON.stringify({ code: "no_qualifying_snapshot" }), s1!.nodeId);
+    const converge = w.converge.getMockImplementation()!;
+    let reached!: () => void;
+    const created = new Promise<void>((resolve) => { reached = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    w.converge.mockImplementationOnce(async (...args) => {
+      const result = await converge(...args);
+      reached();
+      await gate;
+      return result;
+    });
+    await w.wantOne(m);
+    const first = await w.notesOf(m.jobId);
+    expect((first.add as { issued: Array<{ logicalId: string }> }).issued.map((i) => i.logicalId)).toEqual(["dev.impl-s3"]);
+    await created;
+    const s3 = w.nodeOf(m.rigId, "dev.impl-s3")!;
+    expect(w.slots.forModel(m.nodeId).find((s) => s.slotNumber === 3)).toMatchObject({ nodeId: s3.id, phase: "adding", attemptState: "issued" });
+
+    // slot 1 is eligible again, drained outside its cooldown; slot 2 is free again, and two more rows make the plan move
+    // one row to slot 2 and want one more agent. While the cycle awaits that move, slot 3's session exits and its call
+    // returns: it settles `not_running`, which drains its slot.
+    w.db.prepare("UPDATE seat_pool_slots SET reuse_hold = NULL WHERE node_id = ?").run(s1!.nodeId);
+    w.activity.set(s2!.nodeId, idleState(s2!.nodeId));
+    await w.row(m.session);
+    await w.row(m.session);
+    w.hooks.afterMove = async () => {
+      w.hooks.afterMove = undefined;
+      w.sessions.updateStatus(w.sessionsOf(s3.id).at(-1)!.id, "exited");
+      release();
+      await w.executor.idle();
+    };
+    const during = await w.notesOf(m.jobId);
+    await w.executor.idle();
+    expect(w.hooks.afterMove).toBeUndefined();
+    expect(during.moved).toEqual([{ qitemId: expect.any(String), from: m.session, to: `dev-impl-s2@${RIG}` }]);
+    expect(w.launch).not.toHaveBeenCalled();
+    expect(during.add).toEqual({ skipped: "cooldown" });
+    expect(w.slots.forModel(m.nodeId).map((s) => [s.slotNumber, s.phase, s.reuseHold === null])).toEqual([
+      [1, "drained", true], [2, "live", true], [3, "drained", false],
+    ]);
+
+    // past `cooldown_s` since the settle (the drain left the model's pool on `DRAINING`), slot 1 comes back
+    w.clock.now = new Date(w.clock.now.getTime() + DRAINING.cooldownSeconds * 1000 + 1_000);
+    const { settled } = await comeBack(w, m.jobId);
+    expect(w.launch.mock.calls).toEqual([[m.rigId, "dev.impl-s1", { snapshotId: b }]]);
+    expect(settled).toEqual([expect.objectContaining({ slotNumber: 1, nodeId: s1!.nodeId, attempt: expect.objectContaining({ status: "running" }) })]);
   });
 });
 

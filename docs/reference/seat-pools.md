@@ -104,13 +104,18 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
     operation id with what it was issued on, which never runs the add again. With no node recorded, its slot row goes
     and it is reported `no_node`, `not launched (interrupted before create)`; with a node, it settles by the table
     above. What settles this way is reported with the evaluation's other settlements, and kept in the job's history;
-    an add it settles `not_running` is a drain step newer than the plan's read, so that evaluation drains no agent
-    and adds none, comebacks included (`add.skipped: cooldown`), except under `drain: true`; rows still move;
-  - while an add that settled `not_running` keeps its slot `drained` with its reuse hold, no new number is taken: when
-    no eligible `drained` slot is left to bring back, the notes report `add.held` (`held: failed add <id> (slot <n>)
-    settled not_running (<observed>)`), and `add.failedAdd` names that attempt, its slot and its reuse hold,
-    every evaluation outside a cooldown, with no limit on how many. Rows still move, and the other eligible `drained`
-    slots still come back, outside a cooldown. An ordinary `drained` slot, a comeback's reuse hold and an `unknown` add hold no new number.
+    an add it settles `not_running` drains its slot (see the cooldown below);
+  - a drain step newer than the plan's read, as an add that settles `not_running` here or while the moves await
+    starts, holds that evaluation inside the `cooldown_s` after it: its drains (read before the moves) and its add
+    (read again right before it), comebacks included (`add.skipped: cooldown`), wait, except under `drain: true`;
+    rows still move;
+  - while an add that settled `not_running` keeps its slot `drained` with its reuse hold, no new number is taken: an
+    evaluation whose add would take a new number (no eligible `drained` slot left to bring back) reports `add.held`
+    (`held: failed add <id> (slot <n>) settled not_running (<observed>)`), and `add.failedAdd` names that attempt, its
+    slot and its reuse hold, with no limit on how many; when no add runs (the pool is at its target or at `max`, or
+    inside a cooldown), the hold shows only in that slot's `reuseHold` under `slots`. Rows still move, and the other
+    eligible `drained` slots still come back, outside a cooldown. An ordinary `drained` slot, a comeback's reuse hold
+    and an `unknown` add hold no new number.
 - **Latency.** The job runs every 60 seconds, so a row that has waited `dispatch_after_s` is considered by the next
   evaluation, up to one more interval later, before it is moved and before an agent is added. That is not a dispatch
   deadline: a row moves only to an agent that is
