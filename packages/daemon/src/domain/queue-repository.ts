@@ -2076,7 +2076,11 @@ export class QueueRepository {
       return "indeterminate";
     }
     const released: OutboxEntry[] = [];
-    const recheckMembers: NonNullable<import("./session-transport.js").SendOpts["recheckMembers"]> = (holds, held) => {
+    // Splitting members by level is the recheck's job; a single member has no peer to split from and already
+    // carries its own source. A fence that appears while it waits for the seat is caught instead by the send's
+    // currentness check (performWakeSend passes notificationCurrent when there is no recheck) and released below,
+    // exactly as a split group releases a member that left this send.
+    const recheckMembers: NonNullable<import("./session-transport.js").SendOpts["recheckMembers"]> | undefined = group.length < 2 ? undefined : (holds, held) => {
       const current = (entry: OutboxEntry) => entry.auditPointer && !this.transferFence(entry.auditPointer) && this.currentWakeIntent(entry);
       // Without the lead, let surviving members retry under their own admission instead of borrowing the lead's.
       const keep = !current(intent) ? [] : group.filter((entry, i) => {
@@ -2101,6 +2105,16 @@ export class QueueRepository {
       qitemId, intent.destinationSession, intent.senderSession, undefined, recoveryNotice(group) + joinWakeBodies(group), group.map(entry => entry.outboxId),
       trigger, recheckMembers,
     );
+    // A lone member whose row was fenced while it waited for the seat: the transport wrote nothing (its
+    // notificationCurrent check refused), so the entry goes back exactly as it was for the transfer to settle.
+    // That is not a refusal to record — only a closed or transferred row ends a wake, never a park that moved.
+    if (group.length === 1 && outcome.preInputFailure === true && intent.auditPointer && this.transferFence(intent.auditPointer)) {
+      for (const entry of group) {
+        this.db.prepare("UPDATE outbox_entries SET delivery_state = ? WHERE outbox_id = ? AND delivery_state = 'sending'")
+          .run(entry.deliveryState, entry.outboxId);
+      }
+      return "skipped";
+    }
     // A bridged wake isn't confirmed, so the pass counts it as unconfirmed; its row is the bridge's to settle.
     let reportedState: "delivered" | "indeterminate" | "failed" | "retained" = outcome.classified === "verified" ? "delivered"
       : outcome.classified === "bridged" ? "indeterminate" : outcome.classified;
@@ -4958,6 +4972,18 @@ export class QueueRepository {
     if (this.wakeRepo.findCurrentQitemsByGeneratedTimer(jobId).some(({ qitemId }) => !this.transferFence(qitemId))) return null;
     if (this.wakeRepo.findLiveQitemsByAttachedWatchdog(jobId).some(({ qitemId }) => !this.transferFence(qitemId))) return null;
     return "park_timer_target_terminal";
+  }
+
+  /** Delivery-time companion to {@link resolveWatchdogPreDeliveryTerminalReason}: true only when every row this
+   *  generated timer was armed for has left its park for good — closed, or fenced by a transfer. A row that is
+   *  still open is live work even when its wait moved to a different timer, so a reminder already under way that
+   *  names it was not refused for the park's sake and must not be recorded as a failure. */
+  watchdogReminderSuperseded(jobId: string): boolean {
+    const targets = this.wakeRepo.findQitemsByGeneratedTimer(jobId);
+    if (targets.length === 0) return false;
+    // A live attachment keeps the reminder legitimate even when the timer's origin moved on (its text is rewritten).
+    if (this.wakeRepo.findLiveQitemsByAttachedWatchdog(jobId).some(({ qitemId }) => !this.transferFence(qitemId))) return false;
+    return targets.every(({ qitemId, state }) => !!this.transferFence(qitemId) || !isBlockerLive(state));
   }
 
   /** A shared timer can outlive its fenced origin, but its original message belongs to that row. */

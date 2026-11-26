@@ -109,6 +109,32 @@ describe("due parked-row reminders for one seat", () => {
     expect(disposition(stale.jobId, stale.qitemId)).toMatchObject({ state: "terminal", terminalReason: "park_timer_target_terminal", wakePhase: "armed" });
   });
 
+  it("a park that only moved to another timer is live work, not a superseded delivery", async () => {
+    const owner = seat();
+    // The row stays open but its wait moves to a new timer: the old job's broad terminal reason still ends the job,
+    // while the delivery-time check (what a send under way consults) must not call this a closed or transferred row.
+    const moved = await park(owner, "moved");
+    deps.queueRepo.update({ qitemId: moved.qitemId, actorSession: owner, state: "in-progress", transitionNote: "resumed" } as never);
+    deps.queueRepo.update({ qitemId: moved.qitemId, actorSession: owner, state: "blocked", blockedOn: "external:other",
+      transitionNote: "parked again", wakeAfterSeconds: 900 } as never);
+    const next = deps.queueRepo.getParkWakeStatus(moved.qitemId)!.ref;
+    expect(next).not.toBe(moved.jobId);
+    expect(deps.queueRepo.resolveWatchdogPreDeliveryTerminalReason(moved.jobId)).toBe("park_timer_target_terminal");
+    expect(deps.queueRepo.watchdogReminderSuperseded(moved.jobId)).toBe(false);
+
+    const gone = await park(owner, "closed");
+    deps.queueRepo.update({ qitemId: gone.qitemId, actorSession: owner, state: "done", closureReason: "no-follow-on" } as never);
+    expect(deps.queueRepo.watchdogReminderSuperseded(gone.jobId)).toBe(true);
+
+    const transferred = await park(owner, "transferred");
+    db.exec(`INSERT INTO queue_transfer_ledger (record_id, side, kind, transfer_id, archive_digest, origin_host_id,
+      origin_minted_at, destination_host_id, authorization_digest, mapping_digest, actor, recorded_at)
+      VALUES ('moved-rel', 'origin', 'relinquished', 'transfer', 'moved-digest', 'origin', 'minted', 'target', 'auth', 'map', 'operator', '1')`);
+    db.prepare(`INSERT INTO queue_transfer_relinquished (qitem_id, record_id, archive_digest, destination_host_id, source_state)
+      VALUES (?, 'moved-rel', 'moved-digest', 'target', 'blocked')`).run(transferred.qitemId);
+    expect(deps.queueRepo.watchdogReminderSuperseded(transferred.jobId)).toBe(true);
+  });
+
   it.each([false, true])("keeps a fenced generating row's timer only for live attachments (all fenced: %s)", async (allFenced) => {
     const owner = seat();
     const origin = await park(owner, "timer origin");

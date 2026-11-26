@@ -2687,7 +2687,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         createQueueRow: (row) => queueRepoInstance.create({ ...row, sourceSession: "watchdog@system", nudge: false, wakeTrigger: "openrig" })
           .then(({ qitemId, state }) => ({ qitemId, state })),
         resolveParkedRows: ({ jobId, targetSession }) => queueRepoInstance.parkedRowsOwnedBy(jobId, targetSession),
-        notificationCurrent: jobId => queueRepoInstance.resolveWatchdogPreDeliveryTerminalReason(jobId) === null,
+        notificationCurrent: jobId => !queueRepoInstance.watchdogReminderSuperseded(jobId),
         resolveSharedParkReminder: jobId => queueRepoInstance.resolveSharedParkReminder(jobId),
         noteParkedRows: ({ owner, notes }) => queueRepoInstance.noteParkedRows(owner, notes),
         noteQueuedRow: ({ jobId, destinationSession, note }) => queueRepoInstance.noteOpenWatchdogRow(jobId, destinationSession, note),
