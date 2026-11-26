@@ -38,5 +38,9 @@ const TEAM_CLAUDE_ASK = [
   "daemon start", "daemon stop", "bundle install", "seat launch", "seat stop", "seat handover", "seat restart",
   "import", "seat set-permissions", "seat decide-permission", "policy apply", "policy permissions apply", "setup", "compact",
 ].map(command => `Bash(rig ${command}:*)`);
+// The one seat that keeps a no-prompt path: the host's receiving agent (agents.operator_session) settles the
+// permission requests a person answered, so seat decide-permission doesn't ask there. claude-team-permissions.cjs
+// reads the setting through the seat's own rig, and only when a command names decide-permission.
+const RECEIVING_AGENT_NO_ASK = ["Bash(rig seat decide-permission:*)"];
 
-module.exports = { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK };
+module.exports = { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK, RECEIVING_AGENT_NO_ASK };

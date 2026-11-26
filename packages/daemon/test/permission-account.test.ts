@@ -42,6 +42,21 @@ describe("the planned permission account", () => {
     expect(account.controls[0]).toBe('rig seat set-permissions dev-builder@workshop --mode <mode> --reason "<why>"');
   });
 
+  it("leaves seat decide-permission out of the asks only on the host's receiving agent, and says why", () => {
+    const { db, rigRepo, rig, node } = seat("claude-code");
+    const other = rigRepo.addNode(rig.id, "dev.reviewer", { runtime: "claude-code", cwd: "/inert/project" });
+    new SessionRegistry(db).registerSession(node.id, "dev-builder@workshop");
+    new SessionRegistry(db).registerSession(other.id, "dev-reviewer@workshop");
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "dev-builder@workshop");
+    const receiver = planPermissionAccount(db, node.id, "dev-builder@workshop", "claude-code", env);
+    expect(receiver.openRigAdds.claudeAsk).toEqual(TEAM_CLAUDE_ASK.filter(rule => rule !== "Bash(rig seat decide-permission:*)"));
+    expect(receiver.openRigAdds.claudeAsk).toContain("Bash(rig seat set-permissions:*)");
+    expect(receiver.openRigAdds.notes.join(" ")).toContain("receiving agent (agents.operator_session), so rig seat decide-permission doesn't ask here");
+    const teammate = planPermissionAccount(db, other.id, "dev-reviewer@workshop", "claude-code", env);
+    expect(teammate.openRigAdds.claudeAsk).toEqual(TEAM_CLAUDE_ASK);
+    expect(teammate.openRigAdds.notes.join(" ")).not.toContain("receiving agent");
+  });
+
   it("names the kernel default and the kernel list for a kernel Claude seat", () => {
     const { db, node } = seat("claude-code", "kernel");
     const account = planPermissionAccount(db, node.id, "kernel-seat", "claude-code", env);
