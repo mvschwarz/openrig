@@ -747,6 +747,11 @@ const EXTERNAL_TOOLS: Readonly<Record<string, Readonly<Record<string, string>>>>
   question: { read: "rig_question_list", answer: "rig_question_answer" },
 };
 
+export function toolForGrantOperation(object: string, action: string): string | undefined {
+  const actions = Object.hasOwn(EXTERNAL_TOOLS, object) ? EXTERNAL_TOOLS[object] : undefined;
+  return actions && Object.hasOwn(actions, action) ? actions[action] : undefined;
+}
+
 /** The person a caller's grant names: an external grant's, or a token-file grant's own binding. */
 const personOf = (access: McpAccess | undefined): string | undefined =>
   access?.external ? access.external.person : access?.person;
@@ -759,7 +764,7 @@ function externalTools(external: NonNullable<McpAccess["external"]>): Set<string
   const tools = new Set<string>();
   for (const [object, actions] of Object.entries(external.objects)) {
     for (const action of Array.isArray(actions) ? actions : []) {
-      const tool = Object.hasOwn(EXTERNAL_TOOLS, object) && Object.hasOwn(EXTERNAL_TOOLS[object]!, action) ? EXTERNAL_TOOLS[object]![action] : undefined;
+      const tool = toolForGrantOperation(object, action);
       if (tool && (!personTool(tool) || external.person)) tools.add(tool);
     }
   }
