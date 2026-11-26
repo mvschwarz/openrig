@@ -180,12 +180,6 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
   {
     scope: "project",
     runtime: "claude-code",
-    path: ".openrig/context-collector.cjs",
-    purpose: "The context collector script the statusLine runs.",
-  },
-  {
-    scope: "project",
-    runtime: "claude-code",
     path: ".mcp.json",
     purpose: "Merge MCP fragments a team selects.",
   },

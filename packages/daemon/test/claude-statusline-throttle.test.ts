@@ -7,6 +7,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { managedClaudeNodeCommand } from "../src/domain/claude-activity-hooks.js";
+import { collectorCommandScriptPath } from "../src/domain/claude-owned-settings.js";
+import { contextCollectorPath } from "../src/domain/telemetry-state-paths.js";
 import {
   STATUSLINE_THROTTLE_MAX_SECONDS, storedStatuslineThrottle, throttledCollectorCommand, throttledStatusLineForLaunch,
   validateSpecStatuslineThrottle, validateStatuslineThrottle,
@@ -259,14 +261,15 @@ describe("the throttled status line in a launch (#3416 item 3)", () => {
 
   it("throttles OpenRig's own collector, keeping the folder's other status line fields", () => {
     const owned = managedClaudeNodeCommand(process.execPath, "/x/.openrig/context-collector.cjs", "/h/state/context-usage", "/h/state/provider-usage");
-    for (const settings of [undefined, {}, "", { statusLine: { type: "command", command: owned, padding: 2 } },
+    const instanceOwned = managedClaudeNodeCommand(process.execPath, "/h/state/claude-context-collector/context-collector.cjs", "/h/state/context-usage", "/h/state/provider-usage");
+    for (const settings of [undefined, {}, "", { statusLine: { type: "command", command: instanceOwned, padding: 2 } }, { statusLine: { type: "command", command: owned, padding: 2 } },
       { statusLine: { type: "command", command: owned.replace(/^exec /, ""), padding: 2 } }]) {
       const result = folder(settings);
       expect(result).toHaveProperty("statusLine");
       const statusLine = (result as { statusLine: Record<string, unknown> }).statusLine;
       expect(statusLine["type"]).toBe("command");
       expect(statusLine["command"]).toMatch(/^f=.*context-usage\/dev-impl@team'; p=\$\(cat\); /);
-      expect(statusLine["command"]).toMatch(/\[ "\$a" -lt 30 \]; then exit 0; fi;; esac; fi;; esac;; esac; fi; .* \| exec '[^']+' '[^']+\/seat\/\.openrig\/context-collector\.cjs'/);
+      expect(statusLine["command"]).toMatch(/\[ "\$a" -lt 30 \]; then exit 0; fi;; esac; fi;; esac;; esac; fi; .* \| exec '[^']+' '[^']+\/home\/state\/claude-context-collector\/context-collector\.cjs'/);
       if (typeof settings === "object" && settings && "statusLine" in settings) expect(statusLine["padding"]).toBe(2);
     }
   });
@@ -276,6 +279,35 @@ describe("the throttled status line in a launch (#3416 item 3)", () => {
       .toEqual({ note: expect.stringContaining("sets its own status line command, which wins") });
     expect(folder("{ not json")).toEqual({ note: expect.stringContaining("couldn't be read as settings") });
     expect(folder("[]")).toEqual({ note: expect.stringContaining("isn't a settings object") });
+  });
+
+  it.each(["owned legacy", "user wrapper"])("cleans up a legacy file only when the launch repoints its owned command: %s", (kind) => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "statusline-migration-")); roots.push(cwd);
+    const stateDir = path.join(cwd, "instance");
+    const legacyDir = path.join(cwd, ".openrig");
+    const legacy = path.join(legacyDir, "context-collector.cjs");
+    fs.mkdirSync(legacyDir);
+    fs.writeFileSync(legacy, "// older collector\n");
+    const command = kind === "owned legacy" ? managedClaudeNodeCommand("node", legacy, "/context", "/provider")
+      : `sh './my-wrapper.sh' '${legacy}'`;
+    const settingsPath = path.join(cwd, ".claude", "settings.local.json");
+    fs.mkdirSync(path.dirname(settingsPath));
+    const settings = JSON.stringify({ statusLine: { type: "command", command, padding: 2 } });
+    fs.writeFileSync(settingsPath, settings);
+
+    const result = throttledStatusLineForLaunch({ readFile: p => fs.readFileSync(p, "utf8"), exists: fs.existsSync,
+      cwd, stateDir, nodeExecutable: process.execPath, sessionName: "dev", seconds: 30 });
+
+    expect(fs.readFileSync(settingsPath, "utf8")).toBe(settings); // The throttle only writes launch settings.
+    if (kind === "owned legacy") {
+      expect(result).toHaveProperty("statusLine.padding", 2);
+      expect(collectorCommandScriptPath((result as { statusLine: { command: string } }).statusLine.command)).toBe(contextCollectorPath(stateDir));
+      expect(fs.existsSync(legacy)).toBe(false);
+      expect(fs.existsSync(legacyDir)).toBe(false);
+    } else {
+      expect(result).toHaveProperty("note");
+      expect(fs.readFileSync(legacy, "utf8")).toBe("// older collector\n");
+    }
   });
 
   it("puts the throttled status line into the launch's one --settings value, and leaves an unthrottled launch as it was", () => {

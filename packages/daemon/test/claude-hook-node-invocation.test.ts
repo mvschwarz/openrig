@@ -6,6 +6,7 @@ import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { afterEach, expect, it } from "vitest";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
+import { contextCollectorPath } from "../src/domain/telemetry-state-paths.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { parseManagedClaudeNodeCommand } from "../src/domain/claude-activity-hooks.js";
 import { RestoreCheckService, type NodeInventoryEntry } from "../src/domain/restore-check-service.js";
@@ -24,14 +25,14 @@ function fixture() {
   fs.mkdirSync(path.join(cwd, ".claude"), { recursive: true });
   const settings = path.join(cwd, ".claude/settings.local.json");
   const relayDest = path.join(state, "state/claude-activity-hooks/activity-relay.cjs");
-  const collectorDest = path.join(cwd, ".openrig/context-collector.cjs");
+  const collectorDest = contextCollectorPath(state);
   const adapter = (nodeExecutable = process.execPath) => new ClaudeCodeAdapter({
     tmux: {} as ConstructorParameters<typeof ClaudeCodeAdapter>[0]["tmux"], stateDir: state, nodeExecutable,
     activityRelayPath: relay, collectorAssetPath: collector,
     claudeHooksManifestPath: path.resolve(path.dirname(relay), "../claude.json"),
     fsOps: {
       readFile: p => fs.readFileSync(p, "utf8"), writeFile: (p, value) => fs.writeFileSync(p, value),
-      exists: fs.existsSync, mkdirp: p => { fs.mkdirSync(p, { recursive: true }); }, copyFile: fs.copyFileSync,
+      exists: fs.existsSync, mkdirp: p => { fs.mkdirSync(p, { recursive: true }); }, copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest),
     },
   });
   const project = async (a: ClaudeCodeAdapter) => {

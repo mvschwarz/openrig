@@ -7,6 +7,7 @@ import * as nodePath from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { replaceFile } from "../src/adapters/replace-file.js";
+import { contextCollectorPath } from "../src/domain/telemetry-state-paths.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -31,7 +32,7 @@ function seat() {
   };
   const adapter = new ClaudeCodeAdapter({ tmux: {} as TmuxAdapter, fsOps, stateDir: state, collectorAssetPath: asset });
   const settings = nodePath.join(cwd, ".claude", "settings.local.json");
-  const command = `exec ${shellQuote(process.execPath)} ${shellQuote(nodePath.join(cwd, ".openrig", "context-collector.cjs"))} `
+  const command = `exec ${shellQuote(process.execPath)} ${shellQuote(contextCollectorPath(state))} `
     + `${shellQuote(nodePath.join(state, "state", "context-usage"))} ${shellQuote(nodePath.join(state, "state", "provider-usage"))}`;
   const poll = () => adapter.ensureContextCollector({ cwd, tmuxSession: "seat@rig" });
   return { cwd, settings, command, writes, poll };

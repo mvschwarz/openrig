@@ -11,6 +11,7 @@ import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { contextCollectorPath } from "../src/domain/telemetry-state-paths.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import { claudeCommandSessionToken, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
@@ -80,7 +81,7 @@ describe("the status line throttle at launch (#3416 item 3)", () => {
     expect(statusLine.type).toBe("command");
     expect(statusLine.command).toContain(`f=${shellQuote(path.join(f.state, "state", "context-usage", "seat"))};`);
     expect(statusLine.command).toContain('[ "$a" -lt 30 ]');
-    expect(statusLine.command).toContain(shellQuote(path.join(f.cwd, ".openrig", "context-collector.cjs")));
+    expect(statusLine.command).toContain(shellQuote(contextCollectorPath(f.state)));
     expect(f.statuslineThrottleLaunch).toHaveBeenCalledWith("node");
     expect(claudeCommandSessionToken(`claude ${f.args().join(" ")}`)).toBe(mode === "fresh" ? "fresh-id" : "history-id");
   });

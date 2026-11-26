@@ -26,6 +26,7 @@ import { promisify } from "node:util";
 import { managedBlockText, mergeManagedBlock } from "../src/domain/managed-blocks.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { contextCollectorPath } from "../src/domain/telemetry-state-paths.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { replaceFile } from "../src/adapters/replace-file.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
@@ -1143,7 +1144,7 @@ describe("RigTeardownOrchestrator", () => {
   describe("OpenRig's Claude collector, status line and activity hooks in a seat's cwd", () => {
     const COLLECTOR = "// shipped collector\n";
 
-    /** A Claude seat's cwd after a real collector install, with the person's own settings text if given. */
+    /** A migrated Claude seat, with an old cwd collector left over and the person's own settings text if given. */
     function claudeCwd(ownSettings?: string) {
       const cwd = fs.mkdtempSync(path.join(tmpDir, "claude-cwd-"));
       const state = path.join(tmpDir, "openrig-home");
@@ -1162,7 +1163,10 @@ describe("RigTeardownOrchestrator", () => {
       new ClaudeCodeAdapter({ tmux: {} as TmuxAdapter, fsOps, stateDir: state, collectorAssetPath: asset })
         .ensureContextCollector({ cwd, tmuxSession: "dev@claude-rig" });
       const relay = `${shellQuote(process.execPath)} ${shellQuote(claudeActivityRelayPath(state))}`;
-      return { cwd, asset, settings, collector: path.join(cwd, ".openrig", "context-collector.cjs"), relay };
+      const collector = path.join(cwd, ".openrig", "context-collector.cjs");
+      fs.mkdirSync(path.dirname(collector), { recursive: true });
+      fs.copyFileSync(asset, collector); // Left behind by the legacy cwd provisioner.
+      return { cwd, asset, settings, collector, instanceCollector: contextCollectorPath(state), relay };
     }
 
     /** Add hook groups the way the adapter writes them. */
@@ -1196,6 +1200,7 @@ describe("RigTeardownOrchestrator", () => {
 
       expect(fs.readFileSync(s.settings, "utf-8")).toBe(own);
       expect(fs.existsSync(s.collector)).toBe(false);
+      expect(fs.readFileSync(s.instanceCollector, "utf-8")).toBe(COLLECTOR);
       expect(fs.existsSync(path.join(s.cwd, ".openrig"))).toBe(false);
       expect(result.keptFiles).toBeUndefined();
       expect(result.errors).toEqual([]);
@@ -1215,7 +1220,7 @@ describe("RigTeardownOrchestrator", () => {
 
       const old = claudeCwd(own);
       const current = JSON.parse(fs.readFileSync(old.settings, "utf-8")) as Record<string, any>;
-      current["statusLine"]["command"] = current["statusLine"]["command"].replace(/^exec /, "");
+      current["statusLine"]["command"] = current["statusLine"]["command"].replace(/^exec /, "").replace(old.instanceCollector, old.collector);
       fs.writeFileSync(old.settings, JSON.stringify(current, null, 2));
 
       await teardownWith(old.asset).teardown(claudeRig("claude-rig-old", old.cwd));

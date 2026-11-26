@@ -2,6 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { serve } from "@hono/node-server";
 import { communityHarnessesDir } from "../src/domain/community-harness-presets.js";
 import type { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
+import { contextCollectorPath } from "../src/domain/telemetry-state-paths.js";
 import { resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
@@ -403,16 +404,17 @@ console.log(JSON.stringify({home:process.env.CLAUDE_CONFIG_DIR??null}));
     };
     const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec: async () => "" });
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "startup-collector-wiring-"));
+    fs.rmSync(contextCollectorPath(OPENRIG_HOME), { force: true });
     const copy = vi.spyOn(fs, "copyFileSync");
     const rename = vi.spyOn(fs, "renameSync");
     try {
       const adapter = deps.runtimeAdapters!["claude-code"] as ClaudeCodeAdapter;
       adapter.ensureContextCollector({ cwd });
       adapter.ensureContextCollector({ cwd });
-      const dest = path.join(cwd, ".openrig/context-collector.cjs");
-      expect(rename).toHaveBeenCalledTimes(2);
+      const dest = contextCollectorPath(OPENRIG_HOME);
+      expect(rename).toHaveBeenCalledTimes(1);
       expect(rename).toHaveBeenCalledWith(expect.any(String), dest);
-      expect(copy).toHaveBeenCalledTimes(2);
+      expect(copy).toHaveBeenCalledTimes(1);
       expect(copy.mock.calls.every(call => call[1] !== dest && call[2] === fs.constants.COPYFILE_EXCL)).toBe(true);
       expect(fs.readFileSync(dest, "utf8")).toBe(fs.readFileSync(copy.mock.calls[0]![0], "utf8"));
     } finally {

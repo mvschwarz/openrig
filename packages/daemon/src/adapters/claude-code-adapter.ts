@@ -1,4 +1,4 @@
-import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode } from "../domain/claude-continuation-launch.js";
+import { continuationChoiceNotes, resumedClaudeArguments, rewriteLegacyCollectorSettings, sentClaudeAutoMode } from "../domain/claude-continuation-launch.js";
 import { compactionPacketLaunchEnv, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { transportClaudeSettings } from "./claude-settings-transport.js";
@@ -27,7 +27,7 @@ import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/m
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix, commandEnvPrefix } from "./claude-resume-launch.js";
 import { shellQuote, shellWord } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, managedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
-import { isOwnedCollectorCommand, removeOwnedClaudeSettings, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
+import { isOwnedCollectorCommand, removeOwnedClaudeSettings, removeRepointedLegacyCollector, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
 import { type ClaudeJsonFragmentType } from "../domain/types.js";
 import { throttledStatusLineForLaunch } from "../domain/claude-statusline-throttle.js";
 import { insideMissingFolder, isFilesystemRoot } from "../domain/cwd-resolution.js";
@@ -36,7 +36,7 @@ import { observeClaudePermission } from "../domain/permission-drift.js";
 import { claudeAutoModeForLaunch } from "../domain/claude-auto-mode.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
-import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
+import { contextCollectorPath, contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
 import { seatLaunchAdditionArgs, seatLaunchAdditionShellArgs } from "../domain/seat-launch-additions.js";
 import { recordUnchangedSeatSkillFollowing, recordSeatSkillFollowing, recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
 
@@ -47,7 +47,9 @@ export interface ClaudeAdapterFsOps {
   replaceFragment?(path: string, content: string, previous: string | null, cwd: string): void;
   exists(path: string): boolean;
   mkdirp(path: string): void;
-  copyFile(src: string, dest: string): void;
+  /** Atomic when options.atomicOnly is set (see replaceFile): a staging failure throws instead of truncating the
+   *  shared destination in place. Callers that pass it must tolerate the throw — the next poll retries. */
+  copyFile(src: string, dest: string, options?: { atomicOnly?: boolean }): void;
   listFiles?(dirPath: string): string[];
   /** Source file permission bits (for mode-preserving projection). Optional: mode preservation is a no-op if absent. */
   statMode?(path: string): number;
@@ -601,6 +603,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     let launchArgs = permissionArgs(opts.resumeToken ?? generatedSessionId!);
     let nativeArgs = resumedClaudeArguments(opts.resumeToken ? binding.claudeLaunch : undefined, ["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
       ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture, autoMode.block ?? null, settingsSeat);
+    if (opts.resumeToken && binding.claudeLaunch?.args && this.stateDir && binding.cwd) {
+      // A seat launched before the collector moved still carries the cwd script in its captured launch settings;
+      // rewrite it to the instance copy so a native resume stops running the legacy file (#3893 review).
+      nativeArgs = rewriteLegacyCollectorSettings(nativeArgs, { cwd: binding.cwd, stateDir: this.stateDir }, settingsSeat);
+    }
     const sentNative = !!managed || !!(opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable);
     // The packet variable follows the grant this launch sends: a continuation sends the running Claude's arguments.
     const packetEnv = compactionPacketLaunchEnv(sentNative ? nativeArgs : launchArgs,
@@ -1461,7 +1468,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   /**
    * Best-effort: provision the OpenRig context collector for managed Claude sessions.
-   * Writes a collector script and merges status line config into .claude/settings.local.json.
+   * Keeps the collector script in instance state and merges status line config into .claude/settings.local.json.
    * Idempotent: safe to call multiple times (merge preserves existing settings). A user's own
    * status line command (anything but the exact command written below), or a file that does not
    * parse, is left as it is. The collector then never runs for that seat. While a valid sidecar
@@ -1496,10 +1503,23 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.fs.mkdirp(contextDir);
     this.fs.mkdirp(providerUsageDir);
 
-    // 1. Copy collector script to project
-    const collectorDest = nodePath.join(binding.cwd, ".openrig", "context-collector.cjs");
-    this.fs.mkdirp(nodePath.dirname(collectorDest));
-    this.fs.copyFile(this.collectorAssetPath, collectorDest);
+    // 1. Keep one collector copy in instance state, without rewriting identical bytes on every poll.
+    // A bad instance copy must not fail the poll: an unreadable copy is replaced, and a copy that cannot be
+    // staged is left as it is and retried on the next poll (atomicOnly, so a staging failure never truncates
+    // the shared copy in place while a seat reads it). A shipped asset that cannot be read provisions nothing.
+    const collectorDest = contextCollectorPath(this.stateDir);
+    let shipped: string | null = null;
+    try { shipped = this.fs.readFile(this.collectorAssetPath); } catch { shipped = null; }
+    if (shipped !== null) {
+      let current: string | null = null;
+      try { current = this.fs.exists(collectorDest) ? this.fs.readFile(collectorDest) : null; } catch { current = null; }
+      if (current !== shipped) {
+        try {
+          this.fs.mkdirp(nodePath.dirname(collectorDest));
+          this.fs.copyFile(this.collectorAssetPath, collectorDest, { atomicOnly: true });
+        } catch { /* the existing copy keeps serving; the next poll retries */ }
+      }
+    } else return;
 
     // 2. Merge status line config into .claude/settings.local.json
     const settingsPath = nodePath.join(binding.cwd, ".claude", "settings.local.json");
@@ -1534,6 +1554,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     existing["statusLine"] = { ...statusLine, type: "command", command: collectorCmd };
 
     this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
+    removeRepointedLegacyCollector(binding.cwd, current);
   }
 
   /**
