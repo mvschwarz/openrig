@@ -68,7 +68,7 @@ const CALL_TAG = "permission-call:";
 const ACTOR_TAG = "permission-actor:";
 /** Until when the harness's hook takes an answer here; after it (and a grace), an open native ask is over. */
 const ANSWER_BY_TAG = "permission-answer-by:";
-/** Which owner source a native ask went to: chosen-person, return-route or default-person. */
+/** Which owner source a native ask went to: chosen-person or return-route (an ask made before 0.7.25 can say default-person). */
 const ASKED_TAG = "permission-asked:";
 /** Each option a native ask offers. An ask to a conversation can't carry questions (only a person's ask does), so its
  *  options travel as these. */
@@ -577,9 +577,10 @@ export class RunnerPermissions {
   }
 
   /** Who answers a native prompt: the person chosen for the seat (`rig seat set-permissions-to`), else the return route of
-   *  the work the seat is running (the person's own conversation; `seatReturnRoute`), else the default person. Nobody, and
-   *  nothing is asked. */
-  private nativeOwner(seat: RunnerPermissionSeat): { ok: true; address: string; source: "chosen-person" | "return-route" | "default-person"; why: string }
+   *  the work the seat is running (the person's own conversation; `seatReturnRoute`). With neither, nothing is asked: the
+   *  default person isn't asked by implication, since an open ask would hold back the seat's usual prompt escalation (its
+   *  prompt alert and routed relay). A runner's request still goes to the default person (`resolve`). */
+  private nativeOwner(seat: RunnerPermissionSeat): { ok: true; address: string; source: "chosen-person" | "return-route"; why: string }
     | { ok: false; why: string } {
     const selected = this.deps.ownerOf(seat.nodeId);
     if (selected === PERMISSIONS_DENY) {
@@ -597,10 +598,9 @@ export class RunnerPermissions {
       why: route.routes > 1 && !route.inProgress
         ? `your conversation handed ${seat.sessionName} its newest open work (${route.row}), and this address is that work's return route; it holds open work from ${route.routes} conversations, and none is in progress`
         : `your conversation handed ${seat.sessionName} the work it's running (${route.row}), and this address is that work's return route${route.routes > 1 ? `; it holds open work from ${route.routes} conversations, and this one's is in progress` : ""}` };
-    const fallback = defaultPermissionOwner(this.deps.humanRegistry);
-    if (fallback.ok) return { ok: true, address: fallback.address, source: "default-person",
-      why: "you are the default person, and no one else is chosen for this seat or reached by its work's return route" };
-    return { ok: false, why: `No one can be asked${chosenProblem ? ` (the person chosen for this seat: ${chosenProblem})` : ""}: the seat's work carries no return route on this host, and ${fallback.message}` };
+    return { ok: false, why: chosenProblem
+      ? `no one can be asked (the person chosen for this seat: ${chosenProblem}), and the seat's work carries no return route on this host; the prompt goes through the seat's usual escalation instead`
+      : "no one is chosen for this seat (rig seat set-permissions-to) and its work carries no return route on this host, so no one is asked by implication; the prompt goes through the seat's usual escalation instead" };
   }
 
   /** The return route of the open work addressed to the seat (pending, in progress or blocked), with the row that carries

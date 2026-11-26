@@ -1211,7 +1211,8 @@ asked, OpenRig's default is to permit the request.
 
 On a Claude Code seat that loads openrig-core, this also chooses who is asked the
 seat's own permission prompt: the chosen person, else the return route of the work
-it's running, else the default person. There, a prompt no one can be asked isn't
+it's running. With neither, no one is asked, not even the default person, so the
+seat's usual prompt alert isn't held back. There, a prompt no one is asked isn't
 permitted, and --deny stops the question: the prompt stays in the seat's terminal,
 and nothing is refused.
 

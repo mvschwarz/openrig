@@ -68,7 +68,9 @@ function fixture(options: { owner?: string | null; people?: string[]; decider?: 
     resolveOccupantGeneration: (id) => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
     isRegisteredOccupantGeneration: (id, generation) => sessions.isOccupantGenerationRegistered(id, generation) });
   const stream = new StreamStore(db, bus);
-  const owner = options.owner === undefined ? null : options.owner;
+  // A person is chosen for the seat unless a case says otherwise (`owner: null`): a native prompt asks the chosen person or
+  // the work's return route, never the default person by implication.
+  const owner = options.owner === undefined ? PERSON : options.owner;
   if (owner) db.prepare("UPDATE nodes SET permissions_to = ? WHERE id = ?").run(owner, node.id);
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -225,7 +227,8 @@ describe("words and conditions go to the receiving agent, which judges the exact
 describe("no one to ask: nothing is decided, and the native prompt carries on", () => {
   it.each([
     ["no person is registered", { people: [] as string[] }],
-    ["several people are registered and none is the default", { people: ["mike", "dana"] }],
+    ["several people are registered and none is the default", { owner: null, people: ["mike", "dana"] }],
+    ["the default person is registered, but no one is chosen for the seat and its work has no return route", { owner: null, people: ["mike"] }],
     ["the seat's chosen person is no longer registered", { owner: "gone@external", people: [] as string[] }],
   ])("asks no one and permits nothing when %s", async (_case, options) => {
     const f = fixture(options);
@@ -234,6 +237,21 @@ describe("no one to ask: nothing is decided, and the native prompt carries on", 
     expect(String(submitted.body.reason)).toMatch(/Nothing was decided: Claude Code's own prompt stays open in the seat's terminal\.$/);
     expect(f.asks()).toHaveLength(0);
     expect(f.permits()).toHaveLength(0);
+  });
+
+  it("doesn't ask the default person by implication, so the seat's prompt escalation isn't held back", async () => {
+    const f = fixture({ owner: null, people: ["mike"] });
+    const submitted = await f.submit();
+    expect(submitted).toMatchObject({ status: 200, body: { ok: true, state: "not_asked" } });
+    expect(String(submitted.body.reason)).toContain("no one is chosen for this seat (rig seat set-permissions-to) and its work carries no return route on this host, so no one is asked by implication");
+    expect(f.asks()).toHaveLength(0);
+    expect(f.rowsTo(PERSON)).toBe(0);
+    // No open native ask, so the wake ladder's prompt alert and routed relay aren't held.
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+    // A runner's own request still goes to the default person, as before.
+    const runner = await f.submitRunner();
+    expect(runner).toMatchObject({ status: 200 });
+    expect(f.queueRepo.getById(askIdOf(runner))).toMatchObject({ destinationSession: PERSON });
   });
 
   it("refuses nothing on a seat whose operator opted in to refusing runner requests: the native prompt stays", async () => {
@@ -294,12 +312,12 @@ describe("the person's own conversation, through the return route of the work th
       + "it holds open work from 2 conversations, and this one's is in progress");
   });
 
-  it("takes the work in progress over newer work it hasn't started, else the newest open work, ahead of the default person", async () => {
-    const started = fixture();
+  it("takes the work in progress over newer work it hasn't started, else the newest open work", async () => {
+    const started = fixture({ owner: null });
     await started.routedWork(ROUTE);
     await started.routedWork(OTHER_ROUTE, "pending");
     expect((await started.submit()).body).toMatchObject({ askedOf: ROUTE });
-    const waiting = fixture();
+    const waiting = fixture({ owner: null });
     await waiting.routedWork(ROUTE, "pending");
     const newest = await waiting.routedWork(OTHER_ROUTE, "pending");
     const submitted = await waiting.submit();
@@ -308,11 +326,12 @@ describe("the person's own conversation, through the return route of the work th
       + "and this address is that work's return route; it holds open work from 2 conversations, and none is in progress");
   });
 
-  it("asks the default person when the work the seat is running names a conversation on another host, and a chosen person comes first", async () => {
-    const remote = fixture();
+  it("asks no one when the work the seat is running names a conversation on another host and no one is chosen, and a chosen person comes first", async () => {
+    const remote = fixture({ owner: null });
     await remote.routedWork(ROUTE, "pending");
     await remote.routedWork("conversation-0123456789ab@kernel@host-b");
-    expect((await remote.submit()).body).toMatchObject({ askedOf: PERSON });
+    expect((await remote.submit()).body).toMatchObject({ state: "not_asked" });
+    expect(remote.asks()).toHaveLength(0);
     const chosen = fixture({ owner: OTHER_PERSON, people: ["mike", "dana"] });
     await chosen.routedWork(ROUTE);
     await chosen.routedWork(OTHER_ROUTE);
@@ -347,7 +366,7 @@ describe("who decided what: the person's own answer, a relay and an agent's judg
     ["a caller whose header names the registered person", PERSON, "allow"],
     ["the seat whose prompt it is (a deny: no seat approves its own call here)", SEAT, "deny"],
   ])("reads a relay from %s as relayed and unconfirmed, never the person's own answer", async (_case, caller, optionId) => {
-    const f = fixture({ people: ["mike"] });
+    const f = fixture({ owner: null, people: ["mike"] });
     await f.routedWork();
     const askId = askIdOf(await f.submit());
     const by = caller ?? "someone outside a seat";
