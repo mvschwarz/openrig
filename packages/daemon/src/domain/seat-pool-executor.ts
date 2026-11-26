@@ -1153,7 +1153,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             if (entry) reportSettled(modelNodeId, entry);
           }
           // A leftover settled `not_running` here drains its slot, which starts the cooldown the plan could not see: under
-          // it, this cycle's drains wait (`drain: true` keeps its exemption).
+          // it, this cycle's drains wait (`drain: true` keeps its exemption), and so does its add, comebacks included.
           const stepNow = lastDrainStep(deps.slots.forModel(modelNodeId));
           const coolingNow = !spec.drain && stepNow !== null && stepNow !== read.lastStepAt
             && deps.now().getTime() - Date.parse(stepNow) < spec.cooldownSeconds * 1000;
@@ -1251,6 +1251,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             addNotes = { skipped: "pool_block_changed" };
             return;
           }
+          if (coolingNow) { addNotes = { skipped: "cooldown" }; return; }
           const comebackReady = comebackCall !== undefined;
           const comebackNotes: ComebackNote[] = [];
           /** The drained slots this cycle already looked at. */

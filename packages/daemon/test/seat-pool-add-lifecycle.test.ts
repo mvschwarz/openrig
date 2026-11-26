@@ -728,6 +728,37 @@ describe("seat-pool add: while max drops and across a restart (#3395 Piece 1)", 
     expect(w.stopSeat).toHaveBeenCalledTimes(1);
   });
 
+  it("An add a cycle settles `not_running` from its row starts the cooldown before that cycle's add too: an eligible `drained` slot does not come back in it, and the add is skipped until `cooldown_s` has passed.", async () => {
+    const w = lifecycleWorld();
+    const m = await w.model({ max: 2, min: 2, idle_grace_s: 300, cooldown_s: 60 });
+    // the second agent's call returns with its startup not ready: its result is unknown
+    let calls = 0;
+    w.hooks.afterAdd = () => {
+      if (++calls === 2) w.db.prepare("UPDATE sessions SET startup_status = 'pending' WHERE node_id = ?").run(w.nodeOf(m.rigId, "dev.impl-s2")!.id);
+    };
+    const id2 = issuedOf(await w.notesOf(m.jobId))[1]!.attempt.id;
+    await w.executor().idle();
+    await w.notesOf(m.jobId);
+    const s1 = w.nodeOf(m.rigId, "dev.impl-s1")!, s2 = w.nodeOf(m.rigId, "dev.impl-s2")!;
+    // slot 1 was drained an hour ago, with no reuse hold: eligible to come back, outside its cooldown
+    w.sessions.updateStatus(w.latestOf(s1.id).id, "exited");
+    w.db.prepare("UPDATE seat_pool_slots SET phase = 'drained', phase_changed_at = ? WHERE node_id = ?")
+      .run(new Date(w.clock.now.getTime() - 3_600_000).toISOString(), s1.id);
+    // the unknown add's session then exits: the plan still counts it starting and adds one, and the same cycle settles
+    // it `not_running`, which drains its slot
+    w.sessions.updateStatus(w.latestOf(s2.id).id, "exited");
+    const notes = await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(notes.settled).toEqual([{ slotNumber: 2, logicalId: "dev.impl-s2", nodeId: s2.id, attempt: { id: id2, status: "not_running", observed: "exited" } }]);
+    expect(notes.add).toEqual({ skipped: "cooldown" });
+    expect(w.slots.forModel(m.nodeId).map((s) => [s.slotNumber, s.phase])).toEqual([[1, "drained"], [2, "drained"]]);
+
+    // past the cooldown, the add runs again and reaches slot 1
+    w.clock.now = new Date(w.clock.now.getTime() + 61_000);
+    const later = await w.notesOf(m.jobId);
+    expect(later.add).toEqual({ comebacks: [{ slotNumber: 1, logicalId: "dev.impl-s1", nodeId: s1.id, code: "comeback_not_composed" }] });
+  });
+
   it("After `pool: {}`, the evaluation that ends the job reports what it settled: a reservation a restart left is in the terminal notes, with its attempt id.", async () => {
     const w = lifecycleWorld();
     const m = await w.model({ max: 1, min: 1 });
