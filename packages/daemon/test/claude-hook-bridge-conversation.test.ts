@@ -775,3 +775,22 @@ describe("a large backlog and a long-lived conversation", () => {
     }
   });
 });
+
+
+describe("the installed rig's JSON read over a long conversation", () => {
+  it.skipIf(process.platform === "win32")("reads an ordinary handover history larger than spawnSync's default stdout buffer", async () => {
+    const goals = Array.from({ length: 4000 }, (_, n) => goal(KEY, {
+      qitemId: `qitem-history-${n}`, summary: `Goal ${n} `.padEnd(300, "x")
+    }));
+    const fixture = join(data, "rig-data.json");
+    writeFileSync(fixture, JSON.stringify({ goals, pending: [question()], transitions: created("dev-build@starter", "transport:v1") }));
+    expect(Buffer.byteLength(JSON.stringify(goals))).toBeGreaterThan(1024 * 1024);
+    const rig = join(data, "rig");
+    writeFileSync(rig, `#!${process.execPath}\nconst rows = require(${JSON.stringify(fixture)});\nconst args = process.argv.slice(2);\nconst limit = Number(args[args.indexOf('--limit') + 1]);\nconst value = args[1] === 'transitions' ? rows.transitions : args[2] === '--tag' ? rows.goals.slice(0, limit) : rows.pending.slice(0, limit);\nprocess.stdout.write(JSON.stringify(value));\n`, { mode: 0o755 });
+    const s = sink();
+    expect(await bridge.conversationWaiter({ input, out: s.out, deps: {
+      env: { ...env(), OPENRIG_RIG_BIN: rig }, alive: () => true, key: KEY, ...clock(), waiterMs: 1
+    } })).toBe(2);
+    expect(s.text()).toContain("qitem-q1:");
+  });
+});

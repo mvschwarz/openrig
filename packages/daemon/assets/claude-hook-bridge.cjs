@@ -353,7 +353,9 @@ function findRig({ env = process.env, projectDir = first(env.CLAUDE_PROJECT_DIR)
 /** That `rig`, with --json: what it printed, parsed, or null when it couldn't be read (no daemon, say). */
 function runRig(args, { env = process.env, bin = "rig", spawnSync = require("node:child_process").spawnSync } = {}) {
   try {
-    const result = spawnSync(bin, args, { env, encoding: "utf8", timeout: 30000, stdio: ["ignore", "pipe", "ignore"] });
+    // A long conversation's complete listing can exceed spawnSync's default 1 MiB stdout cap. The read already
+    // asks for all matching rows; don't turn a valid history into an unreadable result before batching its tasks.
+    const result = spawnSync(bin, args, { env, encoding: "utf8", timeout: 30000, maxBuffer: Infinity, stdio: ["ignore", "pipe", "ignore"] });
     if (result.error || result.status !== 0) return null;
     return JSON.parse(result.stdout || "null");
   } catch { return null; }
