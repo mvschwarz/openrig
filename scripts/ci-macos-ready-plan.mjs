@@ -57,8 +57,14 @@ export async function reconcileMacosPackageTests(eventName, event, runId, api, l
   if (!plan.eligible) return plan; // Comments, non-counting approvals and manual runs make no cancellation calls.
   const number = event.pull_request.number;
   const current = await api(`/actions/runs/${runId}`);
+  // Fork runs may omit pull_requests. The current event binds its own run; peers also need the workflow's immutable
+  // PR-number title: one fork branch can open PRs against different bases. Unmarked legacy peers stay unknown.
+  const forkRepo = event.pull_request.head?.repo?.full_name;
+  const fromFork = !!forkRepo && !!event.repository?.full_name && forkRepo !== event.repository.full_name;
   const isThisPR = run => run.workflow_id === current.workflow_id && run.event === "pull_request_review"
-    && run.pull_requests?.some(pr => pr.number === number);
+    && (run.pull_requests?.some(pr => pr.number === number) || (fromFork && !run.pull_requests?.length
+      && run.head_repository?.full_name === forkRepo && run.head_branch === event.pull_request.head.ref
+      && (run.id === current.id || run.display_title === `macOS package tests PR #${number}`)));
   if (!isThisPR(current) || current.head_sha !== plan.head) throw new Error("Run identity does not match the approved PR head");
   const live = () => api(`/pulls/${number}`);
   const isCurrent = pr => pr.state === "open" && pr.head?.sha === plan.head;

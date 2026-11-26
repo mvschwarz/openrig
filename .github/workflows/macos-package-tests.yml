@@ -1,4 +1,7 @@
 name: macOS package tests
+# The PR number also identifies fork runs whose REST metadata omits pull_requests.
+run-name: >-
+  ${{ github.event_name == 'pull_request_review' && format('macOS package tests PR #{0}', github.event.pull_request.number) || format('macOS manual run {0}', github.run_id) }}
 
 # Runs the macOS package suites (daemon, cli) for a head a maintainer approved, not for every push. Both are
 # required checks, so a pull request's head merges only after an approval of that exact head starts this workflow

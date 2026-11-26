@@ -98,6 +98,7 @@ test("eligible approvals queue by PR and head without replacing pending coverage
     "format('pr-{0}-{1}', github.event.pull_request.number, github.event.review.commit_id)", "format('run-{0}', github.run_id)"])
     assert.ok(group.includes(guard), guard);
   assert.ok(group.startsWith("macos-package-tests-"));
+  assert.ok(doc["run-name"].includes("format('macOS package tests PR #{0}', github.event.pull_request.number)"));
   for (const job of Object.values(doc.jobs)) assert.equal(job.concurrency, undefined);
 });
 
@@ -287,6 +288,23 @@ test("unknown GitHub identity fails planning without a successful required place
   await assert.rejects(f.plan(), /identity/); assert.deepEqual(f.posts(), []);
 });
 
+test("a fork's approval runs both suites; its peer runs also carry a PR-number title", async () => {
+  // GitHub leaves a workflow run's pull_requests empty for a pull request from a fork.
+  const forkRun = (id, head = HEAD, extra = {}) => run(id, head, { pull_requests: [], head_repository: { full_name: "contrib/openrig" },
+    head_branch: "feature", display_title: "macOS package tests PR #7", ...extra });
+  const forkApproval = () => { const e = approval();
+    return { ...e, repository: { full_name: "mvschwarz/openrig" }, pull_request: { ...e.pull_request, head: { ...e.pull_request.head, ref: "feature", repo: { full_name: "contrib/openrig" } } } }; };
+  const f = fixture({ current: forkRun(200), runs: [forkRun(10, OLDER), forkRun(11, OLDER, { head_repository: { full_name: "other/openrig" } }),
+    run(12, OLDER, { pull_requests: [], head_branch: "feature", head_repository: { full_name: "mvschwarz/openrig" } })] });
+  const plan = await f.plan(forkApproval());
+  assert.deepEqual(checks(plan), REQUIRED_MACOS);
+  // Only the same fork branch's older run is a cancellation target (a fork's read-only token may refuse it; that's logged).
+  assert.deepEqual(f.posts().map(c => c.path), ["/actions/runs/10/cancel"]);
+  // A repeat approval of the fork's head reuses its own genuine pair, as for a same-repository pull request.
+  const repeat = fixture({ current: forkRun(201), runs: [forkRun(20, HEAD, { status: "completed", conclusion: "success" })], jobs: { 20: passedJobs() } });
+  assert.deepEqual(checks(await repeat.plan(forkApproval(), 201)), [PLACEHOLDER_CHECK]);
+});
+
 test("the GitHub adapter uses the scoped token and preserves a native refusal", async () => {
   assert.throws(() => githubApi("owner/repo", ""), /GITHUB_TOKEN/);
   let captured;
@@ -328,4 +346,18 @@ test("an earlier pass cannot hide a later failing attempt on the same head", asy
   assert.ok(f.calls.some(c => c.path.includes("/runs/20/attempts/3/jobs")));
   const unknown = fixture({ runs: [{ ...success, updated_at: undefined }], jobs: { 10: passedJobs() } });
   assert.deepEqual(checks(await unknown.plan()), REQUIRED_MACOS);
+});
+
+test("one fork branch's other PR and unmarked legacy runs cannot be canceled or reused", async () => {
+  const forkRun = (id, head = HEAD, extra = {}) => run(id, head, { pull_requests: [], head_repository: { full_name: "contrib/openrig" },
+    head_branch: "feature", display_title: "macOS package tests PR #7", ...extra });
+  const e = approval(); const event = { ...e, repository: { full_name: "mvschwarz/openrig" }, pull_request: { ...e.pull_request,
+    head: { ...e.pull_request.head, ref: "feature", repo: { full_name: "contrib/openrig" } } } };
+  // The current event knows its own fork PR even on an older, unmarked workflow attempt.
+  const f = fixture({ current: forkRun(200, HEAD, { display_title: "old title" }), runs: [
+    forkRun(10, OLDER, { display_title: "macOS package tests PR #8" }), forkRun(11, OLDER, { display_title: "old title" }),
+    forkRun(12, HEAD, { display_title: "macOS package tests PR #8", status: "completed", conclusion: "success" }),
+    forkRun(13, HEAD, { display_title: "old title", status: "completed", conclusion: "success" })],
+    jobs: { 12: passedJobs(), 13: passedJobs() } });
+  assert.deepEqual(checks(await f.plan(event)), REQUIRED_MACOS); assert.deepEqual(f.posts(), []);
 });
