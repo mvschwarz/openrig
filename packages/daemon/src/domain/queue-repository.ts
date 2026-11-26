@@ -6103,8 +6103,8 @@ export class QueueRepository {
    * does NOT itself emit events — callers decide whether to nudge or escalate.
    *
    * Slice 15 (finding 2): optionally rig-scoped, limited, and compact — mirroring
-   * `list` — so `rig queue overdue` is bounded and body-free by default instead of
-   * dumping every rig's full qitem bodies to a single caller. No args = the prior
+   * `list` — so `rig queue overdue` is bounded and the body field stays absent; displayText may show its first useful line.
+   * It doesn't dump every rig's full qitem bodies to a single caller. No args = the prior
    * behavior (all overdue, full rows) for the watchdog.
    */
   findOverdue(opts: FindOverdueOptions & { compact: true }): CompactQueueItem[];
