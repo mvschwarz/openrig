@@ -3,14 +3,18 @@ import { z } from "zod";
 import type { NodeInventoryEntry } from "./types.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
 import { isPoolAgent } from "./seat-standby.js";
+import { SessionRegistry } from "./session-registry.js";
 
 export type ReaperActivity = Pick<NonNullable<ReturnType<SeatActivityService["getSeatStateBySession"]>>,
   "activity" | "needsInput" | "backgroundWork" | "seq">;
 export type ReapEligibility = ReturnType<typeof reapEligibility>;
 
 export function reapEligibility(db: Database.Database, seat: NodeInventoryEntry, activity: ReaperActivity | null) {
-  const inbox = z.object({ count: z.number() }).parse(db.prepare(`SELECT count(*) AS count FROM queue_items
-    WHERE destination_session = ? AND state IN ('pending','blocked','in-progress')`).get(seat.canonicalSessionName)).count;
+  // Open work addressed to any name that reaches this seat blocks it, not only its canonical name: delivery and
+  // the pool drain resolve a seat's logical address through the registry too, so a row sent to that alias is its inbox.
+  const addresses = seat.canonicalSessionName ? new SessionRegistry(db).sessionAddresses(seat.canonicalSessionName) : [];
+  const inbox = addresses.length === 0 ? 0 : z.object({ count: z.number() }).parse(db.prepare(`SELECT count(*) AS count FROM queue_items
+    WHERE destination_session IN (${addresses.map(() => "?").join(",")}) AND state IN ('pending','blocked','in-progress')`).get(...addresses)).count;
   const session = z.object({ id: z.string(), origin: z.string(), status: z.string(), resume_token: z.string().nullable() }).nullable()
     .parse(db.prepare("SELECT id,origin,status,resume_token FROM sessions WHERE node_id=? ORDER BY id DESC LIMIT 1").get(seat.nodeId) ?? null);
   const generation = z.object({ generation_uuid: z.string() }).nullable().parse(db.prepare(

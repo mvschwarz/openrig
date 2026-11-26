@@ -2,10 +2,15 @@ import { expect, it } from "vitest";
 import { fixture } from "./seat-reaper-fixture.js";
 import { SeatReaperService } from "../src/domain/seat-reaper-service.js";
 
-it.each(["pending", "blocked", "in-progress"])("resets eligibility for an inbox item in %s", async state => {
+it.each([
+  ["pending", "pinned@test"], ["blocked", "pinned@test"], ["in-progress", "pinned@test"],
+  ["pending", "worker@test"], ["blocked", "worker@test"], ["in-progress", "worker@test"],
+])("inbox work in %s addressed to %s blocks reaping", async (state, destination) => {
   // Given an addressed live item.
-  const f = fixture(); f.db.prepare(`INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,body)
-    VALUES ('q',datetime('now'),datetime('now'),'sender@test','worker@test',?,'work')`).run(state);
+  const f = fixture();
+  f.db.exec("UPDATE sessions SET session_name='pinned@test'; UPDATE bindings SET tmux_session='pinned@test'");
+  f.db.prepare(`INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,body)
+    VALUES ('q',datetime('now'),datetime('now'),'sender@test',?,?,'work')`).run(destination, state);
   // When the reaper observes the full threshold.
   await f.mature();
   // Then active inbox work prevents every stop.
