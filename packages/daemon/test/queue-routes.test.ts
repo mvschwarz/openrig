@@ -3076,17 +3076,25 @@ describe("queue routes", () => {
     // A row that names a mission but no project is read in the one healthy catalog project the seat's rig selects, labelled
     // as inferred. Explicit tags keep their own answers, and any other selection keeps the configured root.
     describe("an untagged mission row and the project the seat's rig selects", () => {
-      const INFERRED = "project alpha inferred from this seat's rig; the row names no project";
+      const INFERRED = "project alpha inferred from this seat's rig; the row names no project; add project:<id> to the row to name it";
       const RIG_SELECTS = (project: string) => "projects:\n"
         + ["alpha", "beta", "gamma"].map((id) => `  - id: ${id}\n    root: ${id}\n    rigs: [${id === project ? "r" : "other"}]\n`).join("");
-      const setup = (catalogText: string) => {
+      const setup = (catalogText: string, configuredMissions: string[] = []) => {
         temporaryWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-whoami-untagged-")));
         const catalog = path.join(temporaryWorkspace, "workspace.yaml");
         fs.writeFileSync(catalog, catalogText);
-        // The configured root holds no missions: an untagged row read there finds nothing, as it did before.
+        // The configured root holds only the missions a case names (none by default): an untagged row read there finds
+        // nothing else, as it did before.
         const configured = path.join(temporaryWorkspace, "configured");
         fs.mkdirSync(configured, { recursive: true });
         const slices: Record<string, string> = {};
+        for (const mission of configuredMissions) {
+          const slice = path.join(configured, mission, "slices", "01-work");
+          fs.mkdirSync(slice, { recursive: true });
+          fs.writeFileSync(path.join(configured, mission, "SPEC.md"), `---\nid: ${mission}\n---\n# ${mission}\n`);
+          fs.writeFileSync(path.join(slice, "SPEC.md"), "---\nid: 01-work\n---\n# Work\n");
+          slices[`configured/${mission}`] = slice;
+        }
         for (const project of ["alpha", "beta", "gamma"]) {
           const root = path.join(temporaryWorkspace, project);
           const slice = path.join(root, "work-items", "release", "slices", "01-work");
@@ -3140,6 +3148,26 @@ describe("queue routes", () => {
         expect(body.workCandidates.candidates).toEqual([
           expect.objectContaining({ workNodePath: slices.alpha, unresolved: null, source: expect.stringContaining(INFERRED) }),
         ]);
+      });
+
+      it("infers the only catalog project when its entry lists this seat's rig", async () => {
+        const slices = setup("projects:\n  - id: alpha\n    root: alpha\n    rigs: [r]\n");
+        await claimed(["mission:release", "slice:01-work"]);
+        const body = await whoami();
+        expect(body.currentWork?.workNodePath).toBe(slices.alpha);
+        expect(body.currentWorkBasis).toContain(INFERRED);
+      });
+
+      it("keeps the configured root, unlabelled, for a row whose mission only the configured root holds", async () => {
+        const slices = setup(RIG_SELECTS("alpha"), ["local-work"]);
+        await claimed(["mission:local-work", "slice:01-work"]);
+        await claimed(["mission:release", "slice:01-work"]);
+        const { candidates } = (await whoami()).workCandidates;
+        expect(candidates).toHaveLength(2);
+        expect(candidates).toEqual(expect.arrayContaining([
+          expect.objectContaining({ workNodePath: slices["configured/local-work"], unresolved: null, source: expect.not.stringContaining("inferred") }),
+          expect.objectContaining({ workNodePath: slices.alpha, unresolved: null, source: expect.stringContaining(INFERRED) }),
+        ]));
       });
 
       it.each([
