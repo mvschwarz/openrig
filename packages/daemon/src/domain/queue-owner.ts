@@ -1,6 +1,6 @@
 import { resolveCurrentSessionAddress } from "./session-registry.js";
 import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
-import { SettingsStore } from "./user-settings/settings-store.js";
+import { SettingsStore, type SettingSource } from "./user-settings/settings-store.js";
 import type Database from "better-sqlite3";
 
 /** The operator seat (workspace.operator_seat_name): the person workflow approvals and the escalation
@@ -23,18 +23,20 @@ export function resolveRecoveryAgentSeat(): string | null {
   return readReceivingAgentSetting().session;
 }
 
-/** `agents.operator_session` as the receiving agent reads it: the agent's session, or null with why when it can't be used
- *  (`problem`: unreadable, or not an agent's canonical session). Unset is null with no problem. */
-export function readReceivingAgentSetting(): { session: string | null; problem?: string } {
+/** `agents.operator_session` as the receiving agent reads it: the agent's session and where it was set, or null with why
+ *  when it can't be used (`problem`: unreadable, or not an agent's canonical session). Unset is null with no problem. */
+export function readReceivingAgentSetting(): { session: string | null; problem?: string; source?: SettingSource } {
   let session: string;
+  let source: SettingSource;
   try {
-    const v = new SettingsStore().resolveOne("agents.operator_session" as never).value;
-    session = typeof v === "string" ? v.trim() : "";
+    const resolved = new SettingsStore().resolveOne("agents.operator_session" as never);
+    session = typeof resolved.value === "string" ? resolved.value.trim() : "";
+    source = resolved.source;
   } catch (error) {
     return { session: null, problem: `agents.operator_session couldn't be read (${(error as Error).message})` };
   }
   if (!session) return { session: null };
-  return parseSessionName(session).kind === "canonical" && !isHumanSeatSessionRef(session) ? { session }
+  return parseSessionName(session).kind === "canonical" && !isHumanSeatSessionRef(session) ? { session, source }
     : { session: null, problem: `agents.operator_session is "${session}", which isn't an agent's session, so it's ignored` };
 }
 

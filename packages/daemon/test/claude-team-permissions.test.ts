@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, copyFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, copyFileSync, rmSync, readFileSync, existsSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,7 @@ import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK, operationalLau
 import { shellQuote } from "../src/adapters/shell-quote.js";
 
 const asset = fileURLToPath(new URL("../assets/claude-team-permissions.cjs", import.meta.url));
-const { decide } = createRequire(import.meta.url)(asset);
+const { decide, teamPolicy, isReceivingAgent } = createRequire(import.meta.url)(asset);
 const policy = { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK };
 vi.mock("node:fs", async importOriginal => {
   const original = await importOriginal<typeof import("node:fs")>();
@@ -196,6 +196,71 @@ describe("Claude team command permissions", () => {
       const result = spawnSync("/bin/sh", ["-c", hook.command], { input, encoding: "utf8" });
       expect(result.status).toBe(0); expect(result.stdout).toBe("");
     }
+  });
+
+  describe("the host's receiving agent (agents.operator_session)", () => {
+    const decidePermission = "rig seat decide-permission qitem-runner-permission-0123abcd --option allow --reason 'they said go ahead'";
+    const env = { OPENRIG_SESSION_NAME: "lead-a@team" } as NodeJS.ProcessEnv;
+
+    it("keeps decide-permission's no-prompt path on that seat only; every other ask stays", () => {
+      expect(decide(decidePermission, teamPolicy(decidePermission, env, () => true))).toBe("allow");
+      expect(decide(decidePermission, teamPolicy(decidePermission, env, () => false))).toBe("ask");
+      for (const command of [`${decidePermission} && rig down example`, "rig seat set-permissions example --mode auto --reason x",
+        "rig seat decide-permission example --option allow; rig policy apply example --seat x"])
+        expect(decide(command, teamPolicy(command, env, () => true))).toBe("ask");
+    });
+
+    it("reads the setting only for a command that names decide-permission", () => {
+      const receivingAgent = vi.fn(() => true);
+      for (const command of ["rig down example", "rig status", "npm test"]) {
+        expect(teamPolicy(command, env, receivingAgent).ask).toEqual(TEAM_CLAUDE_ASK);
+      }
+      expect(receivingAgent).not.toHaveBeenCalled();
+      teamPolicy(decidePermission, env, receivingAgent);
+      expect(receivingAgent).toHaveBeenCalledWith(env);
+    });
+
+    it("is the receiving agent only when its own rig names this seat's session; anything unreadable keeps the ask", () => {
+      const answer = (stdout: string, status = 0) => vi.fn(() => ({ status, stdout }));
+      expect(isReceivingAgent(env, answer('{"value":"lead-a@team","source":"file"}'))).toBe(true);
+      expect(isReceivingAgent(env, answer('{"value":" lead-a@team\\n"}'))).toBe(true);
+      expect(isReceivingAgent({ RIGGED_SESSION_NAME: "lead-a@team" } as NodeJS.ProcessEnv, answer('{"value":"lead-a@team"}'))).toBe(true);
+      expect(isReceivingAgent(env, answer('{"value":"lead-b@team"}'))).toBe(false);
+      expect(isReceivingAgent(env, answer('{"value":""}'))).toBe(false);
+      expect(isReceivingAgent(env, answer('{"value":"lead-a@team"}', 1))).toBe(false);
+      expect(isReceivingAgent(env, answer("not json"))).toBe(false);
+      expect(isReceivingAgent(env, vi.fn(() => { throw new Error("spawn rig ENOENT"); }))).toBe(false);
+      const unasked = answer('{"value":"lead-a@team"}');
+      expect(isReceivingAgent({} as NodeJS.ProcessEnv, unasked)).toBe(false);
+      expect(unasked).not.toHaveBeenCalled();
+      const run = answer('{"value":"lead-a@team"}');
+      isReceivingAgent(env, run);
+      expect(run).toHaveBeenCalledWith("rig", ["config", "get", "agents.operator_session", "--json"], expect.objectContaining({ env, timeout: 3000 }));
+    });
+
+    it("the launched team hook asks or allows decide-permission by the seat's own rig config", () => {
+      const dir = mkdtempSync(join(tmpdir(), "receiving-agent-"));
+      try {
+        const rig = join(dir, "rig");
+        writeFileSync(rig, `#!/bin/sh\n[ "$*" = "config get agents.operator_session --json" ] || exit 2\nprintf '{"value":"%s"}' "$STUB_OPERATOR"\n`);
+        chmodSync(rig, 0o755);
+        const settings = JSON.parse(operationalLaunchArgs("claude-code", { teamPermissionDefault: true })[1]);
+        const hook = settings.hooks.PreToolUse[0].hooks[0];
+        const run = (operator: string, session: string | undefined, command = decidePermission) => {
+          const result = spawnSync("/bin/sh", ["-c", hook.command], {
+            input: JSON.stringify({ tool_name: "Bash", tool_input: { command } }), encoding: "utf8",
+            env: { PATH: `${dir}:${process.env.PATH}`, STUB_OPERATOR: operator, ...(session ? { OPENRIG_SESSION_NAME: session } : {}) },
+          });
+          expect(result.status, result.stderr).toBe(0);
+          return JSON.parse(result.stdout).hookSpecificOutput.permissionDecision;
+        };
+        expect(run("lead-a@team", "lead-a@team")).toBe("allow");
+        expect(run("lead-a@team", "worker@team")).toBe("ask");
+        expect(run("", "lead-a@team")).toBe("ask");
+        expect(run("lead-a@team", undefined)).toBe("ask");
+        expect(run("lead-a@team", "lead-a@team", "rig seat set-permissions lead-a@team --mode auto --reason x")).toBe("ask");
+      } finally { rmSync(dir, { recursive: true, force: true }); }
+    });
   });
 
   it.each(["kernel", "team", "legacy"])("loads %s policy under an install path with spaces and quotes", kind => {
