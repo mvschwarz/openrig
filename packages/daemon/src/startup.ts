@@ -2692,8 +2692,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         resolveParkedRows: ({ jobId, targetSession }) => queueRepoInstance.parkedRowsOwnedBy(jobId, targetSession),
         noteParkedRows: ({ owner, notes }) => queueRepoInstance.noteParkedRows(owner, notes),
         noteQueuedRow: ({ jobId, destinationSession, note }) => queueRepoInstance.noteOpenWatchdogRow(jobId, destinationSession, note),
-        // A park timer due at a missing seat is queued work coming due: cold start decides, as for a row's own wake.
-        noteNoReceiver: (session) => seatColdStarter.notify(session),
       }),
       // (i-c) fire-time target-generation gate: resolve the target's LIVE occupant-generation (P12
       // occupant_tenures) so a generation-bound wake is refused once the target has handed over.

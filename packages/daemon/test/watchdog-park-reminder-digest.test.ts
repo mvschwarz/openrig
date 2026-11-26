@@ -11,7 +11,6 @@ import type { AppDeps } from "../src/server.js";
 import type { CmuxTransportFactory } from "../src/terminal/cmux-transport.js";
 import type { ExecFn } from "../src/domain/tmux-adapter.js";
 import { WatchdogScheduler } from "../src/domain/watchdog-scheduler.js";
-import { SeatColdStarter } from "../src/domain/seat-cold-start.js";
 
 let db: Database.Database;
 let deps: AppDeps;
@@ -481,27 +480,5 @@ describe("a park wake shows the park's recorded continuation", () => {
     due(plain.jobId);
     await deps.watchdogScheduler!.runTickNow();
     expect(sends.filter((s) => s.session === owner).map((s) => s.text)).toEqual([header(plain.jobId) + "check the dashboard"]);
-  });
-});
-
-
-describe("standby timer custody at the no-receiver boundary", () => {
-  it("does not request a cold start for a digest whose real parked rows close during delivery", async () => {
-    const owner = seat();
-    const rows = [await park(owner, "first"), await park(owner, "second")];
-    for (const row of rows) due(row.jobId);
-    const notify = vi.spyOn(SeatColdStarter.prototype, "notify").mockImplementation(() => {});
-    try {
-      reply = async () => {
-        for (const row of rows) deps.queueRepo.update({ qitemId: row.qitemId, actorSession: owner,
-          state: "done", closureReason: "no-follow-on", transitionNote: "work finished during reminder delivery" } as never);
-        return { ok: false, sent: false, inputPhase: "not_reached", reason: "session_missing" };
-      };
-      await deps.watchdogScheduler!.runTickNow();
-      expect(sends).toHaveLength(1);
-      expect(rows.map(row => deps.queueRepo.getById(row.qitemId)!.state)).toEqual(["done", "done"]);
-      expect(rows.flatMap(row => deps.queueRepo.parkedRowsOwnedBy(row.jobId, owner))).toEqual([]);
-      expect(notify).not.toHaveBeenCalled();
-    } finally { notify.mockRestore(); }
   });
 });

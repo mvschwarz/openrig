@@ -36,7 +36,6 @@ import type Database from "better-sqlite3";
 import { parseSessionName } from "./session-name.js";
 import type { RigSpec } from "./types.js";
 import type { SeatDeliveryGuard } from "./seat-delivery-guard.js";
-import { readSeatPoolHold } from "./seat-pool-executor.js";
 
 /** Minimum time between cold-start attempts for one seat. */
 export const COLD_START_MIN_INTERVAL_MS = 60_000;
@@ -273,9 +272,8 @@ export class SeatColdStarter {
         // have waited behind queued sends. A `rig down` in that window must not leave a
         // reviving seat in a rig that was taken down — recheck the positive eligibility
         // here, probes included.
-        const rigDown = await this.rigDownRefusal(current);
-        if (rigDown) {
-          this.log(`${seat.logicalId}: not cold-starting: ${rigDown}`);
+        if (!await this.livePeerExists(current.rigId, current.nodeId)) {
+          this.log(`${seat.logicalId}: not cold-starting: no other seat of this rig is live (rig down)`);
           return;
         }
         // The awaited probes took time: the final stop and identity check happens after them.
@@ -347,21 +345,10 @@ export class SeatColdStarter {
     if (ledger === "interval") return refuse("an attempt was made recently");
     if (ledger === "failures") return refuse("too many consecutive failed attempts");
 
-    const rigDown = await this.rigDownRefusal(seat);
-    return rigDown ? refuse(rigDown) : true;
-  }
-
-  /** The rig must be up. A down rig keeps whole-rig restore semantics (the operator's/autoscaler's job).
-   *  - A seat on standby (its latest stop is a recorded standby stop) starts unless the rig is explicitly down: its latest
-   *    `rig.stopped` has no `restore.completed` after it, the seat pool's hold rule. So a rig whose every seat is on
-   *    standby can still start one for its work.
-   *  - Any other seat (dormant) keeps the proxy: another seat of the same rig must be live in tmux. */
-  private async rigDownRefusal(seat: SeatRow): Promise<string | null> {
-    if (classifyColdStartStop(this.deps.db, seat.nodeId).kind === "daemon_reclaim") {
-      return readSeatPoolHold(this.deps.db, seat.rigId).stoppedSeq !== null
-        ? "the rig is down (its last rig down has no rig up after it)" : null;
-    }
-    return await this.livePeerExists(seat.rigId, seat.nodeId) ? null : "no other seat of this rig is live (rig down)";
+    // The rig must be up: another seat of the same rig must be live in tmux. A down
+    // rig keeps whole-rig restore semantics (the operator's/autoscaler's job).
+    if (await this.livePeerExists(seat.rigId, seat.nodeId)) return true;
+    return refuse("no other seat of this rig is live (rig down)");
   }
 
   /** Positive presence of another running seat of the rig, by awaited tmux probes. */

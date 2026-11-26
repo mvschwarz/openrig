@@ -1996,7 +1996,7 @@ describe("#2429: the guard's own paste after Claude Code collapses it", () => {
   });
 });
 
-// Root's selection 1 (standby, 0.7.25): a plain message held only for a draft in the input goes once the input is clear,
+// A plain message held only for a draft in the input goes once the input is clear,
 // through the same guarded delivery, each message with its own outcome and in order. Only messages first held under this
 // behaviour qualify: older held messages, hold-mode messages and system senders' messages stay as they were.
 describe("plain messages held for a draft", () => {
@@ -2067,7 +2067,7 @@ describe("plain messages held for a draft", () => {
 });
 
 
-describe("standby retained-message accounting under changed conditions", () => {
+describe("draft-held message accounting under changed conditions", () => {
   it("records legacy full-quota supersession per message instead of claiming the earlier one delivered", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
     const target = f.guard.target("worker@test");
@@ -2113,7 +2113,7 @@ describe("standby retained-message accounting under changed conditions", () => {
 });
 
 
-describe("standby hold-release notice accounting", () => {
+describe("hold-release notice accounting", () => {
   it("emits one notice when two callers concurrently request the same release", async () => {
     const f=fixture(undefined,{runtime:"claude-code"});
     await f.guard.set("a",{mode:"hold"},"human@test","manual input");
@@ -2130,7 +2130,7 @@ describe("standby hold-release notice accounting", () => {
 });
 
 
-describe("standby pending hold-release notice", () => {
+describe("pending hold-release notice", () => {
   it("notifies after the effective release even when the API initially returns pending", async () => {
     const f=fixture(undefined,{runtime:"claude-code"});
     await f.guard.set("a",{mode:"hold"},"human@test","manual input");
@@ -2154,7 +2154,7 @@ describe("standby pending hold-release notice", () => {
 });
 
 
-describe("standby retry guard and uncertainty controls", () => {
+describe("draft-held retry guard and uncertainty controls", () => {
   it("honours a renewed native-input refusal before retrying a held message", async () => {
     const f=fixture(undefined,{runtime:"claude-code"});await f.enable();f.bodies.a="draft";
     const held=await f.transport.send("worker@test","retained request",{actorSession:"pm@test"});
@@ -2193,7 +2193,7 @@ describe("standby retry guard and uncertainty controls", () => {
 });
 
 
-describe("standby recipient changes during a retry", () => {
+describe("draft-held recipient changes during a retry", () => {
   it.each([false, true])("restores unwritten custody if the recipient changes after selection (already failed=%s)", async alreadyFailed => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
     const held = await f.transport.send("worker@test", "request for original occupant", { actorSession: "pm@test" });
@@ -2214,7 +2214,7 @@ describe("standby recipient changes during a retry", () => {
 });
 
 
-describe("standby delivery controls becoming active between messages", () => {
+describe("draft-held delivery controls becoming active between messages", () => {
   it.each(["restore", "drain"])("stops before the next message when %s becomes pending during a send", async control => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
     const first = await f.transport.send("worker@test", "first retained request", { actorSession: "pm@test" });

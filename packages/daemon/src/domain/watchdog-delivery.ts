@@ -58,10 +58,6 @@ export function makeWatchdogDeliver(deps: {
   /** Notes a later occurrence on the job's earlier cold row at the seat while that row is open (claimed or not), and
    *  returns its id; null when there is none. */
   noteQueuedRow?: (input: { jobId: string; destinationSession: string; note: string }) => string | null;
-  /** Tells the queue's no-receiver path (cold start) that a seat is missing. Called only for a timer that wakes a live
-   *  parked row of that seat: that's queued work coming due, so a seat on standby may be started for it. A reminder about
-   *  no row starts nothing. */
-  noteNoReceiver?: (targetSession: string) => void;
 }): DeliveryFn {
   /** At a queue-only seat the reminder is never typed. About a parked row of the seat, it's noted on that row, here,
    *  before the delivery says so; a later occurrence of a job whose cold row is still open is noted on that row;
@@ -132,15 +128,6 @@ export function makeWatchdogDeliver(deps: {
         // Typed, never queued for a seat's hook bridge: the watchdog's receipts and accounting read only a typed outcome,
         // so a queued reminder would read delivered before anything took it (#3270).
         { actorSession: "watchdog@system", openrigNotice: true, auditPointer: source.jobId, noHookBridge: true, ...(beforeWrite ? { beforeWrite } : {}) });
-      // A park timer that finds its seat missing is the parked row's work coming due: the cold start decides whether a seat
-      // on standby starts for it. Re-read current park custody after the awaited send: a digest's snapshot can be stale.
-      // The reminder's own outcome stands, and its retry types it once the seat is up.
-      if ("reason" in result && result.reason === "session_missing" && deps.noteNoReceiver
-        && (source.parkedRows
-          ? source.parkedRows.some(({ jobId, qitemId }) => deps.resolveParkedRows?.({ jobId, targetSession }).includes(qitemId))
-          : !source.members && (deps.resolveParkedRows?.({ jobId: source.jobId, targetSession }) ?? []).length > 0)) {
-        try { deps.noteNoReceiver(targetSession); } catch { /* telling cold start never changes the reminder's outcome */ }
-      }
       const fact = readSendOutcome(result, writtenFact(result));
       if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted, fact };
       return result.ok
