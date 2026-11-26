@@ -505,7 +505,7 @@ export interface PersistedProjectionEntry {
   resourceType?: string;
   mergeStrategy?: string;
   target?: string;
-  /** A skill whose resource says `on_restore: follow_source`, so a replay keeps it recorded as following. */
+  /** A skill or supported runtime fragment whose resource follows today's source. */
   onRestore?: SkillOnRestore;
 }
 
@@ -1245,7 +1245,11 @@ export type SkillOnRestore = "keep_saved" | "follow_source";
 export interface SkillResource { id: string; path: string; onRestore?: SkillOnRestore; }
 export interface GuidanceResource { id: string; path: string; target: string; merge: "managed_block" | "append"; }
 export interface SubagentResource { id: string; path: string; }
-export interface RuntimeResource { id: string; path: string; runtime: string; type: string; }
+export type ClaudeJsonFragmentType = "claude_mcp_fragment" | "claude_settings_fragment";
+export function isClaudeJsonFragmentType(type: unknown): type is ClaudeJsonFragmentType {
+  return type === "claude_mcp_fragment" || type === "claude_settings_fragment";
+}
+export interface RuntimeResource { id: string; path: string; runtime: string; type: string; onRestore?: SkillOnRestore; }
 
 export type PluginSource =
   | { kind: "local"; path: string };

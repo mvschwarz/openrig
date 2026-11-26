@@ -9,6 +9,12 @@ import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
+const receiptWrites = vi.hoisted(() => vi.fn());
+vi.mock("../src/lib/bundle-source.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/lib/bundle-source.js")>(),
+  writeBundleBuildReceipt: receiptWrites,
+}));
+
 function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   return {
     spawn: vi.fn(() => ({ pid: 1, unref: vi.fn() }) as never),
@@ -503,26 +509,42 @@ describe("Bundle CLI", () => {
     expect(provenance!["notes"]).toBe("checkpoint-2-part-3 fixture");
   });
 
-  // Item 1 / slice-05: provenance auto-includes hostname + cliVersion at invoke time
-  it("bundle create automatically includes hostname + cliVersion in provenance (no flag needed)", async () => {
+  it.each([false, true])("builder identity is private unless explicitly included (%s)", async includeIdentity => {
     capturedCreateBodies = [];
-    await captureLogs(async () => {
-      await makeCmd().parseAsync([
-        "node", "rig", "bundle", "create", "/tmp/rig.yaml",
-        "-o", "/tmp/test.rigbundle",
-      ]);
+    receiptWrites.mockClear();
+    const previous = process.env.OPENRIG_SESSION_NAME;
+    process.env.OPENRIG_SESSION_NAME = "builder@demo";
+    try {
+      await captureLogs(async () => {
+        await makeCmd().parseAsync([
+          "node", "rig", "bundle", "create", "/tmp/rig.yaml", "-o", "/tmp/test.rigbundle",
+          ...(includeIdentity ? ["--include-builder-identity"] : []),
+        ]);
+      });
+      const provenance = capturedCreateBodies.at(-1)!["provenance"] as Record<string, unknown>;
+      expect(typeof provenance.cliVersion).toBe("string");
+      if (includeIdentity) expect(provenance).toMatchObject({ sourceHost: os.hostname(), authorSession: "builder@demo" });
+      else {
+        expect(provenance).not.toHaveProperty("sourceHost");
+        expect(provenance).not.toHaveProperty("authorSession");
+      }
+      expect(receiptWrites).toHaveBeenLastCalledWith(
+        "/tmp/test.rigbundle.build.json", "/tmp/test.rigbundle", expect.any(Object),
+        expect.objectContaining({ sourceHost: os.hostname(), authorSession: "builder@demo" }),
+      );
+    } finally {
+      if (previous === undefined) delete process.env.OPENRIG_SESSION_NAME;
+      else process.env.OPENRIG_SESSION_NAME = previous;
+    }
+  });
+
+  it("a receipt write warning keeps the created archive result and JSON warning", async () => {
+    receiptWrites.mockReturnValueOnce("Bundle created, but its private receipt could not be written");
+    const result = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", "/tmp/rig.yaml", "-o", "/tmp/test.rigbundle", "--json"]);
     });
-    const createBody = capturedCreateBodies[capturedCreateBodies.length - 1];
-    expect(createBody).toBeTruthy();
-    const provenance = createBody!["provenance"] as Record<string, unknown> | undefined;
-    expect(provenance).toBeTruthy();
-    // hostname and cliVersion auto-populate (real os.hostname() + CLI package.json read)
-    expect(typeof provenance!["sourceHost"]).toBe("string");
-    expect((provenance!["sourceHost"] as string).length).toBeGreaterThan(0);
-    expect(typeof provenance!["cliVersion"]).toBe("string");
-    expect((provenance!["cliVersion"] as string).length).toBeGreaterThan(0);
-    // notes is undefined when --notes not passed (no empty string sent)
-    expect(provenance!["notes"]).toBeUndefined();
+    expect(JSON.parse(result.stdout.at(-1)!)).toMatchObject({ archiveHash: expect.any(String), warning: expect.stringContaining("private receipt") });
+    expect(result.exitCode).not.toBe(2);
   });
 
   // Item 2 / slice-05: --min-daemon-version + --min-cli-version flags wire into request body compatibility
@@ -702,16 +724,16 @@ describe("Bundle CLI", () => {
     expect(createBody!["compatibility"]).toBeUndefined();
   });
 
-  // Item 1 / slice-05: authorSession populates when OPENRIG_SESSION_NAME env is set
-  it("bundle create includes authorSession when OPENRIG_SESSION_NAME env is set", async () => {
+  // Public authorSession is deliberate; default receipt-only behavior is covered above.
+  it("bundle create includes authorSession only with the builder-identity opt-in", async () => {
     capturedCreateBodies = [];
     const origEnv = process.env.OPENRIG_SESSION_NAME;
-    process.env.OPENRIG_SESSION_NAME = "velocity-driver@openrig-velocity";
+    process.env.OPENRIG_SESSION_NAME = "builder@demo";
     try {
       await captureLogs(async () => {
         await makeCmd().parseAsync([
           "node", "rig", "bundle", "create", "/tmp/rig.yaml",
-          "-o", "/tmp/test.rigbundle",
+          "-o", "/tmp/test.rigbundle", "--include-builder-identity",
         ]);
       });
     } finally {
@@ -722,6 +744,6 @@ describe("Bundle CLI", () => {
     expect(createBody).toBeTruthy();
     const provenance = createBody!["provenance"] as Record<string, unknown> | undefined;
     expect(provenance).toBeTruthy();
-    expect(provenance!["authorSession"]).toBe("velocity-driver@openrig-velocity");
+    expect(provenance!["authorSession"]).toBe("builder@demo");
   });
 });

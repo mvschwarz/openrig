@@ -32,7 +32,9 @@ async function prepared(file: string, link?: boolean, recordedExecutable?: boole
     CREATE TABLE occupant_tenures(node_id TEXT, generation_uuid TEXT, generation_ordinal INTEGER);`);
   db.prepare("INSERT INTO nodes VALUES ('node','claude-code',?)").run(cwd);
   db.exec("INSERT INTO bindings VALUES ('binding','node','seat','%1'); INSERT INTO occupant_tenures VALUES ('node','generation-1',1)");
-  const managed = new ClaudeManagedLaunch(db, { PATH: `${bin}:/usr/bin:/bin`, HOME: path.join(root, "home") }, {});
+  // The recorded-executable control must not discover a real Claude installed on the host.
+  // These fixtures use /bin/sh explicitly and shell builtins, so their own bin is the complete test PATH.
+  const managed = new ClaudeManagedLaunch(db, { PATH: bin, HOME: path.join(root, "home") }, {});
   const selectedHome = path.join(root, "selected-account");
   if (isolatedHome) mkdirSync(selectedHome);
   return { managed: await managed.prepare({ nodeId: "node", ...(recordedExecutable ? { executable: target } : {}),

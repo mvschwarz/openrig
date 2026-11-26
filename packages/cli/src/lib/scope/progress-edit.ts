@@ -77,7 +77,7 @@ function progressLines(lines: string[]): string[] {
       comment = !line.includes("-->");
       return "";
     }
-    const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)\r?$/);
     if (match) {
       const marker = match[1]![0]!;
       const length = match[1]!.length;

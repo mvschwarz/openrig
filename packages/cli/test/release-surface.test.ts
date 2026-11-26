@@ -2,6 +2,8 @@
 import { beforeAll, describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
@@ -84,6 +86,17 @@ describe("release-surface parser - extract (unit)", () => {
     for (const flag of ["--self", "--seat", "--rig", "--instance", "--severity", "--status"]) {
       expect(surface.flags.has(`health${FLAG_SEP}${flag}`)).toBe(true);
     }
+  });
+
+  it("distinguishes queue export from the standalone export command", () => {
+    const surface = extractSurfaceFromSources(["queue", "queue-export", "queue-import", "export"].map(
+      name => readSource(`src/commands/${name}.ts`),
+    ));
+    expect(surface.flags.has(`queue export${FLAG_SEP}--qitems`)).toBe(true);
+    expect(surface.commands.has("export")).toBe(true);
+    expect(surface.flags.has(`export${FLAG_SEP}--qitems`)).toBe(false);
+    expect(surface.commands.has("queue staging list")).toBe(true);
+    expect(surface.commands.has("staging list")).toBe(false);
   });
 
   it("captures the new queue create flags", () => {
@@ -187,6 +200,39 @@ describe.skipIf(skipTagTests)("release-surface parser - determinism (AC-4)", () 
 });
 
 describe("release-surface parser - honest failure (AC-5)", () => {
+  it("chooses a prior tag from the target's history even when another release is checked out", () => {
+    const repoRoot = fs.mkdtempSync(join(tmpdir(), "openrig-release-base-"));
+    const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", ...args], { cwd: repoRoot, stdio: "pipe" });
+    try {
+      git("init", "-b", "main");
+      git("config", "column.tag", "always");
+      const dir = join(repoRoot, "packages/cli/src/commands");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(join(dir, "sample.ts"), 'export function sample() { return new Command("sample"); }');
+      git("add", ".");
+      git("commit", "-m", "initial");
+      expect(() => generateSurfaceDiff({ repoRoot })).toThrow(/No release tag/);
+      expect(() => generateSurfaceDiff({ repoRoot, to: "missing" })).toThrow(/at ref "missing"/);
+      git("checkout", "-b", "release");
+      git("commit", "--allow-empty", "-m", "first release");
+      git("tag", "-a", "v1", "-m", "v1");
+      git("checkout", "main");
+      git("merge", "--no-ff", "release", "-m", "merge release");
+      git("tag", "v2");
+      git("tag", "v2-alias");
+      git("commit", "--allow-empty", "-m", "later release");
+      git("tag", "v3");
+
+      expect(generateSurfaceDiff({ repoRoot, to: "v1" })).toMatchObject({
+        release_from: "v3",
+        release_from_source: "checkout-nearest-release",
+      });
+      expect(generateSurfaceDiff({ repoRoot, to: "v2" }).release_from).toBe("v1");
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it("throws a 3-part error (not a silent empty diff) on a non-existent ref", () => {
     let caught: unknown;
     try {

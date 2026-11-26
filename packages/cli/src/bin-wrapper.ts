@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import module from "node:module";
+import os from "node:os";
 import path from "node:path";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { RunProgramIo } from "./cli-error.js";
@@ -10,10 +11,26 @@ import type { RunProgramIo } from "./cli-error.js";
 const REEXEC_GUARD_ENV = "OPENRIG_BIN_REEXEC";
 
 // Each `rig` is a new process: Node's on-disk compile cache lets the next call skip compiling the modules
-// again. The cache dates from Node v22.1.0, but this JavaScript API from v22.8.0: before it, `?.()` does
-// nothing. NODE_COMPILE_CACHE and NODE_DISABLE_COMPILE_CACHE still control it.
-// A piped bare invocation only prints usage; cold-cache writes can otherwise delay its exit.
-if (process.argv.length > 2 || (process.stdin.isTTY && process.stdout.isTTY)) module.enableCompileCache?.();
+// again. The cache dates from Node v22.1.0, but this JavaScript API from v22.8.0: before it, nothing is enabled.
+// NODE_COMPILE_CACHE (Node enables it at startup, so this call finds it on) and NODE_DISABLE_COMPILE_CACHE still
+// control it. A piped bare invocation only prints usage; cold-cache writes can otherwise delay its exit.
+if (process.argv.length > 2 || (process.stdin.isTTY && process.stdout.isTTY)) enableCompileCache();
+
+/** The cache lives in the OpenRig home's runtime folder, created owner-only, rather than Node's default under the shared
+ *  temp folder. The home is resolved here, as `getOpenRigHome` does, because nothing may load before the cache is on. A
+ *  home that doesn't exist yet gets no cache: creating it would change which home a later command picks. */
+function enableCompileCache(): void {
+  if (!module.enableCompileCache) return;
+  const home = process.env.OPENRIG_HOME || process.env.RIGGED_HOME || path.join(os.homedir(), ".openrig");
+  if (!existsSync(home)) return;
+  const dir = path.join(home, "run", "compile-cache");
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch {
+    // The cache is optional: Node reports its own failure to use the folder and never throws.
+  }
+  module.enableCompileCache(dir);
+}
 
 export function resolveBinEntry(invokedPath = process.argv[1], moduleUrl = import.meta.url): string {
   const wrapperPath = invokedPath ? realpathSync(invokedPath) : realpathSync(fileURLToPath(moduleUrl));

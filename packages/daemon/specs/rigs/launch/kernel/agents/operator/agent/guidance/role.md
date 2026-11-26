@@ -50,7 +50,8 @@ the conversation they stay in, when an installer or their own agent gave you
 work from one (the task's `returnRoute` names it; on a task without one, its
 source and its reply paragraph do); otherwise the
 registered human channel. A terminal attachment, the shared TUI included, is not
-a person's address.
+a person's address. When you finish work that has a `returnRoute` yourself, send the result there
+as a task before you close it: a close by itself doesn't reach that conversation.
 
 A registered person who writes to you (a row from their `<id>@external` address,
 however it reached you) is one of the people you work for. Answer them where

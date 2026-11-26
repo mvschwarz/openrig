@@ -991,7 +991,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   let persistedFreshPodLaunch: RestoreOrchestratorDeps["freshLaunch"];
   let persistedFreshPodLaunchAvailable: ((rigId: string, nodeId: string) => boolean) | undefined;
   let persistedSeatSkillSelection: RestoreOrchestratorDeps["seatSkillSelection"];
+  let persistedClaudeFragmentSelection: RestoreOrchestratorDeps["resolveClaudeFragments"];
   let persistedArmSeatContinuity: RestoreOrchestratorDeps["armContinuity"];
+  const resolveClaudeFragments: NonNullable<RestoreOrchestratorDeps["resolveClaudeFragments"]> = async (rigId, nodeId) =>
+    persistedClaudeFragmentSelection
+      ? persistedClaudeFragmentSelection(rigId, nodeId)
+      : { ok: false, reason: "the pod instantiator is not ready" };
 
   const restoreOrchestrator = new RestoreOrchestrator({
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
@@ -1007,6 +1012,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     seatSkillSelection: async (rigId, nodeId) => persistedSeatSkillSelection
       ? persistedSeatSkillSelection(rigId, nodeId)
       : { ok: false, reason: "the pod instantiator is not ready" },
+    resolveClaudeFragments,
     armContinuity: async (rigId, nodeId) => persistedArmSeatContinuity ? persistedArmSeatContinuity(rigId, nodeId) : null,
     harnessNotStartedNotice: (input) => noticeHarnessNotStarted(db, queueRepoInstance, input),
   });
@@ -1154,7 +1160,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { PodRigInstantiator } = await import("./domain/rigspec-instantiator.js");
   const { reconcileSkillLoadout } = await import("./domain/skill-catalog.js");
   const { StartupOrchestrator } = await import("./domain/startup-orchestrator.js");
-  const { ClaudeCodeAdapter } = await import("./adapters/claude-code-adapter.js");
+  const { ClaudeCodeAdapter, replaceClaudeFragment } = await import("./adapters/claude-code-adapter.js");
   // P20 — the projection manifest: record-at-apply so the projector can later
   // discriminate a stale re-projection (safe overwrite) from an operator edit (protect).
   const { ProjectionManifestStore } = await import("./domain/projection-manifest-store.js");
@@ -1174,7 +1180,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { PiRuntimeAdapter } = await import("./adapters/pi-runtime-adapter.js");
   const { OmpRuntimeAdapter } = await import("./adapters/omp-runtime-adapter.js");
 
-  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter, readFile: (p: string) => fs.readFileSync(p, "utf-8") });
+  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter,
+    readFile: (p: string) => fs.readFileSync(p, "utf-8"), resolveClaudeFragments });
   const runtimeSettings = new ContextPackSettingsStore().resolveConfig();
   const claudeCollectorAssetPath = nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs");
   // #2456: the adapters' guidance writes check and keep OpenRig's record of each managed block.
@@ -1185,7 +1192,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   } catch (error) {
     console.warn("Could not stage the Codex activity relay; using the shipped relay:", error);
   }
-  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, restoreReadPolicy, hookBridgeLaunch: (nodeId: string, executable?: string) => hookBridge.launchWanted(nodeId, executable), statuslineThrottleLaunch: (nodeId: string) => rigRepo.getNodeStatuslineThrottle(nodeId), fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: claudeCollectorAssetPath, autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), managedBlockRecords: guidanceBlockRecords, recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
+  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, restoreReadPolicy, hookBridgeLaunch: (nodeId: string, executable?: string) => hookBridge.launchWanted(nodeId, executable), statuslineThrottleLaunch: (nodeId: string) => rigRepo.getNodeStatuslineThrottle(nodeId), fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, replaceFragment: replaceClaudeFragment, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: claudeCollectorAssetPath, autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), managedBlockRecords: guidanceBlockRecords, readProjectionHash: (targetPath) => projectionManifestStore.lastHash(targetPath), recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
   const codexAdapter = new CodexRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, prepareTeamWorkspace, prepareSeatFolder, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, seatHome: (nodeId: string, ignoreAccountHome?: boolean) => seatRuntimeHome(db, nodeId, "codex", ignoreAccountHome).home, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, codexLoginShell: readCodexLoginShell, activityRelayPath: codexActivityRelayPath ?? nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveCorePluginDir: () => vendoredCorePluginDir(), resolveCorePluginSelected: (nodeId: string) => Boolean(seatCodexCorePluginDir({ id: nodeId, runtime: "codex" }, db)), resolveHooksEnabled: async () => {
     const { SettingsStore } = await import("./domain/user-settings/settings-store.js");
     return new SettingsStore().resolveOne("runtime.codex.hooks_enabled").value as boolean;
@@ -1427,6 +1434,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   persistedFreshPodLaunch = (rigId, nodeId, launchOpts) => podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts);
   persistedFreshPodLaunchAvailable = (rigId, nodeId) => podInstantiator.canLaunchPersistedFresh(rigId, nodeId);
   persistedSeatSkillSelection = (rigId, nodeId) => podInstantiator.seatSkillSelection(rigId, nodeId);
+  persistedClaudeFragmentSelection = podInstantiator.seatClaudeFragments;
   // A start that is not the first (a restore, a fresh launch) arms the seat's continuity notice the way the first start does:
   // the strategy as the spec says today, reconciled by the seat's stable session name (one job, never a duplicate).
   persistedArmSeatContinuity = async (rigId, nodeId) => {
@@ -1918,8 +1926,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           ? (transcriptsPath ?? getCompatibleOpenRigPath("transcripts"))
           : getCompatibleOpenRigPath("transcripts"),
         exec: execDep,
-        chatSearchFn: (rigId: string, pattern: string) =>
-          chatRepoForAsk.searchChat(rigId, pattern).map((m) => ({
+        chatSearchFn: (rigId: string, keywords: string[]) =>
+          chatRepoForAsk.searchChat(rigId, keywords).map((m) => ({
             sender: m.sender,
             body: m.body,
             createdAt: m.createdAt,
