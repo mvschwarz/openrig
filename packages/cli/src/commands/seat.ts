@@ -1197,7 +1197,7 @@ Examples:
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--to <person>", "The registered person who answers this seat's runner permission requests instead of the default person, such as mike@external")
     .option("--clear", "Remove the override: the default person answers again")
-    .option("--deny", "Opt in to refusing every runner permission request on this seat")
+    .option("--deny", "Opt in to refusing every runner permission request on this seat; on a Claude Code seat, ask no one and leave its prompt in the terminal")
     .requiredOption("--reason <text>", "Audit reason recorded on the node.permissions_to_changed event")
     .option("--operator <address>", "Operator recorded on the audit event (required outside a managed seat)")
     .option("--json", "JSON output for agents")
@@ -1208,6 +1208,12 @@ request to OpenRig, and one person gets an ordinary ask with every option the ag
 offered; the answer goes back to that one request. That person is the default person
 (rig gateway default), unless this override names someone else. When no one can be
 asked, OpenRig's default is to permit the request.
+
+On a Claude Code seat that loads openrig-core, this also chooses who is asked the
+seat's own permission prompt: the chosen person, else the return route of the work
+it's running, else the default person. There, a prompt no one can be asked isn't
+permitted, and --deny stops the question: the prompt stays in the seat's terminal,
+and nothing is refused.
 
 Only a registered person can be chosen (rig gateway human list). A seat address is
 refused. --clear removes the override. --deny is the opt-in for a seat whose requests
@@ -1476,7 +1482,7 @@ resume/successor launch reads it at call time. Examples:
     .option("--note <text>", "With --confirm: what you'll do first")
     .option("--recover", "Finish an interrupted switch from its record")
     .option("--json", "JSON output for agents")
-    .description("Move a live Codex, Claude Code or Pi seat to another runtime, successor first")
+    .description("Move a live Codex, Claude Code, Pi or community-harness seat to another runtime, successor first")
     .addHelpText("after", `
 The seat keeps its address, connections, queue rows and claims. Its successor
 starts on the target runtime beside the current occupant, reads a handover, and
@@ -1490,7 +1496,7 @@ later converge reports a deferred change_runtime); the source runtime's model,
 effort, Codex profile and native permission choice are cleared, not mapped; two
 processes run until cutover; messages sent to the seat during the switch are
 held, not typed, and need sending again afterwards.
-Codex, Claude Code and Pi, single-pane seats only. --dry-run lists the details.
+Codex, Claude Code, Pi and installed community-harness seats, single-pane seats only. --dry-run lists the details.
 A seat that has never started has no pane to switch: declare the other runtime for it in its rig spec and bring the team
 up again from that spec. That's a new generation of the seat, without this seat's edges, settings or queued work.
 --clear-account-home returns to configured member/rig/daemon/native selection; it does not restore historical credentials.

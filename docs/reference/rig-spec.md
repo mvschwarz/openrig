@@ -545,7 +545,9 @@ Claude keeps `acceptEdits` and receives inline session settings allowing ordinar
 `rig` commands, project reads and common project test commands (for example,
 `npm test`, `pnpm test`, `pytest`, `go test` and `cargo test`). Lifecycle commands
 such as `rig up`, `rig down`, `rig restore`, `rig bundle install` and seat stop or
-handover ask through a session `PreToolUse` hook. Their literal help forms, such
+handover ask through a session `PreToolUse` hook, and so do the commands that choose
+or answer a permission (`rig seat set-permissions`, `rig seat decide-permission` and
+`rig policy apply`). Their literal help forms, such
 as `rig down --help`, `rig bundle install -h` and `rig help down`, run without
 that lifecycle prompt. Native personal, project and managed deny/ask rules still
 apply; OpenRig does not remove or override them.
