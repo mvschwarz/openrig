@@ -243,7 +243,7 @@ describe("no one to ask: nothing is decided, and the native prompt carries on", 
     const f = fixture({ owner: null, people: ["mike"] });
     const submitted = await f.submit();
     expect(submitted).toMatchObject({ status: 200, body: { ok: true, state: "not_asked" } });
-    expect(String(submitted.body.reason)).toContain("no one is chosen for this seat (rig seat set-permissions-to) and its work carries no return route on this host, so no one is asked by implication");
+    expect(String(submitted.body.reason)).toContain("No one is chosen for this seat (rig seat set-permissions-to) and its work carries no return route on this host, so no one is asked by implication; the prompt goes through the seat's usual escalation instead");
     expect(f.asks()).toHaveLength(0);
     expect(f.rowsTo(PERSON)).toBe(0);
     // No open native ask, so the wake ladder's prompt alert and routed relay aren't held.
