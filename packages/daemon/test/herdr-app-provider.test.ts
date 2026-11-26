@@ -711,10 +711,39 @@ describe("HerdrAppProvider core placement: no window on this machine, a herdr-co
     const closed = await provider.closeView(opened.space!.id);
     expect(closed.notes?.join(" ")).toContain("dev.qa · S1: its viewer t11 is a plain shell now; OpenRig left it running, close its tab.");
     // A shell's tab stays: the note doesn't say the app removes it.
-    expect(closed.notes?.join(" ")).toContain("removes the tabs of the viewers OpenRig ended, not the shells', when it next refreshes");
+    expect(closed.notes?.join(" ")).toContain("removes the tabs of the viewers OpenRig ended, not those left running, when it next refreshes");
     expect(closed.notes?.join(" ")).not.toContain("removes its tabs");
     expect(world.terminals.get("t11")!.state).toBe("live");
     expect(world.log.some((e) => e.startsWith("kill:"))).toBe(false);
+  });
+
+  it("a core viewer that became a shell since the last check is left running on close: its tab isn't said to go, and the view's folder stays", async () => {
+    makeProvider({ hostname: "box" });
+    const opened = await coreOpen([pane("dev.build@demo"), pane("dev.qa@demo")]);
+    const folder = join(home, "spaces", `demo-${opened.space!.id}`);
+    world.terminals.get("t11")!.argv = ["/bin/bash"]; // core lost its program after the last reconcile
+    world.log = [];
+    const closed = await provider.closeView(opened.space!.id);
+    const said = closed.notes?.join(" ") ?? "";
+    expect(said).toContain("Viewer t11 was left in place: it can't be verified as this OpenRig's.");
+    expect(said).toContain("removes the tabs of the viewers OpenRig ended, not those left running, when it next refreshes");
+    expect(said).not.toContain("removes its tabs");
+    expect([world.terminals.get("t10")!.state, world.terminals.get("t11")!.state]).toEqual(["finished", "live"]);
+    expect(world.log).not.toContain("kill:t11");
+    // The shell's working directory is the view's folder: it isn't removed under it.
+    expect(existsSync(folder)).toBe(true);
+  });
+
+  it("a core view's folder stays while a viewer the close couldn't end yet still runs in it", async () => {
+    makeProvider({ hostname: "box" });
+    const opened = await coreOpen([pane("dev.build@demo")]);
+    const folder = join(home, "spaces", `demo-${opened.space!.id}`);
+    world.coreDown = true;
+    const closed = await provider.closeView(opened.space!.id);
+    expect(closed.notes?.join(" ")).toContain("core could not be asked");
+    expect(closed.notes?.join(" ")).not.toContain("removes its tabs");
+    expect(world.terminals.get("t10")!.state).toBe("live");
+    expect(existsSync(folder)).toBe(true);
   });
 
   it("a failed core start is rolled back by ending what started, with no layout write", async () => {

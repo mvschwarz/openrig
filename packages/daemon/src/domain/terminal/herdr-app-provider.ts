@@ -333,14 +333,19 @@ export class HerdrAppProvider implements TerminalProvider {
       const view = state.views.find((v) => v.id === viewId);
       if (!view) return fail("view_not_found", `No Rig view ${viewId} in ${this.deps.files.appHome}.`);
       this.deps.ownWork?.();
-      const notes = await this.remove(state, [viewId], []);
+      const left = new Set<string>();
+      const notes = await this.remove(state, [viewId], [], { left });
       if (view.placement === "core") {
         const host = this.host();
         const shells = view.viewers.filter((viewer) => viewer.state === "replaced");
         for (const shell of shells) notes.push(`${shell.label}: its viewer ${shell.terminal} is a plain shell now; OpenRig left it running, close its tab.`);
-        notes.push(`This view was placed in herdr-core on ${host}. A herdr-app connected to ${host} removes ${shells.length ? "the tabs of the viewers OpenRig ended, not the shells'," : "its tabs"} when it next refreshes; OpenRig can't see that window.`);
-        // The view's own folder, once nothing of OpenRig's runs in it (rmdir leaves a folder that isn't empty).
-        if (!shells.length) await rmdir(this.spaceFolder(view)).catch(() => {});
+        // Still running after the close: the shells, any viewer this close found unverifiable (a shell since the last
+        // check), and any it couldn't end yet.
+        const pending = new Set(state.pendingEnds.map((p) => p.nonce));
+        const running = view.viewers.some((viewer) => viewer.state === "replaced" || left.has(viewer.nonce) || pending.has(viewer.nonce));
+        notes.push(`This view was placed in herdr-core on ${host}. A herdr-app connected to ${host} removes ${running ? "the tabs of the viewers OpenRig ended, not those left running," : "its tabs"} when it next refreshes; OpenRig can't see that window.`);
+        // The view's own folder, once nothing of OpenRig's runs in it: a shell's working directory is never removed under it.
+        if (!running) await rmdir(this.spaceFolder(view)).catch(() => {});
       }
       return { provider: HERDR_APP_PROVIDER, ok: true, opened: [], absent: [], degraded: [], pages: 0, notes };
     });
@@ -726,9 +731,10 @@ export class HerdrAppProvider implements TerminalProvider {
   /**
    * Remove whole views and single viewers. The file is rewritten first; a viewer is ended only once the app has
    * acknowledged a revision without it (or the Rig layout is not shown, so the app reads the new file when it is),
-   * and only if it is verifiably this OpenRig's. Returns notes for anything left in place.
+   * and only if it is verifiably this OpenRig's. Returns notes for anything left in place; `left` collects the nonces of
+   * viewers left running because they couldn't be verified.
    */
-  private async remove(state: ClientState, viewIds: readonly string[], cells: readonly string[], opts: { neverWritten?: boolean } = {}): Promise<string[]> {
+  private async remove(state: ClientState, viewIds: readonly string[], cells: readonly string[], opts: { neverWritten?: boolean; left?: Set<string> } = {}): Promise<string[]> {
     const removals: Removal[] = [];
     const since = this.now();
     let touchesLayout = false;
@@ -752,7 +758,7 @@ export class HerdrAppProvider implements TerminalProvider {
       // Only core-placed viewers: no layout file refers to them, so they end directly (verified, as any other).
       state.pendingEnds.push(...removals.map((r) => ({ ...r, revision: "unwritten" })));
       await this.deps.files.save(state);
-      return this.endPending(state);
+      return this.endPending(state, opts.left);
     }
     const written = await this.write(state);
     if (!written.ok) {
@@ -775,12 +781,13 @@ export class HerdrAppProvider implements TerminalProvider {
     }
     state.pendingEnds.push(...removals.map((r) => ({ ...r, revision: written.revision })));
     await this.deps.files.save(state);
-    notes.push(...await this.endPending(state));
+    notes.push(...await this.endPending(state, opts.left));
     return notes;
   }
 
-  /** End pending viewers whose removal the app has applied. Uncertain ones stay pending (and running). */
-  private async endPending(state: ClientState): Promise<string[]> {
+  /** End pending viewers whose removal the app has applied. Uncertain ones stay pending (and running); `left` collects
+   *  the nonces of those left running because they couldn't be verified as this OpenRig's. */
+  private async endPending(state: ClientState, left?: Set<string>): Promise<string[]> {
     if (!state.pendingEnds.length) return [];
     const notes: string[] = [];
     const pending = state.pendingEnds;
@@ -806,6 +813,7 @@ export class HerdrAppProvider implements TerminalProvider {
     for (const end of safe) {
       const verdict = await this.endVerified(end);
       if (verdict.kept) kept.push(end);
+      if (verdict.left) left?.add(end.nonce);
       if (verdict.note) notes.push(verdict.note);
     }
     state.pendingEnds = kept;
@@ -819,8 +827,9 @@ export class HerdrAppProvider implements TerminalProvider {
   }
 
   /** Ends a viewer only when the journal, its labels and its exact argv all say it is this OpenRig's. `kept`: still
-   *  pending (core couldn't be asked, or the kill failed), to be tried again. */
-  private async endVerified(end: Removal): Promise<{ kept: boolean; note?: string }> {
+   *  pending (core couldn't be asked, or the kill failed), to be tried again. `left`: it runs and isn't verifiably
+   *  this OpenRig's (a shell core gave its address, say), so it's left running and no longer tracked. */
+  private async endVerified(end: Removal): Promise<{ kept: boolean; left?: true; note?: string }> {
     let terminal = end.terminal;
     if (terminal === null) {
       const found = await this.deps.hc(["ls", "--json", "--label", `openrig.op=${end.nonce}`]);
@@ -847,7 +856,7 @@ export class HerdrAppProvider implements TerminalProvider {
     const ours = t.labels?.["openrig.role"] === "viewer" && t.labels?.["openrig.op"] === end.nonce
       && t.labels?.["openrig.daemon"] === this.deps.daemonInstance
       && JSON.stringify(t.argv) === JSON.stringify(end.argv);
-    if (!ours) return { kept: false, note: `Viewer ${terminal} was left in place: it can't be verified as this OpenRig's.` };
+    if (!ours) return { kept: false, left: true, note: `Viewer ${terminal} was left in place: it can't be verified as this OpenRig's.` };
     const killed = await this.deps.hc(["kill", terminal]);
     if (killed.exit === 0) await this.closeGate(end.nonce);
     return killed.exit === 0 ? { kept: false } : { kept: true, note: `Viewer ${terminal} could not be ended yet: ${killed.error?.message ?? `hc exited ${killed.exit}`}.` };
