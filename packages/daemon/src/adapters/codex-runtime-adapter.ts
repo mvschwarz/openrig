@@ -809,8 +809,19 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           };
           for (const keySource of keySources) {
             const prefix = `${keySource}:${CODEX_HOOK_EVENT_KEY_LABEL[event]}:`;
+            // A person's disable of OpenRig's group is a choice about OpenRig's activity, so it waits at the position the
+            // group comes back to (after the kept groups); its trust and any other state leave with the group.
+            const disabled = groups.some((group, index) => isOpenRigActivityGroup(group)
+              && codexHookStateOf(expected)[`${prefix}${index}:0`]?.enabled === false);
             config = rekeyCodexHookStateText(config, prefix, newIndexOf);
             if (expected.hooks?.state) expected.hooks.state = rekeyCodexHookState(expected.hooks.state, prefix, newIndexOf);
+            if (disabled) {
+              // Free after the move: a kept group lands below kept.length, and stale state sits at or beyond groups.length.
+              const returnKey = `${prefix}${kept.length}:0`;
+              config = upsertCodexHookDisabled(config, returnKey);
+              const state = ((expected.hooks ??= {}).state ??= {});
+              state[returnKey] = { ...state[returnKey], enabled: false };
+            }
           }
           if (kept.length > 0) document.hooks[event] = kept.map((index) => groups[index]!);
           else delete document.hooks[event];
