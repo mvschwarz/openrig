@@ -100,8 +100,12 @@ export async function viewerTerminalEnv(): Promise<NodeJS.ProcessEnv | undefined
       const at = entry.indexOf("=");
       return at > 0 ? [[entry.slice(0, at), entry.slice(at + 1)]] : [];
     }));
-    return inHerdr(env) || inRex(env) || inHerdrApp(env) || inHerdrCoreOnly(env)
-      ? Object.fromEntries(MARKER_KEYS.flatMap(key => env[key] === undefined ? [] : [[key, env[key]]])) : undefined;
+    const core = inHerdrApp(env) || inHerdrCoreOnly(env);
+    // A herdr-core client's app home comes from its own HOME when it sets neither HERDR_APP_HOME nor XDG_CONFIG_HOME, and
+    // HOME isn't a marker: carry the home it resolved, so the open targets this client's app rather than the TUI's.
+    return inHerdr(env) || inRex(env) || core
+      ? { ...Object.fromEntries(MARKER_KEYS.flatMap(key => env[key] === undefined ? [] : [[key, env[key]]])), ...(core ? { HERDR_APP_HOME: herdrAppHome(env) } : {}) }
+      : undefined;
   } catch { return undefined; }
 }
 
