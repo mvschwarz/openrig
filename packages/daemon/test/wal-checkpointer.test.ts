@@ -130,6 +130,55 @@ describe("startWalCheckpointer", () => {
     expect(log()).toBeGreaterThanOrEqual(8);
   });
 
+  it("a poll that is told busy is no reading: the cap does not end on it", async () => {
+    const { db, file } = fileDb(8);
+    // The worker's own source, with its size check answering "busy, -1, -1" (what SQLite gives a NOOP checkpoint that
+    // meets a writer changing the WAL's header) on every poll after the one that saw the WAL pass the cap.
+    const check = 'const [wal] = db.pragma("wal_checkpoint(NOOP)");';
+    const spawn = (source: URL, options: ConstructorParameters<typeof Worker>[1]) => {
+      const text = decodeURIComponent(source.href.slice("data:text/javascript,".length));
+      expect(text).toContain(check);
+      const busy = text
+        .replace(check, 'const [real] = db.pragma("wal_checkpoint(NOOP)"); if (real.log >= workerData.capPages) seenOver += 1; const wal = seenOver > 1 ? { busy: 1, log: -1, checkpointed: -1 } : real;')
+        .replace("let overCap = false;", "let overCap = false; let seenOver = 0;");
+      return new Worker(new URL(`data:text/javascript,${encodeURIComponent(busy)}`), options);
+    };
+    track(await startWalCheckpointer(db, { pollMs: 20, capFactor: 4, spawn }));
+    const reader = createDb(file);
+    cleanups.push(() => { if (reader.open) reader.close(); });
+    reader.exec("BEGIN");
+    reader.prepare("SELECT count(*) FROM t").get();
+    insertPages(db, 40); // past the cap of 4 x 8 pages, pinned
+    await waitFor(() => pragma(db, "wal_autocheckpoint") === 8);
+    await sleep(200); // ten busy polls
+    expect(pragma(db, "wal_autocheckpoint")).toBe(8);
+  });
+
+  it("a second stop() after the wait ran out does not wait on a worker thread that won't end", async () => {
+    const { db } = fileDb(64);
+    // Stands in for a worker inside a long fsync: starts, never answers "stop", and its terminate() never resolves.
+    const stuck = new URL(`data:text/javascript,${encodeURIComponent(`
+      import { parentPort } from "node:worker_threads";
+      parentPort.on("message", () => {});
+      parentPort.postMessage({ type: "ready" });
+    `)}`);
+    const spawn = (_source: URL, options: ConstructorParameters<typeof Worker>[1]) => {
+      const worker = new Worker(stuck, options);
+      const terminate = worker.terminate.bind(worker);
+      worker.terminate = () => new Promise<number>(() => {});
+      cleanups.push(async () => { await terminate(); });
+      return worker;
+    };
+    const checkpointer = await startWalCheckpointer(db, { spawn, stopTimeoutMs: 50 });
+    expect(checkpointer?.active).toBe(true);
+    await checkpointer!.stop(); // the wait runs out
+    expect(checkpointer!.active).toBe(false);
+    const began = Date.now();
+    await checkpointer!.stop();
+    expect(Date.now() - began).toBeLessThan(1000);
+    expect(pragma(db, "wal_autocheckpoint")).toBe(64);
+  });
+
   it("stop() gives the main connection its own threshold back and is safe to repeat", async () => {
     const { db } = fileDb(64);
     const checkpointer = await startWalCheckpointer(db, { pollMs: 20 });

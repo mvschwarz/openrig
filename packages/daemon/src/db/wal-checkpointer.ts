@@ -84,6 +84,10 @@ let lastLog = 0;
 const poll = () => {
   try {
     const [wal] = db.pragma("wal_checkpoint(NOOP)");
+    // A poll that meets a writer in the middle of changing the WAL's header is told "busy" and given -1 for both
+    // counts, without an error. That is no reading: taking -1 for a short WAL would end the cap while the WAL is
+    // still long.
+    if (wal.busy || wal.log < 0) return;
     const restarted = wal.log < lastLog;
     lastLog = wal.log;
     if (overCap ? wal.log < workerData.thresholdPages || (restarted && wal.log < workerData.capPages) : wal.log >= workerData.capPages) {
@@ -119,6 +123,8 @@ export interface WalCheckpointerOptions {
   warn?: (message: string) => void;
   /** The cap in multiples of the threshold; WAL_CAP_FACTOR by default. */
   capFactor?: number;
+  /** How long stop() waits for the worker to close its connection; tests shorten it. */
+  stopTimeoutMs?: number;
   /** Starts the worker thread; tests replace it to reach the worker or to stand in for it. */
   spawn?: (source: URL, options: WorkerOptions) => Worker;
 }
@@ -138,7 +144,7 @@ export async function startWalCheckpointer(db: Database.Database, opts: WalCheck
   const pollMs = opts.pollMs ?? CHECKPOINT_POLL_MS;
 
   let active = false;
-  let stopping = false;
+  let stopping: Promise<void> | undefined;
   let warned = false;
   let closedWatch: ReturnType<typeof setInterval> | undefined;
   const restore = () => {
@@ -172,15 +178,19 @@ export async function startWalCheckpointer(db: Database.Database, opts: WalCheck
   let stopped: () => void = () => {};
   const stoppedPromise = new Promise<void>((resolve) => { stopped = resolve; });
 
-  async function stop(): Promise<void> {
-    if (stopping) return stoppedPromise;
-    stopping = true;
+  // Every call gets the one stop, wait included: a second call made after the wait ran out must not wait on a worker
+  // thread that is still inside its fsync.
+  function stop(): Promise<void> {
+    stopping ??= stopOnce();
+    return stopping;
+  }
+  async function stopOnce(): Promise<void> {
     clearInterval(closedWatch);
     worker.postMessage("stop");
     // A checkpoint in flight on a slow disk can outlast the wait. Shutdown goes on without it: the thread ends when
     // its fsync returns, and a checkpoint cut short is as safe as a crash during one (the WAL still holds every frame).
     let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([stoppedPromise, new Promise<void>((resolve) => { timer = setTimeout(resolve, STOP_TIMEOUT_MS); })]);
+    await Promise.race([stoppedPromise, new Promise<void>((resolve) => { timer = setTimeout(resolve, opts.stopTimeoutMs ?? STOP_TIMEOUT_MS); })]);
     clearTimeout(timer);
     void worker.terminate().catch(() => undefined);
     if (active) restore();
