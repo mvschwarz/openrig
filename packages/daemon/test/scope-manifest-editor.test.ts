@@ -6,6 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import YAML from "yaml";
+import { findFrontmatterBlock } from "../src/domain/frontmatter.js";
 import { readMissionStatus } from "../src/routes/missions.js";
 import {
   ManifestEditError,
@@ -277,6 +278,22 @@ describe("QA: legacy YAML status edits and ambiguous wave shapes", () => {
 
 
 describe("QA: legacy status readers use the same YAML field as the writer", () => {
+  it.each([
+    ["--- ", "\n"], ["----", "\n"], ["---suffix", "\n"], ["--- ", "\r\n"],
+  ])("reads and writes a legacy closing prefix %j with newline %j, preserving its body suffix", (closing, newline) => {
+    const missionPath = path.join(dir, "legacy");
+    const tail = `${closing.slice(3)}${newline}# Body${newline}---${newline}`;
+    const at = file("legacy/SPEC.md", `---${newline}status: planned # keep comment${newline}${closing}${newline}# Body${newline}---${newline}`);
+    expect(servedMissionStatus(missionPath).status).toBe("planned");
+    expect(readMissionStatus(missionPath)).toBe("planned");
+    expect(writeMissionStatus(missionPath, "active")).toBe("written");
+    const written = fs.readFileSync(at, "utf8"), block = findFrontmatterBlock(written)!;
+    expect(YAML.parse(block.yaml)).toEqual({ status: "active" });
+    expect(written.slice(block.bodyStart)).toBe(tail);
+    expect(servedMissionStatus(missionPath).status).toBe("active");
+    expect(writeMissionStatus(missionPath, "active")).toBe("unchanged");
+  });
+
   it("does not rewrite the bytes or mtime of an already selected quoted status", () => {
     const missionPath = path.join(dir, "legacy");
     const original = '---\nstatus: "active" # retain author style\n---\n# Body\n';

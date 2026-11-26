@@ -722,7 +722,7 @@ async function writeStatusThroughDaemon(editor: ScopeManifest, mission: MissionI
     throw new ScopeCliError({ fact: `The daemon didn't write the status (${data.error}): ${data.message ?? "no detail"}.`, consequence: "Nothing was written.", action: "Fix the named issue and run this again." });
   }
   throw new ScopeCliError({ fact: `The running daemon answered ${res.status} without a status result.`,
-    consequence: "No local fallback was written; the daemon's write outcome is unknown.", action: "Check the daemon's response before trying again." });
+    consequence: "No local fallback was written; the daemon's write outcome is unknown.", action: "Run it again; a status that was already written is reported as unchanged." });
 }
 
 // ---------------------------------------------------------------------

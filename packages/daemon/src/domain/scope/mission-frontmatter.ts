@@ -1,18 +1,22 @@
+// The writer edits YAML nodes so comments, quoting, block scalars and nested fields survive. Writer readback,
+// the mission route and the slice sidecar share this parse (LOCKSTEP); invalid headers read no status and edits
+// fail untouched, with no lenient fallback. The shared span finder keeps the existing delimiter grammar.
 import fs from "node:fs";
 import { isMap, parseDocument, type Document } from "yaml";
+import { findFrontmatterBlock } from "../frontmatter.js";
 import { resolveNodeFile } from "./node-file.js";
 
 /** Parse only the YAML header; the Markdown body never goes through a YAML serializer. */
 export function legacyFrontmatter(text: string): { doc: Document; end: number } | null {
-  const match = text.match(/^---\r?\n((?:[\s\S]*?\r?\n)?)---(?=\r?\n|$)/);
-  if (!match) {
+  const block = findFrontmatterBlock(text);
+  if (!block) {
     if (/^---\r?\n/.test(text)) throw new Error("the YAML frontmatter has no closing delimiter");
     return null;
   }
-  const doc = parseDocument(match[1]!);
+  const doc = parseDocument(block.yaml);
   if (doc.errors.length) throw new Error(`it can't be parsed (${doc.errors[0]!.message})`);
   if (doc.contents !== null && !isMap(doc.contents)) throw new Error("the YAML frontmatter is not a mapping");
-  return { doc, end: match[0].length };
+  return { doc, end: block.bodyStart };
 }
 
 /** The top-level authored word, with YAML quoting, comments and nesting interpreted as the writer does. */

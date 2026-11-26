@@ -163,12 +163,9 @@ function computeMissionPath(slice: SliceListEntry): string {
   return path.resolve(slice.slicePath, "..", "..");
 }
 
-/** Slice 18 §3.5 — parse the `status` field from the mission README's
- *  frontmatter. Returns the string when present (no enum validation —
- *  v0 callers care primarily about the "complete" value but other
- *  workflow states may appear), or null when the README is missing /
- *  the field is absent. Powers the durable storytelling-filter for
- *  Getting Started complete-and-hide. */
+/** Read the top-level YAML status string from SPEC.md first, then README.md, with no enum validation.
+ *  Missing files/fields, invalid headers and non-string values read null. Shared with the slice sidecar
+ *  and writer readback; powers Getting Started's durable complete-and-hide filter. */
 export function readMissionStatus(missionPath: string): string | null {
   return readLegacyMissionStatus(missionPath);
 }

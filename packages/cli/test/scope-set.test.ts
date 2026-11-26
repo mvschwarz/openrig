@@ -295,6 +295,7 @@ describe("QA: an indeterminate daemon response is not permission to write locall
     const result = await run(["mission", "set", "release-1.0.0", "--status", "active"]);
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toContain("without a status result");
+    expect(result.stderr).toContain("Run it again; a status that was already written is reported as unchanged.");
     expect(fs.readFileSync(missionFile(), "utf8")).toBe(before);
   });
 
@@ -309,4 +310,14 @@ describe("QA: an indeterminate daemon response is not permission to write locall
     expect(written.metadata.status).toBe("planned");
     expect(written.arrangement.waves.some((wave: { id: string }) => wave.id === "w1")).toBe(true);
   });
+});
+
+it("writes a legacy status whose closing delimiter has a trailing space through the public command", async () => {
+  fs.unlinkSync(missionFile());
+  const spec = path.join(mission(), "SPEC.md");
+  write(spec, "---\nid: OPR.1.0.0\nstatus: planned\n--- \n# Body\n");
+  const result = await run(["mission", "set", "release-1.0.0", "--status", "active", "--json"]);
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout).status).toMatchObject({ outcome: "written", served: { status: "active" } });
+  expect(fs.readFileSync(spec, "utf8")).toBe("---\nid: OPR.1.0.0\nstatus: active\n--- \n# Body\n");
 });
