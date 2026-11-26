@@ -45,6 +45,28 @@ export type SliceQueueCounts = Record<ObservedQueueState, number>;
 
 const KNOWN_QUEUE_STATES = new Set<string>(QUEUE_COUNT_STATES);
 
+/** Queue-derived state (#2729) for `GET /api/slices`, read beside the authored
+ *  `status` and never stored. Order of precedence among open rows is
+ *  blocked, then in-progress, then pending. `idle` means matched rows exist
+ *  and none is open; it does not say nobody is working on the slice. `none`
+ *  means no row matched. `unknown` means the counts could not be read, and is
+ *  never reported as `idle` or `none`.
+ */
+export const SLICE_QUEUE_DERIVED_STATES = ["blocked", "in-progress", "pending", "idle", "none", "unknown"] as const;
+export type SliceQueueDerivedState = (typeof SLICE_QUEUE_DERIVED_STATES)[number];
+
+/** Derive the queue state from observed counts. `null` or absent counts are `unknown`. */
+export function deriveSliceQueueState(counts: SliceQueueCounts | null | undefined): SliceQueueDerivedState {
+  if (!counts) return "unknown";
+  if (counts.blocked > 0) return "blocked";
+  if (counts["in-progress"] > 0) return "in-progress";
+  if (counts.pending > 0) return "pending";
+  for (const state of QUEUE_COUNT_STATES) {
+    if (counts[state] > 0) return "idle";
+  }
+  return "none";
+}
+
 function zeroQueueCounts(): SliceQueueCounts {
   return {
     pending: 0,
@@ -58,12 +80,69 @@ function zeroQueueCounts(): SliceQueueCounts {
   };
 }
 
-function canonicalPhysicalPath(absPath: string): string | null {
+type PhysicalPathResolution =
+  | { ok: true; path: string }
+  | { ok: false; missing: boolean; error: unknown };
+
+/** Physical path for queue-count keys. A symlinked root without `..` keeps its alias spelling,
+ *  and its target can itself contain `..` after another symlink, so use the native realpath. */
+function resolveCanonicalPhysicalPath(absPath: string): PhysicalPathResolution {
   try {
-    return fs.realpathSync(absPath);
-  } catch {
-    return null;
+    return { ok: true, path: fs.realpathSync.native(absPath) };
+  } catch (err) {
+    return { ok: false, missing: (err as NodeJS.ErrnoException).code === "ENOENT", error: err };
   }
+}
+
+function canonicalPhysicalPath(absPath: string): string | null {
+  const resolved = resolveCanonicalPhysicalPath(absPath);
+  return resolved.ok ? resolved.path : null;
+}
+
+export type ConfiguredRootResolution = {
+  identity: string;
+  physicalPath: string | null;
+  status: "ok" | "missing" | "unreadable";
+  captureError?: unknown;
+};
+
+/** The absolute identity and physical path of a configured root, used for the walk, the
+ *  duplicate check, project ownership, readiness, and every published path. A relative
+ *  spelling is made absolute from the working directory. The kernel applies a `..` component
+ *  to the directory a symlink points at, but `path.resolve` removes it from the text first,
+ *  so `/work/link/../missions` and `/work/missions` can be two directories. Every configured
+ *  root is resolved once with `fs.realpathSync.native`: a `..` root takes the resolved
+ *  physical path as its identity, while a root without `..` keeps its normalized spelling as
+ *  its identity alongside the captured physical path. If resolution fails, its spelling is
+ *  retained only as identity metadata while its status marks it missing (`ENOENT`) or
+ *  unreadable so walks, route ownership, and project readiness never re-resolve or walk an
+ *  unresolved root during the same operation. */
+function resolveConfiguredRoot(root: string): ConfiguredRootResolution {
+  if (root.length === 0) {
+    return {
+      identity: root,
+      physicalPath: null,
+      status: "missing",
+      captureError: Object.assign(new Error("ENOENT: no such file or directory, scandir ''"), { code: "ENOENT" }),
+    };
+  }
+  const absolute = path.isAbsolute(root) ? root : process.cwd() + path.sep + root;
+  const hasDotDot = absolute.split(/[\\/]+/).includes("..");
+  const lookupPath = hasDotDot ? absolute : path.resolve(absolute);
+  const resolved = resolveCanonicalPhysicalPath(lookupPath);
+  if (!resolved.ok) {
+    return {
+      identity: lookupPath,
+      physicalPath: null,
+      status: resolved.missing ? "missing" : "unreadable",
+      captureError: resolved.error,
+    };
+  }
+  return {
+    identity: hasDotDot ? resolved.path : lookupPath,
+    physicalPath: resolved.path,
+    status: "ok",
+  };
 }
 
 function parseTypedQueueScope(rawTags: string | null | undefined): {
@@ -215,6 +294,8 @@ export interface SliceIndexerOpts {
 
 interface CachedListing {
   entries: SliceListEntry[];
+  physicalPathsBySlicePath: ReadonlyMap<string, string>;
+  rootsKey: string | null;
   expiresAt: number;
 }
 
@@ -229,6 +310,7 @@ interface CachedSlice {
 interface SliceIdAliases {
   nameById: Map<string, string>;
   idByName: Map<string, string>;
+  rootsKey: string | null;
   expiresAt: number;
 }
 
@@ -240,6 +322,7 @@ interface SliceLocation {
   name: string;
   missionId: string | null;
   slicePath: string;
+  physicalSlicePath: string;
 }
 
 /** the per-generation batch membership index. Replaces the
@@ -439,8 +522,9 @@ export class SliceIndexer {
   /** `projectId` and its declared former ids: the tags this indexer's project membership accepts. */
   readonly projectIds: readonly string[];
   readonly missionId?: string;
-  readonly slicesRoot: string;
-  readonly additionalSliceRoots: string[];
+  private readonly configuredSlicesRoot: string;
+  private readonly configuredAdditionalSliceRoots: string[];
+  private resolvedRootsForOperation: ConfiguredRootResolution[] | null = null;
   readonly dogfoodEvidenceRoot: string | null;
   /** Workflows in Spec Library v0: exposed read-only so the slices
    *  route's `boundToWorkflow` lens filter can call
@@ -474,12 +558,22 @@ export class SliceIndexer {
     this.projectId = opts.projectId;
     this.projectIds = opts.projectId ? [opts.projectId, ...(opts.projectAliases ?? [])] : [];
     this.missionId = opts.missionId;
-    this.slicesRoot = opts.slicesRoot;
-    this.additionalSliceRoots = opts.additionalSliceRoots ?? [];
+    this.configuredSlicesRoot = opts.slicesRoot;
+    this.configuredAdditionalSliceRoots = opts.additionalSliceRoots ?? [];
     this.catalogMissionsRootsSource = opts.catalogMissionsRoots ?? [];
     this.dogfoodEvidenceRoot = opts.dogfoodEvidenceRoot;
     this.db = opts.db;
     this.cacheTtlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+  }
+
+  /** Current filesystem identity of the configured root, resolved at read time. */
+  get slicesRoot(): string {
+    return (this.resolvedRootsForOperation ?? this.resolveConfiguredRoots())[0]?.identity ?? "";
+  }
+
+  /** Current filesystem identities of the configured additional roots. */
+  get additionalSliceRoots(): string[] {
+    return (this.resolvedRootsForOperation ?? this.resolveConfiguredRoots()).slice(1).map((root) => root.identity);
   }
 
   /** The walkable catalog roots (catalogRoots().roots). */
@@ -495,9 +589,76 @@ export class SliceIndexer {
     catch { return { roots: [], unavailable: [] }; }
   }
 
+  /** Configured roots with captured identity, physical path, and status for the current operation. */
+  configuredRootResolutions(): ReadonlyArray<ConfiguredRootResolution> {
+    return (this.resolvedRootsForOperation ?? this.resolveConfiguredRoots()).map((root) => ({ ...root }));
+  }
+
+  /** Capture configured roots once for an operation that spans async yields. */
+  captureConfiguredRoots(): ConfiguredRootResolution[] {
+    return this.resolvedRootsForOperation
+      ? this.resolvedRootsForOperation.map((root) => ({ ...root }))
+      : this.resolveConfiguredRoots();
+  }
+
+  /** Run a synchronous step with a previously captured root snapshot, without holding it across awaits. */
+  withCapturedRoots<T>(roots: ReadonlyArray<ConfiguredRootResolution>, fn: () => T): T {
+    const previous = this.resolvedRootsForOperation;
+    this.resolvedRootsForOperation = roots.map((root) => ({ ...root }));
+    try {
+      return fn();
+    } finally {
+      this.resolvedRootsForOperation = previous;
+    }
+  }
+
+  /** Map a published path under a captured configured root identity to the corresponding path
+   *  under that root's captured physical target so reads never re-traverse a symlink alias. */
+  physicalPathFor(publishedPath: string): string {
+    const normalized = path.resolve(publishedPath);
+    const rootsKey = this.capturedRootsKey();
+    if (
+      this.listingCache
+      && this.listingCache.expiresAt > Date.now()
+      && this.listingCache.rootsKey === rootsKey
+    ) {
+      const cached = this.listingCache.physicalPathsBySlicePath.get(normalized);
+      if (cached !== undefined) return cached;
+    }
+    const roots = this.sliceRootResolutions();
+    if (roots.length > 1) {
+      const location = this.readSliceLocations().find((candidate) => path.resolve(candidate.slicePath) === normalized);
+      if (location) return location.physicalSlicePath;
+    }
+    let bestMatch: { identity: string; physicalPath: string } | null = null;
+    for (const root of roots) {
+      if (normalized !== root.identity) {
+        const prefix = root.identity.endsWith(path.sep) ? root.identity : `${root.identity}${path.sep}`;
+        if (!normalized.startsWith(prefix)) continue;
+      }
+      if (!bestMatch || root.identity.length > bestMatch.identity.length) {
+        bestMatch = root;
+      }
+    }
+    if (!bestMatch || bestMatch.identity === bestMatch.physicalPath) return publishedPath;
+    const relative = path.relative(bestMatch.identity, normalized);
+    return relative.length === 0 ? bestMatch.physicalPath : path.join(bestMatch.physicalPath, relative);
+  }
+
+  /** Keep one configured-root snapshot across a synchronous compound read. */
+  withResolvedRoots<T>(fn: () => T): T {
+    if (this.resolvedRootsForOperation !== null) return fn();
+    this.resolvedRootsForOperation = this.resolveConfiguredRoots();
+    try {
+      return fn();
+    } finally {
+      this.resolvedRootsForOperation = null;
+    }
+  }
+
   /** Returns true when any configured slice root exists on disk. */
   isReady(): boolean {
-    return this.sliceRoots().some((root) => this.isDirectory(root));
+    return this.sliceRootResolutions().some((root) => this.isDirectory(root.physicalPath));
   }
 
   /** The explicit COMPOSITE-OPERATION scope: a
@@ -574,7 +735,7 @@ export class SliceIndexer {
       if (entry.missionId) indexedMissionIds.add(entry.missionId);
     }
     const statuses: Record<string, { authoredStatus: string | null }> = {};
-    for (const root of this.sliceRoots()) {
+    for (const { physicalPath: root } of this.sliceRootResolutions()) {
       let entries: fs.Dirent[];
       try {
         entries = fs.readdirSync(root, { withFileTypes: true });
@@ -614,10 +775,15 @@ export class SliceIndexer {
     if (!this.isReady()) return [];
     if (this.batchDepth === 0) this.reconcileComposition();
     const now = Date.now();
-    if (this.listingCache && this.listingCache.expiresAt > now) {
+    const rootsKey = this.capturedRootsKey();
+    if (this.listingCache && this.listingCache.expiresAt > now && this.listingCache.rootsKey === rootsKey) {
       return this.listingCache.entries;
     }
     const locations = this.readSliceLocations();
+    const physicalPathsBySlicePath = new Map<string, string>();
+    for (const location of locations) {
+      physicalPathsBySlicePath.set(path.resolve(location.slicePath), location.physicalSlicePath);
+    }
     // ONE batch membership index serves this whole rebuild (the <=4 LIKE-
     // execution load contract), then drops so later uncached operations
     // read current queue state (operation scoping) — unless
@@ -629,7 +795,7 @@ export class SliceIndexer {
     } finally {
       if (this.batchDepth === 0) this.membershipIndex = null;
     }
-    this.listingCache = { entries, expiresAt: now + this.cacheTtlMs };
+    this.listingCache = { entries, physicalPathsBySlicePath, rootsKey, expiresAt: now + this.cacheTtlMs };
     return entries;
   }
 
@@ -674,31 +840,52 @@ export class SliceIndexer {
    *  A standalone get() otherwise reads every queue row, bodies included, in one synchronous stretch. The record is
    *  then built exactly as get() builds it, from that index. Inside an open withMembershipBatch scope, or when the
    *  read can't run cooperatively (a transaction, a memory database or a non-WAL file), this is get(). */
-  async getCooperatively(name: string): Promise<SliceRecord | null> {
-    if (this.batchDepth > 0 || !this.isReady()) return this.get(name);
-    this.reconcileComposition();
-    const cached = this.detailCache.get(name);
-    const file = cached && cached.expiresAt > Date.now() ? null : cooperativeReadFile(this.db);
-    if (!file || !this.findSliceLocation(name)) return this.get(name);
-    return this.withCooperativeMembership(file, new Set([name]), () => this.get(name));
+  async getCooperatively(name: string, roots?: ReadonlyArray<ConfiguredRootResolution>): Promise<SliceRecord | null> {
+    const captured = roots ?? this.captureConfiguredRoots();
+    const withRoots = <TValue>(step: () => TValue): TValue => this.withCapturedRoots(captured, step);
+    const plan = withRoots(() => {
+      if (this.batchDepth > 0 || !this.isReady()) return { immediate: true as const, record: this.get(name) };
+      this.reconcileComposition();
+      const cached = this.detailCache.get(name);
+      const file = cached && cached.expiresAt > Date.now() ? null : cooperativeReadFile(this.db);
+      if (!file || !this.findSliceLocation(name)) return { immediate: true as const, record: this.get(name) };
+      return { immediate: false as const, file };
+    });
+    if (plan.immediate) return plan.record;
+    return this.withCooperativeMembership(plan.file, new Set([name]), () => withRoots(() => this.get(name)), captured);
   }
 
   /** withMembershipBatch(), for a route whose batch starts with list(): when the listing isn't cached, the batch's
    *  membership index is read first as getCooperatively reads it, then `fn` runs in the batch with that index. */
-  async withMembershipBatchCooperatively<T>(fn: () => T): Promise<T> {
-    if (this.batchDepth > 0 || !this.isReady()) return this.withMembershipBatch(fn);
-    this.reconcileComposition();
-    const file = this.listingCache && this.listingCache.expiresAt > Date.now() ? null : cooperativeReadFile(this.db);
-    if (!file) return this.withMembershipBatch(fn);
-    return this.withCooperativeMembership(file, null, () => this.withMembershipBatch(fn));
+  async withMembershipBatchCooperatively<T>(fn: () => T, roots?: ReadonlyArray<ConfiguredRootResolution>): Promise<T> {
+    const captured = roots ?? this.captureConfiguredRoots();
+    const withRoots = <TValue>(step: () => TValue): TValue => this.withCapturedRoots(captured, step);
+    const plan = withRoots(() => {
+      if (this.batchDepth > 0 || !this.isReady()) return { immediate: true as const, value: this.withMembershipBatch(fn) };
+      this.reconcileComposition();
+      const file = this.listingCache
+        && this.listingCache.expiresAt > Date.now()
+        && this.listingCache.rootsKey === this.capturedRootsKey()
+        ? null
+        : cooperativeReadFile(this.db);
+      if (!file) return { immediate: true as const, value: this.withMembershipBatch(fn) };
+      return { immediate: false as const, file };
+    });
+    if (plan.immediate) return plan.value;
+    return this.withCooperativeMembership(plan.file, null, () => withRoots(() => this.withMembershipBatch(fn)), captured);
   }
 
   /** Reads the membership index for `served` cooperatively, then runs `fn` with it as the next membership build. An
    *  invalidate() during the read's awaits makes that index older than the caches `fn` fills: the request is still
    *  answered from it, as of the read's start, and nothing it cached is kept. */
-  private async withCooperativeMembership<T>(file: string, served: Set<string> | null, fn: () => T): Promise<T> {
+  private async withCooperativeMembership<T>(
+    file: string,
+    served: Set<string> | null,
+    fn: () => T,
+    roots?: ReadonlyArray<ConfiguredRootResolution>,
+  ): Promise<T> {
     const invalidations = this.invalidations;
-    const index = await this.readMembershipIndexCooperatively(file, served);
+    const index = await this.readMembershipIndexCooperatively(file, served, roots);
     if (invalidations === this.invalidations) return this.withPreparedMembership(served, index, fn);
     try {
       return this.withPreparedMembership(served, index, fn);
@@ -719,9 +906,11 @@ export class SliceIndexer {
   }
 
   // Quiet reconciliation must notice new native membership before the legacy metadata TTL.
-  // This is a cache key over authored bytes and directory entries, not another scope parser.
+  // This is a cache key over physical roots, authored bytes and directory entries, not another scope parser.
   private reconcileComposition(): void {
-    const rows = this.sliceRoots().flatMap(root => {
+    const roots = this.sliceRootResolutions();
+    const rootIdentities = roots.map((root) => [root.identity, root.physicalPath]);
+    const rows = roots.flatMap(({ physicalPath: root }) => {
       if (!fs.existsSync(root)) return [];
       return fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory()).flatMap(entry => {
         const mission = path.join(root, entry.name), manifest = path.join(mission, "mission.yaml");
@@ -730,7 +919,7 @@ export class SliceIndexer {
         return [[manifest, fs.readFileSync(manifest, "utf8"), fs.existsSync(children) ? fs.readdirSync(children).sort() : []]];
       });
     });
-    const next = JSON.stringify(rows);
+    const next = JSON.stringify({ rootIdentities, rows });
     if (this.compositionBasis !== null && this.compositionBasis !== next) this.invalidate();
     this.compositionBasis = next;
   }
@@ -746,7 +935,7 @@ export class SliceIndexer {
    *  authored ID, unless a differently named mission in any configured root claims that ID. */
   missionTagKeys(missionId: string, slicePath?: string): string[] {
     const aliases = this.missionIdAliases();
-    const missionPath = slicePath ? this.missionPathOfSlice(missionId, slicePath) : null;
+    const missionPath = slicePath ? this.missionPathOfSlice(missionId, this.physicalPathFor(slicePath)) : null;
     const id = missionPath
       ? aliases.idByPath.get(missionPath)
       : aliases.idByName.get(missionId);
@@ -785,14 +974,19 @@ export class SliceIndexer {
     const targetsBySliceToken = new Map<string, TargetScope[]>();
     const visibleCountsByPath = new Map<string, SliceQueueCounts | null>();
     const projectIdsByPath = new Map<string, string | null>();
-    const canonicalPathsByInput = new Map<string, string | null>();
+    const canonicalPathsByInput = new Map<string, PhysicalPathResolution>();
     let physicalIdentityComplete = true;
-    const canonicalizeCountPath = (slicePath: string): string | null => {
+    const resolveCountPath = (slicePath: string): PhysicalPathResolution => {
       const inputPath = path.resolve(slicePath);
-      if (!canonicalPathsByInput.has(inputPath)) {
-        canonicalPathsByInput.set(inputPath, canonicalPhysicalPath(slicePath));
-      }
-      return canonicalPathsByInput.get(inputPath) ?? null;
+      const cached = canonicalPathsByInput.get(inputPath);
+      if (cached) return cached;
+      const resolved = resolveCanonicalPhysicalPath(slicePath);
+      canonicalPathsByInput.set(inputPath, resolved);
+      return resolved;
+    };
+    const canonicalizeCountPath = (slicePath: string): string | null => {
+      const resolved = resolveCountPath(slicePath);
+      return resolved.ok ? resolved.path : null;
     };
     const projectForPath = (slicePath: string): string | null => {
       const physicalPath = canonicalizeCountPath(slicePath);
@@ -807,13 +1001,15 @@ export class SliceIndexer {
     };
 
     for (const entry of entries) {
-      const physicalPath = canonicalizeCountPath(entry.slicePath);
-      if (!physicalPath) {
-        physicalIdentityComplete = false;
+      const readPath = this.physicalPathFor(entry.slicePath);
+      const resolved = resolveCountPath(readPath);
+      if (!resolved.ok) {
+        if (!resolved.missing) physicalIdentityComplete = false;
         result.set(entry.slicePath, null);
         continue;
       }
-      const projectId = entry.missionId ? projectForPath(entry.slicePath) : null;
+      const physicalPath = resolved.path;
+      const projectId = entry.missionId ? projectForPath(readPath) : null;
       const counts = entry.missionId && projectId ? zeroQueueCounts() : null;
       if (!visibleCountsByPath.has(physicalPath)) {
         visibleCountsByPath.set(physicalPath, counts);
@@ -848,7 +1044,7 @@ export class SliceIndexer {
     // first visible location that happens to share its directory name.
     const locationsByPath = new Map<string, SliceLocation>();
     for (const location of candidateLocations) {
-      const physicalPath = canonicalizeCountPath(location.slicePath);
+      const physicalPath = canonicalizeCountPath(location.physicalSlicePath);
       if (!physicalPath) {
         candidateScanComplete = false;
         continue;
@@ -872,7 +1068,7 @@ export class SliceIndexer {
     const pathsBySliceId = new Map<string, Set<string>>();
     for (const [physicalPath, location] of locationsByPath) {
       const id = this.readSliceIdForCounting(
-        location.slicePath,
+        location.physicalSlicePath,
         () => { candidateScanComplete = false; },
       );
       sliceIdsByPath.set(physicalPath, id);
@@ -885,7 +1081,7 @@ export class SliceIndexer {
     for (const [physicalPath, location] of locationsByPath) {
       const missionKeys = new Set<string>();
       if (location.missionId) {
-        const missionPath = this.missionPathOfSlice(location.missionId, location.slicePath);
+        const missionPath = this.missionPathOfSlice(location.missionId, location.physicalSlicePath);
         const canonicalMissionPath = missionPath ? canonicalizeCountPath(missionPath) : null;
         if (!canonicalMissionPath) {
           candidateScanComplete = false;
@@ -901,7 +1097,7 @@ export class SliceIndexer {
         sliceKeys.add(sliceId);
       }
       const target: TargetScope = {
-        projectId: projectForPath(location.slicePath),
+        projectId: projectForPath(location.physicalSlicePath),
         missionId: location.missionId,
         missionKeys,
         sliceKeys,
@@ -920,59 +1116,71 @@ export class SliceIndexer {
 
     if (targetsBySliceToken.size === 0) return result;
 
-    const columns = this.db.prepare(`PRAGMA table_info(queue_items)`).all() as Array<{ name: string }>;
-    if (columns.length === 0 || !columns.some((c) => c.name === "tags")) {
-      return result;
-    }
-
-    const countRow = (row: QueueCountRow): void => {
-      if (!KNOWN_QUEUE_STATES.has(row.state)) return;
-      const scope = parseTypedQueueScope(row.tags);
-      if (!scope || scope.projects.size > 1 || scope.slices.size === 0) return;
-      const taggedProject = scope.projects.values().next().value;
-      // A former id a catalogued project declares counts as that project (#3261).
-      const rowProject = taggedProject === undefined ? undefined : candidateOptions.canonicalProjectId?.(taggedProject) ?? taggedProject;
-      const firstSlice = scope.slices.values().next().value!;
-      const candidates = targetsBySliceToken.get(firstSlice);
-      if (!candidates) return;
-
-      let uniqueMatch: TargetScope | null = null;
-      for (const target of candidates) {
-        if (rowProject !== undefined && target.projectId !== rowProject) continue;
-        let allSlicesMatch = true;
-        for (const slice of scope.slices) {
-          if (!target.sliceKeys.has(slice)) {
-            allSlicesMatch = false;
-            break;
-          }
-        }
-        if (!allSlicesMatch) continue;
-        let allMissionsMatch = true;
-        for (const mission of scope.missions) {
-          if (!target.missionKeys.has(mission)) {
-            allMissionsMatch = false;
-            break;
-          }
-        }
-        if (!allMissionsMatch) continue;
-        if (uniqueMatch) {
-          uniqueMatch = null;
-          break;
-        }
-        uniqueMatch = target;
+    // The state-count read is a separate operation from the slice listing, which is
+    // already built by now. If it fails at any point (schema inspection, prepare or
+    // a row read part-way through), drop every partial counter and report null
+    // counts (derived state `unknown`) so the available slice rows still return.
+    // A failure of the listing itself is not caught here and propagates as before.
+    try {
+      const columns = this.db.prepare(`PRAGMA table_info(queue_items)`).all() as Array<{ name: string }>;
+      if (columns.length === 0 || !columns.some((c) => c.name === "tags")) {
+        // The queue cannot be read, so no row can be called absent. Report null
+        // counts (derived state `unknown`) instead of observed zero.
+        for (const slicePath of result.keys()) result.set(slicePath, null);
+        return result;
       }
 
-      if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) return;
-      uniqueMatch.counts[row.state as ObservedQueueState]++;
-    };
-    if (candidateOptions.deferRows) {
-      candidateOptions.deferRows(countRow);
-      return result;
+      const countRow = (row: QueueCountRow): void => {
+        if (!KNOWN_QUEUE_STATES.has(row.state)) return;
+        const scope = parseTypedQueueScope(row.tags);
+        if (!scope || scope.projects.size > 1 || scope.slices.size === 0) return;
+        const taggedProject = scope.projects.values().next().value;
+        // A former id a catalogued project declares counts as that project (#3261).
+        const rowProject = taggedProject === undefined ? undefined : candidateOptions.canonicalProjectId?.(taggedProject) ?? taggedProject;
+        const firstSlice = scope.slices.values().next().value!;
+        const candidates = targetsBySliceToken.get(firstSlice);
+        if (!candidates) return;
+
+        let uniqueMatch: TargetScope | null = null;
+        for (const target of candidates) {
+          if (rowProject !== undefined && target.projectId !== rowProject) continue;
+          let allSlicesMatch = true;
+          for (const slice of scope.slices) {
+            if (!target.sliceKeys.has(slice)) {
+              allSlicesMatch = false;
+              break;
+            }
+          }
+          if (!allSlicesMatch) continue;
+          let allMissionsMatch = true;
+          for (const mission of scope.missions) {
+            if (!target.missionKeys.has(mission)) {
+              allMissionsMatch = false;
+              break;
+            }
+          }
+          if (!allMissionsMatch) continue;
+          if (uniqueMatch) {
+            uniqueMatch = null;
+            break;
+          }
+          uniqueMatch = target;
+        }
+
+        if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) return;
+        uniqueMatch.counts[row.state as ObservedQueueState]++;
+      };
+      if (candidateOptions.deferRows) {
+        candidateOptions.deferRows(countRow);
+        return result;
+      }
+      const rows = this.db.prepare(QUEUE_COUNT_SQL).iterate() as Iterable<QueueCountRow>;
+      runSyncSite("slices.queue_counts_scan", () => {
+        for (const row of rows) countRow(row);
+      });
+    } catch {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
     }
-    const rows = this.db.prepare(QUEUE_COUNT_SQL).iterate() as Iterable<QueueCountRow>;
-    runSyncSite("slices.queue_counts_scan", () => {
-      for (const row of rows) countRow(row);
-    });
 
     return result;
   }
@@ -1028,22 +1236,27 @@ export class SliceIndexer {
       locations.push(location);
     };
 
-    for (const root of this.sliceRoots(additionalRoots)) {
+    const seenPhysicalRoots = new Set<string>();
+    for (const { identity, physicalPath } of this.sliceRootResolutions(additionalRoots, onReadError)) {
+      if (seenPhysicalRoots.has(physicalPath)) continue;
+      seenPhysicalRoots.add(physicalPath);
       let entries: fs.Dirent[];
       try {
-        entries = fs.readdirSync(root, { withFileTypes: true });
+        entries = fs.readdirSync(physicalPath, { withFileTypes: true });
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError?.();
         continue;
       }
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-        const entryPath = path.join(root, entry.name);
+        const entryPath = path.join(identity, entry.name);
+        const physicalEntryPath = path.join(physicalPath, entry.name);
         const nestedSlicesRoot = path.join(entryPath, "slices");
-        if (this.isDirectory(nestedSlicesRoot, onReadError)) {
+        const physicalNestedSlicesRoot = path.join(physicalEntryPath, "slices");
+        if (this.isDirectory(physicalNestedSlicesRoot, onReadError)) {
           let nestedEntries: fs.Dirent[];
           try {
-            nestedEntries = fs.readdirSync(nestedSlicesRoot, { withFileTypes: true });
+            nestedEntries = fs.readdirSync(physicalNestedSlicesRoot, { withFileTypes: true });
           } catch {
             nestedEntries = [];
             onReadError?.();
@@ -1054,6 +1267,7 @@ export class SliceIndexer {
               name: nested.name,
               missionId: entry.name,
               slicePath: path.join(nestedSlicesRoot, nested.name),
+              physicalSlicePath: path.join(physicalNestedSlicesRoot, nested.name),
             });
           }
           continue;
@@ -1062,15 +1276,22 @@ export class SliceIndexer {
           name: entry.name,
           missionId: null,
           slicePath: entryPath,
+          physicalSlicePath: physicalEntryPath,
         });
       }
     }
     return locations.sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  private capturedRootsKey(): string | null {
+    if (this.resolvedRootsForOperation === null) return null;
+    return JSON.stringify(this.sliceRootResolutions().map((root) => [root.identity, root.physicalPath]));
+  }
+
   private sliceIdAliases(): SliceIdAliases {
     const now = Date.now();
-    if (this.idAliases && this.idAliases.expiresAt > now) return this.idAliases;
+    const rootsKey = this.capturedRootsKey();
+    if (this.idAliases && this.idAliases.expiresAt > now && this.idAliases.rootsKey === rootsKey) return this.idAliases;
     // Claims are counted over every physical slice folder in every mission, not just the
     // ones this indexer shows: a mission-scoped indexer must still see that another
     // mission's slice shares the id, and so must one that hides a same-named folder.
@@ -1080,8 +1301,8 @@ export class SliceIndexer {
     const idOfPath = new Map<string, string | null>();
     const claims = new Map<string, Set<string>>();
     for (const location of physical) {
-      const id = this.readSliceId(location.slicePath);
-      idOfPath.set(location.slicePath, id);
+      const id = this.readSliceId(location.physicalSlicePath);
+      idOfPath.set(location.physicalSlicePath, id);
       if (!id || names.has(id)) continue;
       const claimants = claims.get(id) ?? new Set<string>();
       claimants.add(`${location.missionId ?? ""}/${location.name}`);
@@ -1090,12 +1311,12 @@ export class SliceIndexer {
     const nameById = new Map<string, string>();
     const idByName = new Map<string, string>();
     for (const location of this.readSliceLocations()) {
-      const id = idOfPath.get(location.slicePath);
+      const id = idOfPath.get(location.physicalSlicePath);
       if (!id || claims.get(id)?.size !== 1) continue;
       nameById.set(id, location.name);
       idByName.set(location.name, id);
     }
-    this.idAliases = { nameById, idByName, expiresAt: now + this.cacheTtlMs };
+    this.idAliases = { nameById, idByName, rootsKey, expiresAt: now + this.cacheTtlMs };
     return this.idAliases;
   }
 
@@ -1114,14 +1335,7 @@ export class SliceIndexer {
     const missions: Array<{ name: string; missionPath: string; id: string | null }> = [];
     const claims = new Map<string, Set<string>>();
     const seenRoots = new Set<string>();
-    for (const configuredRoot of this.sliceRoots(additionalRoots)) {
-      let root: string;
-      try {
-        root = fs.realpathSync(configuredRoot);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError();
-        continue;
-      }
+    for (const { physicalPath: root } of this.sliceRootResolutions(additionalRoots, onReadError)) {
       if (seenRoots.has(root)) continue;
       seenRoots.add(root);
       let entries: fs.Dirent[];
@@ -1160,11 +1374,12 @@ export class SliceIndexer {
 
   private missionIdAliases(): MissionIdAliases {
     const now = Date.now();
-    if (this.missionAliases && this.missionAliases.expiresAt > now) return this.missionAliases;
+    const rootsKey = this.capturedRootsKey();
+    if (this.missionAliases && this.missionAliases.expiresAt > now && this.missionAliases.rootsKey === rootsKey) return this.missionAliases;
     const missionNames = new Set<string>();
     const missions: Array<{ name: string; missionPath: string; id: string | null }> = [];
     const claims = new Map<string, Set<string>>();
-    for (const root of this.sliceRoots()) {
+    for (const { physicalPath: root } of this.sliceRootResolutions()) {
       let entries: fs.Dirent[];
       try {
         entries = fs.readdirSync(root, { withFileTypes: true });
@@ -1204,7 +1419,7 @@ export class SliceIndexer {
       const only = ids.values().next().value;
       if (only) idByName.set(name, only);
     }
-    this.missionAliases = { nameById, idByName, idByPath, expiresAt: now + this.cacheTtlMs };
+    this.missionAliases = { nameById, idByName, idByPath, rootsKey, expiresAt: now + this.cacheTtlMs };
     return this.missionAliases;
   }
 
@@ -1263,32 +1478,55 @@ export class SliceIndexer {
     }
   }
 
-  private sliceRoots(additionalRoots: readonly string[] = []): string[] {
-    const roots = [this.slicesRoot, ...this.additionalSliceRoots, ...additionalRoots].filter((root) => root.length > 0);
+  /** The distinct, absolute roots to scan, each with its metadata identity and captured
+   *  physical path (see `resolveConfiguredRoot`). Published slice paths are built from
+   *  `identity` (keeping a symlink alias as metadata), while filesystem walks and reads use
+   *  `physicalPath` so one operation reads one captured root. Inside `withResolvedRoots`, the
+   *  captured snapshot roots are used as they are so one request does not re-resolve them
+   *  mid-operation. A root that was missing at capture stays excluded for that operation, and
+   *  an unreadable root reports a read error and stays excluded rather than passing an
+   *  unresolved spelling to `fs.readdirSync` and `path.join`. */
+  private sliceRootResolutions(
+    additionalRoots: readonly string[] = [],
+    onReadError?: () => void,
+  ): Array<{ identity: string; physicalPath: string }> {
+    const configuredRoots = this.resolvedRootsForOperation ?? this.resolveConfiguredRoots();
+    const roots = [
+      ...configuredRoots,
+      ...additionalRoots.map(resolveConfiguredRoot),
+    ];
     const seen = new Set<string>();
-    const out: string[] = [];
+    const out: Array<{ identity: string; physicalPath: string }> = [];
     for (const root of roots) {
-      const resolved = path.resolve(root);
-      if (seen.has(resolved)) continue;
-      seen.add(resolved);
-      out.push(root);
+      if (root.status === "missing") continue;
+      if (root.status === "unreadable") {
+        onReadError?.();
+        continue;
+      }
+      if (root.identity.length === 0 || root.physicalPath === null || seen.has(root.identity)) continue;
+      seen.add(root.identity);
+      out.push({ identity: root.identity, physicalPath: root.physicalPath });
     }
     return out;
   }
 
+  private resolveConfiguredRoots(): ConfiguredRootResolution[] {
+    return [this.configuredSlicesRoot, ...this.configuredAdditionalSliceRoots].map(resolveConfiguredRoot);
+  }
+
   private toListEntry(location: SliceLocation, served: Set<string> | null): SliceListEntry {
-    const { name, missionId, slicePath } = location;
-    const frontmatter = this.readPrimaryFrontmatter(slicePath);
+    const { name, missionId, slicePath, physicalSlicePath } = location;
+    const frontmatter = this.readPrimaryFrontmatter(physicalSlicePath);
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
     const railItem = this.extractRailItem(frontmatter, missionId);
     const qitemIds = this.matchQitems(name, served);
     const proofPacket = this.findProofPacket(name, this.missionId ? missionId : null);
-    const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
+    const lastActivityAt = this.computeLastActivity(physicalSlicePath, qitemIds, proofPacket);
 
     return {
       name,
       missionId,
-      displayName: this.extractDisplayName(slicePath, frontmatter, name),
+      displayName: this.extractDisplayName(physicalSlicePath, frontmatter, name),
       railItem,
       workflowSpec: parseWorkflowSpecRef(frontmatter["workflow_spec"]),
       status,
@@ -1307,21 +1545,21 @@ export class SliceIndexer {
   }
 
   private buildRecord(location: SliceLocation, served: Set<string> | null): SliceRecord {
-    const { name, missionId, slicePath } = location;
-    const frontmatter = this.readPrimaryFrontmatter(slicePath);
+    const { name, missionId, slicePath, physicalSlicePath } = location;
+    const frontmatter = this.readPrimaryFrontmatter(physicalSlicePath);
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
     const railItem = this.extractRailItem(frontmatter, missionId);
     const qitemIds = this.matchQitems(name, served);
     const proofPacket = this.findProofPacket(name, this.missionId ? missionId : null);
-    const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
+    const lastActivityAt = this.computeLastActivity(physicalSlicePath, qitemIds, proofPacket);
     const commitRefs = this.extractCommitRefs(frontmatter);
-    const files = this.listSliceFiles(slicePath);
+    const files = this.listSliceFiles(physicalSlicePath);
 
     return {
       name,
       missionId,
       slicePath,
-      displayName: this.extractDisplayName(slicePath, frontmatter, name),
+      displayName: this.extractDisplayName(physicalSlicePath, frontmatter, name),
       railItem,
       status,
       rawStatus: (frontmatter["status"] as string | undefined) ?? null,
@@ -1589,19 +1827,24 @@ export class SliceIndexer {
    *  rowid window at a time, yielding to the event loop between windows. Each scan is one read transaction, so the
    *  fallback scan's snapshot can be newer than the typed scan's. A read or build failure propagates and nothing is
    *  published; the caller hands the index to the next build (withPreparedMembership). */
-  private async readMembershipIndexCooperatively(file: string, served: Set<string> | null): Promise<MembershipIndex> {
+  private async readMembershipIndexCooperatively(
+    file: string,
+    served: Set<string> | null,
+    roots?: ReadonlyArray<ConfiguredRootResolution>,
+  ): Promise<MembershipIndex> {
+    const withRoots = <TValue>(fn: () => TValue): TValue => (roots ? this.withCapturedRoots(roots, fn) : fn());
     const build = this.membershipBuild(served);
-    let step = build.next();
+    let step = withRoots(() => build.next());
     while (!step.done) {
       if (step.value.kind === "typed") {
         const typed = await readRowsCooperatively<TypedMembershipRow & { ts_created: unknown }>(file, "queue_items", TYPED_MEMBERSHIP_WINDOW_SQL, []);
-        step = build.next(inTypedMembershipOrder(typed.rows));
+        step = withRoots(() => build.next(inTypedMembershipOrder(typed.rows)));
       } else {
         const sql = step.value.tagsColumnPresent ? FALLBACK_MEMBERSHIP_WINDOW_SQL : FALLBACK_BODY_MEMBERSHIP_WINDOW_SQL;
         await readRowsCooperatively<FallbackMembershipRow>(file, "queue_items", sql, [], undefined, undefined, {
-          onWindow: (rows) => { build.next(rows); },
+          onWindow: (rows) => { withRoots(() => build.next(rows)); },
         });
-        step = build.next(null);
+        step = withRoots(() => build.next(null));
       }
     }
     return step.value;
@@ -1701,7 +1944,7 @@ export class SliceIndexer {
       if (served !== null && !served.has(slice)) continue;
       const typed = typedBySlice.get(slice);
       if (typed && typed.length > 0) continue;
-      const frontmatter = this.readPrimaryFrontmatter(location.slicePath);
+      const frontmatter = this.readPrimaryFrontmatter(location.physicalSlicePath);
       const railItem = this.extractRailItem(frontmatter, location.missionId);
       const explicitRailItem = this.extractExplicitRailItem(frontmatter);
       const modernMission = location.missionId !== null && typedMissions.has(location.missionId);
@@ -1797,7 +2040,7 @@ export class SliceIndexer {
 
   private discoverMissionIds(): Set<string> {
     const missionIds = new Set<string>();
-    for (const root of this.sliceRoots()) {
+    for (const { physicalPath: root } of this.sliceRootResolutions()) {
       let entries: fs.Dirent[];
       try { entries = fs.readdirSync(root, { withFileTypes: true }); }
       catch { continue; }

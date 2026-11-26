@@ -222,11 +222,79 @@ function formatTrustLine(trust: ReturnType<typeof deriveScopeTrust>): string {
 // rig scope slice ls
 // ---------------------------------------------------------------------
 
+/** Queue-derived states (#2729), the same set `GET /api/slices` reports in `derivedState`. */
+const QUEUE_DERIVED_STATES = ["blocked", "in-progress", "pending", "idle", "none", "unknown"] as const;
+type QueueDerivedState = (typeof QUEUE_DERIVED_STATES)[number];
+
+const QUEUE_DERIVED_HELP = "blocked (an open item is blocked) > in-progress > pending (open items, in that precedence) | idle (matched items, none open; not \"nobody is working on it\") | none (no matched items) | unknown (counts could not be read)";
+
+function physicalSlicePath(slicePath: string): string | null {
+  try {
+    return fs.realpathSync.native(slicePath);
+  } catch {
+    return null;
+  }
+}
+
+/** Why a listed slice shows `unknown`, when the daemon did answer for it. */
+type QueueStateCause = "missing" | "unrecognized" | "unreadable-counts" | "unresolved-path";
+type QueueStateEntry = { state: QueueDerivedState; cause: QueueStateCause | null };
+
+/** Queue-derived state of each slice, read from the daemon's one `GET /api/slices` list. The join is by physical
+ *  path, so it holds only when the daemon is this home's own daemon: an absolute path alone cannot tell two
+ *  workspaces on different hosts apart. `isLocalInstance()` compares the daemon's `/healthz` instance id with this
+ *  home's durable id, even on a loopback or forwarded endpoint. A slice the daemon does not list, a row without
+ *  `derivedState` (an older daemon), or a daemon that cannot answer all yield `unknown`: a state that could not be
+ *  read is never `idle` or `none`. A malformed list is discarded whole, never used in part. `listed` is true only
+ *  when a well-formed list was read. Per-slice causes are kept so the caller can warn only about the slices it shows. */
+async function readQueueDerivedStates(): Promise<{ states: Map<string, QueueStateEntry>; warnings: string[]; listed: boolean }> {
+  const unreadable = (why: string) => ({ states: new Map<string, QueueStateEntry>(), warnings: [`${why} Queue state is unknown for every slice.`], listed: false });
+  try {
+    const status = await getDaemonStatus(realDeps());
+    if (!daemonMayAnswer(status)) return unreadable(statusGuardMessage(status).fact);
+    const client = new DaemonClient();
+    if (!(await client.isLocalInstance())) {
+      return unreadable("Could not confirm that the daemon is this home's own daemon (this home's identity is missing, or the daemon's instance id did not match or could not be read), so its slice paths cannot be matched to local slices.");
+    }
+    const res = await client.get<{ slices?: unknown }>("/api/slices?filter=all");
+    if (res.status >= 400) return unreadable(`GET /api/slices answered ${res.status}.`);
+    const listed = res.data?.slices;
+    if (!Array.isArray(listed)) throw new Error("the slice list is missing or is not an array");
+    // Validate every entry before using any, so a bad entry leaves no partial result behind. A path must be
+    // absolute: a relative or empty one would be resolved against this shell's working directory and could
+    // name a different workspace's slice.
+    const states = new Map<string, QueueStateEntry>();
+    for (const entry of listed as unknown[]) {
+      const row = entry as { slicePath?: unknown; derivedState?: unknown } | null;
+      if (row === null || typeof row !== "object" || typeof row.slicePath !== "string" || !path.isAbsolute(row.slicePath)) {
+        throw new Error("a slice entry is malformed or has an empty or non-absolute path");
+      }
+      const derived = QUEUE_DERIVED_STATES.find((state) => state === row.derivedState);
+      const cause: QueueStateCause | null = row.derivedState === undefined ? "missing"
+        : !derived ? "unrecognized"
+        : derived === "unknown" ? "unreadable-counts"
+        : null;
+      const physicalPath = physicalSlicePath(row.slicePath);
+      // An entry whose path cannot resolve locally (for example, a cached row after a slice folder was moved or
+      // removed) cannot match any local slice; skip it so unaffected slices keep their states and a local slice at
+      // a moved path stays unknown under the existing "not in the daemon's list" warning.
+      if (physicalPath === null) continue;
+      states.set(physicalPath, { state: derived ?? "unknown", cause });
+    }
+    return { states, warnings: [], listed: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return unreadable(`Could not read queue state from the daemon: ${message}.`);
+  }
+}
+
 function buildSliceLsCommand(): Command {
   const cmd = new Command("ls")
     .description("List slices in a mission (or across all missions)")
     .option("--mission <name>", "Restrict to a single mission")
     .option("--state <state>", "Filter: active (in flight, blocked included) | shipped (delivered in place: shipped or done) | closed (in closed/, or superseded, retired or closed in place) | all", "active")
+    .option("--with-queue", `Add the queue-derived state beside the authored status, read from the daemon's queue rows. It needs this home's own daemon: one it cannot confirm as that (a daemon on another host, say) gives unknown. The authored status is unchanged. ${QUEUE_DERIVED_HELP}`)
+    .option("--derived <state>", `Keep only slices with this queue-derived state (reads the daemon like --with-queue): ${QUEUE_DERIVED_STATES.join(" | ")}`)
     .option("--json", "Machine-readable output")
     .action(async (opts, command) => {
       const out = makeStdout();
@@ -239,16 +307,45 @@ function buildSliceLsCommand(): Command {
           action: "Pick one of: active, closed, shipped, all.",
         }), json, out);
       }
+      const derivedFilter = typeof opts.derived === "string" ? opts.derived.toLowerCase() : null;
+      if (derivedFilter !== null && !(QUEUE_DERIVED_STATES as readonly string[]).includes(derivedFilter)) {
+        fail(new ScopeCliError({
+          fact: `Unknown --derived value "${opts.derived}".`,
+          consequence: "Command did not run.",
+          action: `Pick one of: ${QUEUE_DERIVED_STATES.join(", ")}.`,
+        }), json, out);
+      }
+      const withQueue = Boolean(opts.withQueue) || derivedFilter !== null;
       try {
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
         const missions = opts.mission
           ? [findMission(missionsRoot, opts.mission)]
           : listMissions(missionsRoot);
+        const queue = withQueue ? await readQueueDerivedStates() : null;
         const rows: unknown[] = [];
         const lines: string[] = [];
+        let considered = 0;
+        let unlisted = 0;
+        const causes: Record<QueueStateCause, number> = { missing: 0, unrecognized: 0, "unreadable-counts": 0, "unresolved-path": 0 };
         for (const mission of missions) {
           const slices = listSlices(mission, state);
           for (const slice of slices) {
+            // Resolve the physical path only when queue state was asked for: the default listing stays filesystem-light.
+            // Warnings count the slices of this listing (after mission and authored-state selection, before the
+            // derived filter), so one a filter hides is still explained and another mission's slices are not counted.
+            let derivedState: QueueDerivedState | null = null;
+            if (queue) {
+              const physicalPath = physicalSlicePath(slice.absPath);
+              const entry = physicalPath === null ? undefined : queue.states.get(physicalPath);
+              considered++;
+              if (physicalPath === null) causes["unresolved-path"]++;
+              else if (queue.listed) {
+                if (!entry) unlisted++;
+                else if (entry.cause) causes[entry.cause]++;
+              }
+              derivedState = entry?.state ?? "unknown";
+            }
+            if (derivedFilter !== null && derivedState !== derivedFilter) continue;
             rows.push({
               mission: mission.name,
               name: slice.name,
@@ -256,12 +353,23 @@ function buildSliceLsCommand(): Command {
               slug: slice.slug,
               id: slice.id,
               status: slice.status,
+              ...(derivedState === null ? {} : { derivedState }),
               path: slice.absPath,
             });
-            lines.push(`${mission.name}/${slice.name}    ${slice.id ?? "—"}    ${slice.status ?? "—"}`);
+            lines.push(`${mission.name}/${slice.name}    ${slice.id ?? "—"}    ${slice.status ?? "—"}${derivedState === null ? "" : `    ${derivedState}`}`);
           }
         }
-        emit(out, { ok: true, count: rows.length, slices: rows }, json, lines.length === 0 ? ["(no slices)"] : lines);
+        const of = `of ${considered} slices`;
+        const warnings = [
+          ...(queue?.warnings ?? []),
+          ...(causes.missing > 0 ? [`The daemon reported no queue state for ${causes.missing} ${of} (an older daemon does not report it). Those slices show unknown.`] : []),
+          ...(causes.unrecognized > 0 ? [`The daemon reported a queue state this CLI does not know for ${causes.unrecognized} ${of} (a newer daemon?). Those slices show unknown.`] : []),
+          ...(causes["unreadable-counts"] > 0 ? [`The daemon could not read the queue counts for ${causes["unreadable-counts"]} ${of}. Those slices show unknown.`] : []),
+          ...(causes["unresolved-path"] > 0 ? [`Could not establish the physical identity of ${causes["unresolved-path"]} ${of}. Those slices show unknown.`] : []),
+          ...(unlisted > 0 ? [`${unlisted} ${of} are not in the daemon's list (a same-name slice can hide one, or the daemon can serve another workspace). Those slices show unknown.`] : []),
+        ];
+        if (!json) for (const warning of warnings) process.stderr.write(`Warning: ${warning}\n`);
+        emit(out, { ok: true, count: rows.length, slices: rows, ...(warnings.length ? { warnings } : {}) }, json, lines.length === 0 ? ["(no slices)"] : lines);
       } catch (err) {
         fail(err, json, out);
       }

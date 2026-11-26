@@ -300,6 +300,79 @@ describe("POST /api/missions/:missionId/complete", () => {
     expect(readme).toContain("status: complete");
     expect(readme).toContain("id: preserves");
   });
+
+  it("writes the walked physical mission folder when slicesRoot contains .. across a symlink", async () => {
+    const realBase = path.join(cleanupRoot, "real-base");
+    const realLinkTarget = path.join(realBase, "nested");
+    const realMissions = path.join(realBase, "missions");
+    const decoyMissions = path.join(cleanupRoot, "missions");
+    fs.mkdirSync(realLinkTarget, { recursive: true });
+    fs.mkdirSync(realMissions, { recursive: true });
+
+    writeMissionReadme(realMissions, "m-dotdot", "---\nstatus: active\n---\n# Real mission\n");
+    writeSliceInMission(realMissions, "m-dotdot", "s-dotdot");
+    writeMissionReadme(decoyMissions, "m-dotdot", "---\nstatus: active\n---\n# Decoy lexical mission\n");
+    writeSliceInMission(decoyMissions, "m-dotdot", "s-dotdot");
+
+    const linkPath = path.join(cleanupRoot, "link");
+    fs.symlinkSync(realLinkTarget, linkPath);
+    const dotDotRoot = `${linkPath}${path.sep}..${path.sep}missions`;
+
+    const dotDotIndexer = new SliceIndexer({ slicesRoot: dotDotRoot, dogfoodEvidenceRoot: null, db });
+    const expectedMissionPath = path.join(fs.realpathSync.native(realMissions), "m-dotdot");
+    expect(dotDotIndexer.missionPath("m-dotdot")).toBe(expectedMissionPath);
+
+    const app = buildApp(dotDotIndexer);
+    const post = await app.request("/api/missions/m-dotdot/complete", { method: "POST" });
+    expect(post.status).toBe(200);
+
+    expect(fs.readFileSync(path.join(realMissions, "m-dotdot", "README.md"), "utf-8")).toContain("status: complete");
+    expect(fs.readFileSync(path.join(decoyMissions, "m-dotdot", "README.md"), "utf-8")).toContain("status: active");
+
+    const after = await app.request("/api/missions/m-dotdot", { method: "GET" });
+    expect(after.status).toBe(200);
+    const afterBody = (await after.json()) as { status: string | null; missionPath: string };
+    expect(afterBody.missionPath).toBe(expectedMissionPath);
+    expect(afterBody.status).toBe("complete");
+  });
+
+  it("keeps alias spelling and completes the target mission folder when slicesRoot is a symlink alias without ..", async () => {
+    const realTarget = path.join(cleanupRoot, "real-alias-target");
+    const otherTarget = path.join(cleanupRoot, "other-target");
+    fs.mkdirSync(realTarget, { recursive: true });
+    fs.mkdirSync(otherTarget, { recursive: true });
+
+    writeMissionReadme(realTarget, "m-alias", "---\nstatus: active\n---\n# Alias target mission\n");
+    writeSliceInMission(realTarget, "m-alias", "s-alias");
+    writeMissionReadme(otherTarget, "m-alias", "---\nstatus: active\n---\n# Unrelated sibling mission\n");
+    writeSliceInMission(otherTarget, "m-alias", "s-alias");
+
+    const aliasRoot = path.join(cleanupRoot, "alias-missions");
+    fs.symlinkSync(realTarget, aliasRoot);
+
+    const aliasIndexer = new SliceIndexer({ slicesRoot: aliasRoot, dogfoodEvidenceRoot: null, db });
+    const expectedAliasMissionPath = path.join(path.resolve(aliasRoot), "m-alias");
+    expect(aliasIndexer.missionPath("m-alias")).toBe(expectedAliasMissionPath);
+
+    const app = buildApp(aliasIndexer);
+    const before = await app.request("/api/missions/m-alias", { method: "GET" });
+    expect(before.status).toBe(200);
+    const beforeBody = (await before.json()) as { status: string | null; missionPath: string };
+    expect(beforeBody.missionPath).toBe(expectedAliasMissionPath);
+    expect(beforeBody.status).toBe("active");
+
+    const post = await app.request("/api/missions/m-alias/complete", { method: "POST" });
+    expect(post.status).toBe(200);
+
+    expect(fs.readFileSync(path.join(realTarget, "m-alias", "README.md"), "utf-8")).toContain("status: complete");
+    expect(fs.readFileSync(path.join(otherTarget, "m-alias", "README.md"), "utf-8")).toContain("status: active");
+
+    const after = await app.request("/api/missions/m-alias", { method: "GET" });
+    expect(after.status).toBe(200);
+    const afterBody = (await after.json()) as { status: string | null; missionPath: string };
+    expect(afterBody.missionPath).toBe(expectedAliasMissionPath);
+    expect(afterBody.status).toBe("complete");
+  });
 });
 
 // ---------------------------------------------------------------------------

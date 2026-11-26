@@ -506,7 +506,9 @@ What reads these declarations:
   across missions, as [Project workspace](project-workspace.md) says.
 - **Queue state counts on `GET /api/slices`:** every list row has `queueCounts`, a current, uncapped count by
   `pending`, `in-progress`, `done`, `blocked`, `failed`, `denied`, `canceled` and `handed-off`; it is `null` when
-  the row's project/mission scope cannot be resolved or catalog/candidate-root discovery is incomplete. This is
+  the row's project/mission scope cannot be resolved, catalog/candidate-root discovery is incomplete, the queue
+  table or its `tags` column cannot be read, or the count read itself fails part-way (any partial count is
+  discarded and the slice rows still return). This is
   separate from the existing `qitemCount` display membership field. Counts match exact typed `project:`,
   `mission:` and `slice:` tags in one shared queue scan. A `project:` tag naming a former id a project declares
   under `aliases:` counts as that project ([Project workspace](project-workspace.md#renaming-a-project)).
@@ -520,6 +522,40 @@ What reads these declarations:
   subject to the existing project filter and the newest 500 rows per slice. Counts are recomputed on every list
   request. `?refresh=1|true` invalidates the separate listing cache, not a stored queue-count snapshot. This
   resolution does not change the returned slice list or filters.
+- **Queue-derived state on `GET /api/slices`:** every list row also has `derivedState`, read from the same
+  `queueCounts` with no further query, beside the authored `status`, which it never changes. It is `blocked`
+  when any matched item is blocked, otherwise `in-progress`, otherwise `pending`. It is `idle` when matched
+  items exist and none is open (`done`, `failed`, `denied`, `canceled` and `handed-off` are not open), and
+  `none` when no item matched. `idle` does not mean nobody is working on the slice. It is `unknown`, never
+  `idle` or `none`, when `queueCounts` is `null` because the counts could not be read. `?derived=blocked|in-progress|pending|idle|none|unknown`
+  keeps only rows in that state, case-insensitively and after the `filter` status filter, so
+  `?filter=active&derived=blocked` narrows the authored active slices to the blocked ones. An unknown value
+  answers 400 `derived_invalid` when the indexer is ready. If no root is ready, the route returns 503
+  `slices_root_not_configured` first. Every row's `slicePath` is absolute. The daemon keeps each configured root
+  spelling and captures its physical target once with `fs.realpathSync.native` for each list request. It makes a
+  relative spelling absolute and applies `path.resolve` to roots without `..`; a symlink alias in such a root keeps
+  its alias spelling as `slicePath` metadata. For a root containing `..`, the filesystem follows a symlink before
+  applying `..` (for example, `link/../missions` names `missions` beside the link target), and the resolved physical
+  path is also its identity. If that capture fails, the daemon keeps the absolute configured spelling as metadata
+  and treats the root as missing or unreadable without walking or re-resolving it in that request. Within that
+  request, the daemon reads the slice list, candidate walks, queue counts, configured-root project ownership, and
+  slice and project readiness through each configured root's captured physical target rather than re-traversing a
+  symlink alias; this pins the configured root target for the request, not a filesystem snapshot of mutations inside
+  that target or of separate catalog roots. Duplicate roots are removed after this normalization. A missing or
+  unreadable root behaves as before.
+  If the primary root's capture fails while another configured root is ready, the list request still returns 200 with the slices read from the other ready roots and `primaryReadiness: { state: "unknown" }` without re-reading the primary root through its configured spelling; when the primary root's capture succeeds, `primaryReadiness` is omitted (and a later failure reading project readiness from that captured primary root still returns 500).
+  `rig scope slice ls --with-queue` and `--derived <state>` read this list once and
+  join by physical slice path, only when it can confirm the daemon is this home's own (its `/healthz` instance id
+  matches this home's); a daemon it cannot confirm gives `unknown` for every slice, because the same absolute
+  path can name different workspaces. It rejects the whole list if any row's path is empty or not absolute,
+  because it would resolve against the CLI's working directory. Each reason for `unknown` has its own warning:
+  an unreachable daemon or one it cannot confirm, a malformed list (discarded whole), a row without
+  `derivedState` (an older daemon), a `derivedState` value the CLI does not know (a newer daemon), a row the
+  daemon itself reports as `unknown` (its counts could not be read), a path whose physical identity cannot be
+  established, and a local slice absent from the list. If a root alias is retargeted between daemon counting and
+  CLI response path resolution, one slice's state can show on another slice. The per-slice warnings count only
+  the slices of the listing the command shows (after `--mission` and `--state`,
+  before `--derived`), so another mission's slices never add a warning.
 - **A terminal viewer's pane size:** add `?geometry=1` to the terminal websocket (`GET /api/terminal/<name>`) to
   learn the pane's columns and rows, so a browser terminal wraps lines where the agent's pane does. The size arrives
   as a binary frame holding UTF-8 JSON, `{"type":"geometry","cols":<n>,"rows":<n>}`: once when the viewer joins,
