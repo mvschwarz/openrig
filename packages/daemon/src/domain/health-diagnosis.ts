@@ -137,7 +137,9 @@ export class HealthDiagnosisService {
         continue;
       }
       const age = now - Date.parse(finding.lastObservedAt ?? "");
-      if (!Number.isFinite(age) || age < 0 || age > effective.policy.freshnessSeconds * 1000) {
+      // A quiet ceremony suspicion with no occurrence yet is admitted at any age: the read is current (suspected
+      // requires fresh) and cooldown bounds the rate. Re-presenting an existing occurrence still needs recent activity.
+      if (!Number.isFinite(age) || age < 0 || (age > effective.policy.freshnessSeconds * 1000 && !(suspected && !old))) {
         actions.push({ ...base, action: "deferred", reason: "source is stale or contradictory" }); continue;
       }
       if (old && finding.ceremony?.stage === "confirmed" && old.row.destinationSession === policy.owner

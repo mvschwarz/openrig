@@ -704,7 +704,7 @@ ever run). Left-out rigs don't change the exit code.
           }
 
           const resStatus = res.data["status"] as string;
-          const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string }>) ?? [];
+          const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string; noStartupContext?: true }>) ?? [];
           const rigResult = res.data["rigResult"] as string | undefined;
           const restoreWarnings = (res.data["warnings"] as string[] | undefined) ?? [];
           const notApplied = (freshByRig.get(rigId) ?? []).filter(id => !nodes.some(node => node.logicalId === id && node.status === "fresh-primed"));
@@ -725,8 +725,9 @@ ever run). Left-out rigs don't change the exit code.
           const confirmed: (typeof results)[number] = { rigId, rigName, status: rigResult ?? resStatus, nodes, ...(restoreWarnings.length ? { warnings: restoreWarnings } : {}),
             ...(notApplied.length ? { freshRequestedNotApplied: notApplied } : {}) };
           results[index] = confirmed;
-          // Handle the awaiting-decision ASK (compose the slice-02 TTY flow).
-          const awaiting = nodes.filter((n) => n.status === "awaiting-decision");
+          // Handle the awaiting-decision ASK (compose the slice-02 TTY flow). A seat with no saved startup context can't be
+          // started fresh (the launch refuses without it), so it isn't offered; its reason, printed above, says what to do.
+          const awaiting = nodes.filter((n) => n.status === "awaiting-decision" && !n.noStartupContext);
           if (awaiting.length > 0) {
             const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY) || Boolean(depsOverride?.promptYesNo);
             if (interactive) {

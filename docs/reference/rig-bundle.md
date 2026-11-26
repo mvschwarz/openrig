@@ -295,7 +295,7 @@ where the daemon runs.
 ### Create a bundle
 
 ```bash
-rig bundle create <spec-path-or-github-link> -o <output.rigbundle> [--rig-root <dir>] [--preset <name>] [--seat <pod.member=runtime>]... [--context-pack <dir>]... [--project-dir <dir>] [--name <name>] [--bundle-version <ver>] [--min-cli-version <ver>] [--min-daemon-version <ver>] [--notes <text>] [--include-packages <refs...>] [--allow-drift] [--include-login-files] [--json]
+rig bundle create <spec-path-or-github-link> -o <output.rigbundle> [--rig-root <dir>] [--preset <name>] [--seat <pod.member=runtime>]... [--context-pack <dir>]... [--project-dir <dir>] [--name <name>] [--bundle-version <ver>] [--min-cli-version <ver>] [--min-daemon-version <ver>] [--notes <text>] [--include-packages <refs...>] [--allow-drift] [--include-login-files] [--include-builder-identity] [--json]
 ```
 
 | Flag | Required | Default | Description |
@@ -311,10 +311,20 @@ rig bundle create <spec-path-or-github-link> -o <output.rigbundle> [--rig-root <
 | `--bundle-version` | no | `0.1.0` | Bundle version in the manifest. |
 | `--min-cli-version`, `--min-daemon-version` | no | — | The oldest OpenRig CLI or daemon that may install the bundle, checked on install. For a link they override the author's `bundle.yaml` minimums. |
 | `--notes <text>` | no | — | Notes stored in the manifest's provenance. |
+| `--include-builder-identity` | no | off | Add this machine's hostname and the creating seat's session name to `bundle.yaml`. Without it, those automatic fields stay in the private local build receipt. |
 | `--include-packages <refs...>` | no | all from the spec | Legacy (schema 1) specs only: the package refs to include. |
 | `--include-login-files` | no | off | Only if recipients should have these logins and their owner agrees (for example, an internal test bundle), include them and record their exact archive-relative paths. Create and consumers show a credential-bearing notice. Does not exempt other sensitive files. |
 | `--allow-drift` | no | off | Build a spec that differs from the running rig of the same name. Without it, create refuses; with it, the difference is written into the manifest's provenance notes. Pool agents aren't counted as drift, so this flag isn't needed for them. |
 | `--json` | no | off | Machine-readable output. |
+
+A default create leaves the builder's hostname and session name out of `bundle.yaml`. The local
+receipt `<output.rigbundle>.build.json` keeps the build identity and result outside the archive,
+with owner-only permissions (mode `0600`) on POSIX systems. A GitHub link build keeps the same information in its existing
+import directory's `build.json`. Share the archive, not this private receipt. Explicit notes,
+structured GitHub source and commit, and authored attribution and licence files remain carried.
+`--include-builder-identity` also puts the automatic host/session fields in the archive; older
+bundles that already contain them still inspect and install. If the receipt cannot be written,
+create reports a warning and retains the created archive.
 
 `--context-pack` and `--project-dir` exist only on create. `rig up` and `rig bundle install` have neither, so a bundle
 installed straight from a GitHub link carries no project, and carries a context pack only when the folder's own

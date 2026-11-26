@@ -50,7 +50,7 @@ export function rigCommand(depsOverride?: RigDeps): Command {
     .action(async (rigId: string, opts: { json?: boolean; asTemplate?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(status));
 
       if (opts.json && !opts.asTemplate) {
@@ -284,7 +284,7 @@ export function rigCommand(depsOverride?: RigDeps): Command {
       }
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
 
       const client = deps.clientFactory(getDaemonUrl(status));
 

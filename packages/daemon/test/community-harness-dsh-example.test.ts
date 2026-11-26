@@ -120,7 +120,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 type Permissions = "uncorrelated" | "turn_withdrawn" | "runner_turn_unbound" | "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost" | "late" | "two" | "twoslow";
 interface Hook { auth: string | undefined; body: Record<string, unknown>; at: number }
 
-const cleanups: Array<() => void | Promise<void>> = [];
+const cleanups: Array<() => void | Promise<unknown>> = [];
 // Every cleanup runs, newest first, even after one fails; then the failures are reported.
 afterEach(async () => {
   const failures: unknown[] = [];
@@ -242,7 +242,7 @@ function start(openrig: { url: string }, env: Record<string, string> = {}, binVa
       clearTimeout(timer);
       if (outcome === "stuck") throw new Error(`the dsh runner's stdio didn't close within 5 s of SIGKILL to its process group ${child.pid}; kept ${dir}`);
     }
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
   return {
     dir, exited,

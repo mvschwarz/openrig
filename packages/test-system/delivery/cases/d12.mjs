@@ -116,17 +116,18 @@ async function setUp(ctx, m, { guard = "off" } = {}) {
   await ctx.settle();
 }
 
-/** Claude's PreCompact hook writes its restore packet under /tmp/claude-compaction-restore: a seat's spec can't set
- *  OPENRIG_COMPACTION_OUT_ROOT (OPENRIG_ is reserved), so it lands outside the cell. Only this cell's own packet, the
- *  directory its marker names, is removed afterwards, and its path is recorded. */
+/** Claude's PreCompact hook writes its restore packet under the seat's OpenRig home (`run/compaction-restore`), which is
+ *  the cell's. Only this cell's own packet, the directory its marker names, is removed afterwards, and its path is
+ *  recorded. */
 function packet(ctx) {
   const markerPath = join(ctx.cell.env.OPENRIG_HOME, "compaction", "restore-pending", `${ctx.cell.session}.json`);
   const pending = existsSync(markerPath) ? JSON.parse(readFileSync(markerPath, "utf8")) : null;
   ctx.verdict.info("the restore-pending marker (the PreCompact and bridge hooks)", pending);
   const dir = typeof pending?.outputDir === "string" ? pending.outputDir : null;
-  if (dir && dir.startsWith("/tmp/claude-compaction-restore/") && pending.sessionId && dir.includes(pending.sessionId)) {
+  const packets = join(ctx.cell.env.OPENRIG_HOME, "run", "compaction-restore") + "/";
+  if (dir && dir.startsWith(packets) && pending.sessionId && dir.includes(pending.sessionId)) {
     rmSync(dir, { recursive: true, force: true });
-    ctx.verdict.info("the restore packet outside the cell (/tmp), removed after the cell", dir);
+    ctx.verdict.info("the restore packet, removed after the cell", dir);
   }
 }
 

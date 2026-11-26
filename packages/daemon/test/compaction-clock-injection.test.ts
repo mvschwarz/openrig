@@ -197,13 +197,13 @@ describe("A3-R3 compaction-asset clock/stamp injection (real-spawn)", () => {
   });
 });
 
-// P6(C) — the compaction PACKET output-root isolation seam. The shipped scripts hardcode
-// the packet base to the FIXED /tmp/claude-compaction-restore (precompact-hook.mjs + the
+// P6(C) — the compaction PACKET output-root isolation seam. The shipped scripts default
+// the packet base to ONE folder per OpenRig home (precompact-hook.mjs + the
 // restore-from-jsonl child). Under the injected clock the timestamp STAMP is fixed, so two
 // concurrent writers with the same sessionId land on the SAME `${sessionId}-${stamp}` dir
 // and race the same restore-summary.json — the desk-ruled cross-writer interference that
 // flaked the suite under fleet load. The fix mirrors the injectable-clock seam: a bounded
-// injectable output-root (OPENRIG_COMPACTION_OUT_ROOT) — real /tmp default in production,
+// injectable output-root (OPENRIG_COMPACTION_OUT_ROOT) — the home's folder in production,
 // per-run isolated when the hermetic env-var is set, so each test owns a unique outputDir.
 describe("P6(C) compaction packet output-root injection (per-run isolation)", () => {
   let tmpDir: string;

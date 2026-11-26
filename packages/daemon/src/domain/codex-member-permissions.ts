@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { open } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import type { CodexPermissionEnvelope } from "./codex-rebuild-permissions.js";
 import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
 import { shellQuote } from "../adapters/shell-quote.js";
@@ -124,6 +124,132 @@ export function codexMemberLaunch(permissions: CodexMemberPermissions): { args: 
   }
   const envelope = codexMemberEnvelope(permissions);
   return { args: codexEnvelopeArgs(envelope), observation: observeCodexEnvelope(envelope), suppressAutoAddDirs: permissions.sandbox === "read-only" };
+}
+
+/** What a Codex seat's rig command needs to read. `rig` in a seat is a link under the OpenRig home
+ *  (run/seat-bin) to the paired CLI, which runs on node. A folder that couldn't be found is left out. */
+export interface CodexRigReachPaths {
+  openrigHome: string;
+  rigInstall?: string;
+  /** Exact paired entry and seat alias, when known; directory grants alone can miss a denied file. */
+  rigEntry?: string;
+  rigAlias?: string;
+  /** The node this daemon runs on. rig in the seat runs on the first node on the seat's own PATH, which the daemon
+   *  can't see, so this path is only ever reported as unverified. */
+  node?: string;
+  tmpdir?: string;
+  /** The seat's home folder, for ~/ rules. */
+  home: string;
+  /** The seat's working folder, for :workspace_roots. */
+  cwd?: string;
+}
+
+export interface CodexRigReachGap {
+  /** What the seat's filesystem rules don't let it read. */
+  unreadable: Array<{ what: "the OpenRig home" | "the rig install" | "node"; path: string }>;
+  /** read-only: the legacy read-only sandbox, which never has network. */
+  network: "on" | "off" | "read-only";
+  /** Native selector expansion or overlapping rules the declaration alone cannot establish, and this daemon's node
+   *  whenever the rules don't show the seat can read it. */
+  unverified?: CodexRigReachGap["unreadable"];
+}
+
+/** This is a flat declaration check, not another native sandbox implementation. Unexpanded selectors and
+ *  overlapping grants/denies stay conditional; only Codex can establish their effective coverage. */
+export function codexRigReach(permissions: CodexMemberPermissions, paths: CodexRigReachPaths): CodexRigReachGap | null {
+  if (!("filesystem" in permissions)) {
+    if (permissions.sandbox === "read-only") return { unreadable: [], network: "read-only" };
+    return permissions.network_access === true ? null : { unreadable: [], network: "off" };
+  }
+  const home = resolve(paths.home);
+  const within = (target: string, root: string) => target === root || target.startsWith(root === sep ? sep : root + sep);
+  const readable = (target: string): "read" | "deny" | "unknown" => {
+    const rules: Array<{ root: string; access: CodexFilesystemAccess }> = [];
+    let unexpanded = false;
+    let unexpandedDeny = false;
+    for (const [key, access] of Object.entries(permissions.filesystem)) {
+      if (key === ":minimal") {
+        // Measured native defaults exclude these user-data roots. Other coverage isn't an authored path list.
+        if (!/^\/(?:home|Users|tmp|private\/tmp)(?:\/|$)/i.test(target) && !within(target, home)) {
+          unexpanded = true;
+          if (access === "deny") unexpandedDeny = true;
+        }
+        continue;
+      }
+      const anchor = key === ":root" ? sep : key === ":workspace_roots" || key === ":project_roots" ? paths.cwd
+        : key === ":slash_tmp" ? "/tmp" : key === ":tmpdir" ? paths.tmpdir
+        : key.startsWith("~/") ? join(home, key.slice(2)) : isAbsolute(key) ? key : undefined;
+      if (anchor === undefined || /[?*\[\]{}]/.test(key)) {
+        unexpanded = true;
+        if (access === "deny") unexpandedDeny = true;
+        continue;
+      }
+      const root = resolve(anchor);
+      if (within(target, root)) rules.push({ root, access });
+    }
+    rules.sort((a, b) => b.root.length - a.root.length);
+    const closest = rules[0];
+    if (closest && rules.some(rule => rule.root === closest.root && rule.access !== closest.access)) return "unknown";
+    if (closest?.access === "deny") return unexpanded ? "unknown" : "deny";
+    // A narrower read under a denied ancestor does not prove native access (0.171 Linux hides it).
+    if (rules.some(rule => rule.root !== sep && rule.access === "deny")) return "unknown";
+    // :minimal or a native pattern can also restrict a flat root grant; do not guess its expansion.
+    if (unexpandedDeny || (unexpanded && closest === undefined)) return "unknown";
+    return closest ? "read" : unexpanded ? "unknown" : "deny";
+  };
+  const unreadable: CodexRigReachGap["unreadable"] = [];
+  const unverified: CodexRigReachGap["unreadable"] = [];
+  const checks = [
+    ["the OpenRig home", [paths.openrigHome, paths.rigAlias]],
+    ["the rig install", [paths.rigInstall, paths.rigEntry]],
+    ["node", [paths.node]],
+  ] as const;
+  for (const [what, candidates] of checks) {
+    const observations = candidates.filter((value): value is string => value !== undefined)
+      .map(value => ({ path: resolve(value), state: readable(resolve(value)) }));
+    const denied = observations.find(value => value.state === "deny");
+    const gap = denied ?? observations.find(value => value.state === "unknown");
+    // The daemon's node may not be the one rig runs on in the seat, so it is never a definite gap.
+    if (gap) (denied && what !== "node" ? unreadable : unverified).push({ what, path: gap.path });
+  }
+  const network = permissions.network_access === true ? "on" : "off";
+  return unreadable.length || unverified.length || network === "off"
+    ? { unreadable, network, ...(unverified.length ? { unverified } : {}) } : null;
+}
+
+/** The launch warning for a gap codexRigReach found. Network off was measured blocking 127.0.0.1 on Linux; elsewhere
+ *  the text says "may". */
+export function codexRigReachWarning(label: string, gap: CodexRigReachGap, platform: NodeJS.Platform = process.platform): string {
+  const uncertain = gap.unverified ?? [];
+  const expanded = uncertain.filter(({ what }) => what !== "node").map(({ what, path }) => `${what} (${path})`);
+  const node = uncertain.find(({ what }) => what === "node");
+  // An uncertainty is not a claim that a working native profile is broken, nor a reason to broaden it automatically.
+  const verification = uncertain.length ? [
+    ...(expanded.length ? [`Native filesystem expansion or overlapping rules leave read access unverified for ${expanded.join(", ")}.`] : []),
+    ...(node ? [`The permissions don't show that the seat can read node (${node.path}), the one this daemon runs on. In the seat, rig runs on the first node on the seat's PATH, which may be another one; if it's this one, the seat needs to read it too.`] : []),
+    "Run rig whoami inside the seat to check; do not change a working policy just for this advisory.",
+  ].map(sentence => ` ${sentence}`).join("") : "";
+  if (gap.unreadable.length === 0 && gap.network === "on" && uncertain.length) {
+    return `${label}: this seat's codex_permissions read coverage is not verified.${verification} The launch continues with the permissions as written.`;
+  }
+  const named = gap.unreadable.map(({ what, path }) => `${what} (${path})`);
+  const list = named.length > 1 ? `${named.slice(0, -1).join(", ")} or ${named.at(-1)}` : named[0];
+  const networkOff = gap.network !== "on";
+  const linux = platform === "linux";
+  const said = gap.network === "read-only" ? "this seat's codex_permissions use the read-only sandbox, where network is always off."
+    : list ? `this seat's codex_permissions don't let it read ${list}${networkOff ? ", and network is off" : ""}.`
+    : "network is off in this seat's codex_permissions.";
+  // What breaks is the agent's own rig calls; work typed into its terminal still arrives.
+  const breaks = "can't read or close its queued tasks, ask a question or send a message through rig; messages typed into its terminal still arrive.";
+  const consequence = !list
+    ? `The rig command talks to the OpenRig daemon over 127.0.0.1, which a Codex sandbox with network off ${linux ? `can't reach, so the agent ${breaks}` : `may not reach (seen on Linux). If it doesn't, the agent ${breaks}`}`
+    : `Inside its sandbox the agent can't run rig${!networkOff ? "" : linux ? " or reach the OpenRig daemon" : ", and with network off it may not reach the OpenRig daemon either"}, so it ${breaks}`;
+  const steps = [
+    ...(list ? [`add ${named.length > 1 ? "those paths" : "that path"} with read access`] : []),
+    ...(gap.network === "off" ? ["turn network on (network_access: true)"] : []),
+    ...(gap.network === "read-only" ? ["use sandbox: workspace-write with network_access: true, or keep it read-only with a filesystem list of \":root\": read and network_access: true"] : []),
+  ];
+  return `${label}: ${said} ${consequence} The launch continues with the permissions as written. To fix it: ${steps.join(" and ")}, then run rig whoami inside the seat.${verification}`;
 }
 
 /** What an emitted envelope's arguments ask for; the native result still needs its own observation. */
