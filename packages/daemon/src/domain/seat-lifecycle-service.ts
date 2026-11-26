@@ -2803,13 +2803,18 @@ export class SeatLifecycleService {
     return row ?? null;
   }
 
-  /** From 0.7.9 a fresh, fork or rebuild handover records its successor as launched (#2440); a successor from before
-   *  keeps origin=claimed. Name that case rather than suggest `rig unclaim`, which would end OpenRig's management. */
+  /** From 0.7.9 a fresh, fork or rebuild handover records its successor as launched (#2440), and migration 200 records the
+   *  earlier ones that way at upgrade (#4003). One still reading claimed here was released (detached) since. Name that case
+   *  rather than suggest `rig unclaim`, which would end OpenRig's management. Only the handover's own successor counts:
+   *  registered in its commit, so created no later than a minute after it completed, the rule migration 200 applies; a
+   *  session adopted later is newer and gets the ordinary routes. */
   private earlierHandoverRefusal(nodeId: string, session: { id: string; session_name: string }, refuses: string): SeatRefusal | null {
     if (this.latestSession(nodeId)?.id !== session.id) return null;
     const handover = this.db.prepare(
-      "SELECT continuity_outcome, handover_at FROM nodes WHERE id = ? AND handover_result = 'complete' AND continuity_outcome IN ('fresh', 'forked', 'rebuilt')",
-    ).get(nodeId) as { continuity_outcome: string; handover_at: string | null } | undefined;
+      `SELECT n.continuity_outcome, n.handover_at FROM nodes n JOIN sessions s ON s.id = ? AND s.node_id = n.id
+        WHERE n.id = ? AND n.handover_result = 'complete' AND n.continuity_outcome IN ('fresh', 'forked', 'rebuilt')
+          AND julianday(s.created_at) <= julianday(n.handover_at) + 60.0 / 86400.0`,
+    ).get(session.id, nodeId) as { continuity_outcome: string; handover_at: string | null } | undefined;
     if (!handover) return null;
     return {
       ok: false,

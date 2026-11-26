@@ -39,6 +39,8 @@ interface SeatStatusResponse {
   /** Slice 16: an open runtime switch, or one recovery stopped short of finishing. */
   runtimeSwitch?: { id: string; phase: string; from: string; to: string; committed: boolean; startedAt: string; attention: string | null; outcome: string | null };
   compaction?: { stage: string; detail: string };
+  /** #4003: launched by OpenRig, or adopted (claimed); absent from older daemons. */
+  origin?: "launched" | "claimed" | null;
   current_occupant: string | null;
   /** #3253: the seat's process limits, read back from its process (applied; requested, not applied; unsupported; unknown;
    *  or invalid: the stored value can't be read). `readFrom` says which process was read. */
@@ -279,6 +281,7 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Rig: ${status.rig_name}`);
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
+  if (status.origin) console.log(`Origin: ${status.origin === "claimed" ? "adopted (origin=claimed): OpenRig didn't launch this session, so stop, restart and clean refuse it" : "launched by OpenRig"}`);
   if (status.nativeInput?.unresolved?.length) {
     console.log(`Native request evidence: ${terminalJson(status.nativeInput.unresolved)}`);
     if (status.nativeInput.recovery) console.log(status.nativeInput.recovery);
@@ -1881,9 +1884,10 @@ session and leaves its process running), then end that process and the
 underlying tmux session, including any remaining shell. Closing only its
 viewing window leaves the tmux session running. rig down <rig> leaves a
 session OpenRig didn't start running.
-A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 still reads
-adopted and is refused too, until its next launched handover or managed launch;
-the refusal says so. Stopping ends that agent's session and any work in progress:
+A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 was recorded as
+adopted; OpenRig launched it, and the upgrade to this version records it as
+launched, so it stops like any other seat. rig seat status shows each seat's
+origin. Stopping ends that agent's session and any work in progress:
 check it first (rig capture <seat>) and stop only a seat you own or were asked to
 stop. rig seat launch <seat> --fresh --reason <text> starts
 a fresh occupant there; it does not resume the stopped conversation.

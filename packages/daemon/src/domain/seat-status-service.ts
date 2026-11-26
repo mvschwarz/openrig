@@ -42,6 +42,9 @@ export interface SeatStatus {
   permissions_to: string | null;
   /** Whether the seat's newest session was launched as a community runner, the kind that submits permission requests. */
   runner: boolean;
+  /** #4003: `launched` when OpenRig launched the seat's newest session; `claimed` when it adopted one it didn't launch, which
+   *  stop, restart and clean refuse; null with no session or an unreadable record. */
+  origin: "launched" | "claimed" | null;
   current_occupant: string | null;
   /** The session record's own status. A pane OpenRig can't confirm as the seat's runtime (a bare shell) keeps it
    *  `running`; `lifecycle_state` says how the seat reads. */
@@ -187,6 +190,7 @@ export class SeatStatusService {
       launch_cwd: entry.cwd,
       permissions_to: this.rigRepo.getNodePermissionsTo(entry.nodeId),
       runner: this.launchedAsRunner(entry.nodeId),
+      origin: this.sessionOrigin(entry.nodeId),
       current_occupant: entry.canonicalSessionName,
       session_status: entry.sessionStatus,
       lifecycle_state: entry.lifecycleState,
@@ -244,6 +248,16 @@ export class SeatStatusService {
     enforcer.recoverSeat({ sessionName: session, cwd: entry.cwd, runtime: entry.runtime });
     const observed = enforcer.observedCompaction(session);
     return observed ? { compaction: { ...observed, owedRestore: enforcer.getOwedRestore(session) } } : {};
+  }
+
+  /** #4003: whether OpenRig launched the seat's newest session, or adopted one it didn't launch (stop, restart and clean
+   *  refuse those); null with no session, or when the record can't be read. */
+  private sessionOrigin(nodeId: string): "launched" | "claimed" | null {
+    try {
+      const row = this.rigRepo.db.prepare("SELECT origin FROM sessions WHERE node_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+        .get(nodeId) as { origin: string | null } | undefined;
+      return row ? (row.origin === "claimed" ? "claimed" : "launched") : null;
+    } catch { return null; }
   }
 
   private launchedAsRunner(nodeId: string): boolean {
