@@ -1,3 +1,4 @@
+import { queueDisplayText, QUEUE_DISPLAY_PREFIX_UNITS } from "./queue-display.js";
 import { RigDeliveryDrainStore } from "./rig-delivery-drain.js";
 import { PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap } from "./queue-wake-ladder.js";
 import { LADDER_ATTEMPT_PREFIX } from "./queue-stuck-sweep.js";
@@ -1068,8 +1069,8 @@ export function detectTable(db: Database.Database, tableName: string): boolean {
  * Phase A wires no-op; Phase B can plug in the rig registry to reject
  * phantom-rig destinations. POC compatibility: `qitem_id` shape preserved.
  */
-// Reduced column set for compact rows. `list`, `findOverdue` and `findUndelivered` all select it
-// (plus summary, through QueueRepository.compactColumns) and pass each row through compactRow, so
+// Reduced column set for compact rows. `list`, `findOverdue` and `findUndelivered` select it plus
+// the authored summary and a bounded body prefix (compactColumns), then pass each row through compactRow, so
 // the compact projection is one thing: present text is shown, and what isn't selected is left out
 // and named in fieldsElided, never backfilled as empty.
 const COMPACT_ELIDED_FIELDS = [
@@ -1079,6 +1080,8 @@ const COMPACT_ELIDED_FIELDS = [
 /** A compact listing row: the elided fields are absent, not empty, and `fieldsElided` names them. */
 export type CompactQueueItem = Omit<QueueItem, (typeof COMPACT_ELIDED_FIELDS)[number] | "fieldsElided"> & {
   fieldsElided: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
+  /** Derived one-line preview; summary and elided content retain their own meaning. */
+  displayText: string;
 };
 
 /** `qitemId` narrows either finder to one row, so a caller can ask again whether that row still qualifies. */
@@ -1087,7 +1090,7 @@ type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?
 type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean; qitemId?: string; waiting?: boolean };
 
 function compactRow(item: QueueItem): CompactQueueItem {
-  const row: Record<string, unknown> = { ...item, fieldsElided: [...COMPACT_ELIDED_FIELDS] };
+  const row: Record<string, unknown> = { ...item, displayText: queueDisplayText(item.summary, item.body, item.qitemId), fieldsElided: [...COMPACT_ELIDED_FIELDS] };
   for (const field of COMPACT_ELIDED_FIELDS) delete row[field];
   return row as unknown as CompactQueueItem;
 }
@@ -6086,10 +6089,12 @@ export class QueueRepository {
     return rows.map((r) => this.rowToItem(r, opts?.includeWaiting ?? true));
   }
 
-  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for, and a
+  /** The compact listings' columns: the shared set plus the summary, as authored, a bounded prefix for display, and a
    *  routed row's return route, which isn't elided, so a routed row never lists as unrouted. */
   private compactColumns(): string {
-    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "")
+    // Byte slicing preserves embedded NULs (TEXT substr stops there). Four UTF-8 bytes per UTF-16 unit
+    // supply the helper's entire prefix; any partial code point at the SQL edge is beyond its bound.
+    return COMPACT_QUEUE_COLUMNS + `, CAST(substr(CAST(body AS BLOB), 1, ${QUEUE_DISPLAY_PREFIX_UNITS * 4}) AS TEXT) AS body` + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "")
       + (this.hasReturnRouteColumn ? ", return_route, return_route_basis" : "");
   }
 

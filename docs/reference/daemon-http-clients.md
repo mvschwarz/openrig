@@ -412,6 +412,35 @@ What reads these declarations:
   or render flag establishes no positive delivery or verification claim. These are outcome words, not a capability
   gate: the reminder's status, receipts and retries don't change with them.
 
+## Display a compact queue row
+
+`GET /api/queue/list?compact=1` (also the compact overdue and undelivered reads) adds
+`displayText`: a derived one-line preview. `rig queue list` and MCP `rig_queue_list`
+carry it through. Use it for a row label when you have no authored subject or read body.
+The stored `summary`, including null, is unchanged. `body` and the other fields named in
+`fieldsElided` remain absent. Without `compact=1`, the HTTP listing still returns full rows;
+full reads do not add `displayText`. MCP keeps one JSON text part and its existing
+`structuredContent` page metadata (`items`, `limit`, `truncated`).
+
+The derivation, shared by the three compact repository reads, is
+`queueDisplayText` in `packages/daemon/src/domain/queue-display.ts`:
+
+1. Inspect at most the first 1,024 UTF-16 code units of the summary, dropping a trailing
+   unmatched high surrogate. Split on CRLF, CR, LF, U+2028 or U+2029. Choose the first line
+   whose JavaScript `trim()` is nonempty, trim it, then collapse whitespace runs to one space.
+2. If that supplies no line, do the same to a bounded body prefix. SQL selects at most the first
+   4,096 UTF-8 bytes of the body (byte slicing also preserves embedded NULs); the function
+   applies the same UTF-16 bound before processing it. The preview has at most 160 UTF-16 code units: if longer, keep the first
+   159 (dropping a trailing unmatched high surrogate) and append `…`.
+3. If neither inspected prefix supplies text, apply the same line rule to the qitem id, falling
+   back to `Queue item` only if that too supplies no text. This **does not mean the body is
+   empty**: useful text can occur after the inspected prefix. A content-erased row also uses
+   this fallback. The body is available only on an explicit full read.
+
+This bounds text transferred into JavaScript and preview processing, not SQLite disk reads:
+`substr` may still read the stored body. A short preview is not a speedup claim. Consumers
+should not fetch every body just to label compact rows; detail reads remain their own choice.
+
 ## Route details
 
 - **Early Claude compaction acknowledgement:** Send `{"session":"<session>","earlyAck":true}` to
