@@ -2883,6 +2883,17 @@ describe("#3953 — stop: a live daemon whose record is missing", () => {
     expect(deps.removeFile).not.toHaveBeenCalled();
   });
 
+  it("checks the identified PID again just before the signal, and sends none when it no longer writes this home's log", async () => {
+    const deps = unrecordedDeps();
+    // Identified a moment ago; by the signal, that PID belongs to a process that writes elsewhere.
+    vi.mocked(deps.writesOutputTo!).mockReturnValueOnce(true).mockReturnValueOnce(false);
+    const outcome = await stop(deps);
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toBe(`Cannot stop safely: PID ${DAEMON} no longer shows as writing ${LOG_FILE}; no signal sent, no daemon.json was recorded.`);
+    expect(deps.writesOutputTo).toHaveBeenCalledTimes(2);
+    expect(deps.kill).not.toHaveBeenCalled();
+  });
+
   it("never chooses a process that only owns the port: a listener whose PID doesn't write this home's log is refused", async () => {
     const message = await expectRefused(unrecordedDeps({ answers: { pid: 999 } }),
       /Not identified as this home's daemon: the listener at \S+ is PID 999, which doesn't write \S+daemon\.log, so it isn't shown to be this home's daemon; no signal sent\.$/);

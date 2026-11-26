@@ -1351,6 +1351,12 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   // Only a signalling stop names a request time: this process's clock just before kill, not delivery.
   let requested = "";
   if (pidState !== "dead") {
+    // A daemon identified without its record is checked again just before the signal: its PID came from an answer a
+    // moment ago, and a process given that PID since wouldn't write this home's log. That narrows the gap without
+    // closing it, since nothing binds a PID to one process atomically.
+    if (identified && deps.writesOutputTo?.(state.pid, identified.log) !== true) {
+      throw new Error(`Cannot stop safely: PID ${state.pid} no longer shows as writing ${identified.log}; no signal sent, ${preserved}.`);
+    }
     notBefore = Date.now();
     requested = `; SIGTERM requested at ${new Date(notBefore).toISOString()}`;
     deps.kill(state.pid, "SIGTERM");
