@@ -41,6 +41,8 @@ class FakeHub {
   readonly stallShow = new Set<string>();
   /** Runs while a show is waiting on the hub, before it answers; the show waits for what it returns. */
   duringShow: ((id: string) => void | Promise<void>) | null = null;
+  /** Runs while a claim is waiting on the hub, before it takes effect; the claim waits for what it returns. */
+  duringClaim: ((id: string) => void | Promise<void>) | null = null;
   /** Runs right after a create stores a new item, before it answers. */
   afterCreate: ((id: string) => void) | null = null;
   /** Runs while a connection is being set up, before it's ready. */
@@ -77,6 +79,7 @@ class FakeHub {
       listOwned: async (state, limit) => [...this.items.values()].filter((i) => i.destinationSession === PARTICIPANT && i.state === state).slice(0, limit)
         .map(({ notes: _notes, ...item }) => ({ ...item, body: null })),
       claim: async (id) => {
+        await this.duringClaim?.(id);
         const item = get(id);
         if (item.state !== "pending") throw new HubError("refused", `qitem ${id} is ${item.state}`);
         item.state = "in-progress";
@@ -731,12 +734,65 @@ describe("network connector", () => {
     expect(hubStates()).toEqual({ done: 30 });
   });
 
+  it("a long intake leaves reporting its window: what finished here reaches the hub in the same pass", async () => {
+    const b = bind();
+    for (let i = 0; i < 20; i++) hub.add(`hub-w${i}`);
+    await pass(b.id);
+    await finishAll();
+    // A full backlog of new work whose every claim is slow: taking all of it would outlast the pass.
+    for (let i = 0; i < 200; i++) hub.add(`hub-n${i}`);
+    hub.duringClaim = () => new Promise((resolve) => setTimeout(resolve, 20));
+    const slow = { ...deps, passTimeoutMs: 1000 };
+    const result = await runNetworkBindingPass(slow, bindings.get(b.id)!);
+    expect(result.error).toBeUndefined();
+    expect(result.resultsSent).toBe(20);
+    expect(result.taken).toBeGreaterThan(0);
+    expect(result.taken).toBeLessThan(200);
+  });
+
+  it("items handed on to successors still open here don't hold reporting's first places; each closes first once its successor finishes", async () => {
+    const b = bind();
+    for (const id of ["hub-p1", "hub-p2", "hub-p3"]) hub.add(id);
+    await pass(b.id);
+    const local = (id: string) => runs(id)[0]!;
+    for (const id of ["hub-p1", "hub-p2"]) repo.claim({ qitemId: local(id).qitemId, destinationSession: "dev-impl@lab" });
+    await pass(b.id);
+    const successors: string[] = [];
+    for (const id of ["hub-p1", "hub-p2"]) {
+      const { created } = await repo.handoff({ qitemId: local(id).qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+      successors.push(created.qitemId);
+    }
+    repo.claim({ qitemId: local("hub-p3").qitemId, destinationSession: "dev-impl@lab" });
+    // Two places a pass: the two handed-on items, with nothing new to send, don't keep hub-p3's pickup out.
+    const limited = { ...deps, reportLimit: 2 };
+    await runNetworkBindingPass(limited, bindings.get(b.id)!);
+    expect(hub.items.get("hub-p3")!.notes).toContain(`Picked up by the local seat at ${local("hub-p3").claimedAt}.`);
+    repo.claim({ qitemId: successors[0]!, destinationSession: "review@lab" });
+    await repo.update({ qitemId: successors[0]!, actorSession: "review@lab", state: "done", closureReason: "no-follow-on", resolution: "Reviewed: fine." });
+    expect(await runNetworkBindingPass(limited, bindings.get(b.id)!)).toMatchObject({ resultsSent: 1 });
+    expect(hub.items.get("hub-p1")).toMatchObject({ state: "done", resolution: "Reviewed: fine." });
+  });
+
   /** A finding as a Core hub's stuck sweep writes one, addressed to the participant that claimed `about`. */
   const finding = (id: string, about: string) => hub.items.set(id, { qitemId: id, sourceSession: "assistant@team", destinationSession: PARTICIPANT,
     state: "pending", summary: `Checked on ${about}: it stalled after it was picked up (4 minutes)`, resolution: null, closureReason: null, notes: [],
     body: [`STUCK SWEEP FINDING (stalled-after-claim)`, `row: ${about}`, `destination: ${PARTICIPANT} (source assistant@team, state in-progress)`, "age: 4 min",
       "last transition: Queued for the connected local seat. Not picked up yet.", "why: no meaningful queue change for 4 min; owner activity unknown (queue age does not prove idle)",
       `This is a diagnostic about ${about}, not a second assignment. Read ${about} and act on it.`].join("\n") });
+
+  it("a finding about an item someone else closed on the hub first says its result stayed here, not that it's on the hub", async () => {
+    const b = bind();
+    hub.add("hub-c1");
+    await pass(b.id);
+    hub.raceClose.set("hub-c1", { state: "done", closureReason: "no-follow-on", resolution: "Someone else's answer." });
+    await repo.update({ qitemId: runs("hub-c1")[0]!.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", resolution: "Ours." });
+    await pass(b.id);
+    expect(db.prepare("SELECT outcome FROM network_receipts WHERE hub_qitem_id = 'hub-c1'").get()).toEqual({ outcome: "closed_on_hub" });
+    finding("qitem-recovery-0000000000000009", "hub-c1");
+    expect(await pass(b.id)).toMatchObject({ taken: 0, findingsAnswered: 1 });
+    expect(hub.items.get("qitem-recovery-0000000000000009")!.resolution).toBe("alex@team holds hub-c1 through a connected OpenRig: "
+      + "it has finished there, but hub-c1 was closed here before its result arrived, so the result stays with that OpenRig.");
+  });
 
   it("a hub's stuck-sweep finding about an item this seat holds is answered on the hub from the local item, and never taken as work", async () => {
     const b = bind();
