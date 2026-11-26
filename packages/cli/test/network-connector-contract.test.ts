@@ -48,6 +48,10 @@ interface Fixture {
 }
 interface NormalizedRequest { method: string; path: string; authorization: string | null; rpcMethod: string | null; tool: string | null; arguments: unknown }
 
+/** A JSON text with every object's keys sorted, so a match doesn't depend on the order a request's keys were written in. */
+const canonical = (value: unknown): string => JSON.stringify(value, (_key, v: unknown) => v && typeof v === "object" && !Array.isArray(v)
+  ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : v);
+
 const loadFixture = (scenario: string): Fixture => JSON.parse(fs.readFileSync(path.join(FIXTURES, `${scenario}.json`), "utf8")) as Fixture;
 
 /** A loopback hub that serves one fixture's recorded answers, one pass at a time. */
@@ -110,8 +114,10 @@ class FixtureHub {
     let body: unknown = "";
     try { body = text ? JSON.parse(text) : ""; } catch { body = text; }
     const request = this.normalize(req.method ?? "", new URL(req.url ?? "/", this.origin).pathname, req.headers.authorization, body, true);
-    const open = this.fixture.exchanges.filter((x) => x.pass === this.pass && !this.consumed.has(x));
-    const hit = open.find((x) => JSON.stringify(this.recorded(x)) === JSON.stringify(request));
+    // This pass's exchanges, plus an earlier pass's optional ones still unanswered: the SDK's optional GET can arrive after its
+    // own pass ended (it isn't awaited before the client closes), so it may land in the next pass.
+    const open = this.fixture.exchanges.filter((x) => !this.consumed.has(x) && (x.pass === this.pass || (x.pass < this.pass && !x.required)));
+    const hit = open.find((x) => canonical(this.recorded(x)) === canonical(request));
     if (!hit) {
       // The closest recorded request still open in this pass, for the diff: the same call, else the same JSON-RPC method.
       const nearest = open.find((x) => { const r = this.recorded(x); return r.rpcMethod === request.rpcMethod && r.tool === request.tool; })
@@ -239,6 +245,13 @@ describe("the network connector against a recorded hub", () => {
     expect(bindings.get(binding.id)).toMatchObject({ state: "active", lastError: null });
   });
 
+  it("the derived hub id of an outbound request stays the same across releases", () => {
+    // The hub item id is how a retry after an upgrade finds the request already sent. If its derivation changed, an in-flight
+    // request would be created a second time on the hub. The fixtures normalize the derived id, so this pins it.
+    expect(networkHubRequestId({ nodeId: "node-fixed", hubUrl: "https://hub.example.test/mcp", hubSeat: "alex@team" }, "req-1"))
+      .toBe("qitem-netout-489188d096177d97409e");
+  });
+
   it("outbound-request: a request is created on the hub under its derived id, and the hub's answer closes the local item", async () => {
     const { hub: served, binding, pass } = await connect("outbound-request");
     served.pass = 1;
@@ -270,6 +283,31 @@ describe("the network connector against a recorded hub", () => {
     expect(await pass(2)).toMatchObject({ error: "revoked" });
     expect(bindings.get(binding.id)!.state).toBe("revoked");
     expect(() => readNetworkCredential(localHome, binding.id, bindings.get(binding.id)!.credentialRevision)).toThrow();
+  });
+
+  it("truncated-page: a full page the hub marks cut is one JSON text part, and the connector takes the whole page", async () => {
+    const { hub: served, binding, pass } = await connect("truncated-page");
+    const result = await pass(1);
+    expect(result.error).toBeUndefined();
+    // A full page is taken whole (each item claimed and shown for its body), then the next page is read: empty here.
+    expect(result).toMatchObject({ taken: 25, pickupsSent: 0, resultsSent: 0, unknown: 0 });
+    expect(bindings.get(binding.id)).toMatchObject({ state: "active", lastError: null });
+    const taken = localRepo.list({ limit: 100 });
+    expect(taken).toHaveLength(25);
+    for (let n = 1; n <= 25; n++) {
+      const item = taken.find((i) => (i.tags ?? []).includes(`network-hub-item:qitem-20261125000000-${n}`));
+      expect(item, `hub item ${n}`).toMatchObject({ summary: `From lead@team via network hub: Item ${n}`, state: "pending" });
+      expect(item!.body).toContain(`Item ${n}.`);
+      expect(receipt(`qitem-20261125000000-${n}`)!.queued_sent_at).not.toBeNull();
+    }
+
+    // The shape this pins: exactly `limit` rows as ONE text part; the page marker lives only in structuredContent.
+    const cut = served.fixture.exchanges.map((x) => (x.response.body as { result?: { content?: unknown[]; structuredContent?: { items?: unknown[]; limit?: number; truncated?: boolean } } }).result)
+      .filter((result) => result?.structuredContent?.truncated);
+    expect(cut).toHaveLength(1);
+    expect(cut[0]!.content).toHaveLength(1);
+    expect(cut[0]!.structuredContent).toMatchObject({ limit: 25, truncated: true });
+    expect(cut[0]!.structuredContent!.items).toHaveLength(25);
   });
 
   it("syncing-503: grant_authority_unavailable leaves the binding active with its credential: setting up at first, then retry later", async () => {
