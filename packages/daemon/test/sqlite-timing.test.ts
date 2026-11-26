@@ -118,6 +118,27 @@ describe("SQLite timing spans", () => {
     d.close();
   });
 
+  it("does not mark a slow read with .db_written for a checkpoint just before it", () => {
+    const d = db(true);
+    d.prepare("INSERT INTO t (v) VALUES (?)").run("x");
+    record();
+    d.pragma("wal_checkpoint(TRUNCATE)");   // writes the main file now, right before the slow read
+    d.prepare("SELECT hold_ms(260)").get();
+    expect(spans.map((s) => s.site)).toEqual(["sqlite.get.select"]);
+    d.close();
+  });
+
+  it("keeps the caller's this in a transaction callback, every mode", () => {
+    const d = db();
+    record();
+    const tx = d.transaction(function (this: { value: number }) { return this.value; });
+    expect(tx.call({ value: 7 })).toBe(7);
+    expect(tx.immediate.call({ value: 8 })).toBe(8);
+    expect(tx.deferred.call({ value: 9 })).toBe(9);
+    expect(tx.exclusive.call({ value: 10 })).toBe(10);
+    d.close();
+  });
+
   it("does nothing without a recorder", () => {
     const d = db();
     expect(d.prepare("SELECT hold_ms(260) AS h").get()).toEqual({ h: 260 });
@@ -131,5 +152,15 @@ describe("SQLite timing spans", () => {
     expect(firstKeyword("wal_checkpoint(TRUNCATE)")).toBe("wal_checkpoint");
     expect(firstKeyword("")).toBe("other");
     expect(firstKeyword("(SELECT 1)")).toBe("other");
+    expect(firstKeyword("/* a */ ( /* b */ SELECT 1")).toBe("other");   // a comment ends at its first */
+    expect(firstKeyword("/** x **/select 1")).toBe("select");
+    expect(firstKeyword("/* a * b */ update t")).toBe("update");
+  });
+
+  it("scans comment-heavy SQL in linear time", () => {
+    const started = performance.now();
+    expect(firstKeyword("/*x*/".repeat(5000) + "(")).toBe("other");
+    expect(firstKeyword("/*x*/".repeat(5000) + "select")).toBe("select");
+    expect(performance.now() - started).toBeLessThan(100);
   });
 });

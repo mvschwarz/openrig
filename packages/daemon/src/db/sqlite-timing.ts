@@ -13,7 +13,9 @@ import { recordSlowSyncSite } from "../domain/sync-site-wrap.js";
  * A slow span also says whether the main database file was written while it ran: the site gets `.db_written`. In WAL
  * mode only a checkpoint writes the main file, so `sqlite.run.insert.db_written` is a commit that ran the automatic
  * checkpoint (its fsyncs), and `sqlite.run.insert` alone is a stall in the WAL append itself. Those are the two causes
- * measured in #3895. The check is one stat of the file, made only after a call was already slow.
+ * measured in #3895. The check is one stat of the file, made only after a call was already slow: the file's last write
+ * must come more than 10 ms after the span started, so a write just before the call (or a coarse file clock) is never
+ * counted, and a checkpoint, which writes until it ends, is.
  *
  * Fast calls cost two performance.now() reads and nothing else. With no recorder configured nothing is recorded.
  */
@@ -65,12 +67,13 @@ export function withSqliteTiming(db: Database.Database): Database.Database {
     timed(`sqlite.pragma.${firstKeyword(source)}`, () => pragma(source, options))) as typeof db.pragma;
 
   const transaction = db.transaction.bind(db);
+  // Ordinary functions, so the caller's `this` reaches the callback as better-sqlite3 documents.
   db.transaction = ((fn: (...args: unknown[]) => unknown) => {
     const inner = transaction(fn) as unknown as Record<string, (...args: unknown[]) => unknown> & ((...args: unknown[]) => unknown);
-    const outer = ((...args: unknown[]) => timed("sqlite.transaction", () => inner(...args))) as typeof inner;
+    const outer = function (this: unknown, ...args: unknown[]) { return timed("sqlite.transaction", () => inner.apply(this, args)); } as typeof inner;
     for (const mode of ["deferred", "immediate", "exclusive"] as const) {
       const variant = inner[mode]!;
-      (outer as Record<string, unknown>)[mode] = (...args: unknown[]) => timed("sqlite.transaction", () => variant(...args));
+      (outer as Record<string, unknown>)[mode] = function (this: unknown, ...args: unknown[]) { return timed("sqlite.transaction", () => variant.apply(this, args)); };
     }
     (outer as Record<string, unknown>).default = outer;
     return outer;
@@ -79,14 +82,15 @@ export function withSqliteTiming(db: Database.Database): Database.Database {
   return db;
 }
 
-/** The SQL's first keyword, lower case, letters and underscores only (never the statement text or a value). */
+/** The SQL's first keyword, lower case, letters and underscores only (never the statement text or a value). A block
+ *  comment ends at its first `*\/`, as in SQLite, so each comment matches one way and the scan stays linear. */
 export function firstKeyword(source: string): string {
-  const match = /^(?:\s|--[^\n]*\n|\/\*[\s\S]*?\*\/)*([A-Za-z_]{1,24})/.exec(source);
+  const match = /^(?:\s|--[^\n]*\n|\/\*(?:[^*]|\*+[^*\/])*\*+\/)*([A-Za-z_]{1,24})/.exec(source);
   return match ? match[1]!.toLowerCase() : "other";
 }
 
-/** True when the main database file's mtime is at or after the span's start (10 ms allowed for a coarse clock). */
+/** True when the main database file was last written more than 10 ms after the span started. */
 function mainFileWrittenSince(file: string | null, startedWall: number): boolean {
   if (!file) return false;
-  try { return statSync(file).mtimeMs >= startedWall - 10; } catch { return false; }
+  try { return statSync(file).mtimeMs > startedWall + 10; } catch { return false; }
 }
