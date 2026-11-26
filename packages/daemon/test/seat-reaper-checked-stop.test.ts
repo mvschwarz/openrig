@@ -10,12 +10,17 @@ import { SeatReaperService } from "../src/domain/seat-reaper-service.js";
 it.each([false, true])("uses the real checked stop and lifecycle lease (uncertain=%s)", async uncertain => {
   // Given real lifecycle/guard/adapter services, with only OS terminal effects replaced.
   const f = fixture(); let killed = false;
+  const opts = { runnerSurvives: false };
   const commands: string[] = [];
   const tmux = new TmuxAdapter(async command => {
     commands.push(command);
     if (command.includes("has-session")) return "";
-    if (command.includes("list-panes")) return "%1|0|/fixture|120|40|1";
+    if (command.includes("list-panes")) return "%1|0|/fixture|120|40|1|1";
     if (command.includes("show-environment")) return "OPENRIG_NODE_ID=a";
+    // #3836 review round 6: the runner-exit confirmation rides plain shell execs — the
+    // foreground-group probe and the gone-confirmation (kill -0 against the negative pid).
+    if (command.includes("ps -o tpgid=")) return "4242\n";
+    if (command.includes("kill -0 -4242")) return opts.runnerSurvives ? "" : (() => { throw Error("kill: (4242) - No such process"); })();
     if (command.startsWith("kill -")) {
       expect(f.events().at(-1)).toMatchObject({ phase: "capture", sessionId: "s" });
       if (uncertain) throw Error("kill interrupted");
@@ -35,8 +40,11 @@ it.each([false, true])("uses the real checked stop and lifecycle lease (uncertai
   // When the eligible seat reaches its threshold under the real guard.
   for (let i = 0; i <= 60; i++) { at += 60_000; await service.tick(); }
   // Then only the reviewed tmux session is targeted, and effects match the receipt.
+  // The standby stop signals the runner's foreground group first, then the pane pid, and
+  // confirms the group is gone before the standby record.
   expect(commands.filter(command => command.startsWith("kill -"))).toEqual(uncertain
-    ? ["kill -TERM 4343", "kill -KILL 4343"] : ["kill -TERM 4343"]);
+    ? ["kill -TERM -4242", "kill -KILL -4242"]
+    : ["kill -TERM -4242", "kill -TERM 4343", "kill -0 -4242"]);
   expect(commands.some(command => command.includes("kill-session") || command.includes("detach-client"))).toBe(false);
   expect(killed).toBe(!uncertain);
   expect(f.events()).toContainEqual(expect.objectContaining({ phase: "effect", budgetConsumed: true,

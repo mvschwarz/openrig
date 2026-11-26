@@ -2334,7 +2334,7 @@ export class SeatLifecycleService {
     const undoRequest = () => !request || this.sessionRegistry.revertStopRequest(session.id, request.attemptId, request.prev);
     const keptNote = " The stop request stays recorded: the row changed meanwhile, so this attempt's request couldn't be put back.";
     const kill = target && standbyPane
-      ? await this.stopStandbyPane(target, standbyPane, beforeEffect)
+      ? await this.stopStandbyPane(target, standbyPane, beforeEffect, standby)
       : checked
       ? await this.tmuxAdapter.killSession(session.session_name, beforeEffect)
       : await this.tmuxAdapter.killSession(session.session_name);
@@ -2418,7 +2418,7 @@ export class SeatLifecycleService {
   }
 
   private async stopStandbyPane(target: { session: string; pane: string; nodeId: string }, identity: string,
-    beforeEffect?: () => Promise<void>): Promise<import("../adapters/tmux.js").TmuxResult> {
+    beforeEffect?: () => Promise<void>, standby = false): Promise<import("../adapters/tmux.js").TmuxResult> {
     let began = false;
     try {
       const result = await terminatePaneInPlace(this.tmuxAdapter, target.pane,
@@ -2430,7 +2430,32 @@ export class SeatLifecycleService {
           await beforeEffect?.();
           began = true;
         }, { target, identity });
-      if (result.ok && await this.tmuxAdapter.standbyPaneIdentity(target, true) === identity) return { ok: true };
+      if (result.ok && await this.tmuxAdapter.standbyPaneIdentity(target, true) === identity) {
+        // #3836 review: the pane closing proves the shell exited; the runner can be the
+        // shell's foreground job and outlive it. The stop record is written only when the
+        // signalled foreground group is confirmed gone; an unreadable group, or one still
+        // alive, stays unknown (attention-required) instead of a successful standby stop.
+        if (standby) {
+          // #3836 review: a standby record is written only when the signalled foreground
+          // group is confirmed gone — a pane closing proves the shell exited, while the
+          // runner can be the shell's foreground job and outlive it briefly (zombies).
+          // A human's in-place stop needs no such evidence.
+          const group = result.ok ? result.foregroundGroup : undefined;
+          if (group == null) {
+            return { ok: false, code: "standby_unconfirmed", message: "The runner's foreground process group could not be read, so its exit is unproven. No standby record was written; the seat needs a person's look.", stopPhase: "kill_attempted" };
+          }
+          let gone: boolean | null = null;
+          const deadline = Date.now() + 3_000;
+          do { gone = await this.tmuxAdapter.processGroupGone(group); if (gone === true) break; await new Promise(r => setTimeout(r, 100)); }
+          while (gone === false && Date.now() < deadline);
+          if (gone !== true) {
+            return { ok: false, code: "standby_unconfirmed", message: gone === false
+              ? "The runner's process group is still alive after the standby stop; nothing was recorded."
+              : "The runner's exit could not be confirmed (the process check failed); no standby record was written.", stopPhase: "kill_attempted" };
+          }
+        }
+        return { ok: true };
+      }
       return { ok: false, code: "standby_unconfirmed", message: result.ok ? "The stopped pane could not be verified." : result.message, stopPhase: "kill_attempted" };
     } catch (error) {
       if (!(error instanceof Error)) throw error;

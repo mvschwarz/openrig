@@ -28,7 +28,9 @@ it.each([false, true])("exercises real isolated tmux without an agent provider (
     const f = fixture(); f.settings.observe = observe;
     f.db.prepare("UPDATE bindings SET tmux_pane=?").run(pane);
     const tmux = new TmuxAdapter(async command => {
-      if (!/^kill -(TERM|KILL) \d+$/.test(command)) throw Error("argv execution required");
+      // The standby stop's process-observation rides the same exec: the foreground-group
+      // probe (ps) and the gone-confirmation (kill -0) are plain shell commands too.
+      if (!/^(kill -(TERM|KILL) -?\d+|ps -o tpgid= -p \d+|kill -0 -\d+)$/.test(command)) throw Error("argv execution required");
       return (await exec("sh", ["-c", command], { timeout: 10_000 })).stdout;
     }, undefined,
       async argv => {
@@ -38,6 +40,12 @@ it.each([false, true])("exercises real isolated tmux without an agent provider (
       }, ["-L", socket]);
     const guard = new SeatDeliveryGuard(f.db, name => resolveGuardTarget(f.db, name)); tmux.deliveryGuard = guard;
     const lifecycle = new SeatLifecycleService({ db: f.db, rigRepo: new RigRepository(f.db), sessionRegistry: new SessionRegistry(f.db), eventBus: f.bus, tmuxAdapter: tmux });
+    const rawStop = lifecycle.stopSeat.bind(lifecycle);
+    lifecycle.stopSeat = async (input) => { const r = await rawStop(input); console.error("DBG stop", JSON.stringify(r).slice(0,400)); return r; };
+    const rawGone = tmux.processGroupGone.bind(tmux);
+    tmux.processGroupGone = async (group) => { const g = await rawGone(group); console.error("DBG gone", group, g); return g; };
+    const rawSig = tmux.signalPaneProcess.bind(tmux);
+    tmux.signalPaneProcess = async (pane, signal, witness) => { const r = await rawSig(pane, signal, witness); console.error("DBG sig", signal, JSON.stringify(r).slice(0,200)); return r; };
     let at = 0;
     const service = new SeatReaperService({ ...f.deps, guard, lifecycle, now: () => at });
     // When the reaper crosses the configured threshold.

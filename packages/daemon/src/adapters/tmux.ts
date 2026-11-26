@@ -86,6 +86,8 @@ export function defaultTmuxFileOps(): TmuxFileOps {
 
 export type TmuxResult =
   | { ok: true; warnings?: string[]; stopPhase?: StopPhase;
+    /** #3836 review: the pane tty's foreground process group, when it was readable and signalled. */
+    foregroundGroup?: number;
     /** #3253: a recovery that went ahead without the seat's requested limit. */
     processLimits?: SeatProcessLimitsNotice }
   | { ok: false; code: string; message: string; stopPhase?: StopPhase; inputReadFailure?: InputReadDiagnostic;
@@ -2924,9 +2926,18 @@ export class TmuxAdapter {
         return { ok: false, code: "pane_pid_unavailable", message: `Could not resolve the pane pid for "${paneId}".` };
       }
       beforeWrite();
-      if (standbyWitness) await this.signalForegroundGroup(pid, signal);
-      await this.exec(`kill -${signal} ${pid}`);
-      return { ok: true };
+      let foregroundGroup: number | null = null;
+      if (standbyWitness) foregroundGroup = await this.signalForegroundGroup(pid, signal);
+      try {
+        await this.exec(`kill -${signal} ${pid}`);
+      } catch (err) {
+        // #3836 review: the group signal may already have ended the pane's process —
+        // "no such process" on the follow-up pid kill is a completed signal, not a failure.
+        // The caller still confirms the exit before any standby record is written.
+        if (!/no such process/i.test(err instanceof Error ? err.message : String(err))) throw err;
+        return { ok: true, ...(foregroundGroup !== null ? { foregroundGroup } : {}) };
+      }
+      return { ok: true, ...(foregroundGroup !== null ? { foregroundGroup } : {}) };
     } catch (err) {
       return classifyWriteError(err);
     }
@@ -2934,20 +2945,34 @@ export class TmuxAdapter {
 
   /** A pane's tty foreground process group, read from the pane's own process: null when no tty has one, or `ps`
    *  can't be read. The pane pid signal still covers the shell, so an unreadable group is not a failure. */
-  private async signalForegroundGroup(panePid: number, signal: "TERM" | "KILL"): Promise<void> {
+  private async signalForegroundGroup(panePid: number, signal: "TERM" | "KILL"): Promise<number | null> {
     let group: number | null = null;
     try {
       // Plain `ps`, NOT the tmux-targeted run(): server args would land in ps's argv.
       const parsed = Number.parseInt((await this.exec(`ps -o tpgid= -p ${String(panePid)}`)).trim(), 10);
       group = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
     } catch { /* no ps, or it can't read this pid: the pane pid itself is still signalled */ }
-    if (group === null) return;
+    if (group === null) return null;
     try {
       await this.exec(`kill -${signal} -${group}`);
     } catch (err) {
       // A group already gone (the graceful TERM took the runner with it) is not a failure; any other refusal is,
       // since a runner may still be in it.
       if (!/no such process/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    }
+    return group;
+  }
+
+  /** #3836 review: whether a process group is gone. true = confirmed gone (`kill -0` finds
+   *  nothing), false = still alive, null = the check itself failed (unknown — never read as
+   *  evidence that a runner exited). */
+  async processGroupGone(group: number): Promise<boolean | null> {
+    try {
+      await this.exec(`kill -0 -${group}`);
+      return false;
+    } catch (err) {
+      if (/no such process/i.test(err instanceof Error ? err.message : String(err))) return true;
+      return null;
     }
   }
 

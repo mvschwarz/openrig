@@ -10,7 +10,9 @@ export interface PaneCutoverTiming {
   sleep: (ms: number) => Promise<void>;
 }
 
-export type PaneTerminationResult = { ok: true; path: "graceful" | "forced" } | { ok: false; message: string };
+export type PaneTerminationResult = { ok: true; path: "graceful" | "forced";
+  /** #3836 review: the pane tty's foreground process group, when it was readable and signalled. */
+  foregroundGroup?: number } | { ok: false; message: string };
 
 /**
  * Terminate the pane's root process IN PLACE so a respawn (without -k) can reuse the pane and keep its
@@ -40,13 +42,16 @@ export async function terminatePaneInPlace(
   if (!remain.ok) failures.push(`remain-on-exit: ${remain.message}`);
   await beforeEffect?.();
   const term = await tmux.signalPaneProcess(inputTarget, "TERM", ...(standbyWitness ? [standbyWitness] : []));
+  let foregroundGroup: number | undefined;
+  if (term.ok && "foregroundGroup" in term) foregroundGroup = term.foregroundGroup;
   if (!term.ok) failures.push(`TERM: ${term.message}`);
-  if (await waitPaneDead(tmux, paneId, timing)) return { ok: true, path: "graceful" };
+  if (await waitPaneDead(tmux, paneId, timing)) return { ok: true, path: "graceful", foregroundGroup };
   // Graceful window elapsed — force-kill (the pinned degraded path).
   await beforeEffect?.();
   const kill = await tmux.signalPaneProcess(inputTarget, "KILL", ...(standbyWitness ? [standbyWitness] : []));
+  if (kill.ok && "foregroundGroup" in kill) foregroundGroup = kill.foregroundGroup;
   if (!kill.ok) failures.push(`KILL: ${kill.message}`);
-  if (await waitPaneDead(tmux, paneId, timing)) return { ok: true, path: "forced" };
+  if (await waitPaneDead(tmux, paneId, timing)) return { ok: true, path: "forced", foregroundGroup };
   const detail = failures.length > 0 ? ` Tmux failures: ${failures.join("; ")}.` : "";
   return { ok: false, message: `${label} in pane "${paneId}" did not exit after graceful TERM + forced KILL.${detail}` };
 }
