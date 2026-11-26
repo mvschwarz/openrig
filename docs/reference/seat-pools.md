@@ -104,13 +104,13 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
     operation id with what it was issued on, which never runs the add again. With no node recorded, its slot row goes
     and it is reported `no_node`, `not launched (interrupted before create)`; with a node, it settles by the table
     above. What settles this way is reported with the evaluation's other settlements, and kept in the job's history;
-    an add it settles `not_running` drains its slot and starts the `cooldown_s`, so that evaluation drains no agent
-    and adds none, comebacks included (`add.skipped: cooldown`), except under `drain: true`;
+    an add it settles `not_running` is a drain step newer than the plan's read, so that evaluation drains no agent
+    and adds none, comebacks included (`add.skipped: cooldown`), except under `drain: true`; rows still move;
   - while an add that settled `not_running` keeps its slot `drained` with its reuse hold, no new number is taken: when
     no eligible `drained` slot is left to bring back, the notes report `add.held` (`held: failed add <id> (slot <n>)
     settled not_running (<observed>)`), and `add.failedAdd` names that attempt, its slot and its reuse hold,
-    every evaluation, with no limit on how many. Rows still move, and the other eligible `drained` slots still come
-    back. An ordinary `drained` slot, a comeback's reuse hold and an `unknown` add hold no new number.
+    every evaluation outside a cooldown, with no limit on how many. Rows still move, and the other eligible `drained`
+    slots still come back, outside a cooldown. An ordinary `drained` slot, a comeback's reuse hold and an `unknown` add hold no new number.
 - **Latency.** The job runs every 60 seconds, so a row that has waited `dispatch_after_s` is considered by the next
   evaluation, up to one more interval later, before it is moved and before an agent is added. That is not a dispatch
   deadline: a row moves only to an agent that is
@@ -221,6 +221,7 @@ An add whose launch failed or needs attention while its session still runs is re
 nothing yet settles it. So does an add whose node was created but has no session when the daemon restarts: nothing
 launches it again, and deleting that node removes its slot row, which frees its number. The same holds for a comeback
 whose launch does not run and is not refused before it starts (for example one that awaits a decision, finds a live
-session or fails, or one a daemon restart cut off before its launch): it stays in flight with its outcome kept. Nothing yet clears a reuse hold: an add that settled
+session or fails): it stays in flight with its outcome kept. One a daemon restart cut off before its launch stays in
+flight, with no outcome. Nothing yet clears a reuse hold: an add that settled
 `not_running` holds new numbers until its node is deleted, which removes its slot row. An add, or a comeback whose launch
 had already started, that settles running after `rig down` keeps running.

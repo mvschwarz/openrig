@@ -463,6 +463,8 @@ describe("seat-pool comeback: the drained agent comes back on its own node (#339
     const [s1, s2] = await w.serve(m, 2);
     await w.drain(m, 2);
     // slot 1 is an add that settled not running: its outcome says so, and it keeps its reuse hold
+    // (the UPDATE writes the outcome and the hold `settleAddNotRunning` writes, and the drain already left the slot `drained`;
+    // the C67 test in seat-pool-add-lifecycle.test.ts takes the real path)
     const failedHold = { code: "not_running", observed: "exited" };
     w.db.prepare("UPDATE seat_pool_slots SET attempt_outcome = ?, reuse_hold = ? WHERE node_id = ?")
       .run(JSON.stringify({ status: "not_running", observed: "exited", call: null }), JSON.stringify(failedHold), s1!.nodeId);
@@ -471,18 +473,72 @@ describe("seat-pool comeback: the drained agent comes back on its own node (#339
     await w.row(m.session);
     await w.wantOne(m);
 
-    const { notes, settled } = await comeBack(w, m.jobId);
+    const { notes, next, settled } = await comeBack(w, m.jobId);
     const add = notes.add as { comebacks: ComebackEntry[]; held?: string; failedAdd?: Record<string, unknown> };
     expect(add.comebacks.map((c) => [c.slotNumber, c.nodeId, c.attempt?.status])).toEqual([[2, s2!.nodeId, "in_flight"]]);
     expect(add.held).toBe(`held: failed add ${failedAttempt} (slot 1) settled not_running (exited)`);
+    // the failed add holds the add's new number only, never the whole pool
+    expect(notes).not.toHaveProperty("held");
     expect(add.failedAdd).toEqual({
       slotNumber: 1, nodeId: s1!.nodeId, attempt: { id: failedAttempt, status: "not_running", observed: "exited" }, reuseHold: failedHold,
     });
     expect(add).not.toHaveProperty("issued");
     expect(w.launch.mock.calls.map((call) => call[1])).toEqual(["dev.impl-s2"]);
     expect(settled.map((s) => [s.slotNumber, s.attempt.status])).toEqual([[2, "running"]]);
+    // the next cycle moves a waiting row to the agent that came back, in the same cycle whose add names the failed attempt
+    expect(next.moved).toEqual([{ qitemId: expect.any(String), from: m.session, to: `dev-impl-s2@${RIG}` }]);
+    expect((next.add as { held?: string }).held).toBe(`held: failed add ${failedAttempt} (slot 1) settled not_running (exited)`);
+    expect(next).not.toHaveProperty("held");
     expect(w.converge).toHaveBeenCalledTimes(2);
     expect(w.nodesNamed("dev.impl-s3")).toEqual([]);
+  });
+
+  it("A leftover add the cycle settles `not_running` from its row starts the cooldown before that cycle's add: an eligible `drained` slot does not come back in that cycle nor 30 s later, and comes back once `cooldown_s` has passed since the settle.", async () => {
+    const w = comebackWorld();
+    const { m, w1, b } = await w.drainedAgent();
+    // slot 1 carries a reuse hold for now, so the next add takes a new number, slot 2
+    w.db.prepare("UPDATE seat_pool_slots SET reuse_hold = ? WHERE node_id = ?").run(JSON.stringify({ code: "no_qualifying_snapshot" }), w1.nodeId);
+    // slot 2's call returns with its startup not ready: its result is unknown, and it stays issued once its call is over
+    const converge = w.converge.getMockImplementation()!;
+    w.converge.mockImplementationOnce(async (...args) => {
+      const result = await converge(...args);
+      w.db.prepare("UPDATE sessions SET startup_status = 'pending' WHERE node_id = ?").run(w.nodeOf(m.rigId, "dev.impl-s2")!.id);
+      return result;
+    });
+    await w.wantOne(m);
+    const first = await w.notesOf(m.jobId);
+    await w.executor.idle();
+    expect((first.add as { issued: Array<{ logicalId: string }> }).issued.map((i) => i.logicalId)).toEqual(["dev.impl-s2"]);
+    const s2 = w.nodeOf(m.rigId, "dev.impl-s2")!;
+    const leftover = w.slots.forModel(m.nodeId).find((s) => s.slotNumber === 2)!;
+    expect(leftover).toMatchObject({ nodeId: s2.id, phase: "adding", attemptKind: "add", attemptState: "issued" });
+    expect(JSON.parse(leftover.attemptOutcome!)).toMatchObject({ status: "unknown" });
+    expect(w.launch).not.toHaveBeenCalled();
+
+    // slot 1 is eligible again, drained outside its cooldown; slot 2's session exits, and a second row makes the plan
+    // want one more agent
+    w.db.prepare("UPDATE seat_pool_slots SET reuse_hold = NULL WHERE node_id = ?").run(w1.nodeId);
+    w.sessions.updateStatus(w.sessionsOf(s2.id).at(-1)!.id, "exited");
+    await w.row(m.session);
+    const settle = await w.notesOf(m.jobId);
+    await w.executor.idle();
+    expect(settle.settled).toEqual([{ slotNumber: 2, logicalId: "dev.impl-s2", nodeId: s2.id, attempt: { id: leftover.attemptId, status: "not_running", observed: "exited" } }]);
+    expect(w.launch).not.toHaveBeenCalled();
+    expect(settle.add).toEqual({ skipped: "cooldown" });
+    expect(w.slots.forModel(m.nodeId).map((s) => [s.slotNumber, s.phase, s.reuseHold === null])).toEqual([[1, "drained", true], [2, "drained", false]]);
+
+    // 30 s later, still inside the cooldown the settle started (the drain left the model's pool on `DRAINING`)
+    const cooldownMs = DRAINING.cooldownSeconds * 1000;
+    w.clock.now = new Date(w.clock.now.getTime() + 30_000);
+    await w.notesOf(m.jobId);
+    await w.executor.idle();
+    expect(w.launch).not.toHaveBeenCalled();
+
+    // past `cooldown_s` since the settle, slot 1 comes back
+    w.clock.now = new Date(w.clock.now.getTime() + cooldownMs - 30_000 + 1_000);
+    const { settled } = await comeBack(w, m.jobId);
+    expect(w.launch.mock.calls).toEqual([[m.rigId, "dev.impl-s1", { snapshotId: b }]]);
+    expect(settled).toEqual([expect.objectContaining({ slotNumber: 1, nodeId: w1.nodeId, attempt: expect.objectContaining({ status: "running" }) })]);
   });
 });
 
