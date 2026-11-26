@@ -1,8 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE, type PreparationFailure } from "../src/domain/claude-compaction-enforcer.js";
+import { AUTO_PREP_WAIT_MS_DEFAULT, ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE, type PreparationFailure } from "../src/domain/claude-compaction-enforcer.js";
 import type { SessionTransport } from "../src/domain/session-transport.js";
 const homes: string[] = [];
 afterEach(() => { for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true }); });
@@ -67,6 +67,78 @@ it("a notice callback cannot restore a run that cancellation cleared", async () 
   const saved = JSON.parse(readFileSync(join(dirname(state.mapPath), COMPACTION_RECORD_FILE), "utf8"));
   expect(saved.preparationFailures).toBeUndefined();
   await f.e.maybeAutoCompact(input); expect(f.notice).toHaveBeenCalledTimes(1);
+});
+
+it("the run that opens the notice is the seat's recovery inability, with the context sample the notice carries", async () => {
+  const f = fixture();
+  await end(f); await end(f);
+  expect(f.e.recoveryInability(input.sessionName)).toBeNull();
+  const last = await end(f);
+  await f.e.maybeAutoCompact({ ...input, sampledAt: "2026-11-26T19:00:00Z" });
+  expect(f.notice).toHaveBeenCalledWith(expect.objectContaining({ context: { usedPercentage: 90, sampledAt: "2026-11-26T19:00:00Z" } }));
+  expect(f.e.recoveryInability(input.sessionName)).toBe(
+    `its own managed compaction ended 3 automatic attempts without /compact while its context stayed above the compaction threshold (latest attempt ${last})`);
+  expect(f.e.recoveryInability("other@test")).toBeNull();
+});
+
+it.each(["below", "cancel", "generation"])("no inability after %s", async kind => {
+  const f = fixture(); await end(f); await end(f); await end(f); await f.e.maybeAutoCompact(input);
+  expect(f.e.recoveryInability(input.sessionName)).not.toBeNull();
+  if (kind === "below") await f.e.maybeAutoCompact({ ...input, usedPercentage: 20 });
+  if (kind === "cancel") f.e.cancelPreparation(input.sessionName);
+  // Another occupant, or a live occupant the daemon can't read, is not the seat the run was about.
+  if (kind === "generation") f.generation("g2");
+  expect(f.e.recoveryInability(input.sessionName)).toBeNull();
+});
+
+/** One automatic attempt whose request is delivered and whose map never completes: it ends preparation_incomplete at its
+ *  deadline. A poll while it waits neither counts it nor clears the run. */
+async function endDelivered(f: ReturnType<typeof fixture>, waiting?: () => void) {
+  f.send.mockResolvedValueOnce({ ok: true });
+  await f.e.maybeAutoCompact(input);
+  const state = f.e.getPreparationState(input.sessionName)!;
+  expect(state).toMatchObject({ status: "waiting", delivery: "delivered" });
+  await f.e.maybeAutoCompact(input);
+  waiting?.();
+  f.advance(AUTO_PREP_WAIT_MS_DEFAULT + 1);
+  f.e.reconcilePreparations();
+  expect(f.e.getPreparationState(input.sessionName)).toMatchObject({ status: "stopped", reason: "preparation_incomplete" });
+  f.advance(); return state.attemptId;
+}
+
+it("a delivered request whose map never completes counts toward the notice: the context wall", async () => {
+  const f = fixture();
+  await endDelivered(f); await endDelivered(f); const last = await endDelivered(f);
+  await f.e.maybeAutoCompact(input);
+  expect(f.notice).toHaveBeenCalledTimes(1);
+  expect(f.notice).toHaveBeenCalledWith(expect.objectContaining({ attemptId: last, endedAttempts: 3, reason: "preparation_incomplete", delivered: true }));
+  expect(f.e.recoveryInability(input.sessionName)).toContain("ended 3 automatic attempts without /compact");
+});
+
+it("unsent and delivered-incomplete attempts share one run, and an attempt still waiting for its map decides nothing", async () => {
+  const f = fixture();
+  await end(f); await end(f);
+  await endDelivered(f, () => {
+    expect(f.notice).not.toHaveBeenCalled();
+    expect(f.e.recoveryInability(input.sessionName)).toBeNull();
+  });
+  await f.e.maybeAutoCompact(input);
+  expect(f.notice).toHaveBeenCalledWith(expect.objectContaining({ endedAttempts: 3, delivered: true }));
+});
+
+it("a delivered request whose map completes interrupts the run", async () => {
+  const f = fixture();
+  await end(f); await end(f);
+  f.send.mockResolvedValueOnce({ ok: true });
+  await f.e.maybeAutoCompact(input);
+  const state = f.e.getPreparationState(input.sessionName)!;
+  writeFileSync(state.mapPath, `# map\n${state.marker}\n`);
+  // /compact is refused before input (the fixture's default send), so the complete map is held: the seat can recover.
+  await f.e.maybeAutoCompact(input); await f.e.maybeAutoCompact(input);
+  expect(f.e.getPreparationState(input.sessionName)?.attemptId).toBe(state.attemptId);
+  const saved = JSON.parse(readFileSync(join(dirname(state.mapPath), COMPACTION_RECORD_FILE), "utf8"));
+  expect(saved.preparationFailures).toBeUndefined();
+  expect(f.notice).not.toHaveBeenCalled();
 });
 
 it("cancelling a recovered ended record resets the run across another restart", async () => {

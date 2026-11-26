@@ -3115,6 +3115,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // the type narrow for downstream consumers).
   const { ContextMonitor } = await import("./domain/context-monitor.js");
   const { ClaudeCompactionEnforcer } = await import("./domain/claude-compaction-enforcer.js");
+  // Who can act on a recovery notice: an agent whose own managed compaction this enforcer records as failing can't.
+  const recoveryInability = (session: string): string | null => compactionEnforcer?.recoveryInability(session) ?? null;
   const compactionEnforcer = deps.sessionTransport
     ? new ClaudeCompactionEnforcer(
         new ContextPackSettingsStore(),
@@ -3123,10 +3125,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         // so a stage minted by a retired generation is refused for the successor. null = UNKNOWN → the
         // gate is inert (never compares a stale generation as if live).
         {
-          onPreparationFailure: (failure) => reportPreparationFailure(db, queueRepoInstance, failure),
-          onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure),
-          onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true }),
-          onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown),
+          onPreparationFailure: (failure) => reportPreparationFailure(db, queueRepoInstance, failure, recoveryInability),
+          onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure, { unable: recoveryInability }),
+          onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true, unable: recoveryInability }),
+          onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown, recoveryInability),
           // #3688: a cancel, a new attempt or a replaced occupant settles the notices its debt opened.
           onCompactionDebtEnded: (ended) => settleCompactionNotices(queueRepoInstance, ended),
           terminalPolicies: new TerminalPolicyStore(db),
