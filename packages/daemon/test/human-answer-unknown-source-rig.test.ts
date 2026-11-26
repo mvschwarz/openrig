@@ -25,8 +25,9 @@ function fixture() {
   const db = new Database(":memory:");
   migrate(db, ALL_MIGRATIONS);
   const bus = new EventBus(db);
+  let farKnown = false;
   // This daemon knows near-rig and the person, not far-rig.
-  const repo = new QueueRepository(db, bus, { validateRig: (session) => !session.endsWith("@far-rig"), loadHumanRegistry: () => registry,
+  const repo = new QueueRepository(db, bus, { validateRig: (session) => farKnown || !session.endsWith("@far-rig"), loadHumanRegistry: () => registry,
     transport: { send: async () => ({ ok: true, verified: true, sent: true }) } });
   const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
   const app = new Hono();
@@ -47,10 +48,45 @@ function fixture() {
     return { status: response.status, body: await response.json() as Record<string, unknown> };
   };
   const rowsTo = (destination: string) => (db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE destination_session = ?").get(destination) as { n: number }).n;
-  return { db, repo, ask, answer, rowsTo };
+  return { db, repo, ask, answer, rowsTo, learnFar: () => { farKnown = true; } };
 }
 
 describe("a person's answer to an ask whose source names an unknown rig", () => {
+  it.each([PERSON, "human@host"])("keeps the committed answer when the source rig becomes known before %s retries", async (actorSession) => {
+    const f = fixture();
+    const qitemId = await f.ask(FAR);
+    vi.spyOn(f.repo, "resolveDirectHumanReply").mockReturnValueOnce(false);
+    await f.answer({ qitemId, decision: "First answer" });
+    expect(f.repo.keptAnswer(qitemId)?.words).toBe("First answer");
+    f.learnFar();
+    const retry = await f.answer({ qitemId, actorSession, decision: "Replacement answer" });
+    expect(f.rowsTo(FAR)).toBe(0);
+    expect(f.repo.getById(qitemId)?.resolution).toContain("First answer");
+    expect(JSON.stringify(retry.body)).toContain("wasn't recorded");
+  });
+
+  it("keeps a typed answer when the same person retries an interrupted close with a choice", async () => {
+    const f = fixture();
+    const qitemId = await f.ask(FAR, [{ id: "q1", question: "Ship it?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] }]);
+    vi.spyOn(f.repo, "resolveDirectHumanReply").mockReturnValueOnce(false);
+    await f.answer({ qitemId, decision: "First typed answer" });
+    expect(f.repo.keptAnswer(qitemId)?.words).toBe("First typed answer");
+    const retry = await f.answer({ qitemId, questionId: "q1", optionId: "no" });
+    expect(f.repo.getById(qitemId)?.resolution).toContain("First typed answer");
+    expect(f.repo.getById(qitemId)?.humanAnswers?.q1).toMatchObject({ kind: "typed-reply", text: "First typed answer" });
+    expect(JSON.stringify(retry.body)).toContain("wasn't recorded");
+  });
+
+  it("doesn't let a direct same-person click replace a kept typed answer", async () => {
+    const f = fixture();
+    const qitemId = await f.ask(FAR, [{ id: "q1", question: "Ship it?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] }]);
+    await f.repo.createHumanAnswer({ sourceSession: PERSON, destinationSession: FAR, body: "First typed answer", inboundReplyTo: qitemId });
+    expect(f.repo.recordHumanAnswer({ qitemId, actorSession: PERSON, questionId: "q1", optionId: "no" }))
+      .toMatchObject({ status: "not-applicable", reason: "answered", answeredBy: PERSON });
+    expect(f.repo.getById(qitemId)).toMatchObject({ state: "done", resolution: "First typed answer" });
+    expect(f.repo.getById(qitemId)?.humanAnswers?.q1).toMatchObject({ kind: "typed-reply", text: "First typed answer" });
+  });
+
   // review-r2's reproductions (X-F1, X-F2 on 4d521168), with the kept answer read where it's now written.
   it("keeps the first typed answer when closing the ask is interrupted, and a retry with other words closes with it", async () => {
     const f = fixture();

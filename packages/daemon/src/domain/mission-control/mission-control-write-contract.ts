@@ -702,9 +702,14 @@ export class MissionControlWriteContract {
     // recorded answers, never a bare close.
     const resume = !chose && !words && questions.length > 0 && unansweredQuestions(questions, ask.humanAnswers ?? {}).length === 0;
     const answersReply = (answers: HumanAnswers) => `${formatHumanAnswers(questions, answers).join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(answers)}\nIn reply to: ${input.qitemId} (its humanAnswers field holds the same)`;
+    const keptBefore = this.queueRepo.keptAnswer(input.qitemId);
     let reply: string;
     let wrote = false; // whether this call changed the ask before the return below awaits
-    if (chose) {
+    if (keptBefore) {
+      // An interrupted close already committed this answer. Do not record a later choice or send replacement words.
+      if (keptBefore.actorSession !== input.actorSession) this.keptByAnother(input, keptBefore.actorSession, primaryUser);
+      reply = keptBefore.words;
+    } else if (chose) {
       // A partial app choice has no asynchronous return seam: choice + immutable receipt + audit + events commit
       // under the same envelope. An injected audit failure rolls back the choice too.
       if (input.appSubmission && unansweredQuestions(questions, { ...(ask.humanAnswers ?? {}), [input.questionId ?? ""]: input.optionId ?? "" }).length > 0) {
@@ -793,11 +798,11 @@ export class MissionControlWriteContract {
     if (replyId !== input.qitemId && returned.sourceSession !== input.actorSession) this.answeredByAnother(input, returned, primaryUser);
     // A runner's permission ask is its own answer record (no reply row comes back), so typed words are the person's own.
     // A kept answer is this person's first one, as their returned row would be.
-    const decision = chose || resume
+    const decision = kept ? kept.words : chose || resume
       ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ")
-      : kept ? kept.words : returned.qitemId === input.qitemId ? words : humanAnswerText(returned.body);
+      : returned.qitemId === input.qitemId ? words : humanAnswerText(returned.body);
     // Their earlier answer is the one kept, so different words now weren't recorded: they're told so.
-    const superseded = kept !== null && !chose && !resume && words !== kept.words;
+    const superseded = kept !== null && ((chose && keptBefore !== null) || (!chose && !resume && words !== kept.words));
     // #2446: on a runner's permission ask (no reply row), a call that changed nothing before the await above (typed words,
     // or a choice whose set was already complete) still has its first write ahead, and the await let other requests in, so
     // a guarded answer compares its revision again here, with no await before the close. A call that wrote was compared

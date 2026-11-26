@@ -2701,6 +2701,8 @@ export class QueueRepository {
     // answered in its ask too: the pairing poll reads it there, and nothing reads a reply.
     const ask = this.getById(input.inboundReplyTo);
     if (ask && (runnerPermissionOrigin(ask) || isHostPairingAsk(ask))) return ask;
+    // A kept answer is already committed, even if its source rig has become known since the interrupted close.
+    if (ask && this.keptAnswer(ask.qitemId)) return ask;
     const qitemId = humanAnswerId(input.inboundReplyTo, episodeKey);
     const existing = episodeKey ? this.getById(qitemId) : this.getHumanAnswer(input.inboundReplyTo, input.sourceSession);
     if (existing) return existing;
@@ -5438,7 +5440,8 @@ export class QueueRepository {
       const winner = item.state === "pending" || episodeKey ? this.committedAnswerFromAnother(item.qitemId, input.actorSession, episodeKey) : null;
       if (winner) return { status: "not-applicable" as const, reason: "answered", answeredBy: winner.sourceSession };
       const keptBy = item.state === "pending" ? this.keptAnswer(item.qitemId) : null;
-      if (keptBy && keptBy.actorSession !== input.actorSession) return { status: "not-applicable" as const, reason: "answered", answeredBy: keptBy.actorSession };
+      // A click cannot replace a committed typed answer, including one from the same person. The continuation below closes with it.
+      if (keptBy) return { status: "not-applicable" as const, reason: "answered", answeredBy: keptBy.actorSession };
       const question = item.humanQuestions.find((q) => q.id === input.questionId);
       if (!question?.options.some((o) => o.id === input.optionId)) return { status: "not-applicable" as const, reason: "unknown-option" };
       const recorded = item.humanAnswers ?? {};
