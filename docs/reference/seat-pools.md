@@ -158,7 +158,8 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
   A drained agent keeps its node, its sessions and its history: nothing is removed. `rig up` leaves it stopped until
   the pool brings it back.
 - **Bringing a drained agent back.** A `drained` slot is eligible while it has no reuse hold. The add brings the
-  lowest-numbered eligible slot back on its own node, under its own name, with its own sessions and stored settings:
+  lowest-numbered eligible slot back on its own node, under its own name, with its own sessions and stored settings,
+  in the folder recorded in the snapshot it comes back from:
   - the snapshot is the newest one, of any kind, that is restore-usable, holds the slot's node with its logical id in
     its intended topology, and recorded exactly one active occupant for that node (a running session; in an
     `auto-rehydrate` capture, the retained session that has not exited). The drain's own capture qualifies; a snapshot
@@ -189,9 +190,16 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
     never launched, the slot is `drained` again with no reuse hold, and the comeback is reported `refused` with the
     code `held`;
   - a comeback that runs is reported `running`, with the `snapshotSelection` it was launched from (`mode:
-    "explicit"`), and the slot is `live` again. When the slot's stored settings differ from the model's, it still comes
-    back with its own, and the report carries a warning naming the fields that differ (`cwd` is compared only without
-    `cwd_template`, when the slot took the model's folder); change the slot with the existing seat commands;
+    "explicit"`), and the slot is `live` again. It comes back with its own stored settings, never the model's: the
+    model, effort, Codex profile and permission posture follow the slot's latest saved choices, as in any restore.
+    Its folder is the one that snapshot recorded (the stored one only when it recorded none): a `rig seat set-cwd` on the slot after that capture does not reach the
+    comeback; it is used only by the slot's next fresh launch (`rig seat launch --fresh --stop`, or `rig handover
+    --source rebuild`; see [Change an existing seat's working
+    directory](agent-startup-guide.md#change-an-existing-seats-working-directory));
+  - when the slot's stored settings differ from the model's, the report of a comeback that runs carries a warning
+    naming the fields that differ (`cwd` is compared only without `cwd_template`, when the slot took the model's
+    folder). The warning compares the slot's stored settings: a `cwd` set after the capture is compared at its new
+    value while the agent comes back in the captured folder;
   - every evaluation reports a slot's reuse hold with the slot.
 - **After `pool: {}`.** Clearing the block on re-apply leaves the job running: it drains the free agents with the
   block it was last ensured with (`context.pool`), leaves busy agents `live` until they are free, and ends
