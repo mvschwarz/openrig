@@ -246,6 +246,10 @@ const FALLBACK_ACTOR = "system:queue-fallback";
 
 /** The actor a terminal act is recorded as when it names no responder: explicitly unattributed, never a person. */
 export const UNATTRIBUTED_ACTOR = "human@host";
+/** Recorded on an ask whose answer is kept on it because its source's rig isn't known here (createHumanAnswer). */
+export const ANSWER_NOT_RETURNED_PREFIX = "human-answer not returned:";
+/** The second line of that note: who gave the kept answer. Their words follow it. */
+const KEPT_ANSWER_FROM = "answered by: ";
 
 /**
  * #165: a claim is the destination acting on the row, which is stronger evidence than
@@ -2697,13 +2701,49 @@ export class QueueRepository {
     // answered in its ask too: the pairing poll reads it there, and nothing reads a reply.
     const ask = this.getById(input.inboundReplyTo);
     if (ask && (runnerPermissionOrigin(ask) || isHostPairingAsk(ask))) return ask;
+    // A kept answer is already committed, even if its source rig has become known since the interrupted close.
+    if (ask && this.keptAnswer(ask.qitemId)) return ask;
     const qitemId = humanAnswerId(input.inboundReplyTo, episodeKey);
     const existing = episodeKey ? this.getById(qitemId) : this.getHumanAnswer(input.inboundReplyTo, input.sourceSession);
     if (existing) return existing;
     // One reply per ask: another person's answer already returned is the answer, so it comes back, and the caller says so.
     const answered = this.getById(qitemId);
     if (answered) return answered;
-    return this.create({ ...create, qitemId, tags: [...new Set([...(input.tags ?? []), "human-answer"])] }, verifyBeforeCreate);
+    try {
+      return await this.create({ ...create, qitemId, tags: [...new Set([...(input.tags ?? []), "human-answer"])] }, verifyBeforeCreate);
+    } catch (error) {
+      // `rig queue create --source` takes any source, so an ask can name a rig this daemon doesn't know, with no queue
+      // here for the answer to go back to. The person's answer still counts: it's kept on the ask, as a runner's or a
+      // pairing ask's is, and the ask's history says once why it didn't go back.
+      if (!ask || !(error instanceof QueueRepositoryError) || error.code !== "unknown_destination_rig") throw error;
+      // The answer itself, with who gave it, is written here before anything says it's kept. Only the first is: a retry
+      // or another person's answer then consumes it, as they would a returned answer's row (keptAnswer).
+      const note = `${ANSWER_NOT_RETURNED_PREFIX} ${create.destinationSession} references an unknown rig, so the answer is kept on ${ask.qitemId}`
+        + `\n${KEPT_ANSWER_FROM}${create.sourceSession}\n${humanAnswerText(create.body)}`;
+      this.db.transaction(() => {
+        verifyBeforeCreate?.();
+        if (!this.answerNotReturned(ask.qitemId)) {
+          this.transitionLog.append({ qitemId: ask.qitemId, state: this.getById(ask.qitemId)?.state ?? ask.state, actorSession: "daemon@system", transitionNote: note });
+        }
+      })();
+      return ask;
+    }
+  }
+
+  /** Why an ask's answer was kept on it instead of going back to its source (createHumanAnswer), or null. Only the daemon's
+   *  own in-process note counts, with the same trust rule as replyToChoiceFor: a queue note anyone adds can carry the same
+   *  words, and it isn't a person's answer. */
+  answerNotReturned(qitemId: string): string | null {
+    return this.transitionLog.listForQitem(qitemId).find((t) => t.actorSession === "daemon@system" && t.identityProvenance === null
+      && t.transitionNote?.startsWith(ANSWER_NOT_RETURNED_PREFIX))?.transitionNote ?? null;
+  }
+
+  /** The answer kept on an ask whose source's rig isn't known here: who gave it and their words. It's the ask's committed
+   *  answer, as a returned answer's row is for a known source. Null when none is kept. */
+  keptAnswer(qitemId: string): { actorSession: string; words: string } | null {
+    const lines = this.answerNotReturned(qitemId)?.split("\n");
+    if (!lines?.[1]?.startsWith(KEPT_ANSWER_FROM)) return null;
+    return { actorSession: lines[1].slice(KEPT_ANSWER_FROM.length), words: lines.slice(2).join("\n") };
   }
 
   /** Every answer this person returned to the ask (one per park), oldest first: after close, a replay finds the one its
@@ -2831,8 +2871,10 @@ export class QueueRepository {
             && prior.channel === relay.channel && prior.optionId === relay.optionId && prior.answeredAt === relay.answeredAt) return receipt();
           refuse("This question already has a relay; a direct answer can correct it.");
         }
+        // A kept answer (its source's rig wasn't known) is the ask's committed answer, as a returned answer's row is.
         if (ask.state !== "pending" || ask.blockedOn || (named && Object.hasOwn(direct, named.id))
-          || this.getById(humanAnswerId(ask.qitemId)) || (!ask.relayedAnswers && this.answersForAsk(ask.qitemId).length > 0)) {
+          || this.getById(humanAnswerId(ask.qitemId)) || (!ask.relayedAnswers && this.answersForAsk(ask.qitemId).length > 0)
+          || this.keptAnswer(ask.qitemId)) {
           refuse("This question is not waiting for a relayed answer.");
         }
         if (!ask.relayedAnswers && Object.keys(direct).length) {
@@ -5142,6 +5184,18 @@ export class QueueRepository {
         return this.closeDirectAsk(item, winner.sourceSession, decision, !this.answersAsk(item, winner.sourceSession),
           this.answerIdentity(winner.qitemId));
       }
+      // An answer kept on the ask (its source's rig isn't known here) is its committed answer the same way: the ask closes
+      // as that person's, with their words, whoever completes it, and false tells another caller theirs didn't settle it.
+      const kept = this.keptAnswer(item.qitemId);
+      if (kept) {
+        mine = kept.actorSession === input.actorSession;
+        const questions = item.humanQuestions ?? [];
+        const decision = questions.length && unansweredQuestions(questions, item.humanAnswers ?? {}).length === 0
+          ? formatHumanAnswers(questions, item.humanAnswers ?? {}).join("; ") : kept.words;
+        return this.closeDirectAsk(item, kept.actorSession, decision,
+          mine ? input.primaryUser === true : !this.answersAsk(item, kept.actorSession),
+          mine ? { provenance: input.identityProvenance ?? null, principal: input.identityPrincipal ?? null } : { provenance: null, principal: null });
+      }
       // A close that consumes this caller's own committed answer carries that answer's identity too, so attribution doesn't
       // depend on who completes it. Only a close with no committed answer takes the caller's.
       const own = this.getHumanAnswer(item.qitemId, input.actorSession, { primaryUser: input.primaryUser === true });
@@ -5319,11 +5373,14 @@ export class QueueRepository {
       : `reply from ${actor}, a registered person, on ${asked}'s ask; not answered by ${asked}`;
     const placed = this.placeTypedReply(item, decision);
     if (placed) transitionNote += `; ${placed}`;
+    // An answer kept on the ask (its source's rig isn't known here) has no reply row to carry it, so the ask keeps it.
+    const kept = this.answerNotReturned(item.qitemId) !== null;
     return this.updateInTransactionalContext({
       qitemId: item.qitemId,
       actorSession: actor,
       state: "done",
       closureReason: "no-follow-on",
+      ...(kept ? { resolution: decision } : {}),
       transitionNote,
       ownerNotificationKind: "human-decision-resolved",
       identityProvenance: identity.provenance,
@@ -5387,6 +5444,9 @@ export class QueueRepository {
       const episodeKey = item.state === "pending" ? undefined : this.currentHumanRequiredEpisode(item.qitemId)?.key;
       const winner = item.state === "pending" || episodeKey ? this.committedAnswerFromAnother(item.qitemId, input.actorSession, episodeKey) : null;
       if (winner) return { status: "not-applicable" as const, reason: "answered", answeredBy: winner.sourceSession };
+      const keptBy = item.state === "pending" ? this.keptAnswer(item.qitemId) : null;
+      // A click cannot replace a committed typed answer, including one from the same person. The continuation below closes with it.
+      if (keptBy) return { status: "not-applicable" as const, reason: "answered", answeredBy: keptBy.actorSession };
       const question = item.humanQuestions.find((q) => q.id === input.questionId);
       if (!question?.options.some((o) => o.id === input.optionId)) return { status: "not-applicable" as const, reason: "unknown-option" };
       const recorded = item.humanAnswers ?? {};
@@ -5641,7 +5701,8 @@ export class QueueRepository {
         return refuse("permission-prompt", "a permission prompt or approval gate is never decided on the person's behalf");
       }
       // A click keeps a multi-question ask pending until every question is answered: once the person has started, it's theirs.
-      if (item.relayedAnswers || (item.humanAnswers && Object.keys(item.humanAnswers).length > 0)) {
+      // So is an answer kept on the ask (its source's rig wasn't known), even when its close was interrupted.
+      if (item.relayedAnswers || (item.humanAnswers && Object.keys(item.humanAnswers).length > 0) || this.keptAnswer(item.qitemId)) {
         return refuse("person-answering", "they've started answering; their answer stands");
       }
       if (item.sourceSession !== input.actorSession) {
