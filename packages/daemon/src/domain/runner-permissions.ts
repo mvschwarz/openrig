@@ -77,6 +77,7 @@ const OPTION_TAG = "permission-option:";
 const TAKEN_NOTE = "runner-permission-taken-by-hook";
 /** A tool call with this ask's exact input completed in the same conversation (matched by content, not by id). */
 const COMPLETED_NOTE = "runner-permission-tool-completed";
+const RESOLVED_CALL_NOTE = "runner-permission-call-resolved";
 /** An agent's decision on a request (`rig seat decide-permission`), whoever records it. */
 const DECIDED_NOTE = "runner-permission-decided";
 /** A decision an agent records with `--relay`: its report that this is the person's own answer. OpenRig didn't get that
@@ -866,25 +867,36 @@ export class RunnerPermissions {
     for (const fingerprint of fingerprints.slice(0, 64)) {
       if (typeof fingerprint !== "string" || !FINGERPRINT.test(fingerprint)) continue;
       const rows = candidates.all(seat.sessionName, since, `%"${CALL_TAG}${fingerprint}"%`) as Array<{ qitem_id: string }>;
-      for (const { qitem_id } of rows) {
-        if (settledHere.has(qitem_id)) continue;
+      const matches = rows.flatMap(({ qitem_id }) => {
+        if (settledHere.has(qitem_id)) return [];
         const asked = this.deps.queueRepo.getById(qitem_id);
         const hook = asked ? nativePermissionHook(asked) : null;
         if (!asked || !hook || !asked.tags?.includes(`${CALL_TAG}${fingerprint}`) || tagValue(asked, NODE_TAG) !== seat.nodeId
-          || tagValue(asked, GENERATION_TAG) !== seat.generation || tagValue(asked, ACTOR_TAG) !== (actor ?? "main")) continue;
+          || tagValue(asked, GENERATION_TAG) !== seat.generation || tagValue(asked, ACTOR_TAG) !== (actor ?? "main")) return [];
         const live = this.liveEnd(asked);
-        if (!live || live.state === "canceled") continue;
+        if (!live || live.state === "canceled") return [];
         const transitions = this.deps.queueRepo.listTransitions(live.qitemId);
-        if (transitions.some((t) => t.transitionNote?.startsWith(COMPLETED_NOTE)) || this.withdrawnAfterClose(live)) continue;
+        if (transitions.some((t) => t.transitionNote?.startsWith(COMPLETED_NOTE) || t.transitionNote?.startsWith(RESOLVED_CALL_NOTE))
+          || this.withdrawnAfterClose(live)) return [];
+        const open = live.state === "pending" || live.state === "in-progress" || live.state === "blocked";
+        const decision = open ? null : this.read(null, qitem_id);
+        return [{ qitem_id, asked, hook, live, open, decision }];
+      });
+      // A completed call can belong to an earlier answered ask while an identical later prompt is still waiting.
+      // Consume an outstanding decision first; content alone is no reason to withdraw that later live prompt.
+      const hasDecision = (match: typeof matches[number]): boolean => match.decision?.ok === true
+        && (match.decision.state === "answered" || (match.decision.state === "refused" && match.decision.reason === "said_no"));
+      for (const { qitem_id, asked, hook, live, open, decision } of [...matches.filter(hasDecision), ...matches.filter(match => !hasDecision(match))]) {
         settledHere.add(qitem_id);
-        if (live.state === "pending" || live.state === "in-progress" || live.state === "blocked") {
+        if (open) {
           this.close(live, WITHDRAWN_NOTE, "answered_in_terminal", `${nativeWithdrawText("answered_in_terminal", hook)} ${harnessName(hook)} reported a tool call with exactly this input resolved in the same conversation, without an answer from here (matched by its content; there's no tool-call id).`);
         } else {
-          const decided = this.read(null, qitem_id);
-          // A denied call resolves too, without running: this newest ask is its call, and there's no completion to record.
-          if (!decided.ok || decided.state !== "answered" || decided.optionId === tagValue(asked, REJECT_TAG)) break;
+          if (!decision?.ok || (decision.state !== "answered" && !(decision.state === "refused" && decision.reason === "said_no"))) break;
+          const denied = decision.state === "refused" || decision.optionId === tagValue(asked, REJECT_TAG);
           this.deps.queueRepo.transitionLog.append({ qitemId: live.qitemId, state: live.state, actorSession: asked.sourceSession,
-            transitionNote: `${COMPLETED_NOTE}: a tool call with exactly this input completed in the same ${harnessName(hook)} conversation after this allow (matched by its content; there's no tool-call id). It ran, unless the terminal's own answer came first.` });
+            transitionNote: denied
+              ? `${RESOLVED_CALL_NOTE}: a tool batch resolved this denied call; no tool completion is claimed.`
+              : `${COMPLETED_NOTE}: a tool call with exactly this input completed in the same ${harnessName(hook)} conversation after this allow (matched by its content; there's no tool-call id). It ran, unless the terminal's own answer came first.` });
         }
         settled++;
         break;
