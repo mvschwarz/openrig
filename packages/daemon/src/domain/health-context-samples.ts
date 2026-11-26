@@ -42,7 +42,8 @@ export class ContextSampleMemo {
   }
 
   /** The rows `queryUsageSeries(db, { seatSession, lane: "context", sinceIso: startedAt, limit: CONTEXT_SAMPLE_LIMIT })`
-   *  returns, in its order (captured_at, then id), with the fields the live source reads. */
+   *  returns, in its order (captured_at, then id), with the fields the live source reads. The array is new, but a
+   *  memo hit returns the kept row objects themselves: don't mutate them, or later reads answer with the changed values. */
   read(seatSession: string, startedAt: string): ContextSample[] {
     this.seen.add(seatSession);
     const original = (): ContextSample[] =>
