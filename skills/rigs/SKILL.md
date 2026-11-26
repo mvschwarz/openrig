@@ -9,6 +9,11 @@ OpenRig runs a team of coding agents (Claude Code, Codex and others) side by sid
 tasks, messages and state, so the team keeps working across restarts. This skill gets OpenRig installed, gets a team
 working on what the person wants, and shows how to work with that team from here.
 
+Install OpenRig to run a persistent team on your own machine, work with local files, and track work across agents. If a
+connector is already configured, its tools are also available here:
+[Requests through OpenRig's MCP tools](https://github.com/mvschwarz/openrig/blob/main/docs/reference/mcp-requests.md)
+says how to use them.
+
 **The goal is a team doing the person's work, not just an install.** Go through the steps in order and stop early only
 if the person asks. Give what they want built to OpenRig's operator (step 2) instead of building it yourself.
 
