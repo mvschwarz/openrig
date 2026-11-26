@@ -2894,6 +2894,30 @@ describe("#3953 — stop: a live daemon whose record is missing", () => {
     expect(deps.kill).not.toHaveBeenCalled();
   });
 
+  it("a check just before the signal that can't read stops the daemon as identified, and the report says the check couldn't read", async () => {
+    const deps = unrecordedDeps();
+    vi.mocked(deps.writesOutputTo!).mockReturnValueOnce(true).mockReturnValueOnce({ failure: "lsof timed out" });
+    expect(await stop(deps)).toBe("stopped");
+    expect(deps.kill).toHaveBeenCalledTimes(1);
+    expect(deps.kill).toHaveBeenCalledWith(DAEMON, "SIGTERM");
+    expect(console.warn).toHaveBeenCalledWith(`daemon.json was missing, so this stop identified the daemon: PID ${DAEMON} answered ${ENDPOINT}/healthz with its PID and writes ${LOG_FILE}; whether it still writes ${LOG_FILE} couldn't be read again just before the signal (lsof timed out), so it was signalled as identified. It stopped cleanly; 'rig daemon start' records a new daemon.json.`);
+  });
+
+  it("a daemon that exits on its own before the signal isn't signalled, and its stop is judged as one that already exited", async () => {
+    const deps = unrecordedDeps();
+    vi.mocked(deps.writesOutputTo!).mockReturnValueOnce(true).mockImplementationOnce(() => {
+      // It exits cleanly between identification and the check: no process, a clean receipt, a refusing listener.
+      vi.mocked(deps.isProcessAlive).mockReturnValue(false);
+      vi.mocked(deps.readFile).mockImplementation((p: string) => (p === receiptPath ? cleanReceipt(DAEMON) : null));
+      vi.mocked(deps.fetch!).mockRejectedValue(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }));
+      return false;
+    });
+    expect(await stop(deps)).toBe("stopped");
+    expect(deps.writesOutputTo).toHaveBeenCalledTimes(2);
+    expect(deps.kill).not.toHaveBeenCalled();
+    expect(console.warn).toHaveBeenCalledWith(`daemon.json was missing, so this stop identified the daemon: PID ${DAEMON} answered ${ENDPOINT}/healthz with its PID and writes ${LOG_FILE}. It stopped cleanly; 'rig daemon start' records a new daemon.json.`);
+  });
+
   it("never chooses a process that only owns the port: a listener whose PID doesn't write this home's log is refused", async () => {
     const message = await expectRefused(unrecordedDeps({ answers: { pid: 999 } }),
       /Not identified as this home's daemon: the listener at \S+ is PID 999, which doesn't write \S+daemon\.log, so it isn't shown to be this home's daemon; no signal sent\.$/);

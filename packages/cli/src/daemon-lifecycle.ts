@@ -1350,15 +1350,28 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   let notBefore = Date.parse(state.startedAt);
   // Only a signalling stop names a request time: this process's clock just before kill, not delivery.
   let requested = "";
-  if (pidState !== "dead") {
+  let signal = pidState !== "dead";
+  // Set when the check below couldn't read: the stop goes ahead as identified, and its report says so.
+  let unread = "";
+  if (signal && identified) {
     // A daemon identified without its record is checked again just before the signal: its PID came from an answer a
     // moment ago, and a process given that PID since wouldn't write this home's log. That narrows the gap without
-    // closing it, since nothing binds a PID to one process atomically.
-    if (identified && deps.writesOutputTo?.(state.pid, identified.log) !== true) {
-      throw new Error(`Cannot stop safely: PID ${state.pid} no longer shows as writing ${identified.log}; no signal sent, ${preserved}.`);
+    // closing it, since nothing binds a PID to one process atomically. Only a live PID shown to write elsewhere is
+    // refused: one that's gone has stopped (the judgment below reads it), and an unreadable check is no evidence of
+    // another process.
+    const writes = deps.writesOutputTo?.(state.pid, identified.log);
+    if (writes !== true) {
+      if (!deps.isProcessAlive(state.pid)) signal = false;
+      else if (writes === false) {
+        throw new Error(`Cannot stop safely: PID ${state.pid} no longer shows as writing ${identified.log}; no signal sent, ${preserved}.`);
+      } else {
+        unread = `; whether it still writes ${identified.log} couldn't be read again just before the signal (${writes?.failure ?? "no probe"}), so it was signalled as identified`;
+      }
     }
+  }
+  if (signal) {
     notBefore = Date.now();
-    requested = `; SIGTERM requested at ${new Date(notBefore).toISOString()}`;
+    requested = `; SIGTERM requested at ${new Date(notBefore).toISOString()}${unread}`;
     deps.kill(state.pid, "SIGTERM");
     // One signal. An already-exited target goes straight to the same judgment.
     const deadline = Date.now() + DAEMON_STOP_WAIT_MS;
@@ -1384,7 +1397,7 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   }
   removeMatchingState(deps, stateFile, state);
   if (identified) {
-    console.warn(`daemon.json was missing, so this stop identified the daemon: PID ${identified.pid} answered ${check} with its PID and writes ${identified.log}. It stopped cleanly; 'rig daemon start' records a new daemon.json.`);
+    console.warn(`daemon.json was missing, so this stop identified the daemon: PID ${identified.pid} answered ${check} with its PID and writes ${identified.log}${unread}. It stopped cleanly; 'rig daemon start' records a new daemon.json.`);
   }
   return "stopped";
 }
