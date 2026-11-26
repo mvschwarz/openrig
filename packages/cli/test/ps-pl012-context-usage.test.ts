@@ -164,6 +164,18 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     expect(Array.isArray(body) ? body : body.entries).toEqual([]);
   });
 
+  it("keeps unknown budgets out of the compact footer while retaining raw JSON telemetry", async () => {
+    nodesByRig["rig-1"] = [{ ...nodeAt("unknown-budget", 15), contextUsage: {
+      ...nodeAt("unknown-budget", 15).contextUsage, source: "claude_statusline_json", configuredBudget: null,
+    } }];
+    const displayed = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]); });
+    expect(displayed.logs.join("\n")).not.toContain("Context (");
+    const json = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--full", "--json"]); });
+    const body = JSON.parse(json.logs.join("\n"));
+    const entries = Array.isArray(body) ? body : body.entries;
+    expect(entries[0].contextUsage).toMatchObject({ usedPercentage: 15, configuredBudget: null });
+  });
+
   it("labels a runner context percentage with its reporting source", async () => {
     nodesByRig["rig-1"] = [{ ...nodeAt("runner", 75), contextUsage: { ...nodeAt("runner", 75).contextUsage, source: "runner_reported" } }];
     const result = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]); });

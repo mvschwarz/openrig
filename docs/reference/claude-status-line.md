@@ -89,10 +89,13 @@ with a 200,000-token budget reads as 15% raw and 75% budget.
 
 The budget is capped at the reported model window. It is a configured limit,
 not an observed compaction trigger or countdown; OpenRig subtracts no fixed
-reserve. Other native settings, defaults, suffix values such as `200k`, and
-out-of-range values remain unknown because their interpretation can depend on
-the Claude version and current session. OpenRig does not inspect native settings
-files to guess a limit. See Claude's
+reserve. OpenRig deliberately leaves other native settings, defaults, suffix
+values such as `200k`, and out-of-range values unknown. Suffix support depends on
+the Claude version; settings can change during a session. OpenRig does not
+inspect native settings files to guess a limit. In particular, a budget set only
+through `autoCompactWindow`, `/autocompact` or `--autocompact` remains unknown.
+The CLI omits a budget footer when no budget is known; JSON and seat context
+details retain the unknown state. See Claude's
 [auto-compaction settings](https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction).
 
 The ratio uses current input, cache-read and cache-creation tokens, excluding

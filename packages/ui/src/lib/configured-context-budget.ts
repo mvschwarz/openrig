@@ -5,7 +5,7 @@ export interface ConfiguredContextBudget {
 }
 
 export function configuredBudgetLabel(budget: ConfiguredContextBudget | null | undefined): string {
-  if (!budget) return "configured budget: unknown";
+  if (!budget) return "unknown";
   const percent = budget.usedPercentage == null ? "unknown" : `${budget.usedPercentage}%`;
   return `${percent} configured budget (${budget.tokens.toLocaleString()} tokens; ${budget.source})`;
 }

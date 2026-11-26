@@ -1616,10 +1616,10 @@ async function handleNodes(
   }
   for (const line of modelLines(humanList as NodeEntry[])) console.log(line);
   for (const n of humanList as NodeEntry[]) {
-    if (n.contextUsage?.source === "claude_statusline_json") {
+    if (n.contextUsage?.source === "claude_statusline_json" && n.contextUsage.configuredBudget) {
       const budget = n.contextUsage.configuredBudget;
-      const detail = budget ? `configured ${budget.tokens} tokens from ${budget.source}` : "configured budget unknown";
-      const percent = budget?.usedPercentage == null ? "??" : `${budget.usedPercentage}%`;
+      const detail = `configured ${budget.tokens} tokens from ${budget.source}`;
+      const percent = budget.usedPercentage == null ? "?" : `${budget.usedPercentage}%`;
       console.log(`Context (${n.canonicalSessionName ?? n.logicalId}): ${formatContextUsage(n.contextUsage)} / ${percent} budget; ${detail}; sample ${n.contextUsage.sampledAt ?? "unknown"}`);
     }
     if (n.contextUsage?.source === "runner_reported") {
