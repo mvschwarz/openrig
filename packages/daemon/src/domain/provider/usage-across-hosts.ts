@@ -348,6 +348,17 @@ const seatConfiguration: Check = (v) =>
   })(v)
   || record({ source: oneOf("unknown"), reason: str })(v);
 
+/** #3625: a seat against its rig's assignment. Optional on a seat, so a host from before it stays valid. */
+const seatAssignment: Check = record({
+  provider: oneOf("claude", "codex"),
+  state: oneOf("follows", "override", "not_applied", "no_assignment"),
+  intended: nullable(record({ label: str, reference: str, requestedBy: nullable(str), at: str })),
+  applied: nullable(record({ kind: str, label: str, detail: str, at: str, recovery: optional(str), activity: optional(str) })),
+  override: optional(str),
+  asApplied: optional(oneOf(true)),
+  referenceMissing: optional(oneOf(true)),
+});
+
 /** A served seat account with every field the views read, typed as provider-types.ts says. */
 export const isSeat = record({
   seatSession: str,
@@ -364,6 +375,7 @@ export const isSeat = record({
     withheld: optional(oneOf(true)),
     note: optional(str),
   })),
+  assignment: optional(seatAssignment),
 });
 
 /**
@@ -450,7 +462,8 @@ async function readHost(host: HostEntry, deps: UsageHostsDeps, now: () => string
       status: {
         hostId,
         status: "unsupported-transport",
-        error: `host '${hostId}' is ssh-declared; usage across hosts needs an http registry entry (url; bearer optional)`,
+        error: `host '${hostId}' is ssh-declared; usage across hosts needs an http registry entry (url; bearer optional). `
+          + `Its seats and assignments: rig provider status --host ${hostId}`,
         usage: "unavailable",
         usageReason: "not read",
         readAt: null,
