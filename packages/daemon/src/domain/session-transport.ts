@@ -21,7 +21,6 @@ import {
   COMPOSER_EMPTY_CODEX_PLACEHOLDER_PATTERN as CODEX_EMPTY_COMPOSER_PATTERN,
   COMPOSER_EMPTY_PATTERN,
   COMPOSER_PROMPT_CLASS,
-  COMPOSER_PROMPT_LINE_PATTERN,
   COMPOSER_SELECTION_PATTERN,
   COMPOSER_SELECTION_SCAN_PATTERN,
   findComposerInputLineIndex,
@@ -236,15 +235,15 @@ function trimPaneLines(paneContent: string): string[] {
     .filter((line) => line.length > 0);
 }
 
-const NUMBERED_CHOICE_LINE = composerNumberedChoicePattern();
-
 /** Where a line-mode community harness is asking now. It prints a numbered dialog, the answer and more output into its
- *  scrollback, then a later prompt below them, so, as #2520 reads Claude's empty input box, a later prompt line that isn't
- *  itself a choice row makes everything above it history. With no later prompt in view the whole window counts, as
- *  before. Claude and Codex keep their own current-dialog readers: a live Codex choice can sit above its composer. */
+ *  scrollback, then its next empty prompt below them, so, as #2520 reads Claude's empty input box, a later empty prompt
+ *  line makes everything above it history. Only an empty one: a prompt glyph with text after it can be a selection list's
+ *  own highlighted row (`❯ Yes` under its question), and a draft can't be told from one. With no later empty prompt in
+ *  view the whole window counts, as before. Claude and Codex keep their own current-dialog readers: a live Codex choice
+ *  can sit above its composer. */
 function currentPromptRegion(lines: string[], runtime: string | null | undefined): string[] {
   if (!isCommunityHarnessRuntime(runtime)) return lines;
-  const prompt = lines.map(line => COMPOSER_PROMPT_LINE_PATTERN.test(line) && !NUMBERED_CHOICE_LINE.test(line)).lastIndexOf(true);
+  const prompt = lines.map(line => COMPOSER_EMPTY_PATTERN.test(line)).lastIndexOf(true);
   return prompt < 0 ? lines : lines.slice(prompt + 1);
 }
 
