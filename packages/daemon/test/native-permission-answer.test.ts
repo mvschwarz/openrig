@@ -188,6 +188,12 @@ describe("words and conditions go to the receiving agent, which judges the exact
       message: `Your words on ${askId} went to ${DECIDER}, the receiving agent, which judges whether this exact action meets them. Its decision`
         + ` is recorded as its judgment, not your own answer, with your words as you gave them. ${SEAT}'s prompt waits until then, and is also open in the seat's terminal.` } } });
     expect(f.rowsTo(DECIDER)).toBe(1);
+    // The receiving agent is told to judge the condition itself, and to ask back only when it can't tell: a condition it
+    // can judge isn't a reason for a second round with the person.
+    const told = f.queueRepo.list({ limit: 100 }).find((row) => row.destinationSession === DECIDER)!.body;
+    expect(told).toContain("A condition is theirs to set and yours to judge: when this exact action plainly meets it, allow it; when it plainly doesn't, take the reject option with their words in your reason.");
+    expect(told).toContain("If you can't tell what they meant, or whether this exact action meets their condition, ask them back");
+    expect(told).not.toContain("unclear or conditional");
     expect((await f.read(askId)).body).toMatchObject({ state: "pending" });
     const decided = await f.decide(askId, "allow", DECIDER, { reason: "it pushes the docs branch, which is their condition" });
     expect(decided.body).toMatchObject({ state: "answered", optionId: "allow", native: { answeredAs: "agent", by: DECIDER,
