@@ -8,6 +8,8 @@ import type { QueueRepository } from "./queue-repository.js";
 import { findOtherSessionOwner } from "./session-owner.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
+import { isRosterReadyNotice, rosterReadyNoticeId } from "./roster-ready-notice.js";
+import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
 
 type ClaimedSessionRow = {
   session_id: string;
@@ -573,6 +575,7 @@ export class RigLifecycleService {
       }
     }
 
+    const queueEvents: ReturnType<QueueRepository["updateWithinTransaction"]>["persistedEvents"] = [];
     const persisted: Array<{ type: "session.detached" | "node.removed"; seq: number; createdAt: string }> = [];
     let rosterEvent: ReturnType<EventBus["persistWithinTransaction"]> | null = null;
     const tx = this.db.transaction(() => {
@@ -600,6 +603,16 @@ export class RigLifecycleService {
         nodeId: node.node_id,
       });
       persisted.push({ type: "node.removed", seq: removed.seq, createdAt: removed.createdAt });
+      const noticeSessions = node.latest_session_name ? [node.latest_session_name] : [];
+      for (const notice of this.activeQitemsForSessionNames(noticeSessions).filter(isRosterReadyNotice)) {
+        // A live replacement owns this shared name; close only the removed generation's notice.
+        if (sessionOwner && notice.qitem_id !== rosterReadyNoticeId(rigId, node.latest_session_name!)) continue;
+        const updated = this.queueRepo.updateWithinTransaction({
+          qitemId: notice.qitem_id, actorSession: OPENRIG_SENDER, state: "done",
+          closureReason: "no-follow-on", resolution: "seat removed", transitionNote: "seat removed",
+        });
+        queueEvents.push(...updated.persistedEvents);
+      }
       this.rigRepo.deleteNode(node.node_id);
       rosterEvent = this.eventBus.persistWithinTransaction({
         type: "topology.roster_recorded",
@@ -632,6 +645,7 @@ export class RigLifecycleService {
         });
       }
     }
+    for (const event of queueEvents) this.eventBus.notifySubscribers(event);
     if (rosterEvent) this.eventBus.notifySubscribers(rosterEvent);
 
     if (remaining.length > 0) {
@@ -850,16 +864,22 @@ Shrinking pod '${namespace}' already ${applied.join("; ")}; those changes were n
   }
 
   private activeQitemIdsForSessionNames(sessionNames: string[]): string[] {
+    return this.activeQitemsForSessionNames(sessionNames)
+      .filter(row => !isRosterReadyNotice(row))
+      .map(row => row.qitem_id);
+  }
+
+  private activeQitemsForSessionNames(sessionNames: string[]): Array<{ qitem_id: string; source_session: string }> {
     const uniqueSessionNames = [...new Set(sessionNames)];
     if (uniqueSessionNames.length === 0) return [];
     const placeholders = uniqueSessionNames.map(() => "?").join(", ");
-    return (this.db.prepare(`
-      SELECT qitem_id
+    return this.db.prepare(`
+      SELECT qitem_id, source_session
       FROM queue_items
       WHERE destination_session IN (${placeholders})
         AND state IN ('pending', 'in-progress', 'blocked')
       ORDER BY qitem_id
-    `).all(...uniqueSessionNames) as Array<{ qitem_id: string }>).map((row) => row.qitem_id);
+    `).all(...uniqueSessionNames) as Array<{ qitem_id: string; source_session: string }>;
   }
 
   private activeQitemsError(subject: string, activeQitemIds: string[], before = "removal"): string {

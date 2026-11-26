@@ -66,7 +66,7 @@ describe("hermetic-env fail-closed guard", () => {
 });
 
 // The shared setup (test/hermetic-env.setup.ts) gives compaction packets a folder inside the fixture home, so a test
-// that sets no root of its own never writes to the /tmp/claude-compaction-restore real seats use.
+// that sets no root of its own never writes where a real seat's packets go.
 describe("hermetic-env setup: compaction packet folder", () => {
   it("defaults OPENRIG_COMPACTION_OUT_ROOT to a folder under the fixture-scoped home", () => {
     const home = process.env["OPENRIG_HOME"]!;

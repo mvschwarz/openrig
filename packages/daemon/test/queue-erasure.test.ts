@@ -67,6 +67,15 @@ async function row(id: string, source: string, destination: string, history: Arr
     VALUES (?, 'approve', ?, ?, ?, ?)`).run(`mc-${id}`, id, destination, NOW, `${secret} reason`);
 }
 
+it("scrubbing evidence also scrubs its recorded root names", async () => {
+  await row("roots-scrub", A, B);
+  db.prepare("UPDATE queue_items SET evidence_ref = ?, evidence_ref_roots = ? WHERE qitem_id = ?")
+    .run("/fixture/chart.png", '["private-fixture-root"]', "roots-scrub");
+  await eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "roots-scrub", action: "scrub" }] }, apply: true, nowIso: NOW });
+  expect(db.prepare("SELECT evidence_ref, evidence_ref_roots FROM queue_items WHERE qitem_id = ?").get("roots-scrub"))
+    .toEqual({ evidence_ref: null, evidence_ref_roots: null });
+});
+
 /** Every value in every table, so a check can say no copy of a secret is left anywhere. */
 function everything(): string {
   const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((t) => t.name);

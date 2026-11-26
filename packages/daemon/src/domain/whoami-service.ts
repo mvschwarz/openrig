@@ -5,6 +5,7 @@ import type { SessionRegistry } from "./session-registry.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { resolveWorkspaceContext, type WhoamiWorkspaceBlock } from "./workspace/workspace-resolver.js";
 import { rigStillBeingBuilt } from "./rigs-being-built.js";
+import { shownHubUrl } from "./network/network-requests.js";
 
 export interface WhoamiResult {
   resolvedBy: "node_id" | "session_name";
@@ -27,6 +28,10 @@ export interface WhoamiResult {
     profile: string | null;
     resolvedSpecName: string | null;
     resolvedSpecVersion: string | null;
+    /** The seat's active network binding (`rig network connect`), present only while it has one: the binding id, the
+     *  seat's address on the hub, and the hub, with any query hidden as `rig network status` shows it. The peers it can
+     *  ask are `rig network peers`'. */
+    networkBinding?: { id: string; hubSeat: string; hubUrl: string };
   };
   peers: Array<{
     logicalId: string;
@@ -165,6 +170,15 @@ export class WhoamiService {
     this.contextUsageStore = deps.contextUsageStore ?? null;
   }
 
+  /** A node has at most one active binding (idx_network_bindings_active_node). A database from before the network
+   *  connector has no table, and so no binding. */
+  private activeNetworkBinding(nodeId: string): WhoamiResult["identity"]["networkBinding"] {
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'network_bindings'").get()) return undefined;
+    const row = this.db.prepare("SELECT id, hub_seat AS hubSeat, hub_url AS hubUrl FROM network_bindings WHERE node_id = ? AND state = 'active'")
+      .get(nodeId) as { id: string; hubSeat: string; hubUrl: string } | undefined;
+    return row && { id: row.id, hubSeat: row.hubSeat, hubUrl: shownHubUrl(row.hubUrl) };
+  }
+
   private senderAddress(sessionName: string, nodeId: string): string {
     const current = resolveCurrentSessionAddress(this.db, sessionName);
     return current && resolveCurrentSessionAddress(this.db, current.senderAddress)?.nodeId === nodeId
@@ -268,6 +282,8 @@ export class WhoamiService {
       resolvedSpecName: nodeRow.resolved_spec_name,
       resolvedSpecVersion: nodeRow.resolved_spec_version,
     };
+    const networkBinding = this.activeNetworkBinding(nodeRow.id);
+    if (networkBinding) identity.networkBinding = networkBinding;
 
     // Build peers — other nodes in this rig with their current sessions
     const peers: WhoamiResult["peers"] = [];

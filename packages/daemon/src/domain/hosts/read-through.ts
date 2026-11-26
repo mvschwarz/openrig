@@ -38,6 +38,8 @@ export const READ_THROUGH_TIMEOUT_MS = 5_000;
 //
 // DELIBERATE EXCLUSIONS (recorded, not oversights): other /api/queue/*
 // reads (only the explicit open-human-updates GET below is included);
+// GET /api/queue/attention-aggregate bypasses this middleware because
+// its handler selects its host.
 // /api/files/* (local FS discovery; the twin derives remote missions from
 // the host-keyed slice list instead); /api/slices/:name/proof-asset/*
 // (binary — the raw transport is text-only by design);
@@ -90,6 +92,9 @@ const MH3_BOUNDARY_MESSAGE =
  *  passes everything else through untouched. */
 export function hostReadThrough() {
   return async (c: Context, next: Next) => {
+    // This handler selects its target before aggregation. Raw forwarding would
+    // strip host and make the origin aggregate its subscriptions instead.
+    if (c.req.method === "GET" && c.req.path === "/api/queue/attention-aggregate") return next();
     const hostParam = c.req.query("host");
     // local / absent host param short-circuits to the existing handler. 51-09
     // incr 2: the daemon's OWN self-host id resolves home too (a distinct

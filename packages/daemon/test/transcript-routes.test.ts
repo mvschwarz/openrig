@@ -369,7 +369,7 @@ describe("transcript routes", () => {
   });
 
   it("GET /full applies route-level redaction: synthetic credential patterns absent from wire payload", async () => {
-    // Synthetic credentials covering 4 of the 5 v0 patterns (sk-*, gh*_*,
+    // Synthetic credentials in four of the explicit shapes (sk-*, gh*_*,
     // github_pat_*, Bearer *). NOT real credentials. Per Quality Lesson v9.
     const fixture = [
       "INFO startup",
