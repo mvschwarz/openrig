@@ -9,6 +9,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxOptionDefaultsApplier } from "../src/domain/tmux-option-defaults.js";
 import type { SettingsStore } from "../src/domain/user-settings/settings-store.js";
+import { claudePane, codexPane, type Pane } from "./fixtures/runtime-exit-pane.js";
 
 describe("SuccessorSessionLauncher", () => {
   let db: Database.Database;
@@ -365,6 +366,79 @@ describe("SuccessorSessionLauncher", () => {
     expect(signalPaneProcess).toHaveBeenCalledWith("%42", "KILL"); // graceful failed → forced fallback
     expect(respawnPane).toHaveBeenCalledTimes(1); // respawn only after the pane died (post-KILL)
     expect(launchHarness).toHaveBeenCalledTimes(1);
+  });
+
+  describe("#3901: the retiree exits through its own shutdown before its pane is retired", () => {
+    function cutover(pane: Pane): SuccessorSessionLauncher {
+      pane.session = "dev-impl@rig";
+      listPanes.mockResolvedValue([{ id: "%1", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
+      const measured = pane.tmux();
+      const tmux = { ...measured, createSession, listPanes, killSession, getDefaultShell, getPaneCommand,
+        respawnPane: vi.fn(async (...args: unknown[]) => { pane.effects.push("respawn"); return respawnPane(...args); }) } as unknown as TmuxAdapter;
+      return new SuccessorSessionLauncher(tmux, discoveryRepo, { newId: () => "01ABCDEFG",
+        runtimeAdapters: { codex: fakeAdapter("codex"), "claude-code": fakeAdapter("claude-code") },
+        readinessTimeoutMs: 50, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5, listProcesses: pane.list });
+    }
+
+    it("a Claude Code retiree in a shell-backed pane gets TERM itself (not its shell) and is reported graceful", async () => {
+      const pane = claudePane();
+      const res = await cutover(pane).createSuccessor({ node: { id: "node-1", runtime: "claude-code", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
+      expect(res).toMatchObject({ ok: true, retireeExit: "graceful", retireeExitDetail: expect.stringMatching(/^Claude Code exited on TERM in /) });
+      // The shell, left at its prompt, is ended only after Claude Code has exited; the respawn needs the pane dead.
+      expect(pane.effects).toEqual(["remain-on-exit", "TERM 200", "root HUP", "respawn"]);
+    });
+
+    it("a Codex retiree at an empty input box exits through /exit and is reported graceful", async () => {
+      const pane = codexPane();
+      const res = await cutover(pane).createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
+      expect(res).toMatchObject({ ok: true, retireeExit: "graceful", retireeExitDetail: expect.stringMatching(/^Codex exited through \/exit in /) });
+      expect(pane.effects).toEqual(["remain-on-exit", "type /exit (keys)", "keys Enter", "root HUP", "respawn"]);
+    });
+
+    it("an unresponsive retiree is killed at the end of the window and reported forced, before the respawn", async () => {
+      const pane = claudePane();
+      pane.runtimeIgnores.add("TERM");
+      const res = await cutover(pane).createSuccessor({ node: { id: "node-1", runtime: "claude-code", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
+      expect(res).toMatchObject({ ok: true, retireeExit: "forced", retireeExitDetail: "Claude Code didn't exit within 0.0 s of TERM and was killed." });
+      expect(pane.effects).toEqual(["remain-on-exit", "TERM 200", "KILL 200", "root HUP", "respawn"]);
+    });
+
+    // X-F5: a check that can't be made never fails a handover. Only an agent seen running after its KILL does.
+    it("a retiree whose exit can't be checked after TERM (the process table unreadable) is stopped at the pane, reported forced, and the handover goes on", async () => {
+      const pane = claudePane();
+      const rows = pane.list.getMockImplementation()!;
+      pane.list.mockImplementation(async () => { if (pane.effects.includes("TERM 200")) throw new Error("table unreadable"); return rows(); });
+      const res = await cutover(pane).createSuccessor({ node: { id: "node-1", runtime: "claude-code", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
+      expect(res).toMatchObject({ ok: true, retireeExit: "forced", retireeExitDetail: expect.stringMatching(/^Claude Code was sent TERM, but its exit couldn't be checked/) });
+      expect(pane.effects).toEqual(["remain-on-exit", "TERM 200", "refused KILL 200", "root TERM", "root KILL", "respawn"]);
+    });
+
+    it("a retiree seen still running after its KILL fails the handover before the respawn", async () => {
+      const pane = claudePane();
+      pane.runtimeIgnores.add("TERM");
+      pane.runtimeIgnores.add("KILL");
+      const res = await cutover(pane).createSuccessor({ node: { id: "node-1", runtime: "claude-code", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
+      expect(res).toMatchObject({ ok: false, code: "retiree_not_terminated", replacementStarted: false });
+      expect(pane.effects).not.toContain("respawn");
+    });
+
+    // X-F4: the pane's terminal is read as the pane is resolved, and every cutover effect is held to it.
+    it("a pane that is another server's by the time of the retiree's TERM is left alone, and the handover stops before the respawn", async () => {
+      const pane = claudePane();
+      pane.beforeRuntimeEffect = () => { pane.server = { pid: "4001", start: "1764061290" }; };
+      const res = await cutover(pane).createSuccessor({ node: { id: "node-1", runtime: "claude-code", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
+      expect(res).toMatchObject({ ok: false, code: "guard_target_changed", step: "create_successor", replacementStarted: false });
+      expect(pane.effects).toEqual(["remain-on-exit", "refused TERM 200"]);
+    });
+
+    it("a pane no longer in the departing session when it is resolved gets no cutover at all", async () => {
+      const pane = claudePane();
+      const launcher = cutover(pane);
+      pane.session = "someone-else";
+      const res = await launcher.createSuccessor({ node: { id: "node-1", runtime: "claude-code", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
+      expect(res).toMatchObject({ ok: false, code: "pane_unresolved", step: "resolve_pane", replacementStarted: false });
+      expect(pane.effects).toEqual([]);
+    });
   });
 
   it("#3253: a handover chooses its path before the retiree is signalled, and a limit never stops it after that", async () => {
