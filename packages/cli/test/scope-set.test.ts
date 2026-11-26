@@ -12,7 +12,8 @@ import YAML from "yaml";
 
 const daemon = vi.hoisted(() => ({
   status: { state: "stopped" } as Record<string, unknown>,
-  reply: (_path: string, _body: Record<string, unknown>): { status: number; data: unknown } => ({ status: 404, data: "404 Not Found" }),
+  // What a daemon without the route answers: its catch-all for an unknown /api path (server.ts), as Build's 0.7.18 does.
+  reply: (p: string, _body: Record<string, unknown>): { status: number; data: unknown } => ({ status: 404, data: { error: "not_found", path: p } }),
   posted: [] as Array<{ path: string; body: Record<string, unknown> }>,
 }));
 
@@ -83,7 +84,7 @@ beforeEach(() => {
     write(sliceFile(dir), SLICE);
   }
   daemon.status = { state: "stopped" };
-  daemon.reply = () => ({ status: 404, data: "404 Not Found" });
+  daemon.reply = (p) => ({ status: 404, data: { error: "not_found", path: p } });
   daemon.posted = [];
 });
 
@@ -253,6 +254,15 @@ describe("rig scope mission set --status", () => {
     expect(result.stdout).toContain("written here: the running daemon has no status route; it predates this command");
     expect(result.stdout).toContain("It doesn't count toward project readiness (only active and release-candidate do).");
     expect(YAML.parse(fs.readFileSync(missionFile(), "utf8")).metadata.status).toBe("paused");
+  });
+
+  it("reports the status route's own not-found, and doesn't write it here instead", async () => {
+    daemon.status = { state: "running", healthy: true, pid: 1234, port: 7433 };
+    daemon.reply = () => ({ status: 404, data: { error: "mission_not_found", missionId: "release-1.0.0", missionPath: mission() } });
+    const result = await run(["mission", "set", "release-1.0.0", "--status", "active"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("The daemon didn't write the status (mission_not_found)");
+    expect(fs.readFileSync(missionFile(), "utf8")).toBe(MISSION);
   });
 
   it("reports a daemon that couldn't write it, and doesn't write it here instead", async () => {

@@ -704,6 +704,9 @@ async function writeStatusThroughDaemon(editor: ScopeManifest, mission: MissionI
     `/api/missions/${encodeURIComponent(mission.name)}/status`, { status, missionPath: mission.absPath });
   const data = (res.data ?? {}) as { error?: string; message?: string; outcome?: "written" | "unchanged"; served?: { status: string | null; countsTowardReadiness: boolean } };
   if (res.status < 400 && data.outcome && data.served) return { outcome: data.outcome, via: "daemon", served: data.served };
+  // A daemon answers an /api path it has no route for with 404 { error: "not_found", path }, so this is a daemon that
+  // predates the route. The route's own 404 is mission_not_found, and that one is reported below.
+  if (res.status === 404 && data.error === "not_found") return here("the running daemon has no status route; it predates this command");
   if (typeof data.error === "string") {
     throw new ScopeCliError({ fact: `The daemon didn't write the status (${data.error}): ${data.message ?? "no detail"}.`, consequence: "Nothing was written.", action: "Fix the named issue and run this again." });
   }
