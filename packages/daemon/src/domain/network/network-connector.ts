@@ -34,6 +34,8 @@ const REPORT_SHARE = 0.75;
 /** Taking new work stops at this share of the deadline, so a long intake never uses up reporting's window: what finished
  *  here keeps reaching the hub while new work keeps arriving. */
 const INTAKE_SHARE = 0.5;
+/** How many local handoffs a hub item's local chain is followed through, for its result and its turn to report. */
+const FINAL_ITEM_HOPS = 20;
 /** A network answers a new connection `grant_authority_unavailable` on purpose until it has set the participant up. A
  *  binding that has never had contact asks again this soon, instead of backing off, for this long after it was made. */
 const SETUP_RETRY_MS = 5_000;
@@ -323,7 +325,7 @@ async function answerFinding(deps: NetworkConnectorDeps, binding: NetworkBinding
  *  handed-off item has no one successor here (handed to another host, or the record is gone): its outcome is unknown. */
 function finalItem(repo: QueueRepository, start: QueueItem): QueueItem | null {
   let current = start;
-  for (let hop = 0; hop < 20 && current.state === "handed-off"; hop++) {
+  for (let hop = 0; hop < FINAL_ITEM_HOPS && current.state === "handed-off"; hop++) {
     const next = repo.list({ handedOffFrom: current.qitemId, limit: 2 });
     if (next.length !== 1) return null;
     current = next[0]!;
@@ -358,18 +360,27 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
   until: number): Promise<void> {
   // What closes a hub item comes first (a local item that ended, handed on, or whose record is gone), then a pickup to
   // send, then a queued note. An item still open here with every note sent has nothing to report and only takes its turn.
-  // An item handed on to a successor that's still open here isn't closing yet, so it takes its turn with the open ones
-  // instead of holding every pass's first places; it comes first again once that successor finishes.
-  const open = deps.db.prepare(`SELECT r.* FROM network_receipts r LEFT JOIN queue_items q ON q.qitem_id = r.local_qitem_id
+  // An item handed on along a chain that's still open here (at any hop, as far as `finalItem` follows it) isn't closing
+  // yet, so it takes its turn with the open ones instead of holding every pass's first places; it comes first again
+  // once the chain's last item finishes.
+  const open = deps.db.prepare(`WITH RECURSIVE chain(root, id, hop) AS (
+      SELECT q.qitem_id, q.qitem_id, 0 FROM network_receipts r JOIN queue_items q ON q.qitem_id = r.local_qitem_id
+        WHERE r.binding_id = ? AND r.settled_at IS NULL AND q.state = 'handed-off'
+      UNION ALL
+      SELECT chain.root, s.qitem_id, chain.hop + 1 FROM chain JOIN queue_items s ON s.handed_off_from = chain.id
+        WHERE chain.hop < ${FINAL_ITEM_HOPS}),
+    held(root) AS (SELECT DISTINCT chain.root FROM chain JOIN queue_items s ON s.qitem_id = chain.id
+      WHERE s.state IN ('pending', 'in-progress', 'blocked'))
+    SELECT r.* FROM network_receipts r LEFT JOIN queue_items q ON q.qitem_id = r.local_qitem_id
+      LEFT JOIN held h ON h.root = r.local_qitem_id
     WHERE r.binding_id = ? AND r.settled_at IS NULL
     ORDER BY CASE
       WHEN q.qitem_id IS NULL OR r.outcome = 'unknown' OR q.state IN ('done', 'canceled', 'denied', 'failed') THEN 0
-      WHEN q.state = 'handed-off' AND NOT EXISTS (SELECT 1 FROM queue_items s WHERE s.handed_off_from = q.qitem_id
-        AND s.state IN ('pending', 'in-progress', 'blocked')) THEN 0
+      WHEN q.state = 'handed-off' AND h.root IS NULL THEN 0
       WHEN r.pickup_sent_at IS NULL AND q.claimed_at IS NOT NULL THEN 1
       WHEN r.queued_sent_at IS NULL THEN 2
       ELSE 3 END,
-      COALESCE(r.checked_at, ''), r.created_at LIMIT ?`).all(binding.id, deps.reportLimit ?? REPORT_LIMIT) as Receipt[];
+      COALESCE(r.checked_at, ''), r.created_at LIMIT ?`).all(binding.id, binding.id, deps.reportLimit ?? REPORT_LIMIT) as Receipt[];
   const mark = (column: "queued_sent_at" | "pickup_sent_at" | "settled_at", receipt: Receipt, outcome?: string, lastError: string | null = null) =>
     deps.db.prepare(`UPDATE network_receipts SET ${column} = ?, outcome = COALESCE(?, outcome), last_error = ? WHERE local_qitem_id = ?`)
       .run(now().toISOString(), outcome ?? null, lastError, receipt.local_qitem_id);

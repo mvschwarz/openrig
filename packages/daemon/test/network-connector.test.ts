@@ -773,6 +773,30 @@ describe("network connector", () => {
     expect(hub.items.get("hub-p1")).toMatchObject({ state: "done", resolution: "Reviewed: fine." });
   });
 
+  it("a chain of handoffs whose last item is still open doesn't hold reporting's first places either, at any hop", async () => {
+    const b = bind();
+    for (const id of ["hub-q1", "hub-q2", "hub-q3"]) hub.add(id);
+    await pass(b.id);
+    const local = (id: string) => runs(id)[0]!;
+    for (const id of ["hub-q1", "hub-q2"]) repo.claim({ qitemId: local(id).qitemId, destinationSession: "dev-impl@lab" });
+    await pass(b.id);
+    const lasts: string[] = [];
+    for (const id of ["hub-q1", "hub-q2"]) {
+      const { created } = await repo.handoff({ qitemId: local(id).qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+      repo.claim({ qitemId: created.qitemId, destinationSession: "review@lab" });
+      const { created: last } = await repo.handoff({ qitemId: created.qitemId, fromSession: "review@lab", toSession: "qa@lab", nudge: false });
+      lasts.push(last.qitemId);
+    }
+    repo.claim({ qitemId: local("hub-q3").qitemId, destinationSession: "dev-impl@lab" });
+    const limited = { ...deps, reportLimit: 2 };
+    await runNetworkBindingPass(limited, bindings.get(b.id)!);
+    expect(hub.items.get("hub-q3")!.notes).toContain(`Picked up by the local seat at ${local("hub-q3").claimedAt}.`);
+    repo.claim({ qitemId: lasts[0]!, destinationSession: "qa@lab" });
+    await repo.update({ qitemId: lasts[0]!, actorSession: "qa@lab", state: "done", closureReason: "no-follow-on", resolution: "Checked: fine." });
+    expect(await runNetworkBindingPass(limited, bindings.get(b.id)!)).toMatchObject({ resultsSent: 1 });
+    expect(hub.items.get("hub-q1")).toMatchObject({ state: "done", resolution: "Checked: fine." });
+  });
+
   /** A finding as a Core hub's stuck sweep writes one, addressed to the participant that claimed `about`. */
   const finding = (id: string, about: string) => hub.items.set(id, { qitemId: id, sourceSession: "assistant@team", destinationSession: PARTICIPANT,
     state: "pending", summary: `Checked on ${about}: it stalled after it was picked up (4 minutes)`, resolution: null, closureReason: null, notes: [],

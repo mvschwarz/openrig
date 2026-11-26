@@ -109,10 +109,10 @@ a deadline of 60 seconds, so one slow hub doesn't hold the others. With no activ
      close, or "Closed without a stated result." No other note on the item is sent.
 3. Under a backlog, reporting keeps pace with intake. A pass reports up to twice as many items as it can take, results
    first, then pickups, then queued notes, so finished work doesn't sit behind work still open and the hub doesn't show
-   it in progress. An item handed on here to a successor that's still open waits its turn with the open items, and comes
-   first again once that successor finishes. Taking new work stops at half the pass's deadline, so a long intake never
-   uses up reporting's time. On a slow hub, reporting stops after three quarters of the deadline, and the rest go first
-   next time.
+   it in progress. An item handed on here, once or along a chain of handoffs, whose last item is still open waits its
+   turn with the open items, and comes first again once that last item finishes. Taking new work stops at half the
+   pass's deadline, so a long intake never uses up reporting's time. On a slow hub, reporting stops after three
+   quarters of the deadline, and the rest go first next time.
 4. When an OpenRig hub's stuck sweep finds an item this participant holds with no change for a while, it files a finding
    addressed to the participant. The connector answers that finding on the hub from the local item (queued, picked up,
    or finished here, or that its result stayed here because the hub item was closed elsewhere first) and doesn't queue it
