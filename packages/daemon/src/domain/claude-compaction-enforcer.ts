@@ -4,7 +4,7 @@ import { TerminalPolicyRefusal } from "./terminal-policy.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { CAPTURE_READABLE_BUDGET_MS, SEND_READINESS_FRESHNESS_MS, type SessionTransport, type SendResult } from "./session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
-import { postCompactExtraSetting } from "./managed-restore-read-access.js";
+import { compactionPacketRoot, postCompactExtraSetting } from "./managed-restore-read-access.js";
 import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import * as os from "node:os";
@@ -156,6 +156,11 @@ export type ManualCompactionOutcome =
   | { triggered: false; stage: "skipped-or-failed"; reason: string; preparation?: Pick<PreparationState, "attemptId" | "mapPath" | "delivery" | "compact">;
       /** /compact's result was lost, so its restore steps follow in case it ran. */
       restoreOwed?: true };
+
+type ManualCompactionRefusal = Extract<ManualCompactionOutcome, { triggered: false }>;
+type ManualCompactionOptions = { operatorInitiated?: boolean; skipMap?: boolean; actor?: TerminalActor };
+type ManualCompactionStart = ManualCompactionRefusal
+  | { attemptId: string; completion: Promise<ManualCompactionOutcome> };
 
 export type EnforcerSkipReason =
   | "terminal_policy_refused"
@@ -407,9 +412,9 @@ export function buildPostCompactRestorePrompt(input: {
   if (input.transcriptPath) {
     pieces.push(`If the marker is missing and you have no restore map, rebuild a packet from this Claude JSONL transcript: ${input.transcriptPath}.`);
   } else if (input.sessionId) {
-    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under /tmp/claude-compaction-restore/ for session id ${input.sessionId}.`);
+    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot(input.openrigHome)}/ for session id ${input.sessionId}.`);
   } else {
-    pieces.push("If the marker is missing and you have no restore map, inspect the newest matching packet under /tmp/claude-compaction-restore/ for this Claude session.");
+    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot(input.openrigHome)}/ for this Claude session.`);
   }
   const inlineInstruction = input.postCompactInstruction?.trim();
   const instructionFilePath = input.postCompactInstructionFilePath?.trim();
@@ -1555,14 +1560,14 @@ export class ClaudeCompactionEnforcer {
    */
   async triggerManualCompact(
     input: EnforcerInput,
-    opts: { operatorInitiated?: boolean; skipMap?: boolean; actor?: TerminalActor } = {},
+    opts: ManualCompactionOptions = {},
   ): Promise<ManualCompactionOutcome> {
-    // Do not hold a delivery/lifecycle lease while a seat writes its map or goes idle.
-    // Each actual send takes the existing guard; final checks bind the attempt across awaits.
-    return this.triggerManualCompactUnchecked(input, opts);
+    const start = this.startManualCompact(input, opts);
+    return "completion" in start ? start.completion : start;
   }
 
-  private async triggerManualCompactUnchecked(input: EnforcerInput, opts: { operatorInitiated?: boolean; skipMap?: boolean; actor?: TerminalActor }): Promise<ManualCompactionOutcome> {
+  /** Check and reserve the attempt without awaiting, so only its admitting caller gets the receipt. */
+  startManualCompact(input: EnforcerInput, opts: ManualCompactionOptions): ManualCompactionStart {
     // The manual budget starts with the request. A request reaching a seat before the monitor's first poll after a restart
     // finds its owed restore or open preparation first, so it neither prepares twice nor replaces the owed restore.
     const requestedAt = this.now();
@@ -1583,7 +1588,14 @@ export class ClaudeCompactionEnforcer {
     if (policyRefusal) return this.recordManualFailure(input.sessionName, policyRefusal);
     const attempt = this.beginPreparation(input, "manual", opts.skipMap === true, actor, requestedAt);
     if (attempt.status === "stopped") return this.recordManualFailure(input.sessionName, attempt.reason ?? "occupant_generation_unavailable");
-    const failed = (reason: string): Extract<ManualCompactionOutcome, { triggered: false }> => {
+    this.setManualStage(input.sessionName, "preparing", undefined, opts.operatorInitiated === true);
+    return { attemptId: attempt.attemptId, completion: this.finishManualCompact(input, opts, attempt) };
+  }
+
+  private async finishManualCompact(input: EnforcerInput, opts: ManualCompactionOptions, attempt: PreparationAttempt): Promise<ManualCompactionOutcome> {
+    // No delivery lease is held while the seat writes its map or goes idle.
+    // Each actual send takes the existing guard and rechecks the attempt.
+    const failed = (reason: string): ManualCompactionRefusal => {
       // A cancelled request may settle after an explicit retry. Its receipt must
       // not stop or overwrite the successor attempt's state.
       if (this.pendingPreCompactPrep.get(input.sessionName) === attempt) {
@@ -1593,7 +1605,6 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, stage: "skipped-or-failed", reason,
         preparation: { attemptId: attempt.attemptId, mapPath: attempt.mapPath, delivery: attempt.delivery, compact: attempt.compact } };
     };
-    this.setManualStage(input.sessionName, "preparing", undefined, opts.operatorInitiated === true);
     await this.deliverPreparation(input, attempt);
     // Manual preparation can pause for an ordinary approval, before or after the map is complete. OpenRig never answers
     // it. It keeps the latest completed reading of the seat on the attempt (awaitingInput), recorded before deadline
@@ -2571,7 +2582,7 @@ export class ClaudeCompactionEnforcer {
     } catch { return false; }
   }
 
-  private recordManualFailure(sessionName: string, reason: string): ManualCompactionOutcome {
+  private recordManualFailure(sessionName: string, reason: string): ManualCompactionRefusal {
     this.setManualStage(sessionName, "skipped-or-failed", reason);
     return { triggered: false, stage: "skipped-or-failed", reason };
   }

@@ -203,14 +203,16 @@ interface SeatHandoverMutationResult {
     departingSessionKilled: false;
     /** Absent from an older daemon, whose receipt reported both side effects as a fixed false. */
     departingProcess?: "ended-graceful" | "ended-forced" | "not-touched";
+    /** #3901: what happened to the previous occupant, in a sentence (absent from older daemons). */
+    departingProcessDetail?: string;
     startupContextDelivered: boolean;
     provenanceRecordWritten: boolean;
   };
 }
 
 const DEPARTING_PROCESS_LINES = {
-  "ended-graceful": "The previous occupant's process exited on TERM; its tmux session was kept, and the successor runs in the same pane.",
-  "ended-forced": "The previous occupant's process didn't exit on TERM and was killed; its tmux session was kept, and the successor runs in the same pane.",
+  "ended-graceful": "The previous occupant wasn't forced to stop: it exited through its own shutdown, or had already exited. Its tmux session was kept, and the successor runs in the same pane.",
+  "ended-forced": "The previous occupant was stopped by a signal: it didn't exit through its own shutdown, or that couldn't be confirmed. Its tmux session was kept, and the successor runs in the same pane.",
   "not-touched": "The previous occupant's process wasn't touched: the successor was an existing session.",
 } as const;
 
@@ -449,6 +451,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       ? "The handover's lineage record (occupant tenure) was written."
       : "The handover's lineage record (occupant tenure) was NOT written; check the daemon log, which names the first such failure since the daemon started. The seat is already bound to the successor, so don't run the handover again.");
     console.log(DEPARTING_PROCESS_LINES[result.sideEffects.departingProcess]);
+    if (result.sideEffects.departingProcessDetail) console.log(result.sideEffects.departingProcessDetail);
   }
   // OPR.0.5.5.5 — the per-source execution record: what actually carried context.
   if (result.sourceOutcome?.mode === "fork") {
@@ -565,7 +568,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
 
   const guardRequest = async (method: "GET" | "POST", path: string, body: Record<string, unknown> | undefined, json?: boolean) => {
     const deps = getDeps(); const daemon = await getDaemonStatus(deps.lifecycleDeps);
-    if (!daemonStatusGuard(daemon)) return;
+    if (!daemonStatusGuard(daemon, { json })) return;
     const client = deps.clientFactory(getDaemonUrl(daemon));
     const result = method === "GET" ? await client.get<Record<string, unknown>>(path) : await client.post<Record<string, unknown>>(path, body ?? {});
     console.log(JSON.stringify(result.data, null, json ? undefined : 2));
@@ -585,7 +588,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
         return;
       }
       const deps = getDeps(); const daemon = await getDaemonStatus(deps.lifecycleDeps, { cleanupStaleState: false });
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const path = `/api/startup/${encodeURIComponent(opts.rig)}/nodes/${encodeURIComponent(opts.nodeId)}/history`;
       const response = opts.snapshotId && opts.historySessionId
@@ -758,7 +761,7 @@ Examples:
     .action(async (seat: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
 
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.get<SeatStatusResponse | SeatStatusError>(`/api/seat/status/${encodeURIComponent(seat)}`);
@@ -839,7 +842,7 @@ rig seat handover, THEN retarget the view. Examples:
 
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
 
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.post<SeatSwitchClientResponse | SeatStatusError>(
@@ -896,7 +899,7 @@ identity remains unverified; a version number alone cannot clear it.
     .action(async (session: string, opts: { reason?: string; json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(status));
       const res = await client.post<Record<string, unknown>>(
         `/api/sessions/${encodeURIComponent(session)}/clear-attention`,
@@ -1079,6 +1082,7 @@ identity remains unverified; a version number alone cannot clear it.
         if (codexPermissions !== undefined) {
           const replaced = data["replaced"] as { mode?: { mode?: string } } | undefined;
           console.log(`Codex permission envelope ${data["changed"] === false ? "unchanged" : "recorded and audited"}${replaced?.mode?.mode ? `; it replaces the recorded ${replaced.mode.mode} mode` : ""}.`);
+          for (const advisory of (data["advisories"] as string[] | undefined) ?? []) console.log(`Warning: ${advisory}`);
           console.log(String(data["effect"])); return;
         }
         if (opts.codexProfile !== undefined) {
@@ -1290,7 +1294,7 @@ Examples:
     .action(async (seat: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.get<Record<string, unknown>>(`/api/seat/effort/${encodeURIComponent(seat)}`);
       if (opts.json) {
@@ -1322,7 +1326,7 @@ Example:
     .action(async (seat: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(daemon)) return;
+      if (!daemonStatusGuard(daemon, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.get<Record<string, unknown>>(`/api/seat/runtime-home/${encodeURIComponent(seat)}`);
       if (opts.json) {
@@ -1425,7 +1429,7 @@ resume/successor launch reads it at call time. Examples:
   cmd
     .command("set-runtime")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--runtime <runtime>", "codex, claude-code or pi")
+    .option("--runtime <runtime>", "codex, claude-code, pi, or an installed community harness (rig community-harness list)")
     .option("--reason <text>", "Why the seat moves; recorded with the switch")
     .option("--model <id>", "Target model; otherwise the seat's agent spec for the target, else the target's default")
     .option("--effort <level>", "Target effort, the target runtime's own level (not translated)")
@@ -1750,6 +1754,10 @@ taken from the running Codex's own command line, not probed again. Building the
 command can create OpenRig's own seat-bin link, as every managed launch does.
 A restart that started under an earlier daemon run and never recorded a result is
 shown as staleRestart; it does not block a new restart.
+Linux and macOS: the running Codex's arguments, Codex home and working directory are
+read from /proc on Linux, and on macOS from its launch record (KERN_PROCARGS2) and
+lsof, for a Codex running as the daemon's own user. Elsewhere, or when the OS gives no
+reading, it refuses with settings_unverified before anything is stopped.
 Results: restarted_account_unverified, not_started (the original is still running),
 incomplete (it exited; the resume was not proven; the pane may be held for recovery),
 native_unknown (what happened could not be observed). Only --verify reports moved,
@@ -1914,7 +1922,7 @@ The token is read from STDIN only (never an argument). Examples:
         return;
       }
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
+      if (!daemonStatusGuard(status, { json: opts.json })) return;
       const client = deps.clientFactory(getDaemonUrl(status));
       const res = await client.post<Record<string, unknown>>(
         `/api/sessions/${encodeURIComponent(session)}/resume-token`,

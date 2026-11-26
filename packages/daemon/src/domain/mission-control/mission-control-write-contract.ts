@@ -44,7 +44,7 @@ import type { NotifyRegister } from "../event-bus.js";
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
-import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, type QueueRepository, type QueueItem } from "../queue-repository.js";
+import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, QueueRepositoryError, type QueueRepository, type QueueItem } from "../queue-repository.js";
 import { askBackRoute, terminalAnswerMeaning } from "../receiver-context.js";
 import type { PersistedEvent } from "../types.js";
 import {
@@ -290,6 +290,7 @@ export class MissionControlWriteContract {
             tier: source.tier ?? undefined,
             summary: source.summary,
             evidenceRef: source.evidenceRef,
+            evidenceRefRoots: source.evidenceRefRoots,
             tags: source.tags
               ? [...source.tags, `mission-control:${input.verb}`]
               : [`mission-control:${input.verb}`],
@@ -625,6 +626,33 @@ export class MissionControlWriteContract {
         `qitem ${input.qitemId} isn't an ask to ${input.actorSession}, so ${input.actorSession} can't answer it.`, { qitemId: input.qitemId });
     }
     const before = snapshotQitem(ask);
+    if (ask.relayedAnswers) {
+      const afterCommit: Array<() => void> = [];
+      let result;
+      try {
+        result = this.eventBus.withNotifyEnvelope(register => {
+          input.appSubmission?.verify();
+          const receipt = this.queueRepo.writeRelayedAnswer({ qitemId: ask.qitemId, actorSession: input.actorSession,
+            identityProvenance: input.identityProvenance ?? undefined, nudge: input.notify,
+            direct: { questionId: input.questionId, optionId: input.optionId, text: input.decision, primaryUser } },
+          { register, afterCommit: wake => { afterCommit.push(wake); } });
+          input.appSubmission?.checkpoint(receipt.item);
+          return this.recordAnswer(input, before, input.decision ?? input.optionId ?? "", {
+            outcome: receipt.unplaced || receipt.unanswered.length ? "recorded" : "answered",
+            unanswered: (ask.humanQuestions ?? []).filter(q => receipt.unanswered.includes(q.id)).map(q => q.question),
+            ...(receipt.unplaced ? { message: `Reply returned to ${ask.sourceSession} as ${receipt.replyQitemId} without changing any answer.` }
+              : receipt.corrected ? { message: `Direct correction returned to ${ask.sourceSession} as ${receipt.replyQitemId}. The relay remains in history.` } : {}),
+          }, receipt.replyQitemId, undefined, register);
+        });
+      } catch (err) {
+        if (err instanceof QueueRepositoryError && err.code === "relayed_answer_refused") {
+          throw new MissionControlWriteContractError("answer_not_recorded", err.message);
+        }
+        throw err;
+      }
+      for (const wake of afterCommit) wake();
+      return result;
+    }
     const questions = ask.humanQuestions ?? [];
     const existing = this.queueRepo.getHumanAnswer(input.qitemId, input.actorSession, { primaryUser });
     if (existing && (ask.state === "pending" || ask.state === "done")) {

@@ -505,7 +505,7 @@ export interface PersistedProjectionEntry {
   resourceType?: string;
   mergeStrategy?: string;
   target?: string;
-  /** A skill whose resource says `on_restore: follow_source`, so a replay keeps it recorded as following. */
+  /** A skill or supported runtime fragment whose resource follows today's source. */
   onRestore?: SkillOnRestore;
 }
 
@@ -706,6 +706,9 @@ export interface RestoreNodeResult {
   /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
    *  and doesn't leave the rig partially restored. */
   noConversation?: true;
+  /** An `awaiting-decision` seat with no saved startup context: a fresh start (`rig seat launch --fresh`) reads that
+   *  context and refuses without it, so the seat's reason offers none and callers shouldn't either. */
+  noStartupContext?: true;
   /** #3253: the seat was launched without its requested process limit (the request stays stored; a fresh launch
    *  applies it). */
   processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
@@ -1238,7 +1241,11 @@ export type SkillOnRestore = "keep_saved" | "follow_source";
 export interface SkillResource { id: string; path: string; onRestore?: SkillOnRestore; }
 export interface GuidanceResource { id: string; path: string; target: string; merge: "managed_block" | "append"; }
 export interface SubagentResource { id: string; path: string; }
-export interface RuntimeResource { id: string; path: string; runtime: string; type: string; }
+export type ClaudeJsonFragmentType = "claude_mcp_fragment" | "claude_settings_fragment";
+export function isClaudeJsonFragmentType(type: unknown): type is ClaudeJsonFragmentType {
+  return type === "claude_mcp_fragment" || type === "claude_settings_fragment";
+}
+export interface RuntimeResource { id: string; path: string; runtime: string; type: string; onRestore?: SkillOnRestore; }
 
 export type PluginSource =
   | { kind: "local"; path: string };

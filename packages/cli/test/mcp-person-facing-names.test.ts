@@ -281,7 +281,6 @@ describe("rig_queue_list: an empty inbox", () => {
   it("carries the daemon's page marker, and a cut page never says the inbox is empty (#3572)", async () => {
     const cut = new Headers({ "X-OpenRig-Limit": "1", "X-OpenRig-Truncated": "1" });
     const row = { qitemId: "q-1", sourceSession: "dev-impl@team", destinationSession: CALLER, state: "pending" };
-    const line = "This page stops at the limit of 1 and more items match; pass a larger limit to see the rest.";
     const busy = await connect(rosters("Sam's team"), { external: true, queueRows: [row], queueHeaders: cut });
     // The one row the daemon returned is from a seat outside the caller's team, so the caller's view of the page is empty.
     const hidden = await connect(rosters("Sam's team"), { external: true, queueHeaders: cut,
@@ -290,11 +289,11 @@ describe("rig_queue_list: an empty inbox", () => {
       const listed = await busy.list({ owned: true });
       expect(listed.structuredContent).toMatchObject({ limit: 1, truncated: true });
       expect(listed.structuredContent.items).toHaveLength(1);
-      expect(listed.content.map((c) => c.text).slice(1)).toEqual([line]);
+      expect(listed.content.map((c) => c.text)).toEqual([JSON.stringify([row])]);
 
       const empty = await hidden.list({ owned: true });
       expect(empty.structuredContent).toEqual({ items: [], limit: 1, truncated: true });
-      expect(empty.content.map((c) => c.text)).toEqual(["[]", line]);
+      expect(empty.content.map((c) => c.text)).toEqual(["[]"]);
     } finally { await busy.close(); await hidden.close(); }
   });
 

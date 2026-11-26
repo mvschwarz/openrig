@@ -384,7 +384,8 @@ export function buildPulseModel(snap: FleetSnapshot, nowMs: number = Date.now(),
   const footer = { active: now.length, parked: parkedCount, waitingYou, updatedAgo: ago ? `${ago} ago` : "—" };
 
   return { exceptions, lanes, footer,
-    ...(snap.queueCoverage === "partial" || snap.queueCoverage === "unavailable"
-      ? { queueSampleNote: "Queue counts are samples; unlisted work is unknown." } : {}),
+    ...(snap.queueCoverage === "pending" ? { queueSampleNote: "Queue lists pending: read after the rigs and seats." }
+      : snap.queueCoverage === "partial" || snap.queueCoverage === "unavailable"
+        ? { queueSampleNote: "Queue counts are samples; unlisted work is unknown." } : {}),
   };
 }

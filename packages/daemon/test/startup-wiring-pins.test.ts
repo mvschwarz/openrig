@@ -34,6 +34,7 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
 import { SeatPoolSlotsRepository } from "../src/domain/seat-pool-slots.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 
 // What production startup hands the watchdog's delivery and two of its policies, recorded on the way through to the
 // real factories (nothing else changes): their queue-only seams are closures with no other handle.
@@ -366,6 +367,101 @@ describe("the seat-pool executor's composition (#3395)", () => {
     } finally {
       route.mockRestore(); obligations.mockRestore(); list.mockRestore(); held.mockRestore();
       custody.mockRestore(); seatState.mockRestore(); cycle.mockRestore();
+    }
+  });
+});
+
+describe("the seat-pool drain's composition (#3395)", () => {
+  it("Startup composes the seat-pool drain with the delivery guard's lifecycle lease, the resume metadata refresh of the drained session, the snapshot capture's `auto-rehydrate` kind and the seat lifecycle service's checked stop.", async () => {
+    expect(composed.seatPoolExecutor).toHaveLength(1);
+    const drain = (composed.seatPoolExecutor[0]!.deps as SeatPoolExecutorDeps).drain;
+    expect(drain).toBeDefined();
+
+    // a node of its own, with a running session, so the delivery guard resolves it
+    const rigRepo = new RigRepository(db);
+    const rig = rigRepo.createRig("pin-drain");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.drain", { runtime: "claude-code", podId: pod.id });
+    const sessions = new SessionRegistry(db);
+    const sessionId = sessions.registerSession(node.id, "dev-drain@pin-drain").id;
+    sessions.updateStatus(sessionId, "running");
+    // another live session of the rig, which the drain does not stop
+    const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "claude-code", podId: pod.id });
+    sessions.updateStatus(sessions.registerSession(other.id, "dev-other@pin-drain").id, "running");
+
+    const lifecycle = vi.spyOn(deps.tmuxAdapter.deliveryGuard!, "lifecycle");
+    const refresh = vi.spyOn(deps.resumeMetadataRefresher!, "refresh").mockResolvedValue(undefined as never);
+    const capture = vi.spyOn(deps.snapshotCapture, "captureSnapshot").mockReturnValue({ id: "snap-pin" } as never);
+    const stop = vi.spyOn(SeatLifecycleService.prototype, "stopSeat")
+      .mockResolvedValue({ ok: false, code: "stop_uncertain", message: "m", partialEffect: true });
+    try {
+      // the delivery guard's lifecycle lease
+      expect(await drain!.lifecycle([node.id], async () => "ran")).toBe("ran");
+      expect(lifecycle).toHaveBeenCalledWith([node.id], expect.any(Function));
+      // the resume metadata refresh rig down runs before its snapshot, of the drained session only
+      await drain!.refresh({ rigId: rig.id, nodeId: node.id, sessionId });
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(refresh.mock.calls[0]![0].map((s) => s.sessionId)).toEqual([sessionId]);
+      // the snapshot capture, as an auto-rehydrate snapshot of the rig
+      expect(drain!.capture(rig.id)).toEqual({ snapshotId: "snap-pin" });
+      expect(capture).toHaveBeenCalledWith(rig.id, "auto-rehydrate");
+      // the checked stop: the expected session is passed through, and a refusal keeps its code, message and partial effect
+      const expected = { nodeId: node.id, sessionId: "session-1" };
+      expect(await drain!.stopSeat({ seatRef: "dev-drain@pin-drain", reason: "r", expected }))
+        .toEqual({ ok: false, code: "stop_uncertain", message: "m", partialEffect: true });
+      expect(stop).toHaveBeenCalledWith({ seatRef: "dev-drain@pin-drain", reason: "r", operator: null, expected });
+      stop.mockResolvedValueOnce({ ok: true } as never);
+      expect(await drain!.stopSeat({ seatRef: "dev-drain@pin-drain", reason: "r", expected })).toEqual({ ok: true });
+      // the drain's own recheck reaches the checked stop
+      const recheck = () => null;
+      stop.mockResolvedValueOnce({ ok: true } as never);
+      await drain!.stopSeat({ seatRef: "dev-drain@pin-drain", reason: "r", expected, recheck });
+      expect(stop).toHaveBeenLastCalledWith({ seatRef: "dev-drain@pin-drain", reason: "r", operator: null, expected, recheck });
+    } finally {
+      lifecycle.mockRestore(); refresh.mockRestore(); capture.mockRestore(); stop.mockRestore();
+    }
+  });
+});
+
+describe("the seat-pool add's composition (#3395)", () => {
+  it("Startup composes the seat-pool add with the daemon's export of a member and the member add of `rig add` (convergeOp over the daemon's instantiator), and the executor reserves its operation ids in the daemon's database.", async () => {
+    expect(composed.seatPoolExecutor).toHaveLength(1);
+    const executorDeps = composed.seatPoolExecutor[0]!.deps as SeatPoolExecutorDeps;
+    // without these the executor skips the whole add stage
+    expect(executorDeps.add).toBeDefined();
+    const add = executorDeps.add!;
+    expect(typeof add.exportMember).toBe("function");
+    expect(typeof add.converge).toBe("function");
+    expect(typeof add.makeFolder).toBe("function");
+    expect(executorDeps.rigRepo.getNodeLaunchRecipe).toBeTypeOf("function");
+
+    const rigRepo = new RigRepository(db);
+    const rig = rigRepo.createRig("pin-add");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
+    const model = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: pod.id, cwd: scratch });
+    rigRepo.setNodeStatuslineThrottle(model.id, 30);
+
+    const exported = vi.spyOn(deps.rigSpecExporter, "exportedRawMemberFromNode");
+    const addMember = vi.spyOn(deps.podInstantiator, "addMemberToPod")
+      .mockResolvedValue({ ok: false, code: "rig_not_found", message: "pinned" });
+    try {
+      // the export: the model member in the spec's own keys, from the daemon's exporter
+      const member = add.exportMember(rig.id, model.id);
+      expect(exported).toHaveBeenCalledWith(rig.id, model.id);
+      expect(member).toMatchObject({ id: "impl", runtime: "claude-code", cwd: scratch, statusline_throttle: 30 });
+      // the member add: convergeOp over the daemon's instantiator, with the operation's recordCreated
+      const recordCreated = vi.fn();
+      const converged = await add.converge(rig.id, { kind: "add_member", pod: "dev", member: { ...member, id: "impl-s1" } }, "/rig/root", { recordCreated });
+      expect(converged).toEqual({ kind: "add_member", supported: true, outcome: { ok: false, code: "rig_not_found", message: "pinned" } });
+      expect(addMember).toHaveBeenCalledWith(rig.id, "dev", { ...member, id: "impl-s1" }, "/rig/root", expect.objectContaining({ recordCreated }));
+      // the folder of a cwd_template, created and nothing else
+      const folder = path.join(scratch, "pool-slots", "pin-add", "impl-s1");
+      add.makeFolder(folder);
+      expect(fs.readdirSync(folder)).toEqual([]);
+      // the operation ids go to the daemon's own database: the executor reserves them in its db, the daemon's
+      expect(executorDeps.db).toBe(db);
+    } finally {
+      exported.mockRestore(); addMember.mockRestore();
     }
   });
 });

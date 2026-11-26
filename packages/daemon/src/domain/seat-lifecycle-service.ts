@@ -1,8 +1,10 @@
 import { validateStatuslineThrottle } from "./claude-statusline-throttle.js";
-import { communityHarnessOf } from "./built-in-runtimes.js";
+import { communityHarnessOf, isCommunityHarnessRuntime } from "./built-in-runtimes.js";
+import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { claudeAutoModeAdvisories, readClaudeAutoMode, validateClaudeAutoMode } from "./claude-auto-mode.js";
-import { clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
+import { clearCodexMemberPermissions, codexRigReach, codexRigReachWarning, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
+import { seatRigReachPaths } from "./seat-launch-environment.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
 import { verifyPaneEmptyShell, type NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
@@ -43,7 +45,7 @@ import { resolvePermissionPolicyAttachment, validatePermissionPolicyRef } from "
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import type { PaneCutoverTiming } from "./pane-cutover.js";
 import {
-  effortPrecedence, emittedEffortFromArgv, readNativeEffort, resolveSeatEffort, unknownLevelWarning,
+  effortPrecedence, emittedEffortFromArgv, readNativeEffort, readSeatEffort, resolveSeatEffort, unknownLevelWarning,
   type EffortResolution, type NativeEffortObservation,
 } from "./seat-effort.js";
 import {
@@ -469,6 +471,28 @@ export class SeatLifecycleService {
     } catch (error) {
       return { ok: false as const, code: "terminal_policy_unavailable" as const, message: (error as Error).message };
     }
+  }
+
+  /** Settings suggestions and the seat's saved choices. This read never starts or interrogates a runtime. */
+  modelCatalog(target: SeatSettingTarget) {
+    const resolved = this.resolveSettingTarget(target);
+    if ("code" in resolved) return resolved;
+    const { runtime, model } = resolved.entry;
+    const seat = this.describe(resolved);
+    const saved = { model: model ?? null, effort: readSeatEffort(this.db, seat.nodeId) };
+    const preset = isCommunityHarnessRuntime(runtime) ? loadCommunityHarnessPreset(runtime) : undefined;
+    const declaration = preset?.ok ? preset.preset.modelCatalog : undefined;
+    if (!declaration) {
+      return { ok: true as const, seat, runtime, saved,
+        catalog: { status: "unavailable" as const, reason: "No supported local catalog for this seat's runtime." } };
+    }
+    const observedAt = new Date().toISOString();
+    const { runtimeVersion } = declaration;
+    const models = declaration.models.map(entry => ({
+      ...entry, source: "community-harness-preset" as const, observedAt,
+      ...(runtimeVersion === undefined ? {} : { runtimeVersion }),
+    }));
+    return { ok: true as const, seat, runtime, saved, catalog: { status: "available" as const, models } };
   }
 
   async setModel(input: SeatSettingTarget & { model: string; reason: string; operator?: string | null }): Promise<SetModelResult> {
@@ -1010,7 +1034,7 @@ export class SeatLifecycleService {
     const choices = [input.mode, input.rules, input.autoMode, input.codexPermissions, input.codexProfile].filter(value => value !== undefined).length;
     if (choices !== 1) return { ok: false, code: "permission_selection_refused", message: "Choose exactly one of mode, rules, auto mode, codex permissions or codex profile." };
     if (input.autoMode !== undefined) return this.setClaudeAutoMode(seat, runtime, input.autoMode, input.actor.trim(), input.reason.trim());
-    if (input.codexPermissions !== undefined) return this.setCodexPermissions(seat, runtime, input.codexPermissions, input.actor.trim(), input.reason.trim());
+    if (input.codexPermissions !== undefined) return this.setCodexPermissions(seat, runtime, input.codexPermissions, resolved.entry.cwd ?? undefined, input.actor.trim(), input.reason.trim());
     if (input.codexProfile !== undefined) return this.setCodexProfile(seat, runtime, input.codexProfile, resolved.entry.cwd ?? undefined,
       input.actor.trim(), input.reason.trim(), input.nodeId !== undefined);
     if (input.rules !== undefined) {
@@ -1110,8 +1134,8 @@ export class SeatLifecycleService {
   }
 
   /** A Codex seat's envelope: its explicit permission choice, which replaces a recorded mode in the same write. */
-  private setCodexPermissions(seat: SeatDescriptor, runtime: string, value: unknown, actor: string, reason: string):
-    { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; replaced?: unknown } | SeatRefusal {
+  private setCodexPermissions(seat: SeatDescriptor, runtime: string, value: unknown, cwd: string | undefined, actor: string, reason: string):
+    { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; replaced?: unknown; advisories?: string[] } | SeatRefusal {
     if (runtime !== "codex") return { ok: false, code: "permission_selection_refused", message: "codex_permissions is only supported for codex seats." };
     try {
       const to = validateCodexMemberPermissions(value);
@@ -1139,7 +1163,14 @@ export class SeatLifecycleService {
           effect: `The envelope applies at the next separately authorized managed launch or resume, ${"filesystem" in to ? "as explicit permission and approval flags, with native configuration conflicts refused and inconclusive checks reported as policy not verified." : "as explicit sandbox and approval flags that a profile or policy posture doesn't override."}${replaced ? " It replaces the seat's recorded permission mode." : ""} The current process and history are unchanged. Older readers may ignore it; check rollback compatibility and preserve restrictions before downgrading.` };
       })();
       if (persisted) this.eventBus.notifySubscribers(persisted);
-      return result;
+      // The launch warning a spec preflight gives, so the setter hears now that the seat won't take its tasks.
+      try {
+        const gap = codexRigReach(to, { ...seatRigReachPaths(this.rigRepo.getEffectiveSeatEnv(seat.nodeId)), cwd });
+        return gap ? { ...result, advisories: [codexRigReachWarning(seat.logicalId, gap)] } : result;
+      } catch {
+        // The selection was saved above. Advisory metadata must not turn that successful write into a refusal.
+        return { ...result, advisories: ["Your permission selection was saved. Rig read coverage could not be checked; run rig whoami inside the seat after its next separately selected launch."] };
+      }
     } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
   }
 
@@ -1267,8 +1298,11 @@ export class SeatLifecycleService {
     return { contract: "seat-stop.v1", expected: { nodeId: resolved.nodeId, sessionId: this.latestSession(resolved.nodeId)?.id ?? null } };
   }
 
-  /** Stop one managed seat; an explicit expected tuple activates strict identity checks. */
-  async stopSeat(input: { seatRef: string; reason: string; operator?: string | null; expected?: unknown }): Promise<StopSeatResult> {
+  /** Stop one managed seat; an explicit expected tuple activates strict identity checks. `recheck` (in-process only, with
+   *  `expected`) is the caller's own refusal, run at the final step before each effect, after the liveness probe. */
+  async stopSeat(input: {
+    seatRef: string; reason: string; operator?: string | null; expected?: unknown; recheck?: () => SeatRefusal | null;
+  }): Promise<StopSeatResult> {
     const required = this.requireReason(input.reason);
     if (required) return required;
     if ("expected" in input) {
@@ -1318,7 +1352,7 @@ export class SeatLifecycleService {
 
   /** Hold the existing lifecycle lease from selection validation through terminal and DB effects. */
   private async stopSeatChecked(
-    input: { seatRef: string; reason: string; operator?: string | null }, expected: StopPrecondition,
+    input: { seatRef: string; reason: string; operator?: string | null; recheck?: () => SeatRefusal | null }, expected: StopPrecondition,
   ): Promise<StopSeatResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (!guard) return { ok: false, code: "guard_unavailable", message: "Checked stop requires the delivery guard." };
@@ -1353,7 +1387,9 @@ export class SeatLifecycleService {
           }
           return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to stop.`, guidance: "A dead seat with stale records is returned to launchable with: rig seat clean" };
         }
-        return this.stopManagedTmuxSeat(resolved, session, input.reason, input.operator, true, { selection, guard });
+        const recheck = input.recheck;
+        return this.stopManagedTmuxSeat(resolved, session, input.reason, input.operator, true,
+          { selection, guard, ...(recheck ? { prove: async () => recheck() } : {}) });
       });
     } catch (error) {
       const code = (error as { code?: string }).code;
@@ -2032,6 +2068,7 @@ export class SeatLifecycleService {
       resolvedStartupFiles: startup.resolvedStartupFiles,
       startupActions: startup.startupActions,
       isRestore: false,
+      refreshClaudeFragments: true,
       includeDurableObligations: true,
       sessionName: canonicalSessionName,
       allowFreshFallback: false,
@@ -2536,6 +2573,7 @@ export class SeatLifecycleService {
         ...(typeof raw["mergeStrategy"] === "string" ? { mergeStrategy: raw["mergeStrategy"] as ProjectionEntry["mergeStrategy"] } : {}),
         ...(typeof raw["target"] === "string" ? { target: raw["target"] } : {}),
         ...(typeof raw["pluginType"] === "string" ? { pluginType: raw["pluginType"] as ProjectionEntry["pluginType"] } : {}),
+        ...(raw["onRestore"] === "follow_source" ? { onRestore: "follow_source" as const } : {}),
       }));
     }
 

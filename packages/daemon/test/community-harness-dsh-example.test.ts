@@ -120,8 +120,16 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 type Permissions = "uncorrelated" | "turn_withdrawn" | "runner_turn_unbound" | "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost" | "late" | "two" | "twoslow";
 interface Hook { auth: string | undefined; body: Record<string, unknown>; at: number }
 
-const cleanups: Array<() => void> = [];
-afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
+const cleanups: Array<() => void | Promise<unknown>> = [];
+// Every cleanup runs, newest first, even after one fails; then the failures are reported.
+afterEach(async () => {
+  const failures: unknown[] = [];
+  for (const cleanup of cleanups.splice(0).reverse()) {
+    try { await cleanup(); } catch (error) { failures.push(error); }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, `${failures.length} fixture cleanups failed`);
+});
 
 async function fakeOpenRig(permissions: Permissions, turnReportingUnavailable = false) {
   const hooks: Hook[] = [];
@@ -203,7 +211,8 @@ function start(openrig: { url: string }, env: Record<string, string> = {}, binVa
   const logFile = join(dir, "dsh.log");
   const launchResult = join(dir, "launch", "result.json");
   mkdirSync(join(dir, "launch"));
-  const child: ChildProcess = spawn(process.execPath, [RUNNER], { cwd: dir, stdio: "pipe", env: {
+  // Its own process group, so teardown can stop the runner and the stand-in dsh it started together.
+  const child: ChildProcess = spawn(process.execPath, [RUNNER], { cwd: dir, stdio: "pipe", detached: true, env: {
     PATH: process.env["PATH"]!, [binVar]: fake, FAKE_LOG: logFile, OPENRIG_HOME: join(dir, "home"),
     OPENRIG_URL: openrig.url, OPENRIG_ACTIVITY_HOOK_TOKEN: "test-token",
     OPENRIG_SESSION_NAME: "dev-dsh@test-rig", OPENRIG_NODE_ID: "node-1", OPENRIG_OCCUPANT_GENERATION: "gen-1", OPENRIG_RUNTIME: "dsh",
@@ -213,7 +222,28 @@ function start(openrig: { url: string }, env: Record<string, string> = {}, binVa
   child.stdout!.on("data", (data: Buffer) => { out += data.toString(); });
   child.stderr!.on("data", (data: Buffer) => { out += data.toString(); });
   const exited = new Promise<number | null>((done) => child.on("exit", (code) => done(code)));
-  cleanups.push(() => { child.kill("SIGKILL"); rmSync(dir, { recursive: true, force: true }); });
+  // The stand-in dsh inherits the runner's stderr, so the runner's stdio closes only once the runner has exited and the
+  // stand-in has let go of that pipe. Subscribed now, so a close before teardown isn't missed.
+  const closed = new Promise<void>((done) => child.on("close", () => done()));
+  cleanups.push(async () => {
+    // No pid: the runner never started, so nothing it started can be writing.
+    if (child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch (error) {
+        // ESRCH: the group has already exited. Anything else: shutdown isn't established, so the folder is kept.
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+          throw new Error(`couldn't stop the dsh runner's process group ${child.pid}; kept ${dir}`, { cause: error });
+        }
+      }
+      let timer: NodeJS.Timeout | undefined;
+      const stuck = new Promise<"stuck">((done) => { timer = setTimeout(() => done("stuck"), 5_000); });
+      const outcome = await Promise.race([closed, stuck]);
+      clearTimeout(timer);
+      if (outcome === "stuck") throw new Error(`the dsh runner's stdio didn't close within 5 s of SIGKILL to its process group ${child.pid}; kept ${dir}`);
+    }
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
   return {
     dir, exited,
     out: () => out,

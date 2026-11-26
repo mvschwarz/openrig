@@ -13,7 +13,7 @@ A queue row is erased in one of two ways:
 
 | A scrub clears | A scrub keeps |
 |---|---|
-| body, summary, resolution, tags, blocker text, chain of record, evidence reference, human detail, questions and answers, delegated decision, the input-box reading | id, source and destination, state, priority, tier, times, closure reason, handoff links |
+| body, summary, resolution, tags, blocker text, chain of record, evidence reference, human detail, questions and answers (including the relayed-answer journal), delegated decision, the input-box reading | id, source and destination, state, priority, tier, times, closure reason, handoff links |
 | a closure's target when it's a reason or note, in the row, both transition tables and events. That's every target under a reason other than the two at right, and any target under those two that isn't a session address or a queue id | a closure's target that names a successor: under `handed_off_to` or `superseded`, shaped as a session address (`member@rig`, optionally `@host`) or a queue id (`qitem-…`) |
 | transition notes and recorded principals, live and archived | each transition's state, actor and time |
 | events' `summary`, `reason` and `error` (the event keeps its type and ids, marked `contentErased`) | |

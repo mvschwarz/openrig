@@ -1,4 +1,5 @@
 import type { CommunityHarnessPreset } from "../domain/community-harness-presets.js";
+import type { NodeBinding } from "../domain/runtime-adapter.js";
 import { validateSessionFileFormat } from "../domain/resume-token-validation.js";
 import { PiRuntimeAdapter, type PiRuntimeAdapterDeps } from "./pi-runtime-adapter.js";
 
@@ -30,6 +31,13 @@ export class PiCommunityRuntimeAdapter extends PiRuntimeAdapter {
   /** Whether this launch's preset declares an OpenRig-aware runner, recorded on the session with the launch. */
   runner(): boolean {
     return true;
+  }
+
+  /** What its launch refuses before starting anything, checked before a handover ends the predecessor: a launch wrapper,
+   *  which only built-in Pi applies. Whether the runner starts, signs in or gets ready is known only by launching it. */
+  async preflightLaunch(binding: NodeBinding): Promise<{ ok: true } | { ok: false; error: string }> {
+    const error = this.unsupportedLaunchWrapper(binding);
+    return error ? { ok: false, error } : { ok: true };
   }
 
   protected override get commandName(): string | undefined {

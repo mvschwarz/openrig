@@ -344,6 +344,14 @@ runtime.
 |---|---|---|
 | `rig down <rig>` | — | `--delete`<br>`--force`<br>`--snapshot`<br>`--yes`<br>`--json`<br>`--host <id>` |
 
+Before closing the seats' terminals, down lets each Claude Code or Codex agent exit through its own shutdown: TERM to
+Claude Code itself, `/exit` typed into Codex only while its input box is empty with no prompt open (TERM otherwise).
+Each waits up to 3 s for the agent's exit, then sends KILL and waits up to 3 s again. The output and `runtimeExits` in
+the JSON say, per seat, what that step saw, and why: it exited through its own shutdown (`graceful`, also when no agent
+was left running), it was seen to end on a signal (`forced`), or its end wasn't seen (`unverified`). Whether each
+terminal then closed is the stop's own result: the session count and any warning (`sessionsKilled` and `errors`).
+`--force` closes the terminals at once, without that step.
+
 ### archive
 
 | Invocation | Aliases | Declared options |
@@ -569,7 +577,7 @@ As with the other stages that have no automatic work, work a reader linked with 
 | `rig queue resolve <qitemId>` | — | `--decision <text>` **required**<br>`--actor <session>`<br>`--bearer <token>`<br>`--no-notify`<br>`--json` |
 | `rig queue handoff <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--alert`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
 | `rig queue handoff-and-complete <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--alert`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
-| `rig queue whoami` | — | `--session <session>`<br>`--recent-limit <n>`<br>`--work-candidates`<br>`--json` |
+| `rig queue whoami` | — | `--session <session>`<br>`--recent-limit <n>`<br>`--work-candidates`<br>`--held-work`<br>`--json` |
 | `rig queue fallback <qitemId>` | — | `--destination <session>` **required**<br>`--reason <text>`<br>`--json` |
 | `rig queue show <qitemId>` | — | `--full`<br>`--json`<br>`--host <id>` |
 | `rig queue artifact <qitemId>` | — | `--root <name>`<br>`--json` |
@@ -1238,6 +1246,14 @@ The legacy `continuityTransferred` field is always `false`, not a transfer verdi
 does not prove a lineage write: `sideEffects.provenanceRecordWritten` reads back this handover's occupant
 tenure. If it is false, inspect the daemon log; do not repeat a handover whose seat is already bound.
 
+Before the successor starts in the same pane, the previous occupant exits through its own shutdown where it has one:
+TERM to Claude Code itself (not to its pane's shell), `/exit` typed into Codex only while its input box is empty with
+no prompt open. Its exit is read from its own process: a wait of up to 3 s, then KILL and up to 3 s again; then the
+pane's shell is ended for the successor. When its exit can't be checked, the pane is stopped as before (TERM, then
+KILL), and the handover goes on. `sideEffects.departingProcess` is `ended-graceful` (its own shutdown, or no agent was
+left running) or `ended-forced` (a signal it doesn't handle, KILL, or the pane-level stop when its own exit couldn't be
+confirmed), and `sideEffects.departingProcessDetail` says which in a sentence.
+
 For Codex rebuilds, `sourceOutcome.permissions` distinguishes an emitted predecessor policy, a saved
 successor selection, and an unverified fallback. A saved `--codex-permissions` envelope wins over the
 observed predecessor policy and retains the usual launch additions: workspace-write adds Git metadata,
@@ -1262,6 +1278,8 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | `rig network connect <seat>` | — | `--as <participant>` **required**<br>`--hub <url>`<br>`--token-file <path>`<br>`--allow-http`<br>`--json` |
 | `rig network status` | — | `--json` |
 | `rig network disconnect <binding-or-seat>` | — | `--reason <text>`<br>`--json` |
+| `rig network peers [binding-or-seat]` | — | `--json` |
+| `rig network request [binding-or-seat] <peer>` | — | `--id <request-id>` **required**<br>`--body-file <path>` **required**<br>`--summary <text>`<br>`--json` |
 
 ### startup-proof
 
@@ -1278,7 +1296,7 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | `rig scope slice` | — | — |
 | `rig scope slice ls` | — | `--mission <name>`<br>`--state <state>`<br>`--json` |
 | `rig scope slice show <slice-path>` | — | `--mission <name>`<br>`--json` |
-| `rig scope slice create <mission> <slug>` | — | `--template <kind>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--readme-only`<br>`--json` |
+| `rig scope slice create <mission> <slug>` | — | `--template <kind>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--execution-depends-on <dot-id...>`<br>`--readme-only`<br>`--json` |
 | `rig scope slice ship <slice-path> <release-mission>` | — | `--mission <name>`<br>`--json` |
 | `rig scope slice close <slice-path>` | — | `--reason <reason>` **required**<br>`--in-place`<br>`--note <text>`<br>`--mission <name>`<br>`--json` |
 | `rig scope slice move <slice-path> <dest-mission>` | — | `--mission <name>`<br>`--json` |

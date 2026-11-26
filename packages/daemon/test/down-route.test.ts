@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
 import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import { createApp } from "../src/server.js";
+import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { Pane, bash, claude, claudePane, timing } from "./fixtures/runtime-exit-pane.js";
 
 describe("POST /api/down route", () => {
   // R1: missing rigId -> 400
@@ -170,5 +172,69 @@ describe("POST /api/down route", () => {
     const body = await res.json();
     expect(body.rigName).toBe("handoff-test");
     db.close();
+  });
+
+  // #3901: the response says how each agent ended before its terminal closed; --force closes the terminals at once.
+  function downApp(pane: Pane, kill: { ok: boolean; message?: string } = { ok: true }) {
+    pane.session = "dev@exit-rig";
+    const base = mockTmuxAdapter();
+    const tmux = { ...base, ...pane.tmux(),
+      getSessionEnv: vi.fn(async () => node.id),
+      killSession: vi.fn(async () => { pane.effects.push("kill-session"); return kill.ok ? { ok: true } : { ok: false, code: "unknown", message: kill.message }; }) } as unknown as TmuxAdapter;
+    const db = createFullTestDb();
+    const testApp = createTestApp(db, { tmux });
+    const rig = testApp.rigRepo.createRig("exit-rig");
+    const node = testApp.rigRepo.addNode(rig.id, "dev", { runtime: "claude-code" });
+    const session = testApp.sessionRegistry.registerSession(node.id, "dev@exit-rig");
+    testApp.sessionRegistry.updateStatus(session.id, "running");
+    testApp.sessionRegistry.updateBinding(node.id, { tmuxSession: "dev@exit-rig", tmuxPane: "%1" });
+    const teardownOrchestrator = new RigTeardownOrchestrator({ db, rigRepo: testApp.rigRepo, sessionRegistry: testApp.sessionRegistry,
+      tmuxAdapter: tmux, snapshotCapture: testApp.snapshotCapture, eventBus: testApp.eventBus, listProcesses: pane.list, runtimeExitTiming: timing });
+    const app = createApp({ ...testApp, teardownOrchestrator } as never);
+    return { app, rig, db };
+  }
+
+  // X-F3: the JSON says what the exit step saw; a terminal that wasn't stopped is the stop's own error.
+  it("an agent whose end wasn't seen, in a terminal whose stop fails: unverified in runtimeExits, and the failure in errors", async () => {
+    // An agent the shell holds stopped in the background can't be identified as the pane's agent.
+    const pane = new Pane([bash(100), { ...claude(), tpgid: 100 }]);
+    const { app, rig, db } = downApp(pane, { ok: false, message: "tmux refused" });
+    const res = await app.request("/api/down", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rigId: rig.id }) });
+    const body = await res.json();
+    expect(body.runtimeExits).toEqual([{ session: "dev@exit-rig", path: "unverified",
+      detail: "Claude Code couldn't be identified in the pane, so it wasn't sent its own exit." }]);
+    expect(body).toMatchObject({ sessionsKilled: 0, errors: ["Kill failed for session 'dev@exit-rig': tmux refused"] });
+    db.close();
+  });
+
+  it.each([false, true])("reports each agent's own exit before the terminals close (force=%s)", async (force) => {
+    const pane = claudePane();
+    pane.session = "dev@exit-rig";
+    const base = mockTmuxAdapter();
+    const tmux = { ...base, ...pane.tmux(),
+      getSessionEnv: vi.fn(async () => node.id),
+      killSession: vi.fn(async () => { pane.effects.push("kill-session"); return { ok: true }; }) } as unknown as TmuxAdapter;
+    const db = createFullTestDb();
+    const testApp = createTestApp(db, { tmux });
+    const rig = testApp.rigRepo.createRig("exit-rig");
+    const node = testApp.rigRepo.addNode(rig.id, "dev", { runtime: "claude-code" });
+    const session = testApp.sessionRegistry.registerSession(node.id, "dev@exit-rig");
+    testApp.sessionRegistry.updateStatus(session.id, "running");
+    testApp.sessionRegistry.updateBinding(node.id, { tmuxSession: "dev@exit-rig", tmuxPane: "%1" });
+    const teardownOrchestrator = new RigTeardownOrchestrator({ db, rigRepo: testApp.rigRepo, sessionRegistry: testApp.sessionRegistry,
+      tmuxAdapter: tmux, snapshotCapture: testApp.snapshotCapture, eventBus: testApp.eventBus, listProcesses: pane.list, runtimeExitTiming: timing });
+    const app = createApp({ ...testApp, teardownOrchestrator } as never);
+
+    const res = await app.request("/api/down", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rigId: rig.id, ...(force ? { force: true } : {}) }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    if (force) {
+      expect(body.runtimeExits).toBeUndefined();
+      expect(pane.effects).toEqual(["kill-session"]);
+    } else {
+      expect(body.runtimeExits).toEqual([{ session: "dev@exit-rig", path: "graceful", detail: expect.stringMatching(/^Claude Code exited on TERM in /) }]);
+      expect(pane.effects).toEqual(["TERM 200", "kill-session"]);
+    }
   });
 });

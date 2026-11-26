@@ -25,6 +25,13 @@ try {
   fs.cpSync(path.join(cli, "dist"), path.join(stage, "dist"), { recursive: true });
   fs.mkdirSync(path.join(stage, "daemon"));
   fs.cpSync(path.join(root, "packages/daemon/dist"), path.join(stage, "daemon/dist"), { recursive: true });
+  // The release ships daemon/assets beside daemon/dist (build-package.sh), and compiled daemon modules import its
+  // top-level runtime modules (for example ../assets/claude-hook-bridge.cjs). Stage those; the plugin folders aren't imported.
+  fs.mkdirSync(path.join(stage, "daemon/assets"));
+  const daemonAssets = path.join(root, "packages/daemon/assets");
+  for (const name of fs.readdirSync(daemonAssets)) {
+    if (/\.(cjs|d\.cts)$/.test(name)) fs.copyFileSync(path.join(daemonAssets, name), path.join(stage, "daemon/assets", name));
+  }
   fs.mkdirSync(path.join(stage, "tui"));
   fs.cpSync(path.join(root, "packages/tui/dist"), path.join(stage, "tui/dist"), { recursive: true });
   // Use the actual release import rewrite, including declaration imports, on the staged compiled bytes.
@@ -61,6 +68,11 @@ try {
     assert.equal(typeof entry.startMcpHttpServer, "function");
     assert.equal(entry.startMcpHttpServer, deep.startMcpHttpServer);
     assert.equal(entry.McpHttpConfigError, deep.McpHttpConfigError);
+    // CLI context trace must retain its shared resolver after the release daemon-import rewrite.
+    const trace = await import("@openrig/cli/dist/lib/topology-trace.js");
+    const traced = trace.traceTopologyChain({ topologyRoot: "/unused-topology", legacyRigsRoot: "/unused-legacy", rig: "team", seat: "worker", name: "LEARNED.md",
+      fs: { exists: () => false, read: () => { throw new Error("unexpected file read"); } } });
+    assert.deepEqual(traced.levels.map((level) => [level.altitude, level.source]), [["instance", "absent"], ["rig", "absent"], ["seat", "absent"]]);
     const require = createRequire(import.meta.url);
     assert.equal(require.resolve("@openrig/cli/dist/client"), fileURLToPath(import.meta.resolve("@openrig/cli/dist/client.js")));
     assert.equal(fileURLToPath(import.meta.resolve("@openrig/cli/mcp.js")), ${JSON.stringify(path.join(modules, "@openrig/cli/mcp.js"))});
@@ -69,7 +81,7 @@ try {
   `);
   run(process.execPath, [path.join(consumer, "import.mjs")]);
   fs.writeFileSync(path.join(consumer, "consumer.ts"), `
-    import { startMcpHttpServer, McpHttpConfigError, type McpHttpOptions, type McpAccess, type CallerResolver, type CallerResolution, type McpInstructionExtension } from "@openrig/cli/mcp.js";
+    import { startMcpHttpServer, McpHttpConfigError, type McpHttpOptions, type McpAccess, type CallerResolver, type CallerResolution, type McpInstructionExtension, type BindingLeaveRequest, type BindingLeaveResult } from "@openrig/cli/mcp.js";
     const options: McpHttpOptions = { daemonUrl: "http://127.0.0.1:1", host: "127.0.0.1", port: 0, tokenFile: "local.json" };
     // @ts-expect-error a typed endpoint port must not degrade to any through the package declarations
     const invalidPort: McpHttpOptions = { ...options, port: "not-a-port" };
@@ -89,7 +101,14 @@ try {
     ] };
     // @ts-expect-error resource text must stay typed through the public package
     const invalidInstructions: McpInstructionExtension = { resources: [{ uri: "team://reference/guide", name: "guide", mimeType: "text/plain", text: 3 }] };
-    const endpoint: Promise<{ url: string; authenticated: boolean; close(): Promise<void> }> = startMcpHttpServer({ ...options, resolver, resolverTimeoutMs: 5000, instructions });
+    const onBindingLeave = async (request: BindingLeaveRequest, signal: AbortSignal): Promise<BindingLeaveResult> => {
+      void request.token; void signal;
+      return { removalRevision: request.removalRevision, alreadyRemoved: true };
+    };
+    // @ts-expect-error the provider receipt must remain typed through packed declarations
+    const invalidLeave: BindingLeaveResult = { removalRevision: "r1", removedAt: 3 };
+    void invalidLeave;
+    const endpoint: Promise<{ url: string; authenticated: boolean; close(): Promise<void> }> = startMcpHttpServer({ ...options, resolver, resolverTimeoutMs: 5000, instructions, onBindingLeave });
     void invalidInstructions;
     void invalidResolver;
     const error: Error = new McpHttpConfigError("configuration");

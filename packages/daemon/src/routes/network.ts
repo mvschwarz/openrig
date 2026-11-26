@@ -3,6 +3,9 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import { NetworkBindingError, NetworkBindingStore } from "../domain/network/network-bindings.js";
 import { networkClosedElsewhere } from "../domain/network/network-connector.js";
 import { NetworkInstallationStore, type AccountFetch } from "../domain/network/network-installations.js";
+import { listNetworkPeers, originateNetworkRequest } from "../domain/network/network-requests.js";
+import type { HubConnect } from "../domain/network/hub-client.js";
+import type { QueueRepository } from "../domain/queue-repository.js";
 import { getSelfHostId } from "../domain/hosts/fanout-contract.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { OPENRIG_HOME } from "../openrig-compat.js";
@@ -10,11 +13,15 @@ import { OPENRIG_HOME } from "../openrig-compat.js";
 /** A local seat's connections to a remote hub (`rig network`). Reads list every binding with its state and last contact,
  *  and the account enrollments; tokens and keys are accepted and never returned. Writes are gated like the hosts routes:
  *  enforced when an operator bearer is configured, passed through on a loopback or tailnet-trusted daemon. */
-export function networkRoutes(opts?: { bearerToken?: string | null; home?: string; accountFetch?: AccountFetch; selfHostId?: () => string | null; accountTimeoutMs?: number }): Hono {
+export function networkRoutes(opts?: { bearerToken?: string | null; home?: string; accountFetch?: AccountFetch; selfHostId?: () => string | null; accountTimeoutMs?: number;
+  hubConnect?: HubConnect }): Hono {
   const router = new Hono();
   const requireAuth = authBearerTokenMiddleware({ expectedToken: opts?.bearerToken ?? null });
   router.use("/bindings", async (c, next) => (c.req.method === "GET" ? next() : requireAuth(c, next)));
   router.use("/bindings/:id/disconnect", requireAuth);
+  router.use("/bindings/:id/requests", requireAuth);
+  router.use("/bindings/:id/credential", requireAuth);
+  router.use("/bindings/:id", async (c, next) => (c.req.method === "GET" ? next() : requireAuth(c, next)));
   router.use("/installations", requireAuth);
 
   const home = opts?.home ?? OPENRIG_HOME;
@@ -46,8 +53,22 @@ export function networkRoutes(opts?: { bearerToken?: string | null; home?: strin
       if (body.hubUrl === undefined && body.token === undefined && body.participantName !== undefined) {
         return c.json(await installations(c).connect(store(c), { session: body.session, name: body.participantName }), 201);
       }
-      return c.json(store(c).create({ session: body.session, hubUrl: body.hubUrl, hubSeat: body.hubSeat, token: body.token, allowHttp: body.allowHttp }), 201);
+      return c.json(store(c).create({ session: body.session, hubUrl: body.hubUrl, hubSeat: body.hubSeat, token: body.token, allowHttp: body.allowHttp, provider: body.provider, removal: body.removal }), 201);
     } catch (error) { return refused(c, error); }
+  });
+
+  router.post("/bindings/:id/credential", async (c) => {
+    const body = await json(c);
+    if (!body) return c.json({ error: "invalid_body", message: "The body must be JSON." }, 400);
+    try { return c.json(store(c).rotateCredential(c.req.param("id"), { expectedRevision: body.expectedRevision, provider: body.provider, token: body.token, removal: body.removal })); }
+    catch (error) { return refused(c, error); }
+  });
+
+  router.patch("/bindings/:id", async (c) => {
+    const body = await json(c);
+    if (!body) return c.json({ error: "invalid_body", message: "The body must be JSON." }, 400);
+    try { return c.json(store(c).reportProviderRemoval(c.req.param("id"), { provider: body.provider, removalRevision: body.removalRevision, status: body.providerRemoval, reason: body.reason })); }
+    catch (error) { return refused(c, error); }
   });
 
   router.post("/installations", async (c) => {
@@ -71,6 +92,33 @@ export function networkRoutes(opts?: { bearerToken?: string | null; home?: strin
       const ended = await enrolled.removeAtAccount(bindings, bindings.get(target.id)!);
       return cleanup ? refused(c, cleanup) : c.json({ ...ended, accountRemoval: enrolled.removalOf(ended) });
     } catch (error) { return refused(c, cleanup ?? error); }
+  });
+
+  // A connected seat's peers, and a request to one: the daemon reaches the hub as the seat's participant, so the agent
+  // never holds the participant's token. A request's answer comes back to its local item (network-requests.ts).
+  const bound = (c: Context) => {
+    const target = store(c).find(c.req.param("id")!);
+    if (!target) throw new NetworkBindingError("binding_not_found", `No network binding or connected seat is named '${c.req.param("id")}'.`, 404);
+    return target;
+  };
+  const requestDeps = (c: Context) => {
+    const queueRepo = c.get("queueRepo" as never) as QueueRepository | undefined;
+    if (!queueRepo) throw new NetworkBindingError("queue_unavailable", "This daemon's queue isn't available, so no request can be recorded.", 503);
+    return { db: db(c), queueRepo, bindings: store(c), home, connect: opts?.hubConnect };
+  };
+  router.get("/bindings/:id/peers", async (c) => {
+    try {
+      const target = bound(c);
+      return c.json(await listNetworkPeers({ home, connect: opts?.hubConnect }, target));
+    } catch (error) { return refused(c, error); }
+  });
+  router.post("/bindings/:id/requests", async (c) => {
+    const body = await json(c);
+    if (!body) return c.json({ error: "invalid_body", message: "The body must be JSON." }, 400);
+    try {
+      const target = bound(c);
+      return c.json(await originateNetworkRequest(requestDeps(c), target, { peer: body.peer, requestId: body.requestId, body: body.body, summary: body.summary }), 201);
+    } catch (error) { return refused(c, error); }
   });
 
   return router;

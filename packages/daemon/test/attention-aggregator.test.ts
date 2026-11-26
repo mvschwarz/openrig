@@ -182,3 +182,68 @@ describe("aggregateAttention — fan-out + per-host honesty (FR-1/R15-2)", () =>
     expect(res.items.map((i) => i["qitemId"])).toEqual(["local-1", "b-1", "c-1"]);
   });
 });
+
+
+describe("aggregateAttention — explicit host target", () => {
+  const unrelatedRead = () => { throw new Error("unrelated read"); };
+
+  it("explicit local target skips subscriptions, registry and remote reads", async () => {
+    const res = await aggregateAttention(deps({
+      listSubscriptions: unrelatedRead,
+      loadRegistry: unrelatedRead,
+      fetchImpl: unrelatedRead,
+    }), "local");
+    expect(res).toEqual({ items: [{ qitemId: "local-1", hostId: "local" }], hosts: [{ hostId: "local", status: "ok" }] });
+  });
+
+  it.each(["vps-b", "self-b"])("reads only the unsubscribed registered target %s", async (target) => {
+    const urls: string[] = [];
+    const res = await aggregateAttention(deps({
+      listLocalAttention: unrelatedRead,
+      listSubscriptions: unrelatedRead,
+      loadRegistry: () => ({ ok: true, registry: { hosts: [
+        { id: "vps-b", hostId: "self-b", transport: "http", url: "http://vps-b:7433", bearer_env: "B" },
+        { id: "unrelated", transport: "http", url: "http://unrelated:7433" },
+      ] } }),
+      fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+        urls.push(String(url));
+        expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer tb");
+        return attentionResponse([{ qitemId: "remote-1" }]);
+      }) as typeof fetch,
+    }), target);
+    expect(urls).toEqual(["http://vps-b:7433/api/queue/list?attention=1"]);
+    expect(res).toEqual({ items: [{ qitemId: "remote-1", hostId: target }], hosts: [{ hostId: target, status: "ok" }] });
+  });
+
+  it("unknown target returns only its error and never falls back to subscriptions", async () => {
+    const res = await aggregateAttention(deps({ listLocalAttention: unrelatedRead, listSubscriptions: unrelatedRead, fetchImpl: unrelatedRead }), "ghost");
+    expect(res.items).toEqual([]);
+    expect(res.hosts).toEqual([{ hostId: "ghost", status: "unreachable", error: expect.stringContaining("unknown host id 'ghost'") }]);
+  });
+
+  it("a silent selected target times out without reading any unrelated host", async () => {
+    const urls: string[] = [];
+    const res = await aggregateAttention(deps({
+      listLocalAttention: unrelatedRead, listSubscriptions: unrelatedRead, timeoutMs: 20,
+      fetchImpl: ((url: string | URL | Request, init?: RequestInit) => {
+        urls.push(String(url));
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        });
+      }) as typeof fetch,
+    }), "vps-b");
+    expect(urls).toEqual(["http://vps-b:7433/api/queue/list?attention=1"]);
+    expect(res.items).toEqual([]);
+    expect(res.hosts).toEqual([{ hostId: "vps-b", status: "unreachable", error: "read timed out after 20ms", failedStep: "remote-daemon-unreachable" }]);
+    expect(ATTENTION_READ_TIMEOUT_MS).toBe(5_000);
+  });
+
+  it("selected target retains auth-failed and unsupported-transport outcomes", async () => {
+    for (const [host, status] of [["vps-b", "auth-failed"], ["ssh-1", "unsupported-transport"]]) {
+      const res = await aggregateAttention(deps({ listLocalAttention: unrelatedRead, listSubscriptions: unrelatedRead, env: {}, fetchImpl: unrelatedRead }), host);
+      expect(res.items).toEqual([]);
+      expect(res.hosts).toHaveLength(1);
+      expect(res.hosts[0]).toMatchObject({ hostId: host, status });
+    }
+  });
+});
