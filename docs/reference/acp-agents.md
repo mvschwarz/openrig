@@ -231,7 +231,8 @@ The team's questions reach you only as a registered person: an `<id>@external` a
 `rig gateway human add <id> --display-name "<your name>" --delivery-class <A|B|C|D>` first. Until then, the app says
 so at your first prompt, and your work is still sent.
 
-**In Zed**, add the agent to `settings.json`:
+**In Zed**, open Agent Settings, go to External Agents, choose `Add Agent`, then `Add Custom Agent`. Zed opens your
+`settings.json` at its `agent_servers` entry; make it:
 
 ```json
 "agent_servers": {
@@ -239,7 +240,13 @@ so at your first prompt, and your work is still sent.
 }
 ```
 
-Other apps take the same command and arguments wherever they configure a custom ACP agent.
+**In T3 Code**, open Settings, then Providers, and choose `Add provider`, `Show more`, then `Local ACP command`. Enter
+`rig` as the executable, then add each argument on its own row, in order: `acp`, `serve`, `--to` and `lead@my-team`.
+T3 Code passes them as written, with no shell, so one row holding the whole command won't work. Name it OpenRig, add
+the instance, and choose OpenRig when you start a thread.
+
+Other apps take the same command and arguments wherever they configure a custom ACP agent. If an app can't find `rig`,
+give its full path instead: `command -v rig` prints it.
 
 **Limits:**
 - One receiver per agent command (or the `acp.to` setting); the app has no team picker.
