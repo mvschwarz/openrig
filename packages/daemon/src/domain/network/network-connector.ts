@@ -360,17 +360,17 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
   until: number): Promise<void> {
   // What closes a hub item comes first (a local item that ended, handed on, or whose record is gone), then a pickup to
   // send, then a queued note. An item still open here with every note sent has nothing to report and only takes its turn.
-  // An item handed on along a chain that's still open here (at any hop, as far as `finalItem` follows it) isn't closing
-  // yet, so it takes its turn with the open ones instead of holding every pass's first places; it comes first again
-  // once the chain's last item finishes.
-  const open = deps.db.prepare(`WITH RECURSIVE chain(root, id, hop) AS (
-      SELECT q.qitem_id, q.qitem_id, 0 FROM network_receipts r JOIN queue_items q ON q.qitem_id = r.local_qitem_id
+  // An item handed on along a chain that's still open here isn't closing yet, so it takes its turn with the open ones
+  // instead of holding every pass's first places; it comes first again once the chain's last item finishes. The chain
+  // is followed as `finalItem` follows it: only through handed-off items, so an item closed `done` while handing on
+  // (handoff-and-complete) ends it, and its result comes first.
+  const open = deps.db.prepare(`WITH RECURSIVE chain(root, id, state, hop) AS (
+      SELECT q.qitem_id, q.qitem_id, q.state, 0 FROM network_receipts r JOIN queue_items q ON q.qitem_id = r.local_qitem_id
         WHERE r.binding_id = ? AND r.settled_at IS NULL AND q.state = 'handed-off'
       UNION ALL
-      SELECT chain.root, s.qitem_id, chain.hop + 1 FROM chain JOIN queue_items s ON s.handed_off_from = chain.id
-        WHERE chain.hop < ${FINAL_ITEM_HOPS}),
-    held(root) AS (SELECT DISTINCT chain.root FROM chain JOIN queue_items s ON s.qitem_id = chain.id
-      WHERE s.state IN ('pending', 'in-progress', 'blocked'))
+      SELECT chain.root, s.qitem_id, s.state, chain.hop + 1 FROM chain JOIN queue_items s ON s.handed_off_from = chain.id
+        WHERE chain.state = 'handed-off' AND chain.hop < ${FINAL_ITEM_HOPS}),
+    held(root) AS (SELECT DISTINCT root FROM chain WHERE state IN ('pending', 'in-progress', 'blocked'))
     SELECT r.* FROM network_receipts r LEFT JOIN queue_items q ON q.qitem_id = r.local_qitem_id
       LEFT JOIN held h ON h.root = r.local_qitem_id
     WHERE r.binding_id = ? AND r.settled_at IS NULL

@@ -797,6 +797,24 @@ describe("network connector", () => {
     expect(hub.items.get("hub-q1")).toMatchObject({ state: "done", resolution: "Checked: fine." });
   });
 
+  it("a chain whose middle item closed done while handing on reports that result first, whatever its successor is doing", async () => {
+    const b = bind();
+    for (const id of ["hub-r1", "hub-r2", "hub-r3"]) hub.add(id);
+    await pass(b.id);
+    const local = (id: string) => runs(id)[0]!;
+    repo.claim({ qitemId: local("hub-r1").qitemId, destinationSession: "dev-impl@lab" });
+    await pass(b.id);
+    // The review finishes with a result and hands a follow-up on in one step: it's done, and qa's item is still open.
+    const { created } = await repo.handoff({ qitemId: local("hub-r1").qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+    repo.claim({ qitemId: created.qitemId, destinationSession: "review@lab" });
+    await repo.handoffAndComplete({ qitemId: created.qitemId, fromSession: "review@lab", toSession: "qa@lab", nudge: false,
+      transitionNote: "Reviewed: fine; qa checks the follow-up." });
+    for (const id of ["hub-r2", "hub-r3"]) repo.claim({ qitemId: local(id).qitemId, destinationSession: "dev-impl@lab" });
+    // Two places a pass, two pickups to send: the finished review's result still comes first.
+    expect(await runNetworkBindingPass({ ...deps, reportLimit: 2 }, bindings.get(b.id)!)).toMatchObject({ resultsSent: 1 });
+    expect(hub.items.get("hub-r1")).toMatchObject({ state: "done", resolution: "Reviewed: fine; qa checks the follow-up." });
+  });
+
   /** A finding as a Core hub's stuck sweep writes one, addressed to the participant that claimed `about`. */
   const finding = (id: string, about: string) => hub.items.set(id, { qitemId: id, sourceSession: "assistant@team", destinationSession: PARTICIPANT,
     state: "pending", summary: `Checked on ${about}: it stalled after it was picked up (4 minutes)`, resolution: null, closureReason: null, notes: [],
