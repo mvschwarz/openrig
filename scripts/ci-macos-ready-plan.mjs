@@ -138,8 +138,16 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const eventName = process.env.GITHUB_EVENT_NAME ?? "";
   const event = process.env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")) : {};
   const initial = planMacosPackageTests(eventName, event);
-  const plan = initial.eligible ? await reconcileMacosPackageTests(eventName, event, process.env.GITHUB_RUN_ID,
-    githubApi(process.env.GITHUB_REPOSITORY, process.env.GITHUB_TOKEN, process.env.GITHUB_API_URL)) : initial;
+  let plan = initial;
+  if (initial.eligible) {
+    try {
+      plan = await reconcileMacosPackageTests(eventName, event, process.env.GITHUB_RUN_ID,
+        githubApi(process.env.GITHUB_REPOSITORY, process.env.GITHUB_TOKEN, process.env.GITHUB_API_URL));
+    } catch (error) {
+      // Reconciliation saves runner time; a failed read must not remove the original suite coverage.
+      console.warn(`::warning::macOS reconciliation stopped; using the plain suite plan: ${error.message}`);
+    }
+  }
   const lines = [`eligible=${plan.eligible}`, `head=${plan.head}`, `matrix=${JSON.stringify(plan.matrix)}`];
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${lines.join("\n")}\n`);
   const summary = plan.eligible ? `Required macOS package suites run: ${plan.reason}.` : `Required macOS package suites not run: ${plan.reason}.`;

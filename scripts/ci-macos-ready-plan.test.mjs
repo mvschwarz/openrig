@@ -283,7 +283,7 @@ test("all pages of older active runs are considered", async () => {
   assert.equal(f.posts().length, 101); assert.ok(f.calls.some(c => c.path.includes("page=2")));
 });
 
-test("unknown GitHub identity fails planning without a successful required placeholder or a cancellation", async () => {
+test("unknown GitHub identity stops reconciliation without a successful required placeholder or a cancellation", async () => {
   const f = fixture({ current: run(200, HEAD, { pull_requests: [] }) });
   await assert.rejects(f.plan(), /identity/); assert.deepEqual(f.posts(), []);
 });
@@ -360,4 +360,27 @@ test("one fork branch's other PR and unmarked legacy runs cannot be canceled or 
     forkRun(13, HEAD, { display_title: "old title", status: "completed", conclusion: "success" })],
     jobs: { 12: passedJobs(), 13: passedJobs() } });
   assert.deepEqual(checks(await f.plan(event)), REQUIRED_MACOS); assert.deepEqual(f.posts(), []);
+});
+
+test("a throwing reconcile API still writes the required matrix from the real entry point", async () => {
+  const api = async () => { throw new Error("fixture API unavailable"); };
+  const server = createServer(async (_req, res) => {
+    try { await api(); } catch (error) { res.writeHead(503); res.end(error.message); }
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const dir = mkdtempSync(path.join(tmpdir(), "ci-macos-fallback-")), eventPath = path.join(dir, "event.json"), outputPath = path.join(dir, "output");
+    writeFileSync(eventPath, JSON.stringify(approval()));
+    const child = spawn(process.execPath, [path.join(ROOT, "scripts", "ci-macos-ready-plan.mjs")], { env: { PATH: process.env.PATH,
+      GITHUB_EVENT_NAME: "pull_request_review", GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputPath,
+      GITHUB_RUN_ID: "200", GITHUB_REPOSITORY: "owner/repo", GITHUB_TOKEN: "fixture-token", GITHUB_API_URL: `http://127.0.0.1:${server.address().port}` }, stdio: ["ignore", "pipe", "pipe"] });
+    let out = ""; child.stdout.on("data", d => { out += d; }); child.stderr.on("data", d => { out += d; });
+    const code = await new Promise(resolve => child.on("close", resolve)); assert.equal(code, 0, out);
+    const output = Object.fromEntries(readFileSync(outputPath, "utf8").trim().split("\n").map(line => {
+      const at = line.indexOf("="); return [line.slice(0, at), line.slice(at + 1)];
+    }));
+    assert.equal(output.eligible, "true"); assert.equal(output.head, HEAD);
+    assert.deepEqual(JSON.parse(output.matrix), MACOS_ENTRIES);
+    assert.match(out, /::warning::.*using the plain suite plan.*HTTP 503/);
+  } finally { await new Promise(resolve => server.close(resolve)); }
 });

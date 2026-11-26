@@ -8,6 +8,9 @@ run-name: >-
 # and both suites pass on it. A push after the approval leaves the new head without these checks until it is
 # approved again. A manual dispatch runs the same suites under names that aren't required checks. scripts/ci-macos-ready-plan.mjs makes the decision, and scripts/ci-macos-ready-plan.test.mjs
 # tests it. The Linux suites stay in tests.yml and run on every push.
+# An eligible current-head approval cancels this PR's older-head review runs; other PRs and manuals are isolated.
+# A repeat approval of the same head reuses its last passing pair; the merge desk's CI-base check covers later main
+# changes. An explicit retry runs both suites again. API reconciliation errors fall back to the plain suite plan.
 # No provider credentials or operator configuration are supplied; the suites deny external networking.
 
 on:
