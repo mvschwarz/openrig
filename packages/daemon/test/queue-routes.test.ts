@@ -3404,7 +3404,7 @@ describe("queue routes", () => {
       const plain = (await (await app.request("/api/queue/whoami?session=bob@r&held=1")).json()) as {
         heldAndPendingWork: { held: Array<Record<string, unknown>>; next: Array<Record<string, unknown>> } };
       expect(plain.heldAndPendingWork.held).toEqual([expect.not.objectContaining({ openrigNotice: true })]);
-      expect(plain.heldAndPendingWork.next).toEqual([expect.objectContaining({ summary: "Team roster is ready", openrigNotice: true })]);
+      expect(plain.heldAndPendingWork.next).toEqual([expect.objectContaining({ summary: "Team seats and edges recorded (information only)", openrigNotice: true })]);
       const packet = (await (await app.request("/api/queue/whoami?session=bob@r&candidates=1")).json()) as {
         workCandidates: { next: Array<Record<string, unknown>> } };
       expect(packet.workCandidates.next).toEqual([expect.objectContaining({ openrigNotice: true })]);
