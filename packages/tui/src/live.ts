@@ -30,7 +30,9 @@ export interface QuietTimerHandle {
 }
 
 export interface LiveRefreshDeps {
-  hydrate: (page: PageRead, signal: AbortSignal) => Promise<FleetSnapshot>;
+  /** `firstPaint`: this page has no answer yet, so read only what Topology itself shows; the snapshot then carries
+   *  `pendingReads` and the rest is read at once */
+  hydrate: (page: PageRead, signal: AbortSignal, firstPaint?: boolean) => Promise<FleetSnapshot>;
   scopeKey?: () => string;
   /** draw callback — invoked when the load lifecycle or data changes, so the
    * in-flight frame is actually DRAWN at start and cleared on settle */
@@ -51,6 +53,8 @@ export interface LiveRefresh {
   connectionStatus: (status: NonNullable<LoadState["connection"]>) => void;
   snapshot: () => FleetSnapshot;
   load: () => LoadState;
+  /** resolves once the current page has an answer: Topology's first paint, or a whole read */
+  answered: () => Promise<void>;
   flashes: () => RowFlash[];
   /** stop the quiet fallback during TUI shutdown */
   close: () => void;
@@ -76,6 +80,11 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
   let lastConfirmedAt: number | null = null;
   let snapshot = emptySnapshot();
   let load: LoadState = { inFlight: false, settled: false };
+  let waitingForAnswer: Array<() => void> = [];
+  function settle(): void {
+    load.settled = true;
+    for (const resolve of waitingForAnswer.splice(0)) resolve();
+  }
   // One activity stream serves every page; its state must not travel with cached reads.
   let connection: LoadState["connection"];
   let flashes: RowFlash[] = [];
@@ -148,9 +157,19 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
     load.inFlight = true;
     deps.onFrame();
     try {
-      const next = await deps.hydrate(activePage, controller.signal);
+      let next = await deps.hydrate(activePage, controller.signal, !load.settled);
       syncScope();
       if (startedGeneration !== generation || closed) return;
+      if (next.pendingReads) {
+        // Topology paints from its own reads now; health, attention and the queue lists arrive on the read below.
+        snapshot = { ...next, readErrors: [...new Set([...next.readErrors, ...activePage.errors])] };
+        settle();
+        deps.onFrame();
+        activePage.begin();
+        next = await deps.hydrate(activePage, controller.signal);
+        syncScope();
+        if (startedGeneration !== generation || closed) return;
+      }
       activePage.end();
       next.readErrors = [...new Set([...next.readErrors, ...activePage.errors])];
       load.retainedAt = activePage.retainedAt;
@@ -175,7 +194,7 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
     } finally {
       if (startedGeneration !== generation || closed) return;
       load.inFlight = false;
-      load.settled = true;
+      settle();
       deps.onFrame();
       armQuietTimer();
     }
@@ -220,6 +239,7 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
       return { ...load, ...(connection !== undefined ? { connection } : {}), ...(skew !== undefined ? { skew } : {}), ...(lastConfirmedAt !== null && deps.now() - lastConfirmedAt > overdueAfter ? { stale: true } : {}) };
     },
     flashes: () => [...flashes],
+    answered: () => { syncScope(); return load.settled ? Promise.resolve() : new Promise<void>((resolve) => { waitingForAnswer.push(resolve); }); },
     close: () => {
       closed = true;
       controller.abort();

@@ -112,7 +112,7 @@ it("a row parked on someone is resolved with reply, in words, as the primary use
 
 // The startup paths, through the real StartupController and main.ts's own enable and opening functions and callbacks,
 // taken verbatim from the source (main.ts is the terminal entry, so it isn't imported).
-function startupHarness(rigsSummary: () => Promise<unknown[]>) {
+function startupHarness(rigsSummary: () => Promise<unknown[]>, answered: Promise<void> = Promise.resolve()) {
   const source = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   const start = source.indexOf("  function enableLive(): boolean");
   const funcs = source.slice(start, source.indexOf("  function commandContext()", start));
@@ -127,7 +127,7 @@ function startupHarness(rigsSummary: () => Promise<unknown[]>) {
   const view = createViewState({ instanceId: "startup" });
   const body = `let startup; let liveEnabled = false, inputRevision = 0, buildMismatch = false, eventsDropped = false;
     let activityEvents = null, crashCartOpts = {}; const snapshot = emptySnapshot();
-    const live = { refresh: async () => {}, snapshot: () => snapshot, pushed() {}, connectionStatus() {} };
+    const live = { refresh: async () => {}, snapshot: () => snapshot, pushed() {}, connectionStatus() {}, answered: () => answered };
     const reviewCache = { clear() {} }; const draw = () => {}; const checkDaemonBuild = () => {};
     const subscribeActivityEvents = () => ({ close() {} });
     ${funcs}
@@ -135,7 +135,7 @@ function startupHarness(rigsSummary: () => Promise<unknown[]>) {
       startDaemon: async () => { throw new Error("no daemon start"); }, onChange: () => {${change}}, onWork: async (rig, seat) => {${work}} });
     return { startup, view, touch() { inputRevision++; startup.interacted(); } };`;
   const js = ts.transpileModule(body, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
-  const harness = new Function("StartupController", "client", "view", "emptySnapshot", "opensOnDefaultFeed", js)(StartupController, client, view, emptySnapshot, opensOnDefaultFeed);
+  const harness = new Function("StartupController", "client", "view", "emptySnapshot", "opensOnDefaultFeed", "answered", js)(StartupController, client, view, emptySnapshot, opensOnDefaultFeed, answered);
   return { ...harness, attentionReads: () => attentionReads };
 }
 const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
@@ -145,6 +145,26 @@ it("a normal start opens on the chosen default's Feed", async () => {
   await h.startup.refresh(); await settle();
   expect(h.attentionReads()).toBe(1);
   expect(h.view.get().section).toBe("needs");
+});
+
+it("reads the default Feed only after the page's first answer, so Topology's reads don't wait behind it", async () => {
+  let answer!: () => void;
+  const h = startupHarness(async () => [], new Promise<void>((r) => { answer = r; }));
+  await h.startup.refresh(); await settle();
+  expect(h.attentionReads()).toBe(0);
+  expect(h.view.get().section).toBe("topology");
+  answer(); await settle();
+  expect(h.attentionReads()).toBe(1);
+  expect(h.view.get().section).toBe("needs");
+});
+
+it("doesn't read the default Feed when the person pressed a key before the page answered", async () => {
+  let answer!: () => void;
+  const h = startupHarness(async () => [], new Promise<void>((r) => { answer = r; }));
+  await h.startup.refresh(); await settle();
+  h.touch(); answer(); await settle();
+  expect(h.attentionReads()).toBe(0);
+  expect(h.view.get().section).toBe("topology");
 });
 
 it("a person who pressed a key while the TUI was still connecting stays where they are", async () => {

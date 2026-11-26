@@ -136,9 +136,12 @@ A connected seat can also ask the hub's other participants for work, and read th
 the hub as the seat's participant, so the agent never holds the participant's token.
 
 ```bash
-rig network peers <binding-or-seat> [--json]
-rig network request <binding-or-seat> <peer> --id <request-id> --body-file <path> [--summary "<text>"] [--json]
+rig network peers [binding-or-seat] [--json]
+rig network request [binding-or-seat] <peer> --id <request-id> --body-file <path> [--summary "<text>"] [--json]
 ```
+
+Leave out the binding or seat to use your own seat, so a connected seat can type `rig network peers`. With one
+argument, `request` reads it as the peer. Run outside a seat, both still need it.
 
 `peers` lists the seats and members the hub lets the participant address, as the hub's `rig_team` answers for the
 participant's rig. `request` sends one request to a peer, named as `peers` lists it:

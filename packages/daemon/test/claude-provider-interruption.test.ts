@@ -9,7 +9,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { AgentActivityStore, AGENT_ACTIVITY_FRESHNESS_MS, latestHookWaitsOnPerson } from "../src/domain/agent-activity-store.js";
 import { deriveRelayEvents } from "../src/domain/claude-activity-hooks.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { attachAgentActivity, attachTerminalActivityAndWork, hookOrPaneActivity, seatNeedsAttention } from "../src/domain/node-inventory.js";
+import { attachAgentActivity, attachTerminalActivityAndWork, hookOrPaneActivity, readSeatActivityAsRigPs, seatNeedsAttention } from "../src/domain/node-inventory.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
 import { deriveUsageLimitPools } from "../src/domain/provider/provider-signals.js";
@@ -111,6 +111,9 @@ describe("Claude provider interruptions (#99)", () => {
       activityStore: store, structuralActivity, seatActivity, now: clock,
     });
     expect(capturePaneContent).not.toHaveBeenCalled();
+    // The provider plan and apply read a seat as rig ps serves it (#3625), a provider failure included.
+    expect(readSeatActivityAsRigPs({ hooks: store, structural: structuralActivity, motion: seatActivity,
+      runtimeOf: () => "claude-code", now: () => clock }, SESSION)).toEqual(entry!.agentActivity);
     return entry!.agentActivity;
   }
 

@@ -211,10 +211,11 @@ permission mode keeps `--permission-mode acceptEdits` and gets
 `--settings` (`kernel-authority.ts:64–66`):
 `TEAM_CLAUDE_ALLOW` (`:33`) is `Skill`, `Read(./**)`, `Glob`, `Grep`,
 `Bash(rig:*)`, eight read-only shell commands and 17 test-runner commands, and
-`TEAM_CLAUDE_ASK` (`:40`) asks before 29 `rig` commands: the 23 that start, stop or
+`TEAM_CLAUDE_ASK` (`:40`) asks before 30 `rig` commands: the 23 that start, stop or
 remove teams or agents (such as `up`, `down`, `seat stop`, `seat restart` and `bundle install`),
-and six kept for a person: `import` (its `--instantiate` mode launches nodes), `seat
-set-permissions` and `policy apply` under both spellings (an explicit permission choice),
+and seven kept for a person: `import` (its `--instantiate` mode launches nodes), `seat
+set-permissions`, `seat decide-permission` (it answers a seat's permission prompt, its own included)
+and `policy apply` under both spellings (an explicit permission choice),
 `setup` (kept for its `--policy` path, which records one; a prefix rule can't tell that path
 from ordinary setup, so ordinary setup prompts too), and `compact` (it replaces a peer's
 working context). Other `rig` commands fall under the `Bash(rig:*)` allowance. The list was
@@ -401,7 +402,10 @@ After the check, the local seats whose tiles opened go to `RexAgentStatusRelay`
 client attached to the seat whose `client_termtype` (its XTVERSION reply) names
 Rex. Later activity changes (the same hook-or-pane resolution that recovers
 prompt wakes in `startup.ts`) are written to each Rex client that doesn't already
-have that report; an unknown activity is written as `state=clear`. A client the
+have that report; an unknown activity is written as `state=clear`. Every report,
+a clear included, carries `id=openrig`, so it replaces and clears only OpenRig's
+own record and leaves the agent's own report (the record without an id) and its
+other records alone. A client the
 relay has no record for (after a daemon restart, or one that moved from another
 seat) gets the current report too, a clear included. After a partial write, the
 next write to that terminal starts with ST to close the unfinished OSC. The relay

@@ -26,7 +26,9 @@ function fixture(managed = false) {
   const tmux = { sendText: send, sendShellCommand: send,
     sendKeys: vi.fn(async () => ({ ok: true })) } as unknown as TmuxAdapter;
   const claudeManagedLaunch = { prepare: vi.fn(async () => ({
-    command: (args: string[]) => `claude ${args.map(shellQuote).join(" ")}`, assertCurrent: () => {},
+    command: (args: string[], env: Record<string, string> = {}) =>
+      `${Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)} `).join("")}claude ${args.map(shellQuote).join(" ")}`,
+    assertCurrent: () => {},
   })) } as unknown as ClaudeManagedLaunch;
   const adapter = new ClaudeCodeAdapter({ tmux, stateDir: home, sessionIdFactory: () => CHILD,
     ...(managed ? { claudeManagedLaunch } : {}),
@@ -195,6 +197,31 @@ it.each([
   expect(allow.filter(rule => !rule.startsWith(`Read(/${root}/`) && !rule.includes("/claude-compaction-restore/"))).toEqual([]);
 });
 
+it("with no packet root set, the request and the grant name the OpenRig home's runtime folder, and the grant keeps the previous root for this session only", async () => {
+  const { compactionPacketRoot, withManagedRestoreReads } = await import("../src/domain/managed-restore-read-access.js");
+  const { buildPostCompactRestorePrompt } = await import("../src/domain/claude-compaction-enforcer.js");
+  const { deriveCanonicalSessionName } = await import("../src/domain/session-name.js");
+  vi.stubEnv("OPENRIG_COMPACTION_OUT_ROOT", "");
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), "restore-packets-"))); roots.push(root);
+  const home = path.join(root, "home"), packets = path.join(home, "run", "compaction-restore");
+  const seat = deriveCanonicalSessionName("dev", "owner", "rig");
+  expect(compactionPacketRoot(home)).toBe(packets);
+  expect(compactionPacketRoot(path.relative(process.cwd(), home))).toBe(packets);
+  for (const sessionId of [CHILD, null]) {
+    const prompt = buildPostCompactRestorePrompt({ sessionName: seat, openrigHome: home, sessionId });
+    expect(prompt).toContain(`inspect the newest matching packet under ${packets}/ for `);
+    expect(prompt).not.toContain("/tmp/claude-compaction-restore");
+  }
+  const allow = JSON.parse(withManagedRestoreReads([], { openrigHome: home, session: seat, cwd: path.join(root, "project"),
+    nativeSessionId: CHILD })[1]!).permissions.allow as string[];
+  const files = ["restore-instructions.md", "restore-summary.json", "transcript.txt", "transcript-narrative.txt", "touched-files.md"];
+  // An upgrade: a marker written before it still names a packet under the previous root, and the seat reads its own.
+  const expected = [...spellings(packets), ...spellings("/tmp/claude-compaction-restore")]
+    .flatMap(root => files.map(file => `Read(/${root}/${CHILD}-*/${file})`));
+  expect(allow.filter(rule => rule.includes(`/${CHILD}-*/`))).toEqual(expected);
+  expect(allow.some(rule => rule.includes(PARENT))).toBe(false);
+});
+
 it("both Claude launch paths grant the configured extra file the restore will name", async () => {
   const f = fixture();
   const custom = path.join(f.root, "elsewhere", "team-restore.md");
@@ -219,4 +246,70 @@ it.each([false, true])("legacy resume composes member deny rules with managed re
   const result = settings(f.commands[0]!);
   expect(result.permissions.allow).toEqual(expect.arrayContaining(["Read(./work/**)", `Read(/${f.marker})`]));
   expect(result.permissions.deny).toEqual(["Read(./private/**)"]);
+});
+
+/** What the launched Claude gets in OPENRIG_COMPACTION_PACKET_ROOT, from the command as the pane shell runs it. */
+function packetVariable(command: string): string | undefined {
+  const out = execFileSync("/bin/sh", ["-c", `claude() { printf '%s' "\${OPENRIG_COMPACTION_PACKET_ROOT-unset}"; }; ${command}`], { encoding: "utf8" });
+  return out === "unset" ? undefined : out;
+}
+
+it.each([
+  { kind: "fresh", managed: false }, { kind: "fork", managed: false }, { kind: "resume", managed: false },
+  { kind: "fresh", managed: true }, { kind: "fork", managed: true }, { kind: "resume", managed: true },
+])("$kind, explicit mode=$managed: the launch hands the seat's hooks the packet folder its grant covers", async ({ kind, managed }) => {
+  const f = fixture(managed);
+  vi.stubEnv("OPENRIG_COMPACTION_OUT_ROOT", "");
+  expect((await f.adapter.launchHarness(f.binding, { name: "owner@rig",
+    ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: PARENT } } : {}),
+    ...(kind === "resume" ? { resumeToken: CHILD } : {}) })).ok).toBe(true);
+  const packets = path.join(f.home, "run", "compaction-restore");
+  expect(packetVariable(f.commands[0]!)).toBe(packets);
+  expect(settings(f.commands[0]!).permissions.allow).toContain(`Read(/${packets}/${CHILD}-*/restore-instructions.md)`);
+});
+
+it.each([false, true])("legacy resume, explicit mode=%s: hands the seat's hooks the packet folder its grant covers", async managed => {
+  const f = fixture(managed);
+  vi.stubEnv("OPENRIG_COMPACTION_OUT_ROOT", "");
+  const adapter = new ClaudeResumeAdapter(f.tmux, { openrigHome: f.home, ...(managed ? { claudeManagedLaunch: f.claudeManagedLaunch } : {}) });
+  vi.spyOn(adapter as any, "verifyResume").mockResolvedValue({ ok: true });
+  await adapter.resume("owner@rig", "claude_id", CHILD, f.cwd, "floor", undefined, managed ? "acceptEdits" : undefined, "node", undefined, undefined, false, true);
+  expect(packetVariable(f.commands[0]!)).toBe(path.join(f.home, "run", "compaction-restore"));
+});
+
+it.each([
+  { grant: "the running Claude's, from before packets moved", previous: true, variable: false },
+  { grant: "the running Claude's, naming the OpenRig home's packet folder", previous: false, variable: true },
+])("a relaunch that keeps the running Claude's arguments keeps its grant, and names the packet folder only when that grant covers it: $grant", async ({ previous, variable }) => {
+  const { withManagedRestoreReads } = await import("../src/domain/managed-restore-read-access.js");
+  const f = fixture();
+  vi.stubEnv("OPENRIG_COMPACTION_OUT_ROOT", previous ? "/tmp/claude-compaction-restore" : "");
+  // The running process's own --settings, as a pre-upgrade launch (only the /tmp folder) or a current one wrote it.
+  const running = withManagedRestoreReads([], { openrigHome: f.home, session: "owner@rig", cwd: f.cwd, nativeSessionId: CHILD });
+  vi.stubEnv("OPENRIG_COMPACTION_OUT_ROOT", "");
+  const executable = path.join(f.root, "claude-exe");
+  writeFileSync(executable, "#!/bin/sh\nprintf '%s' \"${OPENRIG_COMPACTION_PACKET_ROOT-unset}\"\n", { mode: 0o755 });
+  f.binding.claudeLaunch = { args: running, configDir: null, warnings: [] };
+  f.binding.claudeExecutable = executable;
+  expect((await f.adapter.launchHarness(f.binding, { name: "owner@rig", resumeToken: CHILD })).ok).toBe(true);
+  const out = execFileSync("/bin/sh", ["-c", f.commands[0]!], { encoding: "utf8" });
+  expect(out).toBe(variable ? path.join(f.home, "run", "compaction-restore") : "unset");
+});
+
+it("names no packet folder for a launch whose grant has none: a legacy session name, no OpenRig home, or a --settings file", async () => {
+  const { compactionPacketLaunchEnv, withManagedRestoreReads } = await import("../src/domain/managed-restore-read-access.js");
+  const f = fixture();
+  vi.stubEnv("OPENRIG_COMPACTION_OUT_ROOT", "");
+  const context = { openrigHome: f.home, session: "owner@rig", cwd: f.cwd };
+  const granted = withManagedRestoreReads([], { ...context, nativeSessionId: CHILD });
+  expect(compactionPacketLaunchEnv(granted, { openrigHome: f.home, nativeSessionId: CHILD }))
+    .toEqual({ OPENRIG_COMPACTION_PACKET_ROOT: path.join(f.home, "run", "compaction-restore") });
+  expect(compactionPacketLaunchEnv(granted, { openrigHome: f.home, nativeSessionId: PARENT })).toEqual({});
+  expect(compactionPacketLaunchEnv(withManagedRestoreReads([], { ...context, nativeSessionId: "legacy name" }),
+    { openrigHome: f.home, nativeSessionId: "legacy name" })).toEqual({});
+  expect(compactionPacketLaunchEnv(granted, { openrigHome: null, nativeSessionId: CHILD })).toEqual({});
+  const file = path.join(f.root, "settings.json");
+  writeFileSync(file, granted[1]!);
+  expect(compactionPacketLaunchEnv(["--settings", file], { openrigHome: f.home, nativeSessionId: CHILD })).toEqual({});
+  expect(compactionPacketLaunchEnv([], { openrigHome: f.home, nativeSessionId: CHILD })).toEqual({});
 });

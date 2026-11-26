@@ -69,6 +69,12 @@ describe("quiet hours over the gateway routes", () => {
     expect(tomorrow.body.window).toMatchObject({ until: "2026-10-21T07:00:00.000Z", revision: 2 });
   });
 
+  it("accepts a leap day even when the offset puts the instant in March", async () => {
+    const f = fixture();
+    const result = await f.call("PUT", "alex/quiet", { until: "2028-02-29T23:30:00-05:00", timezone: "UTC" });
+    expect(result.body.window).toMatchObject({ until: "2028-03-01T04:30:00.000Z" });
+  });
+
   it("an actor named in the body is recorded when there's no seat identity", async () => {
     const f = fixture();
     const set = await f.call("PUT", "alex/quiet", { daily: "22:00-07:00", timezone: "UTC", actor: "alex" }, "");
@@ -81,6 +87,7 @@ describe("quiet hours over the gateway routes", () => {
       [{ daily: "22:00-07:00", timezone: "Mars/Olympus" }, /unknown timezone "Mars\/Olympus"/],
       [{ daily: "22-07", timezone: "UTC" }, /HH:MM-HH:MM/],
       [{ daily: "25:00-07:00", timezone: "UTC" }, /HH:MM/],
+      [{ until: "2027-02-29T23:30:00-05:00", timezone: "UTC" }, /isn't a time/],
       [{ until: "tomorrow", timezone: "UTC" }, /isn't a time/],
       [{ until: "2026-10-20T11:00:00Z", timezone: "UTC" }, /already passed/],
       [{ daily: "22:00-07:00", until: "09:00", timezone: "UTC" }, /not both/],
