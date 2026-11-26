@@ -306,17 +306,25 @@ async function answerFinding(deps: NetworkConnectorDeps, binding: NetworkBinding
   // What the hub hears is the item's progress, as reportBack sends it: no local id, seat or note.
   // A hub item someone else closed first keeps no result of ours: it stays with the local item, and isn't brought back.
   const closedElsewhere = receipt.outcome === "closed_on_hub";
-  const where = !local || !end || receipt.outcome === "unknown" ? "whether it ran is unknown here, so it won't be run again"
-    : closedElsewhere ? `it has finished there, but ${about} was closed here before its result arrived, so the result stays with that OpenRig`
+  const unknown = !local || !end || receipt.outcome === "unknown";
+  const where = unknown ? "whether it ran is unknown here, so it won't be run again"
+    : closedElsewhere ? (FINAL.has(end.state)
+      ? `it has finished there, but ${about} was closed here before its result arrived, so the result stays with that OpenRig`
+      : `it's open there again, but ${about} was closed here before its earlier result arrived, so that result stays with that OpenRig`)
     : FINAL.has(end.state) ? (receipt.settled_at ? `it has finished there, and its result is on ${about}` : `it has finished there, and its result comes back to ${about} next`)
     : local.claimedAt ? `the seat picked it up at ${local.claimedAt}, and it's still open there`
     : "it's queued for the seat there and not picked up yet";
   try {
     await hub.close(item.qitemId, { state: "done", closureReason: "no-follow-on",
-      resolution: `${binding.hubSeat} holds ${about} through a connected OpenRig: ${where}.${closedElsewhere ? "" : ` That OpenRig follows it and brings its result back to ${about}.`}` });
+      resolution: `${binding.hubSeat} holds ${about} through a connected OpenRig: ${where}.${unknown || closedElsewhere || receipt.settled_at ? "" : ` That OpenRig follows it and brings its result back to ${about}.`}` });
   } catch (error) {
-    // Closed meanwhile, by the sweep or by someone there: answered either way.
     if (!(error instanceof HubError) || error.kind !== "refused") throw error;
+    // A refusal can mean the grant cannot close it, not only that someone closed it first.
+    // Only a confirmed close consumes the finding; otherwise take it as ordinary work.
+    try { return HUB_CLOSED.has((await hub.show(item.qitemId)).state); } catch (readError) {
+      if (readError instanceof HubError && readError.kind === "revoked") throw readError;
+      return false;
+    }
   }
   return true;
 }
@@ -363,13 +371,15 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
   // An item handed on along a chain that's still open here isn't closing yet, so it takes its turn with the open ones
   // instead of holding every pass's first places; it comes first again once the chain's last item finishes. The chain
   // is followed as `finalItem` follows it: only through handed-off items, so an item closed `done` while handing on
-  // (handoff-and-complete) ends it, and its result comes first.
+  // (handoff-and-complete) ends it, and its result comes first. An ambiguous successor ends the read as unknown,
+  // just as finalItem does; a still-open branch of that ambiguity must not postpone its unknown report.
   const open = deps.db.prepare(`WITH RECURSIVE chain(root, id, state, hop) AS (
       SELECT q.qitem_id, q.qitem_id, q.state, 0 FROM network_receipts r JOIN queue_items q ON q.qitem_id = r.local_qitem_id
         WHERE r.binding_id = ? AND r.settled_at IS NULL AND q.state = 'handed-off'
       UNION ALL
       SELECT chain.root, s.qitem_id, s.state, chain.hop + 1 FROM chain JOIN queue_items s ON s.handed_off_from = chain.id
-        WHERE chain.state = 'handed-off' AND chain.hop < ${FINAL_ITEM_HOPS}),
+        WHERE chain.state = 'handed-off' AND chain.hop < ${FINAL_ITEM_HOPS}
+          AND (SELECT COUNT(*) FROM queue_items WHERE handed_off_from = chain.id) = 1),
     held(root) AS (SELECT DISTINCT root FROM chain WHERE state IN ('pending', 'in-progress', 'blocked'))
     SELECT r.* FROM network_receipts r LEFT JOIN queue_items q ON q.qitem_id = r.local_qitem_id
       LEFT JOIN held h ON h.root = r.local_qitem_id

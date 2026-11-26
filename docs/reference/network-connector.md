@@ -111,13 +111,13 @@ a deadline of 60 seconds, so one slow hub doesn't hold the others. With no activ
    first, then pickups, then queued notes, so finished work doesn't sit behind work still open and the hub doesn't show
    it in progress. An item handed on here, once or along a chain of handoffs, whose last item is still open waits its
    turn with the open items, and comes first again once that last item finishes. Taking new work stops at half the
-   pass's deadline, so a long intake never uses up reporting's time. On a slow hub, reporting stops after three
-   quarters of the deadline, and the rest go first next time.
+   pass's deadline. Reporting starts no new receipt after three quarters of the deadline, leaving the rest for a
+   later pass. An in-flight hub call can still reach the pass's deadline.
 4. When an OpenRig hub's stuck sweep finds an item this participant holds with no change for a while, it files a finding
    addressed to the participant. The connector answers that finding on the hub from the local item (queued, picked up,
    or finished here, or that its result stayed here because the hub item was closed elsewhere first) and doesn't queue it
-   for the seat, which couldn't act on the hub's item. A finding about anything
-   else is taken like any other item.
+   for the seat. If the hub refuses the close and it cannot be confirmed, the finding is taken as ordinary work.
+   A finding about anything else is also taken like any other item.
 
 To answer, close the local item with your result:
 

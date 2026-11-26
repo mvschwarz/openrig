@@ -815,12 +815,69 @@ describe("network connector", () => {
     expect(hub.items.get("hub-r1")).toMatchObject({ state: "done", resolution: "Reviewed: fine; qa checks the follow-up." });
   });
 
+  it("an ambiguous handoff is reported unknown before older open receipts", async () => {
+    const b = bind();
+    hub.add("hub-open-first");
+    hub.add("hub-ambiguous");
+    await pass(b.id);
+    const item = runs("hub-ambiguous")[0]!;
+    repo.claim({ qitemId: item.qitemId, destinationSession: "dev-impl@lab" });
+    await pass(b.id);
+    await repo.handoff({ qitemId: item.qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+    repo.update({ qitemId: item.qitemId, actorSession: "dev-impl@lab", state: "in-progress", reopen: true,
+      transitionNote: "Reassign the work after the first handoff" });
+    await repo.handoff({ qitemId: item.qitemId, fromSession: "dev-impl@lab", toSession: "qa@lab", nudge: false });
+    expect(repo.list({ handedOffFrom: item.qitemId, limit: 3 })).toHaveLength(2);
+    expect(await runNetworkBindingPass({ ...deps, reportLimit: 1 }, bindings.get(b.id)!)).toMatchObject({ unknown: 1 });
+    expect(hub.items.get("hub-ambiguous")!.notes.at(-1)).toContain("without one successor");
+  });
+
   /** A finding as a Core hub's stuck sweep writes one, addressed to the participant that claimed `about`. */
   const finding = (id: string, about: string) => hub.items.set(id, { qitemId: id, sourceSession: "assistant@team", destinationSession: PARTICIPANT,
     state: "pending", summary: `Checked on ${about}: it stalled after it was picked up (4 minutes)`, resolution: null, closureReason: null, notes: [],
     body: [`STUCK SWEEP FINDING (stalled-after-claim)`, `row: ${about}`, `destination: ${PARTICIPANT} (source assistant@team, state in-progress)`, "age: 4 min",
       "last transition: Queued for the connected local seat. Not picked up yet.", "why: no meaningful queue change for 4 min; owner activity unknown (queue age does not prove idle)",
       `This is a diagnostic about ${about}, not a second assignment. Read ${about} and act on it.`].join("\n") });
+
+  it("an unknown local outcome does not promise a result on the hub", async () => {
+    const b = bind();
+    hub.add("hub-gone");
+    await pass(b.id);
+    db.prepare("DELETE FROM queue_items WHERE qitem_id = ?").run(runs("hub-gone")[0]!.qitemId);
+    finding("qitem-recovery-unknown", "hub-gone");
+    expect(await pass(b.id)).toMatchObject({ findingsAnswered: 1, unknown: 1 });
+    const answer = hub.items.get("qitem-recovery-unknown")!.resolution;
+    expect(answer).toContain("whether it ran is unknown");
+    expect(answer).not.toContain("brings its result back");
+  });
+
+  it.each(["open", "closed", "revoked"] as const)("a refused finding close follows its %s readback", async (outcome) => {
+    const b = bind();
+    hub.add("hub-held");
+    await pass(b.id);
+    const id = "qitem-recovery-refused";
+    finding(id, "hub-held");
+    const connect: HubConnect = async (...args) => {
+      const session = await hub.connect(...args);
+      let closeRefused = false;
+      return { ...session, show: async (target) => {
+        if (target === id && closeRefused && outcome === "revoked") throw new HubError("revoked", "The grant was revoked.");
+        return session.show(target);
+      }, close: async (target, input) => {
+        if (target === id) {
+          closeRefused = true;
+          if (outcome === "closed") hub.items.get(id)!.state = "done";
+          throw new HubError("refused", "This grant cannot close this finding.");
+        }
+        return session.close(target, input);
+      } };
+    };
+    const result = await runNetworkBindingPass({ ...deps, connect }, bindings.get(b.id)!);
+    expect(result).toMatchObject({ taken: outcome === "open" ? 1 : 0, findingsAnswered: outcome === "closed" ? 1 : 0 });
+    expect(runs(id)).toHaveLength(outcome === "open" ? 1 : 0);
+    expect(hub.items.get(id)!.state).toBe(outcome === "closed" ? "done" : "in-progress");
+    if (outcome === "revoked") expect(result.error).toBe("revoked");
+  });
 
   it("a finding about an item someone else closed on the hub first says its result stayed here, not that it's on the hub", async () => {
     const b = bind();
@@ -834,6 +891,12 @@ describe("network connector", () => {
     expect(await pass(b.id)).toMatchObject({ taken: 0, findingsAnswered: 1 });
     expect(hub.items.get("qitem-recovery-0000000000000009")!.resolution).toBe("alex@team holds hub-c1 through a connected OpenRig: "
       + "it has finished there, but hub-c1 was closed here before its result arrived, so the result stays with that OpenRig.");
+    repo.update({ qitemId: runs("hub-c1")[0]!.qitemId, actorSession: "dev-impl@lab", state: "pending", reopen: true,
+      transitionNote: "Continue working locally" });
+    finding("qitem-recovery-reopened", "hub-c1");
+    expect(await pass(b.id)).toMatchObject({ findingsAnswered: 1, resultsSent: 0 });
+    expect(hub.items.get("qitem-recovery-reopened")!.resolution).not.toContain("it has finished there");
+    expect(hub.items.get("qitem-recovery-reopened")!.resolution).toContain("it's open there again, but hub-c1 was closed here before its earlier result arrived");
   });
 
   it("a hub's stuck-sweep finding about an item this seat holds is answered on the hub from the local item, and never taken as work", async () => {
