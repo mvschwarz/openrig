@@ -278,9 +278,10 @@ processes, a gateway say, may keep running after it. OpenRig doesn't stop them, 
 by OpenRig's tests, so check the harness's own processes after `rig down`. Each preset's limits say what to expect.
 
 **Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats). It says
-so before anything changes. To move a running seat to or from an installed harness, use
-`rig seat set-runtime <seat> --runtime <harness> --reason <text>`: it starts a new conversation with a handover. A later
-resume of a harness successor's conversation works only when that harness's preset declares `resume`.
+so before anything changes. To move a running single-pane seat to or from an installed harness, use
+`rig seat set-runtime <seat> --runtime <target> --reason <text>`, where the target is the harness's name, or `codex`,
+`claude-code` or `pi` to move off it. It starts a new conversation with a handover. A later resume of a harness
+successor's conversation works only when that harness's preset declares `resume`.
 
 ## An example: Cursor
 
