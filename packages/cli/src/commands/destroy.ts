@@ -204,7 +204,7 @@ export function destroyCommand(depsOverride?: DestroyCommandDeps): Command {
       plan.warnings = [...warnings, ...plan.warnings];
       const result = await executeDestroy(plan, deps.destroyDeps);
       printResult(result);
-      if (!result.portCleared) {
+      if (!result.portCleared || !result.stateRecreated) {
         process.exitCode = 1;
       }
     });

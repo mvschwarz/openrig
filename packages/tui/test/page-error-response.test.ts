@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import { PageRead } from "../src/page-read.js";
+import { httpFixtureOrigin } from "./http-fixture.js";
 
 async function until(condition: () => boolean, timeout = 500) {
   const started = Date.now();
@@ -19,7 +20,7 @@ describe("page error response ownership", () => {
       response.on("close", () => { disconnected = true; });
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/ps`;
+    const url = `${httpFixtureOrigin(server)}/api/ps`;
     const page = new PageRead(() => 10);
     const read = page.fetch(fetch, new AbortController().signal);
     try {

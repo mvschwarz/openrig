@@ -66,12 +66,14 @@ export async function evaluateWaitTargets(
 }
 
 /** Say why a TCP wait target failed, so a malformed target doesn't read like a closed port. */
-function tcpFailureDetail(tcp: string, reason: "malformed" | "unreachable" | "named_port_needs_nc"): string {
+function tcpFailureDetail(tcp: string, reason: "malformed" | "unreachable" | "named_port_needs_nc" | "named_port_unknown"): string {
   switch (reason) {
     case "malformed":
       return `TCP probe failed: ${tcp} is not host:port with a port from 1 to 65535 or a service name`;
     case "named_port_needs_nc":
       return `TCP probe failed: ${tcp} uses a named port, which needs nc on PATH. Install nc or use a numeric port`;
+    case "named_port_unknown":
+      return `TCP probe failed: ${tcp} could not be resolved in the Windows services database. Use a numeric port`;
     case "unreachable":
       return `TCP probe failed: ${tcp}`;
   }

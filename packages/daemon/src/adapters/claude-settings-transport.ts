@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { replaceWindowsPrivateTextFile } from "../domain/private-text-file.js";
 import { getOpenRigHome } from "../openrig-compat.js";
 
 export interface ClaudeSettingsSeat { openrigHome?: string | null; session: string }
@@ -58,7 +59,8 @@ export function transportClaudeSettings(args: string[], seat: ClaudeSettingsSeat
     const file = path.join(dir, `${digest(entry.value)}.json`);
     try {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      if (ownClaudeSettings(file, seat) !== entry.value) publishSettings(file, entry.value);
+      if (process.platform === "win32") replaceWindowsPrivateTextFile(file, entry.value);
+      else if (ownClaudeSettings(file, seat) !== entry.value) publishSettings(file, entry.value);
       else fs.chmodSync(file, 0o600);
       result[entry.inline ? entry.at : entry.at + 1] = entry.inline ? `--settings=${file}` : file;
       wrote = true;

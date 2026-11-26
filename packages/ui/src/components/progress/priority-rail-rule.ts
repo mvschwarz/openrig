@@ -20,18 +20,21 @@ const MISSION_PATH = /(^|[\\/])missions[\\/][^\\/]+[\\/]PROGRESS\.md$/;
 const ROADMAP_PATH = /(^|[\\/])roadmap[\\/]PROGRESS\.md$/;
 const DELIVERY_LANE_PATH = /(^|[\\/])delivery-ready[\\/]mode-\d+[\\/]PROGRESS\.md$/;
 const SLICE_PATH = /(^|[\\/])slices[\\/][^\\/]+[\\/]PROGRESS\.md$/;
+const LEVEL_PATHS: Array<readonly [RegExp, PriorityRailLevel]> = [
+  [STEERING_BASENAME, "steering"], [DELIVERY_LANE_PATH, "lane"], [ROADMAP_PATH, "lane"], [SLICE_PATH, "slice"], [MISSION_PATH, "mission"],
+];
+const WINDOWS_LEVEL_PATHS = LEVEL_PATHS.map(([pattern, level]) => [new RegExp(pattern.source, "i"), level] as const);
 
 export function classifyPriorityRailLevel(file: ProgressFileNode): PriorityRailLevel {
   // Check both the relPath (tracked relative to the scan root) and the
   // absolutePath (canonical on-disk) so the classifier works regardless
   // of how the operator scoped their scan roots.
   const candidates = [file.relPath, file.absolutePath];
+  // The daemon's canonical path identifies the source filesystem syntax. The
+  // browser may be on a different OS; its own platform cannot decide this.
+  const patterns = /^(?:[A-Za-z]:[\\/]|\\\\)/.test(file.absolutePath) ? WINDOWS_LEVEL_PATHS : LEVEL_PATHS;
   for (const candidate of candidates) {
-    if (STEERING_BASENAME.test(candidate)) return "steering";
-    if (DELIVERY_LANE_PATH.test(candidate)) return "lane";
-    if (ROADMAP_PATH.test(candidate)) return "lane";
-    if (SLICE_PATH.test(candidate)) return "slice";
-    if (MISSION_PATH.test(candidate)) return "mission";
+    for (const [pattern, level] of patterns) if (pattern.test(candidate)) return level;
   }
   return "intermediate";
 }

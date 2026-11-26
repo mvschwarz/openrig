@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, openSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, relative, dirname, extname } from "node:path";
 import { createHash } from "node:crypto";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -46,7 +46,8 @@ function makeId(sourceType: string, relativePath: string): string {
 }
 
 function isYamlFile(filename: string): boolean {
-  return filename.endsWith(".yaml") || filename.endsWith(".yml");
+  const name = process.platform === "win32" ? filename.toLowerCase() : filename;
+  return name.endsWith(".yaml") || name.endsWith(".yml");
 }
 
 // OPR.0.3.2.22 Bug 4 — noise directories that should never enter the
@@ -83,7 +84,7 @@ function walkYamlFiles(rootPath: string): string[] {
     for (const entry of entries) {
       const absPath = join(current, entry.name);
       if (entry.isDirectory()) {
-        if (SKIP_DIRS.has(entry.name)) continue;
+        if (SKIP_DIRS.has(process.platform === "win32" ? entry.name.toLowerCase() : entry.name)) continue;
         stack.push(absPath);
         continue;
       }
@@ -102,7 +103,8 @@ function shouldIndexRelativePath(sourceType: "builtin" | "user_file", relPath: s
     return true;
   }
 
-  const normalized = relPath.replaceAll("\\", "/");
+  const portable = relPath.replaceAll("\\", "/");
+  const normalized = process.platform === "win32" ? portable.toLowerCase() : portable;
   return normalized.startsWith("rigs/") ? normalized.endsWith("/rig.yaml") : normalized.endsWith("/agent.yaml");
 }
 
@@ -241,12 +243,25 @@ export class SpecLibraryService {
     raw["name"] = trimmedName;
 
     const extension = extname(entry.sourcePath) || ".yaml";
-    const fileSafeName = trimmedName.replace(/[^A-Za-z0-9._-]+/g, "-");
-    const nextPath = join(dirname(entry.sourcePath), `${fileSafeName}${extension}`);
+    let fileSafeName = trimmedName.replace(/[^A-Za-z0-9._-]+/g, "-");
+    const prefix = ".openrig-spec-";
+    if (process.platform === "win32" && (
+      /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(fileSafeName)
+      || fileSafeName.length + extension.length > 255
+      || fileSafeName.toLowerCase().startsWith(prefix)
+    )) fileSafeName = prefix + createHash("sha256").update(trimmedName).digest("hex");
+    let nextPath = join(dirname(entry.sourcePath), `${fileSafeName}${extension}`);
     if (nextPath !== entry.sourcePath) {
       try {
         statSync(nextPath);
-        return { ok: false, code: "conflict", error: `A spec file already exists at ${nextPath}.` };
+        let sameFile = false;
+        try { sameFile = process.platform === "win32" && realpathSync.native(nextPath) === realpathSync.native(entry.sourcePath); }
+        catch { /* An unreadable existing target remains a conflict. */ }
+        if (sameFile) {
+          // A display-name case change may name this very file on Windows.
+          // Keep its existing physical spelling and update the authored name.
+          nextPath = entry.sourcePath;
+        } else return { ok: false, code: "conflict", error: `A spec file already exists at ${nextPath}.` };
       } catch {
         // target path is free
       }
@@ -256,8 +271,17 @@ export class SpecLibraryService {
     if (nextPath === entry.sourcePath) {
       writeFileSync(entry.sourcePath, nextYaml, "utf-8");
     } else {
-      writeFileSync(nextPath, nextYaml, "utf-8");
-      unlinkSync(entry.sourcePath);
+      const fd = openSync(nextPath, "wx");
+      let completed = false;
+      try {
+        try { writeFileSync(fd, nextYaml, "utf-8"); } finally { closeSync(fd); }
+        unlinkSync(entry.sourcePath);
+        completed = true;
+      } finally {
+        // A Windows reader may allow the read above but deny deleting the old
+        // file. Keep its bytes and retire only the new file this call created.
+        if (!completed) try { unlinkSync(nextPath); } catch { /* Retain owned output if cleanup is refused. */ }
+      }
     }
 
     this.scan();

@@ -1,7 +1,7 @@
 import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
 import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js";
 import { claudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "../domain/claude-auto-mode.js";
-import { compactionPacketLaunchEnv, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
+import { compactionPacketLaunchEnv, restoreSessionUserHome, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { transportClaudeSettings } from "./claude-settings-transport.js";
 import { claudeMcpArgs, type ClaudeMcp } from "../domain/claude-mcp.js";
@@ -105,6 +105,7 @@ export class ClaudeResumeAdapter {
     launchWrapper?: readonly string[],
     continuation?: ClaudeContinuationLaunch,
     claudeAutoMode?: ClaudeAutoModeChoice,
+    script?: string,
     /** The reserved occupant for this restore; the kept tmux pane may still carry its predecessor's value. */
     occupantGeneration?: string,
   ): Promise<ResumeResult> {
@@ -128,7 +129,7 @@ export class ClaudeResumeAdapter {
       try {
         if (!nodeId || !this.options.claudeManagedLaunch) await unresolvedClaudePermissionModes();
         managed = await this.options.claudeManagedLaunch!.prepare({ nodeId: nodeId!, cwd, session: tmuxSessionName,
-          ...(executable ? { executable } : {}), ...(launchWrapper?.length ? { launchWrapper } : {}),
+          ...(executable ? { executable } : {}), ...(script ? { script } : {}), ...(launchWrapper?.length ? { launchWrapper } : {}),
           ...(occupantGeneration ? { generation: occupantGeneration } : {}),
           ...(continuation?.configDir !== undefined ? { continuationConfigDir: continuation.configDir } : {}) }, selectedPermissionMode);
       } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
@@ -149,10 +150,12 @@ export class ClaudeResumeAdapter {
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const autoMode = claudeAutoModeForLaunch(claudeAutoMode);
     if (autoMode.warning) tokenWarnings.push(autoMode.warning);
+    const restorePolicy = this.options.restoreReadPolicy?.() ?? {};
+    const userHome = /^~[\\/]/.test(restorePolicy.extraInstructionFile?.trim() ?? "") ? await restoreSessionUserHome(this.tmux, tmuxSessionName) : undefined;
     const settingsSeat = { openrigHome: this.options.openrigHome, session: tmuxSessionName };
     let launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {
       openrigHome: this.options.openrigHome, session: tmuxSessionName, cwd, nativeSessionId: resumeToken!,
-      ...(this.options.restoreReadPolicy?.() ?? {}),
+      ...restorePolicy, userHome,
     });
     let wrapperPrefix = "";
     if (!managed && executable && launchWrapper?.length) {
@@ -168,12 +171,12 @@ export class ClaudeResumeAdapter {
     else launchArgs = transportClaudeSettings(launchArgs, settingsSeat, tokenWarnings, continuation?.args);
     const permissionMode = posture + launchArgs.map(arg => ` ${shellQuote(arg)}`).join("");
     const cmd = managed ? managed.command(nativeArgs, { ...claudeResumeLaunchEnv(resumeToken!), ...packetEnv })
-      : `${claudeResumeLaunchPrefix(resumeToken!)}${commandEnvPrefix(packetEnv)}${claudeClassicRendererEnvPrefix(process.env)}${executable ? `exec ${wrapperPrefix}${shellQuote(executable)}` : "claude"} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(resumeToken!)}`;
+      : `${claudeResumeLaunchPrefix(resumeToken!)}${commandEnvPrefix(packetEnv)}${claudeClassicRendererEnvPrefix(process.env)}${executable ? `exec ${wrapperPrefix}${shellQuote(executable)}${script ? ` ${shellQuote(script)}` : ""}` : "claude"} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(resumeToken!)}`;
 
     const configPrefix = continuation?.configDir != null && this.options.seatLaunchEnvironment ? `CLAUDE_CONFIG_DIR=${shellQuote(continuation.configDir)} ` : "";
     const generationPrefix = occupantGeneration ? `OPENRIG_OCCUPANT_GENERATION=${shellQuote(occupantGeneration)} ` : "";
     const classicCommand = generationPrefix + configPrefix + (continuation?.args && executable
-      ? `${claudeResumeLaunchPrefix(resumeToken!)}${commandEnvPrefix(packetEnv)}exec ${wrapperPrefix}${shellQuote(executable)} ${nativeArgs.map(shellQuote).join(" ")}` : cmd);
+      ? `${claudeResumeLaunchPrefix(resumeToken!)}${commandEnvPrefix(packetEnv)}exec ${wrapperPrefix}${shellQuote(executable)}${script ? ` ${shellQuote(script)}` : ""} ${nativeArgs.map(shellQuote).join(" ")}` : cmd);
     if (!managed && continuation?.configDir !== undefined && !configPrefix) tokenWarnings.push("This classic launch cannot privately apply the captured config selector; ordinary pane selection is used.");
     tokenWarnings.push(...continuationChoiceNotes(continuation, posture, model));
     // Recorded from the arguments actually sent: captured continuation arguments carry the running process's settings.
@@ -229,7 +232,8 @@ export class ClaudeResumeAdapter {
     // A launch sent through sendShellCommand (managed, or classic with the seat's launch environment) went as a staged
     // script, run by the line it typed; that line marks this launch in the pane. One typed inline has none.
     const launchLine = managed || this.options.seatLaunchEnvironment ? this.tmux.stagedLaunchTypedLine?.(tmuxSessionName) : undefined;
-    const result = await this.verifyResume(tmuxSessionName, resumeToken!, launchLine).catch((error): ResumeResult => ({
+    const result = await this.verifyResume(tmuxSessionName, resumeToken!, process.platform === "win32"
+      ? managed ?? (executable ? { executable, selectedScript: script } : undefined) : undefined, launchLine).catch((error): ResumeResult => ({
       ok: false,
       code: "attention_required",
       message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
@@ -238,7 +242,7 @@ export class ClaudeResumeAdapter {
     return result.ok ? { ...result, appliedLaunch, ...(warnings.length ? { warnings } : {}) } : result;
   }
 
-  private async verifyResume(tmuxSessionName: string, resumeToken: string, launchLine?: string): Promise<ResumeResult> {
+  private async verifyResume(tmuxSessionName: string, resumeToken: string, selected?: { executable: string; selectedScript?: string }, launchLine?: string): Promise<ResumeResult> {
     const pollMs = this.options.pollMs ?? 200;
     const maxWaitMs = this.options.maxWaitMs ?? 5_000;
     const sleepFn = this.options.sleep ?? sleep;
@@ -343,6 +347,8 @@ export class ClaudeResumeAdapter {
         tmux: this.tmux,
         ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}),
         expectedToken: resumeToken,
+        selectedExecutable: selected?.executable,
+        selectedScript: selected?.selectedScript,
       });
       if (identity) {
         const verifiedProbe = assessNativeResumeProbe({

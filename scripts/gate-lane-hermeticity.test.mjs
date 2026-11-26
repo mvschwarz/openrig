@@ -12,8 +12,30 @@ import {
 } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { writeNativeGateNpm } from "./gate-test-fixtures.mjs";
 import { fileURLToPath } from "node:url";
+import { checkDependencyRoot } from "./gate-lane-hermeticity.mjs";
+
+test("dependency path segments: dotdot-prefixed child is owned, parent and sibling targets escape", () => {
+  const root = mkdtempSync(join(tmpdir(), "gate-path-segments-"));
+  try {
+    mkdirSync(join(root, "node_modules/@openrig"), { recursive: true });
+    mkdirSync(join(root, "packages/..cli"), { recursive: true });
+    mkdirSync(join(root, "outside"));
+    const link = join(root, "node_modules/@openrig/cli");
+    symlinkSync(join(root, "packages/..cli"), link, process.platform === "win32" ? "junction" : "dir");
+    const lock = resolved => writeFileSync(join(root, "package-lock.json"), JSON.stringify({ packages: {
+      "node_modules/@openrig/cli": { resolved, link: true },
+    } }));
+    lock("packages/..cli");
+    assert.equal(checkDependencyRoot(root, { log() {} }).checked, 1);
+    for (const target of ["packages/..", "packages/../outside"]) {
+      lock(target);
+      assert.throws(() => checkDependencyRoot(root, { log() {} }), /lock-derived target escapes/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 const GATE_SCRIPT = fileURLToPath(new URL("./gate-lane.mjs", import.meta.url));
 const CONSUMER_SCRIPT = fileURLToPath(new URL("./gate-lane-consume.mjs", import.meta.url));
@@ -45,7 +67,7 @@ function makeRepo({ lockEntries = true, dependencyRoot = "exact" } = {}) {
   if (dependencyRoot === "symlink") {
     const foreign = mkdtempSync(join(tmpdir(), "gate-hermeticity-root-"));
     mkdirSync(join(foreign, "node_modules"), { recursive: true });
-    symlinkSync(join(foreign, "node_modules"), join(root, "node_modules"));
+    symlinkSync(join(foreign, "node_modules"), join(root, "node_modules"), process.platform === "win32" ? "junction" : "dir");
   } else if (dependencyRoot !== "absent") {
     mkdirSync(join(root, "node_modules/@openrig"), { recursive: true });
     const target = dependencyRoot === "swapped"
@@ -54,7 +76,7 @@ function makeRepo({ lockEntries = true, dependencyRoot = "exact" } = {}) {
         ? join(mkdtempSync(join(tmpdir(), "gate-hermeticity-cross-")), "packages/cli")
         : "../../packages/cli";
     if (dependencyRoot === "cross-tree") mkdirSync(target, { recursive: true });
-    symlinkSync(target, join(root, "node_modules/@openrig/cli"));
+    symlinkSync(resolve(root, "node_modules/@openrig", target), join(root, "node_modules/@openrig/cli"), process.platform === "win32" ? "junction" : "dir");
   }
 
   git(root, "init", "-q");
@@ -89,7 +111,7 @@ async function runGate(root) {
 
 function assertHermeticRefusal(result, pattern) {
   assert.notEqual(result.status, 0, `gate must refuse\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-  assert.match(`${result.stdout}\n${result.stderr}`, pattern);
+  assert.match(`${result.stdout}\n${result.stderr}`.replaceAll("\\", "/"), pattern);
 }
 
 test("dependency root: absent node_modules refuses before the gate mutates", async () => {
@@ -125,7 +147,7 @@ test("dependency root: exact lock-derived target passes and prints the actual/ex
   const result = await runGate(makeRepo());
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /@openrig\/cli[\s\S]*actual[\s\S]*expected/i);
-  assert.match(result.stdout, /packages\/cli/i);
+  assert.match(result.stdout.replaceAll("\\", "/"), /packages\/cli/i);
 });
 
 test("dependency root: a later refusal invalidates a same-HEAD prior PASS", async () => {
@@ -136,7 +158,7 @@ test("dependency root: a later refusal invalidates a same-HEAD prior PASS", asyn
   assert.equal(existsSync(verdictPath), true, "the first gate writes a PASS receipt");
 
   rmSync(join(root, "node_modules/@openrig/cli"), { force: true });
-  symlinkSync("../../packages/other", join(root, "node_modules/@openrig/cli"));
+  symlinkSync(join(root, "packages/other"), join(root, "node_modules/@openrig/cli"), process.platform === "win32" ? "junction" : "dir");
 
   const second = await runGate(root);
   assertHermeticRefusal(second, /@openrig\/cli[\s\S]*packages\/other[\s\S]*packages\/cli/i);
@@ -155,13 +177,14 @@ test("dependency root: drift during the gate refuses before writing a verdict", 
   const fakeNpm = join(fakeBin, "npm");
   write(fakeNpm, `#!/bin/sh\n: > "$OPENRIG_TEST_MARKER"\nwhile [ ! -e "$OPENRIG_TEST_RELEASE" ]; do sleep 0.02; done\nexit 0\n`);
   chmodSync(fakeNpm, 0o755);
+  writeNativeGateNpm(fakeBin);
   const port = await freePort();
 
   const child = spawn(process.execPath, [GATE_SCRIPT], {
     cwd: root,
     env: {
       ...process.env,
-      PATH: `${fakeBin}:${process.env.PATH}`,
+      PATH: `${fakeBin}${delimiter}${process.env.PATH}`,
       OPENRIG_TEST_MARKER: marker,
       OPENRIG_TEST_RELEASE: release,
       OPENRIG_GATE_LANE_PORT: String(port),
@@ -182,7 +205,7 @@ test("dependency root: drift during the gate refuses before writing a verdict", 
   if (!existsSync(marker)) write(release, "abort\n");
   assert.equal(existsSync(marker), true, "the real gate reached its first injected leg");
   rmSync(join(root, "node_modules/@openrig/cli"), { force: true });
-  symlinkSync("../../packages/other", join(root, "node_modules/@openrig/cli"));
+  symlinkSync(join(root, "packages/other"), join(root, "node_modules/@openrig/cli"), process.platform === "win32" ? "junction" : "dir");
   write(release, "continue\n");
 
   const status = await closed;

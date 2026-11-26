@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { Hono } from "hono";
 import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
-import { fixedSizeWorkspaceNote } from "../src/domain/terminal/herdr-live-workspace.js";
+import { fixedSizeWorkspaceNote, herdrCloseCommand } from "../src/domain/terminal/herdr-live-workspace.js";
 import { composeView } from "../src/domain/terminal/view-composer.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
 import { terminalRoutes } from "../src/routes/terminal.js";
@@ -19,7 +19,7 @@ const planId = "0123456789abcdef".repeat(4);
 
 function demoView(): ComposedView {
   const composed = composeView("demo", SEATS.map(seat => ({ seat, label: seat, tmuxSession: `fixture-${seat}`, host: null, readOnly: false, alive: true })),
-    { resolveHost: () => null, localTmux: TMUX, localTmuxServer: SERVER });
+    { resolveHost: () => null, localTmux: TMUX, localTmuxServer: SERVER, localPlatform: "linux" });
   return { ...composed, planId };
 }
 
@@ -70,6 +70,7 @@ function herdr(launch?: { socketPath: string }) {
   // One tmux client per seat tile, numbered by workspace: w1's are 101 and 102, w2's 201 and 202.
   const pid = (paneId: string) => 100 * Number(paneId.slice(1, paneId.indexOf(":"))) + 1 + SEATS.findIndex(seat => paneId.endsWith(`-${seat}`));
   const liveWorkspace = {
+    platform: "linux" as const,
     herdr: async (args: string[]) => {
       cli.push(args);
       const [noun, verb, , id] = args;
@@ -179,6 +180,25 @@ describe("#3052 --provider herdr reuses a live workspace for the same view", () 
       fixedSizeWorkspaceNote("w1", "herdr workspace close 'w1'"),
       "Workspace w2 already shows this view with live attachments, so it was reused; its contents were kept and no new tiles were opened.",
     ]);
+  });
+
+  it("a native Windows open names a close command the person can actually run there", () => {
+    // PowerShell has no `env -u`; the note carries the environment removal and socket pin it does have.
+    const note = fixedSizeWorkspaceNote("w1", herdrCloseCommand("win32", "C:\\daemon home\\herdr.sock", "w1", { posix: "herdr" }));
+    expect(note).toContain("Close it to remove those tiles (its agents keep running): ");
+    expect(note).toContain("Remove-Item Env:HERDR_SESSION -ErrorAction SilentlyContinue; ");
+    expect(note).toContain("$env:HERDR_SOCKET_PATH = 'C:\\daemon home\\herdr.sock'; ");
+    expect(note).toContain("herdr workspace close 'w1'");
+    expect(note).not.toContain("env -u");
+    // PowerShell doubles a quote instead of the POSIX close-requote.
+    expect(herdrCloseCommand("win32", undefined, "it's", { posix: "herdr" })).toBe(
+      "Remove-Item Env:HERDR_SESSION -ErrorAction SilentlyContinue; herdr workspace close 'it''s'");
+    // A native install path with a space needs the call operator, which takes only a quoted path.
+    expect(herdrCloseCommand("win32", undefined, "w1", { posix: "herdr", native: "C:\\Program Files\\herdr\\herdr.exe" }))
+      .toBe("Remove-Item Env:HERDR_SESSION -ErrorAction SilentlyContinue; & 'C:\\Program Files\\herdr\\herdr.exe' workspace close 'w1'");
+    expect(herdrCloseCommand("linux", "/daemon home/herdr.sock", "w1", { posix: "herdr" }))
+      .toBe("env -u HERDR_SESSION HERDR_SOCKET_PATH='/daemon home/herdr.sock' herdr workspace close 'w1'");
+    expect(herdrCloseCommand("linux", undefined, "w1", { posix: "herdr" })).toBe("herdr workspace close 'w1'");
   });
 
   it("a read-only tile's client is not a fixed-size tile", async () => {

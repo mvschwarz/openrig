@@ -3,6 +3,7 @@ import { beforeAll, describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { tmpdir } from "node:os";
+import path from "node:path";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -234,15 +235,20 @@ describe("release-surface parser - honest failure (AC-5)", () => {
   });
 
   it("throws a 3-part error (not a silent empty diff) on a non-existent ref", () => {
+    const root = fs.mkdtempSync(path.join(tmpdir(), "release-surface-ref-"));
     let caught: unknown;
     try {
-      generateSurfaceDiff({ from: "v0.0.0-does-not-exist", to: TO, cwd: here });
+      execFileSync("git", ["init", "--quiet", root], { stdio: "ignore" });
+      generateSurfaceDiff({ to: "v0.0.0-does-not-exist", cwd: root });
     } catch (err) {
       caught = err;
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
     }
     expect(caught).toBeInstanceOf(SurfaceParserError);
     const e = caught as SurfaceParserError;
     expect(e.fact).toBeTruthy();
+    expect(e.fact).toContain("v0.0.0-does-not-exist");
     expect(e.consequence).toBeTruthy();
     expect(e.action).toBeTruthy();
     // explicitly NOT a silent empty diff

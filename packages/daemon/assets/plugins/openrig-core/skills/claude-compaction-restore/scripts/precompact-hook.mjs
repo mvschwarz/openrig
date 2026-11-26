@@ -49,11 +49,11 @@ function nowIso() {
 }
 
 function expandInstructionPath(filePath) {
-  if (filePath.startsWith("~/")) return path.join(os.homedir(), filePath.slice(2));
-  if (filePath.startsWith("${OPENRIG_HOME}/")) {
+  if (filePath.startsWith("~/") || (process.platform === "win32" && filePath.startsWith("~\\"))) return path.join(os.homedir(), filePath.slice(2));
+  if (filePath.startsWith("${OPENRIG_HOME}/") || (process.platform === "win32" && filePath.startsWith("${OPENRIG_HOME}\\"))) {
     return path.join(getOpenRigHome(), filePath.slice("${OPENRIG_HOME}/".length));
   }
-  if (filePath.startsWith("$OPENRIG_HOME/")) {
+  if (filePath.startsWith("$OPENRIG_HOME/") || (process.platform === "win32" && filePath.startsWith("$OPENRIG_HOME\\"))) {
     return path.join(getOpenRigHome(), filePath.slice("$OPENRIG_HOME/".length));
   }
   return filePath;
@@ -153,6 +153,14 @@ function sentinelPath(input) {
 
 // The marker carries its build's jobId: the bridge delivers it only while the sentinel names that build.
 function restoreMarker(input, parsed, restoreInstruction, customMessage, jobId) {
+  // The bridge already consumes this optional per-seat pointer. Only publish
+  // a readable existing map that passes the same declared-seat check as extras;
+  // no configured global path or absent/unreadable file becomes a map promise.
+  let restoreMapPath = null;
+  try {
+    const selected = resolveSeatSafeExtraPath("");
+    if (selected && fs.statSync(selected).isFile()) restoreMapPath = selected;
+  } catch { /* Restore packet remains usable without an optional map. */ }
   return {
     version: 1,
     jobId,
@@ -164,6 +172,7 @@ function restoreMarker(input, parsed, restoreInstruction, customMessage, jobId) 
     transcriptPath: input.transcript_path || null,
     cwd: input.cwd || null,
     outputDir: parsed.outputDir,
+    restoreMapPath,
     restoreInstruction,
     postCompactInstruction: customMessage || "",
     expectedAck: "restored from packet at <path>; resumed at step <X>",

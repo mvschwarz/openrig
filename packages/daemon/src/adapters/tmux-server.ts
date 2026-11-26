@@ -7,6 +7,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { TmuxServerSelection } from "../domain/tmux-server-selection.js";
+import { nativeViewerCommand } from "../domain/terminal/native-viewer-command.js";
+import { readPlatformEnv } from "../domain/platform-env.js";
+import { bindNativeSessionName } from "../domain/terminal/native-session-name.js";
+import { windowsTileAttachArgv } from "../domain/terminal/windows-tile-attach.js";
+import { powershellQuote } from "./windows-launch.js";
 import type { TmuxControlStatus } from "./tmux-control.js";
 
 function realpath(p: string): string {
@@ -26,8 +31,9 @@ function realpath(p: string): string {
  */
 export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined = process.getuid?.()): string[] {
   // tmux puts the socket path first, as is: keep any whitespace in it.
-  const socket = env["TMUX"]?.replace(/,\d+,\d+$/, "");
-  const tmpdir = env["TMUX_TMPDIR"]?.trim() ?? "";
+  const socket = readPlatformEnv(env, "TMUX")?.replace(/,\d+,\d+$/, "");
+  const socketPaths = socket?.startsWith("/") ? path.posix : path;
+  const tmpdir = readPlatformEnv(env, "TMUX_TMPDIR")?.trim() ?? "";
   const customTmpdir = tmpdir !== "" && realpath(tmpdir) !== realpath("/tmp");
   if (!socket?.trim()) {
     if (!customTmpdir || uid === undefined) return [];
@@ -38,10 +44,10 @@ export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined =
     }
   }
   if (!customTmpdir && uid !== undefined) {
-    const standardDirs = [path.join("/tmp", `tmux-${uid}`), path.join(realpath("/tmp"), `tmux-${uid}`)];
-    const socketDirs = [path.dirname(socket), realpath(path.dirname(socket))];
+    const standardDirs = [socketPaths.join("/tmp", `tmux-${uid}`), socketPaths.join(realpath("/tmp"), `tmux-${uid}`)];
+    const socketDirs = [socketPaths.dirname(socket), realpath(socketPaths.dirname(socket))];
     if (socketDirs.some((dir) => standardDirs.includes(dir))) {
-      const name = path.basename(socket);
+      const name = socketPaths.basename(socket);
       return name === "default" ? [] : ["-L", name];
     }
   }
@@ -50,11 +56,19 @@ export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined =
 
 let daemonServerArgs: string[] = [];
 let daemonServerSelection: TmuxServerSelection | undefined;
+let daemonAttachCommand: readonly string[] = ["tmux"];
 
 /** Recorded once at daemon startup, before reconciliation or launch. */
 export function setDaemonTmuxServer(args: readonly string[], selection?: TmuxServerSelection): void {
   daemonServerArgs = [...args];
   daemonServerSelection = selection;
+  daemonAttachCommand = ["tmux"];
+}
+
+/** Pin generated recovery guidance to the daemon's resolved executable. */
+export function setDaemonTmuxAttachCommand(command: readonly string[]): void {
+  if (!command[0] || command.some(word => word.includes("\0"))) throw new Error("Invalid attach command argv");
+  daemonAttachCommand = [...command];
 }
 
 /** Effective startup choice, including a deferred change while old seats survive. */
@@ -81,16 +95,23 @@ export function daemonTmuxControlStatus(): { requested: boolean } & TmuxControlS
   return { requested: true, ...(daemonControl.status?.() ?? { state: "off" }) };
 }
 
+/** Structured executable and prefix arguments; never a shell command. */
+export function daemonTmuxAttachCommand(): string[] {
+  return [...daemonAttachCommand];
+}
+
 function shellWord(value: string, force = false): string {
-  return !force && /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\"'\"'") + "'";
+  if (!force && /^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
+  // Native recovery guidance is entered in PowerShell; its single-quote
+  // escaping differs from POSIX shells even though ordinary quoted paths match.
+  return "'" + value.replace(/'/g, process.platform === "win32" ? "''" : "'\"'\"'") + "'";
 }
 
 /** `tmux`, with the daemon's server flags when it isn't on the default server. */
-export function tmuxOnDaemonServer(): string {
-  // A server name or socket path with `=` is quoted, as tmuxAttachCommand quotes a session word: zsh reads a word that
-  // starts with `=` as a command lookup.
+export function tmuxOnDaemonServer(command: readonly string[] = daemonAttachCommand): string {
   const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg, arg.includes("=")))).join(" ");
-  return `tmux${server ? ` ${server}` : ""}`;
+  const executable = command.map(value => shellWord(value)).join(" ");
+  return `${process.platform === "win32" && (command.length !== 1 || command[0] !== "tmux") ? "& " : ""}${executable}${server ? ` ${server}` : ""}`;
 }
 
 /** A session name as tmux must receive it.
@@ -111,23 +132,37 @@ export function tmuxOnDaemonServer(): string {
  *  `cmd_find_get_session` reads it as a session id before the exact-match flag is consulted. */
 function tmuxSessionWord(session: string): string {
   const markedTarget = session === "~" || session === "{marked}";
-  let word = /^[=@%]/.test(session) || markedTarget ? `=${session}` : session;
-  if (word.endsWith(";")) word = `${word.slice(0, -1)}\\;`;
-  return word;
+  const word = /^[=@%]/.test(session) || markedTarget ? `=${session}` : session;
+  return escapeFinalSeparator(word);
 }
 
-/** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server.
- *
- *  The session is encoded for tmux first and then quoted like any other shell word: callers type
- *  this line into a fresh terminal (the CMUX panes) or hand it to a person to run, and a session
- *  name is not guaranteed to be shell-safe — an adopted session's name comes from outside
- *  OpenRig. `shellWord` leaves the ordinary `name@rig` form byte-identical. `=` is the one
- *  character it cannot leave bare: zsh expands a word beginning with `=` to the path of that
- *  command, and with MAGIC_EQUAL_SUBST it can expand one inside a `name=value` word, so any
- *  session word carrying `=` is forced into quotes. A shell passes those quotes through. */
-export function tmuxAttachCommand(session: string): string {
-  const word = tmuxSessionWord(session);
-  return `${tmuxOnDaemonServer()} attach -t ${shellWord(word, word.includes("="))}`;
+/** One backslash before a final `;`, which tmux would otherwise read as a command separator. */
+function escapeFinalSeparator(word: string): string {
+  return word.endsWith(";") ? `${word.slice(0, -1)}\\;` : word;
+}
+
+/** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. */
+export function tmuxAttachCommand(session: string, command: readonly string[] = daemonAttachCommand): string {
+  if (!command[0] || [...command, ...daemonServerArgs, session].some(value => value.includes("\0"))) throw new Error("Invalid attach command argv");
+  if (process.platform !== "win32") {
+    const word = tmuxSessionWord(session);
+    return `${tmuxOnDaemonServer(command)} attach -t ${shellWord(word, word.includes("="))}`;
+  }
+  if (process.platform === "win32" && bindNativeSessionName(session).marker) {
+    const argv = windowsTileAttachArgv(command[0], [...command.slice(1), ...daemonServerArgs], session, false);
+    return "& " + argv.map(powershellQuote).join(" ");
+  }
+  // This API receives a session name, not a tmux target expression. A stale
+  // hint must not fall back to a surviving session with the same prefix. The
+  // native path still goes through tmux's own parser, so it takes the same
+  // trailing-separator escape the POSIX word does.
+  const target = escapeFinalSeparator("=" + session);
+  const argv = [...command, ...daemonServerArgs, "attach", "-t", target];
+  // PowerShell 5's native call operator alters embedded quotes and drops empty
+  // words even after shell parsing preserved them. Use the established native
+  // argv bridge for those values; ordinary recovery hints stay readable.
+  if (process.platform === "win32" && argv.some(value => value === "" || value.includes('"'))) return nativeViewerCommand(argv, "powershell.exe");
+  return `${tmuxOnDaemonServer(command)} attach -t ${shellWord(target)}`;
 }
 
 /** `tmux set-window-option -t <window> -u window-size` on the daemon's server, for one window by its id (`@N`): drops

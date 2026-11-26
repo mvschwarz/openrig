@@ -1,8 +1,16 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { resolveHerdrSocketPath } from "../src/domain/terminal/herdr-transport.js";
+import { resolveHerdrSocketPath as resolveSocket } from "../src/domain/terminal/herdr-transport.js";
+// The existing HOME/.config matrix specifies POSIX; Windows uses Roaming AppData.
+const resolveHerdrSocketPath = (env: NodeJS.ProcessEnv, selected?: string) => resolveSocket(env, selected, "linux");
 
 describe("Herdr endpoint resolution", () => {
+  it("uses native Roaming AppData and case-insensitive overrides on Windows", () => {
+    const roaming = path.resolve("owned-roaming");
+    expect(resolveSocket({ AppData: roaming, Home: "ignored", herdr_session: "named" }, undefined, "win32"))
+      .toBe(path.join(roaming, "herdr", "sessions", "named", "herdr.sock"));
+    expect(resolveSocket({ herdr_socket_path: "owned-override", HERDR_SESSION: "named" }, "named", "win32")).toBe("owned-override");
+  });
   const home = path.resolve("daemon-home");
   const config = path.resolve("custom-config");
   const socket = path.resolve("private-socket", "herdr.sock");

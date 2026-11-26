@@ -62,6 +62,14 @@ describe("evaluateProtection (PL-016 Item 6)", () => {
   });
   afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
+  it.runIf(process.platform === "win32").each([
+    ["AGENT.YAML", "referenced_by_agent_spec"], ["rig.YmL", "referenced_by_rig_spec"],
+  ])("discovers native reference filename %s with the correct source kind", (file, reason) => {
+    writeFileSync(join(specRoot, file), "session_source:\n  mode: agent_image\n  ref:\n    value: owned-image\n");
+    const result = evaluateProtection({ images: [makeImage({ name: "owned-image" })], specRoots: [specRoot] });
+    expect(result[0]).toMatchObject({ protected: true, reasons: [reason], references: [join(specRoot, file)] });
+  });
+
   it("protects pinned images", () => {
     const result = evaluateProtection({
       images: [makeImage({ name: "pinned", pinned: true })],

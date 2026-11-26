@@ -1,11 +1,48 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { localRead } from "../src/local-reading.js";
 
-const home = fs.mkdtempSync(path.join(tmpdir(), "rig-local-reading-"));
+let home: string;
+beforeEach(() => { home = fs.mkdtempSync(path.join(tmpdir(), "rig-local-reading-")); });
 afterEach(() => { vi.unstubAllEnvs(); fs.rmSync(home, { recursive: true, force: true }); });
+
+it("matches a filesystem-root allowlist without doubling its trailing separator", () => {
+  const workspace = path.join(home, "workspace"); fs.mkdirSync(workspace); fs.writeFileSync(path.join(workspace, "SPEC.md"), "owned");
+  const drive = path.parse(fs.realpathSync(home)).root;
+  vi.stubEnv("OPENRIG_HOME", home); vi.stubEnv("OPENRIG_WORKSPACE_ROOT", workspace); vi.stubEnv("OPENRIG_FILES_ALLOWLIST", `drive:${drive}`);
+  const roots = localRead({ op: "roots" }) as any;
+  const canonical = process.platform === "win32" ? fs.realpathSync.native(path.join(workspace, "SPEC.md")) : fs.realpathSync(path.join(workspace, "SPEC.md"));
+  expect(roots.entries[0]).toMatchObject({ root: "drive", path: path.relative(drive, canonical) });
+  expect(roots.entries[0].error).toBeUndefined();
+});
+it.runIf(process.platform === "win32")("uses the actual casing for an allowlist and an internal file alias", () => {
+  const workspace = path.join(home, "Workspace"); fs.mkdirSync(workspace); fs.writeFileSync(path.join(workspace, "SPEC.md"), "owned alias bytes");
+  fs.symlinkSync(path.join(workspace, "SPEC.md"), path.join(workspace, "alias.md"));
+  vi.stubEnv("OPENRIG_HOME", home); vi.stubEnv("OPENRIG_WORKSPACE_ROOT", workspace.toLowerCase());
+  for (const spelling of [workspace.toUpperCase(), path.toNamespacedPath(workspace)]) {
+    vi.stubEnv("OPENRIG_FILES_ALLOWLIST", `workspace:${spelling}`);
+    expect((localRead({ op: "roots" }) as any).entries[0]).toMatchObject({ root: "workspace", path: "SPEC.md" });
+    expect(localRead({ op: "read", root: "workspace", path: "alias.md" })).toMatchObject({ resolvedPath: "SPEC.md", binary: false });
+  }
+});
+it.runIf(process.platform === "win32")("executes the native local reader through a linked parent directory", () => {
+  const workspace = path.join(home, "workspace"); fs.mkdirSync(workspace); fs.writeFileSync(path.join(workspace, "SPEC.md"), "owned");
+  const link = path.join(home, "reader parent");
+  fs.symlinkSync(fileURLToPath(new URL("../src", import.meta.url)), link, "junction");
+  try {
+    const loader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+    const output = execFileSync(process.execPath, ["--import", loader, path.join(link, "local-reading.ts"), JSON.stringify({ op: "roots" })], {
+      env: { ...process.env, OPENRIG_HOME: home, OPENRIG_WORKSPACE_ROOT: workspace, OPENRIG_FILES_ALLOWLIST: `workspace:${workspace}` },
+      encoding: "utf8", windowsHide: true, timeout: 10000,
+    });
+    expect(JSON.parse(output).entries[0]).toMatchObject({ root: "workspace", path: "SPEC.md" });
+  } finally { fs.unlinkSync(link); }
+});
 
 it("reads configured local sources with the HTTP reader's containment, binary and truncation contract", () => {
   const workspace = path.join(home, "workspace");

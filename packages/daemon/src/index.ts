@@ -3,9 +3,9 @@ import { makeKernelHookReviewReader } from "./domain/kernel-hook-review.js";
 import { serve, type ServerType } from "@hono/node-server";
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { endProbeGroupsOnStartupSignal, stopRuntimeProbes } from "./adapters/bounded-probe-exec.js";
-import { closeHttpServer, createDaemonShutdown, DAEMON_LISTEN_FAILED_EXIT_CODE, DAEMON_SHUTDOWN_RECEIPT, occupiedPortGuidance, trackHttpServerResponses } from "./daemon-shutdown.js";
+import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses, startWindowsDaemonControl, DAEMON_LISTEN_FAILED_EXIT_CODE, occupiedPortGuidance } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
@@ -392,6 +392,9 @@ export async function startServer(port?: number) {
     bindPlan,
   });
 
+  let lifecycleReady = process.platform !== "win32";
+  deps.startupReady = () => lifecycleReady;
+
   // Multi-bind via N serve() instances sharing the same Hono app.
   // Hono's serve() targets a single host:port; for multi-bind we spawn
   // one per host. The contextMonitor + watchdog scheduler only start
@@ -487,6 +490,7 @@ export async function startServer(port?: number) {
   // exit so any in-flight policy evaluation completes (or is awaited).
   // Multi-bind: close every serve() instance in parallel.
   deps.healthDiagnosis?.start();
+  let closeWindowsControl: (() => Promise<void>) | undefined;
   const shutdown = createDaemonShutdown({
     receiptPath: path.join(OPENRIG_HOME, DAEMON_SHUTDOWN_RECEIPT),
     phases: [
@@ -497,6 +501,7 @@ export async function startServer(port?: number) {
       ["wake-recovery", () => wakeRecovery.stop()],
       ["terminal-following", () => deps.terminalService?.stop()],
       ["rex-status", () => deps.rexStatusRelay?.stop()],
+      ["windows-control", () => closeWindowsControl?.()],
       ["timers", () => {
         deps.resumeMetadataRefresher?.stop();
         if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -535,6 +540,8 @@ export async function startServer(port?: number) {
   disarmStartupSignals();
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  if (process.platform === "win32") closeWindowsControl = await startWindowsDaemonControl(OPENRIG_HOME, requestId => shutdown("Windows control", requestId));
+  lifecycleReady = true;
 
   // Backward-compatible single-server return (callers that just need a
   // handle reference; multi-bind shutdown is wired via signal handlers).
@@ -542,12 +549,16 @@ export async function startServer(port?: number) {
 }
 
 // Only start the server when this file is executed directly (not imported).
-// pathToFileURL normalizes argv[1] (backslash paths on Windows) into the same
-// shape as import.meta.url — a plain `file://${argv[1]}` never matches on win32,
-// which made the daemon exit silently with code 0.
-const isDirectRun =
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
+// Node resolves junctions before loading ESM; argv retains the launch spelling.
+const isDirectRun = (() => {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return process.platform === "win32"
+      ? fs.realpathSync.native(fileURLToPath(import.meta.url)) === fs.realpathSync.native(entry)
+      : import.meta.url === pathToFileURL(entry).href;
+  } catch { return false; }
+})();
 
 if (isDirectRun) {
   // Before anything spawns: the tmux server this daemon starts passes its

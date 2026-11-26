@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { createServer } from "node:http";
 import { execFileSync, fork, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { writeWindowsNodeFixture } from "../../../scripts/windows-node-fixture.mjs";
 import { Worker } from "node:worker_threads";
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
 import { resolveNodeConfigAsync, withNodeConfigResolver } from "../src/domain/profile-resolution-worker.js";
 import { preflightValidatedSpec } from "../src/domain/rigspec-preflight.js";
@@ -97,6 +99,100 @@ const MALFORMED = {
   delimiters: ["no frontmatter\n", "no YAML frontmatter delimited by --- lines"],
 } as const;
 
+describe.skipIf(process.platform !== "win32")("native blocked profile catalog", () => {
+  it("returns a resolver exception before starting any native scan helper", async () => {
+    const ctx = fixture(), root = ctx.homedir!;
+    const gate = { armed: join(root, "armed"), started: join(root, "started"), released: join(root, "released") };
+    const { catalog, bin } = catalogWithGitLog(root, gate);
+    const oldPath = process.env.PATH;
+    try {
+      process.env.PATH = bin + delimiter + oldPath;
+      writeFileSync(gate.armed, "");
+      ctx.baseSpec.spec = null as unknown as ResolutionContext["baseSpec"]["spec"];
+      await expect(resolveNodeConfigAsync({ ...ctx, skillsRoot: catalog })).rejects.toThrow(/profiles/);
+      expect(existsSync(gate.started)).toBe(false);
+    } finally { process.env.PATH = oldPath; }
+  });
+
+  it.each(["preflight", "instantiate", "materialized", "retry"])("serves health while %s waits inside an actual worker Git call", async mode => {
+    const ctx = fixture(), root = ctx.homedir!;
+    const gate = { armed: join(root, "armed"), started: join(root, "started"), released: join(root, "released") };
+    const { catalog, bin } = catalogWithGitLog(root, gate);
+    ctx.baseSpec.spec.profiles.default!.uses.skills = ["managed"];
+    mkdirSync(join(root, "agent"));
+    writeFileSync(join(root, "agent/agent.yaml"), "name: worker\nversion: '1.0.0'\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: [managed]\n");
+    const yaml = RigSpecCodec.serialize(ctx.rig);
+    const db = createFullTestDb(), tmux = mockTmuxAdapter();
+    let projectionBlocked = mode === "retry";
+    const adapter: RuntimeAdapter = { runtime: "codex",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: projectionBlocked ? [{ effectiveId: "managed", error: "owned fixture failure" }] : [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })), launchHarness: vi.fn(async () => ({ ok: true })),
+    };
+    const f = createTestApp(db, { tmux, adapters: { codex: adapter }, skillsRootResolver: () => catalog,
+      podInstantiatorFsOps: { exists: existsSync, readFile: file => readFileSync(file, "utf8") } });
+    const server = createServer((_req, response) => response.end("healthy"));
+    const oldPath = process.env.PATH;
+    let operation: Promise<unknown> | undefined;
+    try {
+      let rigId = "", nodeId = "";
+      if (mode === "materialized" || mode === "retry") {
+        const materialized = await f.podInstantiator.materialize(yaml, root);
+        expect(materialized.ok, JSON.stringify(materialized)).toBe(true);
+        if (!materialized.ok) throw Error("Native fixture did not materialize");
+        rigId = materialized.result.rigId;
+        nodeId = f.rigRepo.getRig(rigId)!.nodes[0]!.id;
+      }
+      if (mode === "retry") {
+        expect(await f.podInstantiator.launchMaterialized(yaml, root, rigId)).toMatchObject({ ok: true, result: { nodes: [{ status: "failed" }] } });
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const lifecycle = new SeatLifecycleService({ ...f, db, tmuxAdapter: tmux });
+        expect((await lifecycle.cleanSeat({ seatRef: "dev-worker@test", reason: "Owned fixture shell has exited" })).ok).toBe(true);
+        projectionBlocked = false;
+      }
+      server.listen(0, "127.0.0.1"); await once(server, "listening");
+      process.env.PATH = bin + delimiter + oldPath;
+      let completed = false;
+      const arm = () => { writeFileSync(gate.armed, ""); };
+      operation = (async () => {
+        if (mode === "preflight") {
+          arm();
+          return preflightValidatedSpec(ctx.rig, { rigRoot: root, skillsRoot: catalog,
+            fsOps: { exists: existsSync, readFile: file => readFileSync(file, "utf8") } });
+        }
+        if (mode === "instantiate") return f.podInstantiator.instantiate(yaml, root, { prelaunchHook: async () => { arm(); return { ok: true }; } });
+        arm();
+        if (mode === "materialized") return f.podInstantiator.launchMaterialized(yaml, root, rigId);
+        return f.podInstantiator.retryFirstStart(rigId, nodeId, {
+          id: "worker", agent_ref: "local:agent", profile: "default", runtime: "codex", cwd: root,
+        }, root);
+      })().then(result => { completed = true; return result; });
+      await expect.poll(() => existsSync(gate.started), { timeout: 4000, interval: 10 }).toBe(true);
+      const blocked = JSON.parse(readFileSync(gate.started, "utf8"));
+      expect(blocked.args).toContain("rev-parse");
+      expect(() => process.kill(blocked.pid, 0)).not.toThrow();
+      const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      allowFetchTarget(origin);
+      const response = await fetch(`${origin}/healthz`);
+      expect(await response.text()).toBe("healthy");
+      expect(completed).toBe(false);
+      expect(existsSync(gate.released)).toBe(false);
+      writeFileSync(gate.released, "");
+      const result = await operation;
+      expect(result).toMatchObject(mode === "preflight" ? { ready: true } : { ok: true });
+      await expect.poll(() => { try { process.kill(blocked.pid, 0); return true; } catch { return false; } }, { timeout: 2000 }).toBe(false);
+    } finally {
+      writeFileSync(gate.released, "");
+      await operation?.catch(() => undefined);
+      process.env.PATH = oldPath;
+      server.closeAllConnections();
+      await new Promise<void>(done => server.close(() => done()));
+      db.close();
+    }
+  }, 20000);
+});
+
 function writeAt(dir: string, content: string): string {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "SKILL.md"), content);
@@ -108,7 +204,7 @@ function gitIn(cwd: string, ...args: string[]): void {
 }
 
 /** A committed managed catalog, plus a git on PATH that logs each call the preflight worker makes. */
-function catalogWithGitLog(root: string): { catalog: string; log: string; bin: string } {
+function catalogWithGitLog(root: string, gate?: { armed: string; started: string; released: string }): { catalog: string; log: string; bin: string } {
   const catalog = join(root, "catalog");
   mkdirSync(catalog, { recursive: true });
   gitIn(catalog, "init", "-q");
@@ -118,13 +214,27 @@ function catalogWithGitLog(root: string): { catalog: string; log: string; bin: s
   writeAt(join(catalog, "managed"), "---\nname: managed\ndescription: Managed skill\n---\nBody\n");
   gitIn(catalog, "add", ".");
   gitIn(catalog, "commit", "-qm", "fixture");
-  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const realGit = process.platform === "win32"
+    ? execFileSync("where.exe", ["git.exe"], { encoding: "utf8" }).trim().split(/\r?\n/)[0]!
+    : execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
   const bin = join(root, "bin");
   const log = join(root, "git.log");
   mkdirSync(bin);
   writeFileSync(log, "");
   writeFileSync(join(bin, "git"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexec '${realGit}' "$@"\n`);
   chmodSync(join(bin, "git"), 0o755);
+  if (process.platform === "win32") {
+    writeWindowsNodeFixture(bin, "git", `import fs from 'node:fs';import {spawnSync} from 'node:child_process';
+const args=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(log)},args.join(' ')+'\\n');
+const gate=${JSON.stringify(gate ?? null)};
+if(gate&&fs.existsSync(gate.armed)){
+  fs.writeFileSync(gate.started,JSON.stringify({pid:process.pid,args}));
+  const until=Date.now()+5000;
+  while(!fs.existsSync(gate.released)&&Date.now()<until)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);
+  if(!fs.existsSync(gate.released)){console.error('native scan gate deadline');process.exit(2);}
+}
+const r=spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit',windowsHide:true});if(r.error)throw r.error;process.exitCode=r.status??1;`);
+  }
   return { catalog, log, bin };
 }
 
@@ -144,7 +254,7 @@ describe("profile resolution outside the daemon request thread", () => {
     });
   });
 
-  it("serves a health request while a fallback skill scan is held open", async () => {
+  it.skipIf(process.platform === "win32")("serves a health request while a fallback skill scan is held open", async () => {
     const ctx = fixture();
     // The FIFO holds a real fallback scan until health responds, independent of disk speed.
     // A separate process releases it on timeout too, so a synchronous regression fails
@@ -188,7 +298,7 @@ describe("profile resolution outside the daemon request thread", () => {
     }
   });
 
-  it.each(["instantiate", "materialized", "retry"])("serves health while %s resolves a member after preflight", async mode => {
+  it.skipIf(process.platform === "win32").each(["instantiate", "materialized", "retry"])("serves health while %s resolves a member after preflight", async mode => {
     const ctx = fixture();
     const root = ctx.homedir!;
     skill(ctx, "different-folder", "wanted");
@@ -387,11 +497,14 @@ describe("profile resolution outside the daemon request thread", () => {
     }
   });
 
-  it.each(["deleted", "deleted-cached"])("preserves fresh reads across repeated resolutions with a %s cwd", mode => {
+  it.for(["deleted", "deleted-cached", "relocated", "relocated-cached"])("preserves fresh reads across repeated resolutions with a %s cwd", (mode, context) => {
+    // Windows locks a process's current directory. Keep the POSIX deletion
+    // cases and test the supported move-then-remove lifecycle separately.
+    if ((process.platform === "win32") !== mode.startsWith("relocated")) context.skip();
     const ctx = fixture();
     skill(ctx, "different-folder", "wanted");
     writeFileSync(join(ctx.homedir!, "context.json"), JSON.stringify(ctx));
-    const child = spawnSync(process.execPath, ["--import", createRequire(import.meta.url).resolve("tsx"),
+    const child = spawnSync(process.execPath, ["--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href,
       fileURLToPath(new URL("./fixtures/profile-worker-deleted-cwd.ts", import.meta.url)), ctx.homedir!, mode],
     { cwd: ctx.homedir!, encoding: "utf8", timeout: 10_000, env: { ...process.env } });
     expect(child.error).toBeUndefined();
@@ -402,7 +515,7 @@ describe("profile resolution outside the daemon request thread", () => {
     expect(result.next.errors.some((error: string) => error.includes("wanted"))).toBe(true);
   });
 
-  it("bounds the helper even when resolution fails before opening the FIFO", async () => {
+  it.skipIf(process.platform === "win32")("bounds the helper even when resolution fails before opening the FIFO", async () => {
     const ctx = fixture();
     const { writer, writerExited } = startScanGate(ctx.homedir!, 200);
     ctx.baseSpec.spec = null as unknown as ResolutionContext["baseSpec"]["spec"];
@@ -464,7 +577,7 @@ describe("profile resolution outside the daemon request thread", () => {
     const catalogScans = () => readFileSync(log, "utf8").split("\n")
       .filter(line => line === `-C ${catalog} rev-parse --show-toplevel`).length;
     const path = process.env.PATH;
-    process.env.PATH = `${bin}:${path}`;
+    process.env.PATH = `${bin}${delimiter}${path}`;
     try {
       const first = await preflight();
       expect(reads).toBe(6);

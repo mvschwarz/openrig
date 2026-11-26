@@ -12,6 +12,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { authCommand } from "../src/commands/auth.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
+import { createPrivateTextFile } from "../src/lib/private-text-file.js";
+import { resolveCodexCommand } from "../../daemon/src/domain/windows-provider-command.js";
 import { resolveCodexHome, authSave, authSwitch, copyOntoFresh } from "../src/lib/codex-auth.js";
 
 // Distinctive, grep-proof: if this string ever lands in command output, the secret boundary broke.
@@ -27,7 +30,7 @@ beforeEach(() => {
 
   // Active auth file with the sentinel token (0600).
   const active = path.join(home, "auth.json");
-  fs.writeFileSync(active, JSON.stringify({ OPENAI_API_KEY: SENTINEL, tokens: { access_token: SENTINEL } }), { mode: 0o600 });
+  createPrivateTextFile(active, JSON.stringify({ OPENAI_API_KEY: SENTINEL, tokens: { access_token: SENTINEL } }));
   fs.chmodSync(active, 0o600);
 
   // Saved-profile dir (0700) with a VALID profile and a MALFORMED profile — both carry the sentinel.
@@ -35,11 +38,11 @@ beforeEach(() => {
   fs.mkdirSync(profileDir, { mode: 0o700 });
   fs.chmodSync(profileDir, 0o700);
   const work = path.join(profileDir, "work.json");
-  fs.writeFileSync(work, JSON.stringify({ OPENAI_API_KEY: SENTINEL }), { mode: 0o600 });
+  createPrivateTextFile(work, JSON.stringify({ OPENAI_API_KEY: SENTINEL }));
   fs.chmodSync(work, 0o600);
   const broken = path.join(profileDir, "broken.json");
   // Invalid JSON that still contains the sentinel — exercises the parse-error path (must not echo content).
-  fs.writeFileSync(broken, `{ "OPENAI_API_KEY": "${SENTINEL}", this is not json`, { mode: 0o600 });
+  createPrivateTextFile(broken, `{ "OPENAI_API_KEY": "${SENTINEL}", this is not json`);
   fs.chmodSync(broken, 0o600);
 
   // Fake `codex` on PATH that emits the sentinel on stdout AND stderr, non-zero exit.
@@ -48,8 +51,15 @@ beforeEach(() => {
   const shim = path.join(binDir, "codex");
   fs.writeFileSync(shim, `#!/bin/sh\necho "${SENTINEL}"\necho "${SENTINEL}" 1>&2\nexit 3\n`, { mode: 0o755 });
   fs.chmodSync(shim, 0o755);
+  if (process.platform === "win32") {
+    const pkg = path.join(binDir, "node_modules", "@openai", "codex");
+    fs.mkdirSync(path.join(pkg, "bin"), { recursive: true });
+    fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@openai/codex", bin: { codex: "bin/codex.js" } }));
+    fs.writeFileSync(path.join(binDir, "codex.cmd"), '@echo off\r\n"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js"\r\n');
+    fs.writeFileSync(path.join(pkg, "bin", "codex.js"), `console.log(${JSON.stringify(SENTINEL)});console.error(${JSON.stringify(SENTINEL)});process.exit(3);`);
+  }
   origPath = process.env.PATH;
-  process.env.PATH = `${binDir}:${origPath ?? ""}`;
+  process.env.PATH = `${binDir}${path.delimiter}${origPath ?? ""}`;
 });
 
 afterEach(() => {
@@ -89,7 +99,8 @@ describe("rig auth LEAK-HUNT keystone (OPR.0.4.1.29)", () => {
     expect(fs.readFileSync(path.join(home, "auth-profiles", "work.json"), "utf8")).toContain(SENTINEL);
     expect(fs.readFileSync(path.join(home, "auth-profiles", "broken.json"), "utf8")).toContain(SENTINEL);
     // The shim leaks on BOTH streams when captured — proving stdio:"ignore" is what protects us.
-    const probe = spawnSync("codex", ["login", "status"], { encoding: "utf8" });
+    const launch = resolveCodexCommand(process.env);
+    const probe = spawnSync(launch.command, [...launch.prefix, "login", "status"], { encoding: "utf8", windowsHide: true });
     expect(`${probe.stdout}${probe.stderr}`).toContain(SENTINEL);
   });
 
@@ -173,7 +184,7 @@ describe("rig auth LEAK-HUNT — hardlink + symlinked-parent escapes (rev1-r2)",
     fs.rmSync(p.profileDir, { recursive: true, force: true });
     const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "codexauth-outdir-"));
     expect(outsideDir.startsWith(h + path.sep)).toBe(false); // genuinely outside CODEX_HOME
-    fs.symlinkSync(outsideDir, p.profileDir); // auth-profiles -> /outside/dir
+    fs.symlinkSync(outsideDir, p.profileDir, process.platform === "win32" ? "junction" : "dir");
     expect(authSave(p, "work")).toEqual({ ok: false, reason: "unsafe_path" });
     const leaked = fs.readdirSync(outsideDir).some((f) => {
       try {
@@ -232,13 +243,14 @@ describe("rig auth LEAK-HUNT — fd-first check-then-use / crash-safety (OPR.0.4
   it("refuses when the opened fd's dev/ino no longer matches the caller's earlier lstat (inode swapped in the window)", () => {
     const src = path.join(root, "src.json");
     fs.writeFileSync(src, JSON.stringify({ k: SENTINEL }), { mode: 0o600 });
-    const before = fs.lstatSync(src);
+    const before = process.platform === "win32" ? fs.lstatSync(src, { bigint: true }) : fs.lstatSync(src);
     // Simulate a swap in the check-then-use window: same path, a different inode now. Move the
     // original aside rather than deleting it: while it stays allocated the imposter cannot be
     // handed the same inode number (ext4 recycles a freed inode number immediately).
     fs.renameSync(src, path.join(root, "displaced.json"));
     fs.writeFileSync(src, JSON.stringify({ k: "IMPOSTER" }), { mode: 0o600 });
-    expect(fs.lstatSync(src).ino).not.toBe(before.ino); // the swap really happened
+    const after = process.platform === "win32" ? fs.lstatSync(src, { bigint: true }) : fs.lstatSync(src);
+    expect(after.ino).not.toBe(before.ino); // the swap really happened
     const dest = path.join(root, "dest.json");
     expect(copyOntoFresh(src, dest, { dev: before.dev, ino: before.ino })).toBe(false);
     expect(fs.existsSync(dest)).toBe(false);
@@ -249,8 +261,9 @@ describe("rig auth LEAK-HUNT — fd-first check-then-use / crash-safety (OPR.0.4
     const body = JSON.stringify({ k: SENTINEL });
     fs.writeFileSync(src, body, { mode: 0o600 });
     const dest = path.join(root, "dest.json");
-    expect(copyOntoFresh(src, dest, { dev: fs.lstatSync(src).dev, ino: fs.lstatSync(src).ino })).toBe(true);
-    expect(fs.lstatSync(dest).mode & 0o777).toBe(0o600); // 0600, set at open — no create-then-chmod window
+    const identity = process.platform === "win32" ? fs.lstatSync(src, { bigint: true }) : fs.lstatSync(src);
+    expect(copyOntoFresh(src, dest, { dev: identity.dev, ino: identity.ino })).toBe(true);
+    expectPrivateFile(dest);
     expect(fs.readFileSync(dest, "utf8")).toBe(body); // fd read+write reproduces the bytes exactly
     expect(orphans(root, "dest.json")).toEqual([]);
   });
@@ -308,14 +321,14 @@ describe("rig auth LEAK-HUNT — fd-first check-then-use / crash-safety (OPR.0.4
     const dest = path.join(root, "dest.json");
     expect(copyOntoFresh(a, dest)).toBe(true);
     expect(copyOntoFresh(b, dest)).toBe(true); // second atomic publish over the first
-    expect(fs.lstatSync(dest).mode & 0o777).toBe(0o600);
+    expectPrivateFile(dest);
     expect(fs.readFileSync(dest, "utf8")).toBe(JSON.stringify({ v: "BBB" })); // full, not a partial
     expect(orphans(root, "dest.json")).toEqual([]);
   });
 
   it("end-to-end save + switch through the public API leave no secret-bearing orphan temp in the auth home", () => {
     const p = resolveCodexHome({ CODEX_HOME: root });
-    fs.writeFileSync(p.activeAuth, JSON.stringify({ OPENAI_API_KEY: SENTINEL }), { mode: 0o600 });
+    createPrivateTextFile(p.activeAuth, JSON.stringify({ OPENAI_API_KEY: SENTINEL }));
     fs.chmodSync(p.activeAuth, 0o600);
     fs.mkdirSync(p.profileDir, { recursive: true });
     fs.chmodSync(p.profileDir, 0o700);
@@ -327,7 +340,7 @@ describe("rig auth LEAK-HUNT — fd-first check-then-use / crash-safety (OPR.0.4
     expect(scan(root)).toEqual([]);
     expect(scan(p.profileDir)).toEqual([]);
     // The published files are 0600 and carry the secret only inside the boundary.
-    expect(fs.lstatSync(p.activeAuth).mode & 0o777).toBe(0o600);
-    expect(fs.lstatSync(path.join(p.profileDir, "work.json")).mode & 0o777).toBe(0o600);
+    expectPrivateFile(p.activeAuth);
+    expectPrivateFile(path.join(p.profileDir, "work.json"));
   });
 });

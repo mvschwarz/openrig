@@ -3,7 +3,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { resolveCodexHome, authStatus, authValidate } from "../src/lib/codex-auth.js";
+import { createPrivateTextFile } from "../../daemon/src/domain/private-text-file.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
 
 const SENTINEL = "SENTINEL_TOKEN_MUST_NEVER_APPEAR_sk-abc123";
 let home: string;
@@ -16,8 +19,23 @@ beforeEach(() => {
 afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
 
 function writeAuth(content: string, mode = 0o600) {
-  fs.writeFileSync(paths.activeAuth, content, { mode });
-  fs.chmodSync(paths.activeAuth, mode);
+  writeFixture(paths.activeAuth, content, mode);
+}
+
+function writeFixture(file: string, content: string, mode = 0o600) {
+  if (process.platform !== "win32") {
+    fs.writeFileSync(file, content, { mode });
+    fs.chmodSync(file, mode);
+    return;
+  }
+  createPrivateTextFile(file, content);
+  expectPrivateFile(file);
+  if (mode === 0o600) return;
+  // Deliberately unsafe synthetic file: test a real extra read grant, not chmod bits.
+  // Change only the DACL: Set-Acl may attempt privileged security-descriptor
+  // sections even though this fixture needs only a public read ACE.
+  execFileSync(path.join(process.env.SystemRoot!, "System32", "icacls.exe"), [file, "/grant", "*S-1-1-0:(R)"],
+    { windowsHide: true, stdio: "pipe", timeout: 5000, env: { SystemRoot: process.env.SystemRoot } });
 }
 
 describe("authStatus (OPR.0.4.1.29 — presence/mode/login-state, NEVER secrets)", () => {
@@ -34,7 +52,7 @@ describe("authStatus (OPR.0.4.1.29 — presence/mode/login-state, NEVER secrets)
   it("flags an unsafe (world-readable) active-auth mode without reading contents", () => {
     writeAuth(JSON.stringify({ OPENAI_API_KEY: SENTINEL }), 0o644);
     const r = authStatus(paths, { loginStatus: () => "unavailable" });
-    expect(r.activeAuthMode).toBe("644");
+    expect(r.activeAuthMode).toBe(process.platform === "win32" ? "unsafe" : "644");
     expect(r.activeAuthModeSafe).toBe(false);
     expect(JSON.stringify(r)).not.toContain(SENTINEL);
   });
@@ -45,8 +63,7 @@ describe("authValidate (OPR.0.4.1.29 — mode + parseability, never echo content
     fs.mkdirSync(paths.profileDir, { recursive: true });
     fs.chmodSync(paths.profileDir, 0o700);
     const p = path.join(paths.profileDir, `${name}.json`);
-    fs.writeFileSync(p, content, { mode });
-    fs.chmodSync(p, mode);
+    writeFixture(p, content, mode);
     return p;
   }
 

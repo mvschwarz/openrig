@@ -2,7 +2,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { spawnSync } = require("node:child_process");
+const { spawnRig } = require("./rig-command.cjs");
 
 // One issue per failure episode, after three unsuccessful attempts. Retrying an
 // uncertain stream write uses the same id; a successful delivery starts afresh.
@@ -23,7 +23,7 @@ function recordRefocusResult({ home, seat, identity, failed, deadlineMs = 4_500,
     // Persist the id before contacting the daemon, including timeout/unknown outcomes.
     fs.writeFileSync(file, JSON.stringify(state), { mode: 0o600 });
     if (state.failures < 3 || state.reportedAt) return;
-    const result = spawnSync("rig", [
+    const result = spawnRig([
       "stream", "emit", "--source", seat, "--id", state.issueId,
       "--hint-type", "issue", "--hint-tags", "issue,refocus",
       "--body", `Refocus failed on ${state.failures} consecutive attempts for ${seat}. Orientation remains unverified; inspect this seat's refocus hook diagnostics.`,

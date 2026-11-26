@@ -957,7 +957,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `advisor` | string | no | — | Claude-only Advisor model for this seat. Overrides the AgentSpec profile/default; blank or non-string values are ignored with an advisory. |
 | `claude_mcp` | `none` | no | normal loading | Claude members only. Disable MCP server loading for this agent on every launch and resume. Omit the field to keep Claude's normal configuration; see [Claude MCP loading](#claude-mcp-loading-runtime-claude-code). |
 | `launch_wrapper` | string[] | no | — | Local `pi`, `codex`, `claude-code` and community-harness members; runner presets must declare wrapper support. Literal argument prefix applied to the native executable and its arguments on fresh launch, relaunch, rebuild, resume, fork, restore and handover; `[]` explicitly clears a stored wrapper when re-applying an authored spec, while omitting the key leaves an existing seat's stored choice unchanged. See [Launch wrapper](#launch-wrapper-runtime-pi-and-codex). |
-| `process_limits` | map | no | — | Linux/systemd hosts only, opt-in for this seat, each key on its own. `{ tasks_max: N }` (an integer from 1 to 4194304) and `{ memory_max: <size> }` (an integer number of bytes, or `<n>K`, `M`, `G` or `T`, base 1024; a whole number of MiB up to 2^53 − 2^20 bytes) put the seat's own processes in a systemd user scope of their own with `TasksMax=N` and `MemoryMax=<bytes>`; both keys together share that one scope. The other seats, the daemon and the terminal server stay outside it. Applies to the seat's new launches; a fresh launch the host can't cap is not started, and a recovery goes ahead with a warning. Any other key (a CPU limit) is refused. `{}` clears the stored limits when re-applying an authored spec, a mapping replaces them whole, and omitting the key leaves them unchanged. Valid on terminal members too. See [Process limits](#process-limits-linuxsystemd). |
+| `process_limits` | map | no | — | Opt-in per seat. Linux/systemd supports `tasks_max` and `memory_max`; Windows supports `memory_max` as a Job committed-memory limit, a different measurement from Linux cgroup memory. Windows `tasks_max` is unsupported because Job process counts do not count threads. A fresh launch that cannot enforce the request is refused; recovery continues only with a warning or an honest unknown outcome. Other keys are refused. `{}` clears the limits when re-applying a spec, a mapping replaces them whole, and omission leaves them unchanged. See [Process limits](#process-limits-linuxsystemd). |
 | `statusline_throttle` | integer | no | — | Claude members only, opt-in. Runs OpenRig's context collector from the status line at most once every N seconds (1 to 120); `0` clears a stored throttle when re-applying an authored spec, while omitting the key leaves it unchanged. Also settable with `rig seat set-statusline-throttle`. See [Status line throttle](#status-line-throttle-runtime-claude-code). |
 | `pool` | map | no | — | Makes this member the model of a seat pool: `{ max: N, … }`. Stored and validated; it has no runtime effect until the seat pool job is armed. Anything wrong inside the block is an advisory and the block is not used; the spec stays valid. `{}` clears a stored block when re-applying an authored spec, while omitting the key leaves it unchanged. A daemon from 0.7.18 or earlier refuses a spec with this key. See [Seat pool](#seat-pool-pool). |
 | `permission_policy` | string | no | — | Member-level permission policy; overrides the rig's. Not valid on terminal members. |
@@ -1194,6 +1194,12 @@ members:
   `process_limits.memory_max` gets a limit, and only the keys it sets. Without the map, a seat launches exactly as
   before. `tasks_max` and `memory_max` are the only supported keys; any other key, such as a CPU limit, is refused by
   name rather than accepted and ignored.
+- **Windows:** `memory_max` limits the Job's total committed memory, not the RAM and page cache measured by Linux
+  `memory.max`. A guardian holds the Job handle outside the Job until its last member exits. A lost guardian or an
+  unprovable pane/guardian/Job identity reports unknown, never applied. `tasks_max` is unsupported: a Job's active-process
+  limit is not a Linux process-and-thread task limit. If both are requested, the unsupported request refuses a fresh
+  launch as a whole. A process that escapes a Job by an allowed external mechanism is outside its limit; this is not a
+  security boundary.
 - **The boundary:** The seat's pane command starts in a transient `systemd-run --user --scope` of its own, in
   `openrigseats.slice` (beneath its rig's slice there when the rig sets `seat_slice: rig`), with `TasksMax=N` and/or `MemoryMax=<bytes>` as its only limits (one scope for both). The
   seat's processes leave the terminal server's scope:
@@ -1216,7 +1222,8 @@ members:
   --fresh`, and a relaunch without a snapshot; a first start through the restore path, such as a never-occupied seat's
   start or auto-rehydrate, is a recovery, below) says it couldn't apply the limit instead of starting the seat without
   it, with one of four codes:
-  - `process_limits_unsupported` for a positive inability of the host: not Linux, `systemd-run` or `systemctl` not on
+  - `process_limits_unsupported` for a positive inability of the host: neither a supported Linux scope nor Windows Job,
+    Windows `tasks_max`, `systemd-run` or `systemctl` not on
     the daemon's `PATH`, a systemd too old for seat scopes (it needs 236 or later), no user manager running for the
     user (no socket to reach it), or a throwaway scope with no cgroup v2 path, no `pids.max`, or a `pids.max` that is
     not the value (the pids controller is not delegated), no `memory.max`, or a `memory.max` that is not the value (the

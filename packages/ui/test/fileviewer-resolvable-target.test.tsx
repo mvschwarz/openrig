@@ -83,6 +83,23 @@ function fixtureReview(): ComposedSliceReview {
 }
 
 describe("FileViewer — resolvable-target honesty (retro-demo fixback)", () => {
+  it.each([
+    ["C:\\work", "C:/work/docs/note.md", "docs/note.md"],
+    ["\\\\host\\share", "\\\\host\\share\\docs\\note.md", "docs/note.md"],
+    ["/work", "/work/literal\\name.md", "literal\\name.md"],
+    ["/work", "/work/..notes/note.md", "..notes/note.md"],
+  ])("reads the exact server path under %s", async (root, absolutePath, relative) => {
+    const reads: string[] = [];
+    vi.stubGlobal("fetch", async (input: string) => {
+      const url = new URL(String(input), "http://fixture");
+      if (url.pathname === "/api/files/roots") return Response.json({ roots: [{ name: "ws", path: root }] });
+      if (url.pathname === "/api/files/read") { reads.push(url.searchParams.get("path")!); return Response.json({ content: "exact native body", truncated: false }); }
+      throw Error("Unexpected fixture request");
+    });
+    render(withQuery(<FileViewer path="note.md" kind="markdown" absolutePath={absolutePath} />));
+    await waitFor(() => expect(document.body.textContent).toContain("exact native body"));
+    expect(reads).toEqual([relative]);
+  });
   it("renders NOT RESOLVABLE (never eternal Loading) when given no content and no target", () => {
     render(withQuery(<FileViewer path="missions/m/slices/s/PROOF.md" kind="markdown" absolutePath={null} />));
     expect(screen.getByTestId("file-viewer-unresolvable")).toBeTruthy();

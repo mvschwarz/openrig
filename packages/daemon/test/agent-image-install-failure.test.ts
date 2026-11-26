@@ -30,6 +30,12 @@ function manifest(): AgentImageManifest {
     sourceSessionId: "conversation", sourceResumeToken: "conversation", createdAt: new Date().toISOString(),
     files: [{ path: "supplement.md", role: "notes" }] };
 }
+it.each(["C:\\outside.md", "C:outside.md", "\\\\host\\share\\outside.md", "\\rooted.md", "bad\0.md"])("rejects invalid install member %s before creating any image directory", member => {
+  root = mkdtempSync(join(tmpdir(), "openrig-image-path-"));
+  const library = new AgentImageLibraryService({ roots: [{ path: root, sourceType: "user_file" }] });
+  expect(() => library.install(root!, manifest(), new Map([[member, "owned fixture bytes"]]))).toThrow(/must be relative inside the image/);
+  expect(existsSync(join(root, "snapshot"))).toBe(false);
+});
 it.each(["stats.json", "supplement.md", "manifest.yaml"])("cleans partial %s writes without publishing a snapshot and allows a clean retry", (path) => {
   root = mkdtempSync(join(tmpdir(), "openrig-image-failure-"));
   const library = new AgentImageLibraryService({ roots: [{ path: root, sourceType: "user_file" }] });

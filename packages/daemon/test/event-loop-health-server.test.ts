@@ -19,6 +19,19 @@ function seedRigWithNodes(db: Database.Database, name: string, nodeCount: number
 }
 
 describe("OPR.0.4.3.21 — /healthz enrichment", () => {
+  it("does not report startup ready before native lifecycle control is available", async () => {
+    const db = createFullTestDb();
+    let ready = false;
+    const { app } = createTestApp(db, { appDeps: { startupReady: () => ready } });
+    try {
+      const pending = await app.request("/healthz");
+      expect(pending.status).toBe(503);
+      expect(await pending.json()).toEqual({ status: "starting", pid: process.pid });
+      ready = true;
+      expect((await app.request("/healthz")).status).toBe(200);
+    } finally { db.close(); }
+  });
+
   it("reports missing-pane background work as unknown without changing daemon health", async () => {
     const db = createFullTestDb();
     const backgroundWork = [{ nodeId: "n1", rigId: "rig1", sessionName: "worker@rig", state: "unknown", reason: "pane_pid_gone", observedAt: "2026-11-19T00:00:00.000Z", processes: [{ pid: 42, startedAt: "2026-11-18T00:00:00Z", command: "/usr/bin/node --token=private-token" }] }];

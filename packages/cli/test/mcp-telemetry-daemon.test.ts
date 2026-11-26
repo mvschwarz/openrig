@@ -1,40 +1,38 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 // rig_telemetry_events against the daemon's real telemetry route, over HTTP, through the real DaemonClient: the
 // page `rig telemetry events` reads, with a rig name resolved to its id as the other MCP rig tools resolve it.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import type { AddressInfo } from "node:net";
-import { serve, type ServerType } from "@hono/node-server";
+import { type ServerType } from "@hono/node-server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type Database from "better-sqlite3";
-import { Hono } from "hono";
 import { createDb } from "../../daemon/src/db/connection.js";
-import { eventsSchema } from "../../daemon/src/db/migrations/003_events.js";
-import { telemetryRoutes } from "../../daemon/src/routes/telemetry.js";
+import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
+import { migrate } from "../../daemon/src/db/migrate.js";
+import { createTestApp } from "../../daemon/test/helpers/test-app.js";
 import { DaemonClient } from "../src/client.js";
 import { createMcpServer } from "../src/mcp-server.js";
-import { allowFetchTarget } from "./fetch-guard.js";
 
 describe("rig_telemetry_events on the daemon's telemetry route", () => {
   let db: Database.Database;
+  let fixture: ReturnType<typeof createTestApp>;
   let server: ServerType;
   let call: (args: Record<string, unknown>) => Promise<{ isError: boolean; text: string }>;
   let close: () => Promise<void>;
 
   beforeEach(async () => {
     db = createDb(":memory:");
-    db.exec(eventsSchema.sql);
-    const app = new Hono();
-    app.get("/api/rigs/summary", (c) => c.json([
-      { id: "alpha-id", name: "alpha", archivedAt: null },
-      { id: "beta-id", name: "beta", archivedAt: null },
-    ]));
-    app.route("/api/telemetry", telemetryRoutes({ db: () => db, source: { hostId: null, bootEpoch: "fixture-boot" } }));
-    server = await new Promise<ServerType>((resolve) => {
-      const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
-    });
-    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    allowFetchTarget(origin);
-    const mcp = createMcpServer(new DaemonClient(origin));
+    migrate(db, ALL_MIGRATIONS);
+    // The tool resolves a rig name to its id through the daemon's own rig list, so the fixture owns the rows.
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("alpha-id", "alpha");
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("beta-id", "beta");
+    fixture = createTestApp(db, { appDeps: { daemonBootEpoch: "fixture-boot" } });
+    server = await serveOwnedHonoFixture(fixture.app.fetch);
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    allowFetchTarget(url);
+    const mcp = createMcpServer(new DaemonClient(url));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "collector", version: "1.0.0" });
     await mcp.connect(serverTransport);

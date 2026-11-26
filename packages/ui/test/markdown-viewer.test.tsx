@@ -205,10 +205,11 @@ describe("qitem-markdown-bare-marker-loop — parser terminates on a bare list m
     const { spawn } = await import("node:child_process");
     const path = await import("node:path");
     const childScript = path.resolve(import.meta.dirname, "fixtures/markdown-bare-marker-child.tsx");
-    const runner = path.resolve(import.meta.dirname, "../../../node_modules/.bin/tsx");
+    const runner = path.resolve(import.meta.dirname, "../../../node_modules/tsx/dist/cli.mjs");
 
     const outcome = await new Promise<{ code: number | null; signal: string | null; killed: boolean; out: string; err: string }>((resolve) => {
-      const child = spawn(runner, [childScript], {
+      const child = spawn(process.execPath, [runner, childScript], {
+        windowsHide: true,
         cwd: path.resolve(import.meta.dirname, ".."),
         // Low heap so a runaway parser dies fast instead of eating the box.
         env: { ...process.env, NODE_OPTIONS: "--max-old-space-size=256" },

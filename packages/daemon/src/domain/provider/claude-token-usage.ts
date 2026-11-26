@@ -2,7 +2,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createWindowsPrivateDirectoryAsync } from "../private-text-file.js";
+import { assessWindowsFilePermissions } from "../windows-owned-text.js";
 import { resolveClaudeExecutable, runClaudeCommand } from "./claude-auth-status-reader.js";
+import { readPlatformEnv } from "../platform-env.js";
 import { UsageWindows, type UsageReadOutcome, type UsageReadingStore } from "./usage-windows.js";
 import type { ClaudeTokenIdentity, ClaudeTokenProbe, ProviderUsageAllowance } from "./provider-types.js";
 
@@ -54,7 +57,9 @@ export function claudeTokenUsageReader(options: { launchPath?: string; timeoutMs
     const now = options.now ?? (() => new Date().toISOString());
     const warnings: string[] = [];
     const fail = (reason: string, detail: string) => ({ ok: false as const, at: now(), reason, detail: [detail, ...warnings].join("; ") });
-    const executable = resolveClaudeExecutable({ PATH: options.launchPath ?? process.env.PATH });
+    const launchEnv: NodeJS.ProcessEnv = { PATH: options.launchPath ?? readPlatformEnv(process.env, "PATH"),
+      ...(process.platform === "win32" ? { PATHEXT: readPlatformEnv(process.env, "PATHEXT") } : {}) };
+    const executable = resolveClaudeExecutable(launchEnv);
     if (!executable) return fail("binary_not_found", "no claude executable on the daemon's PATH");
     let scratch: string | undefined;
     try {
@@ -64,14 +69,30 @@ export function claudeTokenUsageReader(options: { launchPath?: string; timeoutMs
       try {
         const st = fs.fstatSync(fd);
         if (!st.isFile() || st.size > 8192) return fail("credential_file_unavailable", "token file must be a regular file, at most 8 KiB");
-        if ((st.mode & 0o077) !== 0) warnings.push("token file has group/others permission bits; mode 0600 or 0400 is recommended");
-        if (process.getuid && st.uid !== process.getuid()) warnings.push(`token file is owned by uid ${st.uid}, not the daemon user`);
+        if (process.platform === "win32") {
+          try {
+            const permissions = await assessWindowsFilePermissions(fd);
+            if (!permissions.owned) warnings.push("token file is not owned by the current Windows user");
+            if (!permissions.privateAcl) warnings.push("token file does not have a private Windows DACL; current-user-only access is recommended");
+          } catch { warnings.push("token file Windows owner/DACL could not be assessed"); }
+        } else {
+          if ((st.mode & 0o077) !== 0) warnings.push("token file has group/others permission bits; mode 0600 or 0400 is recommended");
+          if (process.getuid && st.uid !== process.getuid()) warnings.push(`token file is owned by uid ${st.uid}, not the daemon user`);
+        }
         token = fs.readFileSync(fd, "utf8").trim();
       } finally { fs.closeSync(fd); }
       if (!token || /\s/.test(token)) return fail("credential_file_unavailable", "token file must hold one nonempty token");
-      scratch = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-usage-"));
-      const env: NodeJS.ProcessEnv = { PATH: options.launchPath ?? process.env.PATH, HOME: scratch, CLAUDE_CONFIG_DIR: scratch,
+      scratch = process.platform === "win32" ? await createWindowsPrivateDirectoryAsync(os.tmpdir())
+        : fs.mkdtempSync(path.join(os.tmpdir(), "openrig-usage-"));
+      const env: NodeJS.ProcessEnv = { ...launchEnv, HOME: scratch, CLAUDE_CONFIG_DIR: scratch,
         CLAUDE_CODE_OAUTH_TOKEN: token, DISABLE_AUTOUPDATER: "1" };
+      if (process.platform === "win32") {
+        env.USERPROFILE = scratch;
+        env.APPDATA = path.join(scratch, "AppData", "Roaming");
+        env.LOCALAPPDATA = path.join(scratch, "AppData", "Local");
+        env.TEMP = scratch;
+        env.TMP = scratch;
+      }
       for (const key of ["TMPDIR", "SYSTEMROOT", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"]) if (process.env[key]) env[key] = process.env[key];
       const r = await runClaudeCommand(executable, env, scratch, options.timeoutMs ?? 30_000, options.graceMs ?? 1_000,
         ["-p", "Reply with exactly: OK", "--model", "haiku", "--max-turns", "1", "--output-format", "stream-json", "--verbose",

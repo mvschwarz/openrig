@@ -67,6 +67,17 @@ describe("stateful stdin decoding", () => {
       { type: "char", ch: "[" },
     ]);
   });
+
+  it("does not arm the bare-Escape timer for recognized sequence prefixes", () => {
+    for (const vector of ["\x1b[A", "\x1b[5~", "\x1bOA", "\x1b[<0;47;12M", "\x1b[<0;47;12m"]) {
+      for (let split = 2; split < vector.length; split++) {
+        const decoder = createInputDecoder();
+        const events = decoder.write(vector.slice(0, split));
+        expect(decoder.hasPending(), `${JSON.stringify(vector)} split ${split}`).toBe(false);
+        expect([...events, ...decoder.write(vector.slice(split))]).toEqual(decodeInput(vector));
+      }
+    }
+  });
 });
 
 it("treats CRLF as one activation across arbitrary input chunks", () => {

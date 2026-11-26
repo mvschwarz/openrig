@@ -1,5 +1,6 @@
 import type { RunnerGrantIssuer, RunnerGrantLaunch } from "../domain/runner-grant-launch.js";
 import { randomUUID } from "node:crypto";
+import { readNamedSessionCommand } from "./session-pane-lookup.js";
 import type { EnvironmentStartup } from "../domain/environment-startup.js";
 import type {
   RuntimeAdapter,
@@ -16,7 +17,7 @@ import type { ProjectionPlan } from "../domain/projection-planner.js";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { unsupportedCommunityRunnerLaunchWrapperMessage } from "../domain/launch-wrapper.js";
-import { isShellForeground } from "../domain/shell-classifier.js";
+import { isShellForeground, isWindowsShellHost } from "../domain/shell-classifier.js";
 import { isCommunityHarnessRuntime, loadCommunityHarnessPreset, communityHarnessesDir } from "../domain/community-harness-presets.js";
 import { communityHarnessOf } from "../domain/built-in-runtimes.js";
 import { launchResultRoot, newLaunchAttempt, waitForLaunchResult, type LaunchAttempt } from "../domain/community-harness-launch-result.js";
@@ -25,13 +26,14 @@ import type { CommunityHarnessPreset } from "../domain/community-harness-presets
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { shellQuote } from "./shell-quote.js";
+import { verifyWindowsPaneReceiver } from "../domain/windows-pane-receiver.js";
 import { PiRuntimeAdapter } from "./pi-runtime-adapter.js";
 import { PiCommunityRuntimeAdapter } from "./pi-community-runtime-adapter.js";
 
 export interface CommunityHarnessAdapterDeps {
   environmentStartup?: EnvironmentStartup;
   runnerGrants?: RunnerGrantIssuer;
-  tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand"> & Partial<Pick<TmuxAdapter, "capturePaneContent" | "listPanes">>;
+  tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand"> & Partial<Pick<TmuxAdapter, "capturePaneContent" | "isNativeWindows" | "getPanePid" | "listPanes" | "listSessionPanes">>;
   seatLaunchEnvironment?: Pick<SeatLaunchEnvironment, "command" | "resolveLaunchWrapper">;
   presetsDir?: () => string;
   /** Where launch-result records go (tests); defaults to $OPENRIG_HOME/state/launch-results. */
@@ -117,6 +119,8 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
   }
 
   async launchHarness(binding: NodeBinding, opts: { name: string; resumeToken?: string; resumeType?: string; forkSource?: ForkSource; firstInputText?: string; beforeNativeDispatch?: () => boolean }): Promise<HarnessLaunchResult> {
+    const selectionChanged = () => ({ ok: false as const, recovery: "attention_required" as const, error: "Selected history changed before community harness input; no command was sent." });
+    if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return selectionChanged();
     const contained = this.contained();
     if (contained) {
       if (binding.launchWrapper?.length) return { ok: false, error: WRAPPER_UNAVAILABLE };
@@ -161,6 +165,10 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     // handed, not which model runs.
     const model = found.preset.passesModel ? binding.model?.trim() || undefined : undefined;
     if (found.preset.passesModel) launcherPrefix = model ? `/usr/bin/env OPENRIG_MODEL=${shellQuote(model)} ${launcherPrefix}` : `/usr/bin/env -u OPENRIG_MODEL ${launcherPrefix}`;
+    if (found.preset.passesModel) {
+      const effort = binding.effort?.trim();
+      launcherPrefix = effort ? `/usr/bin/env OPENRIG_EFFORT=${shellQuote(effort)} ${launcherPrefix}` : `/usr/bin/env -u OPENRIG_EFFORT ${launcherPrefix}`;
+    }
     launcherPrefix = found.preset.runner && resolvedWrapper
       ? `/usr/bin/env OPENRIG_LAUNCH_WRAPPER=${shellQuote(JSON.stringify(resolvedWrapper))} ${launcherPrefix}`
       : `/usr/bin/env -u OPENRIG_LAUNCH_WRAPPER ${launcherPrefix}`;
@@ -169,18 +177,20 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     // a launch that failed before typing passed nothing.
     let typed = false;
     let sent = false;
+    const selectionError = new Error("Selected history changed before community harness input");
     const handed = () => ({ ...(firstInput ? { firstInput } : {}),
       ...(model ? { modelInput: { model, dispatch: sent ? "confirmed" as const : "uncertain" as const } } : {}) });
     // #2940: a caller's last read before native dispatch (a keep_alive relaunch's shutdown check, a restore's selection) is
     // asked again right before each terminal write, ahead of the marker that says typing began; absent asks nothing.
     const allowed = opts.beforeNativeDispatch;
     const markTyped = firstInput || model ? () => { typed = true; } : undefined;
-    const beforeInput = allowed ? () => { if (!allowed()) throw new Error(withdrawnBeforeInput); markTyped?.(); } : markTyped;
+    const beforeInput = allowed ? () => { if (!allowed()) throw selectionError; markTyped?.(); } : markTyped;
     try {
       const result = await this.launchPreset(binding, session, found.preset, resumeRef, beforeInput,
         model ? () => { sent = true; } : undefined, launcherPrefix, allowed);
       return { ...result, ...(typed ? handed() : {}) };
     } catch (error) {
+      if (error === selectionError) return selectionChanged();
       if (!typed) throw error;
       return { ok: false, ...handed(), error: `Community harness "${this.runtime}" launch is uncertain: ${(error as Error).message}` };
     }
@@ -218,7 +228,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       let command: string;
       try {
         command = this.deps.seatLaunchEnvironment
-          ? await this.deps.seatLaunchEnvironment.command(session, preset.command, { runtime: this.runtime, nodeId: binding.nodeId, launcherPrefix, ...(authority ? { generation: authority.generation } : {}),
+          ? await this.deps.seatLaunchEnvironment.command(session, preset.command, { runtime: this.runtime, cwd: binding.cwd, nodeId: binding.nodeId, launcherPrefix, ...(authority ? { generation: authority.generation } : {}),
             ...(binding.launchWrapper?.length ? { failClosed: true, ...(!preset.runner ? { launchWrapper: binding.launchWrapper } : {}) } : {}) })
           : launcherPrefix + preset.command;
       } catch (error) {
@@ -287,7 +297,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     let command: string;
     try {
       command = this.deps.seatLaunchEnvironment
-        ? await this.deps.seatLaunchEnvironment.command(session, preset, { runtime: this.runtime, nodeId: binding.nodeId, launcherPrefix,
+        ? await this.deps.seatLaunchEnvironment.command(session, preset, { runtime: this.runtime, cwd: binding.cwd, nodeId: binding.nodeId, launcherPrefix,
           ...(binding.launchWrapper?.length ? { launchWrapper: binding.launchWrapper, failClosed: true } : {}) })
         : launcherPrefix + preset;
     } catch (error) {
@@ -308,7 +318,16 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     }
     const contained = this.contained();
     if (contained) return contained.checkReady(binding);
-    const command = await this.deps.tmux.getPaneCommand(session);
+    const command = await readNamedSessionCommand(this.deps.tmux, session);
+    if ((this.deps.tmux.isNativeWindows || process.platform === "win32") && command && isWindowsShellHost(command)) {
+      if (this.deps.tmux.getPanePid && await verifyWindowsPaneReceiver({ target: binding.tmuxPane ?? session,
+        getPanePid: async target => {
+          const lookup = this.deps.tmux.listSessionPanes ?? this.deps.tmux.listPanes;
+          if (binding.tmuxPane && (!lookup || !(await lookup.call(this.deps.tmux, session)).some(pane => pane.id === binding.tmuxPane))) return null;
+          return this.deps.tmux.getPanePid!(target);
+        } })) return { ready: true };
+      return { ready: false, reason: `Community harness "${this.runtime}" readiness is unverified: a Windows shell host is not evidence of a running harness.`, code: "native_lineage_unverified" };
+    }
     if (!command || isShellForeground(command)) {
       return { ready: false, reason: `Community harness "${this.runtime}" isn't running: the pane is at a shell.`, code: "harness_not_running" };
     }

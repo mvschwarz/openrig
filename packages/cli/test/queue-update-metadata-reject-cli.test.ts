@@ -1,9 +1,11 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 // 51-06 D2, narrowed — REAL CLI acceptance boundary. A genuine `queueCommand` invocation talks over
 // LOOPBACK HTTP to the real candidate queueRoutes + QueueRepository, backed by a migration-faithful test DB
 // (incl. 044 summary + 048 evidence_ref). No pre-baked response. A state change that carries --summary or
 // --evidence-ref is applied and stores them; a blank --summary is reported as not stored, never dropped silently.
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
-import { serve } from "@hono/node-server";
+
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createDb } from "../../daemon/src/db/connection.js";
@@ -50,7 +52,9 @@ beforeAll(async () => {
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("eventBus" as never, bus); c.set("queueRepo" as never, repo); await next(); });
   app.route("/api/queue", queueRoutes());
-  await new Promise<void>((resolve) => { server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 }, (info: { port: number }) => { port = info.port; resolve(); }); });
+  server = await serveOwnedHonoFixture(app.fetch);
+  port = (server.address() as {port:number}).port;
+  allowOwnedHttpFixture(server);
 });
 
 afterAll(async () => {

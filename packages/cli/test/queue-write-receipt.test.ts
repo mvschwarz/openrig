@@ -5,6 +5,7 @@ import type { QueueDeps } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
 import { compactOutputEnabled } from "../src/queue-receipt.js";
 import { ConfigStore } from "../src/config-store.js";
+import { queueRecoveryCommand } from "../src/queue-recovery-command.js";
 
 /**
  * Slice 15 (OPR.0.7.0.15) P1 — queue writes print a short receipt when the

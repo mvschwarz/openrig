@@ -14,12 +14,13 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync as jsRealpath, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { filesRoutes } from "../src/routes/files.js";
 import { FileWriteService } from "../src/domain/files/file-write-service.js";
 import type { AllowlistRoot } from "../src/domain/files/path-safety.js";
+const realpathSync = process.platform === "win32" ? jsRealpath.native : jsRealpath;
 
 function buildApp(opts: { allowlist: AllowlistRoot[]; writeService: FileWriteService | null } | null): Hono {
   const app = new Hono();

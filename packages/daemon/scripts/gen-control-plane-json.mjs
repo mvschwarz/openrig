@@ -7,6 +7,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   writeFileSync,
 } from "node:fs";
@@ -309,7 +310,12 @@ function cliOptions(argv) {
 }
 
 const scriptPath = fileURLToPath(import.meta.url);
-if (resolve(process.argv[1]) === scriptPath) {
+let invokedDirectly = false;
+try {
+  invokedDirectly = typeof process.argv[1] === "string"
+    && realpathSync.native(process.argv[1]) === realpathSync.native(scriptPath);
+} catch { /* Imports without an existing entry file must stay inert. */ }
+if (invokedDirectly) {
   try {
     await generateControlPlaneJson(cliOptions(process.argv.slice(2)));
   } catch (error) {

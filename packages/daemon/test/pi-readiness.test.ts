@@ -80,6 +80,8 @@ describe("Pi version observation", () => {
   it.each(["0.73.1", "pi 0.73.1", "v0.73.1"])("names an older tested-baseline version (%s) without a gate", output => {
     expect(piVersionNotice(output)).toContain("older than OpenRig's tested baseline 0.87.1");
     expect(piVersionNotice(output)).toContain("launch continues");
+    expect(piVersionNotice(output, "win32")).toContain("where.exe pi");
+    expect(piVersionNotice(output, "linux")).toContain("command -v pi");
   });
   it.each(["0.87.1", "0.87.2", "1.0.0", "0.100.0", "0.87.1-dev"])("does not confuse a version response with authentication (%s)", output => {
     expect(piVersionNotice(output)).toContain("answered on the daemon's PATH");

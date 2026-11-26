@@ -1,3 +1,7 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
+import { allowFetchTarget } from "./fetch-guard.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // rig mcp serve --http against the daemon's real routes: the real HTTP listener, the SDK's own HTTP client, and grants in
 // a real token file. With no grants it serves loopback as the env's seat, declared; with grants, every request needs a
 // credential (loopback included), each caller acts as its own seat, reaches only its scope, and a revoked grant stops at
@@ -9,7 +13,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import { serve, type ServerType } from "@hono/node-server";
+import { type ServerType } from "@hono/node-server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type Database from "better-sqlite3";
@@ -58,8 +62,8 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     db = createDb(":memory:");
     migrate(db, ALL_MIGRATIONS);
     home = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-"));
-    shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-shared-")));
-    otherShared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-acct-b-")));
+    shared = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-shared-")));
+    otherShared = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-acct-b-")));
     process.env.OPENRIG_HOME = home;
     // The env seat a local caller is declared as; an authenticated caller must never act as it.
     process.env.OPENRIG_SESSION_NAME = "env-seat@elsewhere";
@@ -81,9 +85,8 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       },
     });
     const { app } = setup;
-    daemon = await new Promise<ServerType>((resolve) => {
-      const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
-    });
+    daemon = await serveOwnedHonoFixture(app.fetch);
+    allowOwnedHttpFixture(daemon);
     daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
   });
 
@@ -102,6 +105,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
 
   async function listen(options: Partial<McpHttpOptions> = {}) {
     const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile, ...options });
+    allowFetchTarget(served.url);
     closers.push(() => served.close());
     return served;
   }
@@ -423,7 +427,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
           checkIn: { status: "unknown", lastCheckInAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), expectedMinutes: null, onRequest: false,
             reason: "no check-in cadence declared" } } }]);
       expect(JSON.parse(fs.readFileSync(presenceFile, "utf8")).seats["grok@team"]).toMatchObject({ grant: "grok" });
-      expect(fs.statSync(presenceFile).mode & 0o777).toBe(0o600);
+      expectPrivateFile(presenceFile);
       expect(fs.readFileSync(tokenFile, "utf8")).not.toContain("lastCallAt");
 
       // Revoked: its next request is refused, and the work and its answer stay.
@@ -827,7 +831,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     expect(stored).not.toContain(token);
     expect(JSON.parse(stored).principals[0]).toMatchObject({ name: "dana", seat: "dana@team", rigs: ["team"], roots: ["proof"], owner: false });
     expect(JSON.parse(stored).principals[0]).not.toHaveProperty("objects");
-    expect(fs.statSync(tokenFile).mode & 0o777).toBe(0o600);
+    expectPrivateFile(tokenFile);
     const listed = await runToken(["list"]);
     expect(listed).toContain("dana: seat dana@team");
     expect(listed).not.toContain(JSON.parse(stored).principals[0].tokenSha256);

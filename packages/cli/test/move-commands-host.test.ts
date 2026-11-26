@@ -5,10 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { authCommand } from "../src/commands/auth.js";
 import { seatCommand } from "../src/commands/seat.js";
 import type { CrossHostResult } from "../src/cross-host-executor.js";
 import type { HostEntry } from "../src/host-registry.js";
+import { createPrivateTextFile } from "../../daemon/src/domain/private-text-file.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
 
 // This machine's persisted identity, as `rig send --host` reads it (the real reader opens the local store).
 vi.mock("../src/local-origin.js", () => ({ readLocalOrigin: () => "host-local" }));
@@ -70,8 +73,9 @@ describe("rig auth --codex-home", () => {
   it("acts on the named home instead of CODEX_HOME", async () => {
     const other = path.join(home, "seat-home");
     fs.mkdirSync(other, { recursive: true });
-    fs.writeFileSync(path.join(other, "auth.json"), JSON.stringify({ auth_mode: "chatgpt" }), { mode: 0o600 });
-    const saved = await capture(() => authCommand({ env: { CODEX_HOME: other, HOME: home } }).parseAsync(["save", "codex-2"], { from: "user" }));
+    createPrivateTextFile(path.join(other, "auth.json"), JSON.stringify({ auth_mode: "chatgpt" }));
+    expectPrivateFile(path.join(other, "auth.json"));
+    const saved = await capture(() => authCommand({ env: { CODEX_HOME: other, HOME: home }, loginStatus: () => "unavailable" }).parseAsync(["save", "codex-2"], { from: "user" }));
     expect(saved.code).toBeUndefined();
 
     expect((await auth(["status", "--codex-home", other])).out).toContain(`codex_home: ${other}`);
@@ -85,6 +89,23 @@ describe("rig auth --codex-home", () => {
 });
 
 describe("rig auth --host", () => {
+  it("the unknown-outcome status check preserves a home with spaces and an apostrophe", async () => {
+    reply = { ok: false, failedStep: "ssh-unreachable", sshStderr: "connection lost" };
+    const remoteHome = "/owned path/User ' 中文/.codex";
+    const result = await auth(["switch", "codex-2", "--host", "box-ssh", "--codex-home", remoteHome]);
+    expect(result.err).toContain("remote-outcome-unknown");
+    const command = result.err.split("Check before repeating it: ")[1]!.split(" (a switch")[0]!;
+    let argv: string[];
+    if (process.platform === "win32") {
+      const script = "function rig { ConvertTo-Json -Compress -InputObject @($args) }\n" + command;
+      argv = JSON.parse(execFileSync(path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+        { encoding: "utf8", windowsHide: true, timeout: 15000, stdio: "pipe" }).trim());
+    } else argv = execFileSync("/bin/sh", ["-c", `rig() { printf '%s\\n' "$@"; }; ${command}`], { encoding: "utf8", timeout: 15000 }).trim().split("\n");
+    expect(argv).toEqual(["auth", "status", "--host", "box-ssh", "--codex-home", remoteHome]);
+    expect(ran).toHaveLength(1); // The check is displayed, never run or retried.
+  });
+
   it("runs the same switch on that machine's SSH entry, as this seat, with the exact home, and passes its output on", async () => {
     const res = await auth(["switch", "codex-2", "--host", "box-ssh", "--codex-home", "/home/ubuntu/.codex"]);
     expect(ran).toEqual([{ host: "box-ssh", origin: ORIGIN, argv: ["rig", "auth", "switch", "codex-2", "--runtime", "codex", "--codex-home", "/home/ubuntu/.codex"] }]);

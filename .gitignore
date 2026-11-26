@@ -46,3 +46,6 @@ packages/daemon/context-packs/
 
 # Internal build receipts; never commit
 /.evidence/
+/rtk/history.db
+/packages/daemon/rtk/history.db
+/packages/ui/rtk/history.db

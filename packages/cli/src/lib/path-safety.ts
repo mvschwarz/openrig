@@ -6,8 +6,11 @@
  */
 export function validateSafePath(path: string, label: string): string | null {
   if (!path || typeof path !== "string") return `${label}: path is required`;
+  if (path.includes("\0")) return `${label}: NUL characters are not allowed`;
   // Windows drive letter absolute
   if (/^[A-Za-z]:[/\\]/.test(path)) return `${label}: absolute paths are not allowed (got "${path}")`;
+  // C:foo is relative to C:'s current directory, not the selected bundle root.
+  if (/^[A-Za-z]:/.test(path)) return `${label}: drive-relative paths are not allowed (got "${path}")`;
   // Normalize backslashes for traversal check
   const normalized = path.replace(/\\/g, "/");
   // Absolute path

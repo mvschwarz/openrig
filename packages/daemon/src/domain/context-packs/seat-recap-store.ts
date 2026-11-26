@@ -26,9 +26,19 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { validateMarkdownAddressability, parseMarkdownSections } from "../markdown-address.js";
 import { parseSessionName } from "../session-name.js";
+import { createPrivateTextFile } from "../private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "../windows-owned-text.js";
 
 export const RECAP_FILENAME = "RECAP.md";
 const CHAIN_DIRNAME = "recap-superseded";
+
+function reserveRecapFile(file: string): number | undefined {
+  if (process.platform === "win32") {
+    createPrivateTextFile(file, "");
+    return undefined;
+  }
+  return openSync(file, "wx");
+}
 
 export class RecapWriteError extends Error {
   constructor(message: string) {
@@ -85,17 +95,17 @@ export function writeSeatRecap(opts: { seatDir: string; content: string; now?: (
   let archived: string | undefined;
   let published = false;
   try {
-    const stagedFd = openSync(staged, "wx");
+    const stagedFd = reserveRecapFile(staged);
     stagedOwned = true;
-    closeSync(stagedFd);
+    if (stagedFd !== undefined) closeSync(stagedFd);
     writeFileSync(staged, opts.content);
     if (existsSync(current)) {
       const chainDir = join(opts.seatDir, CHAIN_DIRNAME);
       mkdirSync(chainDir, { recursive: true });
       const candidate = join(chainDir, `.RECAP-${randomUUID()}.tmp`);
-      const archiveFd = openSync(candidate, "wx");
+      const archiveFd = reserveRecapFile(candidate);
       archiveStage = candidate;
-      closeSync(archiveFd);
+      if (archiveFd !== undefined) closeSync(archiveFd);
       // The reserved staging file belongs to this attempt even if copying fails.
       // No existing archive is touched until complete bytes can be linked.
       copyFileSync(current, archiveStage);
@@ -111,9 +121,9 @@ export function writeSeatRecap(opts: { seatDir: string; content: string; now?: (
             if (!["EOPNOTSUPP", "ENOTSUP", "EPERM", "EXDEV"].includes((err as NodeJS.ErrnoException).code ?? "")) throw err;
             // Reserve the fallback exclusively: collisions still advance the suffix.
             // Track ownership before copying so a partial copy is also cleaned up.
-            const archiveFd = openSync(target, "wx");
+            const archiveFd = reserveRecapFile(target);
             archived = target;
-            closeSync(archiveFd);
+            if (archiveFd !== undefined) closeSync(archiveFd);
             copyFileSync(archiveStage, target);
           }
           archived = target;
@@ -124,7 +134,8 @@ export function writeSeatRecap(opts: { seatDir: string; content: string; now?: (
         }
       }
     }
-    renameSync(staged, current);
+    if (process.platform === "win32" && existsSync(current)) replaceWindowsFilePreservingMetadata(current, staged);
+    else renameSync(staged, current);
     published = true;
   } finally {
     if (stagedOwned) {

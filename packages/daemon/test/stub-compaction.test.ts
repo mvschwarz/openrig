@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fireCompaction, StubCompactionError } from "../src/adapters/stub-compaction.js";
+import { fireRestore } from "../src/adapters/stub-restore.js";
 
 // Slice 51-01 items 6-8 — the stub COMPACTION behavior TRIGGERS the exact shipped seam.
 //
@@ -82,7 +83,7 @@ describe("stub compaction behavior fires the real precompact seam", () => {
       });
       const marker = JSON.parse(readFileSync(result.markerPath, "utf8"));
       expect(dirname(marker.outputDir)).toBe(join(dir, "packets"));
-      const out = { createdAt: marker.createdAt, outStamp: String(marker.outputDir).split("/").pop() };
+      const out = { createdAt: marker.createdAt, outStamp: basename(String(marker.outputDir)) };
       rmSync(dir, { recursive: true, force: true });
       return out;
     };
@@ -100,5 +101,23 @@ describe("stub compaction behavior fires the real precompact seam", () => {
       openrigHome,
       cwd: tmpDir,
     })).toThrow(StubCompactionError);
+  });
+  it("round-trips the real native packet through identity refusal and one-shot restore", () => {
+    const transcriptPath = writeFixtureJsonl(tmpDir);
+    const { markerPath } = fireCompaction({ hookScriptPath: HOOK_SCRIPT, sessionName: SEAT,
+      openrigHome, cwd: tmpDir, transcriptPath, injectClockNow: INJECTED_ISO });
+    const options = { bridgeScriptPath: resolve(HERE, "../assets/plugins/openrig-core/hooks/scripts/compaction-restore-bridge.cjs"),
+      sessionName: SEAT, openrigHome, cwd: tmpDir, transcriptPath, injectClockNow: INJECTED_ISO };
+    const other = join(tmpDir, "other.jsonl"); writeFileSync(other, "distinct synthetic transcript\n");
+    expect(fireRestore({ ...options, transcriptPath: other }).delivered).toBe(false);
+    expect(JSON.parse(readFileSync(markerPath, "utf8")).deliveryCount).toBe(0);
+    const restored = fireRestore(options);
+    expect(restored.markerPath).toBe(markerPath);
+    expect(restored.delivered).toBe(true);
+    expect(restored.additionalContext).toContain(JSON.parse(readFileSync(markerPath, "utf8")).outputDir);
+    expect(fireRestore(options).delivered).toBe(false);
+    const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+    expect(marker.deliveryCount).toBe(1);
+    expect(marker.deliveredAt).toBe(INJECTED_ISO);
   });
 });

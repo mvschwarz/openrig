@@ -159,7 +159,11 @@ describe("LibraryReview", () => {
     expect(screen.queryByTestId("lib-rig-specialist")).toBeNull();
   });
 
-  it("opens agent drilldown for relative local: refs resolved against rig source path", async () => {
+  it.each([
+    ["/specs/rigs/launch/secrets-manager/rig.yaml", "/specs/agents/apps/vault-specialist/agent.yaml"],
+    ["C:\\specs\\rigs\\launch\\secrets-manager\\rig.yaml", "C:\\specs\\agents\\apps\\vault-specialist\\agent.yaml"],
+    ["\\\\host\\share\\specs\\rigs\\launch\\secrets-manager\\rig.yaml", "\\\\host\\share\\specs/agents/apps/vault-specialist/agent.yaml"],
+  ])("opens agent drilldown for local refs from server source %s", async (rigSource, agentSource) => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
 
@@ -171,7 +175,7 @@ describe("LibraryReview", () => {
             name: "vault-specialist",
             version: "1.0",
             sourceType: "builtin",
-            sourcePath: "/specs/agents/apps/vault-specialist/agent.yaml",
+            sourcePath: agentSource,
             relativePath: "agents/apps/vault-specialist/agent.yaml",
             updatedAt: new Date().toISOString(),
           },
@@ -199,7 +203,7 @@ describe("LibraryReview", () => {
           graph: { nodes: [], edges: [] },
           raw: "name: secrets-manager\n",
           libraryEntryId: "svc-rig-2",
-          sourcePath: "/specs/rigs/launch/secrets-manager/rig.yaml",
+          sourcePath: rigSource,
         }), { status: 200 });
       }
 

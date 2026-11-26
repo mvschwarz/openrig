@@ -23,6 +23,7 @@
 // existing callsites (TimelineTab) keep working without modification.
 
 import { useFilesRead, useFilesRoots, FilesReadError, type AllowlistRoot } from "./useFiles.js";
+import { relativeServerPath } from "../lib/server-path.js";
 
 export type ScopeMarkdownState =
   | "idle"
@@ -71,25 +72,6 @@ export interface UseScopeMarkdownResult {
   state: ScopeMarkdownState;
 }
 
-/** Returns true when `parent` is a path-prefix of `child`, treating
- *  both as absolute filesystem paths. Segment-boundary aware so
- *  `/work` is NOT a prefix of `/workspace`. */
-function isPathPrefix(parent: string, child: string): boolean {
-  const p = parent.replace(/\/+$/, "");
-  const c = child.replace(/\/+$/, "");
-  if (c === p) return true;
-  return c.startsWith(p + "/");
-}
-
-/** Compute the path under a root: `<root>/<rel>` → `<rel>`. */
-function relativeUnder(rootPath: string, absChild: string): string {
-  const p = rootPath.replace(/\/+$/, "");
-  const c = absChild.replace(/\/+$/, "");
-  if (c === p) return "";
-  if (c.startsWith(p + "/")) return c.slice(p.length + 1);
-  return c;
-}
-
 /** Pick the deepest-matching allowlist root that contains the
  *  absolute path. Returns null when no root contains it. Exported
  *  for the integration test surface. */
@@ -98,14 +80,14 @@ export function resolveScopePathToAllowlist(
   absoluteScopePath: string,
 ): { rootName: string; relPath: string } | null {
   // Exact match wins; otherwise deepest prefix.
-  const exact = roots.find((r) => r.path.replace(/\/+$/, "") === absoluteScopePath.replace(/\/+$/, ""));
+  const exact = roots.find((r) => relativeServerPath(absoluteScopePath, r.path) === "");
   if (exact) return { rootName: exact.name, relPath: "" };
   const prefixed = roots
-    .filter((r) => isPathPrefix(r.path, absoluteScopePath))
+    .filter((r) => relativeServerPath(absoluteScopePath, r.path) !== null)
     .sort((a, b) => b.path.length - a.path.length);
   const winner = prefixed[0];
   if (!winner) return null;
-  return { rootName: winner.name, relPath: relativeUnder(winner.path, absoluteScopePath) };
+  return { rootName: winner.name, relPath: relativeServerPath(absoluteScopePath, winner.path)! };
 }
 
 /** Fetch `<absoluteScopePath>/<filename>` via /api/files/read with

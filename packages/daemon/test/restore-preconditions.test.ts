@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, unlinkSync, rmSync, rmdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { validatePreRestore } from "../src/domain/restore-preconditions.js";
 import { RestoreCheckService, type RestoreCheckDeps, type NodeInventoryEntry } from "../src/domain/restore-check-service.js";
 import type { SnapshotData, RigServicesRecord } from "../src/domain/types.js";
@@ -18,6 +21,33 @@ function data(): SnapshotData {
 function services(): RigServicesRecord {
   return { rigId: "rig-1", kind: "compose", specJson: "{}", rigRoot: "/services", composeFile: "/services/compose.yaml", projectName: "test", latestReceiptJson: null, createdAt: "", updatedAt: "" };
 }
+
+it.runIf(process.platform === "win32")("checks actual native replay files across case aliases and reports their later absence", () => {
+  const root = mkdtempSync(join(tmpdir(), "restore native replay "));
+  try {
+    const owner = join(root, "Owner Root"); mkdirSync(owner);
+    const file = join(owner, "Notes.md"); writeFileSync(file, "synthetic replay content");
+    const snapshot = data();
+    snapshot.nodes[0]!.cwd = root;
+    snapshot.nodeStartupContext!["node-1"]!.resolvedStartupFiles = [{ path: "Notes.md", ownerRoot: owner.toUpperCase(), absolutePath: file.toUpperCase(), required: true }] as never;
+    expect(validatePreRestore(snapshot, { fsOps: { exists: existsSync } }).blockers).toEqual([]);
+    unlinkSync(file);
+    expect(validatePreRestore(snapshot, { fsOps: { exists: existsSync } }).blockers).toEqual([
+      expect.objectContaining({ code: "required_startup_file_missing", path: file.toUpperCase() }),
+    ]);
+    rmdirSync(owner);
+    expect(validatePreRestore(snapshot, { fsOps: { exists: existsSync } }).blockers.map(item => item.code)).toEqual([
+      "startup_owner_root_missing", "required_startup_file_missing",
+    ]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+it.each(["C:\\files\\notes.md", "\\\\server\\share\\notes.md", ".\\notes.md", "..\\notes.md"])("blocks a missing required Windows startup path: %s", (absolutePath) => {
+  const snapshot = data();
+  snapshot.nodeStartupContext!["node-1"].resolvedStartupFiles![0].absolutePath = absolutePath;
+  const result = validatePreRestore(snapshot, { fsOps: { exists: (p) => p !== absolutePath } });
+  expect(result.blockers).toContainEqual(expect.objectContaining({ code: "required_startup_file_missing", path: absolutePath }));
+});
 
 function node(rigId = "rig-1", running = false): NodeInventoryEntry {
   return {

@@ -11,7 +11,7 @@ import { ContextPackLibraryService } from "../src/domain/context-packs/context-p
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, {recursive:true, force:true}); });
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "workflow-guidance-")); roots.push(root);
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "workflow-guidance-"))); roots.push(root);
   const project = join(root,"project.yaml"), mission = join(root,"missions/trial/mission.yaml"), slice = join(root,"missions/trial/slices/one/slice.yaml");
   const write = (path: string, value: unknown) => {mkdirSync(join(path,".."),{recursive:true});writeFileSync(path,typeof value === "string" ? value : stringify(value));};
   const catalog = join(root,"method.md");
@@ -24,6 +24,29 @@ function fixture() {
   return {root,project,mission,slice,catalog,prose,selected,write,input};
 }
 describe("selected workflow guidance",()=>{
+  it.runIf(process.platform === "win32")("reads case aliases of authored manifests and keeps the explicit slice selection", () => {
+    const f = fixture();
+    f.write(f.slice, { metadata: { id: "one" }, sdlc: { components: [{ id: "draft.review" }] } });
+    const refs = [f.project, f.mission, f.slice].map(file => file.toUpperCase());
+    const g = readWorkflowGuidance({ ...f.input, contextRefs: refs, full: true });
+    expect(g.state).toBe("selected");
+    expect(g.components?.map(c => c.id)).toEqual(["draft.review"]);
+    expect(g.selectionSource).toBe(refs[2]);
+  });
+  it.runIf(process.platform === "win32")("deduplicates physical manifest aliases and retains bound-source attribution", () => {
+    const f = fixture();
+    const sha256 = createHash("sha256").update(readFileSync(f.project)).digest("hex");
+    const alias = f.project.toUpperCase();
+    const g = readWorkflowGuidance({ ...f.input, contextRefs: [alias, f.project, f.mission],
+      binding: { sources: [{ kind: "project", path: f.project, sha256 }] } });
+    expect(g.state).toBe("selected");
+    expect(g.sources.filter(s => s.kind === "project")).toEqual([{ kind: "project", path: alias, sha256, binding: "matches-bound" }]);
+    const other = join(f.root, "other", "project.yaml");
+    f.write(other, { sdlc: f.selected });
+    const ambiguous = readWorkflowGuidance({ ...f.input, contextRefs: [alias, other] });
+    expect(ambiguous.state).toBe("unknown");
+    expect(ambiguous.unknowns.join()).toContain("Multiple project sources");
+  });
   it("delivers flexible prose, original intent and conditional edges without a fixed contract ontology",()=>{
     const f=fixture(), g=readWorkflowGuidance(f.input);
     expect(g.state).toBe("selected");expect(g.lines.join("\n")).toContain("Preserve uncertainty");

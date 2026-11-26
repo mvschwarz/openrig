@@ -111,7 +111,7 @@ files:
     lib.scan();
     const entry = lib.getByRef("collision")!;
     expect(entry.sourceType).toBe("workspace");
-    expect(entry.sourcePath).toContain("/workspace/");
+    expect(entry.sourcePath).toBe(join(workspaceRoot, "collision"));
   });
 
   // Slice-03 Atom 5 (colon-id strip, ruled contract §4) — the id is now
@@ -208,6 +208,9 @@ files:
     const entry = lib.getByRef("guard")!;
     expect(() => lib.resolveFileWithinPack(entry, "../etc/passwd")).toThrow(/inside the pack/);
     expect(() => lib.resolveFileWithinPack(entry, "/abs")).toThrow(/inside the pack/);
+    for (const value of ["C:\\outside.md", "C:outside.md", "\\\\host\\share\\outside.md", "\\rooted.md", "bad\0.md"]) {
+      expect(() => lib.resolveFileWithinPack(entry, value)).toThrow(/inside the pack/);
+    }
   });
 });
 

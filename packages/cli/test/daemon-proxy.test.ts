@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
+import { allowFetchTarget } from "./fetch-guard.js";
 import { promisify } from "node:util";
 import type { Duplex } from "node:stream";
 import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
@@ -33,7 +34,9 @@ async function listen(server: http.Server, protocol = "http:"): Promise<string> 
   });
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Fixture did not bind TCP");
-  return `${protocol}//127.0.0.1:${address.port}`;
+  const url = `${protocol}//127.0.0.1:${address.port}`;
+  allowFetchTarget(url);
+  return url;
 }
 
 async function fixture(mode: "allow" | "deny" | "deny-html" | "hang-connect" | "hang-health" = "allow", tlsMode: "none" | "target" | "both" = "none") {

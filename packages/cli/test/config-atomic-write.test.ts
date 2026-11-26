@@ -5,6 +5,20 @@ import { tmpdir } from "node:os";
 import { ConfigStore } from "../src/config-store.js";
 import { SettingsStore } from "../../daemon/src/domain/user-settings/settings-store.js";
 const failure = vi.hoisted(() => ({ active: false, ownership: false, renameCode: "", createCode: "", writeCode: "ENOSPC" }));
+vi.mock("../src/lib/windows-owned-text.js", async (original) => {
+  const actual = await original<typeof import("../src/lib/windows-owned-text.js")>();
+  return { ...actual, replaceWindowsFilePreservingMetadata: (...args: Parameters<typeof actual.replaceWindowsFilePreservingMetadata>) => {
+    if (failure.renameCode) throw Object.assign(new Error("fixture replacement denied"), { code: failure.renameCode });
+    return actual.replaceWindowsFilePreservingMetadata(...args);
+  } };
+});
+vi.mock("../../daemon/src/domain/windows-owned-text.js", async (original) => {
+  const actual = await original<typeof import("../../daemon/src/domain/windows-owned-text.js")>();
+  return { ...actual, replaceWindowsFilePreservingMetadata: (...args: Parameters<typeof actual.replaceWindowsFilePreservingMetadata>) => {
+    if (failure.renameCode) throw Object.assign(new Error("fixture replacement denied"), { code: failure.renameCode });
+    return actual.replaceWindowsFilePreservingMetadata(...args);
+  } };
+});
 vi.mock("node:fs", async (original) => {
   const actual = await original<typeof import("node:fs")>();
   return { ...actual, openSync: (...args: Parameters<typeof fs.openSync>) => {
@@ -30,8 +44,8 @@ vi.mock("node:fs", async (original) => {
 let dir: string;
 beforeEach(() => { dir = fs.mkdtempSync(join(tmpdir(), "config-atomic-")); });
 afterEach(() => { failure.active = false; failure.ownership = false; failure.renameCode = ""; failure.createCode = ""; failure.writeCode = "ENOSPC"; vi.unstubAllEnvs(); fs.rmSync(dir, { recursive: true, force: true }); });
-const stores = [ConfigStore, SettingsStore];
-it.each(stores)("%s preserves the previous native config after a partial failed set/reset", (Store) => {
+const stores = [["ConfigStore", ConfigStore], ["SettingsStore", SettingsStore]] as const;
+it.each(stores)("%s preserves the previous native config after a partial failed set/reset", (_name, Store) => {
   const file = join(dir, "config.json");
   const store = new Store(file);
   for (const change of [() => store.set("transcripts.lines", "20"), () => store.reset("transcripts.lines"),
@@ -44,7 +58,7 @@ it.each(stores)("%s preserves the previous native config after a partial failed 
     expect(fs.readdirSync(dir)).toEqual(["config.json"]);
   }
 });
-it.each(stores)("%s retains a native config symlink and its target permissions on successful writes", (Store) => {
+it.each(stores)("%s retains a native config symlink and its target permissions on successful writes", (_name, Store) => {
   const target = join(dir, "target.json"), link = join(dir, "config.json");
   fs.writeFileSync(target, "{}"); fs.chmodSync(target, 0o640); fs.symlinkSync(target, link);
   new Store(link).set("transcripts.lines", "20");
@@ -55,7 +69,7 @@ it.each(stores)("%s retains a native config symlink and its target permissions o
 });
 
 const alternateGroup = process.getgroups?.().find((gid) => gid !== process.getgid?.());
-it.skipIf(process.platform === "win32" || alternateGroup === undefined).each(stores)("%s preserves actual nondefault POSIX group ownership and writes in place if preservation is denied", (Store) => {
+it.skipIf(process.platform === "win32" || alternateGroup === undefined).each(stores)("%s preserves actual nondefault POSIX group ownership and writes in place if preservation is denied", (_name, Store) => {
   const file = join(dir, "config.json");
   fs.writeFileSync(file, "{}");
   fs.chownSync(file, process.getuid!(), alternateGroup!);
@@ -72,7 +86,7 @@ it.skipIf(process.platform === "win32" || alternateGroup === undefined).each(sto
   expect(fs.statSync(file)).toMatchObject({ uid: owner.uid, gid: owner.gid });
   expect(fs.readdirSync(dir)).toEqual(["config.json"]);
 });
-it.skipIf(process.platform === "win32" || process.getuid?.() === 0).each(stores)("%s writes and resets in place when the parent is unwritable but the config is writable", (Store) => {
+it.skipIf(process.platform === "win32" || process.getuid?.() === 0).each(stores)("%s writes and resets in place when the parent is unwritable but the config is writable", (_name, Store) => {
   const file = join(dir, "config.json"); fs.writeFileSync(file, "{}"); fs.chmodSync(file, 0o600);
   fs.chmodSync(dir, 0o500);
   try {
@@ -88,7 +102,7 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0).each(stores)
   } finally { fs.chmodSync(dir, 0o700); }
 });
 
-it.skipIf(process.platform === "win32" || process.getuid?.() === 0).each(stores)("%s refuses a read-only config without replacing its bytes", (Store) => {
+it.skipIf(process.platform === "win32" || process.getuid?.() === 0).each(stores)("%s refuses a read-only config without replacing its bytes", (_name, Store) => {
   const file = join(dir, "config.json");
   fs.writeFileSync(file, JSON.stringify({ transcripts: { lines: 40 } }));
   fs.chmodSync(file, 0o444);
@@ -101,11 +115,18 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0).each(stores)
   }
 });
 for (const code of ["EACCES", "EPERM", "EBUSY"]) {
-  it.each(stores)(`%s falls back in place when replacement returns ${code}`, (Store) => {
+  it.each(stores)(`%s ${process.platform === "win32" ? "does not retry a native replacement failure" : "falls back in place"} when replacement returns ${code}`, (_name, Store) => {
     const file = join(dir, "config.json");
     fs.writeFileSync(file, "{}");
     const inode = fs.statSync(file).ino;
     failure.renameCode = code;
+    if (process.platform === "win32") {
+      expect(() => new Store(file).set("transcripts.lines", "20")).toThrow(/fixture replacement denied/);
+      expect(fs.readFileSync(file, "utf8")).toBe("{}");
+      expect(fs.statSync(file).ino).toBe(inode);
+      expect(fs.readdirSync(dir)).toEqual(["config.json"]);
+      return;
+    }
     new Store(file).set("transcripts.lines", "20");
     expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual({ transcripts: { lines: 20 } });
     expect(fs.statSync(file).ino).toBe(inode);
@@ -113,7 +134,7 @@ for (const code of ["EACCES", "EPERM", "EBUSY"]) {
   });
 }
 for (const code of ["ENOSPC", "EIO"]) {
-  it.each(stores)(`%s preserves the old bytes when replacement returns ${code}`, (Store) => {
+  it.each(stores)(`%s preserves the old bytes when replacement returns ${code}`, (_name, Store) => {
     const file = join(dir, "config.json");
     fs.writeFileSync(file, "{}");
     failure.renameCode = code;
@@ -124,7 +145,7 @@ for (const code of ["ENOSPC", "EIO"]) {
 }
 
 for (const code of ["EACCES", "EPERM", "EBUSY"]) {
-  it.each(stores)(`%s falls back in place when staging creation returns ${code}`, (Store) => {
+  it.each(stores)(`%s falls back in place when staging creation returns ${code}`, (_name, Store) => {
     const file = join(dir, "config.json");
     fs.writeFileSync(file, "{}");
     const inode = fs.statSync(file).ino;
@@ -134,7 +155,7 @@ for (const code of ["EACCES", "EPERM", "EBUSY"]) {
     expect(fs.statSync(file).ino).toBe(inode);
     expect(fs.readdirSync(dir)).toEqual(["config.json"]);
   });
-  it.each(stores)(`%s never retries a partial staged data write returning ${code} against the original`, (Store) => {
+  it.each(stores)(`%s never retries a partial staged data write returning ${code} against the original`, (_name, Store) => {
     const file = join(dir, "config.json");
     fs.writeFileSync(file, "{}");
     failure.writeCode = code;

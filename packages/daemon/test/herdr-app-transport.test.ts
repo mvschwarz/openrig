@@ -1,3 +1,4 @@
+import { localControlEndpoint } from "../src/domain/local-control-endpoint.js";
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import net from "node:net";
@@ -78,7 +79,7 @@ describe("createAppSocketExchange (one request per connection, as herdr-app's ow
   afterEach(() => { for (const s of servers.splice(0)) s.close(); for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }); });
   const serve = async (onLine: (line: string, socket: net.Socket) => void) => {
     const root = mkdtempSync(join(tmpdir(), "ha-")); roots.push(root);
-    const path = join(root, "herdr-app.sock");
+    const path = localControlEndpoint(join(root, "herdr-app.sock"));
     const server = net.createServer((socket) => {
       let buf = "";
       socket.on("data", (d) => { buf += d; const nl = buf.indexOf("\n"); if (nl >= 0) onLine(buf.slice(0, nl), socket); });
@@ -109,9 +110,9 @@ describe("createAppSocketExchange (one request per connection, as herdr-app's ow
 
   it("resolves the app home as herdr-app does", () => {
     expect(resolveHerdrAppHome({ HERDR_APP_HOME: "/a" })).toBe("/a");
-    expect(resolveHerdrAppHome({ XDG_CONFIG_HOME: "/x", HOME: "/h" })).toBe("/x/herdr-app");
-    expect(resolveHerdrAppHome({ HOME: "/h" })).toBe("/h/.config/herdr-app");
-    expect(resolveHerdrAppHome({ HERDR_APP_HOME: "", HOME: "/h" })).toBe("/h/.config/herdr-app");
+    expect(resolveHerdrAppHome({ XDG_CONFIG_HOME: "/x", HOME: "/h" })).toBe(join("/x", "herdr-app"));
+    expect(resolveHerdrAppHome({ HOME: "/h" })).toBe(join("/h", ".config", "herdr-app"));
+    expect(resolveHerdrAppHome({ HERDR_APP_HOME: "", HOME: "/h" })).toBe(join("/h", ".config", "herdr-app"));
   });
 
   it("records the runner's herdr-core from the env it executes with, and describes it with or without a socket", () => {
@@ -142,7 +143,7 @@ describe("detection cost: status() when herdr-app is absent or hung (bounded, no
       expect(missing.kind).toBe("unavailable");
       expect(missingMs).toBeLessThan(900);
       // A socket that accepts and never answers (a wedged window).
-      const hungPath = join(dir, "hung.sock");
+      const hungPath = localControlEndpoint(join(dir, "hung.sock"));
       const server = net.createServer(() => { /* never replies */ });
       await new Promise<void>((r) => server.listen(hungPath, () => r()));
       t0 = Date.now();

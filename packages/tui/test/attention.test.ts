@@ -2,12 +2,52 @@ import { expect, it } from "vitest";
 import { DaemonClient } from "../src/daemon-client.js";
 import { hydrateSnapshot } from "../src/hydrate.js";
 import { createViewState, emptySnapshot, computeExplorerRows } from "../src/state.js";
-import { attentionLines, replyAct, answerRequest } from "../src/attention/attention-model.js";
+import { attentionLines, replyAct, answerRequest, composeHumanUpdates } from "../src/attention/attention-model.js";
 import { parseCommand } from "../src/grammar.js";
 import { demoSnapshot } from "../src/demo-data.js";
 import { renderScreen } from "../src/render.js";
 import type { AttentionItem, AttentionRead } from "@openrig/daemon/attention";
 import type { Action, FleetSnapshot } from "../src/types.js";
+
+it.each([
+  ["/books/alpha", "/books/alpha/proof.md#decision", true],
+  ["C:\\books\\alpha", "C:\\books\\alpha\\proof.md#decision", true],
+  ["C:\\books\\alpha", "C:/books/alpha/proof.md#decision", true],
+  ["\\\\host\\share\\alpha", "\\\\host\\share\\alpha\\proof.md#decision", true],
+  ["C:\\books\\alpha", "C:\\books\\alpha-other\\proof.md#decision", false],
+])("retains exact Feed evidence and scoped project navigation for %s", (root, evidence, inside) => {
+  const read = composeHumanUpdates(null, { limit: 20, truncated: false, items: [{
+    qitemId: "proof", summary: "Proof ready", body: "Read the proof", humanDetail: null,
+    destinationSession: "human@external", sourceSession: "author@fixture", tags: ["project:alpha"],
+    evidenceRef: evidence, deliveredAt: "2026-11-02T00:00:00Z", deliveryReceipt: "fixture",
+  }] }, "human-update:proof")!;
+  expect(read.detail!.files).toEqual([{ label: "Update evidence", path: evidence }]);
+  // A tag alone must not invent project authority; use an explicitly served project.
+  expect(read.detail!.item.project).toBeNull();
+  const project = { id: "alpha", root };
+  read.detail!.item.project = project;
+  const snap: FleetSnapshot = { ...emptySnapshot(), attentionRead: read, fileRoots: [{ name: "alpha", path: root }] };
+  const view = createViewState({ instanceId: "native-feed", getSnapshot: () => snap });
+  view.dispatch({ type: "attention-open", id: read.detail!.item.id });
+  view.dispatch({ type: "attention-source", path: evidence + "-not-served" });
+  expect(view.get().file).toBeNull();
+  expect(view.get().lastError).toContain("no longer in the current Attention read");
+  view.dispatch({ type: "attention-source", path: evidence });
+  expect(view.get().project).toEqual(inside ? project : null);
+  expect(view.get().file).toEqual(inside ? { root: "alpha", path: "proof.md", anchor: "decision" } : { root: "", path: evidence });
+  view.dispatch({ type: "back" });
+  expect(view.get().attentionOpen).toBe(read.detail!.item.id);
+  expect(view.get().project).toBeNull();
+});
+
+it.each(["C:proof.md", "proof.md", "https://example.invalid/proof", "\\proof.md"])("does not invent an absolute Feed file for %s", evidenceRef => {
+  const read = composeHumanUpdates(null, { limit: 1, truncated: false, items: [{
+    qitemId: "proof", summary: null, body: "Proof", humanDetail: null, tags: null,
+    destinationSession: "human@external", sourceSession: "author@fixture", evidenceRef,
+    deliveredAt: "today", deliveryReceipt: "fixture",
+  }] }, "human-update:proof");
+  expect(read?.detail?.files).toEqual([]);
+});
 
 const feedRequest: AttentionItem = {
   id: "queue:request", kind: "action", summary: "Choose a cover", unblocks: null, urgency: "routine",

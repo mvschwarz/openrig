@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // An external caller's seat created the way an operator creates one without a launch (`rig import --materialize-only`),
 // served by the built `rig mcp serve --http --grant-service` on a real private daemon: initialize, tools/list and a
 // create/show round trip as that seat, recorded with the grant's principal. The seat check only reads: no session, no
@@ -8,12 +9,15 @@ import http from "node:http";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import Database from "better-sqlite3";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { prepareHermeticEnv } from "../../daemon/test/helpers/hermetic-env.js";
 import { findFreePort, runRig, spawnScenarioDaemon } from "../../daemon/test/helpers/scenario-daemon.js";
+import { allowFetchTarget } from "./fetch-guard.js";
+import { writeWindowsNodeFixture } from "../../../scripts/windows-node-fixture.mjs";
 
 const rigBin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist/bin-wrapper.js");
 const KEY = `${"8977f2dc0000aaaa1111bbbb"}.cus_VVMAexample01.${"ab".repeat(24)}`;
@@ -24,13 +28,47 @@ const INITIALIZE = { jsonrpc: "2.0", id: 1, method: "initialize", params: { prot
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  for (const close of closers.splice(0).reverse()) await close().catch(() => {});
+  const failures: unknown[] = [];
+  for (const close of closers.splice(0).reverse()) {
+    try { await close(); } catch (error) { failures.push(error); }
+  }
+  if (failures.length) throw new AggregateError(failures, "Owned grant-service fixture cleanup failed");
 });
 
 it("serves a materialized, never-launched caller seat over a grant service on a real daemon, and the check starts nothing", async () => {
-  const scaffold = prepareHermeticEnv({ baseEnv: { PATH: process.env.PATH, TERM: "xterm-256color" } });
+  const windows = process.env.SystemRoot ?? "C:\\Windows";
+  const baseEnv = process.platform === "win32" ? {
+    SystemRoot: windows, WINDIR: windows, ComSpec: path.join(windows, "System32/cmd.exe"),
+    PATH: [path.dirname(process.execPath), path.join(windows, "System32/WindowsPowerShell/v1.0"), path.join(windows, "System32")].join(path.delimiter),
+    TERM: "xterm-256color",
+  } : { PATH: process.env.PATH, TERM: "xterm-256color" };
+  const scaffold = prepareHermeticEnv({ baseEnv });
+  const nativeCalls = path.join(scaffold.root, "native-tmux-calls.jsonl");
+  if (process.platform === "win32") {
+    const tools = path.join(scaffold.root, "native-tools"); fs.mkdirSync(tools);
+    // No real terminal executable is reachable: materialization must need no pane.
+    writeWindowsNodeFixture(tools, "tmux", `import fs from 'node:fs';const a=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(nativeCalls)},JSON.stringify(a)+'\\n');if(a.includes('-V')){console.log('tmux 3.4 owned-no-launch-fixture');process.exit(0);}if(a.includes('list-sessions'))console.error('no server running');process.exit(1);`);
+    Object.assign(scaffold.env, { USERPROFILE: scaffold.home, APPDATA: scaffold.home, LOCALAPPDATA: scaffold.home,
+      TEMP: scaffold.root, TMP: scaffold.root, PSMUX_DATA_DIR: path.join(scaffold.root, "native-registry"), PSMUX_CONFIG_FILE: "NUL",
+      PATH: [tools, scaffold.env.PATH].join(path.delimiter) });
+    fs.mkdirSync(scaffold.env.PSMUX_DATA_DIR!);
+  }
   const daemon = await spawnScenarioDaemon(scaffold, { rigBin });
-  closers.push(() => daemon.stop());
+  const daemonPid = JSON.parse(fs.readFileSync(path.join(scaffold.openrigHome, "daemon.json"), "utf8")).pid as number;
+  expect(Number.isSafeInteger(daemonPid) && daemonPid > 0).toBe(true);
+  closers.push(async () => {
+    await daemon.sigterm();
+    let exited = false;
+    for (const deadline = Date.now() + 5000; Date.now() < deadline;) {
+      try { process.kill(daemonPid, 0); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; exited = true; break; }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (!exited) throw new Error(`Owned daemon exit unverified; scratch retained at ${scaffold.root}`);
+    scaffold.cleanup();
+    expect(fs.existsSync(scaffold.root)).toBe(false);
+  });
+  allowFetchTarget(daemon.baseUrl);
   const dbPath = path.join(scaffold.stateDir, "scenario.db");
 
   const spec = path.join(scaffold.root, `${RIG}.yaml`);
@@ -64,7 +102,7 @@ it("serves a materialized, never-launched caller seat over a grant service on a 
       seat, rigs: [RIG], artifact_roots: [], access_class: "work", objects: { queue: ["create", "show", "list"] },
     })));
   });
-  await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
+  await listenOwnedHttpFixture(service);
   closers.push(() => new Promise<void>((resolve) => service.close(() => resolve())));
 
   // The built server, as an operator starts it, beside this daemon (its database proves the daemon is this host's).
@@ -74,11 +112,16 @@ it("serves a materialized, never-launched caller seat over a grant service on a 
   let log = "";
   const server: ChildProcess = spawn(process.execPath, [rigBin, "mcp", "serve", "--http", "--bind", `127.0.0.1:${port}`,
     "--task-destination", LEAD,
-    "--grant-service", `http://127.0.0.1:${(service.address() as AddressInfo).port}/api/connector/v1/grant`], { env, stdio: ["ignore", "pipe", "pipe"] });
+    "--grant-service", `http://127.0.0.1:${(service.address() as AddressInfo).port}/api/connector/v1/grant`], { env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   server.stdout?.on("data", (chunk) => { log += chunk; });
   server.stderr?.on("data", (chunk) => { log += chunk; });
-  closers.push(async () => { server.kill("SIGTERM"); });
+  closers.push(async () => {
+    if (server.exitCode === null && server.signalCode === null) {
+      const exited = once(server, "exit"); server.kill("SIGTERM"); await exited;
+    }
+  });
   const url = `http://127.0.0.1:${port}/mcp`;
+  allowFetchTarget(url);
   const initialize = () => fetch(url, { method: "POST", body: JSON.stringify(INITIALIZE),
     headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${KEY}` } });
   let first: Response | undefined;
@@ -123,4 +166,8 @@ it("serves a materialized, never-launched caller seat over a grant service on a 
   seat = `cus-nobody01-caller@${RIG}`;
   const missing = await initialize();
   expect([missing.status, ((await missing.json()) as { error: string }).error]).toEqual([503, "seat_unavailable"]);
+  if (process.platform === "win32") {
+    const calls: string[][] = fs.readFileSync(nativeCalls, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    expect(calls.some(args => args.some(arg => ["new-session", "new-window", "split-window", "respawn-pane", "send-keys", "send-text"].includes(arg)))).toBe(false);
+  }
 }, 120_000);

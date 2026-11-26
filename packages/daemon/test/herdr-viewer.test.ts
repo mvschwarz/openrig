@@ -239,7 +239,7 @@ describe("owned Herdr viewer", () => {
   });
   it("refuses unsupported platforms and different endpoints", async () => {
     const f = fixture();
-    expect(await new HerdrViewer(socket, async () => { throw new Error("should not run"); }, "win32", f.root).ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unsupported" });
+    expect(await new HerdrViewer(socket, async () => { throw new Error("should not run"); }, "freebsd", f.root).ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unsupported" });
     expect(await new HerdrViewer(socket, async () => JSON.stringify({ running: true, version: "0.9.5", protocol: 22, socket: "/other.sock" }), "linux", f.root).ensure(key, f.target)).toMatchObject({ ok: false });
   });
   it("a writable tile attaches immediately and sizes natively; a read-only tile remains an observer", () => {

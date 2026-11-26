@@ -1,3 +1,5 @@
+import { listenOwnedHttpFixture, allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+
 // S5b final-fix round 2 (r2 artifact 8d9ec788) — every CLI consumer of the
 // direct instantiate/materialize routes must render the locked rig_name_running
 // teaching refusal VERBATIM, not wrap it in check-your-spec/validate noise.
@@ -12,6 +14,7 @@ import { adoptCommand } from "../src/commands/adopt.js";
 import { importCommand } from "../src/commands/import.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type DaemonState, type LifecycleDeps } from "../src/daemon-lifecycle.js";
+
 
 const TEACHING =
   'A rig named "dupe-cli" is already RUNNING: 01RIGID with 1 running session(s) ' +
@@ -63,7 +66,7 @@ describe("rig import rendering — rig_name_running teaching refusal (S5b r2)", 
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await new Promise<void>((resolve, rejectOwnedListen) => { listenOwnedHttpFixture(server, {}).then(resolve, rejectOwnedListen); });
     port = (server.address() as { port: number }).port;
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "import-rnr-"));
     specPath = path.join(tempDir, "rig.yaml");
@@ -76,6 +79,7 @@ describe("rig import rendering — rig_name_running teaching refusal (S5b r2)", 
   });
 
   async function run(mode: "--instantiate" | "--materialize-only" | "adopt"): Promise<{ out: string; exitCode: number | undefined }> {
+    allowOwnedHttpFixture(server);
     const captured: string[] = [];
     const originalExit = process.exitCode;
     process.exitCode = undefined;

@@ -7,6 +7,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { npmCommand } from "./npm-command.mjs";
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -40,9 +41,9 @@ for (const prefix of ["OPENRIG", "RIGGED"]) {
     });
     let output = "";
     try {
-      const child = spawn("npm", ["test", "-w", "packages/daemon", "--",
+      const child = spawn(...npmCommand(["test", "-w", "packages/daemon", "--",
         "test/bundle-routes.test.ts", "test/instance-environment.test.ts", "--maxWorkers=1",
-        "-t", "v2 bundle enters pod-aware path|test instance environment"],
+        "-t", "v2 bundle enters pod-aware path|test instance environment"]),
       { cwd: repo, env, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
       child.stdout.on("data", chunk => { output += chunk; });
       child.stderr.on("data", chunk => { output += chunk; });

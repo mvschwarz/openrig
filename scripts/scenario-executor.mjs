@@ -1,8 +1,8 @@
 // Client-side helpers for the existing scenario scripts; never runs a daemon.
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { constants } from 'node:os';
-import { resolve } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export function dockerPlatform(server) {
@@ -15,7 +15,7 @@ export function dockerPlatform(server) {
 // A client timeout does not establish that its engine-side container stopped.
 // Unknown identity or settlement leaves the container for its owner to reconcile.
 export function settleContainer({ id, name, image }, invoke = args => {
-  const result = spawnSync('docker', args, { encoding: 'utf8', timeout: 35000, maxBuffer: 1024 * 1024 });
+  const result = spawnSync('docker', args, { encoding: 'utf8', timeout: 35000, maxBuffer: 1024 * 1024, windowsHide: true });
   if (result.error || result.status !== 0) throw new Error(result.error?.message ?? result.stderr);
   return result.stdout;
 }) {
@@ -48,10 +48,19 @@ export async function runWithDeadline(argv, { timeoutMs, killAfterMs = 15000 }) 
     throw new Error('Command and positive finite deadline required');
   }
   return new Promise(resolveResult => {
-    const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', detached: true });
+    const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', detached: true, windowsHide: true });
     let forced, escalation, finished = false;
     const signalChild = signal => {
       if (!child.pid) return;
+      if (process.platform === 'win32') {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        // Windows has no POSIX process groups or catchable TERM for console children.
+        // End the live client's tree, not any engine-side Docker container.
+        spawnSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe'),
+          ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        return;
+      }
       try { process.kill(-child.pid, signal); } catch (error) {
         if (error.code !== 'ESRCH') throw error;
       }
@@ -84,11 +93,14 @@ export async function runWithDeadline(argv, { timeoutMs, killAfterMs = 15000 }) 
   });
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+let invokedDirectly = false;
+try { invokedDirectly = Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+catch { /* Imported without an existing entry file. */ }
+if (invokedDirectly) {
   try {
     const [operation, ...args] = process.argv.slice(2);
     if (operation === 'platform') {
-      const version = spawnSync('docker', ['version', '--format', '{{json .Server}}'], { encoding: 'utf8', timeout: 30000 });
+      const version = spawnSync('docker', ['version', '--format', '{{json .Server}}'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
       if (version.error || version.status !== 0) throw new Error(version.error?.message ?? version.stderr);
       const server = JSON.parse(version.stdout);
       const platform = dockerPlatform(server);

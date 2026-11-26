@@ -1,13 +1,13 @@
 import { afterEach, expect, it } from "vitest";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentImageLibraryService } from "../src/domain/agent-images/agent-image-library-service.js";
 import { parseAgentImageManifest } from "../src/domain/agent-images/manifest-parser.js";
 import type { AgentImageManifest } from "../src/domain/agent-images/agent-image-types.js";
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); root = undefined; });
-it.each(["true", "123", "null", "model: fast", "#notes", "normal-name"])("round-trips the operator's image name %s and string metadata", (name) => {
+it.each(["true", "123", "null", "model: fast", "#notes", "normal-name", "CON", "NUL.txt", "trailing.", "ending ", "a?b"])("round-trips the operator's image name %s and string metadata", (name) => {
   root = mkdtempSync(join(tmpdir(), "openrig-image-roundtrip-"));
   const library = new AgentImageLibraryService({ roots: [{ path: root, sourceType: "user_file" }] });
   const manifest: AgentImageManifest = {
@@ -30,6 +30,22 @@ it("preserves YAML-like strings in captured metadata and supplementary descripto
     files: [{ path: "notes.md", role: "true", summary: "123" }] };
   const dir = library.install(root, manifest, new Map([["notes.md", "fixture bytes"]]));
   expect(parseAgentImageManifest(readFileSync(join(dir, "manifest.yaml"), "utf-8"), dir)).toEqual(manifest);
+});
+
+it.runIf(process.platform === "win32")("keeps generated directory keys distinct from literal operator names", () => {
+  root = mkdtempSync(join(tmpdir(), "openrig-image-key-"));
+  const library = new AgentImageLibraryService({ roots: [{ path: root, sourceType: "user_file" }] });
+  const manifest: AgentImageManifest = { name: "model: fast", version: "1", runtime: "codex",
+    sourceSeat: "dev@fixture", sourceSessionId: "session", sourceResumeToken: "session",
+    createdAt: new Date().toISOString(), files: [] };
+  const first = library.install(root, manifest, new Map());
+  const literal = { ...manifest, name: basename(first) };
+  const second = library.install(root, literal, new Map());
+  expect(second).not.toBe(first);
+  expect(() => library.install(root!, manifest, new Map())).toThrow(/already exists/);
+  expect(library.scan()).toEqual({ count: 2, errors: [] });
+  expect(library.getByNameVersion(manifest.name, "1")?.sourcePath).toBe(first);
+  expect(library.getByNameVersion(literal.name, "1")?.sourcePath).toBe(second);
 });
 
 it.each(["  indented first\noutdented second", "no trailing newline", "multiple trailing\n\n", "windows\r\nnotes\r\n", ""])("preserves notes exactly: %j", (notes) => {

@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import { execFile } from "node:child_process";
+import { readPlatformEnv } from "./platform-env.js";
+import { resolveClaudeExecutable, runClaudeCommand } from "./provider/claude-auth-status-reader.js";
 import type Database from "better-sqlite3";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import {
@@ -15,26 +17,39 @@ export interface PermissionDriftReader {
 }
 
 function commandAvailable(command: string): boolean {
-  const pathValue = process.env.PATH;
-  if (!pathValue) return false;
+  const pathValue = readPlatformEnv(process.env, "PATH");
+  if (pathValue === undefined) return false;
+  const names = process.platform === "win32"
+    ? (readPlatformEnv(process.env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(ext => command + ext.toLowerCase())
+    : [command];
   for (const entry of pathValue.split(nodePath.delimiter)) {
-    if (!entry) continue;
-    try {
-      fs.accessSync(nodePath.join(entry, command), fs.constants.X_OK);
-      return true;
-    } catch {
-      // Try the next PATH entry.
+    if (!entry && process.platform !== "win32") continue;
+    for (const name of names) {
+      try {
+        const candidate = nodePath.join(entry.replace(/^"(.*)"$/, "$1"), name);
+        fs.accessSync(candidate, fs.constants.X_OK);
+        if (fs.statSync(candidate).isFile()) return true;
+      } catch {
+        // Try the next PATH entry.
+      }
     }
   }
   return false;
 }
 
-export async function loadClaudePermissionModes(): Promise<string[] | null> {
+export async function loadClaudePermissionModes(env: NodeJS.ProcessEnv = process.env): Promise<string[] | null> {
+  if (process.platform === "win32") {
+    const file = resolveClaudeExecutable(env);
+    if (!file) return null;
+    const result = await runClaudeCommand(file, env, undefined, 1_000, 1_000, ["--help"]);
+    return result.code === 0 && !result.error && !result.timedOut ? parseClaudePermissionModes(result.stdout) : null;
+  }
   return await new Promise((resolve) => {
     execFile("claude", ["--help"], {
       encoding: "utf8",
       timeout: 1_000,
       maxBuffer: 1024 * 1024,
+      env,
     }, (error, stdout) => resolve(error ? null : parseClaudePermissionModes(stdout)));
   });
 }

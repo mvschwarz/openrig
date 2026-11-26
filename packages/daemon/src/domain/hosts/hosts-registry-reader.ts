@@ -32,6 +32,8 @@ export interface SshHostEntry {
   transport: "ssh";
   target: string;
   user?: string;
+  remoteShell?: "posix" | "powershell";
+  rigPath?: string;
   notes?: string;
 }
 
@@ -180,12 +182,18 @@ export function validateHostRegistry(parsed: unknown, sourcePath: string): HostR
       if (user !== undefined && (typeof user !== "string" || user.trim() === "")) {
         return { ok: false, error: `${prefix}.user: optional, but if present must be a non-empty string` };
       }
+      const remoteShell = entry["remoteShell"], rigPath = entry["rigPath"];
+      if (remoteShell !== undefined && remoteShell !== "posix" && remoteShell !== "powershell") return { ok: false, error: `${prefix}.remoteShell: expected posix or powershell` };
+      if (rigPath !== undefined && (typeof rigPath !== "string" || !/^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+[\\/])/.test(rigPath) || /[\x00-\x1f]/.test(rigPath) || !/\.(?:cjs|mjs|js)$/i.test(rigPath))) return { ok: false, error: `${prefix}.rigPath: expected an absolute Windows JavaScript entry` };
+      if (remoteShell === "powershell" && rigPath === undefined) return { ok: false, error: `${prefix}.rigPath: required for powershell remote execution` };
       validated.push({
         id,
         ...(hostId !== undefined ? { hostId: hostId as string } : {}),
         transport: "ssh",
         target,
         ...(user !== undefined ? { user: user as string } : {}),
+        ...(remoteShell !== undefined ? { remoteShell } : {}),
+        ...(rigPath !== undefined ? { rigPath: rigPath as string } : {}),
         ...(notes !== undefined ? { notes: notes as string } : {}),
       });
     } else if (transport === "http") {

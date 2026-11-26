@@ -19,6 +19,7 @@ import { render, cleanup, waitFor, screen, fireEvent } from "@testing-library/re
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 const navigateSpy = vi.fn();
 vi.mock("@tanstack/react-router", async (importActual) => {
@@ -75,7 +76,7 @@ function withQueryClient(ui: ReactNode) {
 
 describe("OPR.0.4.1.13 — table-view crash repro (malformed row + filter)", () => {
   it("wraps every production ScopePages TopologyTableView mount in the table ErrorBoundary", () => {
-    const src = readFileSync("src/components/topology/ScopePages.tsx", "utf8");
+    const src = readFileSync(resolve(import.meta.dirname, "../src/components/topology/ScopePages.tsx"), "utf8");
     const tableMounts = [...src.matchAll(/<TopologyTableView\b/g)].map((m) => m.index ?? -1);
     expect(tableMounts).toHaveLength(3);
 

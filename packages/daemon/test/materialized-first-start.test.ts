@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createFullTestDb, createTestApp, mockNativeRuntime, mockTmuxAdapter } from "./helpers/test-app.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import nodePath from "node:path";
 import { validateCodexMemberPermissions } from "../src/domain/codex-member-permissions.js";
 const root = "/fixture/materialized";
 const close: Array<() => void> = [];
@@ -21,8 +22,9 @@ async function fixture(captureSnapshot = true, memberPatch: Record<string, unkno
   // A Codex launch checks the pane's process, so its panes run codex.
   const native = runtime === "codex" ? mockNativeRuntime(() => "codex") : undefined;
   const tmux = native?.tmux ?? mockTmuxAdapter(); tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+  const fileAt = (file: string) => Object.keys(files).find(key => nodePath.resolve(key) === nodePath.resolve(file));
   const options = { tmux, ...(native ? { listProcesses: native.listProcesses } : {}), adapters: { [runtime]: adapter }, podInstantiatorFsOps: {
-    exists: (path: string) => path in files, readFile: (path: string) => { if (!(path in files)) throw new Error(`Missing ${path}`); return files[path]!; },
+    exists: (file: string) => fileAt(file) !== undefined, readFile: (file: string) => { const key = fileAt(file); if (key === undefined) throw new Error(`Missing ${file}`); return files[key]!; },
   } };
   const app = createTestApp(db, options);
   const source = { version: "0.2", name: "materialized", pods: [{ id: "dev", label: "Dev", members: ["lead", "build", "review", "qa"].map(id => ({ id,
@@ -58,7 +60,7 @@ it.each([[false, true], [true, true], [true, false]])("first-starts only the sel
   expect(sessions[0]!.nodeId).toBe(before.nodes.find(node => node.logicalId === "dev.lead")!.id);
   expect(f.adapter.launchHarness).toHaveBeenCalledTimes(1);
   expect(vi.mocked(f.adapter.deliverStartup).mock.calls.flatMap(call => call[0])).toEqual(expect.arrayContaining([
-    expect.objectContaining({ absolutePath: `${root}/agent/role.md`, required: true }),
+    expect.objectContaining({ absolutePath: nodePath.resolve(root, "agent", "role.md"), required: true }),
   ]));
   expect(f.tmux.killSession).not.toHaveBeenCalled();
   const newest = f.snapshotRepo.getLatestSnapshot(f.rigId);

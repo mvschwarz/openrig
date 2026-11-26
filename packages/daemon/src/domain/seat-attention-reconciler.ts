@@ -1,3 +1,4 @@
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 // OPR.0.3.4.10 — seat attention reconciler: evidence-gated clear of stuck
 // startup_status=attention_required. Managed writer + append-only audit.
 
@@ -92,7 +93,7 @@ async function describeLineageFailure(input: {
       : !!(input.expectedToken && findExactNativeResumeProcess(rows, pid, "claude-code", input.expectedToken, input.rotation));
     if (passes) {
       // The check also needs the session to hold one pane, and the pane's pid to stay the same; the re-run sees neither.
-      const panes = await input.tmux.listPanes(input.sessionName).catch((): unknown[] => []);
+      const panes = await listNamedSessionPanes(input.tmux, input.sessionName).catch((): unknown[] => []);
       if (panes.length > 1) return `The session now has ${panes.length} panes, so the runtime could not be verified for the seat's pane`;
       return `A re-read now finds the ${runtimeName} process the check wanted, so the pane, pid or process may have changed during the check`;
     }
@@ -176,7 +177,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
   };
   let panes: Awaited<ReturnType<PaneIdentityTmux["listPanes"]>>;
   try {
-    panes = await input.tmux.listPanes(input.sessionName);
+    panes = await listNamedSessionPanes(input.tmux, input.sessionName);
     observedAt = now();
     sessionObserved = panes.length > 0;
   } catch (error) {
@@ -251,6 +252,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
   };
   let nativePidUnreadable = false;
   const observationTmux = {
+    getPaneCommand: (target: string) => input.tmux.getPaneCommand(target),
     getPanePid: async (target: string) => {
       const observedPid = await input.tmux.getPanePid(target);
       if (observedPid === null) nativePidUnreadable = true;
@@ -259,7 +261,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
   };
   const recheckPane = async () => {
     try {
-      const currentPanes = await input.tmux.listPanes(input.sessionName);
+      const currentPanes = await listNamedSessionPanes(input.tmux, input.sessionName);
       if (currentPanes.length !== 1 || currentPanes[0]?.id !== pane.id) {
         return { ok: true as const, sameProcess: false };
       }
@@ -289,7 +291,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
     const native = expectedResumeToken !== null
       ? await verifyClaudePaneProcess({ ...observation, expectedToken: expectedResumeToken,
         rotation: input.requireExactResumeLineage ? input.resumeRotation ?? null : storedRotation(input.db, input.nodeId, expectedResumeToken) })
-      : !input.requireExactResumeLineage ? await verifyClaudePaneRuntime(observation) : null;
+      : claudeWrapper && !input.requireExactResumeLineage ? await verifyClaudePaneRuntime(observation) : null;
     if (processReadFailure) return unavailable(processReadFailure);
     const current = await recheckPane();
     if (!current.ok) return unavailable(current.error);

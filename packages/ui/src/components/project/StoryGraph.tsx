@@ -15,6 +15,7 @@ import { FileLink } from "../ui/FileLink.js";
 import { formatStoryDate, type StoryForest, type StoryNode } from "../../lib/story-graph-model.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { sessionMemberLabel } from "../../lib/session-name.js";
+import { serverPathIsAbsolute } from "../../lib/server-path.js";
 import "./StoryGraph.css";
 
 const TOPLINE_H = 54;
@@ -63,9 +64,15 @@ function nodeStroke(node: StoryNode): string {
 /** Pull obvious artifact paths out of the agent-speak body. Honest: omit the
  *  band when none are present (never fabricate outputs). */
 function extractArtifacts(body: string): string[] {
-  const matches = body.match(/[\w./-]+\.(?:ts|tsx|js|jsx|md|png|jpg|gif|mp4|patch|diff|json|yaml|yml|sql|css|html)\b/g);
-  if (!matches) return [];
-  return Array.from(new Set(matches)).slice(0, 6);
+  const refs = new Set<string>();
+  const pattern = /(["'`])([^"'`\r\n]+\.(?:ts|tsx|js|jsx|md|png|jpg|gif|mp4|patch|diff|json|yaml|yml|sql|css|html))\1|[\p{L}\p{N}_./\\:-]+\.(?:ts|tsx|js|jsx|md|png|jpg|gif|mp4|patch|diff|json|yaml|yml|sql|css|html)\b/gu;
+  for (const match of body.matchAll(pattern)) {
+    const ref = match[2] ?? match[0];
+    if (/^(?:https?|file):\/\//i.test(ref)) continue;
+    refs.add(ref);
+    if (refs.size === 6) break;
+  }
+  return [...refs];
 }
 
 function bodyContext(body: string): string {
@@ -113,7 +120,7 @@ function toViewerData(node: StoryNode): QueueItemViewerData {
  *  resolvable against the daemon allowlist, so they stay inert + explicitly
  *  labelled rather than pretending to be openable. */
 function isViewableArtifact(path: string): boolean {
-  return path.startsWith("/");
+  return serverPathIsAbsolute(path);
 }
 
 export function StoryGraph({ forest }: { forest: StoryForest }) {

@@ -4,17 +4,19 @@
 // clients. It never types into, focuses or closes a pane.
 
 import path from "node:path";
+import { readWindowsTileAttachArgv } from "./windows-tile-attach.js";
 
 /** One tab as `herdr tab list` reports it. */
 export interface HerdrTab { workspace_id: string; tab_id: string; label: string }
 
 /** A tile as the check compares it: the attach command the composer gave its pane. */
-export interface LiveTile { label: string; paneCommand: string; recoveryCommand?: string }
+export interface LiveTile { label: string; paneCommand: string; recoveryCommand?: string; attachArgv?: string[] }
 
 /** The view being opened, by what its Herdr tabs carry: the view id and plan in a tab label, or a named view's space. */
 export interface HerdrViewKey { id: string; planId: string; pages: readonly (readonly LiveTile[])[]; spaceLabel?: string }
 
 export interface LiveWorkspaceReaders {
+  platform?: NodeJS.Platform;
   /** Runs the Herdr CLI on the selected endpoint and returns its stdout. */
   herdr(args: string[]): Promise<string>;
   /** Runs a program and returns its stdout: resolving tmux and listing its clients. */
@@ -41,29 +43,79 @@ export function fixedSizeWorkspaceNote(id: string, closeCommand: string): string
   return `Workspace ${id} shows this view with tiles an OpenRig before 0.7.10 opened, which keep a fixed size and attach that way again after every seat restart; it was kept. Close it to remove those tiles (its agents keep running): ${closeCommand}`;
 }
 
+/**
+ * The command that closes a kept workspace, pinned to the endpoint the inventory read.
+ *
+ * A note is something a person types, so Windows gets the environment lines PowerShell actually runs instead of the
+ * POSIX `env -u ...` form, which no native shell has. Each caller passes the two spellings of its own executable, so
+ * the POSIX text it already printed stays byte-identical.
+ */
+export function herdrCloseCommand(platform: NodeJS.Platform, socketPath: string | undefined, id: string, binary: { posix: string; native?: string }): string {
+  if (platform !== "win32") {
+    const quote = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'";
+    return `${socketPath ? `env -u HERDR_SESSION HERDR_SOCKET_PATH=${quote(socketPath)} ${binary.posix}` : binary.posix} workspace close ${quote(id)}`;
+  }
+  const powershell = (value: string) => "'" + value.replace(/'/g, "''") + "'";
+  const pinned = [
+    "Remove-Item Env:HERDR_SESSION -ErrorAction SilentlyContinue",
+    ...(socketPath ? [`$env:HERDR_SOCKET_PATH = ${powershell(socketPath)}`] : []),
+  ];
+  // A bare name runs directly; a path with spaces needs PowerShell's call operator, which only accepts a quoted path.
+  const native = binary.native ?? "herdr";
+  const invocation = /[\s]/.test(native) ? `& ${powershell(native)}` : native;
+  return `${pinned.join("; ")}; ${invocation} workspace close ${powershell(id)}`;
+}
+
 /** One tmux client: the attach commands it can be (compared, never executed), and whether it is a writable client that ignores its size. */
 interface Client { commands: string[]; fixedSize: boolean }
 
-/** The daemon tmux server's clients by pid. Null when tmux or its client list can't be read. */
-async function readClients({ exec, serverArgs }: LiveWorkspaceReaders): Promise<Map<string, Client> | null> {
+/**
+ * The daemon tmux server's clients by pid. Null when tmux or its client list can't be read.
+ *
+ * On Windows the composer writes a native tile argv instead of a POSIX attach command, and stock psmux keeps one
+ * server per session, so a single default-server query cannot prove a multi-seat view's attachments. There the
+ * pages name the sessions to ask, and a client outside the session asked for proves nothing.
+ */
+async function readClients(pages: readonly (readonly LiveTile[])[], readers: LiveWorkspaceReaders): Promise<Map<string, Client> | null> {
+  const { exec, serverArgs } = readers;
   try {
-    const tmux = (await exec("/bin/sh", ["-c", "command -v tmux"])).trim();
-    if (!path.isAbsolute(tmux)) return null;
+    // A native tile carries its own attach argv; there is no POSIX shell to ask for tmux.
+    const nativeTargets = pages.flat().map(pane => ({ pane, target: pane.attachArgv && readWindowsTileAttachArgv(pane.attachArgv) }));
+    const native = (readers.platform ?? process.platform) === "win32";
+    const tmux = native ? nativeTargets.find(item => item.target)?.target?.tmux ?? "" : (await exec("/bin/sh", ["-c", "command -v tmux"])).trim();
+    if (!(native ? path.win32 : path).isAbsolute(tmux)) return null;
     const clients = new Map<string, Client>();
     // Match view-composer's serialization (these strings are compared, never executed).
     const quote = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'";
     const server = serverArgs.map((arg, index) => index % 2 ? quote(arg) : arg).join(" ");
-    const inventory = await exec(tmux, [...serverArgs, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}\t#{client_flags}"]);
-    for (const line of inventory.trim().split("\n")) {
-      const [pid, session, readOnly, flagList] = line.split("\t");
-      if (!pid || !/^\d+$/.test(pid) || !session || !["0", "1"].includes(readOnly ?? "")) continue;
-      // Since 0.7.10 a writable tile sizes its window (#2614); one that ignores size came from an earlier tile script.
-      // A tmux without client_flags reports none, which reads as sizing.
-      const fixedSize = readOnly === "0" && (flagList ?? "").split(",").includes("ignore-size");
-      // Compare the composer's exact command, including session aliases and read-only mode.
-      // SSH/custom commands cannot be confirmed from this local client inventory.
-      const flag = readOnly === "1" ? "-r " : fixedSize ? "-f ignore-size " : "";
-      clients.set(pid, { fixedSize, commands: ["tmux", quote(tmux)].map(binary => `${binary}${server ? ` ${server}` : ""} attach ${flag}-t ${quote(session)}`) });
+    // Stock psmux has one server per session. A single default-server query
+    // cannot prove the attachments in a multi-seat view, unlike POSIX tmux.
+    const sessions: Array<string | undefined> = native ? [...new Set(nativeTargets.flatMap(({ target }) =>
+      target && target.tmux === tmux && JSON.stringify(target.server) === JSON.stringify(serverArgs) ? [target.session] : []))] : [undefined];
+    for (const selectedSession of sessions) {
+      const inventory = await exec(tmux, [...serverArgs, "list-clients", ...(selectedSession === undefined ? [] : ["-t", `=${selectedSession}`]), "-F",
+        native ? "#{client_pid}\t#{session_name}\t#{client_readonly}" : "#{client_pid}\t#{session_name}\t#{client_readonly}\t#{client_flags}"]);
+      for (const line of inventory.trim().split(/\r?\n/)) {
+        const [pid, session, readOnly, flagList] = line.split("\t");
+        if (!pid || !/^\d+$/.test(pid) || !session || !["0", "1"].includes(readOnly ?? "")) continue;
+        if (native) {
+          // A client outside the session this query asked for proves nothing about this view.
+          if (session !== selectedSession) return null;
+          // psmux reports no client_flags, so a native tile is never known to ignore its size; unknown is not fixed.
+          clients.set(pid, { fixedSize: false, commands: nativeTargets
+            .filter(({ target }) => target && target.tmux === tmux && target.session === session
+              && target.readOnly === (readOnly === "1") && JSON.stringify(target.server) === JSON.stringify(serverArgs))
+            .map(({ pane }) => pane.recoveryCommand ?? pane.paneCommand) });
+          continue;
+        }
+        // Since 0.7.10 a writable tile sizes its window (#2614); one that ignores size came from an earlier tile script.
+        // A tmux without client_flags reports none, which reads as sizing.
+        const fixedSize = readOnly === "0" && (flagList ?? "").split(",").includes("ignore-size");
+        // Compare the composer's exact command, including session aliases and read-only mode.
+        // SSH/custom commands cannot be confirmed from this local client inventory.
+        const flag = readOnly === "1" ? "-r " : fixedSize ? "-f ignore-size " : "";
+        clients.set(pid, { fixedSize, commands: ["tmux", quote(tmux)].map(binary => `${binary}${server ? ` ${server}` : ""} attach ${flag}-t ${quote(session)}`) });
+      }
     }
     return clients;
   } catch {
@@ -131,6 +183,11 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: r
   }
 }
 
+/** The same check for a caller that holds one candidate and no client inventory of its own. */
+export async function hasLiveHerdrAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: readonly (readonly LiveTile[])[], pageLabel: (index: number) => string, readers: LiveWorkspaceReaders): Promise<boolean> {
+  return hasLiveAttachments(existing, tabs, pages, pageLabel, readers.herdr, await readClients(pages, readers));
+}
+
 /** Every workspace's tabs, scoped per workspace. Throws when Herdr's inventory is unusable. */
 async function readTabs(herdr: LiveWorkspaceReaders["herdr"]): Promise<{ tabs: HerdrTab[]; spaceLabels: Map<string, string> }> {
   const tabs: HerdrTab[] = [];
@@ -175,7 +232,7 @@ export async function findLiveHerdrWorkspace(view: HerdrViewKey, readers: LiveWo
       (value.startsWith(`${viewMarker}#`) && /^[a-f0-9]{16}$/.test(value.slice(viewMarker.length + 1))));
   });
   const search: LiveWorkspaceSearch = { unconfirmed: [], stale: [...new Set(stale.map(tab => tab.workspace_id))], fixedSize: [] };
-  const clients = candidates.length || search.stale.length ? await readClients(readers) : null;
+  const clients = candidates.length || search.stale.length ? await readClients(view.pages, readers) : null;
   let live: HerdrTab | undefined;
   for (const candidate of candidates) {
     if (await hasLiveAttachments(candidate, tabs, view.pages, pageLabel(candidate), readers.herdr, clients)) { live = candidate; break; }

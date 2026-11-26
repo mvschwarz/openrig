@@ -1,3 +1,4 @@
+import { localControlEndpoint } from "@openrig/daemon/windows-launch";
 // Control-socket adapter — the "addressable-screen API" adopted by the Phase-0
 // spike verdict. One command per line; every line gets a one-line JSON reply.
 //
@@ -22,6 +23,9 @@ import type { ViewState, ViewStateStore } from "./types.js";
 
 /** macOS sun_path caps unix-socket paths at ~104 bytes; guard with margin. */
 export const MAX_SOCKET_PATH_BYTES = 100;
+
+/** Windows IPC has a flat pipe namespace, not filesystem Unix sockets. */
+export const controlEndpoint = localControlEndpoint;
 
 export function describeState(state: ViewState) {
   const named = new Map(state.drill.map((item) => [item.kind, item.name]));
@@ -105,11 +109,28 @@ interface ControlSocketOptions {
 const RECOVERABLE_BIND_CODES = new Set(["EADDRINUSE", "EACCES", "EPERM", "EROFS", "ENAMETOOLONG", "ENOTDIR", "ENOENT"]);
 
 export async function createControlSocket(options: ControlSocketOptions): Promise<ControlSocket> {
+  const endpoint = controlEndpoint(options.socketPath);
+  options = { ...options, socketPath: endpoint };
   try {
     return await createReservedControlSocket(options);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (!options.fallbackOnCollision || !code || !RECOVERABLE_BIND_CODES.has(code)) throw error;
+    // A Windows pipe has a flat namespace with no path length to shorten, so the independent endpoint is the same
+    // name plus this process's unique suffix, and a second failure is reported the same way as a POSIX one.
+    if (process.platform === "win32") {
+      const alternate = `${endpoint}-${process.pid}-${randomUUID()}`;
+      try {
+        return await createReservedControlSocket({ ...options, socketPath: alternate });
+      } catch (alternateError) {
+        const alternateCode = (alternateError as NodeJS.ErrnoException).code;
+        throw new Error(
+          `could not bind a TUI control socket: ${options.socketPath} failed with ${code}, and the independent ` +
+          `endpoint ${alternate} failed with ${alternateCode ?? "no code"}: ` +
+          `${alternateError instanceof Error ? alternateError.message : String(alternateError)}`,
+        );
+      }
+    }
     const directory = path.dirname(options.socketPath);
     const suffix = `-${process.pid}-${randomUUID().slice(0, 8)}.sock`;
     const budget = MAX_SOCKET_PATH_BYTES - Buffer.byteLength(directory + path.sep + suffix);
@@ -208,7 +229,8 @@ async function createReservedControlSocket(options: ControlSocketOptions): Promi
   const { socketPath, view, onMutation } = options;
   const currentContext = options.currentContext ?? (() => "standard");
   const bytes = Buffer.byteLength(socketPath);
-  if (bytes > MAX_SOCKET_PATH_BYTES) {
+  // A Windows pipe name is a hash of the requested path, so no filesystem length limit applies there.
+  if (process.platform !== "win32" && bytes > MAX_SOCKET_PATH_BYTES) {
     // Coded like a bind failure, so createControlSocket can try the shorter independent endpoint
     // instead of rethrowing: length is exactly what a shorter name in the same directory fixes.
     throw Object.assign(
@@ -216,7 +238,7 @@ async function createReservedControlSocket(options: ControlSocketOptions): Promi
       { code: "ENAMETOOLONG" },
     );
   }
-  fs.mkdirSync(path.dirname(socketPath), { recursive: true });
+  if (process.platform !== "win32") fs.mkdirSync(path.dirname(socketPath), { recursive: true });
 
   const server = net.createServer((conn) => {
     let buf = "";
@@ -262,6 +284,9 @@ async function createReservedControlSocket(options: ControlSocketOptions): Promi
     await listen();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+    // A live Windows pipe is owned by its server and disappears on exit.
+    // Never apply filesystem stale-socket unlink/recovery to this namespace.
+    if (process.platform === "win32") throw error;
     // All supported recoverers reserve this path before probing/unlinking.
     const reservation = `${socketPath}.recovery.lock`;
     const releaseReservation = acquireRecoveryReservation(reservation);

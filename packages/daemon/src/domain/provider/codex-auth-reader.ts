@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { userInfo } from "node:os";
+import { readPlatformEnv } from "../platform-env.js";
 
 export interface CodexSeatRow {
   seat: string;
@@ -48,10 +49,12 @@ function accountHome(): string {
 }
 
 function resolveCodexHome(env: NodeJS.ProcessEnv): { profileDir: string; registryPath: string } {
-  const home = typeof env.HOME === "string" && env.HOME.length > 0 ? env.HOME : accountHome();
+  const selectedHome = readPlatformEnv(env, "HOME");
+  const selectedCodexHome = readPlatformEnv(env, "CODEX_HOME");
+  const home = selectedHome || accountHome();
   const codexHome =
-    typeof env.CODEX_HOME === "string" && env.CODEX_HOME.length > 0
-      ? env.CODEX_HOME
+    selectedCodexHome
+      ? selectedCodexHome
       : path.join(home, ".codex");
   return {
     profileDir: path.join(codexHome, "auth-profiles"),
@@ -89,7 +92,7 @@ function readSeats(registryPath: string): { seats: CodexSeatRow[]; registry: Cod
   }
   const rows: CodexSeatRow[] = [];
   let malformedRows = 0;
-  for (const line of raw.split("\n")) {
+  for (const line of raw.split(/\r?\n/)) {
     if (line.length === 0) continue;
     const cols = line.split("\t");
     if (cols.length !== SEAT_COLUMN_COUNT) { // skip malformed rows — never fabricate fields

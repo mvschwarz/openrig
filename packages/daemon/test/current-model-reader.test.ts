@@ -19,7 +19,7 @@ import { ModelDivergenceMonitor } from "../src/domain/model-divergence/model-div
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { vi.restoreAllMocks(); for (const fn of cleanup.splice(0).reverse()) fn(); });
-function fixture(runtime = "claude-code", bulk = true) {
+function fixture(runtime = "claude-code", bulk = true, expandedRecord = false) {
   const db = createFullTestDb(); cleanup.push(() => db.close());
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "observed-model-"))); cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const rigs = new RigRepository(db), sessions = new SessionRegistry(db), identities = new SeatIdentityStore(db);
@@ -48,7 +48,7 @@ function fixture(runtime = "claude-code", bulk = true) {
   const reports = new AgentActivityStore({ db, eventBus: new EventBus(db), now: () => new Date(boot + 60_000) });
   const reader = new CurrentModelReader({ sessions, identities, runnerObservations: reports,
     context: { readSidecar: () => ({ ok: true, data: { session_id: id, session_name: "editor@studio", transcript_path: path, sampled_at: stamp, occupant_generation: tenure.generationUuid } }) } as never,
-    codexRollout: () => path, piRunner: () => ({ state: { ready: true, launchId: "launch", sessionFile: path }, sessionsDir: dir, entryPath: `${dir}/pi-runner.mjs`, stateRoot: dir }),
+    codexRollout: () => path, piRunner: () => ({ state: { ready: true, launchId: "launch", sessionFile: expandedRecord ? realpathSync.native(path) : path }, sessionsDir: dir, entryPath: `${dir}/pi-runner.mjs`, stateRoot: dir }),
     readAllPaneProcesses: bulk ? readAllPaneProcesses : undefined, census, now: () => boot + 60_000, native: { getPanePid, listProcesses: () => census.list(), readThreadIdByPid: thread },
   });
   const input = { nodeId: node.id, canonicalSessionName: "editor@studio", runtime, sessionStatus: "running" };
@@ -111,6 +111,14 @@ it.each([
   const result = await pending;
   expect(result[0]).toMatchObject(revoke ? { status: "unknown", model: null } : { status: "observed", model: "reported/model", source: "runner_reported" });
   expect(result[1]).toMatchObject({ status: "observed", model: "response-model", source: "claude-assistant-response" });
+  });
+
+it.runIf(process.platform === "win32")("reads the owned Pi record through native long-path expansion", async () => {
+  const f = fixture("pi", true, true);
+  expect(await f.reader.observe(f.input)).toMatchObject({ status: "observed", model: "example/response-model" });
+  const record = await f.reader.currentPiRecord(f.node.id, "editor@studio");
+  expect(record.ok).toBe(true);
+  if (record.ok) expect(realpathSync.native(record.path)).toBe(realpathSync.native(f.path));
 });
 
 it("reports assistant-response evidence separately from the pin, with native time and no record contents", async () => {
@@ -239,7 +247,7 @@ it("reports Pi response evidence without consulting its pin or models comparator
 it("selects the current Pi runner and its session file for the effort report, and refuses another occupant's session", async () => {
   const f = fixture("pi");
   expect(await f.reader.currentPiRecord(f.node.id, "editor@studio")).toMatchObject({
-    ok: true, path: f.path, launchId: "launch", pid: 20, startedAt: f.processRows[1]!.startedAt, command: f.processRows[1]!.command,
+    ok: true, path: process.platform === "win32" ? realpathSync.native(f.path) : f.path, launchId: "launch", pid: 20, startedAt: f.processRows[1]!.startedAt, command: f.processRows[1]!.command,
   });
   vi.spyOn(f.sessions, "currentOccupantGenerationForSession").mockReturnValue("replacement");
   expect(await f.reader.currentPiRecord(f.node.id, "editor@studio")).toMatchObject({ ok: false });
@@ -323,6 +331,13 @@ it("r2: batches inventory pane reads and shares one census without per-seat tmux
   expect(f.getPanePid).not.toHaveBeenCalled(); expect(f.list).toHaveBeenCalledTimes(1);
   await f.reader.observeInventory([{ ...f.input, sessionStatus: "stopped" }, { ...f.input, runtime: "stub" }]);
   expect(f.readAllPaneProcesses).toHaveBeenCalledTimes(2);
+});
+
+it("observes inventory with scoped pane reads when the terminal has no safe batch", async () => {
+  const f = fixture("claude-code", false, false);
+  expect(await f.reader.observeInventory([f.input])).toMatchObject([{ status: "observed", model: "response-model" }]);
+  expect(f.readAllPaneProcesses).not.toHaveBeenCalled();
+  expect(f.getPanePid.mock.calls.length).toBeGreaterThanOrEqual(2);
 });
 
 it("r2: uses the bulk path on repeated actual inventory requests and skips unchanged transcript reads", async () => {

@@ -13,11 +13,12 @@ import { CodexThreadIdResolver } from "../src/domain/codex-thread-id.js";
 import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 import { codexDaemonSupportProbe } from "../src/domain/codex-daemon-support.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
+import { writeWindowsNodeFixture } from "../../../scripts/windows-node-fixture.mjs";
 
 const exec = promisify(execFile), roots: string[] = [];
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); for (const r of roots.splice(0)) fs.rmSync(r, { recursive: true, force: true }); });
+afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); for (const r of roots.splice(0)) await fs.promises.rm(r, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); });
 function fixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-selected-home-")); roots.push(root);
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "codex-selected-home-"))); roots.push(root);
   const home = path.join(root, "home"), selected = path.join(root, "selected home's"), cwd = path.join(root, "project-two"), bin = path.join(root, "bin");
   for (const dir of [home, selected, cwd, bin, path.join(home, ".codex"), path.join(root, "project-one")]) fs.mkdirSync(dir, { recursive: true });
   const firstConfig = path.join(home, ".codex/config.toml"); fs.writeFileSync(firstConfig, '# first-home sentinel\nmodel = "fixture"\n');
@@ -25,13 +26,23 @@ function fixture() {
   fs.writeFileSync(path.join(root, 'project-one/AGENTS.md'), 'first-project sentinel\n');
   fs.writeFileSync(path.join(bin, "codex"), `#!${process.execPath}\nconst fs=require('node:fs');const r={home:process.env.CODEX_HOME,cwd:process.cwd(),argv:process.argv.slice(2)};if(process.env.PROBE_RECORD)fs.appendFileSync(process.env.PROBE_RECORD,JSON.stringify(r)+'\\n');if(process.argv.includes('--help'))console.log('Usage: codex [OPTIONS]\\n  --no-daemon');else if(process.argv.includes('--version'))console.log('codex-cli 0.155.1');else console.log(JSON.stringify(r));\n`, { mode: 0o700 });
   const cli = path.join(bin, "rig"); fs.writeFileSync(cli, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
-  const env = { PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin`, HOME: home, CODEX_HOME: selected, OPENRIG_HOME: path.join(root, "instance") };
+  if (process.platform === "win32") {
+    const body = fs.readFileSync(path.join(bin, "codex"), "utf8").split("\n").slice(1).join("\n");
+    writeWindowsNodeFixture(bin, "codex", "import {createRequire} from 'node:module';const require=createRequire(import.meta.url);" + body);
+    fs.writeFileSync(cli, "process.exitCode=0;");
+  }
+  const env: Record<string, string> = { PATH: [bin, path.dirname(process.execPath), ...(process.platform === "win32" ? [path.join(process.env.SystemRoot ?? "C:\\Windows", "System32")] : ["/usr/bin", "/bin"])].join(path.delimiter),
+    HOME: home, USERPROFILE: home, CODEX_HOME: selected, OPENRIG_HOME: path.join(root, "instance"),
+    ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot ?? "C:\\Windows", TEMP: root, TMP: root } : {}) };
   const ids: Record<string, string> = { OPENRIG_NODE_ID: "node", OPENRIG_SESSION_NAME: "seat@rig", OPENRIG_RUNTIME: "codex", OPENRIG_OCCUPANT_GENERATION: "generation" };
-  const tmux = { getPaneCommand: vi.fn(async () => "bash"), getSessionEnv: vi.fn(async (_s: string, k: string) => ids[k]), sendShellCommand: vi.fn(async (_s: string, _cmd: string) => ({ ok: true })) };
+  const tmux = { getPaneCommand: vi.fn(async () => process.platform === "win32" ? "powershell.exe" : "bash"), getSessionEnv: vi.fn(async (_s: string, k: string) => ids[k]), sendShellCommand: vi.fn(async (_s: string, _cmd: string) => ({ ok: true })) };
   const fsOps = { homedir: home, readFile: (p: string) => fs.readFileSync(p, "utf8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c), exists: fs.existsSync, mkdirp: (p: string) => { fs.mkdirSync(p, { recursive: true }); } };
-  const launch = (explicit: boolean) => new (SeatLaunchEnvironment as any)(tmux, env, root, cli, explicit ? selected : undefined) as SeatLaunchEnvironment;
+  const launch = (explicit: boolean) => new (SeatLaunchEnvironment as any)(tmux, env, root, cli, explicit ? selected : undefined, process.platform === "win32" ? "win32" : "posix") as SeatLaunchEnvironment;
   const rc = path.join(root, 'pane.rc'); fs.writeFileSync(rc, `export CODEX_HOME=${shellQuote(path.join(home, '.codex'))}\n`);
-  const run = (cmd: string) => exec('/bin/bash', ['--noprofile', '--norc', '-c', `. ${shellQuote(rc)}; ${cmd}`], { cwd, env, timeout: 5000 });
+  const run = (cmd: string) => process.platform === "win32"
+    ? exec(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"), ["-NoProfile", "-NonInteractive", "-EncodedCommand",
+      Buffer.from("$env:CODEX_HOME = '" + path.join(home, ".codex").replaceAll("'", "''") + "'; " + cmd, "utf16le").toString("base64")], { cwd, env, timeout: 5000, windowsHide: true })
+    : exec('/bin/bash', ['--noprofile', '--norc', '-c', `. ${shellQuote(rc)}; ${cmd}`], { cwd, env, timeout: 5000 });
   return { root, home, selected, cwd, bin, env, tmux, fsOps, launch, run, firstConfig };
 }
 
@@ -57,8 +68,13 @@ it("unset selection keeps the pane home, including when startup supplies its def
   const cmd = await f.launch(false).command('seat@rig', 'codex --versionless', { codexCwd: f.cwd });
   expect(JSON.parse((await f.run(cmd)).stdout).home).toBe(path.join(f.home, '.codex'));
 });
-it("explicit home survives the existing metadata-unavailable fallback", async () => {
+it("preserves the explicit home or refuses when pane metadata is unavailable", async () => {
   const f = fixture(); f.tmux.getSessionEnv.mockRejectedValue(Error('unavailable'));
+  if (process.platform === "win32") {
+    await expect(f.launch(true).command('seat@rig', 'codex --versionless', { codexCwd: f.cwd })).rejects.toThrow(/no POSIX fallback/);
+    expect(f.tmux.sendShellCommand).not.toHaveBeenCalled();
+    return;
+  }
   const cmd = await f.launch(true).command('seat@rig', 'codex --versionless', { codexCwd: f.cwd });
   expect(JSON.parse((await f.run(cmd)).stdout).home).toBe(f.selected);
 });
@@ -68,11 +84,11 @@ it.each(['managed', 'legacy', 'capability'])("%s probe uses the explicit home an
   if (kind === 'capability') {
     expect(await (codexDaemonSupportProbe as any)(f.env.PATH, 5000, f.selected)(f.cwd)).toEqual({ kind: 'supported' });
   } else if (kind === 'legacy') {
-    const a = new CodexResumeAdapter(f.tmux as any, { codexHome: f.selected, launchPath: f.env.PATH } as any);
+    const a = new CodexResumeAdapter(f.tmux as any, { codexHome: f.selected, launchPath: f.env.PATH, seatLaunchEnvironment: f.launch(true) } as any);
     vi.spyOn(a as any, 'verifyResume').mockResolvedValue({ ok: true });
     expect((await a.resume('seat@rig', 'codex_id', 'old', f.cwd, 'fixture')).ok).toBe(true);
   } else {
-    const a = new CodexRuntimeAdapter({ tmux: f.tmux as any, fsOps: f.fsOps, codexHome: f.selected, launchPath: f.env.PATH, resolveGitAddDirs: async () => [] });
+    const a = new CodexRuntimeAdapter({ tmux: f.tmux as any, fsOps: f.fsOps, codexHome: f.selected, launchPath: f.env.PATH, seatLaunchEnvironment: f.launch(true), resolveGitAddDirs: async () => [] });
     vi.spyOn(a as any, 'dismissSkippableCodexUpdatePrompt').mockResolvedValue(undefined); vi.spyOn(a as any, 'captureFreshThreadId').mockResolvedValue('fresh');
     expect((await a.launchHarness({ nodeId: 'node', tmuxSession: 'seat@rig', cwd: f.cwd, codexConfigProfile: 'fixture' } as any, { name: 'seat' })).ok).toBe(true);
   }
@@ -126,7 +142,7 @@ it("seatless startup, disable and projection preserve the other home's bytes; st
     const fragment = path.join(f.cwd, 'fragment.toml'); fs.writeFileSync(fragment, '[sandbox_workspace_write]\nnetwork_access = false\n');
     const result = await a.project({ entries: [{ category: 'runtime_resource', effectiveId: 'fixture', classification: 'safe_projection', resourceType: 'codex_config_fragment', absolutePath: fragment }] } as any, { cwd: f.cwd } as any);
     expect(result.failed).toEqual([]); expect(fs.readFileSync(config, 'utf8')).toContain('network_access = false');
-    expect(fs.readFileSync(config, 'utf8')).toContain(f.cwd);
+    expect(fs.readFileSync(config, 'utf8')).toContain(JSON.stringify(f.cwd).slice(1, -1));
     expect((first.deps.pluginDiscoveryService as any).opts.codexCacheDir).toBe(path.join(f.selected, 'plugins/cache'));
     seed(f.selected, 'second');
     expect((first.deps.contextUsageStore as any).resolveCodexStateDbPaths()).toEqual([path.join(f.selected, 'state_5.sqlite')]);

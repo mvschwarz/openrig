@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
+import path from "node:path";
 import { doctorCommand, runDoctorChecks, type DoctorDeps } from "../src/commands/doctor.js";
 import { runSetup, type SetupDeps } from "../src/commands/setup.js";
 
@@ -16,7 +17,7 @@ function fixture(options: {
   env?: NodeJS.ProcessEnv;
 } = {}): { setup: SetupDeps; doctor: DoctorDeps; commands: string[] } {
   const commands: string[] = [];
-  const readFile = vi.fn((p: string) => p === "/fixture/codex/config.toml" ? options.config ?? null : null);
+  const readFile = vi.fn((p: string) => p === path.join("/fixture/codex", "config.toml") ? options.config ?? null : null);
   const exec = (command: string) => {
     commands.push(command);
     if (options.missingCli?.some((name) => command === `${name} --version` || command.startsWith("npm install"))) {
@@ -72,7 +73,7 @@ describe("setup and doctor provider facts", () => {
     expect(check?.message).toContain("FIXTURE_PROVIDER_KEY");
     expect(JSON.stringify(check)).not.toContain("inert-test-value");
     expect(commands).not.toContain("codex login status");
-    expect(doctor.readFile).toHaveBeenCalledWith("/fixture/codex/config.toml");
+    expect(doctor.readFile).toHaveBeenCalledWith(path.join("/fixture/codex", "config.toml"));
   });
 
   it.each(["broken = [", 'profile = "legacy"\n' + providerConfig])("keeps the unresolved-config login fallback (%s)", async (config) => {

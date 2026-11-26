@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { readWindowsProcessStartToken } from "@openrig/daemon/windows-launch";
 
 /** #3315 — what the child record carries so a later stop can confirm the reservation still names that process. */
 export interface ReservedChildIdentity {
@@ -331,7 +332,7 @@ export function processStartToken(pid: number): string | undefined {
       const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
       return ticks && /^\d+$/.test(ticks) ? `linux:${ticks}` : undefined;
     }
-    if (process.platform === "win32") return undefined;
+    if (process.platform === "win32") return readWindowsProcessStartToken(pid);
     const start = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2_000, env: { ...process.env, LC_ALL: "C" } })
       .trim().replace(/\s+/g, " ");
     return start ? `lstart:${start}` : undefined;

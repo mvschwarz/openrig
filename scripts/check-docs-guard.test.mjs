@@ -88,7 +88,7 @@ test("the real check-docs-guard.mjs exits 0 against the actual repository", () =
 });
 
 // Git quotes non-ASCII, tabs and newlines in its default line-based output.
-test("the real tracked-path reader preserves unusual documentation filenames", async () => {
+test("the real tracked-path reader preserves unusual documentation filenames", { skip: process.platform === "win32" ? "Windows filenames cannot contain newlines or tabs" : false }, async () => {
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");

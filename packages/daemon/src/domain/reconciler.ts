@@ -284,9 +284,9 @@ async function recordedProcessProvenGone(
  *  observation (`observedAt`, in seconds); false when it observably started after it, so the pid was reused; undefined
  *  when its start can't be dated, which proves neither. Start times are whole seconds, so a pid reused within the
  *  observation's second still counts as the observed process. */
-function isRecordedProcess(row: Pick<ProcessTableRow, "startedAt">, observedAt: number): boolean | undefined {
-  const started = lstartToMinTs(row.startedAt);
-  return started === undefined ? undefined : started <= observedAt;
+function isRecordedProcess(row: Pick<ProcessTableRow, "startedAt" | "platform">, observedAt: number): boolean | undefined {
+  const started = row.platform === "win32" ? Date.parse(row.startedAt) / 1000 : lstartToMinTs(row.startedAt);
+  return started === undefined || !Number.isFinite(started) ? undefined : started <= observedAt;
 }
 
 /** #2940: positive proof that no tmux server runs: the process table can be read and shows none. Conservative: any
@@ -305,7 +305,7 @@ async function noTmuxServerRunning(processes: () => Promise<ProcessTableRow[] | 
 export async function recordedProcessStillRunning(
   db: Database.Database,
   session: { nodeId: string; sessionName: string },
-  processes: () => Promise<Array<Pick<ProcessTableRow, "pid" | "ppid" | "command" | "startedAt">> | null>,
+  processes: () => Promise<Array<Pick<ProcessTableRow, "pid" | "ppid" | "command" | "startedAt" | "platform">> | null>,
 ): Promise<{ pid: number; parent: { pid: number; command: string } | null } | null> {
   const evidence = new SeatIdentityStore(db).getProcessEvidence(session.nodeId);
   if (!evidence || evidence.sessionName !== session.sessionName) return null;

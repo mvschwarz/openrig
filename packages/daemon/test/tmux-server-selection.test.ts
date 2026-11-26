@@ -12,7 +12,11 @@ const PINNED_MARKER = "openrig-tmux-pinned-v1\n";
 // its TMPDIR exactly (OPENRIG_TEST_KEEP_TMPDIR=1, as in the shared hermetic setup) or /tmp is not writable.
 // Resolved like the setup's TMPDIR: on macOS /tmp is a symlink to /private/tmp, and the selector reads paths canonically.
 function makeFixtureRoot(): string {
-  const underTmpdir = () => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "t")));
+  // The selector reads Windows paths natively, which also expands an 8.3 short name the caller's TEMP may carry.
+  const underTmpdir = () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "t"));
+    return process.platform === "win32" ? fs.realpathSync.native(root) : fs.realpathSync(root);
+  };
   if (process.platform === "win32" || process.env.OPENRIG_TEST_KEEP_TMPDIR === "1") return underTmpdir();
   try { return fs.realpathSync(fs.mkdtempSync("/tmp/ors-")); }
   catch { return underTmpdir(); }
@@ -139,7 +143,7 @@ describe("durable tmux server selection", () => {
     expect(moved).toMatchObject({ mode: "isolated", migrationPending: false, blockingSessions: [] });
     expect(moved.socketPath).not.toBe(oldSocket);
     expect(moved.executionArgs).toEqual(["-S", moved.socketPath]);
-    expect(fs.readFileSync(path.join(home, "tmux-server.json"), "utf8")).toContain(moved.socketPath!);
+    expect(JSON.parse(fs.readFileSync(path.join(home, "tmux-server.json"), "utf8")).socketPath).toBe(moved.socketPath!);
   });
 
   it("retains a pending pin when isolation is cancelled from a different launching server", async () => {
@@ -281,12 +285,12 @@ describe("durable tmux server selection", () => {
   });
 
   it("reads session ownership from the inspected server", async () => {
-    vi.spyOn(execution, "execArgvCommand").mockResolvedValue(`owned\t${home}\nlegacy\t\n`);
+    vi.spyOn(execution, "execArgvCommand").mockResolvedValue(`owned\t${home}\topenrig-owner-v1\nlegacy\t\topenrig-owner-v1\n`);
     expect(await inspectTmuxServer(oldSocket)).toEqual({ state: "available", sessions: [
       { name: "owned", home }, { name: "legacy" },
     ] });
     expect(execution.execArgvCommand).toHaveBeenCalledWith([
-      "tmux", "-u", "-S", oldSocket, "list-sessions", "-F", "#{session_name}\t#{OPENRIG_HOME}",
+      "tmux", "-u", "-S", oldSocket, "list-sessions", "-F", "#{session_name}\t#{OPENRIG_HOME}\topenrig-owner-v1",
     ]);
   });
 
@@ -399,12 +403,42 @@ describe("durable tmux server selection", () => {
     expect(fs.readFileSync(file, "utf8")).toBe(original);
   });
 
-  it("reports the unsupported Windows selection without pretending to isolate psmux", async () => {
-    expect(await selectTmuxServer({ ...options(), platform: "win32", mode: "isolated" })).toMatchObject({
-      requestedMode: "isolated", mode: "inherit", serverArgs: [], migrationPending: true,
-      note: expect.stringContaining("POSIX"),
+  it("pins Windows execution and new-terminal attachment to the same durable namespace", async () => {
+    const selected = await selectTmuxServer({ ...options(), platform: "win32", mode: "isolated" });
+    expect(selected).toMatchObject({ requestedMode: "isolated", mode: "isolated", migrationPending: false });
+    expect(selected.executionArgs).toEqual(["-S", selected.socketPath]);
+    expect(selected.serverArgs).toEqual(selected.executionArgs);
+    expect(selected.socketPath).toContain(home);
+    expect(await selectTmuxServer({ ...options(), platform: "win32", mode: "isolated" })).toEqual(selected);
+    const other = await selectTmuxServer({ ...options(), home: path.join(root, "other"), platform: "win32", mode: "isolated" });
+    expect(other.socketPath).not.toBe(selected.socketPath);
+  });
+
+  it("keeps live Windows sessions on their original server until an explicit stop", async () => {
+    const observer = vi.fn(async () => ({ state: "available" as const, sessions: [{ name: "owned", home }] }));
+    const selected = await selectTmuxServer({ ...options(), platform: "win32", mode: "isolated", registeredSessions: ["owned"], inspect: observer });
+    expect(selected).toMatchObject({ mode: "inherit", migrationPending: true, socketPath: oldSocket, blockingSessions: ["owned"], executionArgs: ["-S", oldSocket] });
+    expect(observer).toHaveBeenCalledWith(oldSocket);
+  });
+
+  it("records an explicit native default attachment path without changing inherited execution", async () => {
+    const data = path.join(root, "psmux");
+    expect(await selectTmuxServer({ ...options(), platform: "win32", env: { PSMUX_DATA_DIR: data } })).toMatchObject({
+      mode: "inherit", executionArgs: [], serverArgs: ["-S", path.join(data, "default")], migrationPending: false,
     });
-    expect(fs.existsSync(home)).toBe(false);
+  });
+  it("selects Windows inherited servers using the child environment's case-insensitive key rules", async () => {
+    const data = path.join(root, "psmux"), profile = path.join(root, "profile");
+    for (const [env, socket] of [
+      [{ Tmux: `${oldSocket},44,0` }, oldSocket],
+      [{ Psmux_Data_Dir: data }, path.join(data, "default")],
+      [{ UserProfile: profile }, path.join(profile, ".psmux", "default")],
+      [{ PSMUX_DATA_DIR: data, psmux_data_dir: profile }, path.join(data, "default")],
+    ] as Array<[NodeJS.ProcessEnv, string]>) {
+      expect(await selectTmuxServer({ ...options(), platform: "win32", persist: false, env })).toMatchObject({
+        executionArgs: [], serverArgs: ["-S", socket], socketPath: socket,
+      });
+    }
   });
 
   it.each([

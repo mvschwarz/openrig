@@ -1,4 +1,5 @@
 import type { RunnerGrantLaunch, RunnerGrantIssuer } from "../domain/runner-grant-launch.js";
+import { readNamedSessionCommand, captureNamedSessionContent } from "./session-pane-lookup.js";
 import { piAccountSwitchStateRoot } from "../domain/pi-account-state.js";
 import { verifyPiRecovery } from "./pi-runtime-recovery.js";
 import type { RecoveryVerificationInput } from "../domain/runtime-recovery.js";
@@ -14,7 +15,12 @@ import type { RecoveryVerificationInput } from "../domain/runtime-recovery.js";
 // future contract, never a hidden mode here (BR-2).
 
 import nodePath from "node:path";
+import { sameSessionFile } from "./same-session-file.js";
 import { randomUUID } from "node:crypto";
+import { shellQuote } from "./shell-quote.js";
+import { resourceDirectoryPath, resourceIdFromDirectoryName } from "../domain/resource-directory-name.js";
+import { renderWindowsLaunch } from "./windows-launch.js";
+import { verifyWindowsManagedRunner, type WindowsRunnerEvidence } from "../domain/windows-managed-runner.js";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { piTrust, yoloEnabled } from "./yolo-mode.js";
@@ -55,6 +61,10 @@ export interface PiAdapterFsOps {
 }
 
 export interface PiRuntimeAdapterDeps {
+  /** Observation platform for hermetic fixtures; production uses the host. */
+  platform?: NodeJS.Platform;
+  /** Production shares its existing census across readiness/model readers. */
+  listProcesses?: WindowsRunnerEvidence["listProcesses"];
   tmux: TmuxAdapter;
   runnerGrants?: RunnerGrantIssuer;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
@@ -83,6 +93,8 @@ export interface PiRuntimeAdapterDeps {
 }
 
 export class PiRuntimeAdapter implements RuntimeAdapter {
+  private platform: NodeJS.Platform;
+  private listProcesses?: WindowsRunnerEvidence["listProcesses"];
   readonly runtime: string = "pi";
   protected tmux: TmuxAdapter;
   protected runnerGrants?: RunnerGrantIssuer;
@@ -100,6 +112,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   constructor(deps: PiRuntimeAdapterDeps) {
     this.managedBlockRecords = deps.managedBlockRecords;
+    this.platform = deps.platform ?? process.platform;
+    this.listProcesses = deps.listProcesses;
     this.usageFactsEnabled = deps.usageFactsEnabled ?? (() => false);
     this.openRouterChargeEnabled = deps.openRouterChargeEnabled ?? (() => false);
     this.tmux = deps.tmux;
@@ -195,8 +209,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     const { agentDir } = this.bindingPaths(binding);
     const skillsDir = nodePath.join(agentDir, "skills");
     if (this.fs.exists(skillsDir) && this.fs.listFiles) {
-      for (const file of this.fs.listFiles(skillsDir)) {
-        results.push({ effectiveId: file, category: "skill", installedPath: nodePath.join(skillsDir, file) });
+      for (const file of new Set(this.fs.listFiles(skillsDir).map(file => file.split(/[\\/]/)[0]!))) {
+        results.push({ effectiveId: resourceIdFromDirectoryName(file), category: "skill", installedPath: nodePath.join(skillsDir, file) });
       }
     }
     return results;
@@ -205,7 +219,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   /** Conflict detection must inspect this seat's copy, not a Claude sibling. */
   skillTargetPath(tmuxSession: string | null, effectiveId: string): string | null {
     if (!tmuxSession) return null;
-    return nodePath.join(piSeatPaths(this.stateRootForSession(tmuxSession), tmuxSession).agentDir, "skills", effectiveId, "SKILL.md");
+    return nodePath.join(resourceDirectoryPath(nodePath.join(piSeatPaths(this.stateRootForSession(tmuxSession), tmuxSession).agentDir, "skills"), effectiveId), "SKILL.md");
   }
 
   async project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult> {
@@ -306,6 +320,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     if (!binding.tmuxSession) {
       return { ok: false, error: `No tmux session bound — cannot launch the ${this.runtime === "pi" ? "Pi" : "OMP"} harness` };
     }
+    const changedSelection = () => ({ ok: false as const, error: "Selected history changed during runner launch preparation; no native command was sent.", recovery: "attention_required" as const });
+    if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return changedSelection();
     if (opts.resumeToken && opts.forkSource) {
       return { ok: false, error: "resumeToken and forkSource are mutually exclusive — pick one" };
     }
@@ -355,8 +371,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // Launch-attempt scoping (guard fold): overwrite any stale sidecar from a
     // prior runner instance with a pending record BEFORE the command is typed,
     // and only trust sidecar states stamped with THIS attempt's launchId.
-    // The prior record is read FIRST so the durable catch-up cursor
-    // (lastEntryId, FR-5) survives the reset.
+    // Read the prior record at the write boundary so the latest durable
+    // catch-up cursor (lastEntryId, FR-5) survives the reset.
     const launchId = this.newLaunchId();
     let authority: RunnerGrantLaunch | undefined;
     let authorityUnavailable = false;
@@ -365,11 +381,6 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     catch { authorityUnavailable = true; }
     let authorizedLaunchSucceeded = false;
     try {
-      const prior = this.readRunnerState(location.sessionName, location.stateRoot);
-      this.fs.writeFile(
-        paths.runnerStatePath,
-        JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
-      );
 
       const trust = this.runtime === "omp"
         ? (yoloEnabled(process.env, binding.launchPosture) ? "approve" : "no-approve")
@@ -406,25 +417,34 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
         ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
       });
 
-      const fallback = cmd;
+    const runnerCommand = this.platform === "win32" ? `${shellQuote(process.execPath)} ${cmd.slice("node ".length)}` : cmd;
+    const bareCommand = this.platform === "win32" ? renderWindowsLaunch(runnerCommand, {}) : cmd;
+    const beforeInput = () => {
+      if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) throw new Error("Selected history changed before runner input");
+      // Read the latest cursor and publish pending only at the actual write
+      // boundary. Cancelled preparation must not replace the prior sidecar.
+      const prior = this.readRunnerState(location.sessionName, location.stateRoot);
+      this.fs.writeFile(paths.runnerStatePath, JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)));
+    };
+      const fallback = bareCommand;
       // Every Pi-protocol runtime (Pi and its pi-rpc forks) takes the seat launch environment; OMP unchanged.
       let command = this.runtime !== "omp" && this.seatLaunchEnvironment
-        ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: authority?.generation ?? binding.launchGeneration, runtime: this.runtime, accountHome })
+        ? await this.seatLaunchEnvironment.command(sessionName, runnerCommand, { nodeId: binding.nodeId, generation: authority?.generation ?? binding.launchGeneration, runtime: this.runtime, accountHome })
         : fallback;
       const originalCommand = command;
       if (authority) command = authority.wrap(command);
       if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Runner launch selection changed before dispatch." };
       // Stage long commands without leaving a shell above the live runner.
-      let textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
+      let textResult = await this.tmux.sendShellCommand(sessionName, command, beforeInput, { stageIfLong: true, execInScript: true });
       if (!textResult.ok && textResult.code === "launch_path_too_long" && authority && command !== originalCommand) {
         try { await authority.finish(false); } catch { /* optional authority cleanup cannot prevent the original launch */ }
         authority = undefined; authorityUnavailable = true;
         if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Runner launch selection changed before dispatch." };
-        textResult = await this.tmux.sendShellCommand(sessionName, originalCommand, undefined, { stageIfLong: true, execInScript: true });
+        textResult = await this.tmux.sendShellCommand(sessionName, originalCommand, beforeInput, { stageIfLong: true, execInScript: true });
       }
       if (!textResult.ok && textResult.code === "launch_path_too_long" && originalCommand !== fallback && accountHome === undefined) {
         if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Runner launch selection changed before dispatch." };
-        textResult = await this.tmux.sendShellCommand(sessionName, fallback, undefined, { stageIfLong: true, execInScript: true });
+        textResult = await this.tmux.sendShellCommand(sessionName, fallback, beforeInput, { stageIfLong: true, execInScript: true });
       }
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -440,26 +460,25 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       // that sidecar (not pane content) is the token source of truth (FR-5).
       const state = await this.waitForRunnerReady(location.sessionName, launchId, location.stateRoot);
       if (!state.ok) return state.failure;
-
-      const sessionFile = state.value.sessionFile;
-      if (!sessionFile) {
-        return { ok: false, error: `${this.runtime} launch: the runner became ready but reported no session file` };
-      }
-      if (opts.resumeToken && sessionFile !== opts.resumeToken) {
-        // An exact resume must continue the requested history; a runner
-        // that came up on any other file started a different session. Same
-        // contract as the separate resume adapter's verifyResume.
-        return { ok: false, error: `${this.runtime} resume: the runner is ready but does not report the requested session file` };
-      }
-      if (forkRef && sessionFile === forkRef) {
-        // The adapter contract requires the NEW post-fork token, never the
-        // parent's (runtime-adapter.ts fork rule).
-        return { ok: false, error: `${this.runtime} fork: the runner reported the parent session file instead of the post-fork child` };
-      }
-      const validation = this.validateToken(sessionFile);
-      if (!validation.ok) {
-        return { ok: false, error: `${this.runtime} launch: the runner reported a malformed session file (${validation.error})` };
-      }
+    const sessionFile = state.value.sessionFile;
+    if (!sessionFile) {
+      return { ok: false, error: `${this.runtime} launch: the runner became ready but reported no session file` };
+    }
+    if (opts.resumeToken && !sameSessionFile(sessionFile, opts.resumeToken)) {
+      // An exact OMP resume must continue the requested history; a runner
+      // that came up on any other file started a different session. Same
+      // contract as the separate resume adapter's verifyResume.
+      return { ok: false, error: `${this.runtime} resume: the runner is ready but does not report the requested session file` };
+    }
+    if (forkRef && sameSessionFile(sessionFile, forkRef)) {
+      // The adapter contract requires the NEW post-fork token, never the
+      // parent's (runtime-adapter.ts fork rule).
+      return { ok: false, error: `${this.runtime} fork: the runner reported the parent session file instead of the post-fork child` };
+    }
+    const validation = this.validateToken(sessionFile);
+    if (!validation.ok) {
+      return { ok: false, error: `${this.runtime} launch: the runner reported a malformed session file (${validation.error})` };
+    }
 
       // OMP lazily creates its JSONL on the first persisted turn. Readiness
       // is real, but until then there is no history to resume after a reboot.
@@ -499,17 +518,19 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // the runner process, so a ready signal counts ONLY while the pane's
     // foreground process is not back at a shell (a dead runner leaves the
     // pane at the shell; READY scrollback and a stale ready sidecar do not
-    // make a stopped seat ready).
-    const paneCommand = (await this.tmux.getPaneCommand(binding.tmuxSession)) ?? "";
+    // make a stopped seat ready). Windows instead verifies the managed child:
+    // its PowerShell pane label can remain unchanged while that child is live.
+    const paneCommand = (await readNamedSessionCommand(this.tmux, binding.tmuxSession)) ?? "";
     const atShell = SHELL_COMMANDS.has(paneCommand);
     const state = this.readRunnerState(this.runnerLocation(binding).sessionName, this.runnerLocation(binding).stateRoot);
     if (state?.exited) {
       return { ready: false, reason: `${this.runtime}-runner exited (code ${state.exited.code ?? "unknown"})`, code: "runner_exited" };
     }
     if (state?.ready) {
-      if (atShell) {
+      if (atShell && this.platform !== "win32") {
         return { ready: false, reason: `${this.runtime}-runner sidecar says ready but the pane is back at a shell (runner process gone)`, code: "runner_exited" };
       }
+      if (this.platform === "win32") return this.nativeReadiness(binding, state.launchId);
       return { ready: true };
     }
     // Runner-authored pane marker as the secondary signal (FR-2) — still the
@@ -523,15 +544,25 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       return { ready: false, reason: `${this.runtime}-runner exited`, code: "runner_exited" };
     }
     if (paneContent.includes(`${marker} READY`)) {
-      if (atShell) {
+      if (atShell && this.platform !== "win32") {
         return { ready: false, reason: "READY marker is stale scrollback; the pane is back at a shell", code: "runner_exited" };
       }
+      if (this.platform === "win32") return this.nativeReadiness(binding, state?.launchId);
       return { ready: true };
     }
     return { ready: false, reason: `${this.runtime}-runner has not reported ready yet`, code: "awaiting_runtime" };
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
+
+  private async nativeReadiness(binding: NodeBinding, launchId?: string): Promise<ReadinessResult> {
+    const location = this.runnerLocation(binding);
+    const verified = await verifyWindowsManagedRunner({ runtime: this.runtime, sessionName: location.sessionName,
+      entryPath: this.runnerEntryPath, stateRoot: location.stateRoot, cwd: binding.cwd, launchId,
+      getPanePid: async () => typeof this.tmux.getPanePid === "function" ? this.tmux.getPanePid(binding.tmuxPane ?? binding.tmuxSession!) : null,
+      listProcesses: this.listProcesses });
+    return verified ? { ready: true } : { ready: false, code: "awaiting_runtime", reason: `${this.runtime}-runner live identity is not established` };
+  }
 
   protected readRunnerState(sessionName: string, stateRoot = this.stateRootForSession(sessionName)): PiRunnerState | null {
     const { runnerStatePath } = piSeatPaths(stateRoot, sessionName);
@@ -559,7 +590,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       // record immediately at startup and exited on death).
       if (state?.launchId === launchId) {
         if (state.exited) {
-          const paneContent = (await this.tmux.capturePaneContent(sessionName, 40)) ?? "";
+          const paneContent = (await captureNamedSessionContent(this.tmux, sessionName, 40)) ?? "";
           return {
             ok: false,
             failure: {
@@ -628,7 +659,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     if (entry.category === "skill") {
       if (!binding.tmuxSession) return false;
       const { agentDir } = this.bindingPaths(binding);
-      const targetDir = nodePath.join(agentDir, "skills", entry.effectiveId);
+      const targetDir = resourceDirectoryPath(nodePath.join(agentDir, "skills"), entry.effectiveId);
       this.fs.mkdirp(targetDir);
       let isDir = false;
       if (this.fs.listFiles) {
