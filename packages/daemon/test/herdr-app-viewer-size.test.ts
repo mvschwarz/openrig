@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { viewerArgv } from "../src/domain/terminal/herdr-app-provider.js";
+import { coreViewerArgv, tabLabelledArgv, viewerArgv } from "../src/domain/terminal/herdr-app-provider.js";
 import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 
 // The generated viewer with real tmux, as in herdr-app-viewer-gate.test.ts: the seat on its own tmux server, and the
@@ -100,6 +100,19 @@ describe.skipIf(!tmuxBin || !flagsAtRuntime)("the generated herdr-app viewer (re
     await settle();
     expect(await windowSize()).toBe(before);
   }, 40_000);
+
+  it("a viewer placed in herdr-core attaches at once, with no gate, and at the headless size leaves the person's window size alone", async () => {
+    const before = await person();
+    await tmux(view, "-f", "/dev/null", "new-session", "-d", "-s", "v1", "-x", "200", "-y", "120", ...tabLabelledArgv(coreViewerArgv(pane(), "c1"), "dev.a"));
+    expect(await until(async () => (await clients()).length === 2)).toBe(true);
+    await settle();
+    expect(await windowSize()).toBe(before);
+    // Shown in a pane elsewhere and typed in: it sizes the seat like any client a person types in.
+    await tmux(view, "resize-window", "-t", "v1", "-x", "90", "-y", "24");
+    await settle(1_000);
+    await tmux(view, "send-keys", "-t", "v1", "-l", "x");
+    expect(await until(async () => (await windowSize()).startsWith("90x"))).toBe(true);
+  }, 30_000);
 
   it("once the cell is shown and typed in, the seat follows the viewer's own size again", async () => {
     const before = await person();

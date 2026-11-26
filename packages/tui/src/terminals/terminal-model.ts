@@ -19,7 +19,8 @@ export interface TerminalPreview {
   view: string;
   provider: string;
   planId: string;
-  status: { available: boolean; launch?: { socketPath?: string } };
+  /** placement "core": no window answers on the daemon's machine, so Open places the view in that machine's herdr-core. */
+  status: { available: boolean; placement?: "core"; host?: string; launch?: { socketPath?: string } };
   herdrApp?: { appHome?: string };
   composed: {
     id: string;
@@ -150,7 +151,11 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
   lines.push({ text: "Auto-layout: equal cells, at most 9 members per page. Blank cells fill incomplete rectangles. Saved views store membership only; no custom geometry editor." });
   for (const member of [...plan.absent, ...plan.degraded]) lines.push({ text: `Unavailable · ${member.seat}: ${member.reason}` });
   if (page.length && preview.provider === "herdr-app") {
-    if (preview.status.available) {
+    if (preview.status.placement === "core") {
+      // No window here: what OpenRig knows is where it places the view, not who shows it.
+      const host = preview.status.host ?? "the daemon's machine";
+      lines.push({ text: `Opens in this machine's herdr-core (${host}): a herdr-app connected to ${host} shows it. OpenRig can't see that window. Existing conversations stay in place.` });
+    } else if (preview.status.available) {
       // The view opens in the herdr-app window this TUI runs in: no desktop window, no attach-by-hand recipe.
       lines.push({ text: "Opens here: a new Rig view in this herdr-app window, beside your tabs, switched from the strip above them. Nothing needs a desktop display or SSH. Existing conversations stay in place." });
     } else {
