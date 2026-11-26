@@ -257,7 +257,7 @@ export function communityHarnessLabel(runtime: string, dir: string = communityHa
     identity: reported ? "reported by its launcher, not observed" : named ? "named by OpenRig, not observed" : isPiRpc && own ? "reported by its launcher, not observed" : "not confirmed",
     ...(reported || (isPiRpc && own) ? { reportedConversation: reported ?? own } : {}),
     ...(named ? { namedConversation: named } : {}),
-    needsInput: isPiRpc || session?.runner === true ? "from structured activity and screen observations" : "from the screen only: no harness prompt pattern",
+    needsInput: isPiRpc || session?.runner === true || session?.activityHooks?.length ? "from structured activity and screen observations" : "from the screen only: no harness prompt pattern",
     ...(session?.runner !== true && session?.activityHooks?.length ? { activityHooks: [...session.activityHooks] } : {}),
     ...(found.ok ? {} : { presetError: found.message }),
   };

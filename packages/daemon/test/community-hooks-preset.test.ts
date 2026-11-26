@@ -317,7 +317,8 @@ describe("what a person sees for a declared-hooks seat (C-F2)", () => {
     const served = await seat.served();
     expect(served.agentActivity).toMatchObject({ state: "needs_input" });
     expect(served.activityState).toMatchObject({ display: "unknown", needsInput: { count: 0 } });
-    expect(served.communityHarness).toMatchObject({ activityHooks: PARTIAL });
+    // Its label says where its attention comes from: its hooks as well as the screen.
+    expect(served.communityHarness).toMatchObject({ activityHooks: PARTIAL, needsInput: "from structured activity and screen observations" });
     expect(formatSeatActivity(served)).toBe("unknown");
     expect(compactNodeProjection([served])[0]).toMatchObject({ activity: "unknown" });
   });
