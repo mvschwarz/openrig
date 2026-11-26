@@ -1599,10 +1599,21 @@ export function queueRoutes(): Hono {
         } else workProject = unselected(error);
       }
     }
+    // A row that names a mission but no project is read in the one healthy catalog project this seat's rig selects, labelled
+    // as inferred, never as the row's own declaration. Any other selection (the only catalog entry, the seat's folder, the
+    // only unclaimed entry), none, or an unhealthy entry keeps the configured root, as before.
+    const rigProject = workProject && "root" in workProject && workProject.selectedBy === "rig" ? workProject.id : null;
+    const rigProjectRoot = rigProject ? projectMissionsRoots.get(rigProject) : undefined;
+    const inferredRoot = rigProject && rigProjectRoot?.root && !rigProjectRoot.error ? rigProjectRoot.root : null;
     const currentWorkRoot: MissionsRootResolver = (row: CurrentWorkRow) => {
       const projectIds = [...new Set((row.tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim()))
         .filter((tag) => tag.startsWith("project:") && tag.slice("project:".length).trim())
         .map((tag) => tag.slice("project:".length).trim()))];
+      // It stands in for the row's own project, and the configured root could hold a mission of the same name: ambiguous,
+      // so a held or pending row's scope carries the label too.
+      if (projectIds.length === 0 && inferredRoot) {
+        return { root: inferredRoot, reason: `project ${rigProject} inferred from this seat's rig; the row names no project`, ambiguous: true };
+      }
       if (projectIds.length === 0) return { root: missionsRoot };
       // Whether another root could hold a same-named mission when the configured root stands in for the row's project:
       // an unreadable catalogue can't say, and a readable one can only if it lists project roots. With no catalogue

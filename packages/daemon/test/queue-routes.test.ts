@@ -3073,6 +3073,121 @@ describe("queue routes", () => {
       }
     });
 
+    // A row that names a mission but no project is read in the one healthy catalog project the seat's rig selects, labelled
+    // as inferred. Explicit tags keep their own answers, and any other selection keeps the configured root.
+    describe("an untagged mission row and the project the seat's rig selects", () => {
+      const INFERRED = "project alpha inferred from this seat's rig; the row names no project";
+      const RIG_SELECTS = (project: string) => "projects:\n"
+        + ["alpha", "beta", "gamma"].map((id) => `  - id: ${id}\n    root: ${id}\n    rigs: [${id === project ? "r" : "other"}]\n`).join("");
+      const setup = (catalogText: string) => {
+        temporaryWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-whoami-untagged-")));
+        const catalog = path.join(temporaryWorkspace, "workspace.yaml");
+        fs.writeFileSync(catalog, catalogText);
+        // The configured root holds no missions: an untagged row read there finds nothing, as it did before.
+        const configured = path.join(temporaryWorkspace, "configured");
+        fs.mkdirSync(configured, { recursive: true });
+        const slices: Record<string, string> = {};
+        for (const project of ["alpha", "beta", "gamma"]) {
+          const root = path.join(temporaryWorkspace, project);
+          const slice = path.join(root, "work-items", "release", "slices", "01-work");
+          fs.mkdirSync(slice, { recursive: true });
+          // gamma is catalogued but unhealthy: its project file names another id.
+          fs.writeFileSync(path.join(root, "project.yaml"), `id: ${project === "gamma" ? "not-gamma" : project}\nmissions:\n  root: work-items\n`);
+          fs.writeFileSync(path.join(root, "SPEC.md"), `---\nid: ${project}\n---\n# ${project}\n`);
+          fs.writeFileSync(path.join(root, "work-items", "release", "SPEC.md"), "---\nid: release\n---\n# Release\n");
+          fs.writeFileSync(path.join(slice, "SPEC.md"), "---\nid: 01-work\n---\n# Work\n");
+          slices[project] = slice;
+        }
+        app = buildApp({
+          eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox,
+          settingsStore: { resolveOne: (key) => ({ value: key === "workspace.catalog_path" ? catalog
+            : key === "workspace.slices_root" ? configured : temporaryWorkspace }) },
+        });
+        return slices;
+      };
+      const create = async (tags: string[]) => {
+        const created = await app.request("/api/queue/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
+          body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "work", tags, nudge: false }),
+        });
+        expect(created.status).toBe(201);
+        return (await created.json() as { qitemId: string }).qitemId;
+      };
+      const claimed = async (tags: string[]) => {
+        const qitemId = await create(tags);
+        const claim = await app.request(`/api/queue/${qitemId}/claim`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": "bob@r" },
+          body: JSON.stringify({ destinationSession: "bob@r" }),
+        });
+        expect(claim.status).toBe(200);
+        return qitemId;
+      };
+      type Whoami = {
+        currentWork: { workNodePath: string } | null;
+        currentWorkBasis: string;
+        workCandidates: { candidates: Array<{ workNodePath: string | null; source: string; unresolved: string | null }> };
+      };
+      const whoami = async () => (await (await app.request("/api/queue/whoami?session=bob@r&candidates=1")).json()) as Whoami;
+
+      it("resolves in the rig's selected project, and says the project was inferred", async () => {
+        const slices = setup(RIG_SELECTS("alpha"));
+        await claimed(["mission:release", "slice:01-work"]);
+        const body = await whoami();
+        expect(body.currentWork?.workNodePath).toBe(slices.alpha);
+        expect(body.currentWorkBasis).toContain(INFERRED);
+        expect(body.workCandidates.candidates).toEqual([
+          expect.objectContaining({ workNodePath: slices.alpha, unresolved: null, source: expect.stringContaining(INFERRED) }),
+        ]);
+      });
+
+      it.each([
+        { name: "the rig's own project", tags: ["project:alpha"], resolves: "alpha" as const, reason: null },
+        { name: "another project", tags: ["project:beta"], resolves: "beta" as const, reason: null },
+        { name: "several projects", tags: ["project:alpha", "project:beta"], resolves: null,
+          reason: "multiple project tags (alpha, beta); used configured root" },
+        { name: "a project not in the catalogue", tags: ["project:missing"], resolves: null,
+          reason: "project:missing is not in the project catalogue; used configured root" },
+        { name: "an unavailable project", tags: ["project:gamma"], resolves: null,
+          reason: "project:gamma is unavailable in the project catalogue; used configured root" },
+      ])("an explicit tag naming $name keeps its own answer, never the inferred project", async ({ tags, resolves, reason }) => {
+        const slices = setup(RIG_SELECTS("alpha"));
+        await claimed([...tags, "mission:release", "slice:01-work"]);
+        const body = await whoami();
+        expect(body.currentWork?.workNodePath ?? null).toBe(resolves ? slices[resolves] : null);
+        expect(body.currentWorkBasis).not.toContain("inferred");
+        if (reason) expect(body.currentWorkBasis).toContain(reason);
+        expect(body.workCandidates.candidates.every((candidate) => !candidate.source.includes("inferred"))).toBe(true);
+      });
+
+      it.each([
+        { name: "no project is selected", catalog: "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n" },
+        { name: "the only catalog project is selected, not by the rig", catalog: "projects:\n  - id: alpha\n    root: alpha\n" },
+        { name: "the rig selects an unavailable project", catalog: RIG_SELECTS("gamma") },
+      ])("keeps the configured root when $name", async ({ catalog }) => {
+        setup(catalog);
+        await claimed(["mission:release", "slice:01-work"]);
+        const body = await whoami();
+        expect(body.currentWork).toBeNull();
+        expect(body.currentWorkBasis).toContain("typed work did not resolve");
+        expect(body.currentWorkBasis).not.toContain("inferred");
+      });
+
+      it("labels a held row's scope as inferred, and the held row stays context, not current work", async () => {
+        const slices = setup(RIG_SELECTS("alpha"));
+        const qitemId = await create(["mission:release", "slice:01-work"]);
+        queueRepo.update({ qitemId, actorSession: "bob@r", state: "blocked", blockedOn: "external:waiting" });
+        const body = (await (await app.request("/api/queue/whoami?session=bob@r&held=1")).json()) as {
+          currentWork: unknown;
+          heldAndPendingWork: { held: Array<{ qitemId: string; missionPath: string | null; slicePath: string | null; missionsRootFallback: string | null }> };
+        };
+        expect(body.currentWork).toBeNull();
+        expect(body.heldAndPendingWork.held).toEqual([expect.objectContaining({ qitemId,
+          missionPath: path.dirname(path.dirname(slices.alpha)), slicePath: slices.alpha, missionsRootFallback: INFERRED })]);
+      });
+    });
+
     it.each([
       {
         name: "an unknown project tag",
