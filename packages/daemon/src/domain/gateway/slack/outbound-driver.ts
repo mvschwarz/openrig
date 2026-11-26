@@ -40,6 +40,10 @@ export interface OutboundPostPayload {
   destinationSession?: string | null;
   sourceSession?: string | null;
   evidenceRef?: string | null;
+  /** The shared roots evidenceRef's writer may read, carried with the decision so a replay attaches only what the
+   *  writer could: a list limits the attachment to those roots; absent is a writer with no root grant (and every payload
+   *  recorded before this field), attached as before. */
+  evidenceRefRoots?: string[];
   /** F: the loudness discriminators (interim rule: escalations mention, all else quiet). */
   tier?: string | null;
   tags?: string[] | null;
@@ -190,6 +194,7 @@ export function toPayload(q: QueueItem): OutboundPostPayload {
     destinationSession: q.destinationSession,
     sourceSession: q.sourceSession,
     evidenceRef: q.evidenceRef,
+    ...(q.evidenceRefRoots ? { evidenceRefRoots: q.evidenceRefRoots } : {}),
     tier: q.tier,
     tags: q.tags,
     state: q.state,

@@ -1962,6 +1962,7 @@ export class WorkflowRuntime {
         chainOfRecord: [oldPacketId],
         summary: oldPacket.summary ?? undefined,
         evidenceRef: oldPacket.evidenceRef ?? undefined,
+        evidenceRefRoots: oldPacket.evidenceRefRoots,
         targetRepo: oldPacket.targetRepo ?? undefined,
         // An alert-worthy item (a failed step's approval) stays alert-worthy when it's routed to a person.
         ...((oldPacket.tags ?? []).includes(HUMAN_ALERT_TAG) && this.queueRepo.isPersonAddress(input.toSession) ? { humanAlert: true } : {}),

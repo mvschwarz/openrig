@@ -456,6 +456,34 @@ describe("seat-pool comeback: the drained agent comes back on its own node (#339
     expect(w.converge).toHaveBeenCalledTimes(2);
     expect(w.nodesNamed("dev.impl-s3")).toEqual([]);
   });
+
+  it("An add that settled `not_running` holds only the new number: an eligible `drained` slot still comes back in the same cycle, and the next unit takes no new number, naming the failed attempt.", async () => {
+    const w = comebackWorld();
+    const m = await w.model({ pool: { max: 3, min: 2 } });
+    const [s1, s2] = await w.serve(m, 2);
+    await w.drain(m, 2);
+    // slot 1 is an add that settled not running: its outcome says so, and it keeps its reuse hold
+    const failedHold = { code: "not_running", observed: "exited" };
+    w.db.prepare("UPDATE seat_pool_slots SET attempt_outcome = ?, reuse_hold = ? WHERE node_id = ?")
+      .run(JSON.stringify({ status: "not_running", observed: "exited", call: null }), JSON.stringify(failedHold), s1!.nodeId);
+    const failedAttempt = w.slots.forModel(m.nodeId)[0]!.attemptId!;
+    // two rows wait for the model: the add wants two agents
+    await w.row(m.session);
+    await w.wantOne(m);
+
+    const { notes, settled } = await comeBack(w, m.jobId);
+    const add = notes.add as { comebacks: ComebackEntry[]; held?: string; failedAdd?: Record<string, unknown> };
+    expect(add.comebacks.map((c) => [c.slotNumber, c.nodeId, c.attempt?.status])).toEqual([[2, s2!.nodeId, "in_flight"]]);
+    expect(add.held).toBe(`held: failed add ${failedAttempt} (slot 1) settled not_running (exited)`);
+    expect(add.failedAdd).toEqual({
+      slotNumber: 1, nodeId: s1!.nodeId, attempt: { id: failedAttempt, status: "not_running", observed: "exited" }, reuseHold: failedHold,
+    });
+    expect(add).not.toHaveProperty("issued");
+    expect(w.launch.mock.calls.map((call) => call[1])).toEqual(["dev.impl-s2"]);
+    expect(settled.map((s) => [s.slotNumber, s.attempt.status])).toEqual([[2, "running"]]);
+    expect(w.converge).toHaveBeenCalledTimes(2);
+    expect(w.nodesNamed("dev.impl-s3")).toEqual([]);
+  });
 });
 
 describe("seat-pool comeback: which snapshot it sends (#3395 Piece 1)", () => {

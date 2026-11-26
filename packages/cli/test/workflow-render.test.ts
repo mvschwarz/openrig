@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import stringWidth from "string-width";
 import {
   renderTraceTree,
   renderInstanceList,
@@ -114,6 +115,22 @@ describe("workflow-render (WF3 FR-2)", () => {
     expect(lines[1]).toContain("WF01ABC");
     expect(lines[1]).toContain("10m");
     expect(lines[2]).toContain("◐");
+  });
+
+  it("list and trace columns stay aligned in terminal columns for wide workflow names and step ids", () => {
+    const statusColumn = (line: string) => stringWidth(line.slice(0, line.search(/active|waiting|STATUS/)));
+    const lines = renderInstanceList([
+      INSTANCE,
+      { ...INSTANCE, instanceId: "WF02", workflowName: "品質レビュー" },
+      { ...INSTANCE, instanceId: "WF03", workflowName: "リリース前の品質レビュー工程とその確認", status: "waiting" },
+    ], NOW);
+    expect(lines.map(statusColumn)).toEqual([54, 54, 54, 54]);
+    expect(lines[3]).toContain("リリース前の品質レビ… waiting");
+
+    const trace = renderTraceTree(INSTANCE, [{ ...TRAIL[0], stepId: "計画レビュー" }, TRAIL[1]], NOW);
+    const actorColumn = (line: string) => stringWidth(line.slice(0, line.search(/planner@rig|builder@rig/)));
+    const [wideStep, asciiStep] = trace.filter((line) => /planner@rig|builder@rig/.test(line)).map(actorColumn);
+    expect(wideStep).toBe(asciiStep);
   });
 
   it("FR-3a attention markers: failed and waiting rows marked; active/completed unmarked", () => {

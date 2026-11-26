@@ -15,8 +15,8 @@ import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelf
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, SENDER_IDENTITY_HEADER, RELAY_HEADER, IDENTITY_PROVENANCE_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
-import { inheritedReturnRoute, issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
+import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, SENDER_IDENTITY_HEADER, RELAY_HEADER, IDENTITY_PROVENANCE_HEADER, transportSenderSession, canonicalSenderSession, evidenceRefRootsFrom, fromLocalClient } from "./require-sender-identity.js";
+import { conversationIssuedAddress, inheritedReturnRoute, isConversationKeyTag, issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
   routeIsPersonMessage, routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
@@ -106,6 +106,17 @@ export function hostQualifiedRoute(route: string): string | null {
 function withRouteNotCarriedTag(tags: string[] | undefined, notCarried: string | null): string[] | undefined {
   if (!notCarried) return tags;
   return [...(tags ?? []).filter(t => t !== RETURN_ROUTE_NOT_CARRIED_TAG), RETURN_ROUTE_NOT_CARRIED_TAG];
+}
+
+/** The tags a request gives a row, as this daemon keeps them. A `conversation-key:` tag names a person's own conversation
+ *  (slice 15): the openrig plugin's hooks take every address OpenRig issued beside it as that conversation's, and an `auto`
+ *  create under it reuses that address (conversationIssuedAddress). Only OpenRig writes it, through the CLI's
+ *  `--return-route auto` and the stdio MCP server, so it's kept only from a client on this machine (fromLocalClient). From
+ *  any other caller, such as another host, the MCP HTTP adapter's callers or a proxied request, it's dropped and the
+ *  request goes on, as the MCP server drops OpenRig's other provenance tags from an external caller. */
+function keptConversationKeys<T>(c: Context, tags: T): T {
+  if (!Array.isArray(tags) || !tags.some(isConversationKeyTag) || fromLocalClient(c)) return tags;
+  return tags.filter((tag) => !isConversationKeyTag(tag)) as T;
 }
 
 /** How a named route was established: a route carried from another host keeps the basis it was sent with there. */
@@ -845,16 +856,18 @@ export function queueRoutes(): Hono {
       returnRouteBasis?: string;
     }>().catch(() => ({} as never));
 
-    // The return route, when the caller asks for one: `auto` issues a conversation address for this create (from its id, so
-    // an exact retry issues the same one), `self` takes the caller's own identity, and anything else is an address the
-    // caller named. Absent, the create is exactly as before.
+    body.tags = keptConversationKeys(c, body.tags);
+    // The return route, when the caller asks for one: `auto` issues a conversation address (the one the conversation this
+    // create names by its key was already issued, else one from this create's id, so an exact retry issues the same one),
+    // `self` takes the caller's own identity, and anything else is an address the caller named. Absent, the create is
+    // exactly as before.
     const requestedRoute = typeof body.returnRoute === "string" ? body.returnRoute.trim() : undefined;
     if (body.returnRoute !== undefined && (!requestedRoute
       || (requestedRoute !== "auto" && requestedRoute !== "self" && !isRouteAddress(canonicalSenderSession(requestedRoute))))) {
       return c.json({ error: "invalid_return_route", message: "A return route is auto, self, or an agent conversation's queue address (member@rig). A person is reached through the gateway, not a return route." }, 400);
     }
     const createId = body.qitemId ?? (requestedRoute ? newQitemId() : undefined);
-    const issued = requestedRoute === "auto" ? issuedReturnAddress(createId!) : null;
+    const issued = requestedRoute === "auto" ? conversationIssuedAddress(getRepo(c).db, body.tags) ?? issuedReturnAddress(createId!) : null;
 
     // P21 I3 — the source is the transport-derived sender (X-OpenRig-Session), NEVER the body claim.
     // P18 deliver-and-label: absent header + a body sourceSession → recorded as the claimed-era stamp
@@ -868,7 +881,7 @@ export function queueRoutes(): Hono {
     const sourceSession = identity.session;
     c.set("refusalSource" as never, sourceSession as never); // read by traceCreateOutcome
     let route: { address: string; basis: ReturnRouteBasis } | null = requestedRoute === undefined ? null
-      : requestedRoute === "auto" ? { address: issued!, basis: sourceSession === issued ? "issued-actor" : "issued" }
+      : requestedRoute === "auto" ? { address: issued!, basis: derived.ok ? "issued" : "issued-actor" }
         : requestedRoute === "self" ? { address: sourceSession, basis: "caller" }
           : { address: canonicalSenderSession(requestedRoute), basis: carriedRouteBasis(requestedRoute, body.returnRouteBasis) };
     if (route && !isRouteAddress(route.address)) {
@@ -969,6 +982,7 @@ export function queueRoutes(): Hono {
         humanQuestions: body.humanQuestions,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
+        evidenceRefRoots: evidenceRefRootsFrom(c),
         nudge: (body as { nudge?: boolean }).nudge,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
         ...(route ? { returnRoute: route.address, returnRouteBasis: route.basis } : {}),
@@ -1198,6 +1212,7 @@ export function queueRoutes(): Hono {
         wakeAfterSeconds: body.wakeAfterSeconds,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
+        evidenceRefRoots: evidenceRefRootsFrom(c),
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
       const advisories = [body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null, ...unstoredAdvisories(body, item)]
@@ -1223,7 +1238,8 @@ export function queueRoutes(): Hono {
       return c.json({ error: "tags_required", message: "add takes one or more non-blank tags; nothing was written" }, 400);
     }
     try {
-      const { item, added } = getRepo(c).addTags({ qitemId, actorSession, tags: add as string[], ...resolveRecordedIdentity(c, identity) });
+      // A conversation's key, from a caller it isn't kept from, adds nothing (and refuses nothing).
+      const { item, added } = getRepo(c).addTags({ qitemId, actorSession, tags: keptConversationKeys(c, add as string[]), ...resolveRecordedIdentity(c, identity) });
       return c.json({ ...item, added });
     } catch (err) {
       return errorResponse(c, err);
@@ -1252,6 +1268,8 @@ export function queueRoutes(): Hono {
       // "" / "local" = today's local transactional path, byte-identical.
       hostId?: string;
     }>().catch(() => ({} as never));
+    // The new item keeps the work's issued address, so a conversation's key is kept only as for a create.
+    body.tags = keptConversationKeys(c, body.tags);
     // P21 I3: the handoff actor is the transport header, never body.fromSession.
     const identity = requireSenderIdentity(c, { verb: "queue handoff", bodyClaim: body.fromSession });
     if (!identity.ok) return identity.response;
@@ -1306,6 +1324,7 @@ export function queueRoutes(): Hono {
         targetRepo: body.targetRepo,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
+        evidenceRefRoots: evidenceRefRootsFrom(c),
         nudge: (body as { nudge?: boolean }).nudge,
         humanAlert: body.humanAlert,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
@@ -1348,6 +1367,7 @@ export function queueRoutes(): Hono {
       // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (BR-1).
       hostId?: string;
     }>().catch(() => ({} as never));
+    body.tags = keptConversationKeys(c, body.tags);
     // P21 I3: the handoff-and-complete actor is the transport header, never body.fromSession.
     const identity = requireSenderIdentity(c, { verb: "queue handoff-and-complete", bodyClaim: body.fromSession });
     if (!identity.ok) return identity.response;
@@ -1400,6 +1420,7 @@ export function queueRoutes(): Hono {
         targetRepo: body.targetRepo,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
+        evidenceRefRoots: evidenceRefRootsFrom(c),
         nudge: body.nudge,
         humanAlert: body.humanAlert,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)

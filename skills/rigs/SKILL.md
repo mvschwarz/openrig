@@ -22,9 +22,12 @@ if the person asks. Give what they want built to OpenRig's operator (step 2) ins
   to allow the commands that keep asking, for their project only (step 2).
 - **Hand work over with a return route** (`--return-route auto`, or `self` if this session joined; step 2), so most of
   the team's questions come to this conversation's address (choice dialogs and other hosts keep their path), and its
-  result is in the handed-over task's resolution. Set it before you promise to report back. This chat has no wake of
-  its own: say you'll check when they ask, and each turn list your address's tasks, read the handed-over task (`rig
-  queue show <id> --full`, following its successors) and check the seats. Offer a wake only where their app has one.
+  result is in the handed-over task's resolution. Set it before you promise to report back. In Claude Code and Codex,
+  once the openrig plugin is installed and active (step 1), its hooks bring a task that reaches an address OpenRig
+  issued this conversation (`auto`) into it: the team's question, or its result when the lead or operator sends it
+  there as a task. A task closed with no result sent wakes nothing, and other apps have no wake. So say you'll check
+  when they ask, and each turn list your address's tasks, read the handed-over task (`rig queue show <id> --full`,
+  following its successors) and check the seats.
 - **Don't send them to attach** to a seat's terminal to answer, and with no display (headless or SSH) they answer here
   too: don't tell the operator they'll answer in its pane unless they chose that. Bring the prompt here. If the
   operator or a seat sent it to you, record their words and let that sender pass them on; otherwise send their choice
@@ -95,7 +98,7 @@ person needs in their project or home folder and name that path.
 
 ## 1. Install OpenRig, if it isn't installed
 
-- **Check first:** `rig --version`. If it prints a version, go to step 2.
+- **Check first:** `rig --version`. If it prints a version, go to the openrig plugin below.
 - **What it needs:** macOS or Linux, Node.js 22 or 24, tmux, and Claude Code or Codex signed in. Check only what's
   missing: `node --version`, `tmux -V`, `claude auth status` or `codex login status`.
 - **A check that needs the network** (`gh auth status`, a registry or other fetch) can fail falsely in a sandbox without
@@ -114,6 +117,57 @@ person needs in their project or home folder and name that path.
   block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`. A login it reports
   missing isn't harmless: say which one, and that a team may need it (`starter` runs its reviewer on Codex). Pass it on
   in the handoff so the operator fits the team before anything starts.
+- **Then offer the openrig plugin for this app** (once now, and once more only as below), unless this app already has it. **Ask it as its own question,
+  after the install has worked: not in a list of optional extras, and not together with joining or registering.**
+  Never ask it before the install, or in the same dialog as any other choice. A message that lists several choices,
+  numbered or not, counts as one dialog, so the offer is the only choice in its message. If your app asks with a choice
+  dialog, give it a dialog of its own and list installing it first, since a dialog marks its first option; the person
+  can still say no.
+  **Before you offer it, check that `rig` resolves:** `command -v rig`. The plugin's hooks and its MCP server run the
+  `rig` on PATH, else the project's own `node_modules/.bin/rig`. If OpenRig is installed only inside the project
+  (`command -v rig` prints nothing), say in the offer that the plugin finds it only in sessions started in this project,
+  or first recommend an install every session finds (the global install above).
+  Bundled, it reads as skippable, and the person can't tell what they'd lose. Before running anything, tell the person in
+  plain words:
+  - **What it adds:** when I hand the team work, its questions come into this conversation without you telling me to
+    check. The plugin's hooks do this; they read only OpenRig's own record for this conversation.
+  - **What it doesn't do:** it types into no terminal and grants no authority: it only brings the question, and
+    answering stays yours.
+  - **Without it:** the team's questions reach you only when I check for them, when you next message me or while I'm
+    waiting in the background. With it, they arrive here on their own, even when I'm not checking.
+  - **It's your choice.** It's added for every session of this app on this computer, with a skill for working with the
+    team (and in Claude Code, OpenRig's MCP tools); a session that hands the team no work gives the hooks nothing to
+    read.
+
+  On their yes, run the commands from "Install" in the plugin's README (`daemon/assets/plugins/openrig/README.md` in the
+  installed `@openrig/cli` package), which has the details. This route uses the `rig` CLI, so leave out the README's
+  seat setting and `codex mcp add`: they're for the plugin's MCP tools. On no, install nothing. Offer it once more,
+  only when the team's first question reaches the person through your own check: say the plugin would have brought it
+  here by itself, and that the choice is still theirs. After a second no, don't offer it again.
+  - **Claude Code:** `claude plugin marketplace add "$(npm root -g)/@openrig/cli/daemon/assets/plugins/openrig"`, then
+    `claude plugin install openrig@openrig-app`. It reports one option not yet set: that's the seat for the MCP tools,
+    which this route leaves blank, so don't ask the person to set it. **Installed this way, the plugin does nothing in
+    this conversation until the person types `/reload-plugins`** (you can't run it) or starts a new session. Ask for the
+    reload: it keeps this conversation, and the hooks wake only the conversation that handed the work over.
+    - **Make the reload its own short request, and wait for it.** Put nothing else to read or decide in that message,
+      for example: "One step left: please type `/reload-plugins`, then send me any message, such as "done", so I can
+      check the plugin is on." The command doesn't reach you, so their message is your cue. Go on to step 2 after it.
+    - **Then check that it's active:** you now have the plugin's MCP tools (`mcp__plugin_openrig_…`, such as
+      `rig_whoami` and `rig_queue_create`; where your tools load on demand, search them for `rig_whoami`). If they're
+      there, tell the person it's on.
+    - **If they aren't there:** when your tool search says the `plugin:openrig:openrig` server failed to connect, the
+      plugin did load, so don't ask again: say its tools didn't start, and check that `rig` resolves (above). Otherwise
+      say plainly that the plugin isn't active yet, so the team's questions won't come in by themselves, and ask for the
+      reload once more, the same way. If it's still not active after that, say so and check at each turn (step 2).
+  - **Codex:** `codex plugin marketplace add "$(npm root -g)/@openrig/cli/daemon/assets/plugins/openrig-codex"`, then
+    `codex plugin add openrig@openrig-app`. If Codex says `openrig-app` is already added from a different source (an
+    earlier install from the `openrig` folder), run `codex plugin marketplace remove openrig-app`, then both again.
+    Codex runs hooks outside its sandbox, so it asks the person to trust the plugin's two hooks (session start and end)
+    before they run, and again after the plugin changes; untrusted, they don't run. They start in a new Codex session
+    and wake only the session that handed the work over: offer to continue in a new session, or stay here and check at
+    each turn.
+  - **Any other app** (OMP, for one): there's no wake there. Say so plainly, skip the plugin, and check at each turn
+    (step 2).
 - **Then go on to step 2:** say it's installed and ask what they want worked on, and in which repository. A plain
   "install OpenRig" includes this. Stop here only if they say not to start a team.
 - **If something fails:** `rig context get help` is the help guide for the installed version. If `rig` itself won't
@@ -298,6 +352,9 @@ commands; if the two ever differ, this step is right.
     > you finish, put the outcome in this item's resolution, with what the latest review found, and any file in its
     > evidence ref.
 
+    Before that, if you haven't offered the openrig plugin in this conversation yet (step 1; for example because
+    OpenRig was already installed), offer it now as step 1 says: it's still its first offer.
+
     Then run
     `rig queue create --destination <canonicalSessionName> --return-route auto --summary "<the goal in a sentence>" --body-file <file> --verify`
     (if this session joined, `--return-route self` with your `OPENRIG_SESSION_NAME` in front). It prints
@@ -307,9 +364,10 @@ commands; if the two ever differ, this step is right.
     this work again. If the outcome is unknown, repeat the same command with
     `--id` and the ID from its `Queue create request ID:` line, which it prints before it sends: the same task keeps the
     same address.
-  - **Get woken when a task arrives at your address:** right after the handover, start this wait with your shell tool's
-    background option (in Claude Code versions that wake you when a background command ends), with your address in place
-    of `<address>`:
+  - **Get woken when a task arrives at your address:** skip this where the openrig plugin's hooks run (step 1): they
+    bring the task by themselves, and this wait would wake you a second time for it. Otherwise, right after the handover,
+    start this wait with your shell tool's background option (in Claude Code versions that wake you when a background
+    command ends), with your address in place of `<address>`:
 
         until OPENRIG_SESSION_NAME='<address>' rig queue list --owned --state pending --json 2>/dev/null | grep -q '"qitemId"'; do sleep 20; done
 
@@ -326,6 +384,9 @@ commands; if the two ever differ, this step is right.
     Add no label, quotation marks or notes of your own, and don't turn their words into a yes or a no: the agent that
     asked decides what they mean. You speak as yourself, never as the person. If they aren't there to answer, leave
     it open and tell them it's waiting; never answer for them.
+    If the person said no to the openrig plugin once and this is the first question you bring them, end that message
+    with step 1's second offer, in one line: the plugin would have brought this here by itself, and the choice is
+    still theirs. Don't repeat it after that.
     A question can be a seat's permission prompt that the operator or a team seat sent you: show it with the seat,
     the exact action and the choices it offers, and record their words the same way. The agent that sent it passes
     their answer to the seat, so don't send that prompt's answer yourself as well. A task from OpenRig itself
@@ -343,10 +404,12 @@ commands; if the two ever differ, this step is right.
     `rig send <destination> "task <id> is yours"`); `failed` (the wake wasn't delivered, and the task still needs
     doing: wake it the same way); `indeterminate` or `still-pending` (unknown, neither failed nor delivered: check
     before you wake it again). A pending task with no wake isn't lost or done.
-  - **Nothing wakes this chat** when the team asks or finishes: while its work is open, start each of your turns by
-    listing your address's tasks (above), before anything else, including when the person talks to you and when they
-    come back. A Claude Desktop scheduled task can pick the team's results up on a schedule, in a fresh session, not
-    this chat. Offer it if they'd like that.
+  - **What wakes this chat:** in Claude Code and Codex, the openrig plugin's hooks (step 1), when a task reaches an
+    address OpenRig issued it: the team's questions, and its result when the lead or operator sends it there as a task.
+    A task closed with no result sent wakes nothing. Without the plugin, only the wait above does, where your app has
+    one. While its work is open, start each of your turns by listing your address's tasks (above), before anything
+    else, including when the person talks to you and when they come back. A Claude Desktop scheduled task can pick the
+    team's results up on a schedule, in a fresh session, not this chat. Offer it if they'd like that.
 - **If the operator answers with a model error,** such as "… not supported when using Codex with a ChatGPT account", its
   Codex sign-in works but that account can't run the model. OpenRig put the operator on Codex because the sign-in
   passed. Tell the person which model failed. If Claude Code is signed in, offer to move the operator to it; on their
@@ -368,8 +431,10 @@ commands; if the two ever differ, this step is right.
   the operator started it, and whether or not they joined. This is your default responsibility, not a fallback. A permission prompt
   is the person's to answer: they decide, which doesn't mean they type it into the seat's pane, so don't decline to
   relay it. After each step you hand off, and before you report progress, first list your address's tasks
-  (`OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`): a prompt OpenRig or the team
-  already sent you is there as its own task, so answer it there. Then check `rig ps --nodes --rig <rig>` for a
+  (`OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`; through the plugin's tools,
+  `rig_queue_list` with `destination` set to your address, which needs no seat): a prompt OpenRig or the team
+  already sent you is there as its own task, so answer it there. Put `OPENRIG_SESSION_NAME=<address>` in front of
+  every `rig` command you run for this work, so OpenRig records it as this conversation's, not as someone outside a seat. Then check `rig ps --nodes --rig <rig>` for a
   seat stopped at a prompt, and repeat both checks while you wait for a seat's result, so a prompt that appears after
   your last check still reaches them. Show the person each one, with any others waiting, one line each (seat,
   exact action, the choices offered), and the whole prompt when they ask. If a question about that prompt is already
@@ -480,7 +545,9 @@ Follow these steps by default. Only when the person declined the Codex offer abo
   `OPENRIG_SESSION_NAME=<address> rig queue list --mine -a` lists everything this address sent or owns, finished work
   included (without `-a` it shows only open items). It returns at most 100 rows unless you pass `--limit`, so on a busy
   address keep the task IDs you created, or raise `--limit`. Follow that work rather than creating it again.
-  Adding OpenRig's MCP plugin to this app later starts a new session; it doesn't carry this conversation over.
+  A new session doesn't carry this conversation over, and the openrig plugin's hooks don't wake it for an address an
+  earlier session was issued: check that address each turn. In Claude Code the hooks follow the app's process, not the
+  chat: after `/clear`, the new chat still gets the earlier one's tasks.
 - **Other ways to work with the team:** `rig send <seat>@<rig> "..."` types into an agent's terminal,
   `rig capture <seat>@<rig>` reads its screen, and `rig ps --nodes --rig <rig>` shows who's on it.
 

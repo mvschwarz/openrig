@@ -45,6 +45,7 @@ import { decideManagedBlock, managedBlockRecords } from "./managed-block-records
 import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import type { ResolveClaudeFragments } from "./projection-planner.js";
 import type {
   RestoreOutcome,
   RestoreRigResult,
@@ -298,6 +299,7 @@ export interface RestoreOrchestratorDeps {
   /** A seat's skill selection as its spec says today (from its launch recipe), so skills that follow their source
    *  (`on_restore: follow_source`) come back with today's bytes and today's selection. Absent: saved selection only. */
   seatSkillSelection?: (rigId: string, nodeId: string) => Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }>;
+  resolveClaudeFragments?: ResolveClaudeFragments;
   /** Arms the seat's continuity notice (its `managed-compaction` or `apprentice-handover` jobs) for the occupant a restore just
    *  started, the way a first start from the spec does, reconciled by the seat's stable address so a repeat leaves one job.
    *  Resolves to a warning to report, or null. Absent: nothing is armed on restore. A failure never fails the restore. */
@@ -346,6 +348,7 @@ export class RestoreOrchestrator {
   private freshLaunch: RestoreOrchestratorDeps["freshLaunch"];
   private freshLaunchAvailable: RestoreOrchestratorDeps["freshLaunchAvailable"];
   private seatSkillSelection: RestoreOrchestratorDeps["seatSkillSelection"];
+  private resolveClaudeFragments: RestoreOrchestratorDeps["resolveClaudeFragments"];
   private armContinuity: RestoreOrchestratorDeps["armContinuity"];
   private routerLineSettings: Pick<SettingsStore, "resolveOne"> | undefined;
   private getDesiredClaudeActivityHooks: RestoreOrchestratorDeps["getDesiredClaudeActivityHooks"];
@@ -393,6 +396,7 @@ export class RestoreOrchestrator {
     this.freshLaunch = deps.freshLaunch;
     this.freshLaunchAvailable = deps.freshLaunchAvailable;
     this.seatSkillSelection = deps.seatSkillSelection;
+    this.resolveClaudeFragments = deps.resolveClaudeFragments;
     this.armContinuity = deps.armContinuity;
     this.getDesiredClaudeActivityHooks = deps.getDesiredClaudeActivityHooks;
     this.harnessNotStartedNotice = deps.harnessNotStartedNotice;
@@ -2402,6 +2406,24 @@ export class RestoreOrchestrator {
     const recoveryRuntime = startupCtx?.runtime
       ?? (!isPodAware && liveRuntime === node.runtime ? node.runtime : null);
     if (resumeRequested && resumeToken && launchResult && recoveryRuntime === "claude-code") {
+      if (this.resolveClaudeFragments && activityAdapter?.refreshRuntimeFragments && !activityAdapter.environment) {
+        const today: Awaited<ReturnType<ResolveClaudeFragments>> = await this.resolveClaudeFragments(rigId, launchResult.session.nodeId)
+          .catch(() => ({ ok: false as const, reason: "could not resolve today's selection" }));
+        if (today.ok) {
+          const following = today.entries.filter(entry => entry.onRestore === "follow_source");
+          if (following.length) {
+            try {
+              const refresh = activityAdapter.refreshRuntimeFragments(following, { ...launchResult.binding, cwd: launchCwd });
+              warnings?.push(...(refresh.warnings ?? []));
+            } catch {
+              warnings?.push(`Restore: Claude fragments ${following.map(entry => entry.effectiveId).join(", ")} could not be refreshed.`);
+            }
+          }
+        } else if (!today.missingRecipe || startupCtx?.projectionEntries.some(entry =>
+          entry.category === "runtime_resource" && entry.onRestore === "follow_source")) {
+          warnings?.push("Restore: Today's Claude fragment selection couldn't be resolved. Check the seat's agent spec and launch recipe before the next restore.");
+        }
+      }
       // The saved hooks resource ships under the install's specs: read it from the running install, as replay does.
       const entries = (startupCtx?.projectionEntries ?? []).filter(e =>
         e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks")
@@ -2877,6 +2899,7 @@ export class RestoreOrchestrator {
           try {
             const { StartupOrchestrator } = await import("./startup-orchestrator.js");
             const startupOrch = new StartupOrchestrator({ db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmuxAdapter: this.tmuxAdapter,
+              ...(this.resolveClaudeFragments ? { resolveClaudeFragments: this.resolveClaudeFragments } : {}),
               ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
             const replayAsRestore = baseStatus !== "fresh-primed";
             const shouldLaunchHarness = isPodAware;
@@ -2891,6 +2914,7 @@ export class RestoreOrchestrator {
               resolvedStartupFiles: filteredFiles,
               startupActions: sourceActions,
               isRestore: replayAsRestore,
+              refreshClaudeFragments: !resumeRequested && (freshRequested || !replayAsRestore),
               ...(replaySkip ? { replaySkip } : {}),
               preserveStartupContext: replayContained,
               skipHarnessLaunch: !shouldLaunchHarness,

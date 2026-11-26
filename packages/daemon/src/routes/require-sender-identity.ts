@@ -1,4 +1,5 @@
 import type { Context } from "hono";
+import { networkInterfaces } from "node:os";
 import { getSelfHostId } from "../domain/hosts/fanout-contract.js";
 
 /**
@@ -241,17 +242,61 @@ export function parseIdentityPrincipal(raw: string | undefined): string | null {
     ...(label !== undefined ? { label } : {}) });
 }
 
+/** The shared roots a scoped MCP caller's grant may read, which the adapter sends beside its principal (JSON list of
+ *  root names). It can only narrow what the Slack connector attaches from that caller's evidence, never widen it. */
+export const FILE_ROOTS_HEADER = "x-openrig-file-roots";
+
+/** The file authority an evidenceRef written by this request carries: the caller's roots when the adapter sent them, and
+ *  none when they're unreadable or when the request came through the adapter (it named a principal) without them. A
+ *  request with neither header is a local writer with no root grant: null, attached as before.
+ *  The adapter sends an explicit JSON null for an owner grant, which may also name a principal. */
+export function evidenceRefRootsFrom(c: Context): string[] | null {
+  const raw = c.req.header(FILE_ROOTS_HEADER);
+  if (raw !== undefined) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return parsed === null ? null : Array.isArray(parsed) ? parsed.filter((root): root is string => typeof root === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+  return c.req.header(IDENTITY_PRINCIPAL_HEADER) !== undefined ? [] : null;
+}
+
+/** The request's TCP peer address, IPv4-mapped addresses as IPv4; undefined without a socket (an in-process call). */
+function peerAddress(c: Context): string | undefined {
+  const address = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming?.socket?.remoteAddress;
+  if (!address) return undefined;
+  return address.startsWith("::ffff:") ? address.slice(7) : address;
+}
+
 /** Whether the request's TCP peer is this machine. A request without a socket (an in-process call) isn't. */
 function fromLoopbackPeer(c: Context): boolean {
-  const address = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming?.socket?.remoteAddress;
-  if (!address) return false;
-  const v4 = address.startsWith("::ffff:") ? address.slice(7) : address;
-  return v4 === "::1" || /^127\.\d+\.\d+\.\d+$/.test(v4);
+  const v4 = peerAddress(c);
+  return v4 === "::1" || (!!v4 && /^127\.\d+\.\d+\.\d+$/.test(v4));
 }
 
 /** Headers a proxy or forwarder adds. A loopback peer that carries one is relaying someone else's request, so it isn't a
  *  local client, whatever its address. A forwarder that adds none can't be told apart here. */
 const FORWARDING_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip", "via"];
+
+/**
+ * Whether the request came straight from a client on this machine with no grant of its own: the CLI, or the stdio MCP
+ * server it runs. Its TCP peer is loopback or one of this machine's own addresses (a daemon bound to its tailnet address is
+ * reached there), and it carries none of the headers a proxy, another host's daemon (X-OpenRig-Relay) or the MCP HTTP
+ * adapter (its caller's principal or file roots) adds. A forwarder that adds none can't be told apart here.
+ */
+export function fromLocalClient(c: Context): boolean {
+  if ([...FORWARDING_HEADERS, RELAY_HEADER, IDENTITY_PRINCIPAL_HEADER, FILE_ROOTS_HEADER].some((name) => c.req.header(name) !== undefined)) return false;
+  if (fromLoopbackPeer(c)) return true;
+  const address = peerAddress(c);
+  if (!address) return false;
+  try {
+    return Object.values(networkInterfaces()).some((infos) => infos?.some((info) => info.address === address));
+  } catch {
+    return false;
+  }
+}
 
 /**
  * What one of those four stores records for a request: `principal:v1` with the principal only when the request is DIRECT

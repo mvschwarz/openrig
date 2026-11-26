@@ -2,13 +2,16 @@ import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 
 // #3395 (Piece 1): the agents of a seat pool, one row per slot, keyed by the model node. A drained agent keeps its node,
-// name and history. The only row the pool removes is an add's own row when the add ended with no node, which frees the
-// number. Deleting a node by hand takes its slot row with it (ON DELETE CASCADE), which frees the number too.
+// name and history. The only row the pool removes is an add's own row when the add ended with no node (or was cancelled
+// before it was issued), which frees the number. Deleting a node by hand takes its slot row with it (ON DELETE CASCADE),
+// which frees the number too.
 //
 // An add's attempt lives on its row: reserved with a new number, issued under the model's custody lease, then settled
-// (the agent runs) or removed (no node was created). A comeback's attempt lives on the drained slot's own row: reserved,
-// issued, then settled running (`live`), refused (`drained` again, with a reuse hold) or never launched (`drained`
-// again, with no hold).
+// running (`live`), settled not running (`drained`, with a reuse hold, never tried again), kept issued with an `unknown`
+// outcome until a later read settles it, or removed (cancelled before the issue, or no node was created). A comeback's
+// attempt lives on the drained slot's own row: reserved, issued, then settled running (`live`), refused (`drained` again,
+// with a reuse hold) or never launched (`drained` again, with no hold). Every write of an attempt checks the row still
+// holds that attempt id in the state the write expects.
 
 export type SeatPoolSlotPhase = "adding" | "live" | "draining" | "drained";
 export type SeatPoolSlotAttemptKind = "add" | "comeback";
@@ -72,7 +75,7 @@ const fromRow = (row: SlotRow): SeatPoolSlot => ({
 });
 
 /** A recorded outcome as an object; one that isn't a JSON object reads as empty. */
-function readOutcome(text: string | null): Record<string, unknown> {
+export function readAttemptOutcome(text: string | null): Record<string, unknown> {
   if (text === null) return {};
   try {
     const parsed: unknown = JSON.parse(text);
@@ -167,6 +170,23 @@ export class SeatPoolSlotsRepository {
     ).run(input.outcome, input.result, input.at, slotId, attemptId).changes === 1;
   }
 
+  /** An issued add that settled without running (its latest session exited, or its executor is confirmed stopped):
+   *  settled, with its outcome, and the slot `drained` with a reuse hold, so it is never tried again. */
+  settleAddNotRunning(slotId: string, attemptId: string, input: { outcome: string; hold: string; at: string }): boolean {
+    return this.db.prepare(
+      `UPDATE seat_pool_slots SET attempt_state = 'settled', attempt_outcome = ?, reuse_hold = ?, phase = 'drained', phase_changed_at = ?
+        WHERE slot_id = ? AND attempt_id = ? AND attempt_kind = 'add' AND attempt_state = 'issued' AND phase = 'adding'`,
+    ).run(input.outcome, input.hold, input.at, slotId, attemptId).changes === 1;
+  }
+
+  /** A reserved add that is not issued: its row goes, which frees its number. Only while it is still reserved. */
+  cancelReservedAdd(slotId: string, attemptId: string): boolean {
+    return this.db.prepare(
+      `DELETE FROM seat_pool_slots WHERE slot_id = ? AND attempt_id = ? AND attempt_kind = 'add' AND attempt_state = 'reserved'
+         AND phase = 'adding' AND node_id IS NULL`,
+    ).run(slotId, attemptId).changes === 1;
+  }
+
   /** An issued attempt's outcome, kept while the attempt stays issued. */
   recordAttemptOutcome(slotId: string, attemptId: string, outcome: string): boolean {
     return this.db.prepare("UPDATE seat_pool_slots SET attempt_outcome = ? WHERE slot_id = ? AND attempt_id = ? AND attempt_state = 'issued'")
@@ -246,7 +266,7 @@ export class SeatPoolSlotsRepository {
       if (!row || row.phase !== input.from) return false;
       let outcome = row.attempt_outcome;
       if (input.stop !== undefined) {
-        const kept = { ...readOutcome(outcome) };
+        const kept = { ...readAttemptOutcome(outcome) };
         delete kept.stop;
         const next = input.stop === null ? kept : { ...kept, stop: input.stop };
         outcome = Object.keys(next).length > 0 ? JSON.stringify(next) : null;
@@ -263,7 +283,7 @@ export class SeatPoolSlotsRepository {
   stopOutcome(slotId: string): Record<string, unknown> | null {
     const row = this.db.prepare("SELECT attempt_outcome FROM seat_pool_slots WHERE slot_id = ?").get(slotId) as
       { attempt_outcome: string | null } | undefined;
-    const stop = readOutcome(row?.attempt_outcome ?? null).stop;
+    const stop = readAttemptOutcome(row?.attempt_outcome ?? null).stop;
     return stop !== null && typeof stop === "object" && !Array.isArray(stop) ? stop as Record<string, unknown> : null;
   }
 

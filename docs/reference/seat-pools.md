@@ -82,9 +82,33 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
   - `n` is one more than the highest slot number on record, skipping a logical id the rig already has. An add that
     ends with no node removes its slot row, which frees its number;
   - the add is reserved and issued under the model's custody lease, with an operation id, and runs after the lease is
-    released; the evaluation that issued it reports `in flight (attempt <id>)`, and so does every later one while it
-    has not settled, without issuing it again. A later evaluation reports how it settled: `running`, or `no_node`
-    with the add's code.
+    released. Just before the issue, under the same lease, the evaluation reads the job, the holds and the stored
+    block again and plans again with the reservation counted: a lower `max`, `drain: true`, any other change to the
+    block, a hold (such as a `rig.stopped` recorded since the plan) or surplus that reaches the reservation cancels
+    it. A cancelled add has no operation row and is never called; its slot row goes, and the notes report it under
+    `add.cancelled` as `cancelled: not issued`, with the cause in `code`;
+  - the evaluation that issued the add reports `in flight (attempt <id>)`, and so does every later one while its call
+    has not returned, without issuing it again. `max` dropping meanwhile does not cancel or drain an issued add: it
+    settles first. A later evaluation reports how it settled, in `attempt.status` (never as a stop), from the node's
+    latest session:
+
+    | `attempt.status` | When | The slot |
+    | --- | --- | --- |
+    | `running` | The agent's latest session runs (or is idle) with its startup `ready`, and the add's call, if it returned, launched it. | `live`; from there it serves and drains like any other agent, and above `max` it receives no row. |
+    | `no_node` | No node was created, with the add's code (for example `preflight_failed`). | Removed, which frees its number. |
+    | `not_running` | The node exists but does not run: its latest session `exited`, or its executor is confirmed stopped (`probe_absent`), in `attempt.observed`; with the launch's error when the add's call returned. | `drained`, with a reuse hold (JSON `{ code, observed, error? }`: the launch's status or code, or `not_running` when the call never returned; what was observed; the launch's error, if any): never tried again, and it takes no room under `max`. Reported in `slots` every evaluation. |
+    | `unknown` | Anything else (startup not ready, no session yet, or a call that returned a failure or a status other than `launched` while the session runs), with what was read. | Stays `adding` and issued, read again every evaluation until it settles; never issued again, never stopped, and no other free agent is drained because of it. |
+
+  - after a daemon restart, an attempt that no process runs any more is settled by the next evaluation: a reservation
+    that was never issued is cancelled (`cancelled: not issued`), and an issued add is read again by replaying its
+    operation id with what it was issued on, which never runs the add again. With no node recorded, its slot row goes
+    and it is reported `no_node`, `not launched (interrupted before create)`; with a node, it settles by the table
+    above. What settles this way is reported with the evaluation's other settlements, and kept in the job's history;
+  - while an add that settled `not_running` keeps its slot `drained` with its reuse hold, no new number is taken: when
+    no eligible `drained` slot is left to bring back, the notes report `add.held` (`held: failed add <id> (slot <n>)
+    settled not_running (<observed>)`), and `add.failedAdd` names that attempt, its slot and its reuse hold,
+    every evaluation, with no limit on how many. Rows still move, and the other eligible `drained` slots still come
+    back. An ordinary `drained` slot, a comeback's reuse hold and an `unknown` add hold no new number.
 - **Latency.** The job runs every 60 seconds, so a row that has waited `dispatch_after_s` is considered by the next
   evaluation, up to one more interval later, before it is moved and before an agent is added. That is not a dispatch
   deadline: a row moves only to an agent that is
@@ -139,13 +163,15 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
     (`relaunch_fresh`);
   - with no qualifying snapshot, nothing is launched and the slot stays `drained` with the reuse hold
     `no_qualifying_snapshot`, the node id, how many snapshots were read and the condition (1: restore-usable, 2: holds
-    the node, 3: one active occupant) each one failed. The add then tries the next eligible slot, or a new number;
+    the node, 3: one active occupant) each one failed. The add then tries the next eligible slot, or a new number
+    unless an add that settled `not_running` holds new numbers (see *Adding agents*);
   - a newer capture that passes conditions 1 and 2 and whose own occupant map recorded two or more live occupants for
     the node (candidates whose captured sessions were running) stops the search for that slot: no older snapshot is
     picked over it, nothing is launched, and the slot stays `drained` with the reuse hold `conflicting_occupants`,
     naming that snapshot and its candidate session ids, with the snapshots read before it. Only that slot is held: the
-    add tries the next eligible slot, or a new number. A node recorded absent, and an occupancy the metadata can't tell
-    (a legacy relation, or candidates that were not running at capture, as after a reboot), fail condition 3 and the
+    add tries the next eligible slot, or a new number unless an add that settled `not_running` holds new numbers. A
+    node recorded absent, and an occupancy the metadata can't tell (a legacy relation, or candidates that were not
+    running at capture, as after a reboot), fail condition 3 and the
     search goes on; an unknown occupancy is named (`unknown` on its failed condition, and `unknownOccupants` on the
     comeback issued from an older snapshot) and skipped;
   - a launch refused before it starts (`snapshot_not_found`, `snapshot_wrong_rig`, `snapshot_unusable`,
@@ -189,8 +215,10 @@ gone, its job moves, drains, adds and brings back nothing and reports `held: mod
 
 ## What the job does not do yet
 
-An add that creates its node but does not settle running (the agent failed to start, needs attention, or its state is
-unknown) stays in flight; nothing yet settles it, and an add cut off by a daemon restart is not resumed. The same holds
-for a comeback whose launch does not run and is not refused before it starts (for example one that awaits a decision,
-finds a live session or fails): it stays in flight with its outcome kept. Nothing yet clears a reuse hold. An add, or a
-comeback whose launch had already started, that settles running after `rig down` keeps running.
+An add whose launch failed or needs attention while its session still runs is reported `unknown` and stays issued;
+nothing yet settles it. So does an add whose node was created but has no session when the daemon restarts: nothing
+launches it again, and deleting that node removes its slot row, which frees its number. The same holds for a comeback
+whose launch does not run and is not refused before it starts (for example one that awaits a decision, finds a live
+session or fails): it stays in flight with its outcome kept. Nothing yet clears a reuse hold: an add that settled
+`not_running` holds new numbers until its node is deleted, which removes its slot row. An add, or a comeback whose launch
+had already started, that settles running after `rig down` keeps running.
