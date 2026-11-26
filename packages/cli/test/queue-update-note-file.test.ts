@@ -122,10 +122,8 @@ async function runCli(args: string[]): Promise<{ stdout: string; stderr: string;
   return { stdout: stdout.join("\n"), stderr: stderr.join("\n"), exit };
 }
 
-async function withStdin(bytes: string, fn: () => Promise<void>): Promise<void> {
+async function withStdin(fake: PassThrough, fn: () => Promise<void>): Promise<void> {
   const originalStdin = Object.getOwnPropertyDescriptor(process, "stdin");
-  const fake = new PassThrough();
-  fake.end(bytes);
   Object.defineProperty(process, "stdin", { value: fake, configurable: true });
   try {
     await fn();
@@ -226,6 +224,15 @@ describe("resolveQueueNote unit tests", () => {
     await expect(resolveQueueNote({ noteFile: "-" }, async () => "")).resolves.toBe("");
   });
 
+  it("returns an empty note from terminal stdin without registering listeners", async () => {
+    const terminal = Object.assign(new PassThrough(), { isTTY: true });
+    const listen = vi.spyOn(terminal, "on");
+    await withStdin(terminal, async () => {
+      await expect(resolveQueueNote({ noteFile: "-" })).resolves.toBe("");
+      expect(listen).not.toHaveBeenCalled();
+    });
+  });
+
   it("wraps stdin reader error on --note-file -", async () => {
     await expect(
       resolveQueueNote({ noteFile: "-" }, async () => { throw new Error("EIO: stdin broken"); }),
@@ -307,7 +314,7 @@ describe("rig queue update --note-file CLI integration", () => {
   });
 
   it("reads exact bytes from stdin when --note-file - is passed", async () => {
-    await withStdin(EXACT_NOTE, async () => {
+    await withStdin(new PassThrough().end(EXACT_NOTE), async () => {
       const { stderr, exit } = await runCli(["update", id, "--note-file", "-", "--json"]);
       expect(exit, stderr).toBeFalsy();
     });

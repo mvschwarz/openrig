@@ -1061,20 +1061,15 @@ export interface ResolveBodyOpts {
 }
 
 export async function defaultStdinReader(): Promise<string> {
+  // Adding a data listener on a terminal keeps the process alive.
+  if (process.stdin.isTTY) return "";
+
   return new Promise<string>((resolve, reject) => {
     let data = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk: string) => { data += chunk; });
     process.stdin.on("end", () => resolve(data));
     process.stdin.on("error", reject);
-    if (process.stdin.isTTY) {
-      // No pipe is connected to stdin; resolve immediately to empty
-      // rather than blocking forever waiting for data on a TTY. The
-      // empty body then flows through to the daemon's content
-      // validation (queue-repository owns the body contract); the CLI
-      // does not error locally on empty stdin.
-      resolve("");
-    }
   });
 }
 
