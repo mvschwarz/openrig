@@ -217,8 +217,11 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     try {
       let command: string;
       try {
+        // A handover's successor reuses the pane, whose tmux environment still names the predecessor's generation: the
+        // successor takes its own reserved one (a runner's grant names it), so its own hook posts count for it.
+        const generation = authority?.generation ?? binding.launchGeneration;
         command = this.deps.seatLaunchEnvironment
-          ? await this.deps.seatLaunchEnvironment.command(session, preset.command, { runtime: this.runtime, nodeId: binding.nodeId, launcherPrefix, ...(authority ? { generation: authority.generation } : {}),
+          ? await this.deps.seatLaunchEnvironment.command(session, preset.command, { runtime: this.runtime, nodeId: binding.nodeId, launcherPrefix, ...(generation ? { generation } : {}),
             ...(binding.launchWrapper?.length ? { failClosed: true, ...(!preset.runner ? { launchWrapper: binding.launchWrapper } : {}) } : {}) })
           : launcherPrefix + preset.command;
       } catch (error) {
@@ -288,6 +291,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     try {
       command = this.deps.seatLaunchEnvironment
         ? await this.deps.seatLaunchEnvironment.command(session, preset, { runtime: this.runtime, nodeId: binding.nodeId, launcherPrefix,
+          ...(binding.launchGeneration ? { generation: binding.launchGeneration } : {}),
           ...(binding.launchWrapper?.length ? { launchWrapper: binding.launchWrapper, failClosed: true } : {}) })
         : launcherPrefix + preset;
     } catch (error) {
