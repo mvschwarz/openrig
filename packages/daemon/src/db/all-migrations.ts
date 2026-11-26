@@ -1,3 +1,4 @@
+import { contextConfiguredBudgetSchema } from "./migrations/200_context_configured_budget.js";
 import { networkBindingProvidersSchema } from "./migrations/191_network_binding_providers.js";
 import { nodeKeepAliveSchema } from "./migrations/181_node_keep_alive.js";
 import { sessionStopAttemptSchema } from "./migrations/180_session_stop_attempt.js";
@@ -400,4 +401,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   networkRequestsSchema,
   queueItemEvidenceRefRootsSchema,
   queueItemsNativePermissionIndexSchema,
+  contextConfiguredBudgetSchema,
 ];

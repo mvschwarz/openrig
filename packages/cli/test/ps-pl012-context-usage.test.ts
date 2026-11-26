@@ -152,6 +152,18 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     return prog;
   }
 
+  it("displays configured budget beside raw usage while filters still use raw usage", async () => {
+    nodesByRig["rig-1"] = [{ ...nodeAt("budget", 15), contextUsage: {
+      ...nodeAt("budget", 15).contextUsage, source: "claude_statusline_json",
+      configuredBudget: { tokens: 200000, usedPercentage: 75, source: "CLAUDE_CODE_AUTO_COMPACT_WINDOW" },
+    } }];
+    const displayed = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]); });
+    expect(displayed.logs.join("\n")).toContain("15% / 75% budget");
+    const filtered = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "contextUsage.percent>=60"]); });
+    const body = JSON.parse(filtered.logs.join("\n"));
+    expect(Array.isArray(body) ? body : body.entries).toEqual([]);
+  });
+
   it("labels a runner context percentage with its reporting source", async () => {
     nodesByRig["rig-1"] = [{ ...nodeAt("runner", 75), contextUsage: { ...nodeAt("runner", 75).contextUsage, source: "runner_reported" } }];
     const result = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]); });

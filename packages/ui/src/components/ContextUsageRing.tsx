@@ -1,3 +1,4 @@
+import { configuredBudgetLabel, type ConfiguredContextBudget } from "../lib/configured-context-budget.js";
 // Token / Context Usage Surface v0 (PL-012) — small ring indicator for
 // per-node context-usage tier on the topology graph header.
 //
@@ -16,6 +17,7 @@
 
 interface ContextUsageRingProps {
   percent: number | null | undefined;
+  configuredBudget?: ConfiguredContextBudget | null;
   fresh?: boolean;
   availability?: string;
   testIdSuffix?: string;
@@ -56,7 +58,7 @@ export function contextUsageTextClass(
   return `${TIER_TEXT_CLASS[tier]}${tier !== "unknown" && fresh === false ? " opacity-50" : ""}`;
 }
 
-export function ContextUsageRing({ percent, fresh, availability, testIdSuffix }: ContextUsageRingProps) {
+export function ContextUsageRing({ percent, fresh, availability, testIdSuffix, configuredBudget }: ContextUsageRingProps) {
   const tier = deriveContextTier(percent, availability);
   const titleParts: string[] = [];
   if (tier === "unknown") {
@@ -65,6 +67,7 @@ export function ContextUsageRing({ percent, fresh, availability, testIdSuffix }:
     titleParts.push(`context: ${percent}% (${tier})`);
   }
   if (tier !== "unknown" && fresh === false) titleParts.push("stale sample");
+  if (configuredBudget) titleParts.push(configuredBudgetLabel(configuredBudget));
   const title = titleParts.join(" · ");
 
   return (
