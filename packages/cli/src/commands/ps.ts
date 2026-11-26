@@ -1,5 +1,6 @@
 import { modelObservation, formatModelObservation, type ModelObservation } from "../lib/model-observation.js";
 import { formatCheckIn } from "../lib/check-in.js";
+import { fitCell } from "../lib/terminal-cell.js";
 import { Command } from "commander";
 import stringWidth from "string-width";
 import { resolveEffectiveHost } from "../host-selection.js";
@@ -1660,23 +1661,6 @@ function truncate(s: string, max: number): string {
 }
 
 const RIG_COLUMN_SEPARATOR = "  ";
-const cellSegmenter = new Intl.Segmenter();
-
-function fitCell(value: string, width: number): string {
-  if (stringWidth(value) > width) {
-    const limit = width - 1;
-    let prefix = "";
-    let used = 0;
-    for (const { segment } of cellSegmenter.segment(value)) {
-      const segmentWidth = stringWidth(segment);
-      if (used + segmentWidth > limit) break;
-      prefix += segment;
-      used += segmentWidth;
-    }
-    value = prefix + "…";
-  }
-  return value + " ".repeat(width - stringWidth(value));
-}
 
 function padRigRow(cells: string[], widths: number[]): string {
   return cells.map((cell, i) => i < widths.length ? fitCell(cell, widths[i]!) : cell).join(RIG_COLUMN_SEPARATOR);

@@ -578,6 +578,13 @@ const setModelHandler = async (c: Context) => {
 seatRoutes.post("/set-model/:seatRef", setModelHandler);
 seatRoutes.post("/set-model/node/:nodeId", setModelHandler);
 
+const modelCatalogHandler = (c: Context) => {
+  const result = seatLifecycleService(c).modelCatalog(settingTarget(c));
+  return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
+};
+seatRoutes.get("/model-catalog/:seatRef", modelCatalogHandler);
+seatRoutes.get("/model-catalog/node/:nodeId", modelCatalogHandler);
+
 seatRoutes.post("/set-cwd/:seatRef", async (c) => {
   const value: unknown = await c.req.json().catch(() => null);
   const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};

@@ -1,10 +1,13 @@
 import { accountHomePlanMatches } from "../lib/account-home-switch.js";
 import fs from "node:fs";
 import { Command } from "commander";
-import { DaemonClient, DaemonTimeoutError } from "../client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError } from "../client.js";
+import { shellQuote } from "../cross-host-executor.js";
+import { requestMayHaveArrived } from "../remote-host-ops.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { localSelfHostId, originFor, runOnSshHost, type RunOnHostDeps } from "../lib/run-on-host.js";
 
 // Slice-04 (OPR.0.5.0.4) — the `rig provider` CLI verb surface (packet 3ffa3c22 §3), grammar per
 // the auth.ts precedent (conventions/cli-read-command-grammar). Daemon-backed: reads/precheck go
@@ -25,6 +28,8 @@ type Peer = { logicalId: string; sessionName: string | null; home?: "same" | "di
 type SeatView = { home?: string; activity?: string; peers: Peer[] };
 type SwitchReport = { credentialKind?: "api-key"; home?: string; account: string; tokenFile?: string; conversation?: string | null; loginChanged: boolean; undo: string | null; peers: Peer[];
   restart?: { recoveryCommand?: string; remainingStep?: string }; next?: string; warnings?: string[]; tokenApplied?: boolean; effort?: string };
+
+const VALID_ACCOUNT_PROVIDERS: readonly string[] = ["claude", "codex"];
 
 // A switch waits as long as `rig seat restart` does: the seat's in-place restart runs inside it.
 const SWITCH_TIMEOUT_MS = 120_000;
@@ -58,9 +63,9 @@ function printClaude(claude: { credentialKind?: "api-key"; label: string; tokenF
 }
 
 /** Build provider views and account switches; an isolated-home switch first requires the daemon to acknowledge its plan. */
-export function providerCommand(depsOverride?: StatusDeps): Command {
+export function providerCommand(depsOverride?: StatusDeps, remote: { host?: RunOnHostDeps; env?: NodeJS.ProcessEnv } = {}): Command {
   const cmd = new Command("provider").description(
-    "Provider accounts and usage signals, and moving one Codex seat to another login saved in its Codex home",
+    "Provider accounts and usage signals, and moving seats to another account: one seat with switch, a whole rig with assign",
   );
   const getDeps = (): StatusDeps =>
     depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
@@ -160,6 +165,17 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     // prints beside the kept reading.
     if (Array.isArray(m["usage"])) renderUsage(m["usage"] as Array<Record<string, unknown>>);
     if (Array.isArray(m["seatAccounts"])) renderSeatAccounts(m["seatAccounts"] as Array<Record<string, unknown>>);
+    // #3625 — without the seat accounts (usage windows off), the seats with an assignment or a result print on their own.
+    else {
+      const assigned = bindings.filter((b) => assignmentLines(b).length > 0);
+      if (assigned.length) {
+        console.log("ASSIGNMENTS (configured account against the rig's assignment; not proof of the login a running session uses)");
+        for (const b of assigned) {
+          console.log(`  ${b["seatSession"]}  ${b["runtime"]}  ${configuredText((b["configured"] ?? {}) as Record<string, unknown>, follows(b))}`);
+          for (const line of assignmentLines(b)) console.log(line);
+        }
+      }
+    }
   }
 
   // Slice 01 — each seat's configured account and its source (present only while provider.usage_windows is on).
@@ -170,19 +186,67 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     return `${f["reason"] ?? "no reason given"}${f["detail"] !== undefined ? ` (${f["detail"]})` : ""}`;
   }
 
+  // #3625: who set a rig's assignment. A request from outside any seat (e.g. rig run from a plain shell) stores none.
+  function setBy(requestedBy: unknown): string { return typeof requestedBy === "string" && requestedBy ? requestedBy : "a caller that isn't a seat"; }
+
+  // A seat that follows its rig's assignment has that account in its own file or home: worded as the assignment, not as a
+  // choice of its own.
+  function configuredText(c: Record<string, unknown>, follows = false): string {
+    return c["source"] === "registry"
+        ? `configured: profile ${c["profileRef"]} (registry, recorded ${c["recordedAt"]}${c["profileSaved"] === false ? "; profile not saved on this host" : c["profileSaved"] === null ? "; whether the profile is saved: unknown" : ""})`
+        : c["source"] === "claude_token"
+          ? `configured: ${c["kind"] === "api-key" ? "API key" : "token"} ${c["label"]} (${follows ? "its credential file, as the rig is assigned" : "the seat's own credential file"})`
+        : c["source"] === "default_login" && c["homeFrom"]
+          ? `configured: ${follows ? "the seat's home" : "the seat's own home"} (${c["home"]}, from its ${c["homeFrom"]} env${follows ? ", as the rig is assigned" : ""})`
+        : c["source"] === "default_login"
+          ? `configured: default login${c["home"] ? ` (${c["home"]})` : ""}`
+          : `configured: unknown (${c["reason"]})`;
+  }
+
+  // #3625 slice 4 — a seat against its rig's assignment: what the rig is assigned, where this seat's configuration stands
+  // against it, and its last applied result. Configuration and stored results, never the login a session uses. Nothing
+  // prints for a seat whose rig has no assignment and that has no result.
+  // A seat not on its rig's assignment, worded from its last result: none, one that moved it to an earlier assignment, an
+  // unknown one (which may have moved it), or one that didn't move it.
+  function notAppliedText(intended: Record<string, unknown> | null, applied: Record<string, unknown> | null): string {
+    if (!applied) return "not applied to this seat yet";
+    if (applied["kind"] === "unknown") return "this seat isn't known to be configured as assigned: its last result is unknown and may have moved it (see its recovery)";
+    if ((applied["kind"] === "switched" || applied["kind"] === "pending_successor") && applied["label"] !== intended?.["label"]) {
+      return `this seat isn't configured as assigned yet: its last result moved it to ${applied["label"]}, an earlier assignment`;
+    }
+    return "this seat isn't configured as assigned: its last result didn't move it";
+  }
+
+  const follows = (r: Record<string, unknown>) => (r["assignment"] as Record<string, unknown> | undefined)?.["state"] === "follows";
+
+  function assignmentLines(r: Record<string, unknown>): string[] {
+    const a = r["assignment"] as Record<string, unknown> | undefined;
+    if (!a || (a["state"] === "no_assignment" && !a["applied"])) return [];
+    const intended = a["intended"] as Record<string, unknown> | null;
+    const applied = a["applied"] as Record<string, unknown> | null;
+    const standing = a["state"] === "follows" ? (a["asApplied"] ? `this seat is still as the apply of ${intended?.["label"]} left its home` : "this seat is configured as assigned")
+      : a["state"] === "override" ? `this seat is configured with its own choice: ${a["override"] ?? "another account"}`
+        : a["state"] === "not_applied" ? notAppliedText(intended, applied)
+          : "";
+    const lines = [intended
+      ? `    assignment: rig ${r["rigName"]}'s ${a["provider"]} seats to ${intended["label"]} (${intended["reference"]}), set ${intended["at"]} by ${setBy(intended["requestedBy"])}; ${standing}`
+      : `    assignment: none for rig ${r["rigName"]}'s ${a["provider"]} seats`];
+    if (intended && a["referenceMissing"]) {
+      lines.push(`    reference missing: ${intended["label"]} was removed from this daemon's ${a["provider"]} accounts, so this seat is compared only `
+        + `with what an apply left it; add the label again or assign another account`);
+    }
+    if (applied) {
+      lines.push(`    last applied: ${String(applied["kind"]).replace(/_/g, "-")} (${applied["label"]}, ${applied["at"]}): ${applied["detail"]}`);
+      if (applied["recovery"]) lines.push(`      recovery: ${applied["recovery"]}`);
+    }
+    return lines;
+  }
+
   function renderSeatAccounts(rows: Array<Record<string, unknown>>, where = ""): void {
     console.log(`SEATS${where} (configured account; not proof of the login a running session uses)`);
     for (const r of rows) {
       const c = (r["configured"] ?? {}) as Record<string, unknown>;
-      const configured = c["source"] === "registry"
-        ? `configured: profile ${c["profileRef"]} (registry, recorded ${c["recordedAt"]}${c["profileSaved"] === false ? "; profile not saved on this host" : c["profileSaved"] === null ? "; whether the profile is saved: unknown" : ""})`
-        : c["source"] === "claude_token"
-          ? `configured: ${c["kind"] === "api-key" ? "API key" : "token"} ${c["label"]} (the seat's own credential file)`
-        : c["source"] === "default_login" && c["homeFrom"]
-          ? `configured: the seat's own home (${c["home"]}, from its ${c["homeFrom"]} env)`
-        : c["source"] === "default_login"
-          ? `configured: default login${c["home"] ? ` (${c["home"]})` : ""}`
-          : `configured: unknown (${c["reason"]})`;
+      const configured = configuredText(c, follows(r));
       const allowance = (r["allowance"] ?? {}) as Record<string, unknown>;
       console.log(`  ${r["seatSession"]}  ${r["runtime"]}  ${configured} · allowance not linked`);
       if (c["source"] === "default_login" && c["homeNote"]) console.log(`    ${c["homeNote"]}`);
@@ -197,6 +261,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       else if (observed?.["windowsSampled"] === false) console.log("    observed: no status-line windows from this seat yet");
       else if (observed?.["note"]) console.log(`    observed: ${observed["note"]}`);
       if (allowance["reason"]) console.log(`    allowance not linked: ${allowance["reason"]}`);
+      for (const line of assignmentLines(r)) console.log(line);
     }
   }
 
@@ -410,7 +475,13 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
 
   cmd
     .command("status")
-    .description("The whole four-block provider read model (accounts, bindings, signals)")
+    .description("The whole four-block provider read model (accounts, bindings, signals), with each seat's account assignment")
+    .addHelpText("after", `
+Each Claude and Codex seat whose rig has an assignment (rig provider assign) is shown against it: follows (configured as
+the assigned account, or still as its apply left it), override (its own choice of another account), or not applied yet,
+with its last applied result. In --json this is assignment on each bindings row, and on each seatAccounts row when usage
+windows are on. Configured and applied are what the seat's next launch uses and what an apply reported, not proof of the
+login a running session uses.`)
     .option("--json", "Output as parseable JSON")
     .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s here, 75 s with --all-hosts/--hosts; provider.usage_windows is off by default: rig config set provider.usage_windows true)")
     .option("--provider <p>", "With --refresh, read only this provider (codex|claude)")
@@ -418,7 +489,8 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .option("--credential-label <label>", "Operator label for the selected Claude token file; not provider-observed account identity")
     .option("--all-hosts", "Usage windows across every registered host, as each host already holds them (off by default: rig config set provider.usage_windows true)")
     .option("--hosts <ids>", "Like --all-hosts, for these registered hosts (comma-separated); this host is always included, so --hosts b --refresh also reads this daemon")
-    .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string; claudeTokenFile?: string; credentialLabel?: string }) => {
+    .option("--host <id>", "Run this status on that registered machine over its SSH entry, with the same output and --json")
+    .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string; claudeTokenFile?: string; credentialLabel?: string; host?: string }) => {
       if (opts.provider !== undefined && opts.provider !== "codex" && opts.provider !== "claude") {
         console.error(`--provider must be codex or claude (got ${opts.provider})`);
         process.exitCode = 1;
@@ -428,6 +500,15 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       if (tokenSelected && (!opts.claudeTokenFile || !opts.credentialLabel || !opts.refresh || opts.provider !== "claude" || opts.allHosts || opts.hosts !== undefined)) {
         console.error("A token probe requires --refresh --provider claude --claude-token-file <absolute path> --credential-label <label>, on one daemon (no --all-hosts/--hosts).");
         process.exitCode = 1; return;
+      }
+      if (opts.host !== undefined) {
+        if (opts.allHosts || opts.hosts !== undefined || tokenSelected) {
+          console.error("--host runs status on one machine: drop --all-hosts, --hosts and the token probe, or run them without --host.");
+          process.exitCode = 1; return;
+        }
+        // A read: a lost connection is a plain failure, since it changes nothing there.
+        return onHost(opts.host, ["provider", "status", ...(opts.refresh ? ["--refresh"] : []), ...(opts.provider ? ["--provider", opts.provider] : []),
+          ...(opts.json ? ["--json"] : [])], { json: opts.json });
       }
       if (tokenSelected) console.error("Claude token usage refresh spends one model turn; timeout or refusal does not prove no allowance was consumed.");
       const client = await getClient(getDeps());
@@ -852,6 +933,304 @@ switch or restart because a report was refused.`)
         for (const error of res.data.errors ?? []) console.error(`- ${error}`);
         handleHttpError(res, "move report");
       }
+    });
+
+  // #3625: the accounts a daemon knows by label, each a reference on that daemon's own machine. With --host the same
+  // command runs there, over the host's SSH entry, the way rig auth --host does.
+  type AccountRefView = { provider: string; label: string; kind: string; file: string | null; codexHome: string | null; login: string | null };
+  const describeRef = (a: AccountRefView): string => a.kind === "codex_saved_login" ? `the login ${a.login} saved in ${a.codexHome}`
+    : `the ${a.kind === "claude_api_key_file" ? "API-key" : "token"} file ${a.file}`;
+  const onHost = async (hostId: string, argv: string[], opts: { json?: boolean; changes?: string }) => {
+    const env = remote.env ?? process.env;
+    const seat = (env.OPENRIG_SESSION_NAME ?? env.RIGGED_SESSION_NAME)?.trim() || undefined;
+    const origin = await originFor(seat, remote.host?.selfHostId ?? (() => localSelfHostId(realDeps())));
+    await runOnSshHost(hostId, argv.slice(0, 3).filter((a) => !a.startsWith("-")).join(" "), argv, {
+      origin, ...(opts.json ? { json: true } : {}), ...(opts.changes ? { changes: { check: opts.changes } } : {}),
+    }, remote.host);
+  };
+  const refusal = (message: string) => { console.error(message); process.exitCode = 1; };
+  const providerProblem = (provider: string | undefined, required: boolean): string | null =>
+    provider === undefined ? (required ? "Name the provider: --provider claude or --provider codex." : null)
+      : VALID_ACCOUNT_PROVIDERS.includes(provider) ? null : `--provider must be claude or codex, not ${provider}.`;
+
+  const account = cmd
+    .command("account")
+    .description("Accounts this daemon knows by your label: a Claude token or API-key file, or a Codex login saved in a Codex home")
+    .addHelpText("after", `
+Each account is your label and a reference on the daemon's own machine: the absolute path of a file holding a Claude
+subscription token or API key, or a Codex home and the name of a login saved there (rig auth list --codex-home <home>
+lists them). Only the reference is kept: the file isn't read or copied, and no credential passes through OpenRig. Adding
+one checks it first, as rig provider switch does: the file exists, is a regular file and isn't empty (an API-key file
+must also be private, 0600 or 0400; a token file others can read is added with a warning), or the login is saved in
+that home. A refusal says why and stores nothing. A label is unique per provider, and the same label can name
+a Claude and a Codex account. A label is your name for a reference, not proof of the login a running seat uses.
+
+With --host, the command runs on that registered machine over its SSH entry, as this seat, and the reference is a path on
+that machine. Only the command and its output cross the connection.`);
+
+  account
+    .command("add <label>")
+    .description("Add an account by label, after checking its reference on the daemon's machine")
+    .option("--provider <p>", "claude or codex")
+    .option("--token-file <path>", "Claude: the absolute path of a file holding a subscription token (0600 or 0400 recommended)")
+    .option("--api-key-file <path>", "Claude: the absolute path of a 0600 or 0400 file holding an API key")
+    .option("--codex-home <dir>", "Codex: the Codex home the login is saved in")
+    .option("--login <name>", "Codex: the saved login's name in that home")
+    .option("--host <id>", "Add it on this registered machine instead, over its SSH entry; the paths are on that machine")
+    .option("--json", "Output as parseable JSON")
+    .action(async (label: string, opts: { provider?: string; tokenFile?: string; apiKeyFile?: string; codexHome?: string; login?: string; host?: string; json?: boolean }) => {
+      const problem = providerProblem(opts.provider, true) ?? (opts.provider === "claude"
+        ? (opts.codexHome !== undefined || opts.login !== undefined ? "A Claude account is a --token-file or --api-key-file, not --codex-home or --login."
+          : (opts.tokenFile === undefined) === (opts.apiKeyFile === undefined) ? "A Claude account needs one of --token-file <path> or --api-key-file <path>." : null)
+        : opts.tokenFile !== undefined || opts.apiKeyFile !== undefined ? "A Codex account is --codex-home and --login, not a token or API-key file."
+          : opts.codexHome === undefined || opts.login === undefined ? "A Codex account needs --codex-home <dir> and --login <name>." : null);
+      if (problem) return refusal(`${problem} Nothing was stored.`);
+      const fields: Array<[string, string | undefined]> = [["--token-file", opts.tokenFile], ["--api-key-file", opts.apiKeyFile], ["--codex-home", opts.codexHome], ["--login", opts.login]];
+      if (opts.host) {
+        return onHost(opts.host, ["provider", "account", "add", label, "--provider", opts.provider!,
+          ...fields.flatMap(([flag, value]) => value === undefined ? [] : [flag, value]), ...(opts.json ? ["--json"] : [])],
+        { json: opts.json, changes: `rig provider account list --host ${opts.host} --provider ${opts.provider}` });
+      }
+      const client = await getClient(getDeps());
+      if (!client) { process.exitCode = 1; return; }
+      const res = await client.post<{ ok: boolean; account?: AccountRefView; warnings?: string[]; code?: string; message?: string }>("/api/provider/account-refs", {
+        provider: opts.provider, label,
+        ...(opts.tokenFile !== undefined ? { tokenFile: opts.tokenFile } : {}), ...(opts.apiKeyFile !== undefined ? { apiKeyFile: opts.apiKeyFile } : {}),
+        ...(opts.codexHome !== undefined ? { codexHome: opts.codexHome } : {}), ...(opts.login !== undefined ? { login: opts.login } : {}),
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(res.data));
+        if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+      if (handleHttpError(res, "account add")) return;
+      const added = res.data.account!;
+      console.log(`Added the ${added.provider} account ${added.label}: ${describeRef(added)}.`);
+      console.log(added.kind === "codex_saved_login" ? "Checked that the login is saved there; nothing was read or copied."
+        : added.kind === "claude_api_key_file" ? "Checked that the file exists, is private and isn't empty; it wasn't read."
+          : "Checked that the file exists and isn't empty; it wasn't read.");
+      for (const warning of res.data.warnings ?? []) console.log(`Warning: ${warning}.`);
+    });
+
+  account
+    .command("list")
+    .description("The accounts this daemon knows, by provider and label, with each one's reference")
+    .option("--provider <p>", "Only claude or only codex")
+    .option("--host <id>", "List that registered machine's accounts instead, over its SSH entry")
+    .option("--json", "Output as parseable JSON")
+    .action(async (opts: { provider?: string; host?: string; json?: boolean }) => {
+      const problem = providerProblem(opts.provider, false);
+      if (problem) return refusal(problem);
+      if (opts.host) {
+        return onHost(opts.host, ["provider", "account", "list", ...(opts.provider ? ["--provider", opts.provider] : []), ...(opts.json ? ["--json"] : [])], { json: opts.json });
+      }
+      const client = await getClient(getDeps());
+      if (!client) { process.exitCode = 1; return; }
+      const res = await client.get<{ accounts: AccountRefView[] }>(`/api/provider/account-refs${opts.provider ? `?provider=${opts.provider}` : ""}`);
+      if (handleHttpError(res, "account list")) return;
+      if (opts.json) { console.log(JSON.stringify(res.data)); return; }
+      if (res.data.accounts.length === 0) {
+        console.log("No accounts on this daemon. Add one with rig provider account add <label> --provider claude|codex (rig provider account --help).");
+        return;
+      }
+      for (const a of res.data.accounts) console.log(`${a.provider}  ${a.label}  ${describeRef(a)}`);
+    });
+
+  account
+    .command("remove <label>")
+    .description("Remove an account's label; its file or saved login, and any rig assigned to it, are left as they are")
+    .option("--provider <p>", "claude or codex")
+    .option("--host <id>", "Remove it on that registered machine instead, over its SSH entry")
+    .option("--json", "Output as parseable JSON")
+    .action(async (label: string, opts: { provider?: string; host?: string; json?: boolean }) => {
+      const problem = providerProblem(opts.provider, true);
+      if (problem) return refusal(`${problem} Nothing changed.`);
+      if (opts.host) {
+        return onHost(opts.host, ["provider", "account", "remove", label, "--provider", opts.provider!, ...(opts.json ? ["--json"] : [])],
+          { json: opts.json, changes: `rig provider account list --host ${opts.host} --provider ${opts.provider}` });
+      }
+      const client = await getClient(getDeps());
+      if (!client) { process.exitCode = 1; return; }
+      const res = await client.delete<{ ok: boolean; account?: AccountRefView; warning?: string; code?: string; message?: string }>(
+        `/api/provider/account-refs/${opts.provider}/${encodeURIComponent(label)}`);
+      if (opts.json) {
+        console.log(JSON.stringify(res.data));
+        if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+      if (handleHttpError(res, "account remove")) return;
+      console.log(`Removed the ${opts.provider} account ${label}. Its ${res.data.account?.kind === "codex_saved_login" ? "saved login" : "file"} is left as it is, and seats already switched to it keep their own reference.`);
+      if (res.data.warning) console.log(`Warning: ${res.data.warning}`);
+    });
+
+  // #3625: the plan for moving a rig's seats of one provider to an account, computed by the daemon that runs the rig
+  // (slice 2, it changes nothing), and applying exactly that plan, named by its digest (slice 3).
+  type PlanRow = { seat: string; runtime: string; current: string; effect: "change" | "unchanged" | "kept_override" | "not_affected";
+    override?: string; precheck?: { safe: boolean; reasons: string[]; message?: string }; continuity?: string; activity: string; notes?: string[];
+    lastResult?: { kind: string; label: string; detail: string; at: string }; asApplied?: true };
+  type Plan = { daemon: string; rig: string; rigId?: string; provider: string; account: { label: string; reference: string }; includeOverrides: boolean;
+    accountHome?: string; rows: PlanRow[]; codexHomes: Array<{ home: string; seats: Array<{ seat: string; rig: string; rigId?: string; effect: string }> }>;
+    intent?: { label: string; reference: string; requestedBy: string | null; at: string }; digest: string; note: string };
+  type ApplyReport = { daemon: string; rig: string; provider: string; account: { label: string; reference: string }; digest: string;
+    results: Array<{ seat: string; kind: string; detail: string; recovery?: string; activity: string; at: string }>;
+    otherRigPeers: Array<{ seat: string; rig: string; home: string; command?: string; why?: string }> };
+  const kindWords = (kind: string) => kind.replace(/_/g, "-");
+  const printPlan = (plan: Plan, again: string) => {
+    console.log(`Plan ${plan.digest} on ${plan.daemon}: rig ${plan.rig}'s ${plan.provider} seats to ${plan.account.label} (${plan.account.reference})`
+      + `${plan.accountHome ? `, as fresh successors on ${plan.accountHome}` : ""}.`);
+    if (plan.intent) {
+      console.log(`The rig's ${plan.provider} assignment: ${plan.intent.label} (${plan.intent.reference}), applied ${plan.intent.at} by ${setBy(plan.intent.requestedBy)}.`);
+    }
+    for (const row of plan.rows) {
+      const last = row.lastResult ? `  last applied: ${kindWords(row.lastResult.kind)} (${row.lastResult.label}, ${row.lastResult.at}): ${row.lastResult.detail}` : null;
+      if (row.effect === "not_affected") { console.log(`${row.seat}: not affected (${(row.notes ?? []).join("; ")})`); continue; }
+      if (row.effect === "unchanged") {
+        // A seat on a home this plan switches restarts with it (its note says so): what it's doing shows, as for a seat that
+        // changes.
+        const restarts = row.precheck !== undefined;
+        console.log((row.asApplied ? `${row.seat}: unchanged: still as the apply of ${plan.account.label} left its home`
+          : `${row.seat}: unchanged, already on ${plan.account.label}`) + (restarts ? `; activity ${row.activity}` : ""));
+        for (const note of row.notes ?? []) console.log(`  ${note}`);
+        // A seat that restarts with its switched home: its restart was checked.
+        if (row.precheck && !row.precheck.safe) {
+          console.log(`  precheck UNSAFE: ${row.precheck.reasons.join(", ")}`);
+          if (row.precheck.message) console.log(`  ${row.precheck.message}`);
+        }
+      }
+      else if (row.effect === "kept_override") console.log(`${row.seat}: kept (seat override): ${row.override}; --include-overrides moves it too`);
+      else {
+        const check = row.precheck?.safe ? "precheck safe" : `precheck UNSAFE: ${(row.precheck?.reasons ?? []).join(", ")}`;
+        console.log(`${row.seat}: from ${row.current}; ${check}; ${row.continuity}; activity ${row.activity}`);
+        if (row.override) console.log(`  overrides ${row.override}`);
+        if (row.precheck?.message) console.log(`  ${row.precheck.message}`);
+        for (const note of row.notes ?? []) console.log(`  ${note}`);
+      }
+      if (last) console.log(last);
+    }
+    for (const group of plan.codexHomes) {
+      console.log(`Codex home ${group.home}: one switch; every seat on it:`);
+      for (const peer of group.seats) console.log(`  ${peer.seat} (rig ${peer.rig}): ${peer.effect}`);
+    }
+    console.log(`A plan only: nothing was changed. Apply exactly this plan with: ${again} --apply --plan ${plan.digest}`);
+  };
+  const printApply = (report: ApplyReport) => {
+    console.log(`Applied plan ${report.digest} on ${report.daemon}: rig ${report.rig}'s ${report.provider} seats to ${report.account.label} (${report.account.reference}).`);
+    for (const r of report.results) {
+      console.log(`${r.seat}: ${kindWords(r.kind)}: ${r.detail}`);
+      // Only a seat the apply relaunched or restarted, or may have, lost what it was doing.
+      const restarted = r.kind === "switched" || r.kind === "pending_successor" || r.kind === "unknown";
+      if (restarted && (r.activity === "running" || r.activity === "needs_input")) {
+        console.log(`  it was ${r.activity === "running" ? "working" : "waiting for input"} when it was reached: work in flight, including background commands, `
+          + `${r.kind === "unknown" ? "may not have carried over" : "didn't carry over"}`);
+      }
+      if (r.recovery) console.log(`  recovery: ${r.recovery}`);
+    }
+    for (const p of report.otherRigPeers) {
+      console.log(`${p.seat} (rig ${p.rig}): not restarted; it shares ${p.home}, so ${p.command ? `restart it yourself: ${p.command}` : `restart it yourself. ${p.why ?? ""}`.trim()}`);
+    }
+    console.log("Each result is reported on its own: nothing was rolled back or retried.");
+  };
+
+  cmd
+    .command("assign <rig>")
+    .description("Plan moving a rig's seats of one provider to an account this daemon knows by label, then apply that plan")
+    .option("--provider <p>", "claude or codex: a mixed rig gets one assignment per provider")
+    .option("--account <label>", "The account's label (rig provider account list)")
+    .option("--include-overrides", "Also move seats with their own choice of account; by default they're kept and shown")
+    .option("--account-home <dir>", "Codex: move the seats not on the account yet to this prepared home as fresh successors with a handover, instead of in place")
+    .option("--apply", "Carry out the plan, one seat at a time; needs --plan with the digest the plan showed")
+    .option("--plan <digest>", "The digest of the plan you reviewed: apply acts only while the plan is still the same")
+    .option("--host <id>", "Plan or apply on that registered machine instead, over its SSH entry; the rig and account are that daemon's")
+    .option("--json", "Output as parseable JSON")
+    .addHelpText("after", `
+The daemon that runs the rig computes the plan from what it already has, and changes nothing: one row per seat, with its
+configured account, whether it has its own choice of account (kept unless --include-overrides), the switch's precheck
+verdict, whether it keeps its conversation, and what it's doing now. A busy seat is noted, not refused.
+A Claude seat is relaunched in place on the same conversation; a stopped one picks the account up at its next launch.
+A Codex seat switches in place only on Linux and macOS, by changing its Codex home's active login, so every seat on that home moves
+with it: the plan lists each one, in this rig ("would restart") or not ("not restarted; needs rig seat restart <seat>").
+Elsewhere it reads "unsupported in place"; name a prepared home with --account-home to move it as a fresh successor
+with a handover instead. Nothing falls back to that by itself.
+A configured account is what a seat's next launch uses, not proof of the login a running session uses.
+
+--apply --plan <digest> computes the plan again and refuses, changing nothing, unless it's the one you reviewed. It then
+moves each seat through the existing switch, one at a time, reporting each result as unchanged, switched,
+pending-successor, unsupported, failed-before-effect or unknown. A failure doesn't stop the other seats; nothing is
+rolled back or retried, and an unknown result names its recovery command. When a Codex home's own switch ends unknown,
+that home's other seats are skipped. Seats in other rigs on a switched home are listed, never restarted.
+The rig's assignment is stored with the first seat that's on the account or may be, so an apply where every seat was
+refused leaves the earlier one. Afterwards the plan shows the assignment and each seat's last result, and rig provider
+status shows each seat against it. It exits 1 when any seat failed or is unknown.`)
+    .action(async (rig: string, opts: { provider?: string; account?: string; includeOverrides?: boolean; accountHome?: string; apply?: boolean; plan?: string;
+      host?: string; json?: boolean }) => {
+      const problem = providerProblem(opts.provider, true) ?? (opts.account ? null : "Name the account: --account <label> (rig provider account list).")
+        ?? (opts.accountHome !== undefined && opts.provider !== "codex" ? "--account-home is for Codex seats." : null)
+        ?? (opts.apply && !opts.plan ? "--apply needs --plan <digest>: the digest the plan showed. Run the plan first and review it." : null)
+        ?? (opts.plan !== undefined && !opts.apply ? "--plan names the plan to apply: add --apply." : null)
+        ?? (opts.plan !== undefined && !/^[0-9a-f]{12}$/.test(opts.plan) ? "--plan is the 12-character digest the plan showed." : null);
+      if (problem) return refusal(`${problem} Nothing changed.`);
+      // The printed command is copied into a shell: a value with a space or a quote in it is quoted.
+      const arg = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : shellQuote(value);
+      const again = `rig provider assign ${arg(rig)} --provider ${arg(opts.provider!)} --account ${arg(opts.account!)}${opts.includeOverrides ? " --include-overrides" : ""}`
+        + `${opts.accountHome !== undefined ? ` --account-home ${arg(opts.accountHome)}` : ""}`;
+      if (opts.host) {
+        const host = opts.host;
+        await onHost(host, ["provider", "assign", rig, "--provider", opts.provider!, "--account", opts.account!,
+          ...(opts.includeOverrides ? ["--include-overrides"] : []), ...(opts.accountHome !== undefined ? ["--account-home", opts.accountHome] : []),
+          ...(opts.apply ? ["--apply", "--plan", opts.plan!] : []), ...(opts.json ? ["--json"] : [])],
+        { json: opts.json, ...(opts.apply ? { changes: `${again} --host ${arg(host)} (its plan shows each seat's last result)` } : {}) });
+        // The plan printed there names its apply command as that machine runs it; from here it needs --host too.
+        if (!opts.apply && !opts.json && !process.exitCode) {
+          console.log(`This plan is on ${host}. To apply it from this machine: ${again} --host ${arg(host)} --apply --plan <the digest above>`);
+        }
+        return;
+      }
+      const client = await getClient(getDeps());
+      if (!client) { process.exitCode = 1; return; }
+      const qs = new URLSearchParams({ rig, provider: opts.provider!, account: opts.account!,
+        ...(opts.includeOverrides ? { includeOverrides: "1" } : {}), ...(opts.accountHome !== undefined ? { accountHome: opts.accountHome } : {}) });
+      const res = await client.get<{ ok: boolean; plan?: Plan; code?: string; message?: string }>(`/api/provider/assignment-plan?${qs.toString()}`);
+      if (!opts.apply) {
+        if (opts.json) {
+          console.log(JSON.stringify(res.data));
+          if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+          return;
+        }
+        if (handleHttpError(res, "assignment plan")) return;
+        printPlan(res.data.plan!, again);
+        return;
+      }
+      // The plan is read first only to size the wait: the daemon checks the digest itself. Each seat that changes takes a
+      // switch, and so does each other seat of this rig on a Codex home that switches, since it restarts on it.
+      const shown = res.data.plan;
+      const changing = shown ? new Set([...shown.rows.filter((r) => r.effect === "change").map((r) => r.seat),
+        ...shown.codexHomes.flatMap((h) => h.seats.filter((s) => (shown.rigId ? s.rigId === shown.rigId : s.rig === shown.rig)).map((s) => s.seat))]).size : 1;
+      type ApplyResponse = { status: number; data: { ok: boolean; report?: ApplyReport; code?: string; message?: string; digest?: string } };
+      let applied: ApplyResponse;
+      try {
+        applied = await client.post<ApplyResponse["data"]>("/api/provider/assignment-apply", { rig, provider: opts.provider, account: opts.account,
+          plan: opts.plan, ...(opts.includeOverrides ? { includeOverrides: true } : {}), ...(opts.accountHome !== undefined ? { accountHome: opts.accountHome } : {}) },
+        { timeoutMs: SWITCH_TIMEOUT_MS * Math.max(1, changing) + 30_000 });
+      } catch (err) {
+        // A connection that failed before the request left is a plain failure; once it may have arrived, the daemon may be
+        // applying it, so the outcome is unknown.
+        if (!(err instanceof DaemonConnectionError) || !requestMayHaveArrived(err)) throw err;
+        const lost = err instanceof DaemonTimeoutError ? "The CLI timed out waiting for the daemon" : "The CLI lost the connection to the daemon before its answer";
+        if (opts.json) console.log(JSON.stringify({ ok: false, code: "apply_outcome_unknown", digest: opts.plan, check: again,
+          message: `${lost}; the apply may still be running. Don't run it again: each seat's result shows in the plan as it lands.` }));
+        console.error(`${lost}. The apply may still be running, seat by seat, so don't run it again: `
+          + `a second apply to the rig is refused while one runs. Each seat's result shows in the plan as it lands: ${again}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(applied.data));
+        if (applied.status >= 400) process.exitCode = applied.status >= 500 ? 2 : 1;
+      } else {
+        if (handleHttpError(applied, "assignment apply")) return;
+        printApply(applied.data.report!);
+      }
+      if (applied.data.report?.results.some((r) => r.kind === "failed_before_effect" || r.kind === "unknown")) process.exitCode = 1;
     });
 
   return cmd;

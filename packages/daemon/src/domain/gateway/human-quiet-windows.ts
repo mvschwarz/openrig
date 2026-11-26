@@ -242,7 +242,8 @@ export function resolveUntil(value: string, tz: string, now: Date): Date {
     const todays = zonedLocalToInstant(today, text, tz);
     return todays.getTime() > now.getTime() ? todays : zonedLocalToInstant(addDays(today, 1), text, tz);
   }
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(text) || Number.isNaN(Date.parse(text))) {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(text) || Number.isNaN(Date.parse(text))
+    || new Date(text.slice(0, 10)).getUTCDate() !== Number(text.slice(8, 10))) {
     throw new QuietWindowError("invalid_time", `"${value}" isn't a time: use HH:MM (the next such time in the timezone) or an ISO time with an offset, for example 2026-10-21T07:00:00+02:00`);
   }
   return new Date(text);

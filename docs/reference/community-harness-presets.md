@@ -335,8 +335,11 @@ Copy the launcher and the preset for your mode, and maintain them as your own.
 processes, a gateway say, may keep running after it. OpenRig doesn't stop them, and whether they survive isn't exercised
 by OpenRig's tests, so check the harness's own processes after `rig down`. Each preset's limits say what to expect.
 
-**Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats) and
-switching harness on a running seat. Each says so before anything changes.
+**Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats). It says
+so before anything changes. To move a running single-pane seat to or from an installed harness, use
+`rig seat set-runtime <seat> --runtime <target> --reason <text>`, where the target is the harness's name, or `codex`,
+`claude-code` or `pi` to move off it. It starts a new conversation with a handover. A later resume of a harness
+successor's conversation works only when that harness's preset declares `resume`.
 
 ## An example: Cursor
 
@@ -516,6 +519,21 @@ The contributor-owned launcher reads the file and uses its harness’s supported
 OpenRig records `node.startup_first_input_passed` with the path and `submission: unconfirmed`. This says the input was passed at launch, not that the native harness submitted or read it. An uncertain launch is not permission to replay it. Readiness remains process-only. `startup_assisted` is independent: when declared, startup still requires a person’s acknowledgement, including when the first input was passed at launch.
 
 Presets without `first_input` and built-in runtimes keep their existing behavior. Older OpenRig versions reject this new field as unknown. The private input file remains for diagnostics; it can contain private startup context. A launcher that turns its contents into one argument is subject to the platform’s argument-size limit; the launcher must report a launch error rather than silently truncate the turn. The examples’ argument transport is covered with stand-ins; native unattended startup still requires qualification with the installed harness.
+
+## Declare a model catalog
+
+A format-1 preset may include advisory model choices for settings clients.
+
+```yaml
+model_catalog:
+  runtime_version: "1.2.3"
+  models:
+    - id: example/model-a
+      effort_levels: [low, high]
+    - id: example/model-b
+```
+
+Omit `runtime_version` when it is unknown and omit `effort_levels` when the preset has no per-model effort information. An explicit `models: []` declares an empty list. Missing or invalid catalog metadata makes the [seat catalog](seat-node-targeting.md#model-and-effort-catalog) unavailable and leaves preset launch behavior unchanged. Older OpenRig versions may reject `model_catalog` as an unknown field.
 
 ## Pass the seat's declared model at launch
 

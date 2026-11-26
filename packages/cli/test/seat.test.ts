@@ -1094,9 +1094,21 @@ describe("rig seat status", () => {
     const output = logs.join("\n");
     expect(exitCode).toBeUndefined(); // the handover itself completed
     expect(output).toContain("The handover's lineage record (occupant tenure) was NOT written; check the daemon log, which names the first such failure since the daemon started. The seat is already bound to the successor, so don't run the handover again.");
-    expect(output).toContain("The previous occupant's process didn't exit on TERM and was killed; its tmux session was kept, and the successor runs in the same pane.");
+    expect(output).toContain("The previous occupant was stopped by a signal: it didn't exit through its own shutdown, or that couldn't be confirmed. Its tmux session was kept, and the successor runs in the same pane.");
     expect(output).toContain("No conversation continuity was carried: the successor started a fresh conversation.");
     expect(output).not.toContain("session stop");
+  });
+
+  it("#3901: handover human output says how the previous occupant ended, in the daemon's words", async () => {
+    const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT, source: { mode: "rebuild", raw: "rebuild" },
+      sourceOutcome: { mode: "rebuild", primedArtifacts: [], gaps: [] },
+      sideEffects: { departingSessionKilled: false, departingProcess: "ended-graceful", departingProcessDetail: "Claude Code exited on TERM in 0.4 s.",
+        startupContextDelivered: true, provenanceRecordWritten: true } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "rebuild", "--reason", "context wall"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("The previous occupant wasn't forced to stop: it exited through its own shutdown, or had already exited. Its tmux session was kept, and the successor runs in the same pane.\nClaude Code exited on TERM in 0.4 s.");
   });
 
   // #3044: a recovered successor on its fork parent's or the retiring occupant's conversation.

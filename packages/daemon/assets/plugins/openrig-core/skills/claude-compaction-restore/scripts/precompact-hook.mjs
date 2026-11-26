@@ -8,12 +8,11 @@ import { fileURLToPath } from "node:url";
 
 const skillRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const restoreScript = path.join(skillRoot, "scripts", "restore-from-jsonl.mjs");
-// P6(C) injectable output-root: the packet base defaults to the shared
-// /tmp/claude-compaction-restore (production), but becomes per-run isolated when the
-// hermetic env-var OPENRIG_COMPACTION_OUT_ROOT is set — so concurrent writers with the
-// same injected clock + sessionId no longer collide on the same `${sessionId}-${stamp}`
-// dir. Mirrors the injectable-clock seam (OPENRIG_TEST_CLOCK_NOW). Empty/absent = /tmp.
-const outRoot = process.env.OPENRIG_COMPACTION_OUT_ROOT || "/tmp/claude-compaction-restore";
+// P6(C) injectable output-root: restore-from-jsonl.mjs decides where the packet goes (OPENRIG_COMPACTION_OUT_ROOT, then
+// the folder the seat's launch grants it reads in, then beside its restore maps in its launch project, then the OpenRig
+// home's folder), so this hook passes no --out. The hermetic env-var OPENRIG_COMPACTION_OUT_ROOT makes it per-run
+// isolated, so concurrent writers with the same injected clock + sessionId don't collide on the same
+// `${sessionId}-${stamp}` dir. Mirrors the injectable-clock seam (OPENRIG_TEST_CLOCK_NOW).
 // The packet is built by a detached copy of this hook (--finish), so a large transcript can take as long as it needs. The
 // hook waits for it for 25 s by default, inside its own 30 s timeout (hooks/claude.json): a packet ready by then is
 // reported as before; otherwise the hook says the packet is still being built, and the finisher writes the pending
@@ -263,7 +262,7 @@ function runsForThisSeatsProject(env = process.env) {
 if (!runsForThisSeatsProject()) process.exit(0);
 
 function restoreText(outputDir) {
-  return `Pre-compaction restore seed packet prepared at ${outputDir}. This hook output is informational. After compaction, OpenRig may send a later normal user message asking you to restore from this packet; treat that later normal user message as the action request. The restore protocol is: load/read the claude-compaction-restore skill, run "node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs --out /tmp/claude-compaction-restore --json" yourself when needed, read the generated restore-instructions.md, read the generated touched-files.md, identify remembered important files, read those files in full, read root/as-built/codemap docs before real work, then reply with "restored from packet at <path>; resumed at step <X>" with the files you read in full. If any step fails, report the failure explicitly.`;
+  return `Pre-compaction restore seed packet prepared at ${outputDir}. This hook output is informational. After compaction, OpenRig may send a later normal user message asking you to restore from this packet; treat that later normal user message as the action request. The restore protocol is: load/read the claude-compaction-restore skill, run "node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs --json" yourself when needed (it writes under ${path.dirname(outputDir)}), read the generated restore-instructions.md, read the generated touched-files.md, identify remembered important files, read those files in full, read root/as-built/codemap docs before real work, then reply with "restored from packet at <path>; resumed at step <X>" with the files you read in full. If any step fails, report the failure explicitly.`;
 }
 
 function failureText(reason) {
@@ -359,7 +358,7 @@ try {
   const { jobPath, resultPath, reportPath } = packetJobPaths(input, jobId);
   writeExpectedSentinel(input, { jobId, resultPath, reportPath }); // R5: sentinel FIRST, before the packet + marker (catches hook-died-partway)
   supersedeEarlierMarker(input);
-  const args = [restoreScript, "--out", outRoot, "--json"];
+  const args = [restoreScript, "--json"];
   if (input.cwd) args.push("--cwd", input.cwd);
   if (input.transcript_path && input.transcript_path.endsWith(".jsonl") && fs.existsSync(input.transcript_path)) {
     // The transcript as it stands now: compaction appends to it once this hook returns, and the packet is of what came

@@ -211,20 +211,25 @@ permission mode keeps `--permission-mode acceptEdits` and gets
 `--settings` (`kernel-authority.ts:64–66`):
 `TEAM_CLAUDE_ALLOW` (`:33`) is `Skill`, `Read(./**)`, `Glob`, `Grep`,
 `Bash(rig:*)`, eight read-only shell commands and 17 test-runner commands, and
-`TEAM_CLAUDE_ASK` (`:40`) asks before 29 `rig` commands: the 23 that start, stop or
+`TEAM_CLAUDE_ASK` (`:40`) asks before 30 `rig` commands: the 23 that start, stop or
 remove teams or agents (such as `up`, `down`, `seat stop`, `seat restart` and `bundle install`),
-and six kept for a person: `import` (its `--instantiate` mode launches nodes), `seat
-set-permissions` and `policy apply` under both spellings (an explicit permission choice),
+and seven kept for a person: `import` (its `--instantiate` mode launches nodes), `seat
+set-permissions`, `seat decide-permission` (it answers a seat's permission prompt, its own included)
+and `policy apply` under both spellings (an explicit permission choice),
 `setup` (kept for its `--policy` path, which records one; a prefix rule can't tell that path
 from ordinary setup, so ordinary setup prompts too), and `compact` (it replaces a peer's
-working context). Other `rig` commands fall under the `Bash(rig:*)` allowance. The list was
+working context). Other `rig` commands fall under the `Bash(rig:*)` allowance. One seat skips
+the `seat decide-permission` ask (`RECEIVING_AGENT_NO_ASK`): the host's receiving agent, `agents.operator_session`,
+which settles the permission requests a person answered. When a command names `decide-permission`, the hook reads
+that setting through the seat's own `rig` and compares it with `OPENRIG_SESSION_NAME`; a setting it can't read keeps
+the ask. The list was
 42 before: 15 commands were removed and 2 added (`seat restart` and `policy permissions
 apply`), 13 fewer prompts. The settings carry the allow list and a
 `PreToolUse` Bash hook, `packages/daemon/assets/claude-team-permissions.cjs`, that applies
 both lists (`kernel-authority.ts:43–53`): it asks before a lifecycle command unless the
 command only asks for `--help` or `-h`, allows a simple literal command that matches an
-allow rule, and otherwise leaves the decision to Claude (`claude-team-permissions.cjs:234`,
-`:240`). Without the hook file, the settings carry both lists as plain `allow` and `ask`
+allow rule, and otherwise leaves the decision to Claude (`claude-team-permissions.cjs:235`,
+`:241`). Without the hook file, the settings carry both lists as plain `allow` and `ask`
 rules (`kernel-authority.ts:46`). A Codex seat launching at
 `-s workspace-write` gets `--add-dir` for the workspace root (`workspace.root`)
 and its pod's state directory, each created first and skipped with a warning if
