@@ -41,8 +41,10 @@ new chat in the same process (after `/clear`) still gets the earlier chat's task
   - **Claude Code:** `rig_queue_create` gives the work an address of its own by default, whether the plugin's OpenRig
     seat is set or blank. With a seat set, the seat stays the work's sender. Work handed over with `returnRoute: "self"`
     sends the team's questions to the seat's own address instead, which the hooks don't watch, so your agent finds them
-    only when it checks (`rig_queue_list` with `owned`). In one of OpenRig's own seats there's no such default: that seat
-    has its own delivery.
+    only when it checks (`rig_queue_list` with `owned`). A managed seat identified by its inherited `OPENRIG_NODE_ID`
+    or an existing sender binding keeps its own delivery, without that default. If an MCP environment filter removes
+    the node marker and no distinct sender binding remains, the server cannot distinguish it from an outside chat:
+    it can issue an address that the managed seat's hooks won't watch. Keep `OPENRIG_NODE_ID` in that server's environment.
   - **`rig queue create --return-route auto` in the shell,** in Claude Code or Codex.
   - **Not yet: Codex through the MCP server.** Codex may not give the server the session id the key comes from, so its
     handovers get no key and nothing wakes for them. In Codex, hand work over with `rig queue create --return-route auto`

@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 // The MCP queue tools against the daemon's real queue routes, over HTTP, through the real DaemonClient: a seat
 // configured once (OPENRIG_SESSION_NAME in the MCP server's env) hands a task to another seat and reads the
 // answer back by the task's id. Nothing in the tool calls names the sender.
@@ -355,12 +356,12 @@ describe("MCP queue tools on the daemon's queue routes", () => {
   // MCP tool. The decision names the address OpenRig issued it (under the key its own stdio server derives), as
   // OPENRIG_SESSION_NAME=<address> does in a shell, not "someone outside a seat". That's attribution only: a relay still
   // reads relayed and unconfirmed. Another conversation's server, whose key wasn't issued that address, isn't it.
-  it("records a seatless conversation's decision on its own ask as its issued address, never as the person's own answer", async () => {
+  it.each([undefined, "cursor@team"])("records a conversation with configured seat %s on its own ask as its issued address, never as the person's own answer", async (configuredSeat) => {
     const rigs = new RigRepository(db);
     const node = rigs.addNode(rigs.createRig("team").id, "dev.build", { runtime: "claude-code" });
     const sessions = new SessionRegistry(db);
     sessions.updateStatus(sessions.registerSession(node.id, "dev-build@team").id, "running");
-    delete process.env.OPENRIG_SESSION_NAME;
+    if (configuredSeat) process.env.OPENRIG_SESSION_NAME = configuredSeat; else delete process.env.OPENRIG_SESSION_NAME;
     const conversation = async (key: string) => {
       const mcp = createMcpServer(new DaemonClient(url), { conversationKey: () => key });
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -392,7 +393,7 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     // Another conversation's server can't take this conversation's address: it decides as before, outside a seat.
     const second = await ask("invocation-2");
     expect((await other.callTool({ name: "rig_seat_decide_permission", arguments: { askId: second.askId, option: "deny", reason: "not this one" } })).structuredContent)
-      .toMatchObject({ ok: true, state: "answered", optionId: "deny", native: { answeredAs: "agent", by: "someone outside a seat" } });
+      .toMatchObject({ ok: true, state: "answered", optionId: "deny", native: { answeredAs: "agent", by: configuredSeat ?? "someone outside a seat" } });
   });
 
   // R3: with no seat, the conversation closes a team question sent to its issued address with the same MCP tools a seat
@@ -437,7 +438,7 @@ describe("MCP queue tools on the daemon's queue routes", () => {
   });
 
   /** The plugin's stdio server in a conversation whose key is `key`, as `rig mcp serve` derives it. */
-  async function conversationServer(key: string) {
+  async function conversationServer(key: string | null) {
     const mcp = createMcpServer(new DaemonClient(url), { conversationKey: () => key });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "conversation", version: "1.0.0" });
@@ -465,6 +466,32 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     expect(work.tags?.some((tag) => tag.endsWith(":claude:conversation-1:4242"))).toBe(true);
 
     const question = await repo.create({ sourceSession: "dev-build@team", destinationSession: work.returnRoute!, body: "Exclude all four files?" });
+    const unrelated = await repo.create({ sourceSession: "dev-build@team", destinationSession: seat, body: "Unrelated configured-seat work" });
+    const foreign = await repo.create({ sourceSession: "dev-build@team", destinationSession: "conversation-foreign@kernel", body: "Another chat's question" });
+    // The hook receives the parent conversation's env, not its MCP entry's configured tool identity. Exercise the actual
+    // waiter against rows created through MCP; only the CLI read adapter is supplied from this same isolated repository.
+    const bridge = createRequire(import.meta.url)("../../daemon/assets/claude-hook-bridge.cjs");
+    const commands: string[][] = [];
+    const rig = (args: string[]) => {
+      commands.push(args);
+      if (args[1] === "transitions") return repo.listTransitions(args[2]!);
+      const rows = repo.list({ limit: 1000 });
+      if (args[2] === "--tag") return rows.filter((row) => row.tags?.includes(args[3]!));
+      if (args[2] === "--destination") return rows.filter((row) => row.destinationSession === args[3] && row.state === "pending");
+      throw new Error(`Unexpected hook read: ${args.join(" ")}`);
+    };
+    let output = "";
+    let now = 1000;
+    const hookResult = await bridge.conversationWaiter({ input: { session_id: "outside-configured-test", hook_event_name: "Stop" },
+      out: { write(text: string, done?: () => void) { output += text; done?.(); return true; } },
+      deps: { env: { CLAUDE_PLUGIN_DATA: home }, key: "claude:conversation-1:4242", rig, alive: () => true,
+        now: () => now, sleep: async () => { now += 15000; } } });
+    expect(hookResult).toBe(2);
+    expect(output).toContain(question.qitemId);
+    expect(output).not.toContain(unrelated.qitemId);
+    expect(output).not.toContain(foreign.qitemId);
+    expect(commands.filter((args) => args[2] === "--destination").map((args) => args[3])).toEqual([work.returnRoute]);
+
     expect((await mine.callTool({ name: "rig_queue_claim", arguments: { qitemId: question.qitemId } })).isError).toBeFalsy();
     expect((await mine.callTool({ name: "rig_queue_update",
       arguments: { qitemId: question.qitemId, state: "done", closureReason: "no-follow-on", resolution: "Yes, exclude all four" } })).isError).toBeFalsy();
@@ -473,6 +500,39 @@ describe("MCP queue tools on the daemon's queue routes", () => {
 
     const own = await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Another", returnRoute: "self" } });
     expect(repo.getById(createdId(own))).toMatchObject({ returnRoute: seat, returnRouteBasis: "caller" });
+  });
+
+  it("keeps the current sender binding on a default create when the node environment is absent", async () => {
+    delete process.env.OPENRIG_SESSION_NAME;
+    const bound = new DaemonClient(url);
+    // The client can already resolve a current pane binding without a node env marker. Keep that same attributed sender
+    // for the real request; a configured tool identity is absent here, so it must not become an outside conversation.
+    bound.bindSender("managed@team");
+    const mcp = createMcpServer(bound, { conversationKey: () => "claude:conversation-1:4242" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "managed", version: "1.0.0" });
+    await mcp.connect(serverTransport);
+    await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await mcp.close(); });
+    const result = await client.callTool({ name: "rig_queue_create", arguments: { destination: IMPL, body: "Keep the managed route" } });
+    expect(result.isError).toBeFalsy();
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const row = repo.getById(createdId(result))!;
+    expect(row.sourceSession).toBe("managed@team");
+    expect(row.returnRoute ?? null).toBeNull();
+    expect(row.tags?.some((tag) => tag.startsWith("conversation-key:")) ?? false).toBe(false);
+  });
+
+  it("keeps a configured caller's ordinary route when its conversation key is missing", async () => {
+    process.env.OPENRIG_SESSION_NAME = "cursor@team";
+    const mine = await conversationServer(null);
+    const result = await mine.callTool({ name: "rig_queue_create", arguments: { destination: IMPL, body: "No correlation available" } });
+    expect(result.isError).toBeFalsy();
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const row = repo.getById(createdId(result))!;
+    expect(row.sourceSession).toBe("cursor@team");
+    expect(row.returnRoute ?? null).toBeNull();
+    expect(row.tags?.some((tag) => tag.startsWith("conversation-key:")) ?? false).toBe(false);
   });
 
   // Under a seat OpenRig launched (OPENRIG_NODE_ID in the server's env, as Claude Code passes it on), a configured seat is

@@ -1153,10 +1153,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const hostBindingsLoader = options.hostBindingsLoader ?? loadHostBindings;
   // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
   const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
-  /** Whether this server runs under a seat OpenRig launched: only OpenRig's launch sets OPENRIG_NODE_ID, its seat's
-   *  processes carry it, and Claude Code passes its own environment to the MCP servers it starts (Codex passes it only when
-   *  its entry's env_vars names it). The hook bridge reads the same variable to stay out of seats. A seat configured for this
-   *  server's tools (OPENRIG_SESSION_NAME) is a name, not that binding: a person's own conversation can configure one too. */
+  /** A managed-seat marker inherited by this server. Claude normally inherits it; an MCP env allowlist can omit it,
+   *  and Codex passes it only when its entry's env_vars names it. The sender comparison below also preserves an existing
+   *  pane binding. With neither marker nor distinguishable sender binding, managed identity is unknown: a configured tool
+   *  seat alone cannot distinguish a managed seat from a person's outside conversation. The hooks still use their own env. */
   const inManagedSeat = (): boolean => !!readOpenRigEnv("OPENRIG_NODE_ID", "RIGGED_NODE_ID")?.trim();
   /** A tool's optional `host`: that registered http host's client and bearer, or this server's own client when none is
    *  named. A granted connection (an authenticated non-owner) reaches only the daemon serving it, so it can't name one.
@@ -1982,11 +1982,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       // work come back to it, where the openrig plugin's hooks find them under that key. That holds with or without a seat
       // configured for its tools: with one, the seat stays the row's sender; with none, the issued address is the row's
       // declared sender (claimed:v1), and the note says where the questions go instead of "no return address". A seat
-      // OpenRig launched (inManagedSeat) has its own delivery, and the hooks never read an issued address there, so it gets
+      // identified as managed by its inherited marker or an existing sender binding has its own delivery, so it gets
       // no such default. An explicit returnRoute always decides. With no key (another app, an HTTP connection, another
       // host's daemon, or Codex without its session id in this server's env) nothing could read that address, so the create
       // keeps its sender and the usual path for its questions.
-      const wantsKey = !access && !target.remote && (returnRoute === undefined ? !inManagedSeat() : returnRoute.trim() === "auto");
+      const wantsKey = !access && !target.remote && (returnRoute === undefined
+        ? !inManagedSeat() && (await client.senderIdentity()).session === seatOf()
+        : returnRoute.trim() === "auto");
       const key = wantsKey ? options.conversationKey?.() ?? null : null;
       const route = returnRoute ?? (key ? "auto" : undefined);
       const taskNote = note && route === "auto"

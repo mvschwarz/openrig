@@ -230,6 +230,7 @@ describe("no one to ask: nothing is decided, and the native prompt carries on", 
     ["several people are registered and none is the default", { owner: null, people: ["mike", "dana"] }],
     ["the default person is registered, but no one is chosen for the seat and its work has no return route", { owner: null, people: ["mike"] }],
     ["the seat's chosen person is no longer registered", { owner: "gone@external", people: [] as string[] }],
+    ["the chosen person is unavailable while a different default person is registered", { owner: "gone@external", people: ["mike"] }],
   ])("asks no one and permits nothing when %s", async (_case, options) => {
     const f = fixture(options);
     const submitted = await f.submit();
@@ -782,6 +783,20 @@ describe("the real hook process against the real routes", () => {
     // Decided while the hook reads: the reply reads as it always has.
     expect(decided.body).toMatchObject({ state: "answered", optionId: "deny" });
     expect(decided.body.native).not.toHaveProperty("notReached");
+  });
+
+  it("returns a conditional judgment through the real hook without calling it the person's own yes", async () => {
+    const f = fixture({ decider: DECIDER });
+    const port = await served(f);
+    const run = runHook(f, port, {});
+    const askId = await openAsk(f);
+    await f.answer(askId, { decision: "yes, as long as it is the docs branch" });
+    const decided = await f.decide(askId, "allow", DECIDER, { reason: "this exact action uses the docs branch" });
+    expect(decided.body).toMatchObject({ state: "answered", optionId: "allow", native: { answeredAs: "agent", by: DECIDER } });
+    const { stdout, code } = await run;
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } });
+    expect((await f.read(askId)).body).toMatchObject({ native: { taken: true, answeredAs: "agent", said: "yes, as long as it is the docs branch" } });
   });
 
   it("says an answer hasn't reached the prompt when the hook was killed outright while its Claude Code lives on", async () => {
