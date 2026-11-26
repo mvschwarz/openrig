@@ -823,6 +823,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_queue_decide", routes: ["POST /api/queue/:qitemId/delegated-decision"], effect: "destructive", access: "work" },
   { tool: "rig_queue_handoff", routes: ["POST /api/queue/:qitemId/handoff"], effect: "destructive", access: "work" },
   { tool: "rig_queue_unclaim", routes: ["POST /api/queue/:qitemId/unclaim"], effect: "destructive", access: "work" },
+  { tool: "rig_seat_decide_permission", routes: ["POST /api/activity/permission-requests/:askId/decide"], effect: "destructive", access: "work" },
 ];
 
 /** How a member works its inbox, and asks a person while keeping the work: one versioned text, carried in this server's
@@ -1278,6 +1279,41 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     if (detail.status >= 400) return mapResult(detail);
     const name = ((detail.data ?? {}) as RigDetail).rig?.name;
     return scope?.rig(name) ? name as string : outOfScope(`Rig ${handle}`);
+  };
+  /** Every row tagged with this conversation's key, widening the page until it holds them all, as the hook bridge's
+   *  conversationRows does; none when a read fails. */
+  const issuedRows = async (tag: string): Promise<Array<{ returnRoute?: unknown; returnRouteBasis?: unknown; tags?: unknown }>> => {
+    for (let limit = 100; ; limit *= 2) {
+      const res = await client.get(`/api/queue/list?${new URLSearchParams({ tag, limit: String(limit) }).toString()}`);
+      if (res.status >= 400 || !Array.isArray(res.data)) return [];
+      if (res.data.length < limit) return res.data;
+    }
+  };
+  /** With no seat, the address OpenRig issued this stdio server's own conversation (under the conversation key it derives
+   *  itself, as its creates record it), when `qitemId` is addressed there: the conversation then acts as that address, as
+   *  `OPENRIG_SESSION_NAME=<address> rig ...` does in a shell. That's attribution, not proof of a person (a relay still
+   *  reads relayed and unconfirmed). Null otherwise, or when a read fails: the call goes as before. */
+  const ownConversationAddress = async (qitemId: string): Promise<string | null> => {
+    const key = !access && !seatOf() ? options.conversationKey?.() ?? null : null;
+    if (!key) return null;
+    try {
+      if ((await client.senderIdentity()).session) return null;
+      const tag = conversationKeyTag(key);
+      const [item, rows] = await Promise.all([client.get(`/api/queue/${encodeURIComponent(qitemId)}`), issuedRows(tag)]);
+      const address = item.status < 400 ? (item.data as { destinationSession?: unknown } | null)?.destinationSession : undefined;
+      return typeof address === "string" && rows.some((row) => row.returnRoute === address && (row.returnRouteBasis === "issued"
+        || row.returnRouteBasis === "issued-actor") && Array.isArray(row.tags) && row.tags.includes(tag)) ? address : null;
+    } catch { return null; }
+  };
+  /** The client a call on `qitemId` goes through: bound to this conversation's issued address when the item is addressed
+   *  there (ownConversationAddress), so a seatless conversation claims, closes or decides its own items as that address;
+   *  else this server's own. */
+  const clientFor = async (qitemId: string): Promise<DaemonClient> => {
+    const address = await ownConversationAddress(qitemId);
+    if (!address) return client;
+    const bound = clientFactory(client.baseUrl);
+    bound.bindSender(address);
+    return bound;
   };
   const rigOutOfScope = async (handle: string): Promise<TextResult | null> => {
     if (!scope) return null;
@@ -2138,7 +2174,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const denied = await itemOutOfScope(qitemId);
         if (denied) return denied;
-        const res = await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
+        const res = await (await clientFor(qitemId)).post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
         // An external caller's claimed item goes through the same projection as show and list.
         const view = externalView(scope);
         return mapResult(view && res.status < 400 ? { ...res, data: projectForExternal(res.data, view) } : res, undefined, { structured: true });
@@ -2180,7 +2216,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           const blocker = blockedOn?.startsWith("qitem-") ? await client.get(`/api/queue/${encodeURIComponent(blockedOn)}`) : null;
           if (!blocker || blocker.status >= 400 || !scope?.item(blocker.data)) return outOfScope(`Blocker ${blockedOn ?? "(none named)"}`);
         }
-        const res = await hostPost(target, `/api/queue/${encodeURIComponent(qitemId)}/update`, {
+        const res = await hostPost(host ? target : { ...target, client: await clientFor(qitemId) }, `/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state, closureReason, closureTarget, summary, evidenceRef, blockedOn, wakeAfterSeconds, transitionNote: note, resolution, reopen,
         });
         // An external caller's updated item goes through the same projection as show and list.
@@ -2940,6 +2976,35 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const denied = await itemOutOfScope(qitemId, "owner");
         if (denied) return denied;
         return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/unclaim`, { reason }), undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 37. rig_seat_decide_permission — answer a seat's permission ask, the route `rig seat decide-permission` uses
+  if (offered("rig_seat_decide_permission")) server.registerTool(
+    "rig_seat_decide_permission",
+    {
+      description: "Answer a seat's permission ask (qitem-runner-permission-…) with one of the options it offers, as rig seat decide-permission does. Show your person the exact action first. A plain yes or no is their own answer: set relay and pass their exact words in personSaid; it's recorded as relayed by you, unconfirmed, since OpenRig didn't get it from them. For their words or a condition, decide whether this exact action meets them, with reason and personSaid. With no seat, the decision names this conversation's own address when the ask is addressed to it. An ask already answered, ended in the seat's terminal, or stale comes back as it is, and nothing is decided. A reply with native.notReached is recorded but hasn't reached the seat's prompt (its hook isn't reading the ask): tell your person what it says.",
+      inputSchema: z.object({
+        askId: z.string().describe("The ask's id (qitem-runner-permission-…)"),
+        option: z.string().describe("One of the ask's options, by its id: allow or deny for a seat's own Claude Code prompt"),
+        relay: z.boolean().optional().describe("A seat's own prompt only: the person chose this option themselves and you pass it on exactly; recorded as relayed by you, not your decision, and unconfirmed"),
+        personSaid: z.string().optional().describe("The person's own words, exactly as they gave them, recorded as your report of what they said"),
+        reason: z.string().optional().describe("Why, recorded with the decision (say what the person meant)"),
+      }),
+      annotations: DESTRUCTIVE,
+    },
+    async ({ askId, option, relay, personSaid, reason }) => {
+      try {
+        const denied = await itemOutOfScope(askId);
+        if (denied) return denied;
+        // A conversation with no seat answers its own ask as the address it was issued, not as someone outside a seat.
+        const decider = await clientFor(askId);
+        return mapResult(await decider.post(`/api/activity/permission-requests/${encodeURIComponent(askId)}/decide`, {
+          optionId: option, reason: reason ?? "", ...(personSaid !== undefined ? { personSaid } : {}), ...(relay ? { relay: true } : {}),
+        }), undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }

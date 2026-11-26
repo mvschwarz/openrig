@@ -90,7 +90,7 @@ import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
 import { isEpisodeRelay, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RELAY_TAG } from "./return-route.js";
-import { runnerPermissionOrigin } from "./runner-permissions.js";
+import { nativeAskPastWindow, nativePermissionHook, nativeWindowEndedNote, plainYesOrNo, runnerPermissionOrigin } from "./runner-permissions.js";
 import { isHostPairingAsk } from "./hosts/pairing-ask.js";
 import { renderRelayedAnswers, type DirectAnswer, type RelayJournal, type RelayAnswerWrite, type RelayedAnswerReceipt, type ReturnedRelayAnswer } from "./relayed-answers.js";
 import { parseReplyToChoice, parseArrivalThread, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
@@ -3260,6 +3260,11 @@ export class QueueRepository {
     const item = this.getById(qitemId);
     const origin = item?.state === "pending" ? runnerPermissionOrigin(item) : null;
     if (!item || !origin) return false;
+    // A seat's own native prompt past its window: its hook no longer takes an answer, so one given now would reach no one.
+    if (nativeAskPastWindow(item)) {
+      this.update({ qitemId, actorSession: item.sourceSession, state: "canceled", transitionNote: nativeWindowEndedNote(item) });
+      return true;
+    }
     const authority = this.runnerPermissionAuthority(origin);
     if (authority !== "replaced" && authority !== "absent") return false;
     this.update({ qitemId, actorSession: item.sourceSession, state: "canceled",
@@ -5159,6 +5164,14 @@ export class QueueRepository {
     if (!this.permissionDecider || item?.state !== "pending" || !runnerPermissionOrigin(item) || item.humanIntent === "update"
       || (!this.answersAsk(item, input.actorSession) && !input.primaryUser) || !this.isPersonAddress(item.destinationSession)
       || this.committedAnswerFromAnother(item.qitemId, input.actorSession)) return null;
+    // A seat's own native prompt (slice 15): a pick of an offered option, or a plain yes or no, is the person's own answer to
+    // it, relayed as they gave it, with no agent in between; it closes the ask as theirs (the direct reply below). Only their
+    // words go on to the receiving agent, to judge against the exact action.
+    if (nativePermissionHook(item)) {
+      const picked = item.humanAnswers?.[(this.permissionQuestionsFor(item) ?? [])[0]?.id ?? "permission"];
+      const offered = (this.permissionQuestionsFor(item) ?? [])[0]?.options.map((option) => option.id) ?? [];
+      if ((typeof picked === "string" && offered.includes(picked)) || plainYesOrNo(input.decision) !== null) return null;
+    }
     // The requester is the runner seat that asked: the first row of the request, whoever handed it on since.
     let root: QueueItem = item;
     for (let hops = 0; root.handedOffFrom && hops < 10; hops++) {
@@ -5226,7 +5239,9 @@ export class QueueRepository {
 
   /** An agent's decision on a runner's permission request, on the row that holds it now: the chosen option under its
    *  question, and the row closed done, in one transaction. False when the row isn't open any more. */
-  recordPermissionDecision(input: { qitemId: string; actorSession: string; questionId: string; optionId: string; transitionNote: string }): boolean {
+  recordPermissionDecision(input: { qitemId: string; actorSession: string; questionId: string; optionId: string; transitionNote: string;
+    /** A native ask's decision in one line (what the harness's agent is told); kept as the row's resolution's last line. */
+    resolution?: string }): boolean {
     const result = this.db.transaction(() => {
       const item = this.getById(input.qitemId);
       if (!item) return null;
@@ -5236,6 +5251,8 @@ export class QueueRepository {
       // (The caller read it first: a row already decided explicitly, withdrawn or stale never reaches here.)
       if (item.state === "done" || item.state === "failed") {
         this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), item.qitemId);
+        if (input.resolution) this.db.prepare("UPDATE queue_items SET resolution = ? WHERE qitem_id = ?")
+          .run(item.resolution ? `${item.resolution}\n${input.resolution}` : input.resolution, item.qitemId);
         this.transitionLog.append({ qitemId: item.qitemId, state: item.state, actorSession: input.actorSession, transitionNote: input.transitionNote });
         // The row's state doesn't change, but its decision does: a runner waiting on this request reads it now, and
         // Steering refreshes.
@@ -5246,7 +5263,7 @@ export class QueueRepository {
       if (item.state !== "pending" && item.state !== "in-progress" && item.state !== "blocked") return null;
       this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), item.qitemId);
       return this.updateInTransactionalContext({ qitemId: item.qitemId, actorSession: input.actorSession, state: "done",
-        closureReason: "no-follow-on", transitionNote: input.transitionNote });
+        closureReason: "no-follow-on", transitionNote: input.transitionNote, ...(input.resolution ? { resolution: input.resolution } : {}) });
     })();
     if (!result) return false;
     for (const event of result.persistedEvents) {
