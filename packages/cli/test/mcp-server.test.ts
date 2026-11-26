@@ -525,25 +525,56 @@ describe("MCP Server", () => {
       return (whoami.structuredContent as { unknownSender: string }).unknownSender;
     };
 
-    it("a new task reaches its destination from this server's unknown sender, with a note on what's known and its id to follow", async () => {
+    // Slice 15: a seatless connection's new task asks for an issued return route by default, so the team's questions come
+    // back to this conversation, and a stdio server records the conversation's key beside it for the openrig plugin's hooks.
+    it("a new task asks for an issued return route by default, records this conversation's key, and its note says where the questions go", async () => {
       try {
         const fn = post();
-        const label = await seatless("${user_config.seat}", fn);
+        const label = await seatless("${user_config.seat}", fn, undefined, { conversationKey: () => "claude:1a2b3c4d.5000:4242" });
         expect(label).toMatch(UNKNOWN);
         // No request carries the placeholder or the inherited legacy seat: there's no sender header at all.
         expect(senderIdentityHeaders()).toEqual({});
 
-        const result = await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "lead@my-team", body: "Check the build." } });
+        // A key the caller names (another conversation's, say) is dropped: only the one this server derived is recorded.
+        const result = await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "lead@my-team", body: "Check the build.",
+          tags: ["mission:m", "conversation-key:claude:1a2b3c4d.6000:5151"] } });
         expect(result.isError).toBeFalsy();
         const [create] = sent(fn, "/api/queue/create");
-        expect(create).toMatchObject({ destinationSession: "lead@my-team", sourceSession: label });
+        // The issued address is the row's declared sender (claimed:v1), so no body sender is sent.
+        expect(create).toMatchObject({ destinationSession: "lead@my-team", returnRoute: "auto", tags: ["mission:m", "conversation-key:claude:1a2b3c4d.5000:4242"] });
+        expect(create).not.toHaveProperty("sourceSession");
         expect(create!.body).toBe(`[Unknown sender ${label}: this app has no OpenRig seat (OPENRIG_SESSION_NAME is "\${user_config.seat}", a placeholder the app didn't fill in).`
-          + ` Its MCP client says it is "test-client 1.0.0". There's no return address: it follows this by its task id.]\n\nCheck the build.`);
+          + ` Its MCP client says it is "test-client 1.0.0". Its team's questions come back to this conversation's issued return route.]\n\nCheck the build.`);
         expect(JSON.stringify(create)).not.toContain("dev-impl@my-rig");
-        const qitemId = create!.qitemId as string;
-        expect(result.structuredContent).toMatchObject({ qitemId, unknownSender: { label,
-          followUp: `No return address: read this task with rig_queue_show and qitemId ${qitemId}.` } });
+        expect(result.structuredContent).not.toHaveProperty("unknownSender");
         await cleanup();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("with no conversation key (another app, an HTTP connection) asks for no route; a route the caller names is sent as given", async () => {
+      try {
+        for (const extra of [{ conversationKey: () => null }, {}]) {
+          const fn = post();
+          const label = await seatless("", fn, undefined, extra);
+          await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "lead@my-team", body: "Check the build." } });
+          await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "lead@my-team", body: "Check the build.", returnRoute: "auto",
+            tags: ["conversation-key:claude:1a2b3c4d.6000:5151"] } });
+          await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "lead@my-team", body: "Check the build.", returnRoute: "front@kernel" } });
+          const [plain, auto, named] = sent(fn, "/api/queue/create");
+          // Nothing could read an issued address here: the create is as before, from the unknown sender, with no route.
+          expect(plain).toMatchObject({ sourceSession: label });
+          expect(plain).not.toHaveProperty("returnRoute");
+          expect(String(plain!.body)).toContain("There's no return address: it follows this by its task id.]");
+          // Asked for, auto is sent, with no key to record, and none the caller named.
+          expect(auto).toMatchObject({ returnRoute: "auto" });
+          expect(auto).not.toHaveProperty("sourceSession");
+          expect(auto!.tags).toEqual([]);
+          // A named route keeps the unknown sender as the source.
+          expect(named).toMatchObject({ returnRoute: "front@kernel", sourceSession: label });
+          await cleanup();
+        }
       } finally {
         vi.unstubAllEnvs();
       }
@@ -635,6 +666,9 @@ describe("MCP Server", () => {
         await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "lead@my-team", body: "Check the build." } });
         const [fromEnv] = sent(fn, "/api/queue/create");
         expect(fromEnv).not.toHaveProperty("sourceSession");
+        // A seat is its own return address: no route is asked for and no key recorded unless the caller names one.
+        expect(fromEnv).not.toHaveProperty("returnRoute");
+        expect(fromEnv!.tags).toBeUndefined();
         expect(fromEnv!.body).toBe("Check the build.");
         expect(senderIdentityHeaders()).toEqual({ "X-OpenRig-Session": "claude-app@my-rig" });
         await cleanup();
@@ -1591,8 +1625,12 @@ describe("MCP Server", () => {
       await cleanup();
     });
 
-    it("rig_queue_create drops OpenRig's provenance tags only from an external caller's create and revision; other callers' pass as sent", async () => {
-      const sent = ["mission:m", "project:p", "custom", "workflow", "founder-slack", "inbound", "shared-channel", "participant:acme", "slack-body:0123456789abcdef", "slack-attachments:39", "gate"];
+    it("rig_queue_create drops OpenRig's provenance tags only from an external caller's create and revision, and a conversation key from every caller", async () => {
+      // #3964 review F1: the conversation key is OpenRig's own record (the openrig plugin's hooks take an address recorded
+      // beside it as that conversation's), so no caller writes one, whatever its access.
+      const key = "conversation-key:claude:1a2b3c4d.6000:5151";
+      const sent = ["mission:m", "project:p", "custom", "workflow", "founder-slack", "inbound", "shared-channel", "participant:acme", "slack-body:0123456789abcdef", "slack-attachments:39", "gate", key];
+      const kept = sent.filter((tag) => tag !== key);
       const tagsSent = async (access?: McpAccess, revises?: string) => {
         const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
         const getFn = vi.fn(async () => ({ status: 200, data: { qitemId: "qitem-0", sourceSession: "cus-a1-caller@team", destinationSession: "lead@team" } }));
@@ -1609,10 +1647,33 @@ describe("MCP Server", () => {
       };
       const work: McpAccess = { principal: "grok", owner: false, rigs: ["team"], roots: [], workspace: false };
       const external: McpAccess = { ...work, principal: "cus_A1", external: { objects: { queue: ["create", "show", "list"] } } };
-      expect(await tagsSent()).toEqual(sent);
-      expect(await tagsSent(work)).toEqual(sent);
+      expect(await tagsSent()).toEqual(kept);
+      expect(await tagsSent(work)).toEqual(kept);
       expect(await tagsSent(external)).toEqual(["mission:m", "project:p", "custom", "workflow"]);
       expect(await tagsSent(external, "qitem-0")).toEqual(["mission:m", "project:p", "custom", "workflow"]);
+    });
+
+    // An external grant isn't offered handoff; the stdio server and a work grant are.
+    it("rig_queue_handoff passes a caller's tags on without a conversation key, from every caller", async () => {
+      const key = "conversation-key:claude:1a2b3c4d.6000:5151";
+      const work: McpAccess = { principal: "grok", owner: false, rigs: ["team"], roots: [], workspace: false };
+      for (const access of [undefined, work]) {
+        const postFn = vi.fn(async () => ({ status: 201, data: { ok: true } }));
+        const getFn = vi.fn(async () => ({ status: 200, data: { qitemId: "qitem-1", sourceSession: "lead@team", destinationSession: "cus-a1-caller@team" } }));
+        const server = createMcpServer(mockClient({ post: postFn, get: getFn }), { seat: "cus-a1-caller@team", access });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "test-client", version: "1.0.0" });
+        await server.connect(serverTransport);
+        await client.connect(clientTransport);
+        const result = await client.callTool({ name: "rig_queue_handoff", arguments: { qitemId: "qitem-1", to: "qa@team", tags: ["mission:m", key] } });
+        await client.close();
+        await server.close();
+        const label = access?.principal ?? "stdio";
+        expect(result.isError, label).toBeFalsy();
+        const [path, body] = postFn.mock.calls.find(([route]) => String(route).endsWith("/handoff")) as unknown as [string, Record<string, unknown>];
+        expect(path, label).toBe("/api/queue/qitem-1/handoff");
+        expect(body.tags, label).toEqual(["mission:m"]);
+      }
     });
 
     it("rig_queue_create: an external caller hands tasks only to its team, never to a caller-shaped seat (itself included); a self-hosted grant is unchanged", async () => {

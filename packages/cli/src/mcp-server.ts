@@ -8,6 +8,7 @@ import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, operatorAuthHe
 import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer, type HostRegistryLoadResult } from "./host-registry.js";
 import { loadHostBindings, type HostBindingsFile } from "./host-bindings.js";
 import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
+import { CONVERSATION_KEY_TAG_PREFIX, conversationKeyTag } from "@openrig/daemon/conversation-key";
 import { readOpenRigEnv } from "./openrig-compat.js";
 import { resolveRigHandle } from "./rig-handle.js";
 import { formatSeatActivity, type SeatActivityFields } from "./lib/seat-activity.js";
@@ -541,6 +542,14 @@ export const CALLER_SHAPED = /^cus-[^@][^@-]*-[^@]+@[^@]+$/;
  *  `workflow:`/`instance:` among them) are kept. */
 const OPENRIG_PROVENANCE_TAG = /^(?:founder-slack|inbound|shared-channel|gate)$|^participant:|^slack-/;
 
+/** A caller's tags as this server passes them on: without OpenRig's provenance tags from an external caller (above), and
+ *  without a `conversation-key:` tag from any caller. That key is OpenRig's own record of which conversation handed work
+ *  over (slice 15): the openrig plugin's hooks take an address issued beside it as that conversation's, so only the key a
+ *  stdio server derives itself is ever added. A dropped tag is never a refusal: the rest of the request goes on. */
+function callerTags(tags: string[] | undefined, external: boolean): string[] | undefined {
+  return tags?.filter((tag) => !tag.startsWith(CONVERSATION_KEY_TAG_PREFIX) && !(external && OPENRIG_PROVENANCE_TAG.test(tag)));
+}
+
 /** An external grant (openrig.grant/v1): a requester, narrower than a work grant. The grant's own seat is the
  *  only caller. It may hand tasks to its rigs' other seats (never a person or another host's seat, and without team/list
  *  never a caller-shaped seat), read the items it sent and those addressed to it from those seats or from an external
@@ -878,14 +887,14 @@ function askWhichAssistant(canList: boolean, frontDoor: boolean): string {
 
 /** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
  *  that works its inbox. The team's questions to it are the person's to answer. */
-export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v4";
+export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v5";
 export const FRONT_DOOR_WORKFLOW = [
   `Front door (${FRONT_DOOR_WORKFLOW_VERSION}). This seat is a person's agent in their own app: you hand the team their work and bring back what it produced, and you aren't one of its members.`,
   "The team's questions are the person's, and an answer covers only the question it answered: a later one, even one like it, goes back to them, unless they told you outright to decide that kind of question. Approving a plan, a task or 'go ahead' isn't an answer to the questions that work raises. Never tell the team they approved something, or will answer a question, unless they said so, and don't send them to a seat's terminal to answer the team's questions: those come to this seat as items.",
   askWhichAssistant(true, true),
   "Items addressed to your seat (rig_queue_list with owned set) are usually the team's questions about work you handed it. They're the person's to answer, not yours: show each to the person with the team's draft, and record only what the person tells you.",
   "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and exactly what the person typed in resolution, with no label, quotation marks or words of your own (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them unless they told you outright to decide that kind of question: then answer only what's clearly inside it, and say in resolution that you decided under their instruction, not that they answered, and tell them you did. Don't claim an item you can't close with their words or under such an instruction.",
-  "Nothing wakes this conversation when the team finishes, and it has no wake of its own: tell the person you'll check when they ask, then check your work and your items when they ask or come back. Offer a wake only where their app actually has one, such as Claude Desktop's scheduled tasks.",
+  "Where the app runs the openrig plugin's hooks (Claude Code, Codex), a task that reaches an address OpenRig issued to this conversation is brought into it with its recorded sender. Otherwise nothing wakes this conversation when the team finishes, and it has no wake of its own: tell the person you'll check when they ask, then check your work and your items when they ask or come back. Offer a wake only where their app actually has one, such as Claude Desktop's scheduled tasks.",
 ].join(" ");
 const FRONT_DOOR_INSTRUCTIONS = [...SHARED_INSTRUCTIONS, FRONT_DOOR_WORKFLOW].join("\n");
 // An external caller's first paragraph says what the connection is for, on its own: a client may show the model only the
@@ -1115,6 +1124,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   requestSignal?: AbortSignal;
   /** Builds a client for a registered remote host's daemon URL (a tool's optional host argument). */
   clientFactory?: (baseUrl: string) => DaemonClient;
+  /** Derives the key of the conversation that started this server (`@openrig/daemon/conversation-key`). Only the stdio
+   *  server passes it: an HTTP server's process isn't its callers' conversation. */
+  conversationKey?: () => string | null;
   /** Test seams for the host registry and its learned bindings; production reads ~/.openrig. */
   hostRegistryLoader?: () => HostRegistryLoadResult;
   hostBindingsLoader?: () => HostBindingsFile;
@@ -1817,11 +1829,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         tier: z.string().optional().describe("Tier (as rig queue create --tier)"),
         qitemId: z.string().optional().describe("A request id you choose, unique to this request (for example qitem- and random letters), so an uncertain create can be checked by it; pass the same one to retry, never a new one (default: a new id)"),
         revises: z.string().optional().describe("The qitemId of the work this asks to revise"),
+        returnRoute: z.string().optional().describe("Where this work's questions and its seats' prompts come back to you as tasks (as rig queue create --return-route): auto issues an address for this conversation, and is the default when this connection has no seat of its own; self takes this seat's own address."),
         alert: z.boolean().optional().describe("For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now (as rig queue create --alert). It stands out in Slack. Without it the ask still posts to Slack unless the person's Slack subscription is urgent-only, in which case it waits on Steering and the TUI"),
         host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
     },
-    async ({ destination, body, summary, tags, priority, tier, qitemId, revises, alert, host }) => {
+    async ({ destination, body, summary, tags, priority, tier, qitemId, revises, alert, host, returnRoute }) => {
       const target = hostTarget(host);
       if ("content" in target) return target;
       // The server's one receiver counts for this connection only when its grant reaches it. Then a refused destination
@@ -1921,11 +1934,24 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       }
       // With no seat, the task goes to its destination as from the unknown sender, with the note at the top of its body.
       const note = unknownSenderNote("task");
+      // Slice 15: the key of the conversation (Claude Code or Codex) that started this stdio server, on this host's daemon.
+      // A connection with no seat whose conversation has one asks for an issued return route by default, so the team's
+      // questions about this work come back to it, where the openrig plugin's hooks find them under that key; the issued
+      // address is then the row's declared sender (claimed:v1), and the note says where the questions go instead of "no
+      // return address". With no key (another app, an HTTP connection, another host's daemon) nothing could read that
+      // address, so the create keeps the unknown sender and the usual path for its questions.
+      const wantsKey = !access && !target.remote && (returnRoute === undefined ? note !== null : returnRoute.trim() === "auto");
+      const key = wantsKey ? options.conversationKey?.() ?? null : null;
+      const route = returnRoute ?? (note && key ? "auto" : undefined);
+      const taskNote = note && route === "auto"
+        ? note.replace(/ There's no return address: it follows this by its task id\.\]$/, " Its team's questions come back to this conversation's issued return route.]") : note;
+      const sentTags = callerTags(tags, !!access?.external);
       try {
         const res = await hostPost(target, "/api/queue/create", {
-          qitemId: id, destinationSession: destination, body: note ? `${note}\n\n${lineage?.body ?? body}` : lineage?.body ?? body,
-          ...(note ? { sourceSession: unknownSender } : {}), summary, priority, tier,
-          tags: access?.external ? tags?.filter((tag) => !OPENRIG_PROVENANCE_TAG.test(tag)) : tags,
+          qitemId: id, destinationSession: destination, body: taskNote ? `${taskNote}\n\n${lineage?.body ?? body}` : lineage?.body ?? body,
+          ...(note && route !== "auto" ? { sourceSession: unknownSender } : {}), summary, priority, tier,
+          ...(route !== undefined ? { returnRoute: route } : {}),
+          tags: key && route === "auto" ? [...(sentTags ?? []), conversationKeyTag(key)] : sentTags,
           ...(alert ? { humanAlert: true } : {}),
           ...(lineage ? { chainOfRecord: lineage.chainOfRecord } : {}),
         });
@@ -1938,8 +1964,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
         // A create's return, a retry's stored row included, goes through the same external projection as show and list.
         const view = externalView(scope);
-        // An unknown sender has no return address, so it says how to follow the task.
-        const sent = note && res.status < 400 && res.data && typeof res.data === "object" ? { ...res, data: { ...res.data,
+        // An unknown sender with no return route has no return address, so it says how to follow the task.
+        const sent = note && route === undefined && res.status < 400 && res.data && typeof res.data === "object" ? { ...res, data: { ...res.data,
           unknownSender: { label: unknownSender, followUp: `No return address: read this task with rig_queue_show and qitemId ${id}${target.remote && target.name ? ` and host ${target.name}` : ""}.` } } } : res;
         // A seat whose roster entry says it takes no requests still gets the item, and the answer says so, on a retry too.
         return mapResult(await withRequestsAdvisory(view && sent.status < 400 ? { ...sent, data: projectForExternal(sent.data, view) } : sent,
@@ -2887,7 +2913,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       }
       try {
         return mapResult(await withRequestsAdvisory(await hostPost(target, `/api/queue/${encodeURIComponent(qitemId)}/handoff`, {
-          toSession: to, body, transitionNote: note, summary, tags, priority, evidenceRef,
+          // The new item keeps the work's return route, so a conversation's key is no caller's to give it.
+          toSession: to, body, transitionNote: note, summary, tags: callerTags(tags, !!access?.external), priority, evidenceRef,
         }), to, target.remote), undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);

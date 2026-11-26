@@ -17,9 +17,13 @@ behave; this skill is the loop around them.
 
 - Call `rig_whoami`. It names the seat this connection acts as. Every item you create is recorded as coming from that seat,
   and the team's questions about your work come back to it.
-- If it has no seat, you can still hand the team work. It goes as the unknown sender `rig_whoami` names, with no return
-  address, so tell the person the `qitemId` and follow it with `rig_queue_show`. Receiving the team's questions and
-  replies, recording the person's answers and listing your own work need a seat: offer to set one (the last section).
+- If it has no seat, you can still hand the team work. In Claude Code, OpenRig gives that work a return address of its
+  own (`returnRoute` in the result), and the team's questions about it come there as tasks (below). Elsewhere it goes as
+  the unknown sender `rig_whoami` names, with no return address. Either way, tell the person the `qitemId` and follow it
+  with `rig_queue_show`. Recording the person's answers and listing your own work need a seat: offer to set one (the last
+  section). In a shell, the `rig` command can act as that return address instead: put
+  `OPENRIG_SESSION_NAME=<address>` in front of each `rig` command you run for this work (`rig queue ...`,
+  `rig seat decide-permission ...`), so OpenRig records it as this chat's, not as someone outside a seat.
 - Call `rig_team` with the rig's name: it shows the team's seats, what each is for, and its lead. Work goes to the lead
   unless the person names a seat.
 - If `lead` is null (its `leadNote` says why), and the team has exactly one seat, send work there. Otherwise, ask the person
@@ -46,6 +50,12 @@ behave; this skill is the loop around them.
   > unknown. If you hand this item on or give this work to another seat, copy this paragraph into the new item. When
   > you finish, put the outcome in this item's resolution, with what the latest review found, and any file in its
   > evidence ref.
+- With no seat but an address of its own (`returnRoute` in the result), end the body with the result route:
+
+  > When you finish, send the result as a task to this item's return route (`rig queue show <this id>` names it):
+  > `rig queue create --destination <that address> --summary "<the result in a line>" --body-file <file>`. Then
+  > close this item with the result. A close by itself doesn't reach the person's chat, and the task does. If you
+  > hand this item on or give this work to another seat, copy this paragraph into the new item.
 - Tell the person the `qitemId` it returns. It's how both of you find this work again.
 - If the call times out, check `rig_queue_show` with that same `qitemId` before trying again. If you retry, pass the same id
   as `qitemId`. Never retry with a new one: that creates the work twice.
@@ -58,8 +68,41 @@ behave; this skill is the loop around them.
   saw and when it last changed.
 - Before you say the work is done, find the newest review of it on the chain and tell the person its outcome. Work a
   review sent back with something to fix isn't done, even if a commit exists: say what the review asked for.
-- Nothing wakes this chat when the team asks or finishes. While its work is open, check each time the person talks to
-  you, and when they come back.
+- A close by itself wakes no one: the team's result reaches this chat as a task at its address, which the handover's
+  last paragraph asks for. Until that task comes, the record still has the result, so check `rig_queue_show` when the
+  person talks to you, and don't promise to report it by yourself.
+- While its work is open, check each time the person talks to you, and when they come back. Where the app runs this
+  plugin's hooks (Claude Code and Codex do), they also bring you the team's questions (below); elsewhere, nothing wakes
+  this chat when the team asks or finishes.
+
+## When a question arrives by itself
+
+In Claude Code and Codex, this plugin's hooks bring the team's questions to you, and its result when it sends one as a
+task, without anyone asking you to check.
+
+- When this chat hands work over with an address of its own, OpenRig records that address with a key for this chat.
+  The hooks cover:
+  - `rig_queue_create` in Claude Code with no seat, where `returnRoute` `auto` is the default;
+  - `rig_queue_create` with `returnRoute` `auto` when this connection has a seat. Without it, the team's questions go
+    to the seat's own address, which the hooks don't watch: you find them only when you check (`rig_queue_list` with
+    `owned`);
+  - `rig queue create --return-route auto` in the shell, in Claude Code or Codex.
+- Codex through this MCP server isn't covered yet: Codex may not give its MCP servers the session id the key comes
+  from, so a `rig_queue_create` there goes without one, and nothing comes here by itself. In Codex, hand work over with
+  `rig queue create --return-route auto` in the shell.
+- A Codex whose `codex queue` has no `--resume` (Codex 0.171.0 has it) gets the tasks at this chat's next turn, not
+  while it's idle. The hooks say so once in the chat: tell the person in plain words.
+- The hooks read only the addresses recorded under this chat's key, from OpenRig's own record, and check them for new
+  tasks. Claude Code wakes you with them when a turn ends. Codex gets them as a message queued for this chat.
+- Each one says it came from OpenRig's hook bridge and names its sender as OpenRig recorded it. It's a task like any
+  other: show it to the person and record their words, as below.
+- A wake comes when your turn ends. Between wakes, list this chat's tasks yourself: `rig_queue_list` with `destination`
+  set to this chat's address. `owned` and `mine` need a seat, and `destination` doesn't.
+- In Claude Code the key belongs to the app's process, not the chat: after `/clear`, the new chat still gets the
+  earlier one's tasks, and a chat resumed in a new process (`claude --resume`) doesn't get its earlier tasks by itself,
+  so check its address each turn.
+- Codex asks the person to trust the hooks once, and again after the plugin changes, because they run outside its
+  sandbox. They run `node` and `rig`, only read from OpenRig, and type nothing into any terminal.
 
 ## The team's questions
 
@@ -108,6 +151,6 @@ behave; this skill is the loop around them.
 
 ## What this doesn't do
 
-- It doesn't add a panel to the app, and nothing wakes this chat when the team finishes.
+- It doesn't add a panel to the app. Where its hooks don't run, nothing wakes this chat when the team asks or finishes.
 - Anyone using this app on this machine acts as the seat the plugin names.
 - It reaches a team on this machine. A team hosted elsewhere needs that host's own connection.
