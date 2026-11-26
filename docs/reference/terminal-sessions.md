@@ -116,7 +116,9 @@ to follow its inherited sizing again.
 A Herdr tile's pin is OpenRig's own: the window is `manual` with the seat's size
 recorded in its `@openrig-pin-width` and `@openrig-pin-height` options, and
 hooks on the seat's session fit it to a focused client and give that size back on blur or
-detach. The pin stays after the view closes, since a Herdr restart brings tiles
+detach. The tile also gives the size back itself when it closes, however it
+closes, since tmux doesn't read the seat's hook for a client that exits on a
+hangup. The pin stays after the view closes, since a Herdr restart brings tiles
 back without a new open. To unpin a seat, drop the window's setting and
 OpenRig's record together (with the daemon's server flags):
 `tmux set-window-option -t <window> -u window-size \; set-window-option -t <window> -u @openrig-pin-width \; set-window-option -t <window> -u @openrig-pin-height`.

@@ -19,8 +19,9 @@ const KERNEL_CLAUDE_ALLOW = [
 // Native deny/ask rules remain in force. The session hook owns generated lifecycle
 // asks so that a help invocation is not caught by an unconditional ask prefix.
 // Team agents run most rig commands without a prompt. The commands that start, stop or remove teams or
-// agents ask, and so do six kept for a person: import (its --instantiate mode launches nodes, and a
-// prefix can't tell its modes apart), seat set-permissions and policy apply under both spellings (an
+// agents ask, and so do seven kept for a person: import (its --instantiate mode launches nodes, and a
+// prefix can't tell its modes apart), seat set-permissions, seat decide-permission (it answers a seat's
+// permission prompt, its own included) and policy apply under both spellings (an
 // explicit permission choice stays with a person), setup (its --policy option records one, and a prefix
 // can't tell that from ordinary setup), and compact (it replaces a peer's working context). Other rig
 // commands (archive, attach, config set, seat set-model and the like) fall under the Bash(rig:*) allowance.
@@ -35,7 +36,7 @@ const TEAM_CLAUDE_ASK = [
   "up", "down", "start", "launch", "restore", "fork", "bootstrap", "create", "add", "remove",
   "grow", "shrink", "expand", "destroy", "handover", "env down",
   "daemon start", "daemon stop", "bundle install", "seat launch", "seat stop", "seat handover", "seat restart",
-  "import", "seat set-permissions", "policy apply", "policy permissions apply", "setup", "compact",
+  "import", "seat set-permissions", "seat decide-permission", "policy apply", "policy permissions apply", "setup", "compact",
 ].map(command => `Bash(rig ${command}:*)`);
 
 module.exports = { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK };
