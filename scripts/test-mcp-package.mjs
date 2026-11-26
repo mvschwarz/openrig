@@ -25,6 +25,13 @@ try {
   fs.cpSync(path.join(cli, "dist"), path.join(stage, "dist"), { recursive: true });
   fs.mkdirSync(path.join(stage, "daemon"));
   fs.cpSync(path.join(root, "packages/daemon/dist"), path.join(stage, "daemon/dist"), { recursive: true });
+  // The release ships daemon/assets beside daemon/dist (build-package.sh), and compiled daemon modules import its
+  // top-level runtime modules (for example ../assets/claude-hook-bridge.cjs). Stage those; the plugin folders aren't imported.
+  fs.mkdirSync(path.join(stage, "daemon/assets"));
+  const daemonAssets = path.join(root, "packages/daemon/assets");
+  for (const name of fs.readdirSync(daemonAssets)) {
+    if (/\.(cjs|d\.cts)$/.test(name)) fs.copyFileSync(path.join(daemonAssets, name), path.join(stage, "daemon/assets", name));
+  }
   fs.mkdirSync(path.join(stage, "tui"));
   fs.cpSync(path.join(root, "packages/tui/dist"), path.join(stage, "tui/dist"), { recursive: true });
   // Use the actual release import rewrite, including declaration imports, on the staged compiled bytes.

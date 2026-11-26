@@ -130,6 +130,7 @@ function unavailableLine(width: number, reason = "canonical health records could
 function unavailableReason(snap: FleetSnapshot, scope: HealthDisplayScope): string | null {
   if (!scope.local) return "Unavailable · remote instance findings are not served";
   if (!snap.health) return "Not assessed · health has not been loaded in this view";
+  if (snap.health.availability === "pending") return "Pending · read after the rigs and seats";
   if (snap.health.availability !== "loaded") return "Unavailable · canonical health records could not be read";
   if (scope.kind === "seat" && scope.seatId === null) return "Unavailable · stable seat identity was not served; findings cannot be scoped";
   return null;

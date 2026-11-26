@@ -1652,12 +1652,12 @@ rig mcp token list [--json]
 rig mcp token revoke <name>
 ```
 
-The 39 shipped tools fall into four groups. Over stdio, and over HTTP with no grants, every tool but the person tools is
+The 40 shipped tools fall into four groups. Over stdio, and over HTTP with no grants, every tool but the person tools is
 offered. An HTTP grant offers the work tools; the workspace tools with `--workspace` or `--owner`; and the owner tools only
 with `--owner`, which offers every tool but the person tools. Only a grant bound to a person offers the person tools: a
 grant service's grant that names its person, or a token-file grant added with `--person`. A local caller and an unbound
 grant never get them.
-- **Work (20):** orientation, communication and the durable work loop.
+- **Work (21):** orientation, communication and the durable work loop.
   - `rig_whoami`: the seat the server acts as (rig, pod, peers, edges) and the `caller`: authenticated (an HTTP
     credential, with its principal) or declared (`OPENRIG_SESSION_NAME` where the server was configured, which nothing
     verifies).
@@ -1681,6 +1681,8 @@ grant never get them.
   - `rig_human_decision_room`, then `rig_queue_decide`: on your own pending ask to a person, read the decision room of
     the mode they have on, and record a decision you made for them inside it. Only the person tools record a person's own
     answer, and only for the person a grant names.
+  - `rig_seat_decide_permission`: answers a seat's permission ask (`qitem-runner-permission-…`) with one of its options,
+    as `rig seat decide-permission` does, with `relay`, `personSaid` and `reason`. It needs no seat.
 - **Workspace (4):** `rig_slices`, `rig_mission`, `rig_context_pack`, and `rig_context_get` (one context file or
   section, as `rig context get` reads it).
 - **Owner (13):** `rig_up`, `rig_down`, `rig_snapshot_create`, `rig_snapshot_list`, `rig_discover`, `rig_bind`,

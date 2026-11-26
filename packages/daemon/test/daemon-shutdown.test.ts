@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_TIMEOUT_MS, trackHttpServerResponses } from "../src/daemon-shutdown.js";
+import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_TIMEOUT_MS, daemonStopping, trackHttpServerResponses } from "../src/daemon-shutdown.js";
 import { KeepAliveSupervisor } from "../src/domain/keep-alive-supervisor.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -266,4 +266,11 @@ it("the keep-alive phase prevents any new attempt and waits for a tick in flight
     expect(launch).not.toHaveBeenCalled();
     expect(db.prepare("SELECT status, intentionally_stopped AS flag FROM sessions").get()).toEqual({ status: "detached", flag: 0 });
   } finally { db.close(); }
+});
+
+it("settles daemonStopping once a shutdown starts, so a request waiting for a change can answer", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shutdown-unit-")); dirs.push(dir);
+  createDaemonShutdown({ phases: [], markClean: vi.fn(), exit: vi.fn(), log: vi.fn(), receiptPath: path.join(dir, "result.json") })("SIGTERM");
+  const settled = await Promise.race([daemonStopping.then(() => "settled"), new Promise((resolve) => setTimeout(() => resolve("waiting"), 1_000))]);
+  expect(settled).toBe("settled");
 });

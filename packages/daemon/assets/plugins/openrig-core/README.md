@@ -7,9 +7,17 @@ Canonical OpenRig skills and hooks for cross-runtime agent topology coordination
 **Skills (19):** canonical OpenRig operating knowledge, including the public `refocusing` skill and
 its path-only topology/work trace.
 
-**Hooks:** activity tracking, compaction continuity, and the default-on refocus channel. Refocus is
-post-compaction on both runtimes, threshold-triggered on Claude, on-demand on both, configurable
+**Hooks:** activity tracking, compaction continuity, the default-on refocus channel, and on Claude the permission
+answer. Refocus is post-compaction on both runtimes, threshold-triggered on Claude, on-demand on both, configurable
 off, and never runs at fresh session start.
+
+**The permission answer (Claude Code):** when a seat's Claude asks permission for a tool call, `permission-answer.cjs`
+(its own synchronous `PermissionRequest` hook, beside the passive relay) asks the seat's person through OpenRig, with the
+exact action, and waits as long as the prompt is open, up to 24 hours. Claude Code's own prompt stays open in the terminal
+meanwhile, and whichever answer comes first counts. The hook returns only Allow once, or Deny with the person's words.
+With no one to ask, no answer in time, or any failure, it returns no decision and the prompt carries on as before. It never remembers a rule, never
+changes the request, and never blocks a tool call on its own failure. Who's asked, and what an answer means, is in
+`docs/reference/harness-runner-contract.md` ("A seat's own Claude Code prompt").
 
 ## Runtimes
 

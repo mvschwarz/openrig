@@ -344,6 +344,14 @@ runtime.
 |---|---|---|
 | `rig down <rig>` | — | `--delete`<br>`--force`<br>`--snapshot`<br>`--yes`<br>`--json`<br>`--host <id>` |
 
+Before closing the seats' terminals, down lets each Claude Code or Codex agent exit through its own shutdown: TERM to
+Claude Code itself, `/exit` typed into Codex only while its input box is empty with no prompt open (TERM otherwise).
+Each waits up to 3 s for the agent's exit, then sends KILL and waits up to 3 s again. The output and `runtimeExits` in
+the JSON say, per seat, what that step saw, and why: it exited through its own shutdown (`graceful`, also when no agent
+was left running), it was seen to end on a signal (`forced`), or its end wasn't seen (`unverified`). Whether each
+terminal then closed is the stop's own result: the session count and any warning (`sessionsKilled` and `errors`).
+`--force` closes the terminals at once, without that step.
+
 ### archive
 
 | Invocation | Aliases | Declared options |
@@ -1182,7 +1190,7 @@ for producer/consumer wiring and launch-scoped state lifetime.
 | `rig seat set-effort <seat>` | — | `--effort <level>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-statusline-throttle <seat>` | — | `--seconds <n>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-permissions-to <seat>` | — | `--to <person>`<br>`--clear`<br>`--deny`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
-| `rig seat decide-permission <request>` | — | `--option <id>` **required**<br>`--reason <text>`<br>`--json` |
+| `rig seat decide-permission <request>` | — | `--option <id>` **required**<br>`--reason <text>`<br>`--person-said <words>`<br>`--relay`<br>`--json` |
 | `rig seat effort <seat>` | — | `--json` |
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-runtime <seat>` | — | `--runtime <runtime>`<br>`--reason <text>`<br>`--model <id>`<br>`--effort <level>`<br>`--codex-config-profile <name>`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--token-file <path>`<br>`--account-label <label>`<br>`--permission-mode <mode>`<br>`--confirm-timeout <seconds>`<br>`--dry-run`<br>`--confirm <switch-id>`<br>`--note <text>`<br>`--recover`<br>`--json` |
@@ -1243,6 +1251,14 @@ The legacy `continuityTransferred` field is always `false`, not a transfer verdi
 does not prove a lineage write: `sideEffects.provenanceRecordWritten` reads back this handover's occupant
 tenure. If it is false, inspect the daemon log; do not repeat a handover whose seat is already bound.
 
+Before the successor starts in the same pane, the previous occupant exits through its own shutdown where it has one:
+TERM to Claude Code itself (not to its pane's shell), `/exit` typed into Codex only while its input box is empty with
+no prompt open. Its exit is read from its own process: a wait of up to 3 s, then KILL and up to 3 s again; then the
+pane's shell is ended for the successor. When its exit can't be checked, the pane is stopped as before (TERM, then
+KILL), and the handover goes on. `sideEffects.departingProcess` is `ended-graceful` (its own shutdown, or no agent was
+left running) or `ended-forced` (a signal it doesn't handle, KILL, or the pane-level stop when its own exit couldn't be
+confirmed), and `sideEffects.departingProcessDetail` says which in a sentence.
+
 For Codex rebuilds, `sourceOutcome.permissions` distinguishes an emitted predecessor policy, a saved
 successor selection, and an unverified fallback. A saved `--codex-permissions` envelope wins over the
 observed predecessor policy and retains the usual launch additions: workspace-write adds Git metadata,
@@ -1267,8 +1283,8 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | `rig network connect <seat>` | — | `--as <participant>` **required**<br>`--hub <url>`<br>`--token-file <path>`<br>`--allow-http`<br>`--json` |
 | `rig network status` | — | `--json` |
 | `rig network disconnect <binding-or-seat>` | — | `--reason <text>`<br>`--json` |
-| `rig network peers <binding-or-seat>` | — | `--json` |
-| `rig network request <binding-or-seat> <peer>` | — | `--id <request-id>` **required**<br>`--body-file <path>` **required**<br>`--summary <text>`<br>`--json` |
+| `rig network peers [binding-or-seat]` | — | `--json` |
+| `rig network request [binding-or-seat] <peer>` | — | `--id <request-id>` **required**<br>`--body-file <path>` **required**<br>`--summary <text>`<br>`--json` |
 
 ### startup-proof
 

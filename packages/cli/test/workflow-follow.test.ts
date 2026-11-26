@@ -221,6 +221,20 @@ describe("workflow-follow (WF3 FR-1)", () => {
     expect(h.outLines[0]).toContain("status=aborted");
   });
 
+  it("picks up a failure and its trail row missed during a stream disconnect", async () => {
+    const failed = { stepId: "build", closureReason: "failed", actorSession: "b@r", priorQitemId: "Q2" };
+    const h = makeHarness({
+      traceResponses: [ACTIVE_SNAPSHOT, { status: 200, data: {
+        instance: { instanceId: "WF1", status: "failed" }, trail: [...ACTIVE_SNAPSHOT.data.trail, failed],
+      } }],
+      streams: [droppedStream(), droppedStream()],
+    });
+    h.io.sleep = async () => { throw new Error("missed failure should be visible at reconnect"); };
+    expect(await followInstance(h.client, "WF1", { json: false, io: h.io, maxReconnects: 1 })).toBe(EXIT_WORKFLOW_FAILED);
+    expect(h.outLines.filter(line => line.includes("plan") && line.includes("handoff"))).toHaveLength(1);
+    expect(h.outLines.filter(line => line.includes("build") && line.includes("failed"))).toHaveLength(1);
+  });
+
   it("stops polling when an active workflow becomes aborted", async () => {
     const h = makeHarness({
       traceResponses: [ACTIVE_SNAPSHOT, { status: 200, data: { instance: { instanceId: "WF1", status: "aborted" }, trail: [] } }],
@@ -239,6 +253,7 @@ describe("workflow-follow (WF3 FR-1)", () => {
     const h = makeHarness({
       traceResponses: [
         ACTIVE_SNAPSHOT,
+        ACTIVE_SNAPSHOT, // Still running when the stream reconnects; it completes during polling.
         {
           status: 200,
           data: {
