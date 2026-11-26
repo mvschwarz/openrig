@@ -110,15 +110,13 @@ task, without anyone asking you to check.
 - Questions about your work come to your seat: `rig_queue_list` with `owned` lists them.
 - Show the person the question and the team's draft, in their own words where the item gives them. Then ask for an answer.
 - Record only what the person actually tells you, on the question's own task, never with `rig_send`: a message carries
-  no return address, so the work it starts loses this chat's route, and its seats' prompts then reach no one. With a
-  seat, claim the item (`rig_queue_claim`), then close it with `rig_queue_update`: `state` `done`, `closureReason`
-  `no-follow-on`, and exactly what the person typed in `resolution`, nothing else: no label such as "The person's
-  answer:", no quotation marks, and no notes, paths or summaries of your own. With no seat, close it the same way in a
-  shell, as its address:
+  no return address, so the work it starts loses this chat's route, and its seats' prompts then reach no one. Claim
+  the item (`rig_queue_claim`), then close it with `rig_queue_update`: `state` `done`, `closureReason` `no-follow-on`,
+  and exactly what the person typed in `resolution`, nothing else: no label such as "The person's answer:", no
+  quotation marks, and no notes, paths or summaries of your own. With no seat, these tools act as the address OpenRig
+  issued this conversation, for a question sent there. In a shell, close it the same way, as its address:
   `OPENRIG_SESSION_NAME=<address> rig queue update <id> --state done --closure-reason no-follow-on --resolution '<their words>'`.
-  Or answer with `rig_queue_create` to the question's sender, `returnRoute` `auto`, naming the question's id and giving
-  their words. If the person isn't there to answer, leave the item open and tell them it's waiting. Never choose an
-  answer for them.
+  If the person isn't there to answer, leave the item open and tell them it's waiting. Never choose an answer for them.
 - A question can be a seat's permission prompt that the operator or a team seat sent you: show it with the seat, the
   exact action and the choices it offers, and record the person's words the same way. The agent that sent it passes
   their answer to the seat.

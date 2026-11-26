@@ -389,4 +389,45 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     expect((await other.callTool({ name: "rig_seat_decide_permission", arguments: { askId: second.askId, option: "deny", reason: "not this one" } })).structuredContent)
       .toMatchObject({ ok: true, state: "answered", optionId: "deny", native: { answeredAs: "agent", by: "someone outside a seat" } });
   });
+
+  // R3: with no seat, the conversation closes a team question sent to its issued address with the same MCP tools a seat
+  // uses (claim, then update with the person's words as the resolution), as that address, so the question keeps its
+  // answer and the seat's work parked on it comes back. Another conversation's server isn't that address: as before, its
+  // update names no sender and nothing changes.
+  it("lets a seatless conversation claim and close a question sent to its issued address, as that address", async () => {
+    delete process.env.OPENRIG_SESSION_NAME;
+    const conversation = async (key: string) => {
+      const mcp = createMcpServer(new DaemonClient(url), { conversationKey: () => key });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "conversation", version: "1.0.0" });
+      await mcp.connect(serverTransport);
+      await client.connect(clientTransport);
+      closers.push(async () => { await client.close(); await mcp.close(); });
+      return client;
+    };
+    const mine = await conversation("claude:conversation-1:4242");
+    const other = await conversation("claude:conversation-2:4343");
+    expect((await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Add the feature" } })).isError).toBeFalsy();
+    const listed = await new DaemonClient(url).get(`/api/queue/list?${new URLSearchParams({ destinationSession: "dev-build@team" })}`);
+    const work = (listed.data as Array<{ qitemId: string; returnRoute: string }>)[0]!;
+    const address = work.returnRoute;
+    expect(address).toMatch(/^conversation-[0-9a-f]{12}@kernel$/);
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const question = await repo.create({ sourceSession: "dev-build@team", destinationSession: address, body: "Exclude all four files?" });
+    repo.update({ qitemId: work.qitemId, actorSession: "dev-build@team", state: "blocked", blockedOn: question.qitemId });
+    expect(repo.getById(work.qitemId)?.state).toBe("blocked");
+
+    const elsewhere = await other.callTool({ name: "rig_queue_update",
+      arguments: { qitemId: question.qitemId, state: "done", closureReason: "no-follow-on", resolution: "Yes" } });
+    expect(elsewhere.isError).toBe(true);
+    expect(repo.getById(question.qitemId)?.state).toBe("pending");
+
+    expect((await mine.callTool({ name: "rig_queue_claim", arguments: { qitemId: question.qitemId } })).isError).toBeFalsy();
+    expect(repo.getById(question.qitemId)?.state).toBe("in-progress");
+    expect((await mine.callTool({ name: "rig_queue_update",
+      arguments: { qitemId: question.qitemId, state: "done", closureReason: "no-follow-on", resolution: "Yes, exclude all four" } })).isError).toBeFalsy();
+    expect(repo.getById(question.qitemId)).toMatchObject({ state: "done", resolution: "Yes, exclude all four" });
+    expect(repo.listTransitions(question.qitemId).slice(-2).map((t) => t.actorSession)).toEqual([address, address]);
+    expect(repo.getById(work.qitemId)?.state).toBe("pending");
+  });
 });

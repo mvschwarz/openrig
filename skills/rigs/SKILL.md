@@ -385,8 +385,8 @@ commands; if the two ever differ, this step is right.
     `OPENRIG_SESSION_NAME=<address> rig queue update <id> --state done --closure-reason no-follow-on --resolution '<their words>'`,
     keeping their words in single quotes and writing each `'` in them as `'\''`, so the shell runs and changes nothing in them.
     Add no label, quotation marks or notes of your own, and don't turn their words into a yes or a no: the agent that
-    asked decides what they mean. Through the plugin's tools with no seat, answer instead with `rig_queue_create` to the
-    question's sender, `returnRoute` `auto`, naming the question's id and giving their words. Never answer a question
+    asked decides what they mean. Through the plugin's tools with no seat, close it the same way, with `rig_queue_claim`
+    and then `rig_queue_update`: they act as the address OpenRig issued this conversation. Never answer a question
     task with `rig send` or `rig_send`: a message has no return address, so the work it starts loses your route, and its
     seats' prompts then reach no one. You speak as yourself, never as the person. If they aren't there to answer, leave
     it open and tell them it's waiting; never answer for them.
