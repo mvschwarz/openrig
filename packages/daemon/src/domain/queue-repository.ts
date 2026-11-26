@@ -2730,9 +2730,12 @@ export class QueueRepository {
     }
   }
 
-  /** Why an ask's answer was kept on it instead of going back to its source (createHumanAnswer), or null. */
+  /** Why an ask's answer was kept on it instead of going back to its source (createHumanAnswer), or null. Only the daemon's
+   *  own in-process note counts, with the same trust rule as replyToChoiceFor: a queue note anyone adds can carry the same
+   *  words, and it isn't a person's answer. */
   answerNotReturned(qitemId: string): string | null {
-    return this.transitionLog.listForQitem(qitemId).find((t) => t.transitionNote?.startsWith(ANSWER_NOT_RETURNED_PREFIX))?.transitionNote ?? null;
+    return this.transitionLog.listForQitem(qitemId).find((t) => t.actorSession === "daemon@system" && t.identityProvenance === null
+      && t.transitionNote?.startsWith(ANSWER_NOT_RETURNED_PREFIX))?.transitionNote ?? null;
   }
 
   /** The answer kept on an ask whose source's rig isn't known here: who gave it and their words. It's the ask's committed
@@ -2868,8 +2871,10 @@ export class QueueRepository {
             && prior.channel === relay.channel && prior.optionId === relay.optionId && prior.answeredAt === relay.answeredAt) return receipt();
           refuse("This question already has a relay; a direct answer can correct it.");
         }
+        // A kept answer (its source's rig wasn't known) is the ask's committed answer, as a returned answer's row is.
         if (ask.state !== "pending" || ask.blockedOn || (named && Object.hasOwn(direct, named.id))
-          || this.getById(humanAnswerId(ask.qitemId)) || (!ask.relayedAnswers && this.answersForAsk(ask.qitemId).length > 0)) {
+          || this.getById(humanAnswerId(ask.qitemId)) || (!ask.relayedAnswers && this.answersForAsk(ask.qitemId).length > 0)
+          || this.keptAnswer(ask.qitemId)) {
           refuse("This question is not waiting for a relayed answer.");
         }
         if (!ask.relayedAnswers && Object.keys(direct).length) {
@@ -5696,7 +5701,8 @@ export class QueueRepository {
         return refuse("permission-prompt", "a permission prompt or approval gate is never decided on the person's behalf");
       }
       // A click keeps a multi-question ask pending until every question is answered: once the person has started, it's theirs.
-      if (item.relayedAnswers || (item.humanAnswers && Object.keys(item.humanAnswers).length > 0)) {
+      // So is an answer kept on the ask (its source's rig wasn't known), even when its close was interrupted.
+      if (item.relayedAnswers || (item.humanAnswers && Object.keys(item.humanAnswers).length > 0) || this.keptAnswer(item.qitemId)) {
         return refuse("person-answering", "they've started answering; their answer stands");
       }
       if (item.sourceSession !== input.actorSession) {
