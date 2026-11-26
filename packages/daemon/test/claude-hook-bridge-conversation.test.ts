@@ -4,8 +4,8 @@
 // another conversation's key, a running turn, a newer waiter and an already shown or closed task wake nothing. The `rig`
 // it runs is OPENRIG_RIG_BIN's, else the one on PATH, else the project's own install; with none, it says so once per session.
 import { createRequire } from "node:module";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -17,11 +17,12 @@ type Deps = Record<string, unknown>;
 const bridge = require(bridgePath) as {
   conversationKey(opts?: { pid?: number; env?: Record<string, string | undefined>; read?: (pid: number) => Proc | null }): string | null;
   conversationKeyTag(key: string): string;
+  processReader(): (pid: number) => Proc | null;
   conversationWaiter(opts: { input: Record<string, unknown>; out: { write(s: string, done?: (err?: Error | null) => void): unknown }; deps: Deps }): Promise<number>;
   conversationTurn(opts: { input: Record<string, unknown>; deps: Deps }): number;
   codexStart(opts: { input: Record<string, unknown>; deps: Deps }): number;
   codexEnd(opts: { input: Record<string, unknown>; deps: Deps }): number;
-  codexWatch(opts: { sessionId: string; transcriptPath: string; codexPid?: number; deps: Deps }): Promise<number>;
+  codexWatch(opts: { sessionId: string; transcriptPath: string; codexPid?: number; codexPidStart?: string; deps: Deps }): Promise<number>;
   renderConversationTasks(fresh: unknown[]): string;
   findRig(opts?: { env?: Record<string, string | undefined>; projectDir?: string }): string | null;
 };
@@ -256,10 +257,12 @@ describe("the Codex watcher", () => {
   it("SessionStart starts one detached watcher; a live one is kept; SessionEnd stops it", () => {
     const spawned: Array<{ args: string[]; options: Record<string, unknown> }> = [];
     const fakeSpawn = (_cmd: string, args: string[], options: Record<string, unknown>) => { spawned.push({ args, options }); return { pid: 4321, unref() {} }; };
-    expect(bridge.codexStart({ input: codexInput, deps: { env: env(), spawn: fakeSpawn, alive: () => true, codexPid: 3131 } })).toBe(0);
+    const codex = { pid: 3131, ppid: 1, start: "1a2b3c4d.31310", names: ["codex", "/usr/lib/codex/codex"] };
+    expect(bridge.codexStart({ input: codexInput, deps: { env: env(), spawn: fakeSpawn, alive: () => true, codex } })).toBe(0);
     expect(spawned).toHaveLength(1);
-    // The watcher is told which Codex process to outlive no longer than.
-    expect(spawned[0]!.args.slice(1)).toEqual(["codex-watch", SESSION, "/rollout.jsonl", "3131"]);
+    // The watcher is told which Codex process to outlive no longer than: its pid, and its start time, which tells a later
+    // process given the same pid apart.
+    expect(spawned[0]!.args.slice(1)).toEqual(["codex-watch", SESSION, "/rollout.jsonl", "3131", "1a2b3c4d.31310"]);
     expect(spawned[0]!.options).toMatchObject({ detached: true, stdio: "ignore", cwd: "/project" });
     // A resumed or compacted session starts again: the live watcher is enough.
     expect(bridge.codexStart({ input: codexInput, deps: { env: env(), spawn: fakeSpawn, alive: () => true } })).toBe(0);
@@ -628,5 +631,147 @@ describe("the lifetime of a live Codex conversation", () => {
     } })).toBe(0);
     expect(queued).toHaveLength(1);
     expect(queued[0]).toContain("qitem-q1:");
+  });
+});
+
+// After #3964: a large backlog, and a conversation that lives for days. A fresh backlog went into one `codex queue --message`
+// argument, which past Linux's limit on one argument (128 KiB) fails with E2BIG on every try; another conversation's cleanup
+// removed a live watcher's folder by the folder's own time, which a heartbeat rewriting its file leaves alone; and a Codex pid
+// given to another process kept the watcher running.
+describe("a large backlog and a long-lived conversation", () => {
+  const codexKey = `codex:${SESSION}`;
+  /** CodeRabbit's case on #3964: 501 fresh tasks with 300-character summaries. */
+  const backlog = () => Array.from({ length: 501 }, (_, n) => question({ qitemId: `qitem-backlog-${n}`, summary: `Question ${n} `.padEnd(300, "x") }));
+  const idsIn = (messages: string[]) => messages.flatMap((text) => [...text.matchAll(/^- (qitem-backlog-\d+):/gm)].map((m) => m[1]!));
+  /** A clock whose nth wait ends the session, as Codex's SessionEnd does. */
+  const endAt = (n: number) => {
+    const c = clock();
+    let waits = 0;
+    return { now: c.now, sleep: async () => { waits += 1; if (waits === n) bridge.codexEnd({ input: { session_id: SESSION }, deps: { env: env() } }); await c.sleep(); } };
+  };
+
+  it("queues a backlog too big for one codex queue argument in batches that fit, every task once and in order, all marked shown", async () => {
+    const bin = join(data, "bin");
+    const sent = join(data, "sent");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(sent, { recursive: true });
+    // A stand-in `codex` that stores each message it's given (queue --thread <id> --message <text> --resume). Given one
+    // argument past the kernel's limit, it never runs: execve refuses it with E2BIG.
+    writeFileSync(join(bin, "codex"), ["#!/bin/sh", `n=$(ls '${sent}' | wc -l | tr -d ' ')`, `printf '%s' "$5" > '${sent}'/$n.queued`, ""].join("\n"), { mode: 0o755 });
+    const pending = backlog();
+    const { rig } = fakeRig({ goals: [goal(codexKey)], pending });
+    expect(await bridge.codexWatch({ sessionId: SESSION, transcriptPath: "/rollout.jsonl", deps: {
+      env: { ...env(), PATH: [bin, dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter) }, rig, statSize: () => 10, pid: 77, ...endAt(2) } })).toBe(0);
+    expect(readFileSync(stateFile("wake.log", "codex"), "utf8")).not.toMatch(/codex queue failed/);
+    const messages = readdirSync(sent).sort((a, b) => parseInt(a) - parseInt(b)).map((file) => readFileSync(join(sent, file), "utf8"));
+    expect(messages.length).toBeGreaterThan(1);
+    for (const text of messages) {
+      expect(Buffer.byteLength(text)).toBeLessThan(128 * 1024);
+      expect(text).toMatch(/^This is not an error\. OpenRig's hook bridge/);
+    }
+    expect(idsIn(messages)).toEqual(pending.map((row) => row.qitemId));
+    expect(JSON.parse(readFileSync(stateFile("shown.json", "codex"), "utf8"))).toEqual(pending.map((row) => row.qitemId));
+  });
+
+  it("after a batch fails, queues the rest at the next tick: nothing lost, nothing queued twice, only what was stored marked shown", async () => {
+    const pending = backlog();
+    const { rig } = fakeRig({ goals: [goal(codexKey)], pending });
+    const stored: string[] = [];
+    let calls = 0;
+    // The second batch's `codex queue` fails once (a busy Codex, say).
+    const queue = (text: string) => { calls += 1; if (calls === 2) return { ok: false, detail: "codex busy" }; stored.push(text); return { ok: true, detail: "" }; };
+    const waits: number[] = [];
+    let shownAtFailure: string[] = [];
+    let t = 1_000_000;
+    const sleep = async (ms: number) => {
+      waits.push(ms);
+      t += ms;
+      if (waits.length === 1) shownAtFailure = JSON.parse(readFileSync(stateFile("shown.json", "codex"), "utf8"));
+      if (waits.length === 3) bridge.codexEnd({ input: { session_id: SESSION }, deps: { env: env() } });
+    };
+    expect(await bridge.codexWatch({ sessionId: SESSION, transcriptPath: "/rollout.jsonl", deps: { env: env(), rig, queue, now: () => t, sleep, statSize: () => 10, pid: 77 } })).toBe(0);
+    expect(stored.length).toBeGreaterThan(2);
+    // The first batch was stored and marked shown; the one that failed, and those after it, weren't, and came at the next tick.
+    expect(shownAtFailure).toEqual(idsIn(stored.slice(0, 1)));
+    expect(idsIn(stored)).toEqual(pending.map((row) => row.qitemId));
+    expect(waits).toEqual([30_000, 15_000, 15_000]);
+    expect(readFileSync(stateFile("wake.log", "codex"), "utf8")).toMatch(/codex queue failed, trying again in 30 s: codex busy/);
+  });
+
+  it("another conversation's cleanup keeps a live watcher's folder and an idle conversation whose Claude Code still runs, and removes ended ones", async () => {
+    const root = join(data, "conversations");
+    const folder = (name: string) => join(root, name);
+    const day = 24 * 3600 * 1000;
+    /** Sets a folder's and its files' times eight days back, as if nothing had touched them since. */
+    const age = (name: string) => {
+      const at = new Date(Date.now() - 8 * day);
+      for (const file of readdirSync(folder(name))) utimesSync(join(folder(name), file), at, at);
+      utimesSync(folder(name), at, at);
+    };
+    /** A Claude Code conversation's waiter that finds no address under its key: it records itself and ends. */
+    const claudeWaiter = (session: string, key: string, deps: Deps = {}) => bridge.conversationWaiter({ input: { session_id: session, hook_event_name: "Stop", transcript_path: "" },
+      out: sink().out, deps: { env: env(), key, rig: fakeRig().rig, alive: () => true, ...clock(), ...deps } });
+    // The process table the cleanup reads: pid 4242 is still the Claude Code that KEY names; pid 5151, OTHER_KEY's, now
+    // belongs to another process.
+    const read = (pid: number): Proc | null => pid === 4242 ? { pid, ppid: 1, start: "1a2b3c4d.5000", names: ["claude"] }
+      : pid === 5151 ? { pid, ppid: 1, start: "1a2b3c4d.9999", names: ["bash"] } : null;
+    const ended = "0f1e2d3c-4b5a-6978-8a9b-acbdcedf0011";
+    const { rig } = fakeRig({ goals: [goal(codexKey)], pending: [question()] });
+    const c = clock();
+    let waits = 0;
+    const sleep = async () => {
+      waits += 1;
+      if (waits === 1) {
+        // A week goes by. The live watcher's folder, and three others: a Claude Code conversation idle all week whose process
+        // still runs, one whose process is gone (its pid since given to another), and an ended Codex session's.
+        await claudeWaiter("idle-session", KEY);
+        await claudeWaiter("gone-session", OTHER_KEY);
+        mkdirSync(folder(`codex-${ended}`));
+        writeFileSync(join(folder(`codex-${ended}`), "watcher.json"), JSON.stringify({ pid: 999_999, beat: 1 }));
+        for (const name of [`codex-${SESSION}`, "claude-idle-session", "claude-gone-session", `codex-${ended}`]) age(name);
+      }
+      if (waits === 2) {
+        // The live watcher's heartbeat rewrote its file since, and that leaves the folder's own time a week back.
+        expect(Date.now() - statSync(folder(`codex-${SESSION}`)).mtimeMs).toBeGreaterThan(7 * day);
+        expect(Date.now() - statSync(stateFile("watcher.json", "codex")).mtimeMs).toBeLessThan(60_000);
+        // Another conversation's waiter starts, and cleans up.
+        await claudeWaiter("another-session", "claude:1a2b3c4d.8000:6363", { read });
+      }
+      if (waits === 3) bridge.codexEnd({ input: { session_id: SESSION }, deps: { env: env() } });
+      await c.sleep();
+    };
+    expect(await bridge.codexWatch({ sessionId: SESSION, transcriptPath: "/rollout.jsonl", deps: { env: env(), rig,
+      queue: () => ({ ok: true, detail: "" }), now: c.now, sleep, statSize: () => 10, pid: 77 } })).toBe(0);
+    expect(readdirSync(root).sort()).toEqual(["claude-another-session", "claude-idle-session", `codex-${SESSION}`]);
+    // The live watcher kept what it had shown, and ran on until its session ended.
+    expect(JSON.parse(readFileSync(stateFile("shown.json", "codex"), "utf8"))).toEqual(["qitem-q1"]);
+    expect(readFileSync(stateFile("wake.log", "codex"), "utf8")).toMatch(/stopped: the session ended/);
+  });
+
+  it.skipIf(process.platform !== "linux" && process.platform !== "darwin")("stops when its Codex's pid belongs to another process now, told apart by the start time", async () => {
+    // A real process stands in for the session's Codex. A reused pid looks like this to the watcher: the pid answers, with a
+    // start time other than the one the watcher was given.
+    const child = spawn("sleep", ["60"], { stdio: "ignore" });
+    try {
+      const pid = child.pid!;
+      const started = bridge.processReader()(pid)!.start;
+      const watch = async (start: string, deps: Deps = {}) => {
+        rmSync(join(data, "conversations"), { recursive: true, force: true });
+        const { rig } = fakeRig({ goals: [goal(codexKey)], pending: [] });
+        expect(await bridge.codexWatch({ sessionId: SESSION, transcriptPath: "/rollout.jsonl", codexPid: pid, codexPidStart: start,
+          deps: { env: env(), rig, queue: () => ({ ok: true, detail: "" }), statSize: () => 10, pid: 77, ...endAt(3), ...deps } })).toBe(0);
+        return readFileSync(stateFile("wake.log", "codex"), "utf8");
+      };
+      // The process it was given still runs: it watches until the session ends.
+      expect(await watch(started)).toMatch(/stopped: the session ended/);
+      // The pid now belongs to a process that started at another time: it stops, though the pid answers.
+      const reused = await watch(`${started}0`);
+      expect(reused).toMatch(/stopped: the session's codex process ended/);
+      expect(reused).not.toMatch(/stopped: the session ended/);
+      // When the start can't be read, only the pid is checked, as before: an unknown isn't taken for ended.
+      expect(await watch(`${started}0`, { read: () => null })).toMatch(/stopped: the session ended/);
+    } finally {
+      child.kill();
+    }
   });
 });

@@ -23,9 +23,10 @@
 //   codex-start           Codex SessionStart (async): start one detached watcher for this session and exit 0. A Codex hook
 //                         can't start a turn itself; `codex queue` can.
 //   codex-end             Codex SessionEnd: tell this session's watcher to stop.
-//   codex-watch <session id> <transcript path>
+//   codex-watch <session id> <transcript path> <codex pid> <its start time>
 //                         The watcher: the same reads, and it wakes the thread with
-//                         `codex queue --thread <session id> --message … --resume` (exit 0 there means stored, not delivered).
+//                         `codex queue --thread <session id> --message … --resume` (exit 0 there means stored, not delivered),
+//                         a backlog in batches that each fit one argument.
 //                         A failed read or queue is tried again after a longer wait each time, up to five minutes. On a
 //                         Codex whose `codex queue` has no `--resume`, it queues without it, for the thread's next turn,
 //                         and says so once in the thread.
@@ -171,8 +172,12 @@ const CONVERSATION_WAITER_MS = (7200 - 120) * 1000;
 const CODEX_IDLE_EXIT_MS = 6 * 3600 * 1000;
 /** A watcher that hasn't ticked for this long isn't live, whatever its recorded pid says. */
 const WATCHER_LIVE_MS = 3 * CONVERSATION_POLL_MS;
-/** A conversation's state folder untouched for this long is removed. */
+/** A conversation's state folder untouched for this long, the folder and every file in it, is removed, unless the Claude
+ *  Code process its waiter recorded still runs. */
 const STATE_KEEP_MS = 7 * 24 * 3600 * 1000;
+/** The most one `codex queue --message` carries, in bytes of UTF-8: half of Linux's limit on one argument (MAX_ARG_STRLEN,
+ *  32 pages, so 128 KiB with 4 KiB pages), past which the spawn fails with E2BIG. */
+const QUEUE_MESSAGE_MAX_BYTES = 64 * 1024;
 /** Only addresses OpenRig issued for this conversation's own creates are read; a named or inherited route isn't its own. */
 const ISSUED_BASES = new Set(["issued", "issued-actor"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -262,10 +267,36 @@ function nearestAgentProcess(pid, read) {
   }
   return null;
 }
-/** The pid of the nearest process of that kind, when it's the nearest agent; 0 otherwise. */
+/** The nearest process of that kind (its pid and start time), when it's the nearest agent; null otherwise. */
 function nearestAgent(pid, read, kind) {
   const found = nearestAgentProcess(pid, read);
-  return found?.kind === kind ? found.proc.pid : 0;
+  return found?.kind === kind ? found.proc : null;
+}
+
+/** Whether the process recorded by its pid and start time still runs: a pid given to a later process has another start
+ *  time. When the start can't be read, whether the pid runs at all, so an unknown isn't taken for ended. */
+function stillRunning(pid, start, { read = processReader(), isAlive = alive } = {}) {
+  if (!(pid > 0)) return false;
+  const proc = start ? read(pid) : null;
+  return proc ? proc.start === start : isAlive(pid);
+}
+
+/** When a conversation's folder last changed: the newest time of the folder and its files. A live watcher's heartbeat
+ *  rewrites a file that's already there, which changes that file's time and leaves the folder's alone. */
+function touchedAt(folder) {
+  let newest = fs.statSync(folder).mtimeMs;
+  for (const name of fs.readdirSync(folder)) {
+    try { newest = Math.max(newest, fs.statSync(path.join(folder, name)).mtimeMs); } catch { /* removed meanwhile */ }
+  }
+  return newest;
+}
+
+/** Whether the Claude Code process a conversation's waiter recorded, by its key (`claude:<start>:<pid>`), still runs. */
+function waiterKeyRuns(folder, read) {
+  let key = "";
+  try { key = String(JSON.parse(fs.readFileSync(path.join(folder, "waiter.json"), "utf8")).key ?? ""); } catch { return false; }
+  const at = key.lastIndexOf(":");
+  return key.startsWith("claude:") && stillRunning(Number(key.slice(at + 1)), key.slice("claude:".length, at), { read });
 }
 
 /** One conversation's state: which waiter or watcher is current, the turn marker, and the tasks already shown. In the
@@ -290,11 +321,14 @@ function conversationState(runtime, sessionId, { env = process.env, now = Date.n
     exists: (name) => fs.existsSync(file(name)),
     remove: (name) => { try { fs.unlinkSync(file(name)); } catch { /* absent */ } },
     log: (line) => { try { fs.appendFileSync(file("wake.log"), `${new Date(now()).toISOString()} ${process.pid} ${line}\n`); } catch { /* best effort */ } },
-    prune: () => {
+    /** Removes the other conversations' folders that have gone a week untouched, unless their Claude Code still runs. */
+    prune: (read = processReader()) => {
       try {
         for (const entry of fs.readdirSync(root)) {
           const other = path.join(root, entry);
-          if (other !== dir && now() - fs.statSync(other).mtimeMs > STATE_KEEP_MS) fs.rmSync(other, { recursive: true, force: true });
+          try {
+            if (other !== dir && now() - touchedAt(other) > STATE_KEEP_MS && !waiterKeyRuns(other, read)) fs.rmSync(other, { recursive: true, force: true });
+          } catch { /* best effort */ }
         }
       } catch { /* best effort */ }
     },
@@ -515,9 +549,11 @@ async function conversationWaiter({ input = {}, out = process.stderr, deps = {} 
   // Nothing to read with: tell the conversation the way a task wakes it, once for the plugin's install.
   if (!rig) return (await sayNoRigOnce(state, (text) => writeAll(out, text), now)) ? 2 : 0;
   forgetNoRig(state);
-  const me = { pid: deps.pid ?? process.pid, startedAt: now(), event: typeof input.hook_event_name === "string" ? input.hook_event_name : "unknown" };
+  // The key names this conversation's Claude Code process: while it runs, another conversation's cleanup keeps this folder,
+  // and so what was shown here, however long the conversation sits idle.
+  const me = { pid: deps.pid ?? process.pid, startedAt: now(), event: typeof input.hook_event_name === "string" ? input.hook_event_name : "unknown", key };
   state.write("waiter.json", me);
-  state.prune();
+  state.prune(deps.read);
   state.log(`armed ${me.event} for ${key}`);
   const routes = routeWatch(key, input.transcript_path, rig, now, deps.statSize);
   const deadline = me.startedAt + (deps.waiterMs ?? CONVERSATION_WAITER_MS);
@@ -566,10 +602,11 @@ function codexStart({ input = {}, deps = {} } = {}) {
   const current = state.read("watcher.json", {});
   if (current.pid && (deps.alive ?? alive)(current.pid) && now() - Number(current.beat ?? 0) < WATCHER_LIVE_MS) return 0;
   const spawn = deps.spawn ?? require("node:child_process").spawn;
-  // The Codex process this hook runs under, so the watcher stops if it exits without a SessionEnd; 0 when it can't be seen.
-  const codexPid = deps.codexPid !== undefined ? deps.codexPid : nearestAgent(process.pid, processReader(), "codex");
-  const child = spawn(process.execPath, [__filename, "codex-watch", sessionId, typeof input.transcript_path === "string" ? input.transcript_path : "", String(codexPid || 0)],
-    { detached: true, stdio: "ignore", env, cwd: typeof input.cwd === "string" && input.cwd ? input.cwd : undefined });
+  // The Codex process this hook runs under, by pid and start time, so the watcher stops if it exits without a SessionEnd,
+  // and a later process given its pid doesn't keep the watcher running; none when it can't be seen.
+  const codex = deps.codex !== undefined ? deps.codex : nearestAgent(process.pid, processReader(), "codex");
+  const child = spawn(process.execPath, [__filename, "codex-watch", sessionId, typeof input.transcript_path === "string" ? input.transcript_path : "",
+    String(codex?.pid || 0), codex?.start ?? ""], { detached: true, stdio: "ignore", env, cwd: typeof input.cwd === "string" && input.cwd ? input.cwd : undefined });
   state.write("watcher.json", { pid: child.pid, beat: now() });
   child.unref?.();
   state.log(`started watcher ${child.pid}`);
@@ -626,9 +663,21 @@ function codexQueuer(sessionId, state, { env = process.env, now = Date.now, run 
   };
 }
 
-/** The Codex watcher. Returns 0 when its session ended, its Codex process exited, a newer watcher replaced it, or its
- *  rollout went idle with no Codex process to observe. */
-async function codexWatch({ sessionId = "", transcriptPath = "", codexPid = 0, deps = {} } = {}) {
+/** The tasks in order, in batches whose rendered message fits in `max` bytes of UTF-8; a task too large for any batch goes
+ *  alone. */
+function byteBatches(fresh, max) {
+  const batches = [];
+  for (const task of fresh) {
+    const last = batches[batches.length - 1];
+    if (last && Buffer.byteLength(renderConversationTasks([...last, task])) <= max) last.push(task);
+    else batches.push([task]);
+  }
+  return batches;
+}
+
+/** The Codex watcher. Returns 0 when its session ended, its Codex process exited (or its pid now names a process that
+ *  started at another time), a newer watcher replaced it, or its rollout went idle with no Codex process to observe. */
+async function codexWatch({ sessionId = "", transcriptPath = "", codexPid = 0, codexPidStart = "", deps = {} } = {}) {
   const env = deps.env ?? process.env;
   if (inSeat(env) || !UUID_RE.test(sessionId)) return 0;
   const key = `codex:${sessionId.toLowerCase()}`;
@@ -642,7 +691,7 @@ async function codexWatch({ sessionId = "", transcriptPath = "", codexPid = 0, d
   const statSize = deps.statSize ?? ((p) => fs.statSync(p).size);
   const me = deps.pid ?? process.pid;
   state.write("watcher.json", { pid: me, beat: now() });
-  state.prune();
+  state.prune(deps.read);
   if (!rig) { await sayNoRigOnce(state, (text) => queue(text).ok, now); return 0; }
   forgetNoRig(state);
   state.log(`watching for ${key}`);
@@ -656,7 +705,11 @@ async function codexWatch({ sessionId = "", transcriptPath = "", codexPid = 0, d
   for (;;) {
     if (state.exists("stop.json")) { state.log("stopped: the session ended"); return 0; }
     if (state.read("watcher.json", {}).pid !== me) { state.log("superseded"); return 0; }
-    if (codexPid > 0 && !(deps.alive ?? alive)(codexPid)) { state.log("stopped: the session's codex process ended"); return 0; }
+    // Read afresh each tick: a reader keeps the process table it read first.
+    if (codexPid > 0 && !stillRunning(codexPid, codexPidStart, { read: deps.read ?? processReader(), isAlive: deps.alive ?? alive })) {
+      state.log("stopped: the session's codex process ended");
+      return 0;
+    }
     state.write("watcher.json", { pid: me, beat: now() });
     let current = null;
     try { current = transcriptPath ? statSize(transcriptPath) : null; } catch { current = null; }
@@ -668,11 +721,17 @@ async function codexWatch({ sessionId = "", transcriptPath = "", codexPid = 0, d
       failures += 1;
       state.log(`OpenRig couldn't be read, trying again in ${retryIn() / 1000} s`);
     } else if (fresh.length > 0) {
-      const queued = queue(renderConversationTasks(fresh), { tasks: true });
+      // In order, in batches that each fit one argument with room for the notice codexQueuer may put ahead. Each is marked
+      // shown once stored; after one fails, it and the rest come at a later tick.
+      let queued = { ok: true, detail: "" };
+      for (const batch of byteBatches(fresh, QUEUE_MESSAGE_MAX_BYTES - Buffer.byteLength(NO_RESUME_NOTICE))) {
+        queued = queue(renderConversationTasks(batch), { tasks: true });
+        if (!queued.ok) break;
+        markShown(state, batch);
+        state.log(`queued for the thread (stored, not proof it was read): ${batch.map((task) => task.row.qitemId).join(",")}`);
+      }
       if (queued.ok) {
         failures = 0;
-        markShown(state, fresh);
-        state.log(`queued for the thread (stored, not proof it was read): ${fresh.map((task) => task.row.qitemId).join(",")}`);
       } else {
         failures += 1;
         state.log(`codex queue failed, trying again in ${retryIn() / 1000} s: ${queued.detail}`);
@@ -689,7 +748,8 @@ async function main() {
   // A seat keeps its own delivery: the conversation modes end before reading anything.
   if (CONVERSATION_MODES.has(mode) && inSeat()) { process.exitCode = 0; return; }
   if (mode === "codex-watch") {
-    await codexWatch({ sessionId: process.argv[3] ?? "", transcriptPath: process.argv[4] ?? "", codexPid: Number(process.argv[5] ?? 0) || 0 }).catch(() => 0);
+    await codexWatch({ sessionId: process.argv[3] ?? "", transcriptPath: process.argv[4] ?? "", codexPid: Number(process.argv[5] ?? 0) || 0,
+      codexPidStart: process.argv[6] ?? "" }).catch(() => 0);
     process.exit(0);
   }
   const input = await readHookInput();
