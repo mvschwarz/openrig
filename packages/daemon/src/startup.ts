@@ -758,6 +758,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // An idle seat may have cleared the draft its draft-aware guard held a wake for (#48).
     void queueRepoInstance.retryDraftHeldWakesOnIdle(sessionName, state)
       .catch(error => console.warn(`Draft-held wake retry: ${error instanceof Error ? error.name : typeof error}`));
+    // A plain message held only for that draft goes then too, in order, each through the same guarded delivery.
+    void queueRepoInstance.deliverDraftHeldMessagesOnIdle(sessionName, state)
+      .catch(error => console.warn(`Draft-held message delivery: ${error instanceof Error ? error.name : typeof error}`));
     restoredSeatActivity?.(sessionName, state);
     rexSeatActivity?.(sessionName, { activity, runtime });
   };
@@ -2689,6 +2692,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         resolveParkedRows: ({ jobId, targetSession }) => queueRepoInstance.parkedRowsOwnedBy(jobId, targetSession),
         noteParkedRows: ({ owner, notes }) => queueRepoInstance.noteParkedRows(owner, notes),
         noteQueuedRow: ({ jobId, destinationSession, note }) => queueRepoInstance.noteOpenWatchdogRow(jobId, destinationSession, note),
+        // A park timer due at a missing seat is queued work coming due: cold start decides, as for a row's own wake.
+        noteNoReceiver: (session) => seatColdStarter.notify(session),
       }),
       // (i-c) fire-time target-generation gate: resolve the target's LIVE occupant-generation (P12
       // occupant_tenures) so a generation-bound wake is refused once the target has handed over.

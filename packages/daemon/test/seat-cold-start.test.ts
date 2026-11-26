@@ -387,6 +387,44 @@ describe("SeatColdStarter (#2829 slice 1)", () => {
     f.db.close();
   });
 
+  describe("a seat on standby (its latest stop is a recorded standby stop)", () => {
+    const standby = () => fixture({
+      intentionallyStopped: true,
+      stopEvent: { sessionName: "dev-impl@fleet", operator: "daemon:seat-reaper", reason: "idle_reap" },
+    });
+    const rigEvent = (db: Database.Database, type: string) =>
+      db.prepare("INSERT INTO events (rig_id, type, payload) VALUES ('r1', ?, ?)").run(type, JSON.stringify({ type, rigId: "r1" }));
+
+    it("starts in a rig whose every seat is on standby: no live peer is needed while the rig isn't down", async () => {
+      const f = standby();
+      f.setLiveSessions([]);
+      f.starter.notify("dev.impl@fleet");
+      await vi.waitFor(() => expect(f.launches).toHaveLength(1));
+      f.db.close();
+    });
+
+    it("stays down while its rig is explicitly down", async () => {
+      const f = standby();
+      f.setLiveSessions(["dev-rev@fleet"]);
+      rigEvent(f.db, "rig.stopped");
+      f.starter.notify("dev.impl@fleet");
+      await flush();
+      expect(f.launches).toHaveLength(0);
+      expect(f.logs.some(line => line.includes("the rig is down"))).toBe(true);
+      f.db.close();
+    });
+
+    it("starts again once the rig is brought back up", async () => {
+      const f = standby();
+      f.setLiveSessions([]);
+      rigEvent(f.db, "rig.stopped");
+      rigEvent(f.db, "restore.completed");
+      f.starter.notify("dev.impl@fleet");
+      await vi.waitFor(() => expect(f.launches).toHaveLength(1));
+      f.db.close();
+    });
+  });
+
   it("leaves an opted-in single-seat rig dormant without a live peer", async () => {
     const f = fixture();
     f.db.prepare("DELETE FROM nodes WHERE id='n2'").run();

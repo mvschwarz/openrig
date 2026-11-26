@@ -380,6 +380,34 @@ describe("a failed queue wake when its seat returns", () => {
     expect(f.intentOf(f.row.qitemId).deliveryState).toBe("failed");
   });
 
+  describe("a handed-off row (a standby seat started for a handoff)", () => {
+    const handedOff = (f: Awaited<ReturnType<typeof failed>>, ladderNote: string) => {
+      f.db.prepare("UPDATE queue_items SET handed_off_from=? WHERE qitem_id=?").run("qitem-20000101000000-00000000", f.row.qitemId);
+      f.db.prepare("INSERT INTO queue_transitions (qitem_id, ts, state, transition_note, actor_session) VALUES (?, ?, 'pending', ?, 'daemon@system')")
+        .run(f.row.qitemId, new Date().toISOString(), ladderNote);
+    };
+
+    it("is woken once when its seat returns after its wake ladder gave up", async () => {
+      const f = await failed();
+      handedOff(f, "ladder-exhausted: 3 attempts, no pickup");
+      vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+      await reachable(f);
+      expect(f.sendsFor(f.row.qitemId)).toBe(1);
+      expect(f.intentOf(f.row.qitemId).deliveryState).toBe("delivered");
+      await reachable(f);
+      expect(f.sendsFor(f.row.qitemId)).toBe(1);
+    });
+
+    it("stays with its wake ladder while the ladder is still retrying", async () => {
+      const f = await failed();
+      handedOff(f, "wake-attempt: 2 of 3");
+      vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+      await reachable(f);
+      expect(f.send).toHaveBeenCalledTimes(1);
+      expect(f.intentOf(f.row.qitemId).deliveryState).toBe("failed");
+    });
+  });
+
   it("leaves compaction custody in charge, then retries on return after it clears", async () => {
     let owed = false;
     const f = await failed(undefined, () => owed);

@@ -1,6 +1,6 @@
 import { RigDeliveryDrainStore } from "./rig-delivery-drain.js";
 import { PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap } from "./queue-wake-ladder.js";
-import { LADDER_ATTEMPT_PREFIX } from "./queue-stuck-sweep.js";
+import { LADDER_ATTEMPT_PREFIX, LADDER_EXHAUSTED_PREFIX, LADDER_RUNG_PREFIX } from "./queue-stuck-sweep.js";
 import { withUrgentLine } from "./urgent-line.js";
 import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js";
 import type Database from "better-sqlite3";
@@ -76,7 +76,7 @@ export interface RecordRelayOwnerNotificationTransportFailedInput extends Format
   qitemId: string;
   actorSession?: string;
 }
-import { HELD_SENDER_NOTICE_PREFIX, WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
+import { DRAFT_HELD_ELIGIBLE_TAG, HELD_SENDER_NOTICE_PREFIX, WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import { physicalSessionName, SessionRegistry } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
@@ -2378,9 +2378,23 @@ export class QueueRepository {
   /** The rule for re-sending a wake recorded unroutable once its seat may be back, shared by the stuck sweep and
    *  {@link retryUnroutableWakesOnReachable}: unclaimed, not a person's notice, not a local human decision with no
    *  gateway, not held or released for quiet hours, and its seat now pane-bound. A handoff's retry ladder is the
-   *  caller's to check: the sweep defers to a live ladder, the reachable-seat retry leaves every handed-off row to it. */
+   *  caller's to check: the sweep defers to a live ladder, and the reachable-seat retry leaves a handed-off row to its
+   *  ladder until that ladder has given up ({@link wakeLadderExhausted}). */
   unroutableWakeRetryable(row: QueueItem, now: Date = new Date()): boolean {
     return recordsNoWakeRoute(row.lastNudgeResult) && this.reachableWakeRetryable(row, now);
+  }
+
+  /** A handed-off row whose wake ladder has given up: its latest ladder marker is `ladder-exhausted:`. Nothing else
+   *  re-wakes it, so a seat that returns (a standby seat started for this work) gets its wake from the reachable-seat
+   *  retry. A ladder still retrying reaches the returned seat itself. */
+  private wakeLadderExhausted(qitemId: string): boolean {
+    const notes = this.db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ? AND transition_note IS NOT NULL ORDER BY transition_id DESC")
+      .all(qitemId) as Array<{ transition_note: string }>;
+    for (const { transition_note: note } of notes) {
+      if (note.startsWith(LADDER_EXHAUSTED_PREFIX)) return true;
+      if (note.startsWith(LADDER_ATTEMPT_PREFIX) || note.startsWith(LADDER_RUNG_PREFIX)) return false;
+    }
+    return false;
   }
 
   private reachableWakeRetryable(row: QueueItem, now: Date): boolean {
@@ -2408,7 +2422,7 @@ export class QueueRepository {
     )` : "";
     const rows = this.db.prepare(`SELECT q.qitem_id FROM queue_items q
       WHERE q.destination_session IN (${addresses.map(() => "?").join(",")}) AND q.state = 'pending'
-        AND q.handed_off_from IS NULL AND (q.last_nudge_result LIKE 'unroutable:%' OR q.last_nudge_result LIKE 'awaiting-pickup:%' ${provedFailure})
+        AND (q.last_nudge_result LIKE 'unroutable:%' OR q.last_nudge_result LIKE 'awaiting-pickup:%' ${provedFailure})
       ORDER BY q.ts_created, q.qitem_id`)
       .all(...addresses, ...(this.outbox ? [WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, WAKE_PRE_INPUT_FAILURE_TAG] : [])) as Array<{ qitem_id: string }>;
     const now = new Date();
@@ -2423,13 +2437,16 @@ export class QueueRepository {
       // An earlier member's awaited send may have started restore custody before this claim.
       if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return false;
       const current = this.getById(entry.auditPointer);
-      return current?.state === "pending" && addresses.includes(current.destinationSession) && !current.handedOffFrom
+      return current?.state === "pending" && addresses.includes(current.destinationSession)
+        && (!current.handedOffFrom || this.wakeLadderExhausted(current.qitemId))
         && this.reachableWakeRetryable(current, now)
         && (this.unroutableWakeRetryable(current, now) || entry.tags?.includes(WAKE_PRE_INPUT_FAILURE_TAG) === true);
     };
     for (const { qitem_id } of rows) {
       const row = this.getById(qitem_id);
       if (!row || row.state !== "pending" || !this.reachableWakeRetryable(row, now)) continue;
+      // A handed-off row is its ladder's until the ladder has given up.
+      if (row.handedOffFrom && !this.wakeLadderExhausted(row.qitemId)) continue;
       // The failed wake may be the row's own intent or an un-park's blocker intent: re-send whichever failed.
       // One in flight or delivered is never sent again; only a row with no intent at all takes the plain nudge.
       const intents = this.outbox ? this.db.prepare(`SELECT outbox_id, delivery_state FROM outbox_entries
@@ -2467,6 +2484,43 @@ export class QueueRepository {
       const row = this.getById(qitem_id);
       if (row) this.transitionLog.append({ qitemId: qitem_id, state: row.state, actorSession: "wake-ladder@system",
         transitionNote: `${LADDER_ATTEMPT_PREFIX} ${tries + 1}/${cap} outcome=${row.lastNudgeResult ?? outcome} trigger=seat-idle` });
+    }
+  }
+
+  /** Seats with a draft-held delivery pass running, so overlapping idle observations don't race each other. */
+  private readonly draftHeldPasses = new Set<string>();
+
+  /** Messages held only for a draft in the seat's input (tagged {@link DRAFT_HELD_ELIGIBLE_TAG} when first held) go once the
+   *  seat is idle under the draft-aware guard, oldest first, each through the existing guarded delivery: it reads the
+   *  input again and holds the message again if the input still isn't clear, and every other delivery condition applies.
+   *  Each message keeps its own outcome, and the pass stops at the first that isn't delivered, so order holds. Only a held
+   *  entry is reopened (compare-and-set), so a delivered, in-flight or uncertain one is never sent again. Messages held
+   *  before this behaviour, hold-mode messages and other held reasons carry no tag and stay held. */
+  async deliverDraftHeldMessagesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<void> {
+    if (state !== "idle" || !this.outbox || !this.transport?.draftAwareTarget?.(sessionName)) return;
+    const addresses = this.resolveSessionAddresses(sessionName);
+    if (!addresses.length || addresses.some(address => this.deliveryDrains.holds(address))) return;
+    if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return;
+    const key = addresses[0]!;
+    if (this.draftHeldPasses.has(key)) return;
+    this.draftHeldPasses.add(key);
+    try {
+      const held = this.db.prepare(`SELECT outbox_id FROM outbox_entries WHERE delivery_state = 'retained'
+        AND destination_session IN (${addresses.map(() => "?").join(",")})
+        AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value = ?)
+        ORDER BY ts_dispatched, rowid`).all(...addresses, DRAFT_HELD_ELIGIBLE_TAG) as Array<{ outbox_id: string }>;
+      for (const { outbox_id } of held) {
+        if (!this.outbox.reopenHeld(outbox_id)) break;
+        if (!this.outbox.claimForDelivery(outbox_id)) break;
+        const entry = this.outbox.getById(outbox_id)!;
+        await this.transport.send(entry.destinationSession, entry.body, {
+          committedOutboxIds: [outbox_id], actorSession: entry.senderSession,
+          ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}),
+        });
+        if (this.outbox.getById(outbox_id)?.deliveryState !== "delivered") break;
+      }
+    } finally {
+      this.draftHeldPasses.delete(key);
     }
   }
 

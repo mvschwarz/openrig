@@ -1993,3 +1993,73 @@ describe("#2429: the guard's own paste after Claude Code collapses it", () => {
     expect(f.submissions).toEqual([]);
   });
 });
+
+// Root's selection 1 (standby, 0.7.25): a plain message held only for a draft in the input goes once the input is clear,
+// through the same guarded delivery, each message with its own outcome and in order. Only messages first held under this
+// behaviour qualify: older held messages, hold-mode messages and system senders' messages stay as they were.
+describe("plain messages held for a draft", () => {
+  const held = (f: ReturnType<typeof fixture>, sender = "pm@test") => f.db.prepare(
+    "SELECT outbox_id, delivery_state, tags FROM outbox_entries WHERE sender_session = ? ORDER BY ts_dispatched, rowid",
+  ).all(sender) as Array<{ outbox_id: string; delivery_state: string; tags: string | null }>;
+  const tagged = (row: { tags: string | null }) => (JSON.parse(row.tags ?? "[]") as string[]).includes("delivery:draft-eligible");
+
+  it("delivers two different held messages from one sender, each once and in order, when the draft clears", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const first = await f.transport.send("worker@test", "first request", { actorSession: "pm@test" });
+    const second = await f.transport.send("worker@test", "second request", { actorSession: "pm@test" });
+    expect(first.outcome).toBe("retained"); expect(second.outcome).toBe("retained");
+    expect(first.warning).toContain("typed once the input is clear");
+    expect(held(f).map(r => [r.delivery_state, tagged(r)])).toEqual([["retained", true], ["retained", true]]);
+    f.bodies.a = "";
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(held(f).map(r => r.delivery_state)).toEqual(["delivered", "delivered"]);
+    const order = f.submissions.map(s => s.includes("first request") ? 1 : s.includes("second request") ? 2 : 0).filter(Boolean);
+    expect(order).toEqual([1, 2]);
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.submissions.filter(s => s.includes("first request") || s.includes("second request"))).toHaveLength(2);
+  });
+
+  it("keeps them held while the draft stays, typing nothing over it", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    await f.transport.send("worker@test", "first request", { actorSession: "pm@test" });
+    for (let i = 0; i < 3; i++) await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(held(f).map(r => [r.delivery_state, tagged(r)])).toEqual([["retained", true]]);
+    expect(f.writes).toEqual([]);
+  });
+
+  it("leaves a message held before this behaviour alone (no tag), even with the input clear", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    await f.transport.send("worker@test", "older request", { actorSession: "pm@test" });
+    f.db.prepare("UPDATE outbox_entries SET tags = NULL WHERE sender_session = 'pm@test'").run();
+    f.bodies.a = "";
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(held(f).map(r => r.delivery_state)).toEqual(["retained"]);
+    expect(f.writes).toEqual([]);
+  });
+
+  it("never delivers a hold-mode message, and doesn't tag it", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.guard.set("a", { mode: "hold" }, "human@test", "manual terminal");
+    await f.transport.send("worker@test", "a request", { actorSession: "pm@test" });
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(held(f).map(r => [r.delivery_state, tagged(r)])).toEqual([["retained", false]]);
+    expect(f.writes).toEqual([]);
+  });
+
+  it("tells the seat once when hold mode is released, and types none of the held messages", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.guard.set("a", { mode: "hold" }, "human@test", "manual terminal");
+    await f.transport.send("worker@test", "a request", { actorSession: "pm@test" });
+    const send = vi.spyOn(f.transport, "send");
+    expect((await f.post("/api/seat/set-typing-guard/worker@test", { mode: "off", reason: "back at the keyboard" })).status).toBe(200);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(String(send.mock.calls[0]![1])).toMatch(/^Automatic input is no longer held\. 1 held message was kept for this seat and not delivered: read it with rig seat held-messages /);
+    expect(held(f).map(r => r.delivery_state)).toEqual(["retained"]);
+    expect((await f.post("/api/seat/set-typing-guard/worker@test", { mode: "draft-aware", reason: "draft mode" })).status).toBe(200);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("doesn't tag a system sender's held message, which keeps its own schedule", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    await f.transport.send("worker@test", "reminder", { actorSession: "watchdog@system" });
+    expect(held(f, "watchdog@system").map(r => [r.delivery_state, tagged(r)])).toEqual([["retained", false]]);
+  });
+});

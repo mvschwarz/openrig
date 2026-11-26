@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
+import { DRAFT_HELD_ELIGIBLE_TAG, DRAFT_HELD_REASONS, OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import { DeliveryGuardError, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import type { SendOpts, SendResult } from "./session-transport.js";
 
@@ -107,8 +107,17 @@ export class DraftAwareDelivery {
       "invalid_wait_for_idle", "invalid_dangerously_interact", "dangerously_interact_requires_reason", "prompt_override_audit_unavailable",
       "transport_unavailable", "session_missing", "tmux_unavailable"].includes(result.reason ?? "");
     const noWrite = !result.ok && !inputWritten && preInputRefusal;
+    // A plain message from an agent or a person, held only for a draft in the input, is typed once the input is clear. A
+    // queue wake has its own retry, and a system sender (a watchdog, a notice) its own schedule, so neither is.
+    // It keeps its own outcome only while the seat's held quota has room for it; at a full quota it takes its sender's
+    // place as any held message does (#2430), so one sender can't fill the quota.
+    const draftHeld = noWrite && !opts.queueWake && DRAFT_HELD_REASONS.has(result.reason ?? "")
+      && !!opts.actorSession && !opts.actorSession.endsWith("@system")
+      && !!target.nodeId && this.outbox.fitsWithoutCoalescing(target.nodeId, text);
     if (noWrite) result = { ...result, ok: true, sent: false, verified: false, outcome: "retained",
-      warning: "Held, not delivered. Retry the current request when the input is free; no saved callback or message is replayed automatically." };
+      warning: draftHeld
+        ? "Held, not delivered yet: the input shows a draft. It's typed once the input is clear, after any earlier held message; nothing else is replayed."
+        : "Held, not delivered. Retry the current request when the input is free; no saved callback or message is replayed automatically." };
     else if (!inputWritten && result.sent === false && result.inputPhase !== "not_reached") {
       // A wait-path failure can follow a dispatched native write. Only a positive pre-input result proves no write.
       const { sent: _sent, ...uncertain } = result; result = uncertain;
@@ -124,6 +133,9 @@ export class DraftAwareDelivery {
         this.db.transaction(() => {
           for (const id of receipt.ids) {
             this.outbox.finalizeDelivery(id, state);
+            if (draftHeld) this.db.prepare(`UPDATE outbox_entries SET tags=json_insert(COALESCE(tags,'[]'),'$[#]',?)
+              WHERE outbox_id=? AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)`)
+              .run(DRAFT_HELD_ELIGIBLE_TAG, id, DRAFT_HELD_ELIGIBLE_TAG);
             this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?").run(JSON.stringify({ ...receipt, result }), id);
           }
           // Settled as held: only now does it take its sender's place (#2430); a delivered attempt never absorbs held ones.

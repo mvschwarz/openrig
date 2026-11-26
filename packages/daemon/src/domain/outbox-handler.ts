@@ -23,6 +23,16 @@ const WATCHDOG_SENDER = "watchdog@system";
 export const COALESCE_ACTOR = "outbox@system";
 /** The retirement reason of a held message coalesced into a newer one from the same sender; the id follows. */
 export const COALESCED_INTO = "coalesced into ";
+/** A plain message from an agent or a person, held only because the seat's input showed a draft (draft-aware guard). It is
+ *  typed once the input reads empty (QueueRepository.deliverDraftHeldMessagesOnIdle), keeps its own outcome, and is never
+ *  coalesced into a later message or a later message into it. Written only when the message is first held under this
+ *  behaviour, so messages held before it, hold-mode messages and other held reasons stay as they were. */
+export const DRAFT_HELD_ELIGIBLE_TAG = "delivery:draft-eligible";
+/** The draft-aware refusals that mean only "a draft is in the input". */
+export const DRAFT_HELD_REASONS: ReadonlySet<string> = new Set(["draft_input_busy", "draft_input_unknown", "draft_input_changed"]);
+/** A seat's active held-message quota (provisional bounded defaults). */
+const HELD_QUOTA_COUNT = 100;
+const HELD_QUOTA_BYTES = 8 * 1024 * 1024;
 /** Senders whose held messages coalesce: not an unattributed sender, and not a watchdog (one reminder per job instead). */
 const coalescibleSender = (sender: string | null | undefined): sender is string => !!sender && sender !== "unknown" && sender !== WATCHDOG_SENDER;
 
@@ -616,9 +626,12 @@ export class OutboxHandler {
 
   /** The sender's held messages at this seat, oldest first. */
   private heldFrom(senderSession: string, nodeId: string): string[] {
+    // A draft-held message keeps its own outcome: it never takes another's place, and none takes its place.
     return (this.db.prepare(`SELECT outbox_id FROM outbox_entries
-      WHERE delivery_state='retained' AND sender_session=? AND json_extract(guard_binding,'$.nodeId')=? ORDER BY ts_dispatched,rowid`)
-      .all(senderSession, nodeId) as Array<{ outbox_id: string }>).map(row => row.outbox_id);
+      WHERE delivery_state='retained' AND sender_session=? AND json_extract(guard_binding,'$.nodeId')=?
+        AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)
+      ORDER BY ts_dispatched,rowid`)
+      .all(senderSession, nodeId, DRAFT_HELD_ELIGIBLE_TAG) as Array<{ outbox_id: string }>).map(row => row.outbox_id);
   }
 
   /** #2430: the held messages coalesced into this one, oldest first. */
@@ -652,9 +665,16 @@ export class OutboxHandler {
       }
     }
     const size = Buffer.byteLength(body, "utf8");
-    if (size > 1024 * 1024 || usage.count >= 100 || usage.bytes + size > 8 * 1024 * 1024) {
+    if (size > 1024 * 1024 || usage.count >= HELD_QUOTA_COUNT || usage.bytes + size > HELD_QUOTA_BYTES) {
       throw new OutboxHandlerError("retained_quota_full", "Held-message quota is full. Retire a specific held message to release active quota; no input was written.");
     }
+  }
+
+  /** Whether one more held message of `body` fits the seat's quota with nothing coalesced to make room. A draft-held
+   *  message keeps its own outcome only when it does; at a full quota it takes its sender's place as before (#2430). */
+  fitsWithoutCoalescing(nodeId: string, body: string): boolean {
+    const usage = this.retentionUsage(nodeId);
+    return usage.count < HELD_QUOTA_COUNT && usage.bytes + Buffer.byteLength(body, "utf8") <= HELD_QUOTA_BYTES;
   }
 
   /** Current active quota inputs; reading them neither retires nor retries retained custody. */
