@@ -502,6 +502,27 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     expect((kept as { settings: { note: string } }).settings.note).toContain("effort included");
   });
 
+  it("doesn't count OpenRig's own launch guidance as drift: the resume carries the current guidance, and the plan says so", async () => {
+    // The running Codex started with OpenRig's earlier guidance (as before an upgrade); the relaunch builds the current one.
+    const earlier = `-m gpt-5.5 -c developer_instructions="earlier-openrig-guidance" -s workspace-write resume ${TOKEN}`;
+    const w = world({ runningArgs: earlier });
+    const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(plan).toMatchObject({ ok: true });
+    expect((plan as { settings: { note: string } }).settings.note)
+      .toContain("OpenRig's launch guidance (developer_instructions) has changed since this Codex started, such as after an OpenRig upgrade");
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "adopt the new openrig-core" }))
+      .toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    // A setting someone chose still refuses beside it, and the guidance isn't named.
+    expect(await world({ savedModel: "gpt-5.6", runningArgs: earlier }).service.restartInPlace({ seatRef: SEAT, plan: true }))
+      .toMatchObject({ ok: false, code: "settings_drift", detail: { differs: ["model"] } });
+    // So does any other config override.
+    expect(await world({ runningArgs: `-m gpt-5.5 -c tools.web_search=true -s workspace-write resume ${TOKEN}` }).service.restartInPlace({ seatRef: SEAT, plan: true }))
+      .toMatchObject({ ok: false, code: "settings_drift", detail: { differs: ["config tools.web_search"] } });
+    // Unchanged guidance adds nothing to the note.
+    const same = await world().service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect((same as { settings: { note: string } }).settings.note).not.toContain("launch guidance");
+  });
+
   it("refuses drift in home and cwd, naming each", async () => {
     const home = world({ facts: { 200: facts({ env: { CODEX_HOME: "/other/.codex" } }), 100: facts() } });
     expect(await home.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ code: "settings_drift", detail: { differs: ["codex home"] } });
