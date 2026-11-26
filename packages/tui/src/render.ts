@@ -325,7 +325,7 @@ function queueFacts(snap: FleetSnapshot, session: string | null | undefined): { 
 }
 
 function queueIncomplete(snap: FleetSnapshot): boolean {
-  return snap.queueCoverage === "partial" || snap.queueCoverage === "unavailable";
+  return snap.queueCoverage === "partial" || snap.queueCoverage === "unavailable" || snap.queueCoverage === "pending";
 }
 
 function queueCount(snap: FleetSnapshot, count: number): string | number {
@@ -334,7 +334,8 @@ function queueCount(snap: FleetSnapshot, count: number): string | number {
 
 function queueSampleLines(snap: FleetSnapshot, width: number): ContentLine[] {
   return queueIncomplete(snap) ? wrapDetailLines([
-    { text: snap.queueCoverage === "unavailable" ? "Queue sample incomplete: a list read failed." : "Queue sample may be incomplete: a list reached its cap." },
+    { text: snap.queueCoverage === "pending" ? "Queue lists pending: read after the rigs and seats."
+      : snap.queueCoverage === "unavailable" ? "Queue sample incomplete: a list read failed." : "Queue sample may be incomplete: a list reached its cap." },
     { text: "Counts are lower bounds; unlisted work is unknown." },
   ], width) : [];
 }

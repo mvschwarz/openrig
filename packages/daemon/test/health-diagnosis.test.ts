@@ -105,10 +105,20 @@ it("reads the census without projecting non-owned topical rows, and still refuse
   t.db.prepare("UPDATE queue_items SET chain_of_record = ? WHERE qitem_id = ?").run("{not json", foreign.qitemId);
   expect(t.service.list().map((o) => o.row.qitemId)).toEqual([id]);
 
-  // Exactly 10000 tagged rows refuses the census even though none of the extra rows is owned.
+  // The census reads only the occurrence namespace: topical rows can't fill it and hide an occurrence.
   const insert = t.db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body, tags)
     VALUES (?, ?, ?, 'peer@rig', 'owner@rig', 'done', 'x', '["health-diagnosis"]')`);
-  t.db.transaction(() => { for (let i = 0; i < 9998; i++) insert.run(`qitem-topical-${i}`, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"); })();
+  t.db.transaction(() => { for (let i = 0; i < 9999; i++) insert.run(`qitem-topical-${i}`, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"); })();
+  const prepare = vi.spyOn(t.db, "prepare");
+  expect(t.service.list().map((o) => o.row.qitemId)).toEqual([id]);
+  const census = prepare.mock.calls.map(([sql]) => String(sql)).find((sql) => sql.includes("json_each(queue_items.tags)"))!;
+  prepare.mockRestore();
+  // A search of the primary-key range, not a scan of every queue row.
+  const plan = t.db.prepare(`EXPLAIN QUERY PLAN ${census}`).all("a", "b", "health-diagnosis", 1) as Array<{ detail: string }>;
+  expect(plan.map((row) => row.detail).join(" | ")).toMatch(/SEARCH queue_items USING INDEX sqlite_autoindex_queue_items_1 \(qitem_id>\? AND qitem_id<\?\)/);
+
+  // Exactly 10000 tagged rows in the namespace refuses the census before ownership is read.
+  t.db.transaction(() => { for (let i = 0; i < 9999; i++) insert.run(`qitem-health-diagnosis-x${i}`, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"); })();
   expect(() => t.service.list()).toThrow("health_diagnosis_census_truncated");
 });
 

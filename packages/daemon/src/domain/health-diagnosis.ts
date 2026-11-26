@@ -83,14 +83,17 @@ export class HealthDiagnosisService {
   }
   list(refresh = true) {
     // Refuse a truncated ownership census rather than treating a hidden occurrence as absent.
-    // The same selection as queue.list({ tag, limit }) (exact tag membership, newest created first), reading only
-    // ids: a full row of every topical match would be built and discarded. show re-reads each owned row fresh.
-    const ids = (this.deps.queue.db.prepare(`SELECT qitem_id FROM queue_items
-      WHERE EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?) ORDER BY ts_created DESC LIMIT ?`)
-      .all("health-diagnosis", 10000) as Array<{ qitem_id: string }>).map((r) => r.qitem_id);
-    if (ids.length === 10000) throw new Error("health_diagnosis_census_truncated");
-    // The tag is proven by the query; the id namespace marks an occurrence (show checks both on the fresh row).
-    const occurrences = ids.filter((id) => id.startsWith(this.id(""))).map((id) => this.show(id, false));
+    // Occurrences are the rows in this id namespace that carry the tag (show checks both on the fresh row), so the
+    // census reads that primary-key range only. Matching the tag across every queue row held the event loop for
+    // seconds on a long-lived queue, once a minute while diagnosis is enabled. An ORDER BY in SQL can lead the planner
+    // back to a scan in creation order, so the ids are sorted here, newest created first.
+    const prefix = this.id("");
+    const rows = this.deps.queue.db.prepare(`SELECT qitem_id, ts_created FROM queue_items
+      WHERE qitem_id >= ? AND qitem_id < ? AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?) LIMIT ?`)
+      .all(prefix, `${prefix.slice(0, -1)}.`, "health-diagnosis", 10000) as Array<{ qitem_id: string; ts_created: string }>;
+    if (rows.length === 10000) throw new Error("health_diagnosis_census_truncated");
+    const ids = rows.sort((a, b) => (a.ts_created < b.ts_created ? 1 : a.ts_created > b.ts_created ? -1 : 0)).map((r) => r.qitem_id);
+    const occurrences = ids.map((id) => this.show(id, false));
     if (!refresh) return occurrences;
     const current = new Map(this.deps.projection.records().map((finding) => [finding.id, finding]));
     return occurrences.map((o) => {
