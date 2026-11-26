@@ -22,7 +22,8 @@ import { cooperativeReadFile } from "../domain/execution-candidate-reader.js";
  * checkpoint on another thread can be overlapped by commits, which leaves frames uncopied; while every checkpoint is
  * overlapped (a fast writer, or slow fsyncs under disk load) the WAL is never reused and the file grows. So when the
  * WAL reaches WAL_CAP_FACTOR times the threshold, the worker stands back and the main connection gets its automatic
- * checkpoint back until the WAL has been reused: one checkpoint on the main thread, as before this change.
+ * checkpoint back until the WAL has been reused: one checkpoint on the main thread, as before this change. A WAL of
+ * the cap's size or more after its reuse (a single transaction that large) stays with the main connection.
  *
  * Nothing about durability changes: `synchronous` is left as it is, and a checkpoint syncs the same files in the
  * same order whichever connection runs it.
@@ -50,6 +51,8 @@ export const WAL_CAP_FACTOR = 4;
 const NOOP_CHECKPOINT_MIN_SQLITE = [3, 51, 0];
 const START_TIMEOUT_MS = 10_000;
 const STOP_TIMEOUT_MS = 5_000;
+/** How long a start that failed waits for the worker thread to end before startup goes on without it. */
+const START_FAILED_EXIT_WAIT_MS = 1_000;
 
 const SOURCE = new URL(`data:text/javascript,${encodeURIComponent(`
 import { parentPort, workerData } from "node:worker_threads";
@@ -73,11 +76,17 @@ try {
 // Checkpointing whenever there is anything to copy would make the main connection restart the WAL, and sync its
 // new header, about once a poll. So wait until the WAL is as large as the automatic checkpoint lets it get (its
 // rule: frames in the WAL, not frames pending), then checkpoint on every poll until the WAL has been reused.
+// The WAL has been reused when it is short again, or shorter than at the last poll: its frame count only falls when
+// a write restarts it. The second sign is for a writer whose every transaction is as large as the threshold, which
+// never leaves a short WAL for a poll to see.
 let overCap = false;
+let lastLog = 0;
 const poll = () => {
   try {
     const [wal] = db.pragma("wal_checkpoint(NOOP)");
-    if (overCap ? wal.log < workerData.thresholdPages : wal.log >= workerData.capPages) {
+    const restarted = wal.log < lastLog;
+    lastLog = wal.log;
+    if (overCap ? wal.log < workerData.thresholdPages || (restarted && wal.log < workerData.capPages) : wal.log >= workerData.capPages) {
       overCap = !overCap;
       parentPort.postMessage({ type: overCap ? "over-cap" : "under-cap" });
     }
@@ -146,13 +155,20 @@ export async function startWalCheckpointer(db: Database.Database, opts: WalCheck
   };
 
   // execArgv: [] as in profile-resolution-worker.ts: the worker needs none of the daemon's loaders or flags.
-  const worker = (opts.spawn ?? ((source, options) => new Worker(source, options)))(SOURCE, {
-    execArgv: [],
-    workerData: {
-      file, pollMs, thresholdPages, capPages: thresholdPages * (opts.capFactor ?? WAL_CAP_FACTOR),
-      minSqlite: NOOP_CHECKPOINT_MIN_SQLITE, requireFrom: import.meta.url,
-    },
-  });
+  // new Worker() can throw where it stands (no thread to be had, for one), before there is a worker to listen to.
+  let worker: Worker;
+  try {
+    worker = (opts.spawn ?? ((source, options) => new Worker(source, options)))(SOURCE, {
+      execArgv: [],
+      workerData: {
+        file, pollMs, thresholdPages, capPages: thresholdPages * (opts.capFactor ?? WAL_CAP_FACTOR),
+        minSqlite: NOOP_CHECKPOINT_MIN_SQLITE, requireFrom: import.meta.url,
+      },
+    });
+  } catch (error) {
+    fallBack(`could not start (${error instanceof Error ? error.message : String(error)})`);
+    return null;
+  }
   let stopped: () => void = () => {};
   const stoppedPromise = new Promise<void>((resolve) => { stopped = resolve; });
 
@@ -186,7 +202,17 @@ export async function startWalCheckpointer(db: Database.Database, opts: WalCheck
   });
 
   if (!ready || warned) {
-    await worker.terminate().catch(() => undefined);
+    // terminate() resolves when the thread has ended, and a thread inside a synchronous SQLite call (opening the file
+    // on a stalled disk) ends only when that call returns. Startup waits a moment for a tidy end and then goes on
+    // without it: the worker has not taken the checkpoints over, the main connection's automatic checkpoint was never
+    // turned off, and the thread ends at its next return to JavaScript without having polled.
+    worker.unref();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      worker.terminate().catch(() => undefined),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, START_FAILED_EXIT_WAIT_MS); }),
+    ]);
+    clearTimeout(timer);
     return null;
   }
   // Never keeps the process alive on its own. A daemon that exits without stop() loses nothing: frames not yet

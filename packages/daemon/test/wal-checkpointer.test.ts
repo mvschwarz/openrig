@@ -109,6 +109,27 @@ describe("startWalCheckpointer", () => {
     expect((db.pragma("wal_checkpoint(NOOP)") as Array<{ log: number }>)[0]!.log).toBeLessThan(8);
   });
 
+  it("a reused WAL goes back to the worker even when every transaction is as large as the threshold", async () => {
+    const { db, file } = fileDb(8);
+    track(await startWalCheckpointer(db, { pollMs: 20, capFactor: 4 }));
+    const reader = createDb(file);
+    reader.exec("BEGIN");
+    reader.prepare("SELECT count(*) FROM t").get();
+    insertPages(db, 40); // past the cap of 4 x 8 pages, pinned
+    await waitFor(() => pragma(db, "wal_autocheckpoint") === 8);
+    await sleep(60); // a poll has seen the long WAL
+    reader.exec("COMMIT");
+    reader.close();
+    insertPages(db, 10); // the main connection checkpoints inside this commit
+    expect(pendingPages(db)).toBe(0);
+    insertPages(db, 10); // reuses the WAL from its start and leaves it at the threshold or over: never a short WAL
+    const log = () => (db.pragma("wal_checkpoint(NOOP)") as Array<{ log: number }>)[0]!.log;
+    expect(log()).toBeGreaterThanOrEqual(8);
+    expect(log()).toBeLessThan(32);
+    await waitFor(() => pragma(db, "wal_autocheckpoint") === 0);
+    expect(log()).toBeGreaterThanOrEqual(8);
+  });
+
   it("stop() gives the main connection its own threshold back and is safe to repeat", async () => {
     const { db } = fileDb(64);
     const checkpointer = await startWalCheckpointer(db, { pollMs: 20 });
@@ -180,6 +201,41 @@ describe("startWalCheckpointer", () => {
     expect(await startWalCheckpointer(db, { warn, spawn })).toBeNull();
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]![0]).toMatch(/has no NOOP checkpoint, added in 99\.0\.0/);
+    expect(pragma(db, "wal_autocheckpoint")).toBe(1000);
+  });
+
+  it("a worker that can't be created warns once and changes nothing", async () => {
+    const { db } = fileDb();
+    const warn = vi.fn();
+    const spawn = () => { throw new Error("no thread to be had"); };
+    expect(await startWalCheckpointer(db, { warn, spawn })).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]![0]).toMatch(/could not start \(no thread to be had\)/);
+    expect(pragma(db, "wal_autocheckpoint")).toBe(1000);
+  });
+
+  it("a failed start does not wait on a worker thread that won't end", async () => {
+    const { db } = fileDb();
+    const warn = vi.fn();
+    // Stands in for a worker stuck in a synchronous call: reports the failure and stays alive, and its terminate()
+    // never resolves.
+    const stuck = new URL(`data:text/javascript,${encodeURIComponent(`
+      import { parentPort } from "node:worker_threads";
+      parentPort.postMessage({ type: "failed", message: "disk stalled" });
+      setInterval(() => {}, 1000);
+    `)}`);
+    const spawn = (_source: URL, options: ConstructorParameters<typeof Worker>[1]) => {
+      const worker = new Worker(stuck, options);
+      const terminate = worker.terminate.bind(worker);
+      worker.terminate = () => new Promise<number>(() => {});
+      cleanups.push(async () => { await terminate(); });
+      return worker;
+    };
+    const began = Date.now();
+    expect(await startWalCheckpointer(db, { warn, spawn })).toBeNull();
+    expect(Date.now() - began).toBeLessThan(4000);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]![0]).toMatch(/could not start \(disk stalled\)/);
     expect(pragma(db, "wal_autocheckpoint")).toBe(1000);
   });
 
