@@ -336,9 +336,11 @@ import { resolveAdvisorModel, resolveKeepAlive, selectedPluginPaths, type Resolu
 import { resolveNodeConfigAsync, withNodeConfigResolver } from "./profile-resolution-worker.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
-import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, filterProtectedProjections, type ProjectionPlan } from "./projection-planner.js";
+import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, filterProtectedProjections, isClaudeFragmentEntry,
+  type ProjectionPlan, type ResolveClaudeFragments } from "./projection-planner.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
+import { NativePermissionStore } from "./native-permission-store.js";
 import { PodRepository } from "./pod-repository.js";
 import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, SkillResource, StartupAction, StartupFile } from "./types.js";
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime-adapter.js";
@@ -422,6 +424,7 @@ interface PodInstantiatorDeps {
   /** S20 P4 — materializes the selected Claude continuity policy by
    *  registering jobs in the existing watchdog engine after startup succeeds. */
   continuityPolicyMaterializer?: Pick<ContinuityPolicyMaterializer, "arm">;
+  rosterReadyNotice?: (rigId: string, sessions: string[]) => Promise<string[]>;
 }
 
 export interface MaterializeResult {
@@ -975,8 +978,17 @@ export class PodRigInstantiator {
         policy: this.deps.rigRepo.getNodePolicyProvenance(nodeId), rigPolicy: this.deps.rigRepo.getRigPolicyProvenance(rigId) };
     };
     const saved = contract()!;
+    // The launch applies the seat's current saved Codex envelope (NativePermissionStore, at startup), not the declared
+    // one, so the preflight's rig reach advisory reads that one too. A cleared envelope means none; one that can't be
+    // read refuses the launch on its own.
+    let codexPermissions: RigSpecPodMember["codexPermissions"];
+    if (saved.member.runtime === "codex") {
+      try { codexPermissions = new NativePermissionStore(this.db).launchOverride(nodeId, "codex").codexPermissions; }
+      catch { /* see above */ }
+    }
+    const member = saved.member.runtime === "codex" ? { ...saved.member, codexPermissions } : saved.member;
     const selected = { ...source.spec, name: saved.name, env: saved.env ?? undefined, permissionPolicy: undefined,
-      pods: [{ ...context.pod, members: [saved.member], edges: [] }], edges: [] };
+      pods: [{ ...context.pod, members: [member], edges: [] }], edges: [] };
     const inherited = saved.policy ? { ...saved.policy, ref: saved.policy.nodeRef ?? saved.rigPolicy?.rigRef ?? "none",
       resolvedTarget: saved.policy.resolvedTarget ?? undefined, declaringDir: saved.policy.declaringDir ?? undefined }
       : this.inheritedPermissionPolicy(rigId);
@@ -1496,18 +1508,32 @@ export class PodRigInstantiator {
    *  has been written (#2871), so a seat that asks who's on its team in between is told the team isn't complete yet. */
   private async instantiateBuilding(rigSpecYaml: string, rigRoot: string, opts?: Parameters<PodRigInstantiator["instantiate"]>[2]) {
     const marked: string[] = [];
+    let rosterComplete = false;
     const recordCreated: RecordCreated = (rigId, nodeId) => {
       if (nodeId === undefined) { markRigBuilding(this.db, rigId); marked.push(rigId); }
       opts?.recordCreated?.(rigId, nodeId);
     };
+    let outcome: InstantiateOutcome;
     try {
-      return await this.instantiateOnce(rigSpecYaml, rigRoot, { ...opts, recordCreated });
+      outcome = await this.instantiateOnce(rigSpecYaml, rigRoot, { ...opts, recordCreated, recordRosterComplete: () => { rosterComplete = true; } });
     } finally {
       for (const rigId of marked) unmarkRigBuilding(this.db, rigId);
     }
+    if (outcome.ok && rosterComplete && this.deps.rosterReadyNotice) {
+      try {
+        const nodes = this.deps.rigRepo.getRig(outcome.result.rigId)!.nodes;
+        const agents = new Set(nodes.filter(node => node.runtime !== "terminal").map(node => node.logicalId));
+        const sessions = outcome.result.nodes.flatMap(node => node.status === "launched" && node.sessionName && agents.has(node.logicalId) ? [node.sessionName] : []);
+        const warnings = await this.deps.rosterReadyNotice(outcome.result.rigId, sessions);
+        if (warnings.length) outcome.result.warnings = [...(outcome.result.warnings ?? []), ...warnings];
+      } catch (error) {
+        outcome.result.warnings = [...(outcome.result.warnings ?? []), `Roster-ready notification is unconfirmed: ${error instanceof Error ? error.message : String(error)}`];
+      }
+    }
+    return outcome;
   }
 
-  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
+  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; recordRosterComplete?: () => void; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -1852,15 +1878,23 @@ export class PodRigInstantiator {
       }
     });
 
+    let edgesRecorded = true;
     // Create pod-local edges (after all members created)
     for (const pod of rigSpec.pods) {
       for (const edge of pod.edges) {
         const fromId = nodeIdMap[`${pod.id}.${edge.from}`];
         const toId = nodeIdMap[`${pod.id}.${edge.to}`] ?? (edge.kind === "escalates_to" && isEscalationTargetRef(edge.to) ? edge.to : undefined);
+        const targetLabel = edge.kind === "escalates_to" && isEscalationTargetRef(edge.to) ? edge.to : `${pod.id}.${edge.to}`;
         if (fromId && toId) {
           try {
             this.deps.rigRepo.addEdge(rigId, fromId, toId, edge.kind);
-          } catch { /* best-effort */ }
+          } catch (error) {
+            edgesRecorded = false;
+            podInstantiateWarnings.push(`Roster incomplete: edge ${pod.id}.${edge.from} -> ${targetLabel} (${edge.kind}) could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        } else {
+          edgesRecorded = false;
+          podInstantiateWarnings.push(`Roster incomplete: edge ${pod.id}.${edge.from} -> ${targetLabel} (${edge.kind}) could not be recorded because an endpoint is missing.`);
         }
       }
     }
@@ -1872,8 +1906,18 @@ export class PodRigInstantiator {
       if (fromId && toId) {
         try {
           this.deps.rigRepo.addEdge(rigId, fromId, toId, edge.kind);
-        } catch { /* best-effort */ }
+        } catch (error) {
+          edgesRecorded = false;
+          podInstantiateWarnings.push(`Roster incomplete: edge ${edge.from} -> ${edge.to} (${edge.kind}) could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else {
+        edgesRecorded = false;
+        podInstantiateWarnings.push(`Roster incomplete: edge ${edge.from} -> ${edge.to} (${edge.kind}) could not be recorded because an endpoint is missing.`);
       }
+    }
+
+    if (edgesRecorded && Object.keys(nodeIdMap).length === rigSpec.pods.reduce((count, pod) => count + pod.members.length, 0)) {
+      opts?.recordRosterComplete?.();
     }
 
     // OPR.0.3.2.CT (conveyor-trust-minimal-fix):
@@ -2395,31 +2439,6 @@ export class PodRigInstantiator {
   }
 
   /**
-   * A seat's skill selection as its spec says today, for a restore that follows skills (`on_restore: follow_source`):
-   * resolved from its launch recipe the way a fresh launch of it would be, with the agent spec read from disk now.
-   * Every skill its profile selects, and those whose resource follows its source, with the source's full path. When it
-   * can't be resolved, says why; the restore then keeps the saved selection.
-   */
-  /** A seat's launch config as its spec says today: resolved from its launch recipe the way a fresh launch of it would be, with
-   *  the agent spec read from disk now. Shared by every restore-time read of the spec (skills, the continuity notice). */
-  private async resolveSeatConfigToday(rigId: string, nodeId: string) {
-    const node = this.deps.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
-    if (!node) return { ok: false as const, reason: `node ${nodeId} not found` };
-    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
-    if (!recipe) return { ok: false as const, reason: `${node.logicalId} has no launch recipe` };
-    const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
-    if (!context) return { ok: false as const, reason: `${node.logicalId}'s launch recipe does not contain its member definition` };
-    const member = this.persistedMember(node, context.member);
-    const resolved = resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
-    if (!resolved.ok) return { ok: false as const, reason: resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error };
-    const config = await resolveNodeConfigAsync({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
-      profileName: member.profile, specRoot: recipe.rigRoot, cwdOverride: node.cwd ?? undefined, member, pod: context.pod, rig: recipe.rigSpec,
-      skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
-    if (!config.ok) return { ok: false as const, reason: config.errors.join("; ") };
-    return { ok: true as const, node, config };
-  }
-
-  /**
    * A seat's continuity strategy as its spec says today (its `compaction_strategy` and `mechanic`), for a start that is not
    * the first one: a restore (`rig up --existing`) or a fresh launch. A first start arms it from the spec directly; the others
    * come here, so a seat that selects `managed-compaction` or `apprentice-handover` keeps its notice across them.
@@ -2436,16 +2455,21 @@ export class PodRigInstantiator {
     // so its spec is not resolved (a Codex agent whose spec no longer resolves gets no warning about a notice it never had) and arming with the
     // default strategy still retires a job a Claude start left behind (#3579 R2).
     if (node.runtime !== "claude-code") return { ok: true, compactionStrategy: "default-compaction", mechanic: undefined, runtime: node.runtime };
-    const seat = await this.resolveSeatConfigToday(rigId, nodeId);
+    const seat = await this.resolvePersistedSeatConfig(rigId, nodeId);
     if (!seat.ok) return seat;
-    return { ok: true, compactionStrategy: seat.config.config.compactionStrategy as CompactionStrategy, mechanic: seat.config.config.mechanic, runtime: node.runtime };
+    return { ok: true, compactionStrategy: seat.config.compactionStrategy as CompactionStrategy, mechanic: seat.config.mechanic, runtime: node.runtime };
   }
 
+  /**
+   * A seat's skill selection as its spec says today, for a restore that follows skills (`on_restore: follow_source`):
+   * resolved from its launch recipe the way a fresh launch of it would be, with the agent spec read from disk now.
+   * Every skill its profile selects, and those whose resource follows its source, with the source's full path. When it
+   * can't be resolved, says why; the restore then keeps the saved selection.
+   */
   async seatSkillSelection(rigId: string, nodeId: string): Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }> {
-    const seat = await this.resolveSeatConfigToday(rigId, nodeId);
-    if (!seat.ok) return seat;
-    const config = seat.config;
-    const skills = config.config.selectedResources.skills;
+    const resolved = await this.resolvePersistedSeatConfig(rigId, nodeId);
+    if (!resolved.ok) return resolved;
+    const skills = resolved.config.selectedResources.skills;
     const selected = new Set(skills.map((skill) => skill.effectiveId));
     return { ok: true, selection: {
       selected,
@@ -2454,8 +2478,8 @@ export class PodRigInstantiator {
         source: nodePath.resolve(skill.sourcePath, (skill.resource as SkillResource).path),
       })),
       // OpenRig's own packaged plugin skills follow the packaged source by default, so an upgrade's copy comes back.
-      packaged: packagedSeatSkills(config.config.skillLoadout?.entries ?? [], selected),
-      warnings: config.config.skillWarnings ?? [],
+      packaged: packagedSeatSkills(resolved.config.skillLoadout?.entries ?? [], selected),
+      warnings: resolved.config.skillWarnings ?? [],
     } };
   }
 
@@ -2476,6 +2500,34 @@ export class PodRigInstantiator {
       profileName: member.profile, specRoot: recipe.rigRoot, cwdOverride: node.cwd ?? undefined, member, pod: context.pod,
       rig: this.withRigStartupLayers(recipe.rigSpec, layers), skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
     return config.ok ? config.config.startup.actions : null;
+  }
+
+  seatClaudeFragments: ResolveClaudeFragments = async (rigId, nodeId) => {
+    const resolved = await this.resolvePersistedSeatConfig(rigId, nodeId, "current");
+    if (!resolved.ok) return resolved;
+    const input = { ...resolved, fsOps: this.deps.fsOps };
+    const result = planProjection(input);
+    if (!result.ok) return { ok: false, reason: result.errors.join("; ") };
+    return { ok: true, entries: result.plan.entries.filter(isClaudeFragmentEntry) };
+  };
+
+  /** Resolve the saved launch recipe against the current spec for skills, Claude fragments and continuity. */
+  private async resolvePersistedSeatConfig(rigId: string, nodeId: string, runtimeSource: "recipe" | "current" = "recipe") {
+    const node = this.deps.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return { ok: false as const, reason: `node ${nodeId} not found` };
+    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
+    if (!recipe) return { ok: false as const, reason: `${node.logicalId} has no launch recipe`, missingRecipe: true as const };
+    const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
+    if (!context) return { ok: false as const, reason: `${node.logicalId}'s launch recipe does not contain its member definition` };
+    const member = this.persistedMember(node, context.member);
+    if (runtimeSource === "current" && node.runtime !== null) member.runtime = node.runtime;
+    const resolved = resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
+    if (!resolved.ok) return { ok: false as const, reason: resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error };
+    const config = await resolveNodeConfigAsync({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
+      profileName: member.profile, specRoot: recipe.rigRoot, cwdOverride: node.cwd ?? undefined, member, pod: context.pod, rig: recipe.rigSpec,
+      skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
+    if (!config.ok) return { ok: false as const, reason: config.errors.join("; ") };
+    return { ok: true as const, config: config.config, collisions: resolved.collisions };
   }
 
   /** Whether a persisted recipe contains enough validated source to attempt a fresh launch. */

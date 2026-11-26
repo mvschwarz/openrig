@@ -2,7 +2,7 @@
   "version": 1,
   "edges": {
     "bundle": {
-      "working-with-an-openrig-team/SKILL.md": "7cfa6ebd30ab229e76de47d2b3ab570bc98f286d3de9cc4ac22fd2d0239daf80"
+      "working-with-an-openrig-team/SKILL.md": "c9a42fdd9632d10de4d8e38abdb6e2b9b049d06b628b96907cf3447f77a4dd63"
     },
     "canonical": {
       "core/agent-starters/SKILL.md": "8e8961f44fccb812f39e01174a331dab24f153ceaba91925f1e42371836cdec0",
@@ -27,7 +27,7 @@
       "core/specification-system/SKILL.md": "5226d6e8b1362df89ba3d5afd82e4b4add355870132ca4b140d7f9f4324ffdc1",
       "core/topology-mutation-and-seat-management/SKILL.md": "527ca074432ce6513fb25cd27e8c709dabe0c91361b8999e09b272f3813abe62",
       "core/watchdog/SKILL.md": "88e097e7fe7321e166541b9eac42016fa7a3d362a86fde8946e666f22409f145",
-      "core/working-with-an-openrig-team/SKILL.md": "7cfa6ebd30ab229e76de47d2b3ab570bc98f286d3de9cc4ac22fd2d0239daf80",
+      "core/working-with-an-openrig-team/SKILL.md": "c9a42fdd9632d10de4d8e38abdb6e2b9b049d06b628b96907cf3447f77a4dd63",
       "pm/backlog-capture/SKILL.md": "345c2b47fc85e48c15c0d42bbb48fb27dd3b0ceec36bf59dc6ed20daaea47a84",
       "pm/context-builder/SKILL.md": "0134c9b0a9f196565109f7f51b6ec78d5c3e4b5982a0d7105a93b29952625b3c",
       "pm/exec-summary/SKILL.md": "ada0f42337920e7acdd94e24cad4f5c269b057e750f4a7fc627ea9efbc02fcb6",
@@ -71,8 +71,8 @@
       "applying-a-permission-policy/SKILL.md": "f7bba8d50b10fc8715f40a57bf82677ca9388c6718c8a162833d9c6daf2afdca",
       "claude-compaction-restore/SKILL.md": "e1a6ee501ae97d6de0a8df8dae01c088953f56907e76f10089908d7a8c5691a7",
       "claude-compaction-restore/reference/SKILL-v1.md": "6af2a889c9c38227fb186897c6e29185f81b215822070b469a6ceeb47734e133",
-      "claude-compaction-restore/scripts/precompact-hook.mjs": "b92021d062c8e57520c2e4c3acce8b2d6769c308e3d011956e7fba93fd52cf3d",
-      "claude-compaction-restore/scripts/restore-from-jsonl.mjs": "1379352d86d85e2683726ebd77ad4bbe59f81e85fce799d382f84576b59afe13",
+      "claude-compaction-restore/scripts/precompact-hook.mjs": "8f1307038a4d1b155d4e75330bda41c2f74287d0cddf2576d576477c936b7e8e",
+      "claude-compaction-restore/scripts/restore-from-jsonl.mjs": "65ae96ca437bee2fa2bb6e26f6ece3df3cb885bde2c4937ca3dcda6312d78cb8",
       "claude-compaction-restore/templates/compact-instruction.md": "682c778464517b831902ddc2678c055545899b4751a1d32391ce965d5eb7061d",
       "claude-compaction-restore/templates/post-compact-restore-instruction.md": "10a5a7e5e052f3aa000a4209f386dc4eb90a3c2bba449ca685f124714f59e47a",
       "delegating-work/SKILL.md": "fc5638949ce7600446a04e59dbe94996ea910e94beef1fa71cb7a31fa140fce6",
@@ -99,7 +99,7 @@
       "queue-handoff/SKILL.md": "ca16094ab4d7cc267a8005435b21b1bd8f50f35d097d6856f938e32594488e6b",
       "refocusing/SKILL.md": "18865d3289f4ed6a1cab0998e8c2c297d593eaf58a6c28bd9f54c7efade99087",
       "refocusing/references/refocus.md": "6e71513e82bd815e1506b0be4f9a972eecd3053a8deb06340c10b1d1792489bc",
-      "refocusing/scripts/trace-to-root.py": "913662fc7860735aa6f3a97b1a8d3a59f51c716d79222f58dc8eeff63213f485",
+      "refocusing/scripts/trace-to-root.py": "e8a205a439761466d802cd9a489d273b74856c917cc87034f5595cf6fba6a538",
       "retiring-and-inheriting-a-seat/CHANGELOG.md": "1756a0a6dadc015e2744b4c39a3e7cd08813d9d421e788e953ac5ad75b064197",
       "retiring-and-inheriting-a-seat/SKILL.md": "4945abbc7114bf268714bcc2f90fb22a86089f1e7df852e306d739d5df0be127",
       "seat-continuity-and-handover/SKILL.md": "9d2b251971b53872930032840736eec05ecb23e07bdbb70ef799464efeab91ee",
@@ -132,7 +132,7 @@
       "core/specification-system/SKILL.md": "5226d6e8b1362df89ba3d5afd82e4b4add355870132ca4b140d7f9f4324ffdc1",
       "core/topology-mutation-and-seat-management/SKILL.md": "527ca074432ce6513fb25cd27e8c709dabe0c91361b8999e09b272f3813abe62",
       "core/watchdog/SKILL.md": "88e097e7fe7321e166541b9eac42016fa7a3d362a86fde8946e666f22409f145",
-      "core/working-with-an-openrig-team/SKILL.md": "7cfa6ebd30ab229e76de47d2b3ab570bc98f286d3de9cc4ac22fd2d0239daf80",
+      "core/working-with-an-openrig-team/SKILL.md": "c9a42fdd9632d10de4d8e38abdb6e2b9b049d06b628b96907cf3447f77a4dd63",
       "pm/backlog-capture/SKILL.md": "345c2b47fc85e48c15c0d42bbb48fb27dd3b0ceec36bf59dc6ed20daaea47a84",
       "pm/context-builder/SKILL.md": "0134c9b0a9f196565109f7f51b6ec78d5c3e4b5982a0d7105a93b29952625b3c",
       "pm/exec-summary/SKILL.md": "ada0f42337920e7acdd94e24cad4f5c269b057e750f4a7fc627ea9efbc02fcb6",

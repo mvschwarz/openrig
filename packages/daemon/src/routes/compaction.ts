@@ -39,11 +39,13 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       }, 503);
     }
 
-    const body = await c.req.json<{ session?: string; skipMap?: boolean }>().catch(() => ({} as { session?: string; skipMap?: boolean }));
+    type TriggerBody = { session?: string; skipMap?: boolean; earlyAck?: boolean };
+    const body: TriggerBody = await c.req.json<TriggerBody>().catch(() => ({}));
     if (!body.session) {
       return c.json({ ok: false, error: "Missing required field: session" }, 400);
     }
     if (body.skipMap !== undefined && typeof body.skipMap !== "boolean") return c.json({ ok: false, error: "skipMap must be boolean" }, 400);
+    if (body.earlyAck !== undefined && typeof body.earlyAck !== "boolean") return c.json({ ok: false, error: "earlyAck must be boolean" }, 400);
     const sessionName = physicalSessionName(db, body.session);
 
     // Ambiguity / existence check — mirror /send (409 ambiguous, 404 not found).
@@ -64,6 +66,8 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
 
     if (row.runtime === "pi") {
+      if (body.earlyAck) return c.json({ ok: false, session: sessionName, runtime: "pi",
+        reason: "early_ack_unsupported", error: "Early compaction acknowledgement is available only for Claude Code seats." }, 422);
       const service = c.get("piCompactionService" as never) as PiCompactionService | undefined;
       if (!service) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
       // The caller's actor reaches the same terminal-policy check the Claude path uses.
@@ -85,21 +89,31 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     // absent / stale / unknown we pass null (never invent a value); an explicit
     // manual request doesn't depend on the threshold, so it proceeds without it.
     const usage = usageStore.getForNode(row.node_id, sessionName);
-    const outcome = await enforcer.triggerManualCompact(
-      {
-        nodeId: row.node_id,
-        sessionName,
-        runtime: row.runtime,
-        cwd: row.cwd,
-        usedPercentage: usage.availability === "known" ? usage.usedPercentage : null,
-        transcriptPath: usage.transcriptPath,
-        sessionId: usage.sessionId,
-      },
-      // This is the OPERATOR's manual-trigger verb (bearer-auth'd); the resulting sequence is
-      // drain-exempt while auto-compaction is disabled. GHOST-STAGE fix (a) actor-gate: automation
-      // paths that do NOT set this are NOT exempt, so they cannot launder a drain past the gate.
-      { operatorInitiated: true, skipMap: body.skipMap === true, actor: { source: "caller", session: transportSenderSession(c) ?? null } },
-    );
+    const input = {
+      nodeId: row.node_id, sessionName, runtime: row.runtime, cwd: row.cwd,
+      usedPercentage: usage.availability === "known" ? usage.usedPercentage : null,
+      transcriptPath: usage.transcriptPath, sessionId: usage.sessionId,
+    };
+    // This is the OPERATOR's manual-trigger verb (bearer-auth'd); the resulting sequence is
+    // drain-exempt while auto-compaction is disabled. GHOST-STAGE fix (a) actor-gate: automation
+    // paths that do NOT set this are NOT exempt, so they cannot launder a drain past the gate.
+    const options = { operatorInitiated: true, skipMap: body.skipMap === true,
+      actor: { source: "caller" as const, session: transportSenderSession(c) ?? null } };
+    let outcome: ManualCompactionOutcome;
+    if (body.earlyAck) {
+      const start = enforcer.startManualCompact(input, options);
+      if ("completion" in start) {
+        const { attemptId, completion } = start;
+        void completion.catch((error: unknown) => {
+          console.error("[compaction] manual attempt failed after acknowledgement",
+            { sessionName, attemptId, errorClass: error instanceof Error ? error.name : typeof error });
+        });
+        return c.json({ ok: true, session: sessionName, stage: "preparing", attemptId }, 202);
+      }
+      outcome = start;
+    } else {
+      outcome = await enforcer.triggerManualCompact(input, options);
+    }
 
     if (outcome.triggered) {
       return c.json({ ok: true, session: sessionName, stage: outcome.stage, compact: compactResultText("submitted_unconfirmed") });

@@ -32,6 +32,9 @@ export function main(argv: string[]): number {
   const args = parseArgs(argv);
   try {
     const diff = generateSurfaceDiff({ from: args.from, to: args.to, cwd: args.cwd });
+    if (diff.release_from_source === "checkout-nearest-release") {
+      process.stderr.write(`Warning: no earlier release found for ${diff.release_to}. Using the checkout's nearest release ${diff.release_from}. Pass --from to choose a different base.\n`);
+    }
     const yaml = diffToYaml(diff);
     if (args.out) {
       fs.writeFileSync(args.out, yaml);

@@ -21,6 +21,7 @@
     "./attention": { "types": "./dist/attention-surface.d.ts", "import": "./dist/attention-surface.js" },
     "./project-catalog": { "types": "./dist/project-catalog-surface.d.ts", "import": "./dist/project-catalog-surface.js" },
     "./mission-parent": { "types": "./dist/mission-parent-surface.d.ts", "import": "./dist/mission-parent-surface.js" },
+    "./transcript-redaction": { "types": "./dist/transcript-redaction-surface.d.ts", "import": "./dist/transcript-redaction-surface.js" },
     "./daemon-shutdown": {
       "types": "./dist/daemon-shutdown.d.ts",
       "import": "./dist/daemon-shutdown.js"
@@ -104,6 +105,10 @@
     "./codex-auth": {
       "types": "./dist/codex-auth-surface.d.ts",
       "import": "./dist/codex-auth-surface.js"
+    },
+    "./conversation-key": {
+      "types": "./dist/conversation-key-surface.d.ts",
+      "import": "./dist/conversation-key-surface.js"
     },
     "./herdr-live-workspace": {
       "types": "./dist/herdr-live-workspace-surface.d.ts",

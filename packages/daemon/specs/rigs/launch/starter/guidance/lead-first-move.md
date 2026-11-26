@@ -23,7 +23,10 @@ before committing without the review.
 
 **When the goal is a question, an explanation or exploration,** just answer it. No mission or slice.
 
-When the goal is done, close the operator's row with the result.
+When the goal is done, close the operator's row with the result. If the row has a `returnRoute` (the goal, or a
+later task, came from the person's own conversation), first send the result there as a task
+(`rig queue create --destination <returnRoute> --summary "<the result in a line>" --body-file <file>`): a close by
+itself doesn't reach that conversation, and the task does.
 
 **If a seat you're waiting on stops at a prompt,** for example a reviewer asking to run a command, look at your goal row
 first (`rig queue show <id> --full`). With a `returnRoute`, the person answers from their own conversation, not from your

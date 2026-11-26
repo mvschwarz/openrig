@@ -1,12 +1,32 @@
 import { Command } from "commander";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { conversationKey } from "@openrig/daemon/conversation-key";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
-import { createMcpServer, dropUnfilledSeat, unfilledSeatText, type UnfilledSeat } from "../mcp-server.js";
+import { daemonMayAnswer, daemonStatusGuard, getDaemonStatus, getDaemonUrl, printStatusGuard, resolveConfiguredDaemonTarget } from "../daemon-lifecycle.js";
+import { createMcpServer, dropUnfilledSeat, toolForGrantOperation, unfilledSeatText, type UnfilledSeat } from "../mcp-server.js";
 import { addGrant, McpHttpConfigError, mcpTokenFilePath, readGrantServiceHeader, readGrants, revokeGrant, rotateGrant, startMcpHttpServer } from "../mcp-http.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+
+function parseGrantAllow(values: string[]): Record<string, string[]> {
+  const objects = new Map<string, Set<string>>();
+  for (const value of values) {
+    const [object, actions, ...extra] = value.split(":");
+    if (!object || !actions || extra.length > 0) {
+      throw new Error(`--allow needs object:action[,action...], for example queue:list,show. Got ${JSON.stringify(value)}.`);
+    }
+    const allowed = objects.get(object) ?? new Set<string>();
+    for (const action of actions.split(",")) {
+      if (!toolForGrantOperation(object, action)) {
+        throw new Error(`--allow does not recognize ${JSON.stringify(`${object}:${action}`)} as a supported object and action.`);
+      }
+      allowed.add(action);
+    }
+    objects.set(object, allowed);
+  }
+  return Object.fromEntries([...objects].map(([object, actions]) => [object, [...actions]]));
+}
 
 /**
  * `rig mcp serve` — start MCP server wrapping the daemon API.
@@ -69,24 +89,6 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
       const unfilledSeat = dropUnfilledSeat();
       if (unfilledSeat) console.error(`rig mcp serve: ${unfilledSeatText(unfilledSeat)}; serving with no seat until it names this app's address on the team.`);
 
-      let daemonUrl: string;
-      if (opts.port) {
-        const daemonPort = parseInt(opts.port, 10);
-        if (Number.isNaN(daemonPort)) {
-          console.error("Invalid port number");
-          process.exitCode = 1;
-          return;
-        }
-        if (daemonPort < 1 || daemonPort > 65535) {
-          console.error(`Warning: daemon port ${daemonPort} is outside [1, 65535]; MCP will start, but daemon tool calls may fail. Check --port.`);
-        }
-        daemonUrl = `http://127.0.0.1:${daemonPort}`;
-      } else {
-        const status = await getDaemonStatus(deps.lifecycleDeps);
-        if (!daemonStatusGuard(status)) return;
-        daemonUrl = getDaemonUrl(status);
-      }
-
       if (!opts.http && (opts.grantService || opts.grantServiceHeaderFile)) {
         console.error("--grant-service and --grant-service-header-file need --http");
         process.exitCode = 1;
@@ -113,6 +115,36 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
         process.exitCode = 1;
         return;
       }
+
+      let daemonUrl: string;
+      if (opts.port) {
+        const daemonPort = parseInt(opts.port, 10);
+        if (Number.isNaN(daemonPort)) {
+          console.error("Invalid port number");
+          process.exitCode = 1;
+          return;
+        }
+        if (daemonPort < 1 || daemonPort > 65535) {
+          console.error(`Warning: daemon port ${daemonPort} is outside [1, 65535]; MCP will start, but daemon tool calls may fail. Check --port.`);
+        }
+        daemonUrl = `http://127.0.0.1:${daemonPort}`;
+      } else {
+        const status = await getDaemonStatus(deps.lifecycleDeps);
+        if (daemonMayAnswer(status)) {
+          daemonUrl = getDaemonUrl(status);
+        } else if (opts.http || readOpenRigEnv("OPENRIG_URL", "RIGGED_URL") !== undefined) {
+          daemonStatusGuard(status);
+          return;
+        } else {
+          // An app starts its stdio server when the app starts, often before the daemon. Exiting would leave the app
+          // without these tools until it reconnects, so serve anyway: aimed at the endpoint the status names, else this
+          // home's configured one, each call reaches the daemon once it answers there.
+          printStatusGuard(status);
+          daemonUrl = getDaemonUrl(status.port !== undefined ? status : { state: status.state, ...resolveConfiguredDaemonTarget() });
+          console.error(`rig mcp serve: serving anyway. Tool calls go to the daemon at ${daemonUrl} and fail until it answers there.`);
+        }
+      }
+
       if (opts.http) {
         await serveHttp(daemonUrl, opts.bind ?? "127.0.0.1:7437", opts.grantService, opts.grantServiceHeaderFile, oauth, opts.taskDestination, opts.frontDoor === true, unfilledSeat);
         return;
@@ -124,7 +156,8 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
       process.once("SIGINT", finish);
       process.once("SIGTERM", finish);
       // Serves the protocol revision the client opens with: 2026-07-28 per request, or 2025's initialize handshake.
-      const served = serveStdio(() => createMcpServer(client, { frontDoor: opts.frontDoor === true, ...(unfilledSeat ? { unfilledSeat } : {}) }), { onerror: (err) => console.error(`rig mcp serve: ${err.message}`) });
+      // The stdio server runs as a child of the app's conversation, so it can derive that conversation's key (slice 15).
+      const served = serveStdio(() => createMcpServer(client, { frontDoor: opts.frontDoor === true, ...(unfilledSeat ? { unfilledSeat } : {}), conversationKey }), { onerror: (err) => console.error(`rig mcp serve: ${err.message}`) });
       try {
         // EOF is a normal stdio disconnect, not an unresolved top-level await.
         if (process.stdin.readableEnded) finish();
@@ -146,11 +179,15 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
     .option("--root <name...>", "Shared file roots (OPENRIG_FILES_ALLOWLIST names) whose artifacts it may read")
     .option("--workspace", "Also read the work tree and context (rig_slices, rig_mission, rig_context_*)")
     .option("--owner", "An owner grant: every tool and object, like the local owner")
+    .option("--allow <object:actions>", "Offer only these object actions, for example queue:list,show (repeatable)",
+      (value: string, previous: string[] = []) => [...previous, value])
     .option("--person <entity_id>", "The registered person (rig gateway human list) this connection may answer the team's questions for, with rig_question_list and rig_question_answer: only what they explicitly say. Never inferred from the seat or --owner")
-    .action(async (name: string, opts: { seat: string; rig?: string[]; root?: string[]; workspace?: boolean; owner?: boolean; person?: string }) => {
+    .action(async (name: string, opts: { seat: string; rig?: string[]; root?: string[]; workspace?: boolean; owner?: boolean; person?: string; allow?: string[] }) => {
       const file = mcpTokenFilePath();
       try {
+        const objects = opts.allow ? parseGrantAllow(opts.allow) : undefined;
         const issued = await addGrant(file, { name, seat: opts.seat, rigs: opts.rig ?? [], roots: opts.root ?? [], workspace: opts.workspace === true, owner: opts.owner === true,
+          ...(objects !== undefined ? { objects } : {}),
           ...(opts.person !== undefined ? { person: opts.person } : {}) });
         console.log(`Token for ${name}, shown once (only its hash is kept in ${file}):`);
         console.log(issued);

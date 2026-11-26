@@ -104,6 +104,8 @@ export interface HostNode {
   /** Why the connected assistants couldn't be read (an older daemon, a failed read, an unusable answer); absent when
    *  they were read or not asked for. */
   connectedAssistantsUnavailable?: string;
+  /** This local table's first paint deferred its connected-assistant read. */
+  connectedAssistantsPending?: boolean;
 }
 
 /** A connected assistant's check-in as this daemon reports it. */
@@ -370,8 +372,9 @@ export type HealthCoverage = {
 };
 
 export interface HealthSnapshot {
-  /** loaded means the canonical bounded list read answered, including [] */
-  availability: "loaded" | "unavailable";
+  /** loaded means the canonical bounded list read answered, including []; pending means it hasn't been read yet,
+   *  because Topology's first paint doesn't wait for it */
+  availability: "loaded" | "unavailable" | "pending";
   evaluatedAt: string | null;
   total: number;
   truncated: boolean;
@@ -473,8 +476,8 @@ export interface FleetSnapshot {
    * human-facing set); empty array = the join ran and yielded zero (silence). */
   attention: QueueRead[];
   /** Coverage of the four active queue lists, before filtering by rig/pod/seat.
-   * A cap is possible truncation; it does not prove an omitted row. */
-  queueCoverage?: "complete" | "partial" | "unavailable";
+   * A cap is possible truncation; it does not prove an omitted row. Pending: not read yet (Topology's first paint). */
+  queueCoverage?: "complete" | "partial" | "unavailable" | "pending";
   /** PULSE ⧗ BLOCKED ON AGENTS source — the shipped state=blocked read (ALL
    * blocked qitems); the render filters to NON-human blockedOn. */
   blocked: QueueRead[];
@@ -502,6 +505,9 @@ export interface FleetSnapshot {
   stream: Array<{ tsEmitted: string; sourceSession: string; body: string }>;
   /** named per-read failures (honest partial hydration, never silent) */
   readErrors: string[];
+  /** Topology's first paint: only its own reads (rigs, hosts, seats) answered. Health, attention, the queue lists and
+   *  the other reads are still to come, so what they feed is pending, never empty. */
+  pendingReads?: true;
 }
 
 export type GetSnapshot = () => FleetSnapshot;
