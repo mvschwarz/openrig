@@ -164,7 +164,7 @@ With the switch on:
   the seat's rig selects, when that project is healthy, and its label says the
   project was inferred from the seat's rig. Any explicit `project:` tag decides
   for itself, even another project's. With no project selected by the rig, the
-  row is read under workspace.root as before.
+  row is read under the configured missions root as before.
 - The seat's `LEARNED.md` contributes its `MY JOB HERE` and `STANDING DUTIES`
   sections, and notes and each node's `PROGRESS.md` contribute their
   `Current state` section. When a file has

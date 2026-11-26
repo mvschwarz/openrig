@@ -3143,6 +3143,9 @@ describe("queue routes", () => {
       });
 
       it.each([
+        { name: "an empty project tag", tags: ["project:"], resolves: null, reason: null },
+        { name: "a whitespace-only project tag", tags: ["project:   "], resolves: null, reason: null },
+        { name: "an empty project in bundled tags", tags: ["other:tag, project:  "], resolves: null, reason: null },
         { name: "the rig's own project", tags: ["project:alpha"], resolves: "alpha" as const, reason: null },
         { name: "another project", tags: ["project:beta"], resolves: "beta" as const, reason: null },
         { name: "several projects", tags: ["project:alpha", "project:beta"], resolves: null,

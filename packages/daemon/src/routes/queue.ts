@@ -1606,12 +1606,12 @@ export function queueRoutes(): Hono {
     const rigProjectRoot = rigProject ? projectMissionsRoots.get(rigProject) : undefined;
     const inferredRoot = rigProject && rigProjectRoot?.root && !rigProjectRoot.error ? rigProjectRoot.root : null;
     const currentWorkRoot: MissionsRootResolver = (row: CurrentWorkRow) => {
-      const projectIds = [...new Set((row.tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim()))
-        .filter((tag) => tag.startsWith("project:") && tag.slice("project:".length).trim())
-        .map((tag) => tag.slice("project:".length).trim()))];
+      const projectTags = (row.tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim()))
+        .filter((tag) => tag.startsWith("project:"));
+      const projectIds = [...new Set(projectTags.map((tag) => tag.slice("project:".length).trim()).filter(Boolean))];
       // It stands in for the row's own project, and the configured root could hold a mission of the same name: ambiguous,
       // so a held or pending row's scope carries the label too.
-      if (projectIds.length === 0 && inferredRoot) {
+      if (projectTags.length === 0 && inferredRoot) {
         return { root: inferredRoot, reason: `project ${rigProject} inferred from this seat's rig; the row names no project`, ambiguous: true };
       }
       if (projectIds.length === 0) return { root: missionsRoot };
