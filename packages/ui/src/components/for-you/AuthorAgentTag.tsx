@@ -10,10 +10,14 @@
 // in cmux). The label stays a Link so right-click / cmd-click still
 // open the seat detail page (URL preserved).
 
+import { useMemo } from "react";
 import { Link } from "@tanstack/react-router";
 import { useCmuxLaunch } from "../../hooks/useCmuxLaunch.js";
+import { useNodeInventory } from "../../hooks/useNodeInventory.js";
+import { usePsEntries } from "../../hooks/usePsEntries.js";
 import { ActorMark, isHumanActor } from "../graphics/RuntimeMark.js";
 import { parseSessionName } from "../../lib/session-name.js";
+import { buildTopologySessionIndex, resolveTopologySession } from "../../lib/topology-activity.js";
 
 interface AuthorAgentTagProps {
   authorSession: string;
@@ -22,22 +26,38 @@ interface AuthorAgentTagProps {
   testId?: string;
 }
 
-function parseSeat(authorSession: string): { logicalId: string; rigId: string | null } {
-  // OPR.0.4.6.MH1 FR-8: the shared parse contract; non-canonical names
-  // render whole as the logical id (no rig link target).
+/** The seat a canonical session names, resolved against its rig's own node inventory. A session's local part is
+ *  `{pod}-{member}` and doesn't split back into a logical id (`dev-impl@my-rig` is `dev.impl`), and it names its rig
+ *  while the seat page and the cmux launcher take the rig's id. Null until it resolves, or when it doesn't (a name
+ *  that matches no rig or several, or no node). */
+function useSessionSeat(authorSession: string, cardRigId: string | undefined): { rigId: string; logicalId: string } | null {
   const parsed = parseSessionName(authorSession);
-  if (parsed.kind !== "canonical") return { logicalId: authorSession, rigId: null };
-  return { logicalId: parsed.member, rigId: parsed.rig };
+  const rigName = parsed.kind === "canonical" ? parsed.rig : null;
+  const rigs = usePsEntries();
+  const named = rigName && !cardRigId ? (rigs.data ?? []).filter((rig) => rig.name === rigName) : [];
+  const rigId = rigName ? cardRigId ?? (named.length === 1 ? named[0]!.rigId : null) : null;
+  const nodes = useNodeInventory(rigId);
+  return useMemo(() => {
+    if (!rigId || !nodes.data) return null;
+    const index = buildTopologySessionIndex(nodes.data.map((node) => ({
+      nodeId: `${node.rigId}::${node.logicalId}`,
+      rigId: node.rigId,
+      rigName: node.rigName,
+      logicalId: node.logicalId,
+      canonicalSessionName: node.canonicalSessionName,
+    })));
+    const seat = resolveTopologySession(index, authorSession);
+    return seat?.logicalId ? { rigId, logicalId: seat.logicalId } : null;
+  }, [rigId, nodes.data, authorSession]);
 }
 
 export function AuthorAgentTag({ authorSession, rigId, className, testId }: AuthorAgentTagProps) {
-  const parsed = parseSeat(authorSession);
-  const targetRigId = rigId ?? parsed.rigId;
+  const seat = useSessionSeat(authorSession, rigId);
   const cmuxLaunch = useCmuxLaunch();
   const humanActor = isHumanActor(authorSession);
 
-  // If we can't resolve a rigId, just show the tag without a link.
-  if (!targetRigId) {
+  // Until the seat resolves, show the tag without a link: a guessed id would open the wrong seat or none.
+  if (!seat) {
     return (
       <span
         data-testid={testId ?? "author-agent-tag"}
@@ -52,13 +72,13 @@ export function AuthorAgentTag({ authorSession, rigId, className, testId }: Auth
   return (
     <Link
       to="/topology/seat/$rigId/$logicalId"
-      params={{ rigId: targetRigId, logicalId: encodeURIComponent(parsed.logicalId) }}
+      params={{ rigId: seat.rigId, logicalId: encodeURIComponent(seat.logicalId) }}
       data-testid={testId ?? "author-agent-tag"}
       onClick={(e) => {
         // Cmd/Ctrl-click or right-click → standard Link behavior (open seat detail).
         // Plain click → fire cmux launcher AND let Link navigate.
         if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-        cmuxLaunch.mutate({ rigId: targetRigId, logicalId: parsed.logicalId });
+        cmuxLaunch.mutate({ rigId: seat.rigId, logicalId: seat.logicalId });
       }}
       className={
         className ??
