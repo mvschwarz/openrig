@@ -900,6 +900,27 @@ function polledBacklogText(member: string, rows: BacklogRow[], thresholdMinutes:
   };
 }
 
+/** The standing notice for a person's own conversation at the address OpenRig issued it (#3964). OpenRig doesn't see the
+ *  conversation's reads, so it says only what OpenRig knows: nobody has claimed these rows. Built from the rows' fixed facts. */
+function conversationBacklogText(address: string, rows: BacklogRow[], thresholdMinutes: number): { summary: string; body: string } {
+  const { sorted, listed, count } = backlogListing(rows);
+  return {
+    summary: backlogTitle(`${address}'s work`, rows.length),
+    body:
+      `STUCK SWEEP FINDING (unclaimed-backlog)\n` +
+      `conversation: ${address} (an address OpenRig issued to a person's own conversation, not a seat: no wake is sent to it, ` +
+      `and it picks up work when it reads its own queue)\n` +
+      `unclaimed: ${count} (the threshold is ${thresholdMinutes} min)\n` +
+      `${listed.join("\n")}\n` +
+      `why: nobody has claimed these rows, and OpenRig can't tell whether the conversation has read them: only a claim shows ` +
+      `it picked one up. Ask its person to check that conversation, or route the work to another seat. This one notice ` +
+      `stands for these rows instead of a finding per row, and follows them as they come and go.\n` +
+      `List them: rig queue list --destination ${address} --state pending\n` +
+      `The sweep closes this notice itself once every row it stands for is claimed, parked or closed.\n` +
+      `${BACKLOG_ROWS_PREFIX}${JSON.stringify(sorted.map((r) => r.qitemId))}`,
+  };
+}
+
 /** The rows a standing notice's body says it stands for, or null when the line is missing or unreadable: unknown, which is
  *  never read as "none". */
 function backlogRowsOf(body: string): Set<string> | null {
@@ -968,7 +989,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const agentSeats = new Map<string, { logicalId: string; rig: string } | null>();
     /** #2988: each seat's one declared delegation parent (parentNow, below), dropped with agentSeats. */
     const parentsNow = new Map<string, string | null>();
-    /** Hosted polling-member status (pollsForWork, below), dropped on every yield or awaited write. */
+    /** Whether a destination polls for its work (pollsForWork, below), dropped on every yield or awaited write. */
     const pollingMembers = new Map<string, boolean>();
     /** Configured operator recovery seats (routeAroundMissing, below), dropped on every yield or awaited write. */
     let recoverySeats: Array<string | null> | undefined;
@@ -1136,12 +1157,14 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       && !hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes);
     const isHumanNotice = (row: QueueItem): boolean => row.deliveryOutcome === "never-posted" || row.deliveryOutcome === "transport-failed";
     // A hosted member with no wake trigger picks up its work by reading the queue: nothing can push work to it, by design.
-    // Its rows' unroutable wakes aren't failed deliveries, so they get no finding each; work it leaves unclaimed past the
-    // unclaimed age is listed in the member's one standing notice instead. Refreshed after every yield or awaited write.
+    // So does a person's own conversation at the address OpenRig issued it (#3964), through the openrig plugin's hooks or
+    // its own check. Their rows' unroutable wakes aren't failed deliveries, so they get no finding each; work left unclaimed
+    // past the unclaimed age is listed in one standing notice per address instead. Refreshed after every yield or awaited write.
     const pollsForWork = (session: string): boolean => {
       let polls = pollingMembers.get(session);
       if (polls === undefined) {
-        polls = deps.queueRepo.isHostedMember(session) && deps.queueRepo.classifyDestinationOf(session).class === "unroutable";
+        polls = (deps.queueRepo.isHostedMember(session) || deps.queueRepo.isIssuedConversation(session))
+          && deps.queueRepo.classifyDestinationOf(session).class === "unroutable";
         pollingMembers.set(session, polls);
       }
       return polls;
@@ -1578,7 +1601,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       c.noWake = true;
       const recipient = noWakeRecipient(c.route, c.row.sourceSession);
       c.why += noRoute
-        ? `; ${c.route} has no wake route on this daemon (no terminal, not a person). If it's a hosted member, it sees this work only when it next checks, so ask it to; otherwise fix the address`
+        ? deps.queueRepo.isIssuedConversation(c.route)
+          ? `; ${c.route} is an address OpenRig issued to a person's own conversation: no wake is sent to it, and OpenRig can't see its activity, so ask its person`
+          : `; ${c.route} has no wake route on this daemon (no terminal, not a person). If it's a hosted member, it sees this work only when it next checks, so ask it to; otherwise fix the address`
         : terminalSeat
           ? `; ${c.route} is a terminal seat; nothing there can claim this work, and no wake is typed into it. Route the work to an agent seat`
           : `; ${c.route} is a hosted member. OpenRig rang its trigger (${c.row.lastNudgeResult ?? "no ring recorded"}), and it hasn't claimed this work. It sees work only when it checks, so ask it to`;
@@ -2076,9 +2101,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const polled = !parent && (rows.length > 0 ? rows.some(polledUnclaimed) : pollsForWork(seat));
       const backlogText = (standsFor: BacklogRow[]) => parent
         ? parentBacklogText(seat, parent, standsFor, ageMinutes, parentNow(seat) === parent)
-        : polled
-          ? polledBacklogText(seat, standsFor, ageMinutes, deps.queueRepo.hostedMemberCheckIn(seat, now), now)
-          : unclaimedBacklogText(seat, standsFor, ageMinutes, node);
+        : polled && deps.queueRepo.isIssuedConversation(seat)
+          ? conversationBacklogText(seat, standsFor, ageMinutes)
+          : polled
+            ? polledBacklogText(seat, standsFor, ageMinutes, deps.queueRepo.hostedMemberCheckIn(seat, now), now)
+            : unclaimedBacklogText(seat, standsFor, ageMinutes, node);
       // A polling member's notice goes where its rows' findings went: the person, else their creator when they share one,
       // else the operator agent. With none, it stays with the member, which reads it when it next checks. A parent's
       // notice goes to the parent.
