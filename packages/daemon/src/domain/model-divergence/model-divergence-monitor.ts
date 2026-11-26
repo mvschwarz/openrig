@@ -22,7 +22,7 @@
 
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
-import { CANONICAL_MODEL_PINS } from "../spec-validation-advisory.js";
+import { isClaudeModelAlias } from "../spec-validation-advisory.js";
 
 export interface PinnedSeat {
   nodeId: string;
@@ -196,26 +196,19 @@ export class ModelDivergenceMonitor {
     const key = `${seat.nodeId}:${seat.generation ?? seat.sessionName}`;
     if (this.settled.has(key)) return;
     const read = await this.deps.readEffectiveModel(seat, cycle);
-    if (!read.ok) {
-      // PENDING, never assumed — and never invisible: past the threshold this generation is
-      // named ONCE as never-checked (r1 measured real codex rollouts whose signal sat outside
-      // the bounded read; without this line such a seat would be skipped silently forever).
-      const polls = (this.pendingPolls.get(key) ?? 0) + 1;
-      this.pendingPolls.set(key, polls);
-      this.pendingReasons.set(key, read.reason);
-      if (polls >= PENDING_VISIBILITY_POLLS && !this.pendingWarned.has(key)) {
-        this.pendingWarned.add(key);
-        this.warn(
-          `[model-divergence] ${seat.sessionName} (pin ${seat.pinnedModel}) has NO effective-model ` +
-          `read after ${polls} polls — this seat is pinned but UNCHECKED (${read.reason}). ` +
-          `A divergence here would currently be invisible.`,
-        );
-      }
+    const pins = read.ok ? read.pinReadings ?? [seat.pinnedModel] : [];
+    // The answering model cannot resolve the expected pin: a fallback may have answered.
+    // Only reader-supplied resolved pin readings can make an alias comparison determinate.
+    const reason = !read.ok ? read.reason
+      : seat.runtime === "claude-code" && (pins.some(isClaudeModelAlias) || isClaudeModelAlias(read.model))
+        ? "model-alias-unresolved" : null;
+    if (reason !== null) {
+      this.markPending(key, seat, reason);
       return;
     }
+    if (!read.ok) return;
     this.pendingPolls.delete(key);
     this.pendingReasons.delete(key);
-    const pins = read.pinReadings ?? [seat.pinnedModel];
     if (pins.some((pin) => modelsMatch(pin, read.model, seat.runtime))) {
       this.settled.add(key);
       return;
@@ -229,6 +222,20 @@ export class ModelDivergenceMonitor {
     }
     if (!alreadyProclaimed) fired.push(await this.proclaim(seat, read.model, occurrenceId));
     this.settled.add(key);
+  }
+
+  private markPending(key: string, seat: PinnedSeat, reason: string): void {
+    const polls = (this.pendingPolls.get(key) ?? 0) + 1;
+    this.pendingPolls.set(key, polls);
+    this.pendingReasons.set(key, reason);
+    if (polls >= PENDING_VISIBILITY_POLLS && !this.pendingWarned.has(key)) {
+      this.pendingWarned.add(key);
+      this.warn(
+        `[model-divergence] ${seat.sessionName} (pin ${seat.pinnedModel}) comparison remains UNKNOWN ` +
+        `after ${polls} polls — this seat is pinned but UNCHECKED (${reason}). ` +
+        `A divergence here would currently be invisible.`,
+      );
+    }
   }
 
   private async proclaim(seat: PinnedSeat, effectiveModel: string, occurrenceId: string): Promise<ModelDivergenceProclamation> {
@@ -290,17 +297,8 @@ export class ModelDivergenceMonitor {
   }
 }
 
-/** Pin comparison: canonicalize the PIN through the one shipped alias map, then EXACT,
- *  case-insensitive, after trimming (f7dfca0c, founder-steered). History on record: exact was
- *  ruled at build; a seat reversed it to whole-token alias matching; r2 reversed THAT back
- *  because generic token containment lets one pin bless multiple distinct models ("codex"
- *  matched gpt-5.6-codex AND gpt-5.1-codex-mini). The landed remedy is the explicit
- *  provider-aware mapping r2's ruling allowed for: CANONICAL_MODEL_PINS
- *  (spec-validation-advisory.ts) is the SINGLE mapping home — spec validation nudges pins
- *  toward canonical ids with it, and this detector canonicalizes the pinned string through the
- *  same data before comparing. Never add a second map here, and never token containment: an
- *  unknown alias or a fallback model canonicalizes to itself and still diverges. Raw
- *  pinned/effective strings travel untouched in any proclamation. */
+/** Compare literal model ids, retaining Claude's context-window, Bedrock and snapshot forms.
+ *  Aliases require a resolved expected id before this comparison; never infer it from the answer. */
 export function modelsMatch(pinned: string, effective: string, runtime?: string | null): boolean {
   // Claude's [1m] selects the context window, not a different model. Other runtimes keep it literal.
   const modelId = (model: string) => runtime === "claude-code" ? model.trim().replace(/\[1m\]$/i, "") : model;
@@ -323,12 +321,7 @@ const CLAUDE_SNAPSHOT = /-\d{8}$/;
 /** Bedrock's Anthropic model-id prefix: `anthropic.`, alone or after a cross-Region inference-profile geography. */
 const BEDROCK_PROFILE = /^(?:(?:global|us|eu|apac|jp|au|us-gov)\.)?anthropic\./;
 
-/** The pin as modelsMatch compares it: trimmed, lower-cased, through CANONICAL_MODEL_PINS. */
+/** Normalize a literal pin without resolving provider-specific aliases. */
 export function canonicalModelPin(pinned: string): string {
-  const pin = pinned.trim().toLowerCase();
-  return (CANONICAL_MODEL_PINS[pin] ?? pin).toLowerCase();
+  return pinned.trim().toLowerCase();
 }
-// (The self-expiring CLAUDE_ALIAS_MIGRATION_BRIDGE and its SPEC_VALIDATION_CAPABILITIES sentinel
-// gate completed their arc and are DELETED per the bridge's own deletion contract: the 5.3
-// advisory landed, the bridge emptied, and f7dfca0c replaced the no-tolerance state with
-// canonicalization through the advisory's shipped map.)

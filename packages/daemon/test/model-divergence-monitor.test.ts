@@ -12,7 +12,6 @@ import {
   formatProclamation,
   type PinnedSeat,
 } from "../src/domain/model-divergence/model-divergence-monitor.js";
-import { SPEC_VALIDATION_CAPABILITIES } from "../src/domain/rigspec-schema.js";
 import { ProcessCensus } from "../src/domain/process-census.js";
 import * as monitorModule from "../src/domain/model-divergence/model-divergence-monitor.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -244,117 +243,92 @@ describe("ModelDivergenceMonitor — the cause-agnostic comparison", () => {
   });
 });
 
-describe("modelsMatch — pin canonicalized through the ONE shipped map, then EXACT (f7dfca0c)", () => {
-  it("exact ids match case-insensitively", () => {
+describe("model pins without a version table", () => {
+  it("compares literal ids without guessing versions or generic token matches", () => {
     expect(modelsMatch("gpt-5.6-luna", " GPT-5.6-Luna ")).toBe(true);
     expect(modelsMatch("claude-fable-5-1", "claude-fable-5-1")).toBe(true);
-  });
-
-  it("SINGLE MAPPING HOME: the deleted migration bridge stays deleted; the monitor consults the advisory's map", async () => {
-    // The bridge's own deletion contract completed at f7dfca0c. The monitor module must export
-    // NO alias map of its own — CANONICAL_MODEL_PINS in spec-validation-advisory.ts is the one
-    // mapping home for spec validation AND the runtime detector. A resurrected local map is the
-    // two-registries failure mode; reviewers key on this pin.
-    const monitorMod = await import("../src/domain/model-divergence/model-divergence-monitor.js");
-    expect("CLAUDE_ALIAS_MIGRATION_BRIDGE" in monitorMod).toBe(false);
-    const advisory = await import("../src/domain/spec-validation-advisory.js");
-    expect(advisory.CANONICAL_MODEL_PINS.fable).toBe("claude-fable-5-1");
-    expect(modelsMatch("fable", advisory.CANONICAL_MODEL_PINS.fable)).toBe(true); // same data drives both
-    // r2 BLOCKING-1 structural half: the map must stay null-prototype so arbitrary string pins
-    // can never read inherited Object members (behavioral pins cover both consumers).
-    expect(Object.getPrototypeOf(advisory.CANONICAL_MODEL_PINS)).toBeNull();
-  });
-
-  it("OPR.0.5.3.3: model-pin-canonicalization capability stays REGISTERED (spec advisory contract)", () => {
-    expect(SPEC_VALIDATION_CAPABILITIES.has("model-pin-canonicalization")).toBe(true);
-  });
-
-  it("r2's ambiguity discriminators stay false: one pin can never bless multiple distinct models", () => {
-    expect(modelsMatch("codex", "gpt-5.6-codex")).toBe(false);
-    expect(modelsMatch("codex", "gpt-5.1-codex-mini")).toBe(false);
-    expect(modelsMatch("mini", "gpt-5.4-mini")).toBe(false);
-  });
-
-  it("genuine divergence fails: wrong family, partial ids", () => {
-    expect(modelsMatch("fable", "claude-opus-5")).toBe(false);
+    for (const pin of ["fable", "opus", "codex", "mini", "constructor", "__proto__", "hasOwnProperty"]) {
+      expect(modelsMatch(pin, "claude-opus-5-5")).toBe(false);
+    }
+    expect(modelsMatch("fable", "claude-fable-5-1")).toBe(false);
     expect(modelsMatch("gpt-5.6-luna", "gpt-5.6")).toBe(false);
-    expect(modelsMatch("gpt-5.1-codex-mini", "gpt-5.4-mini")).toBe(false);
-  });
-});
-
-describe("f7dfca0c — alias-pin false positives end AT THE DETECTOR via the one shipped canonical map", () => {
-  // Founder-steered, desk-ruled: an alias-pinned seat running exactly the model its alias names
-  // is NOT divergent — the ruled class re-proclaimed per generation and per daemon restart.
-  // The pin canonicalizes through CANONICAL_MODEL_PINS (spec-validation-advisory.ts, the ONE
-  // mapping home) and then compares EXACT. No token containment; r2's ambiguity discriminators
-  // (one pin blessing multiple models) stay false in the neighbors above.
-  it("RED-1: alias pin canonicalizes — fable matches claude-fable-5-1, with trim/case retained", () => {
-    expect(modelsMatch("fable", "claude-fable-5-1")).toBe(true);
-    expect(modelsMatch(" FABLE ", " Claude-Fable-5-1 ")).toBe(true);
   });
 
-  it("control: alias pin vs a DIFFERENT canonical model still diverges (unknown aliases too)", () => {
-    expect(modelsMatch("fable", "claude-opus-5")).toBe(false);
-    expect(modelsMatch("fable", "claude-fable-6")).toBe(false);
-    expect(modelsMatch("opus", "claude-opus-5")).toBe(false); // unmapped alias: no blessing
-  });
+  it.each(["opus", "sonnet", "haiku", "fable", "best", "default", "opusplan", " OPUS[1M] "])(
+    "keeps %s pending instead of guessing a match or divergence", async (pinnedModel) => {
+      let model = "claude-opus-5-5";
+      const { monitor, sent, recorded } = makeMonitor({
+        listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel }],
+        readEffectiveModel: () => ({ ok: true, model }),
+      });
+      expect(await monitor.checkOnce()).toEqual([]);
+      // Even a different family may be the alias's configured provider override.
+      model = "claude-sonnet-5-5";
+      expect(await monitor.checkOnce()).toEqual([]);
+      expect(monitor.pendingSeats()).toEqual([{ key: "n1:gen-1", polls: 2, reason: "model-alias-unresolved" }]);
+      expect(sent).toEqual([]);
+      expect(recorded).toEqual([]);
+    },
+  );
 
-  it("RED-2 (monitor level): an alias-pinned claude seat running its canonical model makes NO proclamation", async () => {
-    const seat: PinnedSeat = { ...SEAT, runtime: "claude", pinnedModel: "fable" };
+  it("does not settle an unknown comparison; a later exact pin detects a genuine mismatch", async () => {
+    let pinnedModel = "sonnet";
     const { monitor, recorded } = makeMonitor({
-      listPinnedSeats: () => [seat],
-      readEffectiveModel: () => ({ ok: true as const, model: "claude-fable-5-1" }),
+      listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel }],
+      readEffectiveModel: () => ({ ok: true, model: "claude-opus-5-5" }),
     });
-    expect(await monitor.checkOnce()).toHaveLength(0);
-    expect(recorded).toHaveLength(0);
+    expect(await monitor.checkOnce()).toEqual([]);
+    pinnedModel = "claude-sonnet-5-5";
+    expect(await monitor.checkOnce()).toMatchObject([{ pinnedModel, effectiveModel: "claude-opus-5-5" }]);
+    expect(monitor.pendingSeats()).toEqual([]);
+    expect(recorded).toHaveLength(1);
   });
 
-  it("r2 BLOCKING-1: prototype-key pins are UNKNOWN aliases, not inherited Object members — they diverge, never throw", () => {
-    // r2's discriminator: CANONICAL_MODEL_PINS[pin] on an ordinary object returns inherited
-    // Object.prototype members for valid string pins like "constructor"/"__proto__" — `?? pin`
-    // never runs and `.toLowerCase()` throws, aborting the WHOLE detector pass. Lookup must be
-    // own-property-only.
-    expect(modelsMatch("constructor", "claude-opus-5")).toBe(false);
-    expect(modelsMatch("__proto__", "claude-opus-5")).toBe(false);
-    expect(modelsMatch("hasOwnProperty", "claude-opus-5")).toBe(false);
-  });
-
-  it("r2 BLOCKING-1 (monitor level): a prototype-key pin proclaims RAW and does NOT blind later seats in the pass", async () => {
-    const evil: PinnedSeat = { ...SEAT, nodeId: "n-evil", sessionName: "evil@r", runtime: "claude", pinnedModel: "constructor" };
-    const later: PinnedSeat = { ...SEAT, nodeId: "n-later", sessionName: "later@r", pinnedModel: "gpt-5.1-codex-mini" };
-    const { monitor, recorded } = makeMonitor({
-      listPinnedSeats: () => [evil, later],
-      readEffectiveModel: (seat: PinnedSeat) =>
-        ({ ok: true as const, model: seat.sessionName === "evil@r" ? "claude-opus-5" : "gpt-5.4-mini" }),
-    });
-    const fired = await monitor.checkOnce();
-    // Both divergences proclaim — the pass survives the adversarial pin, raw strings intact.
-    expect(fired).toHaveLength(2);
-    expect(fired[0]!.pinnedModel).toBe("constructor");
-    expect(fired[0]!.effectiveModel).toBe("claude-opus-5");
-    expect(fired[1]!.pinnedModel).toBe("gpt-5.1-codex-mini");
-    expect(recorded).toHaveLength(2);
-  });
-
-  it("control (monitor level): alias pin on the WRONG model proclaims with RAW strings preserved", async () => {
-    const seat: PinnedSeat = { ...SEAT, runtime: "claude", pinnedModel: "fable" };
+  it("uses resolved pin readings when supplied by the runtime reader", async () => {
     const { monitor } = makeMonitor({
-      listPinnedSeats: () => [seat],
-      readEffectiveModel: () => ({ ok: true as const, model: "claude-opus-5" }),
+      listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel: "opus" }],
+      readEffectiveModel: () => ({ ok: true, model: "custom-deployment", pinReadings: ["custom-deployment"] }),
     });
-    const fired = await monitor.checkOnce();
-    expect(fired).toHaveLength(1);
-    expect(fired[0]!.pinnedModel).toBe("fable"); // raw pin, never the canonicalized form
-    expect(fired[0]!.effectiveModel).toBe("claude-opus-5");
+    expect(await monitor.checkOnce()).toEqual([]);
+    expect(monitor.pendingSeats()).toEqual([]);
+  });
+
+  it("an alias reported as the effective model is not proof for an exact pin", async () => {
+    const { monitor } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel: "claude-opus-5-5" }],
+      readEffectiveModel: () => ({ ok: true, model: "opus" }),
+    });
+    expect(await monitor.checkOnce()).toEqual([]);
+    expect(monitor.pendingSeats()[0]?.reason).toBe("model-alias-unresolved");
+  });
+
+  it("retains the missing current-occupant signal reason without comparing aliases", async () => {
+    const { monitor } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel: "opus" }],
+      readEffectiveModel: () => ({ ok: false, reason: "record-predates-current-occupant" }),
+    });
+    expect(await monitor.checkOnce()).toEqual([]);
+    expect(monitor.pendingSeats()[0]?.reason).toBe("record-predates-current-occupant");
+  });
+
+  it("does not apply Claude aliases to another runtime or hide later divergences", async () => {
+    const { monitor } = makeMonitor({
+      listPinnedSeats: () => [
+        { ...SEAT, runtime: "claude-code", pinnedModel: "opus" },
+        { ...SEAT, nodeId: "n2", runtime: "codex", pinnedModel: "opus" },
+        { ...SEAT, nodeId: "n3", runtime: "claude-code", pinnedModel: "constructor" },
+      ],
+      readEffectiveModel: () => ({ ok: true, model: "claude-opus-5-5" }),
+    });
+    expect((await monitor.checkOnce()).map(p => p.nodeId)).toEqual(["n2", "n3"]);
+    expect(monitor.pendingSeats()).toHaveLength(1);
   });
 });
-
 
 describe("Claude context-window pins", () => {
   it.each([
     ["claude-opus-5-5[1m]", "claude-opus-5-5"],
     ["  Claude-Opus-5-5[1M] ", " CLAUDE-OPUS-5-5 "],
-    ["fable[1m]", "claude-fable-5-1"],
     ["claude-opus-5-5", "claude-opus-5-5[1m]"],
     ["claude-opus-5-5[1m]", "claude-opus-5-5[1m]"],
   ])("matches %s to %s without proclaiming", async (pinnedModel, model) => {
@@ -372,8 +346,6 @@ describe("Claude context-window pins", () => {
     ["claude-code", "claude-opus-5-5[1m]", "claude-fable-5-1"],
     ["claude-code", "claude-opus-5-5[2m]", "claude-opus-5-5"],
     ["claude-code", "claude-opus-5-5[1m]-extra", "claude-opus-5-5"],
-    ["claude-code", "opus[1m]", "claude-opus-5-5"],
-    ["claude-code", "fable", "claude-fable-5"],
     ["codex", "claude-opus-5-5[1m]", "claude-opus-5-5"],
     ["pi", "claude-opus-5-5[1m]", "claude-opus-5-5"],
     ["omp", "claude-opus-5-5[1m]", "claude-opus-5-5"],
@@ -404,7 +376,6 @@ describe("Claude snapshot pins", () => {
     ["  Claude-Haiku-4-5 ", " CLAUDE-HAIKU-4-5-20251001 "],
     ["claude-haiku-4-5-20251001", "claude-haiku-4-5"],
     ["claude-sonnet-4-5[1m]", "claude-sonnet-4-5-20250929"],
-    ["fable", "claude-fable-5-1-20261001"],
   ])("matches %s to %s without proclaiming", async (pinnedModel, model) => {
     const { monitor, sent, recorded } = makeMonitor({
       listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel }],
@@ -420,7 +391,6 @@ describe("Claude snapshot pins", () => {
     ["claude-code", "claude-haiku-4-5-20251001", "claude-haiku-4-5-20260101"],
     ["claude-code", "claude-haiku-4", "claude-haiku-4-5-20251001"],
     ["claude-code", "claude-haiku-4-5", "claude-haiku-4-5-20251001-extra"],
-    ["claude-code", "haiku", "claude-haiku-4-5-20251001"],
     ["codex", "claude-haiku-4-5", "claude-haiku-4-5-20251001"],
     ["pi", "claude-haiku-4-5", "claude-haiku-4-5-20251001"],
     [null, "claude-haiku-4-5", "claude-haiku-4-5-20251001"],

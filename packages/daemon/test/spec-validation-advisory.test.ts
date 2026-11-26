@@ -3,17 +3,24 @@ import { describe, it, expect } from "vitest";
 import { aliasModelPinAdvisory } from "../src/domain/spec-validation-advisory.js";
 import { RigSpecSchema, LegacyRigSpecSchema } from "../src/domain/rigspec-schema.js";
 
-describe("aliasModelPinAdvisory — names the canonical id for an alias pin", () => {
-  it("returns a named advisory stating the canonical id for a known alias", () => {
+describe("aliasModelPinAdvisory — identifies aliases without inventing a version", () => {
+  it("returns a named advisory recommending a full id for a known alias", () => {
     const adv = aliasModelPinAdvisory("fable", "pods.dev.members.driver");
     expect(adv).not.toBeNull();
     expect(adv).toContain("pods.dev.members.driver");
     expect(adv).toContain('"fable"');
-    expect(adv).toContain('"claude-fable-5-1"'); // the canonical id
+    expect(adv).toContain('full model id');
+  });
+
+  it.each(["opus", "sonnet", "haiku", "fable", "best", "default", "opusplan", "sonnet[1m]"])("advises on %s without a version table", (pin) => {
+    const text = aliasModelPinAdvisory(pin, "seat");
+    expect(text).toContain("full model id");
+    expect(text).toContain("unknown");
+    expect(text).not.toMatch(/claude-.*-\d/);
   });
 
   it("case/whitespace-insensitive on the alias", () => {
-    expect(aliasModelPinAdvisory("  Fable ", "x")).toContain('"claude-fable-5-1"');
+    expect(aliasModelPinAdvisory("  Fable ", "x")).toContain('full model id');
   });
 
   it("returns null for a canonical pin, an unknown pin, or a non-string", () => {
@@ -44,7 +51,7 @@ describe("RigSpecSchema.validate — alias pins surface as advisories, never err
     const canonResult = RigSpecSchema.validate(base("claude-fable-5-1"));
 
     // advisory present for the alias, absent for the canonical pin
-    expect(aliasResult.advisories?.some((a) => a.includes("claude-fable-5-1"))).toBe(true);
+    expect(aliasResult.advisories?.some((a) => a.includes("full model id"))).toBe(true);
     expect(canonResult.advisories ?? []).toHaveLength(0);
 
     // FAIL-OPEN: the advisory changes neither `valid` nor `errors`.
@@ -67,7 +74,7 @@ describe("LegacyRigSpecSchema.validate — alias pins surface as advisories on t
     const aliasResult = LegacyRigSpecSchema.validate(legacyBase("fable"));
     const canonResult = LegacyRigSpecSchema.validate(legacyBase("claude-fable-5-1"));
 
-    expect(aliasResult.advisories?.some((a) => a.includes("claude-fable-5-1"))).toBe(true);
+    expect(aliasResult.advisories?.some((a) => a.includes("full model id"))).toBe(true);
     expect(canonResult.advisories ?? []).toHaveLength(0);
     // FAIL-OPEN: identical valid/errors with vs without the alias.
     expect(aliasResult.valid).toBe(canonResult.valid);
@@ -85,7 +92,7 @@ describe("LegacyRigSpecSchema.validate — alias pins surface as advisories on t
     });
     expect(result.valid).toBe(false);
     expect(result.errors).toContain("each node must have a string id");
-    expect(result.advisories?.some((a) => a.includes("claude-fable-5-1"))).toBe(true);
+    expect(result.advisories?.some((a) => a.includes("full model id"))).toBe(true);
     expect(result.advisories?.some((a) => a.includes("nodes.?"))).toBe(true); // fallback location
   });
 });
