@@ -11,7 +11,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import type React from "react";
+import { FeedCard } from "../src/components/for-you/FeedCard.js";
+import { needsInputSeatToFeedCard } from "../src/lib/attention-feed.js";
 import { FeedCardTerminalDrill } from "../src/components/for-you/FeedCardTerminalDrill.js";
 
 const mockFetch = vi.fn();
@@ -51,6 +54,32 @@ describe("FeedCardTerminalDrill (AC-4)", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+  });
+
+  it("opens the waiting seat's live terminal when its session is known", async () => {
+    const sessionName = "dev-impl@my-rig";
+    const waiting = needsInputSeatToFeedCard({ logicalId: "dev.impl", sessionName, source: "hook" });
+    const unresolved = needsInputSeatToFeedCard({ logicalId: "dev.qa", source: "hook" });
+    const rootRoute = createRootRoute({
+      component: () => <><FeedCard card={waiting} /><FeedCard card={unresolved} /></>,
+    });
+    const seatRoute = createRoute({
+      getParentRoute: () => rootRoute,
+      path: "/topology/seat/$rigId/$logicalId",
+    });
+    const router = createRouter({
+      routeTree: rootRoute.addChildren([seatRoute]),
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    const { findByTestId, getByTestId } = withQueryClient(<RouterProvider router={router} />);
+
+    const drill = await findByTestId<HTMLButtonElement>(`feed-card-drill-${waiting.id}`);
+    expect(drill.disabled).toBe(false);
+    expect(drill.title).toBe(`Open live terminal for ${sessionName}`);
+    const tag = getByTestId("author-agent-tag");
+    expect(tag.textContent).toBe(sessionName);
+    expect(drill.parentElement?.parentElement).toBe(tag.parentElement);
+    expect(getByTestId<HTMLButtonElement>(`feed-card-drill-${unresolved.id}`).disabled).toBe(true);
   });
 
   it("clicking the drill opens the terminal preview for the resolved session via the session-name seam", async () => {
