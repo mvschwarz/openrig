@@ -14,6 +14,7 @@ import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { listNativeProcessesOrThrow, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { readNativeProcessLaunch } from "../src/domain/native-process-arguments.js";
 
 const SHIPPED = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core");
 const RELAY = path.join(SHIPPED, "hooks/scripts/activity-relay.cjs");
@@ -52,6 +53,7 @@ interface WorldOptions {
   paneDead?: (session: string) => boolean;
   processTable?: "throws";
   seatRecords?: "throws";
+  readHomes?: (pids: number[]) => ReadonlyMap<number, string> | Promise<ReadonlyMap<number, string>>;
 }
 
 function world(options: WorldOptions = {}) {
@@ -103,6 +105,8 @@ function world(options: WorldOptions = {}) {
       return seats.map((seat) => ({ nodeId: seat.nodeId, tmuxSession: seat.session }));
     },
     listProcesses: () => { if (options.processTable === "throws") throw new Error("ps: cannot read the process table"); return rows; },
+    readCodexHomes: options.readHomes ?? (pids => new Map(pids.map(pid => [pid,
+      seats[Math.floor((pid - 1000) / 10)]?.home === "own" ? ownHome : daemonHome]))),
     // Codex's install as seen on 0.171.0: the new version's folder replaces the older one, and the entry is registered.
     runCodexCli: async (args, env) => {
       calls.push({ args, home: env.CODEX_HOME });
@@ -126,7 +130,7 @@ function world(options: WorldOptions = {}) {
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   const waits = () => log.mock.calls.map((call) => String(call[0])).filter((line) => line.startsWith("[openrig] codex core plugin deferred: "));
   return {
-    adapter, calls, daemonHome, ownHome, pluginsDir, project, waits,
+    adapter, calls, daemonHome, ownHome, pluginsDir, project, waits, rows,
     adds: () => calls.filter((call) => call.args[0] === "plugin" && call.args[1] === "add"),
     launch: (nodeId: string, resumeToken?: string) => adapter.launchHarness(
       { nodeId, tmuxSession: `${nodeId}@r`, cwd: project } as never, { name: `${nodeId}@r`, ...(resumeToken ? { resumeToken } : {}) }),
@@ -234,6 +238,18 @@ describe("#3385: no codex plugin add for a Codex home while a seat runs the inst
     await w.adapter.ensureCodexCorePluginAtBoot(true);
     expect(w.adds()).toEqual([]);
     expect(w.waits()[0]).toContain("OpenRig's records of its Codex seats couldn't be read, so a seat may be running there.");
+  });
+
+  it.each(["missing", "throws"])("an unreadable running home is named and holds only until the process exits: %s", async failure => {
+    const w = world({ seats: [{ nodeId: "a", session: "dev-a@r", pane: "codex", home: "own" }],
+      readHomes: () => { if (failure === "throws") throw new Error("process launch unavailable"); return new Map(); } });
+    await w.adapter.ensureCodexCorePluginAtBoot(true);
+    expect(w.adds()).toEqual([]);
+    expect(w.waits()[0]).toContain("dev-a@r (Codex home unreadable)");
+    // Its own home declaration cannot prove where the still-running process is.
+    w.rows.splice(1, 1);
+    await w.adapter.ensureCodexCorePluginAtBoot(true);
+    expect(w.adds()).toHaveLength(1);
   });
 });
 
@@ -365,5 +381,35 @@ describe("#3385: a daemon start", () => {
     try {
       expect(f.codexCalls().filter((args) => args[0] === "plugin").map((args) => args.slice(0, 2))).toEqual([["plugin", "add"]]);
     } finally { third.db.close(); }
+  }, 120_000);
+
+  it("a next-launch home change does not release the upgrade under a Codex still running in its original home", async () => {
+    const f = daemonFixture();
+    const nextHome = path.join(f.root, "next-codex-home");
+    fs.mkdirSync(nextHome);
+    const first = await startDaemon(f, () => null);
+    first.db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'r')").run();
+    first.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-1', 'rig-1', 'dev.impl', 'codex')").run();
+    first.db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'codex')")
+      .run("node-1", JSON.stringify([{ category: "plugin", absolutePath: path.join(f.instance, "plugins", "openrig-core") }]));
+    first.db.prepare("INSERT INTO bindings (id, node_id, tmux_session) VALUES ('binding-1', 'node-1', 'dev-impl@r')").run();
+    installed(f.codexHome, path.join(f.instance, "plugins"));
+
+    // The record changes while this process is alive; only its next launch uses the new home.
+    const pane = spawn(path.join(f.live, "codex"), ["--stay"], {
+      env: { ...process.env, CODEX_HOME: f.codexHome }, stdio: "ignore",
+    });
+    processes.push(pane);
+    await new Promise<void>((resolve, reject) => { pane.once("spawn", resolve); pane.once("error", reject); });
+    expect((await readNativeProcessLaunch(pane.pid!))?.env.CODEX_HOME).toBe(f.codexHome);
+    first.db.prepare("UPDATE nodes SET env_json = ? WHERE id = 'node-1'").run(JSON.stringify({ CODEX_HOME: nextHome }));
+    first.db.close();
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const second = await startDaemon(f, () => pane.pid!);
+    try {
+      expect(f.codexCalls().filter((args) => args[0] === "plugin")).toEqual([]);
+      expect(cached(f.codexHome)).toEqual([OLDER]);
+      expect(log.mock.calls.some((call) => String(call[0]).includes("Codex seats running there: dev-impl@r."))).toBe(true);
+    } finally { second.db.close(); }
   }, 120_000);
 });

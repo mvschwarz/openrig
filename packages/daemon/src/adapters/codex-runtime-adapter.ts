@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
+import { readNativeProcessLaunches } from "../domain/native-process-arguments.js";
 import { parse as parseToml } from "smol-toml";
 import { isMissingTmuxServer, type TmuxAdapter } from "./tmux.js";
 import { tmuxAttachCommand } from "./tmux-server.js";
@@ -217,6 +218,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private resolveCorePluginSelected?: (nodeId: string) => boolean;
   // #3385: the Codex seats OpenRig records, for the check that holds an openrig-core upgrade while one runs in that home.
   private listCodexSeats?: () => CodexSeatRecord[] | Promise<CodexSeatRecord[]>;
+  private readCodexHomes: (pids: number[]) => ReadonlyMap<number, string> | Promise<ReadonlyMap<number, string>>;
   private runCodexCli: CodexCliRunner;
   // One Codex config.toml per adapter: launches, the boot step and resume all write it (and Codex's install writes it too),
   // so each of those runs its whole setup under this one lock, one after another.
@@ -272,6 +274,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     resolveCorePluginSelected?: (nodeId: string) => boolean;
     /** #3385: every Codex seat OpenRig records, with its bound tmux session. Absent: no seat holds an upgrade. */
     listCodexSeats?: () => CodexSeatRecord[] | Promise<CodexSeatRecord[]>;
+    /** The running processes' homes, not their next-launch selections. Missing values remain unknown. */
+    readCodexHomes?: (pids: number[]) => ReadonlyMap<number, string> | Promise<ReadonlyMap<number, string>>;
     runCodexCli?: CodexCliRunner;
     /** Where Codex's system and legacy managed config files live (default /etc/codex). */
     codexSystemConfigDir?: string;
@@ -283,6 +287,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.resolveCorePluginDir = deps.resolveCorePluginDir;
     this.resolveCorePluginSelected = deps.resolveCorePluginSelected;
     this.listCodexSeats = deps.listCodexSeats;
+    this.readCodexHomes = deps.readCodexHomes ?? readRunningCodexHomes;
     this.runCodexCli = deps.runCodexCli ?? defaultCodexCli;
     this.codexSystemConfigDir = deps.codexSystemConfigDir ?? "/etc/codex";
     this.tmux = deps.tmux;
@@ -616,7 +621,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /**
    * #3385: the Codex seats that run in `codexHome`, other than `exceptNodeId`. A seat counts when its home (its own
-   * CODEX_HOME, else the daemon's) is this one and the pane of its bound tmux session runs a Codex process. Codex loads the
+   * CODEX_HOME, else HOME/.codex, from the process itself) is this one and the pane of its bound tmux session runs a Codex process. Codex loads the
    * installed plugin into every session in a home, so seats that didn't select openrig-core count too. A seat whose session,
    * pane or processes can't be read is `unknown`, never not running; an unbound seat, or a session tmux says is gone, isn't
    * running.
@@ -631,29 +636,38 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const target = realPathOf(codexHome);
     let rows: Promise<CodexProcess[]> | undefined;
     const table = () => (rows ??= Promise.resolve().then(() => this.listProcessesShared()));
+    const live: Array<{ session: string; pids: number[] }> = [];
     for (const seat of seats) {
       if (seat.nodeId === exceptNodeId || !seat.tmuxSession) continue;
-      if (realPathOf(nodePath.dirname(this.resolveCodexConfigPath(this.homeFor({ nodeId: seat.nodeId })))) !== target) continue;
-      const state = await this.sessionRunsCodex(seat.tmuxSession, table);
-      if (state === "running") running.push(seat.tmuxSession);
-      else if (state === "unknown") unknown.push(seat.tmuxSession);
+      const pids = await this.sessionCodexPids(seat.tmuxSession, table);
+      if (pids === "unknown") unknown.push(seat.tmuxSession);
+      else if (pids.length > 0) live.push({ session: seat.tmuxSession, pids });
+    }
+    // Batch the OS capture: a macOS daemon must not start one osascript process per seat.
+    let homes: ReadonlyMap<number, string>;
+    try { homes = await this.readCodexHomes([...new Set(live.flatMap(seat => seat.pids))]); }
+    catch { homes = new Map(); }
+    for (const seat of live) {
+      const values = seat.pids.map(pid => homes.get(pid));
+      if (values.some(home => home && nodePath.isAbsolute(home) && realPathOf(home) === target)) running.push(seat.session);
+      else if (values.some(home => !home || !nodePath.isAbsolute(home))) unknown.push(`${seat.session} (Codex home unreadable)`);
     }
     return { running, unknown };
   }
 
   /** Whether a tmux session's pane runs a Codex process: the pane's own process or one below it. */
-  private async sessionRunsCodex(session: string, table: () => Promise<CodexProcess[]>): Promise<"running" | "stopped" | "unknown"> {
+  private async sessionCodexPids(session: string, table: () => Promise<CodexProcess[]>): Promise<number[] | "unknown"> {
     try {
       const probe = await this.tmux.probeSession(session);
-      if (probe.state === "absent" || isMissingTmuxServer(probe)) return "stopped";
+      if (probe.state === "absent" || isMissingTmuxServer(probe)) return [];
       if (probe.state !== "present") return "unknown";
       const panePid = await this.tmux.getPanePid(session);
       if (!panePid) return "unknown";
       const rows = await table();
       // A pane tmux keeps after its process exited (remain-on-exit, as the pane cutover leaves it) still reports that pid.
       // tmux says when the pane is dead: then its seat runs no Codex. A live pid the table missed stays unknown.
-      if (!rows.some((row) => row.pid === panePid)) return (await this.tmux.isPaneDead(session)) ? "stopped" : "unknown";
-      return paneRunsCodex(rows, panePid) ? "running" : "stopped";
+      if (!rows.some((row) => row.pid === panePid)) return (await this.tmux.isPaneDead(session)) ? [] : "unknown";
+      return paneCodexProcesses(rows, panePid).map(row => row.pid);
     } catch {
       return "unknown";
     }
@@ -3271,22 +3285,33 @@ function realPathOf(path: string): string {
 
 /** #3385: whether a pane's own process, or any process below it, is a Codex (by its OS name, or a `codex` argv token). A
  *  zombie isn't. */
-function paneRunsCodex(rows: CodexProcess[], panePid: number): boolean {
+function paneCodexProcesses(rows: CodexProcess[], panePid: number): CodexProcess[] {
   const children = new Map<number, CodexProcess[]>();
   for (const row of rows) {
     const siblings = children.get(row.ppid);
     if (siblings) siblings.push(row); else children.set(row.ppid, [row]);
   }
   const seen = new Set<number>();
+  const found: CodexProcess[] = [];
   const queue = rows.filter((row) => row.pid === panePid);
   while (queue.length > 0) {
     const row = queue.shift()!;
     if (seen.has(row.pid)) continue;
     seen.add(row.pid);
-    if (row.state !== "Z" && (row.executableName === "codex" || commandLooksLikeCodex(row.command))) return true;
+    if (row.state !== "Z" && (row.executableName === "codex" || commandLooksLikeCodex(row.command))) found.push(row);
     queue.push(...(children.get(row.pid) ?? []));
   }
-  return false;
+  return found;
+}
+
+/** Only the two home variables leave the transient OS capture; credentials and other environment values do not. */
+async function readRunningCodexHomes(pids: number[]): Promise<ReadonlyMap<number, string>> {
+  const homes = new Map<number, string>();
+  for (const [pid, launch] of await readNativeProcessLaunches(pids)) {
+    const home = launch.env.CODEX_HOME ?? (launch.env.HOME ? nodePath.join(launch.env.HOME, ".codex") : undefined);
+    if (home && nodePath.isAbsolute(home)) homes.set(pid, home);
+  }
+  return homes;
 }
 
 /** #3385: why an openrig-core install waits in a Codex home, for the runtime setup report and the start's own result. */

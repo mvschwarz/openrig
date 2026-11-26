@@ -49,6 +49,8 @@ under it turns its refocus and compaction hooks off ("plugin contents changed; h
 (read from Codex 0.169.0's source, #3385). So OpenRig doesn't replace an installed openrig-core in a Codex home while any
 Codex seat runs there, whether or not it selected the plugin (Codex loads the installed plugin into every session in a home).
 A seat with its own `CODEX_HOME` holds only that home, and a seat whose session or processes can't be read counts as running.
+The running process's home is used: changing its next-launch home does not move the running session. If that home can't
+be read, the warning names the seat and its unreadable home; it holds the upgrade until the process exits or its home can be read.
 Seats started there meanwhile start with the installed version. The daemon log names the seats holding it
 (`codex core plugin deferred: …`) at each daemon start and each Codex start that waits, and a launch or a
 `rig seat restart` that waits lists them in its own warnings too. The upgrade installs at the next Codex start in that home with no other Codex seat running: a fresh launch, a
