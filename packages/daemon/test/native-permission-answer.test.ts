@@ -16,6 +16,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { runWakeLadderTick, PROMPT_ALERT_TAG } from "../src/domain/queue-wake-ladder.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
@@ -178,6 +179,135 @@ describe("a clear yes or no from the person", () => {
 });
 
 describe("words and conditions go to the receiving agent, which judges the exact action", () => {
+  it("keeps an ask-back and a further handoff holding until the current chain closes", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    await f.answer(askId, { decision: "yes, for that request" });
+    const first = f.db.prepare("SELECT qitem_id FROM queue_items WHERE handed_off_from = ?").get(askId) as { qitem_id: string };
+    const { created: second } = await f.queueRepo.handoff({ qitemId: first.qitem_id, fromSession: DECIDER,
+      toSession: "other@perm-rig", nudge: false });
+    f.db.prepare("UPDATE queue_items SET state = 'blocked' WHERE qitem_id = ?").run(second.qitemId);
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    // The same forwarding form that the native resolver supports on older queue records.
+    f.db.prepare("UPDATE queue_items SET state = 'done', closure_reason = 'handed_off_to' WHERE qitem_id = ?").run(first.qitem_id);
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    f.queueRepo.update({ qitemId: second.qitemId, actorSession: "other@perm-rig", state: "done", closureReason: "no-follow-on" });
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+  });
+
+  it("uses the newest addressed successor, including equal-time ties, instead of an older open branch", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    const old = await f.queueRepo.create({ sourceSession: PERSON, destinationSession: DECIDER, body: "old branch", nudge: false });
+    f.db.prepare("UPDATE queue_items SET handed_off_from = ?, state = 'blocked' WHERE qitem_id = ?").run(askId, old.qitemId);
+    await f.answer(askId, { decision: "yes, for that request" });
+    f.db.prepare("UPDATE queue_items SET ts_created = ? WHERE handed_off_from = ?").run("2026-01-01T00:00:00.000Z", askId);
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    await f.decide(askId, "allow", DECIDER);
+    expect(f.queueRepo.getById(old.qitemId)?.state).toBe("blocked");
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+  });
+
+  it("keeps an unrepresented handoff holding, still bounded by the original answer window", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    await f.answer(askId, { decision: "yes, for that request" });
+    f.db.prepare("UPDATE queue_items SET state = 'handed-off', handed_off_to = ? WHERE handed_off_from = ?")
+      .run("receiver@elsewhere@other-host", askId);
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    const by = f.queueRepo.getById(askId)!.tags!.find(tag => tag.startsWith("permission-answer-by:"))!;
+    const deadline = Date.parse(by.slice("permission-answer-by:".length));
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline)).toBe(true);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline + 1)).toBe(false);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, Number.NaN)).toBe(false);
+  });
+
+  it("lets a later bare prompt alert reach the existing orchestrator after the word answer is decided", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    await f.answer(askId, { decision: "yes, for that request" });
+    let now = new Date();
+    let episode = "native-ask", prompt = now.toISOString();
+    const attemptWake = vi.fn(async (_qitemId: string, _destination: string, _occurrence?: string) => "delivered-ack-pending");
+    const tick = () => runWakeLadderTick({ db: f.db, queueRepo: f.queueRepo, now, attemptWake,
+      resolveOrchestrator: () => DECIDER, readPromptState: (destination) => destination === SEAT ? "blocked" : "clear", log: () => {},
+      readPermissionPrompts: () => [{ destination: SEAT, episode, state: "blocked",
+        prompt, observedAt: now.toISOString(), evidenceRef: "fixture prompt" }] });
+    const alerts = () => f.queueRepo.list({ limit: 100 }).filter(row => row.tags?.includes(PROMPT_ALERT_TAG));
+    await tick();
+    expect(alerts()).toHaveLength(0);
+    await f.decide(askId, "allow", DECIDER);
+    episode = "later-prompt";
+    prompt = new Date(now.getTime() + 5 * 60_000).toISOString();
+    now = new Date(now.getTime() + 10 * 60_000);
+    await tick();
+    expect(alerts()).toEqual([expect.objectContaining({ destinationSession: DECIDER, state: "pending" })]);
+    expect(attemptWake).toHaveBeenCalledWith(expect.any(String), DECIDER, expect.any(String));
+    expect(attemptWake.mock.calls.some(call => call[1] === SEAT)).toBe(false); // wake the owner, never type into the native prompt
+  });
+
+  it("does not let newer decided handoffs hide an older ask that still takes an answer", async () => {
+    const f = fixture();
+    const askId = askIdOf(await f.submit());
+    const by = new Date(Date.now() + 3600_000).toISOString();
+    const tags = JSON.stringify(["runner-permission", "permission-native-hook:claude-code", `permission-answer-by:${by}`]);
+    const put = f.db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session,
+      state, body, tags, handed_off_to, handed_off_from) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)`);
+    f.db.transaction(() => { for (let n = 0; n < 25; n++) {
+      const id = `qitem-closed-native-${n}`, at = new Date(Date.now() + n + 1000).toISOString();
+      put.run(id, at, at, SEAT, PERSON, "handed-off", tags, DECIDER, null);
+      put.run(`${id}-decider`, at, at, PERSON, DECIDER, "done", null, null, id);
+    } })();
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    await f.answer(askId, { optionId: "allow" });
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+  });
+
+  it("keeps the longest answer window inclusive at its boundary and excludes expired history", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit({ holdSeconds: 86400 }));
+    const by = f.queueRepo.getById(askId)!.tags!.find(tag => tag.startsWith("permission-answer-by:"))!;
+    const deadline = Date.parse(by.slice("permission-answer-by:".length));
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline)).toBe(true);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline + 1)).toBe(false);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, Number.NaN)).toBe(false);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, Number.POSITIVE_INFINITY)).toBe(false);
+    // This is a valid old ask: both creation and its one-day answer window are in the past.
+    const old = new Date(deadline - 3 * 86400_000).toISOString();
+    f.db.prepare("UPDATE queue_items SET ts_created = ?, tags = ? WHERE qitem_id = ?")
+      .run(old, JSON.stringify(["runner-permission", "permission-native-hook:claude-code", "permission-answer-by:" + new Date(deadline - 2 * 86400_000).toISOString()]), askId);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline)).toBe(false);
+  });
+
+  it("keeps holding an ask passed on with handoff-and-complete until its colleague's row closes, here or on another host", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    const { created } = await f.queueRepo.handoffAndComplete({ qitemId: askId, fromSession: PERSON, toSession: "other@perm-rig", nudge: false });
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "done", closureReason: "handed_off_to" });
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    f.queueRepo.update({ qitemId: created.qitemId, actorSession: "other@perm-rig", state: "done", closureReason: "no-follow-on" });
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+    // The cross-host form closes the source done too, with no successor on this host: it holds until answer-by.
+    const remote = askIdOf(await f.submit({ requestId: "req-remote" }));
+    f.db.prepare("UPDATE queue_items SET state = 'done', closure_reason = 'handed_off_to', handed_off_to = ? WHERE qitem_id = ?")
+      .run("receiver@elsewhere", remote);
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    const by = f.queueRepo.getById(remote)!.tags!.find(tag => tag.startsWith("permission-answer-by:"))!;
+    expect(nativeAskHoldsPrompt(f.db, SEAT, Date.parse(by.slice("permission-answer-by:".length)) + 1)).toBe(false);
+  });
+
+  it("releases the prompt-alert hold after a word answer is decided on its handoff", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    await f.answer(askId, { decision: "yes, for that request" });
+    expect(f.queueRepo.getById(askId)?.state).toBe("handed-off");
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    await f.decide(askId, "allow", DECIDER, { reason: "the action meets the answer" });
+    expect(f.queueRepo.getById(askId)?.state).toBe("handed-off");
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+  });
+
   it("allows the action when it meets the person's condition, as the agent's judgment", async () => {
     const f = fixture({ decider: DECIDER });
     const askId = askIdOf(await f.submit());
@@ -897,8 +1027,29 @@ describe("the reads on every tool batch and wake-ladder tick cover only the seat
     const [sql] = await preparedDuring(f, (text) => text.includes("state IN ('pending','in-progress','blocked','handed-off')"),
       () => expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true));
     expect(sql).toBeDefined();
-    const read = plan(f, sql!, SEAT);
-    expect(read).toContain(`SEARCH queue_items USING INDEX ${INDEX} (source_session=?)`);
+    // Bounded by the longest answer window: an ask created before it can't still be taking an answer, so a seat's older
+    // native history (handed-off asks stay handed-off) is never read on a tick.
+    const read = plan(f, sql!, SEAT, new Date(0).toISOString());
+    expect(read).toContain(`SEARCH queue_items USING INDEX ${INDEX} (source_session=? AND ts_created>?)`);
     expect(read).not.toMatch(/SCAN queue_items|TEMP B-TREE/);
+  });
+});
+
+describe("native prompt-hold handoff lookup plan", () => {
+  it("uses the existing successor index while following the current handoff", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    await f.answer(askId, { decision: "yes, for that request" });
+    const prepare = f.db.prepare.bind(f.db);
+    let sql = "";
+    const spy = vi.spyOn(f.db, "prepare").mockImplementation((text: string) => {
+      if (text.startsWith("WITH RECURSIVE chain")) sql = text;
+      return prepare(text);
+    });
+    try { expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true); } finally { spy.mockRestore(); }
+    expect(sql).not.toBe("");
+    const details = (f.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(JSON.stringify([askId])) as Array<{ detail: string }>).map(r => r.detail).join(" | ");
+    expect(details).toContain("idx_queue_items_handed_off_from");
+    expect(details).not.toMatch(/SCAN queue_items|SCAN next\b/);
   });
 });

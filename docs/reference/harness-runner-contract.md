@@ -650,8 +650,9 @@ the person:
   and its relay task to the routed conversation. The ask is already that conversation's question about the prompt. The
   alert's relay would put the same question there a second time, with text telling it to type keys into the seat, and
   keys typed there answer the prompt in the terminal and end the ask. Once the ask ends (its prompt ended in the
-  terminal, the seat restarted, or 24 hours passed), they go on as before. A hook killed outright leaves its ask open, so
-  the hold lasts until the window ends; an answer meanwhile says it hasn't reached the prompt.
+  terminal, the seat restarted, an agent decided on the person's words, or 24 hours passed), they go on as before. An
+  ask handed on to someone who hasn't decided yet, on this host or another, still holds them. A hook killed outright
+  leaves its ask open, so the hold lasts until the window ends; an answer meanwhile says it hasn't reached the prompt.
 - **A conversation that isn't listening:** an ask to the person's own conversation reaches it through the `openrig`
   plugin's waiter, which listens for about two hours after each of its turns (its hooks' 7200-second timeout). A prompt
   after that waits for the person's next turn there, with the seat's prompt alert held, until they come back or the ask's

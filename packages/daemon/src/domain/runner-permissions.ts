@@ -1141,14 +1141,39 @@ function nativeDecisionMessage(input: { decider: string; relay: boolean; denies:
 export function nativeAskHoldsPrompt(db: Database.Database, sessionName: string, now = Date.now()): boolean {
   try {
     // The seat's native asks only (the partial index), not every row it ever sent: the wake ladder asks this on its ticks.
-    const rows = db.prepare(`SELECT tags FROM queue_items WHERE source_session = ? AND state IN ('pending','in-progress','blocked','handed-off')
-      AND ${NATIVE_ASK_ROWS} ORDER BY ts_created DESC LIMIT 20`).all(sessionName) as Array<{ tags: string | null }>;
-    return rows.some(({ tags }) => {
+    // Stream the indexed asks: decided handoffs must not consume a row limit and hide an older open ask. An ask's answer-by is
+    // at most MAX_HOLD_SECONDS after it was created, so older asks (handed-off ones stay handed-off) are never read.
+    if (!Number.isFinite(now)) return false;
+    const since = new Date(now - MAX_HOLD_SECONDS * 1000 - NATIVE_GRACE_MS).toISOString();
+    const rows = db.prepare(`SELECT qitem_id, state, tags FROM queue_items WHERE source_session = ? AND ts_created >= ?
+      AND (state IN ('pending','in-progress','blocked','handed-off') OR (state = 'done' AND closure_reason = 'handed_off_to'))
+      AND ${NATIVE_ASK_ROWS} ORDER BY ts_created DESC`).iterate(sessionName, since) as Iterable<{ qitem_id: string; state: string; tags: string | null }>;
+    const handedOff: string[] = [];
+    for (const { qitem_id, state, tags } of rows) {
       let parsed: unknown;
-      try { parsed = JSON.parse(tags ?? "[]"); } catch { return false; }
+      try { parsed = JSON.parse(tags ?? "[]"); } catch { continue; }
       const by = Array.isArray(parsed) ? parsed.find((tag): tag is string => typeof tag === "string" && tag.startsWith(ANSWER_BY_TAG)) : undefined;
       const until = Date.parse(by?.slice(ANSWER_BY_TAG.length) ?? "");
-      return Array.isArray(parsed) && parsed.includes(RUNNER_PERMISSION_TAG) && Number.isFinite(until) && now <= until;
-    });
+      if (!Array.isArray(parsed) || !parsed.includes(RUNNER_PERMISSION_TAG) || !Number.isFinite(until) || !(now <= until)) continue;
+      // Handed on (handed-off, or done by handoff-and-complete): its chain decides, below.
+      if (state !== "handed-off" && state !== "done") return true;
+      handedOff.push(qitem_id);
+    }
+    if (handedOff.length === 0) return false;
+    // Follow the same newest, addressed successor as liveEnd. UNION makes cycles converge. An unrepresented
+    // handoff (including one off-host) is not proof of a decision, so it still holds until answer-by.
+    return db.prepare(`WITH RECURSIVE chain(qitem_id, state, handed_off_to, closure_reason) AS (
+      SELECT qitem_id, state, handed_off_to, closure_reason FROM queue_items
+        WHERE qitem_id IN (SELECT value FROM json_each(?))
+      UNION
+      SELECT next.qitem_id, next.state, next.handed_off_to, next.closure_reason FROM chain
+        JOIN queue_items next ON next.rowid = (
+          SELECT rowid FROM queue_items WHERE handed_off_from = chain.qitem_id AND destination_session = chain.handed_off_to
+          ORDER BY ts_created DESC, rowid DESC LIMIT 1)
+        WHERE chain.state = 'handed-off' OR (chain.state = 'done' AND chain.closure_reason = 'handed_off_to')
+    ) SELECT 1 FROM chain WHERE state IN ('pending','in-progress','blocked')
+      OR ((state = 'handed-off' OR (state = 'done' AND closure_reason = 'handed_off_to')) AND NOT EXISTS (
+        SELECT 1 FROM queue_items WHERE handed_off_from = chain.qitem_id AND destination_session = chain.handed_off_to))
+      LIMIT 1`).get(JSON.stringify(handedOff)) !== undefined;
   } catch { return false; }
 }
