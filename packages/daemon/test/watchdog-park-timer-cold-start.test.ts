@@ -30,12 +30,12 @@ describe("a park timer due at a missing seat", () => {
   });
 
   it("tells cold start for a digest that carries parked rows", async () => {
-    const f = deliverWith(missing, []);
+    const f = deliverWith(missing, ["qitem-20000101000000-00000002"]);
     await f.deliver({ targetSession: SEAT, message: "Resume parked work" },
       { jobId: "job-1", policy: "periodic-reminder", members: [{ jobId: "job-1", occurrenceId: "o1" }],
         parkedRows: [{ jobId: "job-1", qitemId: "qitem-20000101000000-00000002" }] });
     expect(f.noteNoReceiver).toHaveBeenCalledWith(SEAT);
-    expect(f.resolveParkedRows).not.toHaveBeenCalled();
+    expect(f.resolveParkedRows).toHaveBeenCalledWith({ jobId: "job-1", targetSession: SEAT });
   });
 
   it("starts nothing for a reminder that wakes no parked row", async () => {

@@ -2499,8 +2499,10 @@ export class QueueRepository {
   async deliverDraftHeldMessagesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<void> {
     if (state !== "idle" || !this.outbox || !this.transport?.draftAwareTarget?.(sessionName)) return;
     const addresses = this.resolveSessionAddresses(sessionName);
-    if (!addresses.length || addresses.some(address => this.deliveryDrains.holds(address))) return;
-    if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return;
+    if (!addresses.length) return;
+    const paused = () => addresses.some(address => this.deliveryDrains.holds(address))
+      || [sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address));
+    if (paused()) return;
     const key = addresses[0]!;
     if (this.draftHeldPasses.has(key)) return;
     this.draftHeldPasses.add(key);
@@ -2510,13 +2512,41 @@ export class QueueRepository {
         AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value = ?)
         ORDER BY ts_dispatched, rowid`).all(...addresses, DRAFT_HELD_ELIGIBLE_TAG) as Array<{ outbox_id: string }>;
       for (const { outbox_id } of held) {
+        // A restore or drain can start while the preceding send awaited its delivery lease.
+        if (paused()) break;
+        const target = this.transport.draftAwareTarget?.(sessionName);
+        if (!target) break;
+        const entry = this.outbox.getById(outbox_id);
+        // Match the same complete binding as the transport guard. Earlier-occupant custody remains held and listed,
+        // without being claimed or preventing a later message for the current occupant from going.
+        if (!entry?.guardBinding || JSON.stringify(entry.guardBinding) !== JSON.stringify(target)) continue;
         if (!this.outbox.reopenHeld(outbox_id)) break;
         if (!this.outbox.claimForDelivery(outbox_id)) break;
-        const entry = this.outbox.getById(outbox_id)!;
-        await this.transport.send(entry.destinationSession, entry.body, {
-          committedOutboxIds: [outbox_id], actorSession: entry.senderSession,
-          ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}),
-        });
+        try {
+          const result = await this.transport.send(entry.destinationSession, entry.body, {
+            committedOutboxIds: [outbox_id], actorSession: entry.senderSession,
+            ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}),
+          });
+          if (result.reason === "guard_target_changed" && result.sent !== true
+            && (result.sent === false || result.inputPhase === "not_reached")
+            && result.inputPhase !== "attempted" && result.inputPhase !== "written") {
+            // Custody can change while the transport waits for the lease. This positive no-write result returns the
+            // already-held message to its list, even if the conditional transport finalized its refusal first.
+            this.outbox.retainUnwritten(outbox_id);
+            continue;
+          }
+          if (this.outbox.getById(outbox_id)?.deliveryState === "sending") {
+            // An early guard refusal can precede the transport's receipt handling. Settle this claim by the existing
+            // outcome rules, without a destination: a plain message must never tell cold start to start its seat.
+            const outcome = this.classifyWakeResult(result);
+            if (outcome.classified !== "bridged") this.outbox.finalizeDelivery(outbox_id,
+              outcome.classified === "verified" ? "delivered" : outcome.classified);
+          }
+        } catch (error) {
+          // A thrown send has no positive no-write result. Keep its uncertainty, never an in-flight or retryable claim.
+          this.outbox.finalizeDelivery(outbox_id, "indeterminate");
+          throw error;
+        }
         if (this.outbox.getById(outbox_id)?.deliveryState !== "delivered") break;
       }
     } finally {

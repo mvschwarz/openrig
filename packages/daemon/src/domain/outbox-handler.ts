@@ -691,6 +691,13 @@ export class OutboxHandler {
       .run(outboxId).changes === 1;
   }
 
+  /** Return a claimed held message after a positive no-write recipient refusal. Its original binding/custody stays
+   * listed; this admits no new message and never overwrites a delivered, uncertain or retired outcome. */
+  retainUnwritten(outboxId: string): boolean {
+    return this.db.prepare("UPDATE outbox_entries SET delivery_state='retained', delivered_at=NULL WHERE outbox_id=? AND delivery_state IN ('sending','failed')")
+      .run(outboxId).changes === 1;
+  }
+
   /** #48: claim an entry that was never tried, or whose last try definitely wrote nothing (failed), for one more send.
    *  One delivered, uncertain (indeterminate), held, retired or already in flight is left as it is, so an uncertain send
    *  is never repeated. */

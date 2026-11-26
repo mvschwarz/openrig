@@ -133,9 +133,12 @@ export function makeWatchdogDeliver(deps: {
         // so a queued reminder would read delivered before anything took it (#3270).
         { actorSession: "watchdog@system", openrigNotice: true, auditPointer: source.jobId, noHookBridge: true, ...(beforeWrite ? { beforeWrite } : {}) });
       // A park timer that finds its seat missing is the parked row's work coming due: the cold start decides whether a seat
-      // on standby starts for it. The reminder's own outcome stands, and its retry types it once the seat is up.
+      // on standby starts for it. Re-read current park custody after the awaited send: a digest's snapshot can be stale.
+      // The reminder's own outcome stands, and its retry types it once the seat is up.
       if ("reason" in result && result.reason === "session_missing" && deps.noteNoReceiver
-        && (source.parkedRows?.length ?? (source.members ? 0 : (deps.resolveParkedRows?.({ jobId: source.jobId, targetSession }) ?? []).length)) > 0) {
+        && (source.parkedRows
+          ? source.parkedRows.some(({ jobId, qitemId }) => deps.resolveParkedRows?.({ jobId, targetSession }).includes(qitemId))
+          : !source.members && (deps.resolveParkedRows?.({ jobId: source.jobId, targetSession }) ?? []).length > 0)) {
         try { deps.noteNoReceiver(targetSession); } catch { /* telling cold start never changes the reminder's outcome */ }
       }
       const fact = readSendOutcome(result, writtenFact(result));
