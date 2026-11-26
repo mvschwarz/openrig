@@ -1,8 +1,8 @@
-import { createRequire } from "node:module";
 // The MCP queue tools against the daemon's real queue routes, over HTTP, through the real DaemonClient: a seat
 // configured once (OPENRIG_SESSION_NAME in the MCP server's env) hands a task to another seat and reads the
 // answer back by the task's id. Nothing in the tool calls names the sender.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
