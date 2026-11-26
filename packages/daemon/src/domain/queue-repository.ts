@@ -77,6 +77,7 @@ export interface RecordRelayOwnerNotificationTransportFailedInput extends Format
   actorSession?: string;
 }
 import { HELD_SENDER_NOTICE_PREFIX, WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
+import { readStandbyStop } from "./seat-standby.js";
 import { physicalSessionName, SessionRegistry } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
@@ -1222,7 +1223,7 @@ export class QueueRepository {
   private outbox: OutboxHandler | undefined;
   /** #2829 slice 1 — cold-start notifier, late-wired by startup after the restore orchestrator exists. */
   private wakeWithoutReceiverNotifier: ((destinationSession: string, drainPass?: object) => void) | undefined;
-  private standbyWake?: (destination: string, owed: () => boolean) => Promise<void> | undefined;
+  private standbyWake?: (destination: string, owed: () => boolean) => Promise<boolean> | undefined;
   // A first clear may recover durable refusals observed before startup. Later clears need
   // a new positive refusal/attention episode, so a returning prompt cannot spin retries.
   private readonly promptRecoveryState = new Map<string, boolean>();
@@ -1766,8 +1767,13 @@ export class QueueRepository {
       if (draftTarget) this.outbox.assertRetentionCapacity(draftTarget.nodeId, frozenEnvelope, input.fromSession, [input.outboxId]);
       this.outbox.record(record);
       const binding = this.transport?.deliveryTarget?.(input.toSession);
-      if (binding) this.db.prepare("UPDATE outbox_entries SET guard_binding=? WHERE outbox_id=? AND guard_binding IS NULL")
-        .run(JSON.stringify(binding), input.outboxId);
+      if (binding) {
+        const standby = readStandbyStop(this.db, binding.nodeId);
+        const bindingHasReceiver = standby?.session !== binding.session || standby.pane !== binding.pane;
+        const target = bindingHasReceiver ? binding : { ...binding, pane: null };
+        this.db.prepare("UPDATE outbox_entries SET guard_binding=? WHERE outbox_id=? AND guard_binding IS NULL")
+          .run(JSON.stringify(target), input.outboxId);
+      }
     }
     return input.outboxId;
   }
@@ -1874,6 +1880,7 @@ export class QueueRepository {
     outboxId: string,
     attempted: Set<string> = new Set(), // this pass's attempt history, inherited by any release it delivers
     eligible: (entry: OutboxEntry) => boolean = () => true,
+    mayWake: (entry: OutboxEntry) => boolean = eligible,
   ): Promise<"delivered" | "indeterminate" | "failed" | "skipped" | "retained"> {
     if (!this.outbox) return "skipped";
     if (!this.transport) return "skipped"; // no transport → stays pending for a later drain
@@ -1883,6 +1890,18 @@ export class QueueRepository {
       if (this.deliveryDrains.holds(alreadyHeld.destinationSession)) return "retained";
       if (alreadyHeld.auditPointer && !this.wakeOutcomeStale(alreadyHeld)) this.recordNudgeAttempt(alreadyHeld.auditPointer, "retained:typing_guard");
       return "retained";
+    }
+    const standbyWorkId = alreadyHeld?.auditPointer;
+    if (standbyWorkId && (alreadyHeld.deliveryState === "pending" || alreadyHeld.deliveryState === "failed")) {
+      const owed = () => {
+        const entry = this.outbox?.getById(outboxId);
+        const row = this.getById(standbyWorkId);
+        return !!entry && entry.deliveryState === alreadyHeld.deliveryState && !!row && isBlockerLive(row.state)
+          && row.destinationSession === entry.destinationSession && !this.deliveryDrains.holds(entry.destinationSession)
+          && this.currentWakeIntent(entry) && mayWake(entry);
+      };
+      const starting = this.standbyWake?.(alreadyHeld.destinationSession, owed);
+      if (starting && (!await starting || !owed())) return "skipped";
     }
     const claim = (entry: OutboxEntry): boolean => {
       if (this.deliveryDrains.holds(entry.destinationSession) || !eligible(entry) || attempted.has(entry.outboxId)) return false;
@@ -2145,14 +2164,10 @@ export class QueueRepository {
     // A stop also refuses every later claim inside a delivery: coalesced peers and members it releases for their own send.
     // So does a missing receiver, for a notification already tried. One never tried still gets its attempt, so its row
     // records why it didn't land.
+    const mayWake = (entry: OutboxEntry): boolean => !opts?.stopRequested?.() && (!opts?.eligible || opts.eligible(entry));
     const eligible = (entry: OutboxEntry): boolean => {
-      if (opts?.stopRequested?.() || opts?.eligible && !opts.eligible(entry)) return false;
+      if (!mayWake(entry)) return false;
       if (entry.deliveryState === "pending" || !this.wakeHasNoReceiver(entry.destinationSession, coldStartPass)) return true;
-      const qitemId = entry.auditPointer;
-      if (qitemId) this.standbyWake?.(entry.destinationSession, () => {
-        const row = this.getById(qitemId);
-        return !opts?.stopRequested?.() && row?.state === "pending" && row.destinationSession === entry.destinationSession;
-      });
       skipped.set(entry.outboxId, entry.destinationSession);
       return false;
     };
@@ -2170,7 +2185,7 @@ export class QueueRepository {
       for (const intent of pending) {
         if (opts?.stopRequested?.()) return result();
         cursor = intent.id;
-        const outcome = await this.deliverWakeIntent(intent.outbox_id, attempted, eligible);
+        const outcome = await this.deliverWakeIntent(intent.outbox_id, attempted, eligible, mayWake);
         if (outcome !== "skipped") tally[outcome]++;
       }
       if (pending.length < BATCH) break; // served short batch ⇒ drained
@@ -2517,9 +2532,9 @@ export class QueueRepository {
       const row = this.getById(qitemId);
       return !!row && isBlockerLive(row.state) && row.destinationSession === destinationSession;
     };
-    const starting = this.standbyWake?.(destinationSession, owed);
+    const starting = committedOutboxIds ? undefined : this.standbyWake?.(destinationSession, owed);
     if (starting) {
-      await starting;
+      if (!await starting) return { classified: "failed", nudgeResult: "failed:standby-resume-not-confirmed" };
       if (!owed()) return { classified: "failed", nudgeResult: "failed:queue-work-no-longer-owed" };
     }
     // DEFECT FIX (S1-class, 3 live specimens): a virtual

@@ -197,6 +197,7 @@ export interface SeatColdStartLedgerRow {
 
 export class SeatColdStarter {
   private readonly inFlight = new Map<string, Promise<void>>();
+  private readonly standbyInFlight = new Map<string, Promise<boolean>>();
   private readonly evaluations = new Map<string, number>();
   private readonly drainEvaluations = new WeakMap<object, Map<string, number>>();
 
@@ -212,28 +213,28 @@ export class SeatColdStarter {
     }
   }
 
-  wakeStandby(destinationSession: string, workStillOwed: () => boolean): Promise<void> | undefined {
+  wakeStandby(destinationSession: string, workStillOwed: () => boolean): Promise<boolean> | undefined {
     const parsed = parseSessionName(destinationSession);
     if (parsed.kind !== "canonical" || !workStillOwed()) return undefined;
     const seat = this.resolveSeat(parsed.member, parsed.rig, destinationSession);
     if (!seat) return undefined;
-    const existing = this.inFlight.get(seat.nodeId);
+    const existing = this.standbyInFlight.get(seat.nodeId);
+    if (existing) return existing;
     const standby = readStandbyStop(this.deps.db, seat.nodeId);
     if (!standby) return undefined;
-    if (existing) return existing;
-    const pending = this.resumeStandby(seat, standby, workStillOwed).finally(() => this.inFlight.delete(seat.nodeId));
-    this.inFlight.set(seat.nodeId, pending);
+    const pending = this.resumeStandby(seat, standby, workStillOwed).finally(() => this.standbyInFlight.delete(seat.nodeId));
+    this.standbyInFlight.set(seat.nodeId, pending);
     return pending;
   }
 
-  private async resumeStandby(seat: SeatRow, standby: StandbyStop, workStillOwed: () => boolean): Promise<void> {
+  private async resumeStandby(seat: SeatRow, standby: StandbyStop, workStillOwed: () => boolean): Promise<boolean> {
     try {
-      await this.deps.deliveryGuard.lifecycle([seat.nodeId], async () => {
+      return await this.deps.deliveryGuard.lifecycle([seat.nodeId], async () => {
         const current = readStandbyStop(this.deps.db, seat.nodeId);
         const recipe = this.deps.getNodeLaunchRecipe(seat.nodeId);
         const isCurrent = recipe?.rigSpec.pods.some(pod => pod.members.some(member => `${pod.id}.${member.id}` === seat.logicalId));
         if (!isCurrent || isPoolAgent(this.deps.db, seat.nodeId) || !workStillOwed() || current?.identity !== standby.identity || current.sessionId !== standby.sessionId
-          || this.ledgerRefuses(seat.nodeId, this.currentTime())) return;
+          || this.ledgerRefuses(seat.nodeId, this.currentTime())) return false;
         this.record(seat.nodeId, "launching", "in_flight", this.currentTime().toISOString());
         let outcome: ColdStartLaunchOutcome;
         try {
@@ -245,10 +246,12 @@ export class SeatColdStarter {
         const label = "error" in outcome ? `${outcome.kind}:${outcome.error}` : outcome.kind;
         this.record(seat.nodeId, label, outcome.kind === "resumed" ? "succeeded" : "failed", this.currentTime().toISOString());
         this.log(`${seat.logicalId}: standby ${label}`);
+        return outcome.kind === "resumed";
       });
     } catch (error) {
       if (!(error instanceof Error)) throw error;
       this.log(`${seat.logicalId}: standby wake refused: ${error.message}`);
+      return false;
     }
   }
 
