@@ -273,4 +273,15 @@ describe("rig scope mission set --status", () => {
     expect(result.stderr).toContain("The daemon didn't write the status (mission_status_write_failed): mission.yaml: it can't be parsed.");
     expect(fs.readFileSync(missionFile(), "utf8")).toBe(MISSION);
   });
+
+  it("names a wave it wrote when the status after it isn't written", async () => {
+    daemon.status = { state: "running", healthy: true, pid: 1234, port: 7433 };
+    daemon.reply = () => ({ status: 500, data: { error: "mission_status_write_failed", message: "README.md: it can't be read" } });
+    const result = await run(["mission", "set", "release-1.0.0", "--wave", "w1", "--slices", "OPR.1.0.0.1", "--status", "active"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("The daemon didn't write the status (mission_status_write_failed)");
+    expect(result.stderr).toContain(`The status was not written. Wave w1 was: ${missionFile()}.`);
+    expect(result.stderr).not.toContain("Nothing was written.");
+    expect(YAML.parse(fs.readFileSync(missionFile(), "utf8")).arrangement.waves).toContainEqual({ id: "w1", slices: ["OPR.1.0.0.1"] });
+  });
 });

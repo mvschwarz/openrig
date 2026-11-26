@@ -670,7 +670,17 @@ function buildMissionSetCommand(): Command {
           (payload.wave as Record<string, unknown>).notes = notes;
         }
         if (status !== undefined) {
-          const written = await writeStatusThroughDaemon(editor, mission, status);
+          let written: Awaited<ReturnType<typeof writeStatusThroughDaemon>>;
+          try {
+            written = await writeStatusThroughDaemon(editor, mission, status);
+          } catch (err) {
+            // A wave written above stays written, so "Nothing was written" would be false.
+            const wave = payload.wave as { id: string; outcome: string } | undefined;
+            if (err instanceof ScopeCliError && wave?.outcome === "written") {
+              throw new ScopeCliError({ fact: err.fact, consequence: `The status was not written. Wave ${wave.id} was: ${manifestPath}.`, action: err.action });
+            }
+            throw err;
+          }
           const served = written.served;
           lines.push(`Status ${written.outcome}${written.via === "here" ? ` (written here: ${written.reason}; a running daemon's slice list can show the earlier word for up to a minute)` : ""}.`);
           lines.push(`Status, as the readers now serve it: ${served.status ?? "none"}. ${served.countsTowardReadiness ? "It counts toward project readiness." : "It doesn't count toward project readiness (only active and release-candidate do)."} A status is a label: readiness is judged separately.`);
@@ -710,7 +720,7 @@ async function writeStatusThroughDaemon(editor: ScopeManifest, mission: MissionI
   if (typeof data.error === "string") {
     throw new ScopeCliError({ fact: `The daemon didn't write the status (${data.error}): ${data.message ?? "no detail"}.`, consequence: "Nothing was written.", action: "Fix the named issue and run this again." });
   }
-  return here("the running daemon has no status route; it predates this command");
+  return here(`the running daemon answered ${res.status} without a result`);
 }
 
 // ---------------------------------------------------------------------

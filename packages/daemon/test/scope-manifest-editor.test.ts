@@ -212,4 +212,25 @@ describe("mission status", () => {
       .toBe("---\nid: OPR.9\nintent: saves $$ and $' each run\nstatus: cost $& more\n---\n# Legacy\n");
     expect(writeMissionStatus(missionPath, "cost $& more")).toBe("unchanged");
   });
+
+  it("writes only a legacy node file's top-level status: an empty one keeps the next field, a nested one stays", () => {
+    const missionPath = path.join(dir, "legacy");
+    const readme = path.join(missionPath, "README.md");
+    file("legacy/README.md", "---\nstatus:\nid: OPR.9\n---\n# Legacy\n");
+    expect(writeMissionStatus(missionPath, "active")).toBe("written");
+    expect(fs.readFileSync(readme, "utf8")).toBe("---\nstatus: active\nid: OPR.9\n---\n# Legacy\n");
+    file("legacy/README.md", "---\nid: OPR.9\nmetadata:\n  status: nested\nstatus: planned\n---\n# Legacy\n");
+    expect(writeMissionStatus(missionPath, "active")).toBe("written");
+    expect(fs.readFileSync(readme, "utf8")).toBe("---\nid: OPR.9\nmetadata:\n  status: nested\nstatus: active\n---\n# Legacy\n");
+    expect(servedMissionStatus(missionPath).status).toBe("active");
+  });
+
+  it("keeps a legacy status YAML would write as a block on its one line, so a rerun writes nothing", () => {
+    const missionPath = path.join(dir, "legacy");
+    file("legacy/README.md", "---\nid: OPR.9\nstatus: planned\n---\n# Legacy\n");
+    expect(writeMissionStatus(missionPath, "---")).toBe("written");
+    expect(fs.readFileSync(path.join(missionPath, "README.md"), "utf8")).toBe("---\nid: OPR.9\nstatus: \"---\"\n---\n# Legacy\n");
+    expect(writeMissionStatus(missionPath, "---")).toBe("unchanged");
+    expect(servedMissionStatus(missionPath).status).toBe("---");
+  });
 });

@@ -112,8 +112,8 @@ export function missionsRoutes(): Hono {
   // #3616 — any authored status word, written by the same writer as complete. `rig scope mission set --status` sends
   // the mission folder it resolved (`missionPath`), so a mission found under a named workspace is the one written.
   app.post("/:missionId/status", async (c) => {
-    const body = await c.req.json().catch(() => ({})) as { status?: unknown };
-    const status = typeof body.status === "string" ? body.status.trim() : "";
+    const body = await c.req.json().catch(() => null) as { status?: unknown } | null;
+    const status = typeof body?.status === "string" ? body.status.trim() : "";
     if (!status || /[\r\n]/.test(status)) {
       return c.json({ error: "status_required", message: "status must be one non-empty line" }, 400);
     }
@@ -129,7 +129,8 @@ async function setStatus(c: Context, status: string, failure: string): Promise<R
     return c.json({ error: "slices_indexer_unavailable" }, 503);
   }
   const missionId = c.req.param("missionId")!;
-  const named = (await c.req.json().catch(() => ({})) as { missionPath?: unknown }).missionPath;
+  // `/complete` takes no body, and a JSON `null` is no body either.
+  const named = (await c.req.json().catch(() => null) as { missionPath?: unknown } | null)?.missionPath;
   // Only the folder is needed: a cold list() would rebuild queue membership for
   // every slice before this write could run.
   // A named folder must be that mission's: absolute, a directory, and named for it.

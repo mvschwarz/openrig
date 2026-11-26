@@ -300,6 +300,17 @@ describe("POST /api/missions/:missionId/complete", () => {
     expect(readme).toContain("status: complete");
     expect(readme).toContain("id: preserves");
   });
+
+  it("completes a mission posted with a JSON null body, as with no body", async () => {
+    writeMissionReadme(missionsRoot, "nullbody", "---\nid: nullbody\nstatus: active\n---\n# Body\n");
+    writeSliceInMission(missionsRoot, "nullbody", "s");
+    const app = buildApp(indexer);
+    const res = await app.request("/api/missions/nullbody/complete", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "null",
+    });
+    expect(res.status).toBe(200);
+    expect(fs.readFileSync(path.join(missionsRoot, "nullbody", "README.md"), "utf-8")).toContain("status: complete");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -425,7 +436,7 @@ describe("POST /api/missions/:missionId/status", () => {
   it("needs one non-empty line of status, and writes nothing otherwise", async () => {
     const mission = authored(missionsRoot, "authored", "planned");
     const app = buildApp(indexer);
-    for (const body of [{}, { status: "  " }, { status: "active\nkind: x" }]) {
+    for (const body of [{}, null, { status: "  " }, { status: "active\nkind: x" }]) {
       const res = await post(app, "authored", body);
       expect(res.status).toBe(400);
       expect(await res.json()).toMatchObject({ error: "status_required" });
