@@ -320,7 +320,9 @@ describe("#3385: a daemon start", () => {
     fs.writeFileSync(path.join(bin, "codex"), `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nif(process.argv.includes('--help'))console.log('Usage: codex [OPTIONS]\\n  --no-daemon');else if(process.argv.includes('--version'))console.log('codex-cli 0.169.0');\n`, { mode: 0o700 });
     fs.writeFileSync(path.join(live, "codex"), `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o700 });
     const instance = path.join(root, "instance");
-    const env = { PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin`, HOME: home, CODEX_HOME: codexHome, OPENRIG_HOME: instance };
+    // The stand-in `codex` comes first; the suite's own PATH follows, so `ps` stays the one the suite chose (hosted macOS
+    // runs the suite in a sandbox where the setuid /bin/ps can't start, and puts a nonprivileged copy first on PATH).
+    const env = { PATH: `${bin}:${path.dirname(process.execPath)}:${process.env.PATH ?? "/usr/bin:/bin"}`, HOME: home, CODEX_HOME: codexHome, OPENRIG_HOME: instance };
     const codexCalls = () => fs.existsSync(calls) ? fs.readFileSync(calls, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]) : [];
     return { root, home, codexHome, live, env, instance, codexCalls };
   }
