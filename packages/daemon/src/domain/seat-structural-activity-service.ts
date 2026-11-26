@@ -128,7 +128,9 @@ export class SeatStructuralActivityService {
       this.latestBySession.delete(sessionName);
       return null;
     }
-    const c = communityHarnessPaneActivity(classifyPaneActivity(content), communityHarness, content);
+    // A community seat's screen is read as its runtime's, as `rig send` reads it, so an answered dialog in its scrollback
+    // is history here too. Built-in seats keep the runtime-free read.
+    const c = communityHarnessPaneActivity(classifyPaneActivity(content, communityHarness ? { runtime: communityHarness } : {}), communityHarness, content);
     // Redraws from an unrecorded Codex layout cannot establish work or completed idle.
     // Keep positive work and attention visible; native hooks are resolved separately by the activity fold.
     const unrecognizedVersion = runtime === "codex" && c.state !== "attention" && c.state !== "agent_active" && namesAnotherClientVersion(content, "codex");

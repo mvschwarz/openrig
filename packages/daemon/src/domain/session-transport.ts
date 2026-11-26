@@ -21,6 +21,7 @@ import {
   COMPOSER_EMPTY_CODEX_PLACEHOLDER_PATTERN as CODEX_EMPTY_COMPOSER_PATTERN,
   COMPOSER_EMPTY_PATTERN,
   COMPOSER_PROMPT_CLASS,
+  COMPOSER_PROMPT_LINE_PATTERN,
   COMPOSER_SELECTION_PATTERN,
   COMPOSER_SELECTION_SCAN_PATTERN,
   findComposerInputLineIndex,
@@ -36,7 +37,7 @@ import { declaredCapabilities, readSendOutcome, type WrittenFact } from "./conne
 import { DraftAwareDelivery, type GuardedDeliverySummary, type QueueWakeFacts } from "./draft-aware-delivery.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
-import { communityHarnessOf } from "./built-in-runtimes.js";
+import { communityHarnessOf, isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 import { claudeResumeRotation, sessionCommunityHarnessSelect, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter, TmuxResult } from "../adapters/tmux.js";
 import { tmuxUnsetWindowSizeCommand } from "../adapters/tmux-server.js";
@@ -233,6 +234,18 @@ function trimPaneLines(paneContent: string): string[] {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+}
+
+const NUMBERED_CHOICE_LINE = composerNumberedChoicePattern();
+
+/** Where a line-mode community harness is asking now. It prints a numbered dialog, the answer and more output into its
+ *  scrollback, then a later prompt below them, so, as #2520 reads Claude's empty input box, a later prompt line that isn't
+ *  itself a choice row makes everything above it history. With no later prompt in view the whole window counts, as
+ *  before. Claude and Codex keep their own current-dialog readers: a live Codex choice can sit above its composer. */
+function currentPromptRegion(lines: string[], runtime: string | null | undefined): string[] {
+  if (!isCommunityHarnessRuntime(runtime)) return lines;
+  const prompt = lines.map(line => COMPOSER_PROMPT_LINE_PATTERN.test(line) && !NUMBERED_CHOICE_LINE.test(line)).lastIndexOf(true);
+  return prompt < 0 ? lines : lines.slice(prompt + 1);
 }
 
 function truncateEvidence(text: string): string {
@@ -834,7 +847,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     !!claudeComposer.liveStatus && CLAUDE_LIVE_STATUS_PATTERN.test(claudeComposer.liveStatus);
   // Wider window for prompt SIGNATURES so a tall footer can't push a real prompt out of view (see
   // PROMPT_SCAN_LINES). The generic activity checks below keep the tighter 8-line window.
-  const promptScanLines = historyAboveInput ? [] : lastNonBlank.slice(-PROMPT_SCAN_LINES);
+  const promptScanLines = historyAboveInput ? [] : currentPromptRegion(lastNonBlank.slice(-PROMPT_SCAN_LINES), options.runtime);
   const trailingNonBlank = lastNonBlank.slice(-3);
   const lastLine = lastNonBlank.at(-1) ?? "";
   const idlePromptLine = trailingNonBlank.find((line) =>
