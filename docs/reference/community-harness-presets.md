@@ -293,6 +293,12 @@ Agent's CLI.
 - **The launcher:** it creates the session OpenRig named (`-c <name> --create-if-missing`), and on a resume reopens it
   without `--create-if-missing`, with its own Hermes home per seat. A name that matches nothing ends with Hermes's own
   "No session found" error.
+- **First startup input:** the preset declares `first_input: true`. With Hermes v0.23.4, the launcher passes
+  `OPENRIG_FIRST_INPUT` as `--query-file <path>`; on a real terminal Hermes submits that text as the first turn and
+  stays interactive. It does not read or replay the file on a resume. A missing, unreadable or empty file stops the
+  launch with an error; the startup text is never truncated to fit a command-line argument. This transport is covered
+  with a stand-in; unattended startup still needs checking with the installed Hermes.
+  A fresh handover's restore packet is still typed after launch, outside `first_input`; its consumption isn't observed.
 - **Settings go in the seat's Hermes `config.yaml`, not in flags:** Hermes's CLI creates a named session with no launch
   flags and then reopens it, refusing any creation flag (model, provider, `--max-turns`) that differs. So the preset's
   command carries none, and each seat's `config.yaml`, in its Hermes home, sets them before the seat's first start:

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "yaml";
@@ -16,13 +16,18 @@ function run(env: Record<string, string>) {
   const fake = join(dir, "hermes");
   const observe = `legacy=false; [ "\${OPENRIG_ACTIVITY_HOOK_TOKEN-}" != legacy-hook ] || legacy=true
 printf '%s|%s|%s|%s|%s|%s|%s|%s\\n' "\${OPENRIG_RUN_ID+x}" "\${OPENRIG_ACTIVITY_HOOK_TOKEN+x}" "$legacy" "$OPENRIG_NODE_ID" "\${OPENRIG_SESSION_NAME-}" "\${OPENRIG_URL-}" "\${OPENRIG_OCCUPANT_GENERATION-}" "\${ANTHROPIC_API_KEY-}" >> "${dir}/native-env"`;
-  writeFileSync(fake, `#!/bin/sh\n${observe}\necho "$@ HOME=$HERMES_HOME" > "${dir}/started"\n`);
+  writeFileSync(fake, `#!/bin/sh\n${observe}\nprevious=\nfor arg do
+  if [ "$previous" = --query-file ]; then cat "$arg" > "${dir}/received"; fi
+  previous="$arg"
+done
+echo "$@ HOME=$HERMES_HOME" > "${dir}/started"\n`);
   chmodSync(fake, 0o755);
   const launch = (extra: Record<string, string>) => execFileSync(join(EXAMPLE, "openrig-hermes-launch"), ["--provider", "openrouter"],
     { env: { PATH: process.env["PATH"]!, OPENRIG_HERMES: fake, OPENRIG_HOME: join(dir, "home"), OPENRIG_NODE_ID: "node-1", ...extra }, timeout: 20_000, stdio: "pipe" });
   launch(env);
   return { started: readFileSync(join(dir, "started"), "utf8").trim(), home: join(dir, "home", "state", "hermes", "node-1"), launch,
-    childEnv: readFileSync(join(dir, "native-env"), "utf8").trim() };
+    childEnv: readFileSync(join(dir, "native-env"), "utf8").trim(),
+    firstInput: existsSync(join(dir, "received")) ? readFileSync(join(dir, "received"), "utf8") : null };
 }
 
 describe("the documented Hermes launcher and preset", () => {
@@ -41,6 +46,30 @@ describe("the documented Hermes launcher and preset", () => {
   it("reopens the named session on a resume with none of the creation flags, which Hermes refuses there", () => {
     const { started, home } = run({ OPENRIG_RESUME_REF: "openrig-dev-impl-1a2b3c4d" });
     expect(started).toBe(`chat -c openrig-dev-impl-1a2b3c4d HOME=${home}`);
+  });
+
+  it("passes the whole first turn by file, including whitespace and text beyond argument limits", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hermes-first-input-")); dirs.push(dir);
+    const file = join(dir, "first input.txt");
+    const text = "  Identity: café 🌍\n'quoted' `literal` ${literal}\n" + "long line\n".repeat(40_000) + "\n\n";
+    writeFileSync(file, text, { mode: 0o600 });
+    const { started, firstInput } = run({ OPENRIG_CONVERSATION: "named", OPENRIG_FIRST_INPUT: file });
+    expect(firstInput).toBe(text);
+    expect(started).toContain(`--query-file ${file}`);
+    expect(started).not.toContain("Identity:");
+  });
+
+  it("ignores even a stale first-input path when reopening a conversation", () => {
+    const { started, firstInput } = run({ OPENRIG_RESUME_REF: "named", OPENRIG_FIRST_INPUT: "/missing/stale-first-input" });
+    expect(firstInput).toBeNull();
+    expect(started).not.toContain("--query-file");
+  });
+
+  it.each([false, true])("reports a missing or empty first-input file instead of dropping it (empty=%s)", empty => {
+    const dir = mkdtempSync(join(tmpdir(), "hermes-first-input-")); dirs.push(dir);
+    const file = join(dir, "input");
+    if (empty) writeFileSync(file, "");
+    expect(() => run({ OPENRIG_CONVERSATION: "named", OPENRIG_FIRST_INPUT: file })).toThrow(/first-input file.*nothing was started/);
   });
 
   it("starts nothing when OpenRig passed no name", () => {
@@ -96,6 +125,6 @@ describe("the documented Hermes launcher and preset", () => {
     });
 
   it("is a preset this OpenRig loads, declaring names_conversation and not resume, and doesn't yet take a model", () => {
-    expect(loadCommunityHarnessPreset("hermes", EXAMPLE)).toMatchObject({ ok: true, preset: { namesConversation: true, launchResult: false, resume: false, passesModel: false } });
+    expect(loadCommunityHarnessPreset("hermes", EXAMPLE)).toMatchObject({ ok: true, preset: { namesConversation: true, firstInput: true, launchResult: false, resume: false, passesModel: false } });
   });
 });

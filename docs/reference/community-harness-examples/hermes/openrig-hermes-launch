@@ -49,6 +49,15 @@ if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
   exec "$hermes" chat -c "$OPENRIG_RESUME_REF"
 fi
 if [ -n "${OPENRIG_CONVERSATION:-}" ]; then
+  # Hermes v0.23.4 seeds its interactive TTY from this file without a paste/Enter race.
+  # Passing the path avoids shell expansion and argument-size limits on the startup text.
+  if [ -n "${OPENRIG_FIRST_INPUT:-}" ]; then
+    if [ ! -f "$OPENRIG_FIRST_INPUT" ] || [ ! -r "$OPENRIG_FIRST_INPUT" ] || [ ! -s "$OPENRIG_FIRST_INPUT" ]; then
+      echo "openrig-hermes-launch: the first-input file is missing, unreadable or empty; nothing was started" >&2
+      exit 1
+    fi
+    set -- "$@" --query-file "$OPENRIG_FIRST_INPUT"
+  fi
   exec "$hermes" chat -c "$OPENRIG_CONVERSATION" --create-if-missing "$@"
 fi
 echo "openrig-hermes-launch: OpenRig passed no conversation name; is names_conversation set in the preset?" >&2
