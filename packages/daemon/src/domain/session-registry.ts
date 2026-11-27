@@ -1070,6 +1070,18 @@ export function sessionCommunityHarnessSelect(db: Database.Database, alias = "s"
   return has ? `${alias}.agent_app` : "NULL";
 }
 
+/** The community harness a seat was last launched for: the selection on the newest of its session rows that records one.
+ *  A newer row without one, such as the provisional session of a restore launch that couldn't tell the harness (#4047),
+ *  doesn't hide it. Null when no row records one, or on a schema without the column. Callers still require it to name the
+ *  seat's current runtime (`communityHarnessOf`), so a seat never launched for an installed preset gets no adapter. */
+export function seatRecordedCommunityHarness(db: Database.Database, nodeId: string): string | null {
+  const app = sessionCommunityHarnessSelect(db);
+  if (app === "NULL") return null;
+  const row = db.prepare(`SELECT ${app} AS app FROM sessions s WHERE s.node_id = ? AND ${app} IS NOT NULL
+    ORDER BY s.created_at DESC, s.id DESC LIMIT 1`).get(nodeId) as { app: string } | undefined;
+  return row?.app ?? null;
+}
+
 const sessionsHaveCommunityRunner = new WeakMap<Database.Database, boolean>();
 
 /** The SQL that reads whether a session's community app was launched as a runner: 1, 0, or NULL. NULL also on a schema

@@ -370,6 +370,25 @@ describe("changing an existing seat's launch directory", () => {
     expect(savedCwd(seat.node.id)).toBe(fs.realpathSync(newCwd));
   });
 
+  it("#4047: finds a community harness's adapter when a newer session lost the seat's harness selection", async () => {
+    const seat = seed();
+    const presets = path.join(root, "community-harnesses");
+    fs.mkdirSync(presets);
+    fs.writeFileSync(path.join(presets, "synth.yaml"), "format: 1\nname: synth\ncommand: synth-harness --serve\nmaintainer: Example Maintainer\nlimits: []\nfirst_input: true\n");
+    db.prepare("UPDATE nodes SET runtime = 'synth' WHERE id = ?").run(seat.node.id);
+    db.prepare("UPDATE node_startup_context SET runtime = 'synth' WHERE node_id = ?").run(seat.node.id);
+    const launched = (db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(seat.node.id) as { id: string }).id;
+    registry.recordCommunityHarnessSelection(launched, "synth");
+    registry.updateStatus(launched, "superseded");
+    // A restore launch that couldn't tell the harness left a newer row without the selection.
+    registry.updateStatus(registry.registerSession(seat.node.id, seat.sessionName).id, "detached");
+    service = new SeatLifecycleService({ db, rigRepo, sessionRegistry: registry, eventBus, tmuxAdapter: tmux,
+      runtimeAdapters: withCommunityHarnessResolver({ "claude-code": adapter } as Record<string, RuntimeAdapter>, { tmux, presetsDir: () => presets }) });
+    const result = await service.setCwd({ seatRef: seat.sessionName, cwd: newCwd, reason: "isolate workspace" });
+    expect((result as { code?: string }).code).toBeUndefined();
+    expect(result).toMatchObject({ ok: true, changed: true });
+  });
+
   it("works with the seat's typing guard on, without an input lease and without changing its protection", async () => {
     const seat = seed();
     const seatGuard = guard();
