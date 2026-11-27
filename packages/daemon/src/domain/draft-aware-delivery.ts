@@ -223,8 +223,9 @@ export class DraftAwareDelivery {
    *  waiter took was never handed to anyone, so it stays queued for the bridge to deliver, once, by its own rules. */
   recover(): void {
     this.db.prepare(`UPDATE outbox_entries SET delivery_state='indeterminate' WHERE guard_delivery IS NOT NULL AND delivery_state='sending'
-      AND NOT (CASE WHEN json_valid(guard_delivery) THEN json_extract(guard_delivery,'$.channel') = ?
-        AND json_extract(guard_delivery,'$.state') = 'queued' ELSE 0 END)`).run(HOOK_BRIDGE_CHANNEL);
+      AND NOT (CASE WHEN json_valid(guard_delivery) THEN json_extract(guard_delivery,'$.channel') IS ?
+        AND json_extract(guard_delivery,'$.state') IS 'queued' ELSE 0 END)`).run(HOOK_BRIDGE_CHANNEL);
+    // `IS`, not `=`: a receipt with no channel or state reads NULL there, and `NOT NULL` would skip the row.
     // A draft-held message claimed with no receipt yet, such as one the hook bridge handed back for typing
     // (HookBridge.releaseForTyping) before the typed send wrote its own: whether it was typed is unknown, and it would
     // otherwise hold its sender's later messages behind it for good.
