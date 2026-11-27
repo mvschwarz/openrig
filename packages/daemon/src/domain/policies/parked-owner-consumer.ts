@@ -10,9 +10,10 @@
 // Row notes describe attempts and preserve positive prompt-refusal recovery. They
 // do not veto an undelivered reminder. Recorded success and actual prompt holds
 // still apply. A typed quota refusal waits for admission or obligation changes while existing recovery keeps custody.
-// The engine owns cadence; attempts rotate eligible owners. An owner named in the job's
-// context.owner_min_interval_s gets at most one reminder per that many seconds; the
-// next one names every obligation still open, with the ones new since the last.
+// The engine owns cadence; attempts rotate eligible owners. After a reminder was typed and
+// sent to the occupant running as an owner, that owner gets no other one for
+// context.owner_min_interval_s (an hour by default); the next one names every obligation
+// still open, with the ones new since the last.
 //
 // One-oracle law (mini-req 2): the parked verdict, held-health classification,
 // indeterminate arm, and obligation join all come from diagnoseRigParked — this
@@ -22,7 +23,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import type { Policy, PolicyJob, PolicyEvaluation } from "./types.js";
 import { BACKGROUND_SHELL_GRACE_MINUTES } from "../queue-pickup.js";
-import { deliveryReachedSeat, type WatchdogHistoryEntry } from "../watchdog-history-log.js";
+import { deliveryReachedSeat, historyRecordedAt, type WatchdogHistoryEntry } from "../watchdog-history-log.js";
 
 /** Structural view of the shipped SeatParkedDiagnosis (parked-query.ts). */
 export interface ParkedSeatDiagnosisView {
@@ -58,9 +59,10 @@ export interface ParkedOwnerConsumerDeps {
   history: {
     listForJob: (jobId: string, limit: number) => WatchdogHistoryEntry[];
     countForJob: (jobId: string) => number;
-    /** The job's newest sends recorded as reaching one seat (outcome `sent`), newest first, however many other rows
-     *  came after them. Without it, an owner_min_interval_s finds no earlier reminder and holds nothing back. */
-    listSentToTarget?: (jobId: string, targetSession: string, limit: number) => WatchdogHistoryEntry[];
+    /** The job's newest send to one seat that was typed and submitted (status `ok`, result `accepted`) to that
+     *  occupant generation, however many other rows came after it. Without it, the owner's minimum interval finds no
+     *  earlier reminder and holds nothing back. */
+    latestAcceptedSendTo?: (jobId: string, targetSession: string, occupantGeneration: string) => WatchdogHistoryEntry | null;
   };
   /** The durable row-side surfaces (queue repository, adapter-wired). */
   rows: {
@@ -116,29 +118,40 @@ export function rigFromAnchor(targetSession: string): string {
     : targetSession;
 }
 
-/** The job context key: owner session -> minimum seconds between this job's reminders to it. */
+/** The job context key: the minimum seconds between this job's reminders to one owner. A number sets it for every
+ *  owner; an object (owner session -> seconds) sets it per owner, the others keeping the default. 0 turns it off. */
 export const OWNER_MIN_INTERVAL_KEY = "owner_min_interval_s";
+/** The minimum interval of an owner the job's context doesn't set. */
+export const DEFAULT_OWNER_MIN_INTERVAL_S = 3600;
 
-/** The valid entries of context.owner_min_interval_s; an entry that is not a positive finite number is ignored. */
-export function ownerMinIntervals(context: Record<string, unknown> | null | undefined): Map<string, number> {
+const validInterval = (seconds: unknown): seconds is number => typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0;
+
+/** The valid part of context.owner_min_interval_s: a number of seconds that is not negative, or an object keeping
+ *  only such entries; anything else is not set (null). */
+function ownerMinIntervalSetting(context: Record<string, unknown> | null | undefined): number | Record<string, number> | null {
   const raw = context?.[OWNER_MIN_INTERVAL_KEY];
-  const out = new Map<string, number>();
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
-  for (const [owner, seconds] of Object.entries(raw)) {
-    if (typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0) out.set(owner, seconds);
-  }
-  return out;
+  if (validInterval(raw)) return raw;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const kept = Object.entries(raw).filter((entry): entry is [string, number] => validInterval(entry[1]));
+  return kept.length === 0 ? null : Object.fromEntries(kept);
+}
+
+/** One owner's minimum interval in seconds (0: none), from the job's context or the default. */
+export function ownerMinInterval(context: Record<string, unknown> | null | undefined, owner: string): number {
+  const setting = ownerMinIntervalSetting(context);
+  if (typeof setting === "number") return setting;
+  return setting !== null && Object.hasOwn(setting, owner) ? setting[owner]! : DEFAULT_OWNER_MIN_INTERVAL_S;
 }
 
 /** The spec the daemon ensures for a rig's job. The ensure rewrites the spec on every start, so an operator's
- *  owner_min_interval_s in the prior spec is carried over (only its valid entries); everything else is the default. */
+ *  owner_min_interval_s in the prior spec is carried over (only its valid part); everything else is the default. */
 export function parkedOwnerSpecYaml(rigName: string, priorSpecYaml?: string | null): string {
   const spec = `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${makeRigAnchor(rigName)}\ncontext:\n  rig: ${rigName}\n`;
   let prior: unknown = null;
   try { prior = priorSpecYaml ? parseYaml(priorSpecYaml) : null; } catch { /* an unreadable prior spec keeps nothing */ }
   const context = prior !== null && typeof prior === "object" ? (prior as { context?: unknown }).context : null;
-  const kept = ownerMinIntervals(context !== null && typeof context === "object" ? context as Record<string, unknown> : null);
-  return kept.size === 0 ? spec : `${spec}  ${OWNER_MIN_INTERVAL_KEY}: ${JSON.stringify(Object.fromEntries(kept))}\n`;
+  const kept = ownerMinIntervalSetting(context !== null && typeof context === "object" ? context as Record<string, unknown> : null);
+  return kept === null ? spec : `${spec}  ${OWNER_MIN_INTERVAL_KEY}: ${JSON.stringify(kept)}\n`;
 }
 
 // ── The row-note contract (stable prefixes; parsed here and queried by the S01
@@ -294,29 +307,24 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         } catch { /* reporting failure is not permission to lose the next message */ }
       }
 
-      // context.owner_min_interval_s: when each named owner last got a reminder that reached it, read from the job's
-      // sends to that seat (failed and refused attempts don't count). The interval runs from the later of the evaluation
-      // that sent it and the delivered note a later scan records on its row, so it never starts before the delivery.
-      const minIntervals = ownerMinIntervals(job.context);
-      const lastReminder = (owner: string): { at: number; obligations: string[]; episodeKey: string | null; primaryRow: string | null } | null => {
-        let sends: WatchdogHistoryEntry[] = [];
-        try { sends = deps.history.listSentToTarget?.(job.jobId, owner, 5) ?? []; } catch { /* unknown history holds no reminder back */ }
-        const e = sends.find(h => h.deliveryTargetSession === owner && deliveryReachedSeat(h.deliveryStatus));
-        const evaluatedAt = e ? Date.parse(e.evaluatedAt) : Number.NaN;
-        if (!e || !Number.isFinite(evaluatedAt)) return null;
+      // The owner's minimum interval runs from its newest reminder that was typed and sent (the transport accepted the
+      // submit, whether or not the screen confirmed it) to the occupant running as that owner now, timed from when that
+      // send returned (the history row recorded then). An attempt that may or may not have been sent, a failed one, a
+      // refused one, one to an earlier occupant, or one with no recorded occupant starts nothing: an unknown occupant
+      // earns no quiet time.
+      const lastReminder = (owner: string, generation: string | null):
+        { at: number; obligations: string[]; episodeKey: string | null; primaryRow: string | null } | null => {
+        if (generation === null) return null;
+        let e: WatchdogHistoryEntry | null = null;
+        try { e = deps.history.latestAcceptedSendTo?.(job.jobId, owner, generation) ?? null; } catch { /* unknown history holds no reminder back */ }
+        const sentAt = e ? historyRecordedAt(e.historyId) : null;
+        if (!e || sentAt === null || e.deliveryTargetSession !== owner || e.deliveryStatus !== "ok"
+          || e.evaluationNotes?.["deliveryFact"] !== "accepted" || e.evaluationNotes?.["occupantGeneration"] !== generation) return null;
         const named = e.evaluationNotes?.["obligations"];
         const key = typeof e.evaluationNotes?.["episodeKey"] === "string" ? e.evaluationNotes["episodeKey"] as string : null;
         const row = e.evaluationNotes?.["primaryRow"];
-        let deliveredAt = Number.NaN;
-        try {
-          if (key && typeof row === "string") {
-            const note = deps.rows.listTransitions(row).find(t => t.transitionNote === `${DELIVERED_PREFIX} ${key}`);
-            deliveredAt = note ? Date.parse(note.ts) : Number.NaN;
-          }
-        } catch { /* without the note, the evaluation time stands */ }
-        return { at: Number.isFinite(deliveredAt) ? Math.max(evaluatedAt, deliveredAt) : evaluatedAt,
-          obligations: Array.isArray(named) ? named.filter((id): id is string => typeof id === "string") : [], episodeKey: key,
-          primaryRow: typeof row === "string" ? row : null };
+        return { at: sentAt, obligations: Array.isArray(named) ? named.filter((id): id is string => typeof id === "string") : [],
+          episodeKey: key, primaryRow: typeof row === "string" ? row : null };
       };
 
       // A delivered reminder's rows still pending and unclaimed past the bound go to someone who can act, once per
@@ -476,7 +484,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           // go to someone who can act, once for this episode.
           const deliveredAt = transitions.find(t => t.transitionNote === `${DELIVERED_PREFIX} ${lastKey}`)?.ts;
           const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && namedIds.includes(r.qitemId)).map(r => r.qitemId);
-          const escalationFailure = deliveredAt ? await escalateIfDue(seat.sessionName, lastKey!, deliveredAt, unclaimed, [], primaryRow) : undefined;
+          const escalationFailure = deliveredAt ? await escalateIfDue(seat.sessionName, lastKey!, deliveredAt, unclaimed, namedIds, primaryRow) : undefined;
           skipped.push({ seat: seat.sessionName, why: "unchanged-since-last-wake", ...(escalationFailure ? { escalationFailure } : {}) });
           continue;
         }
@@ -501,12 +509,12 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           continue;
         }
         // The owner's minimum interval: nothing is reserved until it ends, and the next reminder names every obligation
-        // still open, the ones opened since the last reminder included. A reminder that never reached the seat doesn't count.
+        // still open, the ones opened since the last reminder included. Only a reminder typed and sent to this occupant counts.
         // A seat at a prompt is not held: this attempt's refusal is what alerts whoever can clear the prompt. The last
         // reminder's rows still unclaimed past the bound are escalated as when nothing changed.
-        const minIntervalS = minIntervals.get(seat.sessionName);
-        const last = minIntervalS === undefined ? null : lastReminder(seat.sessionName);
-        if (!terminal && minIntervalS !== undefined && last && seat.activity.needsInput.count === 0
+        const minIntervalS = ownerMinInterval(job.context, seat.sessionName);
+        const last = minIntervalS === 0 ? null : lastReminder(seat.sessionName, generation);
+        if (!terminal && last && seat.activity.needsInput.count === 0
           && (deps.now?.() ?? Date.now()) - last.at < minIntervalS * 1000) {
           const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && last.obligations.includes(r.qitemId)).map(r => r.qitemId);
           const nextReminderAt = new Date(last.at + minIntervalS * 1000).toISOString();
@@ -546,9 +554,9 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           `(a hold on a person also needs --summary and --evidence-ref unless the row has them). ` +
           `After a recorded delivery to this occupant, this check waits for your rows to change. An interrupted or unconfirmed attempt may repeat; interactive-prompt recovery stays with the wake-or-escalate ladder. ` +
           `Held rows stay listed in rig view show held; for a claimed in-progress row, the wake-or-escalate ladder also retries a failed wake.` +
-          (minIntervalS === undefined ? "" :
+          (!last ? "" :
             ` This check reminds you at most once per ${minIntervalS} s; this reminder covers every obligation still open` +
-            (last ? ` since the last one at ${new Date(last.at).toISOString()}` : "") +
+            ` since the last one at ${new Date(last.at).toISOString()}` +
             (newSinceLastWake.length > 0 ? `, new since then: ${newSinceLastWake.join(", ")}` : "") + ".");
         return {
           action: "send",
@@ -560,7 +568,9 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
             idsHash,
             primaryRow,
             obligations: namedIds,
-            ...(minIntervalS === undefined ? {} : { ownerMinIntervalS: minIntervalS, newSinceLastWake }),
+            // The occupant this reminder goes to: its interval is that occupant's, never a successor's.
+            ...(generation === null ? {} : { occupantGeneration: generation }),
+            ...(last ? { ownerMinIntervalS: minIntervalS, newSinceLastWake } : {}),
             evidence: Number.isFinite(shell) && seat.activity.needsInput.count === 0 ? "arbitrated-idle-at-prompt; background-shell-past-ceiling" : "arbitrated-idle-at-prompt",
             episodeClosures: closures,
             skippedSeats: skipped,

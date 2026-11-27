@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { monotonicFactory } from "ulid";
+import { decodeTime, monotonicFactory } from "ulid";
 
 // Increasing ids within a millisecond, so the readers' `history_id DESC` tiebreak is newest first for entries with
 // the same evaluated_at.
@@ -34,6 +34,16 @@ export type QueueOnlyDeliveryCode = typeof QUEUED_AS_ROW | typeof NOTED_ON_PARKE
 
 export function isQueueOnlyDeliveryCode(code: unknown): code is QueueOnlyDeliveryCode {
   return code === QUEUED_AS_ROW || code === NOTED_ON_PARKED_ROW || code === NOTED_ON_QUEUED_ROW;
+}
+
+/** When a history row was recorded, from its id (ms since the epoch), or null for an id that isn't one this log made.
+ *  A send's row is recorded once the send has returned, so for a send this is after it. */
+export function historyRecordedAt(historyId: string): number | null {
+  try {
+    return decodeTime(historyId);
+  } catch {
+    return null;
+  }
 }
 
 /** Whether a recorded delivery reached its seat: typed (`ok`), or in its queue at a queue-only seat. A reader that
@@ -129,15 +139,19 @@ export class WatchdogHistoryLog {
     return rows.map(rowToEntry);
   }
 
-  /** The job's newest sends recorded as reaching one target session (outcome `sent`), newest first. */
-  listSentToTarget(jobId: string, targetSession: string, limit = 5): WatchdogHistoryEntry[] {
-    const rows = this.db
+  /** The job's last-recorded send to one target session that was typed and submitted (outcome `sent`, status `ok`, the
+   *  send's own result `accepted`) to the given occupant generation, however many other rows came after it; null if none.
+   *  Ordered by the id, the time the row was recorded (after the send returned), not by when the send was decided. */
+  latestAcceptedSendTo(jobId: string, targetSession: string, occupantGeneration: string): WatchdogHistoryEntry | null {
+    const row = this.db
       .prepare(
         `SELECT * FROM watchdog_history WHERE job_id = ? AND delivery_target_session = ? AND outcome = 'sent'
-         ORDER BY evaluated_at DESC, history_id DESC LIMIT ?`,
+           AND delivery_status = 'ok' AND json_extract(evaluation_notes, '$.deliveryFact') = 'accepted'
+           AND json_extract(evaluation_notes, '$.occupantGeneration') = ?
+         ORDER BY history_id DESC LIMIT 1`,
       )
-      .all(jobId, targetSession, limit) as HistoryRow[];
-    return rows.map(rowToEntry);
+      .get(jobId, targetSession, occupantGeneration) as HistoryRow | undefined;
+    return row ? rowToEntry(row) : null;
   }
 
   listAll(limit = 100): WatchdogHistoryEntry[] {
