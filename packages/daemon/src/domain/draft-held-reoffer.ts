@@ -6,7 +6,9 @@ import type { AgentActivity } from "./types.js";
 export function attachDraftHeldReoffer(
   structural: { attachSweepCompleted(listener: () => void): void; paneActivity(sessionName: string): number | undefined },
   repo: { draftHeldSeats(): Array<{ session: string; newest: string }>;
-    deliverDraftHeldMessagesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<DraftHeldPassEnd> },
+    deliverDraftHeldMessagesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<DraftHeldPassEnd>;
+    draftHeldWakeSeats(): Array<{ session: string; lastTry: string }>;
+    retryDraftHeldWakesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<DraftHeldPassEnd> },
   stateOf: (sessionName: string) => AgentActivity["state"] | undefined,
   opts: Pick<DraftHeldReofferDeps, "now" | "intervalMs" | "onError"> = {},
 ): void {
@@ -14,6 +16,8 @@ export function attachDraftHeldReoffer(
     heldSeats: () => repo.draftHeldSeats(),
     deliver: sessionName => repo.deliverDraftHeldMessagesOnIdle(sessionName, stateOf(sessionName)),
     paneActivity: sessionName => structural.paneActivity(sessionName),
+    heldWakeSeats: () => repo.draftHeldWakeSeats(),
+    deliverWakes: sessionName => repo.retryDraftHeldWakesOnIdle(sessionName, stateOf(sessionName)),
   }));
 }
 
@@ -29,6 +33,10 @@ export interface DraftHeldReofferDeps {
   /** tmux's last write time for the seat's pane, as the sweep read it (SeatStructuralActivityService.paneActivity); it
    *  changes only when the pane does. Undefined when not known, which counts as changed. */
   paneActivity: (session: string) => number | undefined;
+  /** Seats with draft-held queue wakes that have had a try, with the newest try's time (QueueRepository.draftHeldWakeSeats). */
+  heldWakeSeats?: () => Array<{ session: string; lastTry: string }>;
+  /** One draft-held wake pass for the seat (QueueRepository.retryDraftHeldWakesOnIdle). */
+  deliverWakes?: (session: string) => Promise<DraftHeldPassEnd>;
   now?: () => number;
   intervalMs?: number;
   onError?: (error: unknown) => void;
@@ -50,7 +58,29 @@ export function createDraftHeldReoffer(deps: DraftHeldReofferDeps): () => void {
   const now = deps.now ?? Date.now;
   const offers = new Map<string, Offer>();
   const running = new Set<string>();
+  // Queue wakes: each try the activity path made gets ONE more offer after the quiet interval, keyed by that try's time.
+  // #48 counts tries for the owner's escalation, so a person who keeps typing still reaches it after the same number of
+  // distinct tries; this only adds the observation a quiet-window hold was missing.
+  const wakeOffered = new Map<string, string>();
+  const wakesRunning = new Set<string>();
+  const offerWakes = () => {
+    if (!deps.heldWakeSeats || !deps.deliverWakes) return;
+    let seats: Array<{ session: string; lastTry: string }>;
+    try { seats = deps.heldWakeSeats(); } catch (error) { deps.onError?.(error); return; }
+    const held = new Set(seats.map(seat => seat.session));
+    for (const session of Array.from(wakeOffered.keys())) if (!held.has(session)) wakeOffered.delete(session);
+    for (const { session, lastTry } of seats) {
+      if (wakesRunning.has(session) || wakeOffered.get(session) === lastTry || now() - Date.parse(lastTry) < interval) continue;
+      wakesRunning.add(session);
+      void deps.deliverWakes(session).then(() => {
+        // The offer's own try (when it recorded one) is this seat's new newest; it isn't offered again.
+        const after = deps.heldWakeSeats?.().find(seat => seat.session === session)?.lastTry;
+        wakeOffered.set(session, after ?? lastTry);
+      }, error => { wakeOffered.set(session, lastTry); deps.onError?.(error); }).finally(() => wakesRunning.delete(session));
+    }
+  };
   return () => {
+    offerWakes();
     let seats: Array<{ session: string; newest: string }>;
     try { seats = deps.heldSeats(); } catch (error) { deps.onError?.(error); return; }
     const held = new Set(seats.map(seat => seat.session));
