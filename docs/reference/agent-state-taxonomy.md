@@ -33,9 +33,9 @@ attention, or OpenRig can't confirm the pane's process as the seat's runtime, su
 output reads `Session: needs attention`, as `rig ps` reads `att`.
 Beside the LIFECYCLE, a recorded-running agent seat whose current identity check saw a shell as the pane's foreground
 command, without verifying the seat's agent there, serves `agentLiveness` (`agent_liveness` in `rig seat status`):
-`{ state: "not_verified", reason: "shell_foreground", command, observedAt }`. That's the reading a send is refused on
-(`target_runtime_unverified`). A community harness's seat can read it with its LIFECYCLE still `running`, because OpenRig
-can't prove that harness's process. `rig ps --nodes` shows `agent not verified` as the REASON and a `Liveness` line, and
+`{ state: "not_verified", reason: "shell_foreground", command, observedAt }`, once its startup is no longer pending. It
+shows a stored shell observation; delivery checks the target again and applies its runtime's own policy. A community
+harness's seat can read it with its LIFECYCLE still `running`, because OpenRig can't prove that harness's process. `rig ps --nodes` shows `agent not verified` as the REASON and a `Liveness` line, and
 `rig seat status` shows an `Agent:` line. It isn't proof the agent stopped, since an agent can run behind a wrapper.
 Otherwise the field is absent, which claims nothing. It's read from the identity check's stored verdict, so showing it
 reads nothing new.

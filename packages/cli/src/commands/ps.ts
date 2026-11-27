@@ -685,7 +685,8 @@ function livenessLine(seat: string, node: NodeEntry): string {
 }
 
 /** A recorded-running seat whose current identity check saw a shell in the pane's foreground and didn't verify its agent
- *  (the daemon's agentLiveness): the reading a send is refused on. Not known stopped: the agent can run behind a wrapper. */
+ *  (the daemon's agentLiveness), a stored shell observation; delivery checks the target again and applies its runtime's own
+ *  policy. Not known stopped: the agent can run behind a wrapper. */
 function agentNotVerified(node: NodeEntry): boolean {
   return node.agentLiveness?.state === "not_verified";
 }

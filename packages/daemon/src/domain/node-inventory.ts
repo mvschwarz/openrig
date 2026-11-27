@@ -400,13 +400,15 @@ function deriveNodeKind(runtime: string | null): "agent" | "infrastructure" {
 }
 
 /** NodeInventoryEntry.agentLiveness, from the applicable stored verdict: a running agent seat whose current identity check saw
- *  a shell in the foreground and didn't verify its agent. Undefined otherwise. */
+ *  a shell in the foreground and didn't verify its agent. Undefined otherwise, and while its startup is still pending: a launch
+ *  marks the session running on its default shell before the agent starts there. */
 function deriveAgentLiveness(
-  runtime: string | null, sessionStatus: string | null, verdict: SeatIdentityVerdict | null,
+  runtime: string | null, sessionStatus: string | null, startupStatus: NodeInventoryEntry["startupStatus"],
+  verdict: SeatIdentityVerdict | null,
 ): NodeInventoryEntry["agentLiveness"] {
   const command = verdict?.evidence.observedCommand?.trim().toLowerCase();
-  if (sessionStatus !== "running" || deriveNodeKind(runtime) !== "agent" || !verdict || verdict.verdict === "verified"
-    || !command || !isShellForeground(command)) return undefined;
+  if (!runtime || sessionStatus !== "running" || startupStatus === "pending" || deriveNodeKind(runtime) !== "agent"
+    || !verdict || verdict.verdict === "verified" || !command || !isShellForeground(command)) return undefined;
   return { state: "not_verified", reason: "shell_foreground", command: command.replace(/^-/, ""), observedAt: verdict.observedAt };
 }
 
@@ -1119,7 +1121,7 @@ function buildInventoryItem(
     usableSnapshot,
     identityVerdict: identityVerdict?.verdict ?? null,
   });
-  const agentLiveness = deriveAgentLiveness(row.runtime, sessionStatus, identityVerdict);
+  const agentLiveness = deriveAgentLiveness(row.runtime, sessionStatus, startupStatus, identityVerdict);
   const entry: NodeInventoryEntry = {
     nodeId: row.node_id,
     rigId: row.rig_id,

@@ -509,7 +509,25 @@ describe("agent liveness beside the lifecycle", () => {
     }
   });
 
-  it("claims nothing for an agent's own command, a verified check, an unavailable or absent check, a terminal seat, a stopped session or another pane's check", () => {
+  // A launch marks the session running on its default shell while startup is pending, before the agent starts there: that
+  // shell isn't an agent that exited. A startup that needs attention keeps the reading beside its att.
+  it("claims nothing while startup is pending, and keeps the reading once startup needs attention", () => {
+    const db = createFullTestDb();
+    try {
+      seedRunningSeat(db);
+      db.prepare("UPDATE nodes SET runtime = 'hermes' WHERE id = 'n1'").run();
+      db.prepare("UPDATE sessions SET startup_status = 'pending' WHERE id = 'sess1'").run();
+      new SeatIdentityStore(db).upsert(observed("unconfirmed", "process_identity_unconfirmed", "bash"));
+      expect(read(db)).toMatchObject({ sessionStatus: "running", startupStatus: "pending" });
+      expect(read(db).agentLiveness).toBeUndefined();
+      db.prepare("UPDATE sessions SET startup_status = 'attention_required' WHERE id = 'sess1'").run();
+      expect(read(db)).toMatchObject({ lifecycleState: "attention_required", agentLiveness: { state: "not_verified", command: "bash" } });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("claims nothing for an agent's own command, a verified check, an unavailable or absent check, a terminal seat, no runtime, a stopped session or another pane's check", () => {
     const cases: Array<[string, (db: Database.Database) => void]> = [
       ["the agent's own command", db => new SeatIdentityStore(db).upsert(observed("unconfirmed", "process_identity_unconfirmed", "python3"))],
       ["a verified check", db => new SeatIdentityStore(db).upsert(observed("verified", null, "zsh"))],
@@ -517,6 +535,10 @@ describe("agent liveness beside the lifecycle", () => {
       ["no check yet", () => {}],
       ["a terminal seat", db => {
         db.prepare("UPDATE nodes SET runtime = 'terminal' WHERE id = 'n1'").run();
+        new SeatIdentityStore(db).upsert(observed("unconfirmed", "process_identity_unconfirmed", "zsh"));
+      }],
+      ["no runtime", db => {
+        db.prepare("UPDATE nodes SET runtime = NULL WHERE id = 'n1'").run();
         new SeatIdentityStore(db).upsert(observed("unconfirmed", "process_identity_unconfirmed", "zsh"));
       }],
       ["a stopped session", db => {
