@@ -67,11 +67,25 @@ function codexEntry(searchPath: string, cwd: string): string {
 }
 
 /** Resolve exactly on the daemon launch PATH, without consulting the pane rc. */
-export function launchExecutable(name: string, searchPath: string, cwd: string): string {
+export function findLaunchExecutable(
+  name: string,
+  searchPath: string,
+  cwd: string,
+): { executable: string; cwdDependent: boolean } | undefined {
   for (const entry of searchPath.split(path.delimiter)) {
     const file = path.resolve(cwd, entry, name);
-    try { accessSync(file, constants.X_OK); if (statSync(file).isFile()) return file; } catch { /* next entry */ }
+    try {
+      accessSync(file, constants.X_OK);
+      if (statSync(file).isFile()) {
+        return { executable: file, cwdDependent: !path.isAbsolute(name) && !path.isAbsolute(entry) };
+      }
+    } catch { /* next entry */ }
   }
+}
+
+export function launchExecutable(name: string, searchPath: string, cwd: string): string {
+  const found = findLaunchExecutable(name, searchPath, cwd);
+  if (found) return found.executable;
   throw new Error(`Seat launch requires ${name} on the daemon launch PATH.`);
 }
 

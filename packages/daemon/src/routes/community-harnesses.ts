@@ -1,23 +1,31 @@
 // Community harnesses: the installed presets, usable or not, so a person or an agent can see which apps can run in a
 // seat, who maintains each, and what each declares it can't do.
 //   GET /api/community-harnesses — every preset under $OPENRIG_HOME/community-harnesses
-import { basename } from "node:path";
+import { basename, delimiter, isAbsolute } from "node:path";
 import { Hono } from "hono";
 import { communityHarnessesDir, listCommunityHarnessPresets } from "../domain/community-harness-presets.js";
-import { launchExecutable } from "../domain/seat-launch-environment.js";
+import { findLaunchExecutable } from "../domain/seat-launch-environment.js";
 
 /** Only resolve literal executable words. Expansion and a seat's cwd belong to its shell. */
 function executablePreflight(command: string): { executable?: string; executableProblem?: string } {
   const match = /^(?:'([^']+)'|"([^"\\$`]+)"|([^\s'"\\$`~]+))(?=\s|$)/.exec(command.trim());
   const program = match?.[1] ?? match?.[2] ?? match?.[3];
-  if (!program || (program.includes("/") && !program.startsWith("/"))) {
+  if (!program || (basename(program) !== program && !isAbsolute(program))) {
     return { executableProblem: "Executable depends on the seat's shell or working directory." };
   }
-  try {
-    return { executable: launchExecutable(program, process.env.PATH ?? "", process.cwd()) };
-  } catch {
-    return { executableProblem: "Executable was not found in the daemon's PATH." };
+  const searchPath = process.env.PATH ?? "";
+  const found = findLaunchExecutable(program, searchPath, process.cwd());
+  if (found) {
+    return found.cwdDependent
+      ? { executable: found.executable, executableProblem: "Executable lookup depends on the daemon's working directory." }
+      : { executable: found.executable };
   }
+  const relativeSearch = !isAbsolute(program) && searchPath.split(delimiter).some((entry) => !isAbsolute(entry));
+  return {
+    executableProblem: relativeSearch
+      ? "Executable was not found in the daemon's PATH. Relative PATH entries depend on the working directory."
+      : "Executable was not found in the daemon's PATH.",
+  };
 }
 
 export function communityHarnessesRoutes(): Hono {

@@ -647,6 +647,7 @@ describe("rig doctor", () => {
   it("--community-harnesses reports invalid presets without running the general checks", async () => {
     const harnesses = [{ name: "broken", usable: false, path: "/presets/broken.yaml", problem: "missing maintainer" }];
     const fetch = vi.fn(async () => Response.json({ dir: "/presets", harnesses }));
+    vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:8999");
     vi.stubGlobal("fetch", fetch);
     try {
       const program = new Command();
@@ -654,11 +655,37 @@ describe("rig doctor", () => {
       const { logs, exitCode } = await captureLogs(() =>
         program.parseAsync(["node", "rig", "doctor", "--community-harnesses", "--json"]),
       );
-      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/community-harnesses?preflight=true"), expect.anything());
+      expect(fetch).toHaveBeenCalledWith("http://127.0.0.1:8999/api/community-harnesses?preflight=true", expect.anything());
       expect(JSON.parse(logs.join("\n"))).toEqual({ healthy: false, dir: "/presets", harnesses });
       expect(exitCode).toBe(1);
     } finally {
       vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reports spec conformance and community harness preflight together", async () => {
+    const harnesses = [{ name: "sample", usable: true, path: "/presets/sample.yaml" }];
+    vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:8999");
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ dir: "/presets", harnesses })));
+    try {
+      const program = new Command();
+      program.addCommand(doctorCommand(makeDeps({
+        specPath: "missing-rig.yaml",
+        readFile: () => null,
+      })));
+      const { logs, exitCode } = await captureLogs(() =>
+        program.parseAsync(["node", "rig", "doctor", "--spec", "missing-rig.yaml", "--community-harnesses", "--json"]),
+      );
+      expect(JSON.parse(logs.join("\n"))).toMatchObject({
+        healthy: false,
+        checks: expect.arrayContaining([expect.objectContaining({ name: "spec_live_conformance", status: "fail" })]),
+        communityHarnesses: { healthy: true, dir: "/presets", harnesses },
+      });
+      expect(exitCode).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
     }
   });
 

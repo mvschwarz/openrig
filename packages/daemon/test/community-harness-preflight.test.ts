@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join, relative } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { communityHarnessesRoutes } from "../src/routes/community-harnesses.js";
 
@@ -32,4 +32,20 @@ it("checks executable availability on request while preserving normal listings",
     expect.objectContaining({ name: "relative", usable: true, executableProblem: expect.stringContaining("working directory") }),
     expect.objectContaining({ name: "valid", usable: true, executable: expect.any(String) }),
   ]));
+
+  const localBin = mkdtempSync(join(process.cwd(), ".preflight-bin-"));
+  roots.push(localBin);
+  const launcher = join(localBin, "launcher");
+  writeFileSync(launcher, "", { mode: 0o755 });
+  writeFileSync(join(dir, "cwd.yaml"), "format: 1\nname: cwd\ncommand: launcher\nmaintainer: fixture\nlimits: []\n");
+  vi.stubEnv("PATH", [relative(process.cwd(), localBin), dirname(process.execPath)].join(delimiter));
+  const relativeChecked = await (await app.request("/?preflight=true")).json();
+  expect(relativeChecked.harnesses.find((entry: { name: string }) => entry.name === "cwd")).toMatchObject({
+    executable: launcher,
+    executableProblem: expect.stringContaining("working directory"),
+  });
+  expect(relativeChecked.harnesses.find((entry: { name: string }) => entry.name === "valid")).not.toHaveProperty("executableProblem");
+  expect(relativeChecked.harnesses.find((entry: { name: string }) => entry.name === "missing")).toMatchObject({
+    executableProblem: expect.stringContaining("working directory"),
+  });
 });

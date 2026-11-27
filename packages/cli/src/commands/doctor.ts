@@ -1,4 +1,4 @@
-import { Command, Option } from "commander";
+import { Command } from "commander";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import net from "node:net";
@@ -654,6 +654,32 @@ export async function readLiveLogicalIds(base: string, rigName: string, ownerCli
   }
 }
 
+async function checkCommunityHarnesses() {
+  const { data } = await new DaemonClient().get<{
+    dir: string;
+    harnesses: Array<{
+      name: string; path: string; usable: boolean; problem?: string; command?: string;
+      executable?: string; executableProblem?: string; limits?: string[];
+    }>;
+  }>("/api/community-harnesses?preflight=true");
+  return { healthy: data.harnesses.every((preset) => preset.usable), ...data };
+}
+
+function printCommunityHarnesses(result: Awaited<ReturnType<typeof checkCommunityHarnesses>> | { healthy: false; error: string }) {
+  if ("error" in result) {
+    console.log(`  [FAIL] Community harness presets: ${result.error}`);
+    return;
+  }
+  console.log(`Community harness presets in ${result.dir}`);
+  for (const preset of result.harnesses) {
+    console.log(`  [${preset.usable ? "OK" : "FAIL"}] ${preset.name} (${preset.path}): ${preset.problem ?? preset.command}`);
+    if (preset.executable) console.log(`    Executable: ${preset.executable}`);
+    if (preset.executableProblem) console.log(`    Warning: ${preset.executableProblem}`);
+    for (const limit of preset.limits ?? []) console.log(`    Limit: ${limit}`);
+  }
+  console.log("Preset validation reads the daemon's configuration. It does not launch the command.");
+}
+
 export function doctorCommand(depsOverride?: DoctorDeps): Command {
   const cmd = new Command("doctor")
     .description("Check installation, provider authentication, writable paths, port/daemon and conditional cmux control")
@@ -661,29 +687,19 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
 
   cmd
     .option("--json", "JSON output for agents")
-    .addOption(new Option("--community-harnesses", "Check installed community harness presets on the daemon").conflicts("spec"))
+    .option("--community-harnesses", "Check installed community harness presets on the daemon")
     .option("--spec <path>", "Rig spec to check against the running rig of the same name (spec-vs-live topology)")
     .action(async (opts: { json?: boolean; spec?: string; communityHarnesses?: boolean }) => {
-      if (opts.communityHarnesses) {
-        const config = (depsOverride?.configStore ?? new ConfigStore()).resolve();
-        const base = `http://${formatDaemonHostForUrl(config.daemon.host ?? "127.0.0.1")}:${config.daemon.port ?? DEFAULT_PORT}`;
-        const { data } = await new DaemonClient(base).get<{
-          dir: string;
-          harnesses: Array<{ name: string; path: string; usable: boolean; problem?: string; command?: string; executable?: string; executableProblem?: string; limits?: string[] }>;
-        }>("/api/community-harnesses?preflight=true");
-        const healthy = data.harnesses.every((preset) => preset.usable);
-        if (opts.json) console.log(JSON.stringify({ healthy, ...data }, null, 2));
-        else {
-          console.log(`Community harness presets in ${data.dir}`);
-          for (const preset of data.harnesses) {
-            console.log(`  [${preset.usable ? "OK" : "FAIL"}] ${preset.name} (${preset.path}): ${preset.problem ?? preset.command}`);
-            if (preset.executable) console.log(`    Executable: ${preset.executable}`);
-            if (preset.executableProblem) console.log(`    Warning: ${preset.executableProblem}`);
-            for (const limit of preset.limits ?? []) console.log(`    Limit: ${limit}`);
-          }
-          console.log("Preset validation reads the daemon's configuration. It does not launch the command.");
-        }
-        if (!healthy) process.exitCode = 1;
+      const communityHarnesses = opts.communityHarnesses
+        ? await checkCommunityHarnesses().catch((error: unknown) => {
+          if (!opts.spec) throw error;
+          return { healthy: false as const, error: error instanceof Error ? error.message : String(error) };
+        })
+        : undefined;
+      if (communityHarnesses && !opts.spec) {
+        if (opts.json) console.log(JSON.stringify(communityHarnesses, null, 2));
+        else printCommunityHarnesses(communityHarnesses);
+        if (!communityHarnesses.healthy) process.exitCode = 1;
         return;
       }
       const deps: DoctorDeps = depsOverride ?? {
@@ -718,10 +734,10 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
       const { checks, asyncChecks } = runDoctorChecks(deps, providerChecks);
       const resolvedAsync = await Promise.all(asyncChecks);
       const allChecks = [...checks, ...resolvedAsync];
-      const healthy = allChecks.every((c) => c.status !== "fail");
+      const healthy = allChecks.every((c) => c.status !== "fail") && (communityHarnesses?.healthy ?? true);
 
       if (opts.json) {
-        console.log(JSON.stringify({ healthy, checks: allChecks }, null, 2));
+        console.log(JSON.stringify({ healthy, checks: allChecks, communityHarnesses }, null, 2));
         if (!healthy) process.exitCode = 1;
         return;
       }
@@ -733,6 +749,10 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         if (check.fix) console.log(`       Fix: ${check.fix}`);
       }
 
+      if (communityHarnesses) {
+        console.log("");
+        printCommunityHarnesses(communityHarnesses);
+      }
       console.log("");
       console.log(healthy ? "No failures in the checks above. Review any WARN or SKIP rows." : "Some checks failed. Review the FAIL rows and their fixes above.");
       console.log("Authentication checks report local provider facts; no agent task or provider request was tested.");
