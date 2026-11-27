@@ -740,7 +740,8 @@ export class OutboxHandler {
   /** Whether this sender has a draft-held message for this exact occupant binding that's still owed (held, or claimed by
    *  its retry), dispatched before `ids[0]`, the request being sent. A request not recorded yet comes after all of them. A
    *  later message from the sender goes behind it, so a stale request never follows its correction; a held message's own
-   *  retry never waits behind one sent after it. A crash can't leave one owed: startup settles guarded `sending` entries. */
+   *  retry never waits behind one sent after it. A claimed one the daemon stopped during isn't owed after a restart:
+   *  DraftAwareDelivery.recover() settles marked `sending` entries, with or without a receipt, as uncertain. */
   hasEarlierDraftHeld(senderSession: string, binding: { nodeId: string }, ids: readonly string[]): boolean {
     if (!ids.length) return false;
     const recorded = this.db.prepare("SELECT 1 FROM outbox_entries WHERE outbox_id=?").get(ids[0]) !== undefined;

@@ -2595,7 +2595,8 @@ export class QueueRepository {
   /** Messages held only for a draft in the seat's input (tagged {@link DRAFT_HELD_ELIGIBLE_TAG} when first held) go once the
    *  seat is idle under the draft-aware guard, oldest first, each through the existing guarded delivery: it reads the
    *  input again and holds the message again if the input still isn't clear, and every other delivery condition applies.
-   *  Each message keeps its own outcome, and the pass stops at the first that isn't delivered, so order holds. Only a held
+   *  Each message keeps its own outcome, and the pass stops at the first that isn't delivered, so order holds; one whose own
+   *  paste was refused is withdrawn and no longer holds the rest, so the pass goes on past it. Only a held
    *  entry is reopened (compare-and-set), so a delivered, in-flight or uncertain one is never sent again. Messages held
    *  before this behaviour, hold-mode messages and other held reasons carry no tag and stay held.
    *
@@ -2663,7 +2664,11 @@ export class QueueRepository {
           this.outbox.finalizeDelivery(outbox_id, "indeterminate");
           throw error;
         }
-        const after = this.outbox.getById(outbox_id)?.deliveryState;
+        const settled = this.outbox.getById(outbox_id);
+        const after = settled?.deliveryState;
+        // Its own paste was refused before anything was written, which withdrew it from automatic retry (it stays held,
+        // with its result). It no longer holds later messages back, so the pass goes on to them rather than ending as a draft.
+        if (after === "retained" && !settled?.tags?.includes(DRAFT_HELD_ELIGIBLE_TAG)) continue;
         if (after !== "delivered") return after === "retained" ? "draft" : "done";
       }
     } finally {
