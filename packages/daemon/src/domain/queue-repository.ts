@@ -76,7 +76,7 @@ export interface RecordRelayOwnerNotificationTransportFailedInput extends Format
   qitemId: string;
   actorSession?: string;
 }
-import { DRAFT_HELD_ELIGIBLE_TAG, HELD_SENDER_NOTICE_PREFIX, WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
+import { DRAFT_HELD_ELIGIBLE_TAG, HELD_RETRY_NOT_ADMITTED, HELD_SENDER_NOTICE_PREFIX, WAKE_INTENT_PREFIX, type DraftHeldPassEnd, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import { physicalSessionName, SessionRegistry } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
@@ -465,7 +465,7 @@ export interface QueueNudgeTransport {
     // (h): stampISO threads the nudge's compose time so the transport's delivered-latency calc can
     // measure the wait for a handoff nudge too (the real impl is SessionTransport, which accepts it).
     text: string,
-    opts?: { verify?: boolean; stampISO?: string; actorSession?: string; committedOutboxIds?: string[]; deliveryId?: string; auditPointer?: string; queueWake?: boolean; openrigNotice?: true }
+    opts?: { verify?: boolean; stampISO?: string; actorSession?: string; committedOutboxIds?: string[]; deliveryId?: string; auditPointer?: string; queueWake?: boolean; openrigNotice?: true; retryAdmission?: () => boolean }
   ): Promise<{ ok: boolean; verified?: boolean; sent?: boolean; inputPhase?: "not_reached" | "attempted" | "written"; error?: string; reason?: string; outcome?: string;
     sessionName?: string; usageLimit?: { asOf: string; resetsAt: string } }>;
 }
@@ -2473,49 +2473,68 @@ export class QueueRepository {
   /** Seats with a draft-held delivery pass running, so overlapping idle observations don't race each other. */
   private readonly draftHeldPasses = new Set<string>();
 
+  /** The seats holding draft-held messages, for the periodic offer (createDraftHeldReoffer); none without an outbox. */
+  draftHeldSeats(): Array<{ session: string; newest: string }> {
+    return this.outbox?.draftHeldSeats() ?? [];
+  }
+
   /** Messages held only for a draft in the seat's input (tagged {@link DRAFT_HELD_ELIGIBLE_TAG} when first held) go once the
    *  seat is idle under the draft-aware guard, oldest first, each through the existing guarded delivery: it reads the
    *  input again and holds the message again if the input still isn't clear, and every other delivery condition applies.
    *  Each message keeps its own outcome, and the pass stops at the first that isn't delivered, so order holds. Only a held
    *  entry is reopened (compare-and-set), so a delivered, in-flight or uncertain one is never sent again. Messages held
-   *  before this behaviour, hold-mode messages and other held reasons carry no tag and stay held. */
-  async deliverDraftHeldMessagesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<void> {
-    if (state !== "idle" || !this.outbox || !this.transport?.draftAwareTarget?.(sessionName)) return;
+   *  before this behaviour, hold-mode messages and other held reasons carry no tag and stay held.
+   *
+   *  The list is read again before each message, so one held while the pass runs (a later message behind an earlier one
+   *  from its sender) goes in its turn. Each send re-reads the pass's own conditions (draft-aware mode, drain, restore)
+   *  under its delivery lease (`retryAdmission`), so a change that took effect while it waited keeps it held. The result
+   *  says how the pass ended, for the periodic offer (DraftHeldReoffer). */
+  async deliverDraftHeldMessagesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<DraftHeldPassEnd> {
+    if (state !== "idle" || !this.outbox || !this.transport?.draftAwareTarget?.(sessionName)) return "skipped";
     const addresses = this.resolveSessionAddresses(sessionName);
-    if (!addresses.length) return;
+    if (!addresses.length) return "skipped";
     const paused = () => addresses.some(address => this.deliveryDrains.holds(address))
       || [sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address));
-    if (paused()) return;
+    if (paused()) return "paused";
     const key = addresses[0]!;
-    if (this.draftHeldPasses.has(key)) return;
+    if (this.draftHeldPasses.has(key)) return "skipped";
     this.draftHeldPasses.add(key);
+    // Entries this pass has already taken or left (another occupant's custody), so a re-read never takes one twice.
+    const seen = new Set<string>();
     try {
-      const held = this.db.prepare(`SELECT outbox_id FROM outbox_entries WHERE delivery_state = 'retained'
-        AND destination_session IN (${addresses.map(() => "?").join(",")})
-        AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value = ?)
-        ORDER BY ts_dispatched, rowid`).all(...addresses, DRAFT_HELD_ELIGIBLE_TAG) as Array<{ outbox_id: string }>;
-      for (const { outbox_id } of held) {
+      for (;;) {
+        const next = (this.db.prepare(`SELECT outbox_id FROM outbox_entries WHERE delivery_state = 'retained'
+          AND destination_session IN (${addresses.map(() => "?").join(",")})
+          AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value = ?)
+          ORDER BY ts_dispatched, rowid`).all(...addresses, DRAFT_HELD_ELIGIBLE_TAG) as Array<{ outbox_id: string }>)
+          .find(row => !seen.has(row.outbox_id));
+        if (!next) return "done";
+        const { outbox_id } = next;
+        seen.add(outbox_id);
         // A restore or drain can start while the preceding send awaited its delivery lease.
-        if (paused()) break;
+        if (paused()) return "paused";
         const target = this.transport.draftAwareTarget?.(sessionName);
-        if (!target) break;
+        if (!target) return "paused";
         const entry = this.outbox.getById(outbox_id);
         // Match the same complete binding as the transport guard. Earlier-occupant custody remains held and listed,
         // without being claimed or preventing a later message for the current occupant from going.
         if (!entry?.guardBinding || JSON.stringify(entry.guardBinding) !== JSON.stringify(target)) continue;
-        if (!this.outbox.reopenHeld(outbox_id)) break;
-        if (!this.outbox.claimForDelivery(outbox_id)) break;
+        if (!this.outbox.reopenHeld(outbox_id)) return "done";
+        if (!this.outbox.claimForDelivery(outbox_id)) return "done";
         try {
           const result = await this.transport.send(entry.destinationSession, entry.body, {
             committedOutboxIds: [outbox_id], actorSession: entry.senderSession,
             ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}),
+            retryAdmission: () => !paused() && !!this.transport?.draftAwareTarget?.(sessionName),
           });
-          if (result.reason === "guard_target_changed" && result.sent !== true
+          if ((result.reason === "guard_target_changed" || result.reason === HELD_RETRY_NOT_ADMITTED) && result.sent !== true
             && (result.sent === false || result.inputPhase === "not_reached")
             && result.inputPhase !== "attempted" && result.inputPhase !== "written") {
-            // Custody can change while the transport waits for the lease. This positive no-write result returns the
-            // already-held message to its list, even if the conditional transport finalized its refusal first.
+            // Custody, the mode, a drain or a restore can change while the transport waits for the lease. This positive
+            // no-write result returns the already-held message to its list, even if a conditional transport finalized its
+            // refusal first. A changed occupant leaves later messages for the current one free to go; the others stop.
             this.outbox.retainUnwritten(outbox_id);
+            if (result.reason === HELD_RETRY_NOT_ADMITTED) return "paused";
             continue;
           }
           if (this.outbox.getById(outbox_id)?.deliveryState === "sending") {
@@ -2530,7 +2549,8 @@ export class QueueRepository {
           this.outbox.finalizeDelivery(outbox_id, "indeterminate");
           throw error;
         }
-        if (this.outbox.getById(outbox_id)?.deliveryState !== "delivered") break;
+        const after = this.outbox.getById(outbox_id)?.deliveryState;
+        if (after !== "delivered") return after === "retained" ? "draft" : "done";
       }
     } finally {
       this.draftHeldPasses.delete(key);

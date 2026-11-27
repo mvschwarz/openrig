@@ -63,6 +63,7 @@ export class SeatStructuralActivityService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweeping = false; // single-flight guard: one whole-fleet sweep at a time (MUST-FIX 2)
   private activityChanged?: (sessionName: string) => void;
+  private sweepCompleted?: () => void;
   private bannerEmitter:
     | ((sessionName: string, banner: CodexLimitBanner | null, observedAt: Date) => void)
     | null = null;
@@ -87,6 +88,14 @@ export class SeatStructuralActivityService {
 
   /** Notify from the existing captures only, after the cache holds the new verdict. */
   attachActivityChanged(listener: (sessionName: string) => void): void { this.activityChanged = listener; }
+
+  /** Called once at the end of each completed sweep, whether or not any verdict changed: for work that must be offered
+   *  again while a seat's state stays the same (a draft-held message, #3991). It adds no capture. */
+  attachSweepCompleted(listener: () => void): void { this.sweepCompleted = listener; }
+
+  /** tmux's last write time (window_activity, in seconds) for the seat's pane, as the latest sweep read it: it changes
+   *  only when something is written to the pane. Undefined when the sweep had no window listing for it. */
+  paneActivity(sessionName: string): number | undefined { return this.capturedActivity.get(sessionName)?.activity; }
 
   /** The cached structural observation — ONLY while current (capture-FREE read). Returns null AND evicts
    *  once the observation is older than the freshness window, so a stalled/failed poller never leaves a
@@ -236,6 +245,7 @@ export class SeatStructuralActivityService {
           else this.capturedActivity.delete(r.session_name);
         } catch { /* isolate: one seat's failure never crashes the sweep */ }
       }));
+      try { this.sweepCompleted?.(); } catch { /* a listener's failure never crashes the sweep */ }
     } finally {
       this.sweeping = false;
     }

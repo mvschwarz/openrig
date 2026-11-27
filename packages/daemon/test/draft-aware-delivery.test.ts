@@ -9,7 +9,9 @@ import nativePaste from "./fixtures/claude-paste-footer.json";
 import { wrapPaneEnvelope } from "../src/lib/pane-envelope.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { COALESCED_INTO, DRAFT_HELD_PER_SENDER, OutboxHandler } from "../src/domain/outbox-handler.js";
+import { COALESCED_INTO, DRAFT_HELD_BEHIND_EARLIER, DRAFT_HELD_PER_SENDER, OutboxHandler } from "../src/domain/outbox-handler.js";
+import { attachDraftHeldReoffer } from "../src/domain/draft-held-reoffer.js";
+import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { RigDeliveryDrainStore } from "../src/domain/rig-delivery-drain.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
@@ -729,8 +731,12 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(await f.send("draft-cleared", "current request", { beforeWrite: oldPrerequisite })).toMatchObject({ outcome: "retained", sent: false });
     expect(f.submissions).toEqual([]);
     f.bodies.a = "";
-    expect(await f.send("draft-cleared", "current request")).toMatchObject({ ok: true, sent: true });
-    expect(f.submissions).toEqual(["current request"]);
+    // The held request goes once the input is clear, so the sender's resend waits behind it rather than overtaking it, and
+    // both go in order. Neither replays the first attempt's prerequisite.
+    expect(await f.send("draft-cleared", "current request")).toMatchObject({ outcome: "retained", sent: false, reason: DRAFT_HELD_BEHIND_EARLIER });
+    expect(f.submissions).toEqual([]);
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.submissions).toEqual(["current request", "current request"]);
     expect(oldPrerequisite).not.toHaveBeenCalled();
   });
 
@@ -908,8 +914,10 @@ describe("current draft-aware delivery through the real transport", () => {
   it("does not serialize or replay a live prerequisite", async () => {
     const f = fixture(); await f.enable(); f.bodies.a = "draft"; const beforeWrite = vi.fn();
     expect(await f.send("live", "message", { beforeWrite })).toMatchObject({ outcome: "retained", reason: "draft_input_busy" });
-    f.bodies.a = ""; await f.send("live", "message");
-    expect(beforeWrite).not.toHaveBeenCalled(); expect(f.submissions).toEqual(["message"]);
+    // The resend waits behind the held message (same sender), and both go in order; the live prerequisite never runs.
+    f.bodies.a = ""; expect(await f.send("live", "message")).toMatchObject({ outcome: "retained", reason: DRAFT_HELD_BEHIND_EARLIER });
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(beforeWrite).not.toHaveBeenCalled(); expect(f.submissions).toEqual(["message", "message"]);
   });
 });
 
@@ -2307,5 +2315,145 @@ describe("draft-held messages bounded per sender", () => {
     expect(result.outcome).toBe("retained");
     expect(result.warning).not.toContain("typed once the input is clear");
     expect(rows(f, sender).map(r => tagged(r))).toEqual([false]);
+  });
+});
+
+
+// How a draft-held message's retry joins the paths around it: it's offered again once a temporary condition passes, through
+// the daemon's own wiring (the structural sweep) rather than a direct pass call; a sender's later message never overtakes its
+// earlier held one; and a retry re-reads the mode, a drain and a restore under the delivery lease once it's its turn to type.
+describe("draft-held retry integration", () => {
+  const stateOf = (f: ReturnType<typeof fixture>, id: string) => f.outbox.getById(id)!.deliveryState;
+  const order = (f: ReturnType<typeof fixture>, texts: string[]) =>
+    f.submissions.map(s => texts.findIndex(t => s.includes(t))).filter(i => i >= 0);
+  const nowSec = () => Math.floor(Date.now() / 1000);
+
+  it("the sweep offers it again after the first try met recent typing, at the same idle state, and delivers it once", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "request held for the draft", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    // The daemon's wiring: the structural sweep drives the offer; the seat stays idle throughout.
+    let clock = Date.now();
+    const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20) }, () => new Date(clock));
+    const passes = vi.spyOn(f.repo, "deliverDraftHeldMessagesOnIdle");
+    attachDraftHeldReoffer(structural, f.repo, () => "idle", { now: () => clock });
+    // The person clears the draft; their writable client was active this second.
+    f.bodies.a = "";
+    f.hooks.clients = () => `0|${nowSec()}\n`;
+    await structural.pollAllRunningTmuxSeats(f.db);
+    await vi.waitFor(() => expect(passes).toHaveBeenCalledTimes(1));
+    await passes.mock.results[0]!.value;
+    expect(stateOf(f, id)).toBe("retained");
+    expect(f.submissions).toEqual([]);
+    // The same idle screen, inside the interval: no new offer.
+    await structural.pollAllRunningTmuxSeats(f.db);
+    expect(passes).toHaveBeenCalledTimes(1);
+    // After the quiet interval, with no new activity transition, the next sweep offers it again: one delivery.
+    f.hooks.clients = () => `0|${nowSec() - 10}\n`;
+    clock += 4_500;
+    await structural.pollAllRunningTmuxSeats(f.db);
+    await vi.waitFor(() => expect(stateOf(f, id)).toBe("delivered"));
+    for (let i = 0; i < 3; i++) { clock += 4_500; await structural.pollAllRunningTmuxSeats(f.db); }
+    expect(f.submissions.filter(s => s.includes("request held for the draft"))).toHaveLength(1);
+  });
+
+  it("a draft that stays is read twice, then not again until the pane changes", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "a sitting draft";
+    await f.transport.send("worker@test", "request behind a sitting draft", { actorSession: "pm@test" });
+    let clock = Date.now();
+    // As in the daemon, the sweep reads each window's last write time; this pane isn't written to again.
+    const written = Math.floor(clock / 1000) - 60;
+    const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20),
+      readAllSessionWindows: async () => new Map([["worker@test", { activity: written, size: "80x24" }], ["sibling@test", { activity: written, size: "80x24" }]]) },
+      () => new Date(clock));
+    const passes = vi.spyOn(f.repo, "deliverDraftHeldMessagesOnIdle");
+    attachDraftHeldReoffer(structural, f.repo, () => "idle", { now: () => clock });
+    for (let i = 0; i < 5; i++) {
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await Promise.all(passes.mock.results.map(r => r.value));
+      clock += 4_500;
+    }
+    expect(passes).toHaveBeenCalledTimes(2);
+    expect(f.writes).toEqual([]);
+  });
+
+  it("with A held and the input clear, a live send B from the same sender waits behind A, then A and B go in order", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const a = await f.transport.send("worker@test", "stale request A", { actorSession: "pm@test" });
+    f.bodies.a = "";
+    const b = await f.transport.send("worker@test", "correction B", { actorSession: "pm@test" });
+    expect(b).toMatchObject({ outcome: "retained", sent: false, reason: DRAFT_HELD_BEHIND_EARLIER });
+    expect(b.warning).toContain("typed right after it");
+    expect(f.submissions).toEqual([]);
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect([a, b].map(r => stateOf(f, r.outboxIds![0]!))).toEqual(["delivered", "delivered"]);
+    expect(order(f, ["stale request A", "correction B"])).toEqual([0, 1]);
+  });
+
+  it("interleaved senders: another sender isn't held behind, and a send arriving between A1 and A2 goes after A2", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const a1 = await f.transport.send("worker@test", "request A1", { actorSession: "pm@test" });
+    const a2 = await f.transport.send("worker@test", "request A2", { actorSession: "pm@test" });
+    f.bodies.a = "";
+    const other = await f.transport.send("worker@test", "other sender C", { actorSession: "qa@test" });
+    expect(other).toMatchObject({ ok: true });
+    expect(order(f, ["other sender C"])).toEqual([0]);
+    const original = f.transport.send.bind(f.transport);
+    let late: Promise<unknown> | undefined;
+    vi.spyOn(f.transport, "send").mockImplementationOnce(async (session, text, opts) => {
+      const result = await original(session, text, opts);
+      late = original("worker@test", "request B, sent between A1 and A2", { actorSession: "pm@test" });
+      return result;
+    });
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    await late;
+    expect([a1, a2].map(r => stateOf(f, r.outboxIds![0]!))).toEqual(["delivered", "delivered"]);
+    expect(order(f, ["other sender C", "request A1", "request A2", "request B, sent between A1 and A2"])).toEqual([0, 1, 2, 3]);
+  });
+
+  it("an off activation queued behind a held lease keeps the old body held; it goes once draft-aware is on again", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "old held body", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    f.bodies.a = "";
+    let release!: () => void;
+    const occupied = f.guard.exclusive("a", () => new Promise<void>(resolve => { release = resolve; }));
+    const off = f.guard.set("a", { mode: "off" }, "human@test", "leaving draft-aware", 20);
+    const pass = f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    await off; release(); await occupied;
+    expect(await pass).toBe("paused");
+    expect(stateOf(f, id)).toBe("retained");
+    expect(f.writes).toEqual([]); expect(f.submissions).toEqual([]);
+    await f.enable();
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(stateOf(f, id)).toBe("delivered");
+    expect(f.submissions.filter(s => s.includes("old held body"))).toHaveLength(1);
+  });
+
+  it.each(["drain", "restore"])("a %s that starts while the retry waits for the lease keeps it held, nothing typed", async control => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "held through a control", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    let restorePending = false;
+    const repo = new QueueRepository(f.db, new EventBus(f.db), { transport: f.transport,
+      hasPendingPostCompactStage: () => restorePending, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+    repo.attachOutbox(f.outbox);
+    const drain = new RigDeliveryDrainStore(f.db), jobs = new WatchdogJobsRepository(f.db);
+    const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
+    f.bodies.a = "";
+    let release!: () => void;
+    const occupied = f.guard.exclusive("a", () => new Promise<void>(resolve => { release = resolve; }));
+    const pass = repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    await new Promise(resolve => setTimeout(resolve, 10));
+    if (control === "restore") restorePending = true;
+    else drain.begin(rigId, { drainId: "fixture-while-waiting", owner: "human@test", reviewAt: new Date(Date.now() + 60_000).toISOString() }, jobs);
+    release(); await occupied;
+    expect(await pass).toBe("paused");
+    expect(stateOf(f, id)).toBe("retained");
+    expect(f.writes).toEqual([]); expect(f.submissions).toEqual([]);
+    restorePending = false;
+    if (control === "drain") drain.end(rigId, "fixture-while-waiting", jobs);
+    await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(stateOf(f, id)).toBe("delivered");
   });
 });

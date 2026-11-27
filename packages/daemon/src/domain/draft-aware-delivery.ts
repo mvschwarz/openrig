@@ -1,10 +1,18 @@
 import type Database from "better-sqlite3";
-import { DRAFT_HELD_ELIGIBLE_TAG, DRAFT_HELD_PER_SENDER, DRAFT_HELD_REASONS, HELD_QUOTA_BYTES, HELD_QUOTA_COUNT, OutboxHandler, OutboxHandlerError, type OutboxEntry } from "./outbox-handler.js";
+import { DRAFT_HELD_BEHIND_EARLIER, DRAFT_HELD_ELIGIBLE_TAG, DRAFT_HELD_PER_SENDER, DRAFT_HELD_REASONS, HELD_QUOTA_BYTES, HELD_QUOTA_COUNT, OutboxHandler, OutboxHandlerError, type OutboxEntry } from "./outbox-handler.js";
 import { isOpenRigSender } from "../lib/pane-envelope.js";
 
 /** OpenRig's own senders, which have their own schedules: the daemon and its subsystem actors (`isOpenRigSender`), and the
  *  `…@system` machinery (a watchdog, the wake ladder), as the stuck sweep reads them. */
 const openRigOwnSender = (sender: string): boolean => isOpenRigSender(sender) || sender.endsWith("@system");
+/** A plain message from an agent or a person: not a queue wake (it has its own retry) and not OpenRig's own notice or
+ *  sender (the daemon, a watchdog, a notice), which keep their own schedules. */
+const plainMessage = (opts: SendOpts): opts is SendOpts & { actorSession: string } => !opts.queueWake && !opts.openrigNotice && !!opts.actorSession && !openRigOwnSender(opts.actorSession);
+/** Whether the seat's draft-aware delivery is on (requested or in effect), as the draft-held pass itself reads it. */
+const draftAwareOn = (guard: SeatDeliveryGuard, nodeId: string): boolean => {
+  const policy = guard.configuration(nodeId);
+  return policy.desired.mode === "draft-aware" || policy.effective.mode === "draft-aware";
+};
 import { DeliveryGuardError, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import type { SendOpts, SendResult } from "./session-transport.js";
 
@@ -85,6 +93,14 @@ export class DraftAwareDelivery {
       quotaFull = error instanceof OutboxHandlerError && error.code === "retained_quota_full";
     }
     try {
+      // Same-sender order: while this sender's earlier plain message is still held for the draft, a later one goes behind
+      // it instead of being typed first (a stale request would then follow its correction). It's held, with its own
+      // outcome, and typed after the earlier one; nothing is refused. Only a saved message with room in the quota waits,
+      // and only while draft-aware delivery is on, the one mode in which the earlier message is typed once the input clears.
+      if (recorded && plainMessage(opts) && draftAwareOn(this.guard, target.nodeId)
+        && this.outbox.fitsWithoutCoalescing(target.nodeId, text) && this.outbox.hasEarlierDraftHeld(opts.actorSession, target, receipt.ids)) {
+        throw new DeliveryGuardError(DRAFT_HELD_BEHIND_EARLIER, "An earlier message from this sender is held for this seat's draft. This one is held behind it and typed after it, in order; nothing was pasted.");
+      }
       // A paste the guard left unsubmitted (#2429) is recognized here, to be submitted ahead of this delivery, unless the
       // delivery needs an idle seat: submitting it starts a turn, so that delivery is held as before.
       await this.guard.beforeInput(session, false, undefined, opts.waitForIdleMs === undefined && !opts.preserveInput ? "recognize" : undefined);
@@ -109,7 +125,7 @@ export class DraftAwareDelivery {
         ...(guardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}) };
     }
     if (inputWritten) result = { ...result, sent: true };
-    const preInputRefusal = ["draft_input_busy", "draft_input_unknown", "draft_input_changed", "draft_wake_superseded",
+    const preInputRefusal = ["draft_input_busy", "draft_input_unknown", "draft_input_changed", "draft_wake_superseded", DRAFT_HELD_BEHIND_EARLIER,
       "target_needs_input", "wait_for_idle_timeout", "target_activity_unknown", "target_runtime_unverified", "target_runtime_not_running", "target_runtime_conflict",
       "invalid_wait_for_idle", "invalid_dangerously_interact", "dangerously_interact_requires_reason", "prompt_override_audit_unavailable",
       "transport_unavailable", "session_missing", "tmux_unavailable"].includes(result.reason ?? "");
@@ -119,11 +135,15 @@ export class DraftAwareDelivery {
     // neither is. It keeps its own outcome while the seat's held quota has room; at a full quota it takes its sender's
     // place as any held message does (#2430). Past DRAFT_HELD_PER_SENDER from one sender, that sender's oldest is
     // coalesced into its newest (supersedeDraftHeld), so one sender can't fill the quota.
-    const draftHeld = noWrite && !opts.queueWake && DRAFT_HELD_REASONS.has(result.reason ?? "")
-      && !!opts.actorSession && !openRigOwnSender(opts.actorSession)
+    // A refusal about the message itself (tabs or control characters, a long Codex paste, a viewport too small for it)
+    // asks the sender to send it differently: typing it later would only meet the same refusal, so it's held as before.
+    const draftHeld = noWrite && plainMessage(opts) && DRAFT_HELD_REASONS.has(result.reason ?? "")
+      && !result.inputReadFailure?.reason.startsWith("paste_")
       && !!target.nodeId && this.outbox.fitsWithoutCoalescing(target.nodeId, text);
     if (noWrite) result = { ...result, ok: true, sent: false, verified: false, outcome: "retained",
-      warning: draftHeld
+      warning: draftHeld && result.reason === DRAFT_HELD_BEHIND_EARLIER
+        ? "Held, not delivered yet: an earlier message of yours is held for this seat's draft. This one is typed right after it once the input is clear, while draft-aware delivery stays on; nothing else is replayed."
+        : draftHeld
         ? "Held, not delivered yet: the input shows a draft. It's typed once the input is clear while draft-aware delivery stays on, after any earlier held message; nothing else is replayed."
         : "Held, not delivered. Retry the current request when the input is free; no saved callback or message is replayed automatically." };
     else if (!inputWritten && result.sent === false && result.inputPhase !== "not_reached") {

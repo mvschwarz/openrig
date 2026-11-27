@@ -28,8 +28,18 @@ export const COALESCED_INTO = "coalesced into ";
  *  DRAFT_HELD_PER_SENDER from one sender at a seat. Written only when the message is first held under this behaviour, so
  *  messages held before it, hold-mode messages and other held reasons stay as they were. */
 export const DRAFT_HELD_ELIGIBLE_TAG = "delivery:draft-eligible";
-/** The draft-aware refusals that mean only "a draft is in the input". */
-export const DRAFT_HELD_REASONS: ReadonlySet<string> = new Set(["draft_input_busy", "draft_input_unknown", "draft_input_changed"]);
+/** A plain message held, with the input clear, because an earlier one from the same sender is still held for a draft at
+ *  this seat: it's typed after that one, in order (DraftAwareDelivery). */
+export const DRAFT_HELD_BEHIND_EARLIER = "draft_held_behind_earlier";
+/** A held message's automatic retry that its own conditions no longer admit once it holds the delivery lease
+ *  (SendOpts.retryAdmission): nothing is written, and the message stays held. */
+export const HELD_RETRY_NOT_ADMITTED = "held_retry_not_admitted";
+/** How a draft-held delivery pass ended (QueueRepository.deliverDraftHeldMessagesOnIdle): a message went back to held
+ *  (`draft`), a drain, restore or mode change stopped it (`paused`), nothing eligible was left to try (`done`), or it
+ *  didn't run (`skipped`: not idle, not draft-aware, or a pass already running). */
+export type DraftHeldPassEnd = "draft" | "paused" | "done" | "skipped";
+/** The draft-aware refusals that mean only "a draft is in the input", and the hold that keeps a sender's order behind one. */
+export const DRAFT_HELD_REASONS: ReadonlySet<string> = new Set(["draft_input_busy", "draft_input_unknown", "draft_input_changed", DRAFT_HELD_BEHIND_EARLIER]);
 /** How many draft-held messages one sender keeps at a seat, each with its own outcome. Past it, the sender's oldest is
  *  coalesced into its newest, as #2430 does for held messages (recorded, readable by ID). Five covers a realistic burst
  *  while a person types (a request, a correction, a follow-up or two), bounds what a clearing draft types from one sender,
@@ -725,6 +735,28 @@ export class OutboxHandler {
   retainUnwritten(outboxId: string): boolean {
     return this.db.prepare("UPDATE outbox_entries SET delivery_state='retained', delivered_at=NULL WHERE outbox_id=? AND delivery_state IN ('sending','failed')")
       .run(outboxId).changes === 1;
+  }
+
+  /** Whether this sender still has a draft-held message for this exact occupant binding, dispatched before `ids[0]` (the
+   *  request being sent, already recorded). A later message from the sender goes behind it, so a stale request never
+   *  follows its correction; a held message's own retry never waits behind one sent after it. */
+  hasEarlierDraftHeld(senderSession: string, binding: { nodeId: string }, ids: readonly string[]): boolean {
+    if (!ids.length) return false;
+    const rows = this.db.prepare(`SELECT outbox_id FROM outbox_entries WHERE delivery_state='retained' AND sender_session=?
+      AND json_extract(guard_binding,'$.nodeId')=? AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)
+      AND (ts_dispatched, rowid) < (SELECT ts_dispatched, rowid FROM outbox_entries WHERE outbox_id=?)`)
+      .all(senderSession, binding.nodeId, DRAFT_HELD_ELIGIBLE_TAG, ids[0]) as Array<{ outbox_id: string }>;
+    const exact = JSON.stringify(binding);
+    return rows.some(({ outbox_id }) => !ids.includes(outbox_id) && JSON.stringify(this.getById(outbox_id)?.guardBinding) === exact);
+  }
+
+  /** The seats with draft-held messages, each with its newest one's dispatch time: what the periodic offer reads once per
+   *  seat-activity sweep (createDraftHeldReoffer). The plain text match runs before the JSON one, so a large set of other
+   *  held messages costs little (about 0.15 ms against 9.7 ms without it, over 756 held entries in a long-lived database). */
+  draftHeldSeats(): Array<{ session: string; newest: string }> {
+    return this.db.prepare(`SELECT destination_session AS session, MAX(ts_dispatched) AS newest FROM outbox_entries
+      WHERE delivery_state='retained' AND tags LIKE ? AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)
+      GROUP BY destination_session`).all(`%${DRAFT_HELD_ELIGIBLE_TAG}%`, DRAFT_HELD_ELIGIBLE_TAG) as Array<{ session: string; newest: string }>;
   }
 
   /** #48: claim an entry that was never tried, or whose last try definitely wrote nothing (failed), for one more send.

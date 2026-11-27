@@ -31,7 +31,7 @@ import {
   type ComposerSnapshot,
 } from "./composer-prompts.js";
 export { inspectStartupStagedText } from "./startup-submission-evidence.js";
-import { OutboxHandler, OutboxHandlerError } from "./outbox-handler.js";
+import { HELD_RETRY_NOT_ADMITTED, OutboxHandler, OutboxHandlerError } from "./outbox-handler.js";
 import { declaredCapabilities, readSendOutcome, type WrittenFact } from "./connection-contract.js";
 import { DraftAwareDelivery, type GuardedDeliverySummary, type QueueWakeFacts } from "./draft-aware-delivery.js";
 import type Database from "better-sqlite3";
@@ -2059,6 +2059,10 @@ export interface SendOpts {
   onInputEffect?: (phase: "pasted" | "submitted", written?: { text: string }) => void;
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
+  /** Internal: an automatic retry of a message that's already held. Read under the delivery lease, before any input path
+   *  is chosen, so a mode change, drain or restore that took effect while it waited is seen; false writes nothing and
+   *  returns HELD_RETRY_NOT_ADMITTED, so the message stays held. Never accepted from HTTP send options. */
+  retryAdmission?: () => boolean;
   /** Explicit internal composer-preservation request. Managed compaction instead uses ordinary draft-delivery defaults.
    *  `"typed"` (#2575) holds only a box that reads typed or typed-with-suggestion; any other reading that isn't empty is
    *  pasted over and named in `pastedOverInputBox`, never called empty. */
@@ -2178,6 +2182,11 @@ function promptRoute(sessionName: string, prompt: Pick<AgentActivity, "reason" |
 /** The caller's cancellation signal, or none for sends no caller owns (queue wakes, committed outbox deliveries). */
 function callerSignal(opts?: SendOpts): AbortSignal | undefined {
   return opts?.queueWake || opts?.committedOutboxIds ? undefined : opts?.signal;
+}
+
+function heldRetryNotAdmitted(sessionName: string): SendResult {
+  return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: HELD_RETRY_NOT_ADMITTED,
+    error: `The held message's retry is no longer admitted (delivery mode, drain or restore changed while it waited). Nothing was typed into '${sessionName}'; the message stays held.` };
 }
 
 function callerCancelled(sessionName: string): SendResult {
@@ -3228,6 +3237,8 @@ export class SessionTransport {
       }
       let bridgeWarning: string | undefined;
       const result = await guard.operation(sessionName, async () => {
+        // A held message's retry re-reads its own admission here, under the lease, before any route is chosen.
+        if (opts?.retryAdmission && !opts.retryAdmission()) return heldRetryNotAdmitted(sessionName);
         const taken = this.takeFromHookBridge(sessionName, ids, opts);
         if (taken) return taken;
         const members = recheck(false);
