@@ -498,7 +498,8 @@ delivery and within `queue.wake_retry_cap`. A try the guard held gets one more o
 the seat stays idle with nothing new to report: after about 4.5 s, and not before the
 guard's quiet window for activity at the seat's own terminal has ended. An offer that
 couldn't try (a drain, an owed restore, the seat not idle) is offered again later. The
-wake ladder doesn't also retry these rows on its own timer.
+wake ladder doesn't also retry these rows on its own timer; a handed-off row at a seat
+that isn't in `draft-aware` mode keeps the ladder's retry.
 Switching modes alone replays nothing; a retry already admitted while the seat was
 `draft-aware` goes once. Still held past that cap or
 `queue.wake_unconfirmed_window_minutes`, or held in `hold` mode past the window, the row
