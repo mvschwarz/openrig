@@ -269,7 +269,8 @@ export class SeatDeliveryGuard {
 
   /** `actor` is the requesting seat, or null for a request without a seat identity: that change applies the same way and
    *  the preference and its audit row record UNATTRIBUTED_GUARD_ACTOR. */
-  async set(nodeId: string, value: unknown, actor: string | null, reason: string, timeoutMs = 2000): Promise<GuardPreference> {
+  async set(nodeId: string, value: unknown, actor: string | null, reason: string, timeoutMs = 2000,
+    onHoldReleased?: () => void): Promise<GuardPreference> {
     const recordedActor = actor ?? UNATTRIBUTED_GUARD_ACTOR;
     if (!recordedActor.trim() || !reason.trim()) throw new DeliveryGuardError("guard_reason_required", "Actor and reason are required.");
     const at = new Date().toISOString();
@@ -300,14 +301,20 @@ export class SeatDeliveryGuard {
       return { change, desired };
     })();
     const activation = this.serial(nodeId, async () => {
-      this.db.transaction(() => {
+      return this.db.transaction(() => {
+        // Read the effective transition under the lease, not the caller's earlier snapshot.
+        const releasedHold = this.configuration(nodeId).effective.mode === "hold" && desired.mode !== "hold";
         // Later requests are serialized too. Apply each accepted transition, in order.
         this.db.prepare("UPDATE seat_delivery_guards SET effective = ? WHERE node_id = ?").run(Number(desired.mode !== "off"), nodeId);
         if (this.hasModeConfig) this.db.prepare("UPDATE seat_delivery_guards SET effective_config=? WHERE node_id=?").run(JSON.stringify(desired), nodeId);
         this.db.prepare("UPDATE seat_delivery_guard_changes SET effective_at = ? WHERE id = ?")
           .run(new Date().toISOString(), change);
+        return releasedHold;
       })();
     });
+    // The notification follows the effective transition, even if this request returned pending. It runs outside the
+    // lease, and its failure cannot change the saved preference. Concurrent requests for one release notify once.
+    if (onHoldReleased) void activation.then(released => { if (released) onHoldReleased(); }).catch(() => undefined);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([activation, new Promise<void>(resolve => { timer = setTimeout(resolve, timeoutMs); })]);

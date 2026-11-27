@@ -1213,16 +1213,17 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
 
   describe("a blocked row's pickup history is not read", () => {
     // Records whose meaningful-history query ran (by qitem), and can make that query fail.
-    function watchHistory(opts: { fail?: boolean } = {}) {
+    function watchHistory(opts: { fail?: boolean; onRead?: (count: number) => void } = {}) {
       const readFor: string[] = [];
       const prepare = db.prepare.bind(db);
       db.prepare = ((sql: string) => {
         const stmt = prepare(sql);
-        if (!sql.includes("LAG(state) OVER")) return stmt;
+        if (!sql.startsWith("SELECT t.transition_id, t.ts FROM") || !sql.includes("queue_transitions")) return stmt;
         const get = stmt.get.bind(stmt);
         return Object.assign(stmt, { get: (...binds: unknown[]) => {
           readFor.push(String(binds[0]));
           if (opts.fail) throw new Error("history unavailable");
+          opts.onRead?.(readFor.length);
           return get(...binds);
         } });
       }) as typeof db.prepare;
@@ -1263,6 +1264,30 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
       const loud = watchHistory({ fail: true });
       try { await expect(projector.show("execution", { mission: MISSION })).rejects.toThrow("history unavailable"); } finally { loud.restore(); }
       expect(loud.readFor).toContain("qitem-lane-31");
+    });
+
+    it("serves a health turn between expensive history reads in both lanes and parks", async () => {
+      // No Git await can provide the yield this test needs; both lanes use legacy batons.
+      db.prepare("UPDATE queue_items SET body = '' WHERE state = 'in-progress'").run();
+      const beats: Promise<Response>[] = [];
+      const observed: number[] = [];
+      const app = new Hono().get("/healthz", c => {
+        observed.push(history.readFor.length);
+        return c.json({ status: "ok" });
+      });
+      const history = watchHistory({ onRead: count => {
+        if (count === 1 || count === 3) beats.push(new Promise(resolve => {
+          setImmediate(() => resolve(app.request("/healthz")));
+        }));
+        // Model a costly synchronous SQLite step, with no assertion about machine speed.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 12);
+      } });
+      try {
+        await show();
+        for (const response of await Promise.all(beats)) expect(response.status).toBe(200);
+        expect(history.readFor).toHaveLength(4); // two Q1 lanes, then their two Q5 park rows
+        expect(observed).toEqual([1, 3]); // each health turn ran before the next history read
+      } finally { history.restore(); }
     });
   });
 

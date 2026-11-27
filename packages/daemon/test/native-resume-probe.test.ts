@@ -181,6 +181,18 @@ describe("native resume probe", () => {
       expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "2.1.283", paneContent, claudeResumeIdentityVerified: true }))
         .toMatchObject({ status: "resumed", code: "verified_native_identity" });
     });
+
+    // Claude Code 2.1.330, never signed in, resumed to the conversation its login refusal saved (fixtures/claude-login-resume-2.1.330.md).
+    it.each([
+      ["claude-login-resume-2.1.330.txt", "failed"],
+      ["claude-login-resume-2.1.330-80x24.txt", "failed"],
+      // The refusal is followed by a later turn, so it isn't current: the footer alone proves no login blocker.
+      ["claude-login-resume-later-turn-2.1.330-80x24.txt", "resumed"],
+    ])("reads a 2.1.330 resume that was never signed in: %s", (name, status) => {
+      const paneContent = fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent })).toMatchObject(status === "failed"
+        ? { status, code: "login_required", loginRefusal: { message: "Not logged in · Please run /login", row: "result" } } : { status });
+    });
   });
   describe("issue116 headerless custom status lines", () => {
     const reportedFooter = "  5h 71% left · weekly 24% left · GPT-6-Astra high · Context 81% left";

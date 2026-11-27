@@ -1699,7 +1699,7 @@ export function retainedProviderFailure(
 
 /** The pane's own interactive prompts: a picker or question, and a permission or confirmation. A draft in the input
  *  box is not one. */
-const NATIVE_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt"]);
+const NATIVE_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt", "hook_trust_gate"]);
 
 /**
  * The served activity for a seat with a current Claude authentication or billing failure (`retainedProviderFailure`):
@@ -1966,8 +1966,11 @@ export function hookOrPaneActivity(
   idleYieldsToFrame = false,
   runtime?: string | null,
 ): { source: "hook" | "limit" | "pane"; activity: AgentActivity } | null {
-  // Running/needs_input hooks keep their meaning.
-  if (hookActivity && hookActivity.state !== "unknown" && !(hookActivity.state === "idle" && idleYieldsToFrame)) {
+  // A current hook-review menu can follow Stop without posting another lifecycle hook. Only a capture begun after
+  // that idle hook replaces it; running/needs_input hooks keep their meaning. The structural cache owns freshness.
+  const newerHookReview = runtime === "codex" && structural?.state === "attention" && structural.reason === "hook_trust_gate"
+    && Date.parse(structural.captureStartedAt ?? "") > Date.parse(hookActivity?.eventAt ?? "");
+  if (hookActivity && hookActivity.state !== "unknown" && !(hookActivity.state === "idle" && (idleYieldsToFrame || newerHookReview))) {
     return { source: "hook", activity: hookActivity };
   }
 

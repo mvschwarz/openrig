@@ -148,6 +148,16 @@ describe("seat typing guard commands", () => {
     const json = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig", "--json"]).then(() => undefined));
     expect(JSON.parse(json.logs.join("\n")).nativeInput).toEqual(nativeInput);
   });
+  it("shows the served hook-review reason in human and JSON seat status", async () => {
+    const activityState = { display: "needs-input", needsInput: { count: 1, reason: "hook_trust_gate" } };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, activityState } }, []);
+    const human = await captureLogs(() => makeCommand(deps)
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(human.logs).toContain("Activity: needs-input (hook_trust_gate)");
+    const json = await captureLogs(() => makeCommand(deps)
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig", "--json"]).then(() => undefined));
+    expect(JSON.parse(json.logs.join("\n")).activityState).toEqual(activityState);
+  });
   it.each([
     { name: "a Claude Code seat with no one chosen", data: { runtime: "claude-code", runner: false, permissions_to: null },
       line: "Own permission prompts asked of (with openrig-core loaded): its work's return route, else no one" },
