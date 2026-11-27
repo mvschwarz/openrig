@@ -11,7 +11,7 @@ import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
-import { codexMemberLaunch, type CodexMemberPermissions } from "../domain/codex-member-permissions.js";
+import { codexMemberLaunch, withSeatGitDirs, type CodexMemberPermissions } from "../domain/codex-member-permissions.js";
 import { codexPolicyWarning, resolveCodexFilesystemHome, verifyCodexFilesystemPolicy, type CodexFilesystemVerifier } from "../domain/codex-filesystem-preflight.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
@@ -97,7 +97,10 @@ export class CodexResumeAdapter {
     if (wrapped && !this.options.seatLaunchEnvironment) {
       return { ok: false, code: "resume_failed", message: "launch_wrapper support unavailable; no agent started." };
     }
-    const filesystem = codexPermissions && "filesystem" in codexPermissions ? codexPermissions : undefined;
+    // A filesystem envelope that lets the seat write its working folder names its git dirs as writable, as its launch does.
+    const permissions = codexPermissions && "filesystem" in codexPermissions
+      ? withSeatGitDirs(codexPermissions, await this.options.resolveGitAddDirs?.(cwd) ?? [], cwd) : codexPermissions;
+    const filesystem = permissions && "filesystem" in permissions ? permissions : undefined;
     const codexHome = seatCodexHome ?? this.options.codexHome ?? (filesystem ? resolveCodexFilesystemHome() : undefined);
     let policyWarning: string | undefined;
     if (filesystem) {
@@ -135,7 +138,7 @@ export class CodexResumeAdapter {
     }
 
     const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
-    const choice = codexPermissions ? codexMemberLaunch(codexPermissions) : undefined;
+    const choice = permissions ? codexMemberLaunch(permissions) : undefined;
     const posture = choice ? profileArg + choice.args : codexPostureArg(profileArg, process.env, resolvedPosture);
     const appliedLaunch = choice ? choice.observation : observeCodexSandbox(posture);
     if (policyWarning) appliedLaunch.reason = policyWarning;

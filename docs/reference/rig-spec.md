@@ -426,8 +426,12 @@ The mapping accepts native `read`, `write` and `deny` values at absolute paths,
 It must be nonempty; nested subpath maps and arbitrary Codex settings are not part
 of this option. Omitted network access becomes `false`. Include the read access
 your tools and installed Codex executable need; this custom profile adds no
-workspace, temporary, queue-state, seat-folder or Git-directory write grants of
-its own. Native Codex decides whether the host can enforce the supplied rules.
+workspace, temporary, queue-state or seat-folder write grants of its own. When
+it lets the seat write its working folder, OpenRig adds a write rule for the
+seat's Git directories, the same ones a plain workspace-write seat gets through
+`--add-dir`, because Codex keeps `.git` read-only inside a writable root unless
+the profile names it. Naming a Git directory yourself, for example as `read`,
+keeps your rule and Codex's protection. Native Codex decides whether the host can enforce the supplied rules.
 Filesystem approval accepts `never` or `on-request`; the retired `untrusted`
 approval is rejected before the selection is saved.
 
