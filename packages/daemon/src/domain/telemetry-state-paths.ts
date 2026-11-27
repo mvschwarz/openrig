@@ -1,5 +1,12 @@
 import { join } from "node:path";
 
+/** Instance-owned collector copy, independent of any seat's working folder. */
+export const CONTEXT_COLLECTOR_RELATIVE_PATH = "state/claude-context-collector/context-collector.cjs";
+
+export function contextCollectorPath(openrigHome: string): string {
+  return join(openrigHome, CONTEXT_COLLECTOR_RELATIVE_PATH);
+}
+
 export function contextUsageDirectory(openrigHome: string): string {
   return join(openrigHome, "state", "context-usage");
 }

@@ -17,7 +17,7 @@
 
 import nodePath from "node:path";
 import { shellQuote } from "../adapters/shell-quote.js";
-import { contextUsageDirectory, providerUsageDirectory, telemetrySidecarFilename } from "./telemetry-state-paths.js";
+import { contextCollectorPath, contextUsageDirectory, providerUsageDirectory, telemetrySidecarFilename } from "./telemetry-state-paths.js";
 import { managedClaudeNodeCommand } from "./claude-activity-hooks.js";
 import { isOwnedCollectorCommand } from "./claude-owned-settings.js";
 
@@ -116,7 +116,7 @@ export function throttledCollectorCommand(input: ThrottledCollectorInput): strin
 export interface ThrottledStatusLineInput {
   readFile(path: string): string;
   exists(path: string): boolean;
-  /** The seat's working folder, where the collector and its settings live. */
+  /** The seat's working folder, where its Claude settings live. */
   cwd: string;
   /** The OpenRig home the collector writes its sidecars under. */
   stateDir: string;
@@ -153,8 +153,12 @@ export function throttledStatusLineForLaunch(input: ThrottledStatusLineInput): {
     return { note: `The status line throttle wasn't applied: ${settingsPath} sets its own status line command, which wins.` };
   }
   const contextDir = contextUsageDirectory(input.stateDir);
-  const collector = managedClaudeNodeCommand(input.nodeExecutable, nodePath.join(input.cwd, ".openrig", "context-collector.cjs"),
+  const collector = managedClaudeNodeCommand(input.nodeExecutable, contextCollectorPath(input.stateDir),
     contextDir, providerUsageDirectory(input.stateDir));
-  return { statusLine: { ...current, type: "command",
-    command: throttledCollectorCommand({ collectorCommand: collector, contextDir, sessionName: input.sessionName, seconds: input.seconds }) } };
+  const statusLine = { ...current, type: "command",
+    command: throttledCollectorCommand({ collectorCommand: collector, contextDir, sessionName: input.sessionName, seconds: input.seconds }) };
+  // No legacy cleanup here: this only builds the launch's --settings value, it does not write the seat's settings
+  // file. The legacy file goes away when the settings poll repoints `.claude/settings.local.json` to the instance
+  // collector — deleting it now would leave the persisted settings naming a missing file if this launch fails.
+  return { statusLine };
 }

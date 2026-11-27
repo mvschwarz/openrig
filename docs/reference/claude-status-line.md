@@ -26,19 +26,24 @@ placeholder paths and `my-statusline` with your actual commands:
 #!/bin/sh
 input=$(cat)
 printf '%s' "$input" |
-  node '/seat/cwd/.openrig/context-collector.cjs' \
+  node '/instance/home/state/claude-context-collector/context-collector.cjs' \
     '/instance/home/state/context-usage' \
     '/instance/home/state/provider-usage' >/dev/null 2>&1
 printf '%s' "$input" | my-statusline
 ```
 
-Take the collector path and both directory arguments from the existing generated
-`statusLine.command` in that seat's `.claude/settings.local.json`, leaving out
-its leading `exec`: it only lets the generated single command replace its shell,
-and a wrapper doesn't need it. The instance home is the selected `OPENRIG_HOME`. Keep paths quoted, including paths with
-spaces. Each command needs the same status line JSON on stdin: simply running
+Derive the collector path and both directory arguments from the selected instance home (`OPENRIG_HOME`), not
+from that seat's `.claude/settings.local.json`: once a wrapper is installed, that file holds the wrapper command,
+so the generated paths are no longer in it. The collector is
+`<home>/state/claude-context-collector/context-collector.cjs`, the context directory
+`<home>/state/context-usage`, and the provider directory `<home>/state/provider-usage`. The leading `exec` on the
+generated command only lets the generated single command replace its shell, and a wrapper doesn't need it. Keep
+paths quoted, including paths with spaces. Each command needs the same status line JSON on stdin: simply running
 the collector and renderer in sequence against a single stdin lets the first
 consume the input.
+
+If you already have a wrapper, change its collector path to `<OpenRig home>/state/claude-context-collector/context-collector.cjs`.
+The old call fails quietly, so the context reading stops updating and goes stale.
 
 In that same settings file, merge this field while preserving your other settings:
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  contextCollectorPath,
   contextUsageDirectory,
   legacyContextUsageDirectory,
   legacyProviderUsageDirectory,
@@ -10,7 +11,8 @@ import {
 } from "../src/domain/telemetry-state-paths.js";
 
 describe("OpenRig-owned telemetry paths", () => {
-  it("owns both telemetry roots beneath state", () => {
+  it("owns the collector and both telemetry roots beneath state", () => {
+    expect(contextCollectorPath("/openrig-home")).toBe("/openrig-home/state/claude-context-collector/context-collector.cjs");
     expect(contextUsageDirectory("/openrig-home")).toBe("/openrig-home/state/context-usage");
     expect(providerUsageDirectory("/openrig-home")).toBe("/openrig-home/state/provider-usage");
   });

@@ -405,7 +405,7 @@ not the destination's file contents.)
   overwrites an unrecorded differing file with a warning; the refusal is deliberate, while the occupant still runs.
 - **What to do:** use a clean destination, or move or merge those files, then retry.
 - **Not checked:** managed guidance blocks and native configuration merges keep the adapter's policy at launch, and
-  launch-owned files such as `.openrig/context-collector.cjs` are written by launch as always.
+  launch-owned files are written by launch as always.
 - **A community harness** takes no startup files, so none are checked for it.
 
 **The running occupant keeps its current directory.** Adopt the new one with:
@@ -430,8 +430,9 @@ preservation. The result reports what was emitted, not native successor equivale
 **Adopt it promptly.** The saved directory doesn't move the running process, but background work can use it before
 adoption. Saved configuration isn't the live process's directory, and these examples aren't the only consumers. For a
 running Claude seat:
-- **Collector provisioning** writes `.openrig/context-collector.cjs` and merges `.claude/settings.local.json` in the
-  saved directory, under its existing preservation rules.
+- **Collector provisioning** merges `.claude/settings.local.json` in the saved directory, under its existing
+  preservation rules. The collector script itself lives at `$OPENRIG_HOME/state/claude-context-collector/context-collector.cjs`.
+  Repointing an owned legacy command removes its regular `.openrig/context-collector.cjs` file and the directory if empty.
 - **Managed compaction,** manual (`POST /api/compaction/trigger`) or automatic, asks the seat to write its restore map
   under it. That may be outside the seat's current workspace, so a seat without bypass permissions may meet a write
   prompt.
@@ -933,7 +934,7 @@ relative to that directory.
 | Path | When OpenRig writes it | What `rig down` does |
 | --- | --- | --- |
 | Managed blocks in `CLAUDE.md` (or the rig's `managed_blocks` file, such as `CLAUDE.local.md`) or `AGENTS.md` | Each launch merges the seat's guidance blocks. A fresh Codex launch that takes developer instructions puts them in its launch text instead: in `AGENTS.md` it adds only the seat-skills line, after your yes, and refreshes blocks already there. A fresh Pi seat writes its own agent-directory `AGENTS.md` outside the project, except when that folder or file is a link: then its guidance stays in the repository `AGENTS.md`. | Removes OpenRig's blocks, current or legacy, and keeps everything else. When nothing else is left, it deletes the file if the file began with an OpenRig block, or held only blocks in an older format. A block-only file isn't proof that OpenRig created it. The seat-skills line is kept if you edited it. |
-| `.openrig/context-collector.cjs` | Claude seats, at launch. | Removes it while its bytes are still the shipped collector's; otherwise keeps it and says so. |
+| Legacy `.openrig/context-collector.cjs`, left by launches before the collector moved to instance state | Claude seats, at launch, before the move. Migration removes it when repointing an owned legacy command. | Removes it while its bytes match the current shipped collector's; otherwise keeps it and says so. |
 | `.claude/settings.local.json` | Claude seats, at launch: OpenRig's status line and its activity hooks are merged in, separately. Your own status line is never replaced, but the activity hooks are still merged beside it. A file that doesn't parse gets neither. | Removes OpenRig's status line and hooks and keeps the file, even if `{}` is all that's left. |
 | `.claude/settings.local.json` fragments and `.mcp.json` | When a profile or spec declares `claude_settings_fragment` or `claude_mcp_fragment`. | Leaves the merged content in place. |
 | `.claude/agents/`, `.claude/plugins/<id>/`, `.claude/extensions/<id>/`; `.agents/<id>.yaml`, `.codex/plugins/<id>/`, `.agents/extensions/<id>/` | When the seat's projection includes subagents, plugins or runtime resources (Claude, then Codex). | Leaves them in place. |

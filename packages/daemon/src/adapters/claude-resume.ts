@@ -1,4 +1,4 @@
-import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
+import { continuationChoiceNotes, resumedClaudeArguments, rewriteLegacyCollectorSettings, sentClaudeAutoMode, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
 import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js";
 import { claudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "../domain/claude-auto-mode.js";
 import { compactionPacketLaunchEnv, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
@@ -161,6 +161,11 @@ export class ClaudeResumeAdapter {
       catch { return { ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." }; }
     }
     let nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture, autoMode.block ?? null, settingsSeat);
+    if (continuation?.args && cwd && this.options.openrigHome) {
+      // As on the launch path: a seat launched before the collector moved still carries the cwd script in its
+      // captured arguments; rewrite it to the instance copy before the transport stages them (#3893 review).
+      nativeArgs = rewriteLegacyCollectorSettings(nativeArgs, { cwd, stateDir: this.options.openrigHome }, settingsSeat);
+    }
     const sentNative = !!managed || !!(continuation?.args && executable);
     // The packet variable follows the grant this resume sends: a continuation sends the running Claude's arguments.
     const packetEnv = compactionPacketLaunchEnv(sentNative ? nativeArgs : launchArgs, { openrigHome: this.options.openrigHome, nativeSessionId: resumeToken! });

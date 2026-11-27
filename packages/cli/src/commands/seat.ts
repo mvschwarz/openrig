@@ -1700,9 +1700,9 @@ The saved directory doesn't move the running process. Adopt it with
   rig seat launch <seat> --fresh --stop --reason <text>   (a blank conversation) or
   rig seat handover <seat> --source rebuild --reason <text>   (carries durable context)
 Until then, background work can already use the saved directory. For a running
-Claude seat, for example, collector provisioning writes .openrig/context-collector.cjs
-and merges .claude/settings.local.json there (under its existing preservation
-rules), and managed compaction, manual or automatic, asks the seat to write its
+Claude seat, for example, collector provisioning merges .claude/settings.local.json
+there (under its existing preservation rules; the collector script itself lives in
+instance state, not the seat's folder), and managed compaction, manual or automatic, asks the seat to write its
 restore map there, which may be outside its current workspace, where a seat
 without bypass permissions may meet a write prompt. Adopting promptly is guidance; it doesn't protect against a poll or
 a compaction that runs before your next command.

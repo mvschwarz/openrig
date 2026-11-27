@@ -1,9 +1,12 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { readNativeProcessLaunch } from "./native-process-arguments.js";
 import type { ClaudeAutoMode } from "./claude-auto-mode.js";
 import { ownClaudeSettings, type ClaudeSettingsSeat } from "../adapters/claude-settings-transport.js";
+import { shellQuote } from "../adapters/shell-quote.js";
+import { collectorCommandScriptPath } from "./claude-owned-settings.js";
+import { contextCollectorPath } from "./telemetry-state-paths.js";
 
 /** Transient argv/config selector only; no general environment values or positional startup input. */
 export interface ClaudeContinuationLaunch { args?: string[]; configDir?: string | null; warnings: string[] }
@@ -110,6 +113,56 @@ export function resumedClaudeArguments(launch: ClaudeContinuationLaunch | undefi
     args.push(...posture.split(" "));
   }
   return [...args, "--resume", conversation];
+}
+
+/** Rewrite one status line command from the legacy cwd collector to the instance-state copy. A seat launched before
+ *  the collector moved (#3768) carries the old script in its captured launch arguments; the rewrite only fires for
+ *  OpenRig's own collector commands (plain or throttled wrapper — see collectorCommandScriptPath), and only when the
+ *  legacy path occurs exactly once, so a user's own command that merely contains the path is never touched. Returns
+ *  the rewritten command, or null when the command needs no rewrite. */
+export function rewriteLegacyCollectorCommand(command: string, legacy: string, current: string): string | null {
+  if (collectorCommandScriptPath(command) !== legacy) return null;
+  const legacyToken = shellQuote(legacy);
+  if (command.split(legacyToken).length - 1 !== 1) return null;
+  return command.replace(legacyToken, shellQuote(current));
+}
+
+/** Rewrite the collector script inside captured Claude launch arguments, from the legacy cwd copy to the
+ *  instance-state copy (#3768 / #3893 review). Applied to a native resume's replayed arguments, before the settings
+ *  transport stages them: a fresh launch already builds the instance path, so only replayed arguments can still name
+ *  the legacy file. Inline `--settings` JSON is rewritten in place; a settings file OpenRig staged is read back,
+ *  rewritten and left inline for the transport to re-stage; foreign settings files stay opaque and untouched.
+ *  Arguments without a `--settings` value, and values whose status line is not OpenRig's collector, come back
+ *  unchanged — including the autoMode block and every other settings key, which are preserved as parsed. */
+export function rewriteLegacyCollectorSettings(args: string[], options: { cwd: string; stateDir: string },
+  seat?: ClaudeSettingsSeat): string[] {
+  const legacy = join(options.cwd, ".openrig", "context-collector.cjs");
+  const current = contextCollectorPath(options.stateDir);
+  if (legacy === current) return args;
+  const result = [...args];
+  args.forEach((arg, at) => {
+    const inline = arg.startsWith("--settings=");
+    if (arg !== "--settings" && !inline) return;
+    const raw = inline ? arg.slice("--settings=".length) : args[at + 1] ?? "";
+    let parsed: unknown;
+    try { parsed = JSON.parse(ownClaudeSettings(raw, seat) ?? raw); } catch { return; }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    const settings = parsed as Record<string, unknown>;
+    const statusLine = settings["statusLine"];
+    if (typeof statusLine !== "object" || statusLine === null || Array.isArray(statusLine)) return;
+    const command = (statusLine as Record<string, unknown>)["command"];
+    if (typeof command !== "string") return;
+    const rewritten = rewriteLegacyCollectorCommand(command, legacy, current);
+    if (rewritten === null) return;
+    const next = { ...settings, statusLine: { ...(statusLine as Record<string, unknown>), command: rewritten } };
+    const json = JSON.stringify(next);
+    if (inline) result[at] = `--settings=${json}`;
+    else result[at + 1] = json;
+    // No legacy cleanup here: this only rewrites launch arguments, it does not write the seat's settings file.
+    // The legacy file goes away when the settings poll repoints `.claude/settings.local.json` to the instance
+    // collector — deleting it now would leave the persisted settings naming a missing file if this launch fails.
+  });
+  return result;
 }
 
 export function continuationPermission(launch: ClaudeContinuationLaunch): string {

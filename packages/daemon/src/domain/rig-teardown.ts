@@ -730,7 +730,7 @@ export class RigTeardownOrchestrator {
 
   /** What a Claude seat may still use, by the same rule as guidance files: the cwd of a Claude seat of any other rig that
    *  isn't archived, or of one of this rig's Claude seats still live (a failed stop, an inconclusive probe, an attached
-   *  CLI) or released and not seen gone. Each cwd's settings file, collector, `.claude` and `.openrig` are keyed by
+   *  CLI) or released and not seen gone. Each cwd's settings file, legacy collector, `.claude` and `.openrig` are keyed by
    *  their own identity too, so a target another directory reaches through a symlink or a hardlink counts as in use. */
   private claudeTargetsInUse(rigId: string): Set<string> {
     const rows = this.db.prepare(`

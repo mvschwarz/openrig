@@ -1,11 +1,12 @@
-// OpenRig's own additions in a Claude seat's cwd: the context collector `.openrig/context-collector.cjs`, its
-// `statusLine`, and the activity relay hooks in `.claude/settings.local.json`. Ownership is the exact generated
-// Node-command shape. The adapter's install and reconcile and rig down's cleanup (#875) share these matchers, so what
+// OpenRig's collector and activity relay live in instance state; their `statusLine` and hooks live in the seat's
+// `.claude/settings.local.json`. Legacy cwd collectors remain owned for migration and cleanup. Ownership is the exact
+// generated Node-command shape. The adapter's install and reconcile and rig down's cleanup (#875) share these matchers, so what
 // down takes back is exactly what a launch would recognise as its own.
 
 import fs from "node:fs";
 import nodePath from "node:path";
 import { CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH, parseManagedClaudeNodeCommand } from "./claude-activity-hooks.js";
+import { CONTEXT_COLLECTOR_RELATIVE_PATH } from "./telemetry-state-paths.js";
 
 // OpenRig-owned relay path suffix. Ownership is the generated Node command whose single
 // argument ends with this path — a changed prefix still matches (replace, not duplicate); a
@@ -23,18 +24,69 @@ function hookCommand(hook: unknown): string | undefined {
 // OpenRig-owned collectors use canonical POSIX-quoted paths. Recognise older unquoted
 // three/four-token commands too, but preserve commands composed with shell operators or
 // extra arguments. Old unquoted paths containing spaces cannot be identified unambiguously.
-const OWNED_COLLECTOR_SUFFIX = nodePath.sep + nodePath.join(".openrig", "context-collector.cjs");
+const OWNED_COLLECTOR_SUFFIXES = [
+  nodePath.sep + nodePath.normalize(CONTEXT_COLLECTOR_RELATIVE_PATH),
+  nodePath.sep + nodePath.join(".openrig", "context-collector.cjs"),
+];
 
 export function isOwnedCollectorCommand(cmd: string): boolean {
   if (/[\r\n]/.test(cmd)) return false;
   const parsed = parseManagedClaudeNodeCommand(cmd);
   if (parsed && (parsed.args.length === 2 || parsed.args.length === 3)) {
-    return parsed.args[0]!.endsWith(OWNED_COLLECTOR_SUFFIX);
+    return OWNED_COLLECTOR_SUFFIXES.some((suffix) => parsed.args[0]!.endsWith(suffix));
   }
   const tokens = cmd.trim().split(/\s+/);
   if ((tokens.length !== 3 && tokens.length !== 4) || tokens[0] !== "node") return false;
   if (tokens.some((token) => /[;&|<>`$()'"\\]/.test(token))) return false;
-  return tokens[1]!.endsWith(OWNED_COLLECTOR_SUFFIX);
+  return OWNED_COLLECTOR_SUFFIXES.some((suffix) => tokens[1]!.endsWith(suffix));
+}
+
+/** Without a repointed owned command as evidence, teardown only takes back this release's collector bytes. */
+export function isShippedCollectorBytes(bytes: Buffer, shipped: Buffer): boolean {
+  return bytes.equals(shipped);
+}
+
+/** The collector script a status line command runs, for OpenRig's own plain or throttled commands; null otherwise.
+ *  A throttled command is a shell one-liner whose last pipe runs the collector, so its tail is parsed, not the whole
+ *  line. A user command that merely contains the path is not an owned command and returns null. */
+export function collectorCommandScriptPath(command: string): string | null {
+  const parsed = parseManagedClaudeNodeCommand(command);
+  if (parsed && (parsed.args.length === 2 || parsed.args.length === 3)
+    && OWNED_COLLECTOR_SUFFIXES.some((suffix) => parsed.args[0]!.endsWith(suffix))) return parsed.args[0]!;
+  const pipe = command.lastIndexOf("| ");
+  if (pipe < 0) return null;
+  const tail = parseManagedClaudeNodeCommand(command.slice(pipe + 2).trim());
+  if (tail && (tail.args.length === 2 || tail.args.length === 3)
+    && OWNED_COLLECTOR_SUFFIXES.some((suffix) => tail.args[0]!.endsWith(suffix))) return tail.args[0]!;
+  return null;
+}
+
+/** The managed throttle wrapper throttledCollectorCommand builds: a shell one-liner that checks a sidecar stamp
+ *  (`f=<sidecar base>`, `p=$(cat)`, `o=1; s=; u=`, `"$f.throttle"`) and pipes the input to the collector. A user's
+ *  own pipeline that merely ends in the collector (for example `printf '{}' | node …/context-collector.cjs`) has
+ *  none of this preamble, so it stays rejected: only OpenRig's own throttle form counts as a repointed command. */
+export function isManagedThrottledCollectorCommand(command: string): boolean {
+  if (!command.startsWith("f=") || !command.includes("p=$(cat)") || !command.includes("o=1; s=; u=")
+    || !command.includes('"$f.throttle"')) return false;
+  return collectorCommandScriptPath(command) !== null;
+}
+
+/** After repointing an owned command, take back the legacy cwd file it named, regardless of its bytes.
+ *  User wrappers, other folders' collectors and symlinks are left alone. Cleanup is best-effort and never recursive. */
+export function removeRepointedLegacyCollector(cwd: string, command: unknown): void {
+  if (typeof command !== "string"
+    || (!isOwnedCollectorCommand(command) && !isManagedThrottledCollectorCommand(command))) return;
+  const script = collectorCommandScriptPath(command);
+  const legacy = nodePath.resolve(cwd, ".openrig", "context-collector.cjs");
+  if (!script || nodePath.resolve(cwd, script) !== legacy) return;
+  try {
+    const stat = fs.lstatSync(legacy);
+    if (!stat.isFile() || stat.isSymbolicLink()) return;
+    fs.unlinkSync(legacy);
+    removeIfEmpty(nodePath.dirname(legacy), () => false);
+  } catch {
+    // Missing or inaccessible: leave it without failing provisioning.
+  }
 }
 
 export function isOwnedRelayCommand(cmd: string | undefined): boolean {
@@ -105,7 +157,8 @@ const SHARED = "another seat's directory still uses it through a link, so it was
 /** rig down (#875), for a cwd no Claude seat still uses: take back what OpenRig added there for Claude.
  *  - Its entries leave `.claude/settings.local.json`, which is kept even when that leaves `{}`, since nothing records
  *    whether OpenRig created it. Settings that don't parse as an object are left as they are.
- *  - The collector goes only while its bytes are the shipped collector's.
+ *  - A legacy cwd collector goes while its bytes are this release's shipped collector's. Other bytes are kept;
+ *    migration removes older copies when repointing their owned commands. The instance copy stays.
  *  - `.openrig` and `.claude` go only if they're then empty, never recursively.
  *  - A target `isShared` names (one another seat's directory reaches through a symlink or a hardlink) is left as it is.
  *  Returns what was kept for the person to look at. */
@@ -127,7 +180,8 @@ export function cleanupOwnedClaudeCwd(cwd: string, collectorAssetPath: string | 
     let shipped: Buffer | null = null;
     try { shipped = collectorAssetPath ? fs.readFileSync(collectorAssetPath) : null; } catch { shipped = null; }
     if (!shipped) kept.push(`${collectorPath}: couldn't be compared with the shipped collector, so it was kept`);
-    else if (fs.lstatSync(collectorPath).isFile() && fs.readFileSync(collectorPath).equals(shipped)) fs.unlinkSync(collectorPath);
+    else if (fs.lstatSync(collectorPath).isFile()
+      && isShippedCollectorBytes(fs.readFileSync(collectorPath), shipped)) fs.unlinkSync(collectorPath);
     else kept.push(`${collectorPath}: not the shipped collector's bytes, so it was kept`);
   }
   for (const dir of [".openrig", ".claude"]) removeIfEmpty(nodePath.join(cwd, dir), isShared);
