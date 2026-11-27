@@ -34,6 +34,23 @@ describe("SeatStatusService", () => {
     db.close();
   });
 
+  it("reports a recorded standby only for the stopped session that owns the pane", () => {
+    const rig = rigRepo.createRig("standby-status");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "pi" });
+    const session = sessionRegistry.registerSession(node.id, "worker@standby-status");
+    sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: session.sessionName, tmuxPane: "%1" });
+    sessionRegistry.markIntentionallyStopped(session.id);
+    new EventBus(db).emit({ type: "session.stopped", rigId: rig.id, nodeId: node.id, sessionId: session.id,
+      sessionName: session.sessionName, operator: "daemon:seat-reaper", reason: "idle_reap", standbyPane: "$1|42|100|%1" });
+    expect(service.getStatus(session.sessionName)).toMatchObject({ ok: true, status: { session_status: "exited", standby_stopped: true } });
+
+    const resumed = sessionRegistry.registerSession(node.id, session.sessionName);
+    sessionRegistry.updateStatus(resumed.id, "running");
+    const status = service.getStatus(session.sessionName);
+    expect(status).toMatchObject({ ok: true, status: { session_status: "running" } });
+    expect(status.ok && status.status).not.toHaveProperty("standby_stopped");
+  });
+
   it("reads only the selected node input route and observes route changes", () => {
     const rig = rigRepo.createRig("routes");
     const node = rigRepo.addNode(rig.id, "worker", { runtime: "pi" });

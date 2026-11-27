@@ -52,6 +52,7 @@ export function makeWatchdogDeliver(deps: {
   /** The live parked rows of the target whose current park this job wakes: at a queue-only seat the reminder is noted
    *  on them, not made into another row. */
   resolveParkedRows?: (input: { jobId: string; targetSession: string }) => string[];
+  wakeStandby?: (destination: string, owed: () => boolean) => Promise<boolean> | undefined;
   notificationCurrent?: (jobId: string) => boolean;
   resolveSharedParkReminder?: (jobId: string) => string | null;
   /** Writes each note on its parked row, in one transaction, while the row is still `owner`'s and its current park is
@@ -125,6 +126,16 @@ export function makeWatchdogDeliver(deps: {
       }
       if (deps.isQueueOnlySeat?.(targetSession) && deps.createQueueRow) {
         return { ...await queueOnly(targetSession, message, continuityAction !== undefined, source), continuityActionCompleted };
+      }
+      if (source.policy === "periodic-reminder") {
+        const owed = () => source.parkedRows
+          ? source.parkedRows.length > 0 && source.parkedRows.every(({ jobId, qitemId }) => deps.resolveParkedRows?.({ jobId, targetSession }).includes(qitemId))
+          : (deps.resolveParkedRows?.({ jobId: source.jobId, targetSession }).length ?? 0) > 0;
+        const starting = deps.wakeStandby?.(targetSession, owed);
+        if (starting) {
+          if (!await starting) return { status: "failed", sent: false, inputPhase: "not_reached", error: "Standby resume was not confirmed." };
+          if (!owed()) return { status: "failed", sent: false, inputPhase: "not_reached", error: "The park wake is no longer owed." };
+        }
       }
       const warning = deps.outbox && source.policy === "periodic-reminder" ? "" : "Delivery may repeat after an unconfirmed attempt.\n";
       const payload = formatWatchdogDeliveryMessage(source, warning + message);

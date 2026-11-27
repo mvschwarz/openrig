@@ -83,6 +83,7 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  standby_stopped?: true;
   /** The seat's state as `rig ps --nodes` shows it; absent from an older daemon. */
   lifecycle_state?: string;
   launch_cwd?: string | null;
@@ -330,7 +331,7 @@ function printHuman(status: SeatStatusResponse): void {
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   // #3185: a bare shell or an unconfirmed pane process keeps the session record running; read the seat as rig ps does.
-  console.log(`Session: ${status.session_status === "running" && status.lifecycle_state === "attention_required"
+  console.log(`Session: ${status.standby_stopped ? "standby (wakes for queued work)" : status.session_status === "running" && status.lifecycle_state === "attention_required"
     ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
   const stop = status.permission_stop;
   if (stop && stop.state !== "unavailable") {

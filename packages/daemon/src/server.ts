@@ -263,6 +263,7 @@ export interface AppDeps {
   watchdogHistoryLog?: WatchdogHistoryLog;
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
+  seatReaper?: import("./domain/seat-reaper-service.js").SeatReaperService;
   /** #2940: relaunches a keep_alive seat that falls while the daemon runs. Started after the listener binds; stopped first. */
   keepAliveSupervisor?: import("./domain/keep-alive-supervisor.js").KeepAliveSupervisor;
   /** The outbound network connector (`rig network`); started after the listener binds. */
