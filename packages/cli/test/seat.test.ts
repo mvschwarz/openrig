@@ -1251,6 +1251,26 @@ describe("rig seat status", () => {
     expect(output).not.toContain("restore packet) was delivered");
   });
 
+  it("first-input handover output separates passing the launch file from submission and consumption", async () => {
+    const deps = makeDeps({ status: 200, data: {
+      ...HANDOVER_RESULT_FRESH,
+      restorePacket: { status: "unconfirmed", reason: "passed at launch", consumption: "unconfirmed",
+        firstInput: { path: "/private/first-input/attempt.txt", submission: "unconfirmed" } },
+      sideEffects: { ...HANDOVER_RESULT_FRESH.sideEffects, startupContextDelivered: false },
+    } }, []);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "fresh", "--reason", "context-wall"]);
+    });
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
+    expect(output).toContain("passed at launch through /private/first-input/attempt.txt; submission and consumption are unconfirmed");
+    expect(output).toContain("Do not resend the packet or repeat the handover");
+    expect(output).not.toContain("before sending the context again");
+    expect(output).not.toContain("restore packet) was delivered");
+    expect(output).not.toContain("OpenRig delivered no startup context");
+  });
+
   it("handover fresh human output says an unconfirmed restore packet was sent, not that nothing was delivered", async () => {
     const reason = "the input box could not be observed";
     const deps = makeDeps({ status: 200, data: {

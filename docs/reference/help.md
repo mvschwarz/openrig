@@ -161,6 +161,10 @@ A managed Codex seat at its active "Hooks need review" menu reports `needs-input
 to attach to that seat's terminal. Review the hooks in Codex there; OpenRig does not choose or approve them for you.
 Old hook-review text above a later conversation prompt is not an active review menu.
 
+When a Claude seat's conversation is resumed and its latest reply is Claude's login refusal ("Not logged in · Please run
+/login"), the resume keeps the seat for its person and says so, not that the resume failed. Its conversation is kept, and
+nothing is typed into it. If the seat isn't signed in, sign in with `/login` in that seat's terminal.
+
 ### You can't tell which instance or configuration is involved
 
 Read [instance layout](instance-layout.md) (`rig context get reference/instance-layout.md`) and

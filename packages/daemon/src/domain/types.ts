@@ -336,6 +336,8 @@ export type RigEvent =
       requestedBy: string | null; generation: string; previousGeneration: string;
       settings: Record<string, { value: string | null; source: string }>; dropped: Array<{ setting: string; value: string }>;
       permissionSelection: string; claimsMoved: number }
+  | { type: "seat.handover_first_input_passed"; rigId: string; nodeId: string; occupantGeneration: string | null;
+      path: string; submission: "unconfirmed"; consumption: "unconfirmed"; launchCommand: "accepted" | "unconfirmed"; binding: "not_committed" }
   | { type: "seat.handover_completed"; rigId: string; nodeId: string; logicalId: string; previousOccupant: string; currentOccupant: string; source: string; reason: string; operator: string | null;
       /** OPR.0.5.5.5 (fix B2) — the executed source outcome, persisted so the DURABLE
        *  record (not just the command response) carries what primed the successor:

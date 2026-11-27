@@ -199,8 +199,8 @@ interface SeatHandoverMutationResult {
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending" | "none"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string };
         model?: { requested: string | null; predecessorCompared: false } };
-  /** The restore or rebuild priming packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
-  restorePacket?: { status: "unconfirmed" | "accepted"; reason: string };
+  /** A packet passed at launch or typed afterward, with its submission still unconfirmed. */
+  restorePacket?: { status: "unconfirmed" | "accepted"; reason: string; firstInput?: { path: string; submission: "unconfirmed" }; consumption?: "unconfirmed" };
   /** #2456: the required startup files the successor started without, where a start would have failed. */
   startedWithoutRequired?: string[];
   /** #2985: this handover adopted the running successor of an earlier failed one (`--recover`). */
@@ -531,8 +531,11 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
     // #3044: a recovered successor on the retiring occupant's conversation resumed it (the result's warning says so).
     if (result.currentStatus?.continuityOutcome !== "resumed") console.log("No conversation continuity was carried: the successor started a fresh conversation.");
   } else if (result.restorePacket?.status === "unconfirmed") {
-    // The packet was pasted and Enter pressed: the successor may already be working on it, so don't send it again.
-    if (result.source.mode === "rebuild") {
+    // A launch input is not a pasted-and-submitted packet; keep its receipt distinct.
+    if (result.restorePacket.firstInput) {
+      console.log(`The restore packet was passed at launch through ${result.restorePacket.firstInput.path}; submission and consumption are unconfirmed.`);
+      console.log("Do not resend the packet or repeat the handover because its uptake is unknown.");
+    } else if (result.source.mode === "rebuild") {
       console.log(`The rebuild priming packet was sent to the successor, but its submission is unconfirmed: ${result.restorePacket.reason}.`);
       if (result.restorePacket.reason === "the prompt still looked staged in the input box") {
         console.log("Check the successor's current screen. Only if that exact packet is still staged, submit the existing packet once. Do not resend blindly or rerun the handover.");
@@ -1794,7 +1797,7 @@ Examples:
     .requiredOption("--keep-conversation", "Resume the seat's own conversation in its own pane; never a fresh launch or fork")
     .option("--reason <text>", "Audit reason (required when executing)")
     .option("--plan", "Run every check and show what a restart would keep; nothing is stopped or restarted")
-    .option("--verify", "After a real tool-using turn, check whether the restarted seat can be reported as moved")
+    .option("--verify", "With --keep-conversation, after a real tool-using turn: check whether the restarted seat can be reported as moved")
     .option("--expect-account <text>", "With --verify: the account Codex's /status Account line must name")
     .option("--operator <address>", "Operator recorded on the audit event")
     .option("--host <id>", "Restart a seat on this registered machine, over its SSH entry, as this seat")

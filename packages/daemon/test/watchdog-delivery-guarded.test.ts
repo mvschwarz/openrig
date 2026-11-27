@@ -1167,3 +1167,51 @@ describe("queue-only seat: a watchdog reminder is never typed (#3076)", () => {
     expect(next.f.submissions).toEqual([]);
   });
 });
+
+// A held reminder's history names what held it: the transport's own reason beside the held outboxIds, or `unknown` where
+// the path that held it returned none. skipReason stays typing_guard_retained, which readers match.
+describe("a held watchdog reminder records what held it", () => {
+  const evaluate = async (f: { db: Database.Database }, deliver: ReturnType<typeof makeWatchdogDeliver>) => {
+    const jobs = new WatchdogJobsRepository(f.db);
+    const history = new WatchdogHistoryLog(f.db);
+    const engine = new WatchdogPolicyEngine({ jobsRepo: jobs, historyLog: history, eventBus: new EventBus(f.db), deliver });
+    const job = jobs.register({ policy: "periodic-reminder", targetSession: seat, intervalSeconds: 60, registeredBySession: seat, specYaml: "message: Still owed\n" });
+    await engine.evaluate(job);
+    return history.listForJob(job.jobId, 1)[0]!;
+  };
+
+  it.each([
+    ["the typing guard's hold", (f: ReturnType<typeof fixture>) => f.hold(), "typing_guard_enabled"],
+    ["a person's draft under draft-aware delivery", async (f: ReturnType<typeof fixture>) => { await f.enable(); f.setInput("a person's unfinished message"); }, "draft_input_busy"],
+  ] as const)("%s: the history names the transport's reason beside the held messages", async (_name, setUp, reason) => {
+    const f = fixture();
+    await setUp(f);
+    const entry = await evaluate(f, f.deliver);
+    expect(entry).toMatchObject({ deliveryStatus: "retained", outcome: "skipped", skipReason: "typing_guard_retained",
+      evaluationNotes: { retainedNotDelivered: true, retainedReason: reason } });
+    expect((entry.evaluationNotes as { outboxIds: string[] }).outboxIds.length).toBeGreaterThan(0);
+    expect(f.pastes).toEqual([]);
+    expect(f.submissions).toEqual([]);
+  });
+
+  it("a retention whose path gives no reason records it as unknown, never an inferred one", async () => {
+    const f = fixture();
+    const deliver = makeWatchdogDeliver({ sessionTransport: { send: async () => ({ ok: true, sessionName: seat, outcome: "retained", sent: false, verified: false, outboxIds: ["held-1"] }) } as never });
+    const entry = await evaluate(f, deliver);
+    expect(entry).toMatchObject({ deliveryStatus: "retained", skipReason: "typing_guard_retained",
+      evaluationNotes: { outboxIds: ["held-1"], retainedNotDelivered: true, retainedReason: "unknown" } });
+  });
+
+  it("the delivery keeps the transport's reason for a retention, as it does for a failure, and adds none where there is none", async () => {
+    const send = (reason?: string) => makeWatchdogDeliver({ sessionTransport: { send: async () => ({ ok: true, sessionName: seat, outcome: "retained", sent: false,
+      verified: false, outboxIds: ["held-1"], ...(reason ? { reason } : {}) }) } as never })({ targetSession: seat, message: "Still owed" }, lone("r", "r1"));
+    expect(await send("draft_held_behind_earlier")).toMatchObject({ status: "retained", outboxIds: ["held-1"], transportReason: "draft_held_behind_earlier" });
+    expect(await send()).not.toHaveProperty("transportReason");
+    // A parked-owner reminder held by the watchdog itself at a queue-only seat has no transport reason either.
+    const queueOnly = await makeWatchdogDeliver({ sessionTransport: { send: async () => { throw new Error("never typed"); } } as never,
+      isQueueOnlySeat: () => true, createQueueRow: async () => { throw new Error("never a row"); } } as never)(
+      { targetSession: seat, message: "Still owed" }, { jobId: "p", policy: PARKED_OWNER_POLICY_NAME, occurrenceId: "p1" });
+    expect(queueOnly).toMatchObject({ status: "retained" });
+    expect(queueOnly).not.toHaveProperty("transportReason");
+  });
+});
