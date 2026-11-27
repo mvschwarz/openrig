@@ -670,6 +670,21 @@ describe("rig seat status", () => {
     expect(logs).toContain(expected);
   });
 
+  // Slice 60: a killed agent's shell lived on, and the seat read running. The daemon's agent_liveness shows it beside that.
+  it("shows an agent that isn't verified beside a running session, and says nothing when the daemon serves no reading", async () => {
+    const run = async (extra: Record<string, unknown>) => {
+      const deps = makeDeps({ status: 200, data: { ...STATUS, runtime: "hermes", lifecycle_state: "running", ...extra } }, []);
+      return (await captureLogs(async () => {
+        await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+      })).logs;
+    };
+    const shown = await run({ agent_liveness: { state: "not_verified", reason: "shell_foreground", command: "zsh", observedAt: "2026-11-27T12:15:30.000Z" } });
+    expect(shown).toContain("Session: running");
+    expect(shown).toContain("Agent: not verified: the pane's foreground is zsh, not a verified hermes agent (identity check at "
+      + "2026-11-27T12:15:30.000Z). It may have exited to its shell, or run behind a wrapper; rig capture dev-impl@seat-rig shows the pane.");
+    expect((await run({})).some(line => line.startsWith("Agent:"))).toBe(false);
+  });
+
   // A seat joined with rig attach runs in someone else's program: OpenRig can't see its process, only what it writes.
   it.each([
     [{ at: "2026-11-27T08:00:00.000Z", qitemId: "qitem-1", state: "in-progress" },
