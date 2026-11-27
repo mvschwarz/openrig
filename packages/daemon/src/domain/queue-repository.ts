@@ -6625,7 +6625,25 @@ export class QueueRepository {
       isHostedMember: (dest) => this.hostedMemberFn(dest),
       hostedCheckIn: (dest) => this.hostedMemberCheckIn(dest),
       isIssuedConversation: (dest) => this.isIssuedConversation(dest),
+      isExternalCliSeat: (dest) => this.isExternalCliSeat(dest),
     });
+  }
+
+  /** Whether this address is a seat joined with `rig attach` as an external CLI, in an active rig: by its session or its
+   *  binding's external name, or as the canonical `<pod>-<member>@<rig>` of such a node. OpenRig can't type into it
+   *  (seat-kinds: no inbound transport), so its work waits for that program's own read. An unreadable record reads false. */
+  isExternalCliSeat(destination: string): boolean {
+    try {
+      if (this.db.prepare(`SELECT 1 FROM bindings b JOIN nodes n ON n.id = b.node_id JOIN rigs r ON r.id = n.rig_id
+        WHERE b.attachment_type = 'external_cli' AND r.archived_at IS NULL
+          AND (b.external_session_name = ? OR EXISTS (SELECT 1 FROM sessions s WHERE s.node_id = n.id AND s.session_name = ?))
+        LIMIT 1`).get(destination, destination)) return true;
+      const at = destination.lastIndexOf("@");
+      if (at <= 0) return false;
+      return !!this.db.prepare(`SELECT 1 FROM bindings b JOIN nodes n ON n.id = b.node_id JOIN rigs r ON r.id = n.rig_id
+        WHERE b.attachment_type = 'external_cli' AND r.archived_at IS NULL AND r.name = ? AND REPLACE(n.logical_id, '.', '-') = ?
+        LIMIT 1`).get(destination.slice(at + 1), destination.slice(0, at));
+    } catch { return false; }
   }
 
   /** Whether OpenRig issued this address to a person's own conversation here (#3964): its work waits for that conversation

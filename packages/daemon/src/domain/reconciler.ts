@@ -65,6 +65,14 @@ export class Reconciler {
     this.readProcesses = deps.readProcesses ?? readProcessTable;
   }
 
+  /** The rig's seats whose binding is an external CLI (`rig attach`). An unreadable record reads as none, as before. */
+  private externalCliNodes(rigId: string): Set<string> {
+    try {
+      return new Set((this.db.prepare(`SELECT b.node_id FROM bindings b JOIN nodes n ON n.id = b.node_id
+        WHERE n.rig_id = ? AND b.attachment_type = 'external_cli'`).all(rigId) as Array<{ node_id: string }>).map((r) => r.node_id));
+    } catch { return new Set(); }
+  }
+
   /** `nodeIds` (#2940): reconcile only these seats' sessions, leaving the rest of the rig as it is; the keep_alive
    *  supervisor uses it at runtime for its own seats. Without it, every session of the rig is reconciled, as at boot.
    *  `absenceProof: "positive"` (#2940): a session counts as gone only when tmux says it's absent or that no server is
@@ -78,7 +86,11 @@ export class Reconciler {
     opts?: { nodeIds?: readonly string[]; absenceProof?: "positive" },
   ): Promise<ReconcileResult> {
     const only = opts?.nodeIds ? new Set(opts.nodeIds) : null;
-    const sessions = this.sessionRegistry.getSessionsForRig(rigId).filter((session) => !only || only.has(session.nodeId));
+    // A seat joined with `rig attach` as an external CLI runs in someone else's program: OpenRig neither launches nor stops
+    // it (seatProcessOwner), and tmux never held it, so a tmux probe says nothing about it. Its sessions are left as they are.
+    const external = this.externalCliNodes(rigId);
+    const sessions = this.sessionRegistry.getSessionsForRig(rigId)
+      .filter((session) => (!only || only.has(session.nodeId)) && !external.has(session.nodeId));
 
     let checked = 0;
     let detached = 0;

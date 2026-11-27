@@ -81,7 +81,7 @@ export interface NodeEntry {
   latestErrorStage?: string | null;
   // OPR.0.4.3.06 — challenge-verified orientation, distinct from startupStatus.
   oriented?: string;
-  lifecycleState?: "running" | "detached" | "recoverable" | "attention_required";
+  lifecycleState?: "running" | "detached" | "recoverable" | "attention_required" | "unknown";
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
   resumeCommandLabel?: string | null;
@@ -962,6 +962,8 @@ function abbrevNodeLifecycle(state: NodeEntry["lifecycleState"] | undefined): st
   if (state === "recoverable") return "rec";
   if (state === "detached") return "det";
   if (state === "attention_required") return "att";
+  // A seat attached from an outside program (rig attach): OpenRig can't see whether it runs.
+  if (state === "unknown") return "unk";
   return "—";
 }
 
