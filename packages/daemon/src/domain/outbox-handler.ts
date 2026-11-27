@@ -23,6 +23,32 @@ const WATCHDOG_SENDER = "watchdog@system";
 export const COALESCE_ACTOR = "outbox@system";
 /** The retirement reason of a held message coalesced into a newer one from the same sender; the id follows. */
 export const COALESCED_INTO = "coalesced into ";
+/** A plain message from an agent or a person, held only because the seat's input showed a draft (draft-aware guard). It is
+ *  typed once the input reads empty (QueueRepository.deliverDraftHeldMessagesOnIdle) and keeps its own outcome, up to
+ *  DRAFT_HELD_PER_SENDER from one sender at a seat. Written only when the message is first held under this behaviour, so
+ *  messages held before it, hold-mode messages and other held reasons stay as they were. */
+export const DRAFT_HELD_ELIGIBLE_TAG = "delivery:draft-eligible";
+/** A plain message held, with the input clear, because an earlier one from the same sender is still held for a draft at
+ *  this seat: it's typed after that one, in order (DraftAwareDelivery). */
+export const DRAFT_HELD_BEHIND_EARLIER = "draft_held_behind_earlier";
+/** A held message's automatic retry that its own conditions no longer admit once it holds the delivery lease
+ *  (SendOpts.retryAdmission): nothing is written, and the message stays held. */
+export const HELD_RETRY_NOT_ADMITTED = "held_retry_not_admitted";
+/** How a draft-held delivery pass ended (QueueRepository.deliverDraftHeldMessagesOnIdle): a message went back to held
+ *  for a draft the guard saw (`draft`), or because it couldn't read the input or its clients' activity (`unknown`: not
+ *  a draft known to be there), a drain, restore or mode change stopped it (`paused`), nothing eligible was left to try
+ *  (`done`), or it didn't run (`skipped`: not idle, not draft-aware, or a pass already running). */
+export type DraftHeldPassEnd = "draft" | "unknown" | "paused" | "done" | "skipped";
+/** The draft-aware refusals that mean only "a draft is in the input", and the hold that keeps a sender's order behind one. */
+export const DRAFT_HELD_REASONS: ReadonlySet<string> = new Set(["draft_input_busy", "draft_input_unknown", "draft_input_changed", DRAFT_HELD_BEHIND_EARLIER]);
+/** How many draft-held messages one sender keeps at a seat, each with its own outcome. Past it, the sender's oldest is
+ *  coalesced into its newest, as #2430 does for held messages (recorded, readable by ID). Five covers a realistic burst
+ *  while a person types (a request, a correction, a follow-up or two), bounds what a clearing draft types from one sender,
+ *  and keeps one sender to a small share of the seat's quota (five here, plus one ordinary held message). */
+export const DRAFT_HELD_PER_SENDER = 5;
+/** A seat's active held-message quota (provisional bounded defaults). */
+export const HELD_QUOTA_COUNT = 100;
+export const HELD_QUOTA_BYTES = 8 * 1024 * 1024;
 /** Senders whose held messages coalesce: not an unattributed sender, and not a watchdog (one reminder per job instead). */
 const coalescibleSender = (sender: string | null | undefined): sender is string => !!sender && sender !== "unknown" && sender !== WATCHDOG_SENDER;
 
@@ -598,6 +624,30 @@ export class OutboxHandler {
     const older = group.includes(newestId)
       ? held.filter(id => !group.includes(id))
       : held.filter(id => id !== newestId && group.includes(id));
+    this.retireInto(senderSession, nodeId, newestId, older);
+  }
+
+  /** A sender's draft-held messages at a seat past DRAFT_HELD_PER_SENDER: the oldest are retired into the newest, by the
+   *  same recorded coalescing (#2430), so a clearing draft types at most that many from one sender. Returns the IDs it
+   *  retired, for the sender's result. */
+  supersedeDraftHeld(outboxId: string): string[] {
+    const entry = this.getById(outboxId);
+    if (entry?.deliveryState !== "retained" || !entry.guardBinding || !coalescibleSender(entry.senderSession)) return [];
+    const nodeId = entry.guardBinding.nodeId;
+    const held = (this.db.prepare(`SELECT outbox_id FROM outbox_entries
+      WHERE delivery_state='retained' AND sender_session=? AND json_extract(guard_binding,'$.nodeId')=?
+        AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)
+      ORDER BY ts_dispatched,rowid`)
+      .all(entry.senderSession, nodeId, DRAFT_HELD_ELIGIBLE_TAG) as Array<{ outbox_id: string }>).map(row => row.outbox_id);
+    if (held.length <= DRAFT_HELD_PER_SENDER) return [];
+    const older = held.slice(0, held.length - DRAFT_HELD_PER_SENDER);
+    this.retireInto(entry.senderSession, nodeId, held[held.length - 1]!, older);
+    return older;
+  }
+
+  /** Retire `older` into `newestId` (#2430's recorded coalescing): the ones already coalesced into them are repointed, so
+   *  the newest names every message it stands for, and an urgent marking carries forward. */
+  private retireInto(senderSession: string, nodeId: string, newestId: string, older: readonly string[]): void {
     if (older.length === 0) return;
     const now = new Date().toISOString();
     const reason = `${COALESCED_INTO}${newestId}`;
@@ -616,9 +666,12 @@ export class OutboxHandler {
 
   /** The sender's held messages at this seat, oldest first. */
   private heldFrom(senderSession: string, nodeId: string): string[] {
+    // A draft-held message keeps its own outcome: it never takes another's place, and none takes its place.
     return (this.db.prepare(`SELECT outbox_id FROM outbox_entries
-      WHERE delivery_state='retained' AND sender_session=? AND json_extract(guard_binding,'$.nodeId')=? ORDER BY ts_dispatched,rowid`)
-      .all(senderSession, nodeId) as Array<{ outbox_id: string }>).map(row => row.outbox_id);
+      WHERE delivery_state='retained' AND sender_session=? AND json_extract(guard_binding,'$.nodeId')=?
+        AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)
+      ORDER BY ts_dispatched,rowid`)
+      .all(senderSession, nodeId, DRAFT_HELD_ELIGIBLE_TAG) as Array<{ outbox_id: string }>).map(row => row.outbox_id);
   }
 
   /** #2430: the held messages coalesced into this one, oldest first. */
@@ -652,9 +705,16 @@ export class OutboxHandler {
       }
     }
     const size = Buffer.byteLength(body, "utf8");
-    if (size > 1024 * 1024 || usage.count >= 100 || usage.bytes + size > 8 * 1024 * 1024) {
+    if (size > 1024 * 1024 || usage.count >= HELD_QUOTA_COUNT || usage.bytes + size > HELD_QUOTA_BYTES) {
       throw new OutboxHandlerError("retained_quota_full", "Held-message quota is full. Retire a specific held message to release active quota; no input was written.");
     }
+  }
+
+  /** Whether one more held message of `body` fits the seat's quota with nothing coalesced to make room. A draft-held
+   *  message keeps its own outcome only when it does; at a full quota it takes its sender's place as before (#2430). */
+  fitsWithoutCoalescing(nodeId: string, body: string): boolean {
+    const usage = this.retentionUsage(nodeId);
+    return usage.count < HELD_QUOTA_COUNT && usage.bytes + Buffer.byteLength(body, "utf8") <= HELD_QUOTA_BYTES;
   }
 
   /** Current active quota inputs; reading them neither retires nor retries retained custody. */
@@ -669,6 +729,46 @@ export class OutboxHandler {
   reopenHeld(outboxId: string): boolean {
     return this.db.prepare("UPDATE outbox_entries SET delivery_state='pending' WHERE outbox_id=? AND delivery_state='retained'")
       .run(outboxId).changes === 1;
+  }
+
+  /** Return a claimed held message after a positive no-write recipient refusal. Its original binding/custody stays
+   * listed; this admits no new message and never overwrites a delivered, uncertain or retired outcome. */
+  retainUnwritten(outboxId: string): boolean {
+    return this.db.prepare("UPDATE outbox_entries SET delivery_state='retained', delivered_at=NULL WHERE outbox_id=? AND delivery_state IN ('sending','failed')")
+      .run(outboxId).changes === 1;
+  }
+
+  /** Whether this sender has a draft-held message for this exact occupant binding that's still owed (held, or claimed by
+   *  its retry), dispatched before `ids[0]`, the request being sent. A request not recorded yet comes after all of them. A
+   *  later message from the sender goes behind it, so a stale request never follows its correction; a held message's own
+   *  retry never waits behind one sent after it. A claimed one the daemon stopped during isn't owed after a restart:
+   *  DraftAwareDelivery.recover() settles marked `sending` entries, with or without a receipt, as uncertain. */
+  hasEarlierDraftHeld(senderSession: string, binding: { nodeId: string }, ids: readonly string[]): boolean {
+    if (!ids.length) return false;
+    const recorded = this.db.prepare("SELECT 1 FROM outbox_entries WHERE outbox_id=?").get(ids[0]) !== undefined;
+    const rows = this.db.prepare(`SELECT outbox_id FROM outbox_entries WHERE delivery_state IN ('retained','sending') AND sender_session=?
+      AND json_extract(guard_binding,'$.nodeId')=? AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)
+      ${recorded ? "AND (ts_dispatched, rowid) < (SELECT ts_dispatched, rowid FROM outbox_entries WHERE outbox_id=?)" : ""}`)
+      .all(senderSession, binding.nodeId, DRAFT_HELD_ELIGIBLE_TAG, ...(recorded ? [ids[0]] : [])) as Array<{ outbox_id: string }>;
+    const exact = JSON.stringify(binding);
+    return rows.some(({ outbox_id }) => !ids.includes(outbox_id) && JSON.stringify(this.getById(outbox_id)?.guardBinding) === exact);
+  }
+
+  /** A held message that can't be typed as it is (its own paste was refused) is no longer owed to a clearing draft: it
+   *  keeps its custody and result, and later work stops waiting behind it. */
+  withdrawDraftHeld(outboxId: string): void {
+    this.db.prepare(`UPDATE outbox_entries SET tags=(SELECT json_group_array(value) FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value != ?)
+      WHERE outbox_id=? AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value = ?)`)
+      .run(DRAFT_HELD_ELIGIBLE_TAG, outboxId, DRAFT_HELD_ELIGIBLE_TAG);
+  }
+
+  /** The seats with draft-held messages, each with its newest one's dispatch time: what the periodic offer reads once per
+   *  seat-activity sweep (createDraftHeldReoffer). The plain text match runs before the JSON one, so a large set of other
+   *  held messages costs little (about 0.15 ms against 9.7 ms without it, over 756 held entries in a long-lived database). */
+  draftHeldSeats(): Array<{ session: string; newest: string }> {
+    return this.db.prepare(`SELECT destination_session AS session, MAX(ts_dispatched) AS newest FROM outbox_entries
+      WHERE delivery_state='retained' AND tags LIKE ? AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)
+      GROUP BY destination_session`).all(`%${DRAFT_HELD_ELIGIBLE_TAG}%`, DRAFT_HELD_ELIGIBLE_TAG) as Array<{ session: string; newest: string }>;
   }
 
   /** #48: claim an entry that was never tried, or whose last try definitely wrote nothing (failed), for one more send.

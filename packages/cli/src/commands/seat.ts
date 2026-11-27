@@ -83,6 +83,7 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  activityState?: { display: string; needsInput: { count: number; reason: string | null } } | null;
   external_attachment?: { liveness: "unknown"; lastOwnQueueAction: { at: string; qitemId: string; state: string } | null;
     lastOwnQueueActionRead?: "read" | "unavailable" };
   standby_stopped?: true;
@@ -344,6 +345,10 @@ function printHuman(status: SeatStatusResponse): void {
   } else {
     console.log(`Session: ${status.standby_stopped ? "standby (wakes for queued work)" : status.session_status === "running" && status.lifecycle_state === "attention_required"
       ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
+  }
+  if (status.activityState) {
+    const reason = status.activityState.needsInput.count > 0 ? status.activityState.needsInput.reason : null;
+    console.log(`Activity: ${status.activityState.display}${reason ? ` (${reason})` : ""}`);
   }
   const stop = status.permission_stop;
   if (stop && stop.state !== "unavailable") {
