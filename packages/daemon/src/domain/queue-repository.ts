@@ -2609,12 +2609,14 @@ export class QueueRepository {
         if (!entry?.guardBinding || JSON.stringify(entry.guardBinding) !== JSON.stringify(target)) continue;
         if (!this.outbox.reopenHeld(outbox_id)) return "done";
         if (!this.outbox.claimForDelivery(outbox_id)) return "done";
+        let heldFor: string | undefined;
         try {
           const result = await this.transport.send(entry.destinationSession, entry.body, {
             committedOutboxIds: [outbox_id], actorSession: entry.senderSession,
             ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}),
             retryAdmission: () => !paused() && !!this.transport?.draftAwareTarget?.(sessionName),
           });
+          heldFor = result.reason;
           if ((result.reason === "guard_target_changed" || result.reason === HELD_RETRY_NOT_ADMITTED) && result.sent !== true
             && (result.sent === false || result.inputPhase === "not_reached")
             && result.inputPhase !== "attempted" && result.inputPhase !== "written") {
@@ -2642,7 +2644,9 @@ export class QueueRepository {
         // Its own paste was refused before anything was written, which withdrew it from automatic retry (it stays held,
         // with its result). It no longer holds later messages back, so the pass goes on to them rather than ending as a draft.
         if (after === "retained" && !settled?.tags?.includes(DRAFT_HELD_ELIGIBLE_TAG)) continue;
-        if (after !== "delivered") return after === "retained" ? "draft" : "done";
+        // Held again because the guard couldn't read the input or its clients' activity: uncertainty, not a draft seen,
+        // so the periodic offer keeps trying (DraftHeldReoffer) while the guard still decides each delivery.
+        if (after !== "delivered") return after === "retained" ? heldFor === "draft_input_unknown" ? "unknown" : "draft" : "done";
       }
     } finally {
       this.draftHeldPasses.delete(key);

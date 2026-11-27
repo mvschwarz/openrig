@@ -4147,7 +4147,18 @@ export class SessionTransport {
     // setup). A refusal there is proven pre-input and returns caller_cancelled; Enter below never checks it.
     const cancel = callerSignal(opts);
     if (cancel?.aborted) return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
-    const beforePaste = cancel ? () => { opts?.beforeWrite?.(); if (cancel.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the paste"); } : opts?.beforeWrite;
+    // A held message's retry reads its admission again at the adapter's last step before the paste, as it did under the
+    // lease: a drain, restore or mode change that began during the awaited steps since then keeps it held, nothing pasted.
+    const retry = opts?.retryAdmission;
+    const beforePaste = cancel || retry ? () => {
+      opts?.beforeWrite?.();
+      if (retry) {
+        let admitted = false;
+        try { admitted = retry(); } catch { /* a check that can't be read keeps the message held */ }
+        if (!admitted) throw new DeliveryGuardError(HELD_RETRY_NOT_ADMITTED, "The held message's retry is no longer admitted (delivery mode, drain or restore changed while it waited); nothing was pasted.");
+      }
+      if (cancel?.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the paste");
+    } : opts?.beforeWrite;
     const preserveInput = opts?.preserveInput ? async () => {
       const readBox = async () => runtime === "claude-code" || runtime === "codex"
         ? this.captureInputBox(readTarget, runtime, { remainingMs: INPUT_BOX_READ_DEADLINE_MS }) : null;
@@ -4194,7 +4205,8 @@ export class SessionTransport {
     }
     if (!textResult.ok) {
       // A draft refusal is the guard holding the write before any input; it is not an attempted write.
-      const policyRefusal = typeof textResult.code === "string" && (textResult.code.startsWith("expected_identity_") || textResult.code.startsWith("draft_") || textResult.code.startsWith("override_input_") || textResult.code === "managed_compaction_pending");
+      const policyRefusal = typeof textResult.code === "string" && (textResult.code.startsWith("expected_identity_") || textResult.code.startsWith("draft_") || textResult.code.startsWith("override_input_") || textResult.code === "managed_compaction_pending"
+        || textResult.code === HELD_RETRY_NOT_ADMITTED);
       return observe({
         ok: false,
         sessionName,

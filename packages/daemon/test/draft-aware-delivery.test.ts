@@ -2317,6 +2317,18 @@ describe("draft-held messages bounded per sender", () => {
     expect(f.submissions).toEqual([]);
   });
 
+  it("doesn't promise to type a draft-held message later when its receipt couldn't be saved", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const finalize = vi.spyOn(OutboxHandler.prototype, "finalizeDelivery").mockImplementationOnce(() => { throw new Error("ledger failure"); });
+    try {
+      const result = await f.transport.send("worker@test", "request whose receipt fails", { actorSession: "pm@test" });
+      expect(result).toMatchObject({ ok: false, sent: false, outcome: "failed" });
+      expect(result.warning).toContain("bookkeeping is unavailable");
+      expect(result.warning).not.toContain("typed once the input is clear");
+      expect(f.submissions).toEqual([]);
+    } finally { finalize.mockRestore(); }
+  });
+
   it("at a full quota with a clear input, says the message was typed and doesn't ask for a retry", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "";
     const target = f.guard.target("worker@test");
@@ -2474,6 +2486,73 @@ describe("draft-held retry integration", () => {
     if (control === "drain") drain.end(rigId, "fixture-while-waiting", jobs);
     await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
     expect(stateOf(f, id)).toBe("delivered");
+  });
+
+  // #3991 r5: the lease's admission check comes before awaited steps (the guard's re-reads and settle before the paste).
+  // A control that starts during them is read again at the paste, so nothing is pasted.
+  it.each(["drain", "restore"])("a %s that starts during the retry's awaited steps before its paste keeps it held, nothing pasted", async control => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "held through a late control", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    let restorePending = false;
+    const repo = new QueueRepository(f.db, new EventBus(f.db), { transport: f.transport,
+      hasPendingPostCompactStage: () => restorePending, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+    repo.attachOutbox(f.outbox);
+    const drain = new RigDeliveryDrainStore(f.db), jobs = new WatchdogJobsRepository(f.db);
+    const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
+    f.bodies.a = "";
+    let started = false;
+    f.hooks.settle = () => {
+      if (started) return;
+      started = true;
+      if (control === "restore") restorePending = true;
+      else drain.begin(rigId, { drainId: "fixture-before-paste", owner: "human@test", reviewAt: new Date(Date.now() + 60_000).toISOString() }, jobs);
+    };
+    expect(await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle")).toBe("paused");
+    expect(started).toBe(true);
+    expect(stateOf(f, id)).toBe("retained");
+    expect(f.writes).toEqual([]); expect(f.submissions).toEqual([]);
+    f.hooks.settle = undefined;
+    restorePending = false;
+    if (control === "drain") drain.end(rigId, "fixture-before-paste", jobs);
+    await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(stateOf(f, id)).toBe("delivered");
+    expect(f.submissions.filter(s => s.includes("held through a late control"))).toHaveLength(1);
+  });
+
+  // #3991 r5: an activity read that fails is uncertainty, not a draft the guard saw, so it never stops the periodic offer.
+  it("two failed activity reads on an unchanged pane don't stop the offers: once the reader recovers, the next offer delivers once", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "request held while the reader fails", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    f.bodies.a = "";
+    let clock = Date.now();
+    // The pane isn't written to again, as in the sitting-draft case above.
+    const written = Math.floor(clock / 1000) - 60;
+    const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20),
+      readAllSessionWindows: async () => new Map([["worker@test", { activity: written, size: "80x24" }], ["sibling@test", { activity: written, size: "80x24" }]]) },
+      () => new Date(clock));
+    const passes = vi.spyOn(f.repo, "deliverDraftHeldMessagesOnIdle");
+    attachDraftHeldReoffer(structural, f.repo, () => "idle", { now: () => clock });
+    // tmux answers with a client row the guard can't read, so the activity read fails (client_activity_unavailable).
+    let failing = true;
+    f.hooks.clients = () => failing ? "unreadable client row\n" : `0|${nowSec() - 10}\n`;
+    for (let i = 0; i < 3; i++) {
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await Promise.all(passes.mock.results.map(r => r.value));
+      clock += 4_500;
+    }
+    expect(passes).toHaveBeenCalledTimes(3);
+    expect(await passes.mock.results[2]!.value).toBe("unknown");
+    expect(stateOf(f, id)).toBe("retained");
+    expect(f.writes).toEqual([]);
+    // The reader recovers; nothing new is written to the pane and no new message arrives.
+    failing = false;
+    await structural.pollAllRunningTmuxSeats(f.db);
+    await Promise.all(passes.mock.results.map(r => r.value));
+    expect(stateOf(f, id)).toBe("delivered");
+    for (let i = 0; i < 2; i++) { clock += 4_500; await structural.pollAllRunningTmuxSeats(f.db); }
+    expect(f.submissions.filter(s => s.includes("request held while the reader fails"))).toHaveLength(1);
   });
 });
 
