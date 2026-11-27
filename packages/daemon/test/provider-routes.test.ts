@@ -9,6 +9,8 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { readClaudeSeatTokenRef } from "../src/domain/claude-seat-token.js";
 import type { FourBlockReadModel } from "../src/domain/provider/provider-types.js";
 
 // Slice-04 (OPR.0.5.0.4) seam B — the daemon provider routes (packet 3ffa3c22 §3). Thin handlers
@@ -170,7 +172,7 @@ describe("provider routes", () => {
     expect(seen.map((s) => s.input)).toEqual([
       { seat: "s1", toAccount: "work", tokenFile: "/tokens/work" },
       { seat: "s1", toAccount: "stored-login", tokenFile: null },
-      { seat: "s1", toAccount: "work", forceUnsafe: false, tokenFile: "/tokens/work" },
+      { seat: "s1", toAccount: "work", forceUnsafe: false, tokenFile: "/tokens/work", requestedBy: null },
     ]);
     for (const { claudeSeat } of seen) {
       expect(claudeSeat).toMatchObject({ seat: expect.any(Function), snapshot: expect.any(Function), exclusive: expect.any(Function), relaunchInPane: expect.any(Function) });
@@ -244,6 +246,43 @@ describe("provider routes", () => {
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "failed" });
       launched = { ok: false, code: "snapshot_not_found", message: "no such snapshot" };
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "snapshot_not_found" });
+    } finally { db.close(); }
+  });
+
+  it("a never-launched Claude seat is found by its seat name with no session, and its first-launch reference is saved with a record only while it stays unlaunched", async () => {
+    const db = createFullTestDb();
+    try {
+      const repo = new RigRepository(db), registry = new SessionRegistry(db), eventBus = new EventBus(db);
+      const rig = repo.createRig("fixture-rig");
+      const node = repo.addNode(rig.id, "dev.a", { runtime: "claude-code", cwd: "/work/a" });
+      const codex = repo.addNode(rig.id, "dev.b", { runtime: "codex", cwd: "/work/b" });
+      let lent!: ClaudeSeatRelaunch;
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        for (const [key, value] of Object.entries({ rigRepo: repo, eventBus,
+          providerService: { ...stubService, precheck: async (_i: unknown, _r: unknown, claudeSeat: ClaudeSeatRelaunch) => { lent = claudeSeat; return { safe: true }; } } })) {
+          c.set(key as never, value as never);
+        }
+        await next();
+      });
+      app.route("/api/provider", providerRoutes());
+      await app.request("/api/provider/precheck?seat=dev-a@fixture-rig&toAccount=work&tokenFile=%2Ftokens%2Fwork");
+      expect(lent.seat("dev-a@fixture-rig")).toEqual({ nodeId: node.id, rigId: rig.id, rigName: "fixture-rig", logicalId: "dev.a", running: false, pane: null, pristine: true });
+      expect(lent.seat("dev-b@fixture-rig")).toBeNull(); // a Codex seat keeps the Codex path
+      expect(lent.seat("dev-z@fixture-rig")).toBeNull();
+      const events: Array<{ type: string }> = [];
+      eventBus.subscribe((event) => { events.push(event as { type: string }); });
+      expect(lent.saveFirstLaunchTokenRef!(node.id, { label: "work", tokenFile: "/tokens/work" }, { requestedBy: "rig-admin@ops" })).toEqual({ ok: true });
+      expect(readClaudeSeatTokenRef(db, node.id)).toEqual({ label: "work", tokenFile: "/tokens/work" });
+      expect(events.filter((e) => e.type === "node.claude_token_ref_changed")).toEqual([expect.objectContaining({ rigId: rig.id, nodeId: node.id, logicalId: "dev.a",
+        from: null, to: "work", tokenFile: "/tokens/work", credential: "subscription_token", operator: "rig-admin@ops", effect: "first_launch" })]);
+      // A first launch began (the seat has a session): it's the launched seat now, and nothing is saved over its launch.
+      registry.registerSession(node.id, "dev-a@fixture-rig");
+      expect(lent.saveFirstLaunchTokenRef!(node.id, null, { requestedBy: null })).toMatchObject({ ok: false, code: "seat_launched" });
+      expect(readClaudeSeatTokenRef(db, node.id)).toEqual({ label: "work", tokenFile: "/tokens/work" });
+      expect(lent.seat("dev-a@fixture-rig")).not.toHaveProperty("pristine");
+      expect(lent.saveFirstLaunchTokenRef!(codex.id, null, { requestedBy: null })).toMatchObject({ ok: false, code: "seat_changed" });
+      expect(events.filter((e) => e.type === "node.claude_token_ref_changed")).toHaveLength(1);
     } finally { db.close(); }
   });
 

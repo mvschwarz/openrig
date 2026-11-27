@@ -15,6 +15,7 @@ import { periodicCarryIsCurrent, snapshotLaunchOutcome } from "../domain/restore
 import type { SessionRegistry } from "../domain/session-registry.js";
 import { resolveActiveSnapshotSession } from "../domain/active-occupant.js";
 import { readClaudeSeatTokenRef } from "../domain/claude-seat-token.js";
+import type { EventBus } from "../domain/event-bus.js";
 import { processArgv, verifyClaudePaneRuntime, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { emittedEffortFromArgv, readSeatEffort, type LaunchEffortSelection } from "../domain/seat-effort.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
@@ -80,11 +81,38 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
         JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id LEFT JOIN bindings b ON b.node_id = n.id
         WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`)
         .get(seat) as { id: string; rig_id: string; logical_id: string; runtime: string | null; name: string; status: string; tmux_pane: string | null } | undefined;
-      return row?.runtime === "claude-code"
+      if (row) return row.runtime === "claude-code"
         ? { nodeId: row.id, rigId: row.rig_id, rigName: row.name, logicalId: row.logical_id, running: row.status === "running", pane: row.tmux_pane ?? null } : null;
+      // A seat that has never launched has no session row: the seat-ref resolver finds its node by its canonical name
+      // (active rigs only; a name more than one seat has resolves to none).
+      const resolved = new SeatStatusService({ rigRepo }).getStatus(seat);
+      if (!resolved.ok || resolved.status.runtime !== "claude-code") return null;
+      const node = rigRepo.db.prepare("SELECT n.id, n.rig_id, n.logical_id, r.name FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.rig_id = ? AND n.logical_id = ?")
+        .get(resolved.status.rig_id, resolved.status.logical_id) as { id: string; rig_id: string; logical_id: string; name: string } | undefined;
+      if (!node || rigRepo.db.prepare("SELECT 1 FROM sessions WHERE node_id = ? LIMIT 1").get(node.id)) return null;
+      return { nodeId: node.id, rigId: node.rig_id, rigName: node.name, logicalId: node.logical_id, running: false, pane: null, pristine: true };
     },
     tokenRef: (nodeId) => readClaudeSeatTokenRef(rigRepo.db, nodeId),
     setTokenRef: (nodeId, ref) => { rigRepo.setNodeClaudeTokenRef(nodeId, ref); },
+    saveFirstLaunchTokenRef: (nodeId, ref, audit) => {
+      const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+      let persisted: ReturnType<EventBus["persistWithinTransaction"]> | null = null;
+      const saved = rigRepo.db.transaction((): { ok: true } | { ok: false; code: "seat_launched" | "seat_changed"; message: string } => {
+        const node = rigRepo.db.prepare("SELECT rig_id, logical_id, runtime FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string; logical_id: string; runtime: string | null } | undefined;
+        if (node?.runtime !== "claude-code") return { ok: false, code: "seat_changed", message: "The seat is no longer this Claude seat." };
+        if (rigRepo.db.prepare("SELECT 1 FROM sessions WHERE node_id = ? LIMIT 1").get(nodeId)) {
+          return { ok: false, code: "seat_launched", message: "The seat launched after this switch checked it, so its first launch already chose its login. Run the switch again for the launched seat." };
+        }
+        const from = readClaudeSeatTokenRef(rigRepo.db, nodeId);
+        if (!rigRepo.setNodeClaudeTokenRef(nodeId, ref)) return { ok: false, code: "seat_changed", message: "The seat's reference couldn't be saved on this daemon's database." };
+        if (eventBus) persisted = eventBus.persistWithinTransaction({ type: "node.claude_token_ref_changed", rigId: node.rig_id, nodeId,
+          logicalId: node.logical_id, from: from?.label ?? null, to: ref?.label ?? null, tokenFile: ref?.tokenFile ?? null,
+          credential: ref ? ref.kind === "api-key" ? "api_key" : "subscription_token" : "stored_login", operator: audit.requestedBy, effect: "first_launch" });
+        return { ok: true };
+      })();
+      if (persisted && eventBus) eventBus.notifySubscribers(persisted);
+      return saved;
+    },
     snapshot: (rigId, nodeId) => {
       const capture = c.get("snapshotCapture" as never) as SnapshotCapture | undefined;
       if (!capture) return { snapshotId: "(none)", resumes: false, why: "can't be taken: this daemon has no snapshot capture" };
@@ -535,8 +563,8 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({ error: "apiKeyFile must be a path and cannot be combined with tokenFile" }, 400);
     }
     // Business outcome (incl. failed_safely / rebind_in_progress) is an explicit 200 payload.
-    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(typeof apiKeyFile === "string" ? { apiKeyFile } : {}) },
-      seatRestartOf(c), claudeSeatOf(c)), 200);
+    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(typeof apiKeyFile === "string" ? { apiKeyFile } : {}),
+      requestedBy: transportSenderSession(c) ?? null }, seatRestartOf(c), claudeSeatOf(c)), 200);
   });
 
   // Slice 18 — subscription move reports: queue items tagged subscription-move, filed by the agent that moved a Codex

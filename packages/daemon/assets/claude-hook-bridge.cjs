@@ -574,7 +574,9 @@ async function conversationWaiter({ input = {}, out = process.stderr, deps = {} 
   if (!state) return 0;
   const now = deps.now ?? Date.now;
   const wait = deps.sleep ?? sleep;
-  const rig = deps.rig !== undefined ? deps.rig : rigReader(env);
+  // The app's PATH, which the hooks inherit, lacks a folder the login profile adds after it started (a new ~/.local/bin from
+  // `npm install -g --prefix ~/.local`), so look on a login shell's PATH too, as the Codex watcher does.
+  const rig = deps.rig !== undefined ? deps.rig : sessionRigReader(env, undefined, deps.loginPath);
   // Nothing to read with: tell the conversation the way a task wakes it, once for the plugin's install.
   if (!rig) return (await sayNoRigOnce(state, (text) => writeAll(out, text), now)) ? 2 : 0;
   forgetNoRig(state);

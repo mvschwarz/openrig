@@ -122,6 +122,7 @@ import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, 
 import { slackMicros } from "./gateway/slack/state-store.js";
 import { askBackRoute, RUNNER_CLOSE_WAITS, terminalAnswerMeaning } from "./receiver-context.js";
 import { runSyncSite, runSyncSiteWhenSlow } from "./sync-site-wrap.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 /** A direct ask's answer row ID: from the ask, or from the ask and the park episode its answer belongs to. */
 function humanAnswerId(askId: string, episodeKey?: string): string {
@@ -6625,7 +6626,27 @@ export class QueueRepository {
       isHostedMember: (dest) => this.hostedMemberFn(dest),
       hostedCheckIn: (dest) => this.hostedMemberCheckIn(dest),
       isIssuedConversation: (dest) => this.isIssuedConversation(dest),
+      isExternalCliSeat: (dest) => this.isExternalCliSeat(dest),
     });
+  }
+
+  /** Whether this address is a seat joined with `rig attach` as an external CLI, in an active rig: by its session or its
+   *  binding's external name, or as the canonical `<pod>-<member>@<rig>` of such a node. OpenRig can't type into it
+   *  (seat-kinds: no inbound transport), so its work waits for that program's own read. An unreadable record reads false. */
+  isExternalCliSeat(destination: string): boolean {
+    try {
+      const external = (rows: Array<{ attachment_type: string | null }>) =>
+        rows.some((row) => seatProcessOwner(resolveSeatKind(row.attachment_type)) === "external");
+      if (external(this.db.prepare(`SELECT b.attachment_type FROM bindings b JOIN nodes n ON n.id = b.node_id JOIN rigs r ON r.id = n.rig_id
+        WHERE r.archived_at IS NULL
+          AND (b.external_session_name = ? OR EXISTS (SELECT 1 FROM sessions s WHERE s.node_id = n.id AND s.session_name = ?))`)
+        .all(destination, destination) as Array<{ attachment_type: string | null }>)) return true;
+      const at = destination.lastIndexOf("@");
+      if (at <= 0) return false;
+      return external(this.db.prepare(`SELECT b.attachment_type FROM bindings b JOIN nodes n ON n.id = b.node_id JOIN rigs r ON r.id = n.rig_id
+        WHERE r.archived_at IS NULL AND r.name = ? AND REPLACE(n.logical_id, '.', '-') = ?`)
+        .all(destination.slice(at + 1), destination.slice(0, at)) as Array<{ attachment_type: string | null }>);
+    } catch { return false; }
   }
 
   /** Whether OpenRig issued this address to a person's own conversation here (#3964): its work waits for that conversation

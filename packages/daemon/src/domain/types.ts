@@ -305,6 +305,9 @@ export type RigEvent =
   // A Claude launch that didn't give the seat its own subscription token: Claude started on its config dir's stored
   // login. The reference (label and file path) only; the token value never enters OpenRig.
   | { type: "seat.claude_token_not_applied"; rigId: string; nodeId: string; label: string; tokenFile: string; reason: string }
+  /** A never-launched Claude seat's own credential reference, saved for its first launch (`rig provider switch`): labels and
+   *  the file path only, never its contents. `operator` is the calling seat's session when the request named one. */
+  | { type: "node.claude_token_ref_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; tokenFile: string | null; credential: "subscription_token" | "api_key" | "stored_login"; operator: string | null; effect: "first_launch" }
   | { type: "seat.attention_cleared"; rigId: string; nodeId: string; sessionName: string; from: string; to: "ready"; clearedBy: "evidence" | "operator_attestation"; evidence?: { kind: string; state?: string; reason?: string }; reason?: string; previousError: string | null }
   | { type: "seat.attention_clear_refused"; rigId: string; nodeId: string; sessionId: string; sessionName: string; attentionClass: "restore_outcome"; code: string; attemptId?: number; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   | { type: "rig.imported"; rigId: string; specName: string; specVersion: string }
@@ -812,7 +815,9 @@ export interface NodeRecoveryGuidance {
 // Per-node lifecycle projection derived from session/restore state plus snapshot resume metadata.
 // L2 cold-start truth model: distinguishes a recoverable detached node from a node that would
 // fresh-launch, and surfaces "attention required" for the post-L3 Claude resume-prompt proxy.
-export type NodeLifecycleState = "running" | "detached" | "recoverable" | "attention_required";
+/** `unknown`: a seat joined with `rig attach` as an external CLI runs in someone else's program, so OpenRig can't see
+ *  whether it's running (see `NodeInventoryEntry.externalAttachment`). */
+export type NodeLifecycleState = "running" | "detached" | "recoverable" | "attention_required" | "unknown";
 
 /**
  * OPR.0.4.3.19 — the liveness identity verdict for a managed seat.
@@ -915,10 +920,20 @@ export interface NodeInventoryEntry {
   configuredAccount?: string | null;
   /** Present only on a community harness's seat: its label, maintainer and declared limits. */
   communityHarness?: import("./community-harness-presets.js").CommunityHarnessLabel;
-  /** Effective current status; confirmed session absence projects as detached. */
+  /** Effective current status; confirmed session absence projects as detached. A seat joined with `rig attach` as an
+   *  external CLI reads `attached`: OpenRig can't see its process, so a stored running or detached isn't its state. */
   sessionStatus: string | null;
   /** Persisted session status, retained for history and registry-based rollups. */
   storedSessionStatus?: string | null;
+  /** Present only on a seat attached from an outside program (`rig attach`, an external CLI): OpenRig can't type into it
+   *  or see its process, so its liveness is unknown. Its own newest queue action (a claim, note or handoff it wrote, live or
+   *  archived) is the only sign OpenRig has that it's working; null when it has written none. `lastOwnQueueActionRead` is
+   *  "unavailable" when that history couldn't be read, and then the null says nothing about it. */
+  externalAttachment?: {
+    liveness: "unknown";
+    lastOwnQueueAction: { at: string; qitemId: string; state: string } | null;
+    lastOwnQueueActionRead: "read" | "unavailable";
+  };
   /** The latest session was explicitly stopped and has no replacement binding.
    * It remains non-running, but is not a missing member in the rig lifecycle. */
   intentionallyStopped?: boolean;

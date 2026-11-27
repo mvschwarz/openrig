@@ -322,7 +322,10 @@ describe.each(["restore", "preparation"] as const)("%s recovery routing", (kind)
         return;
       }
       if (route.expected === "unresolved") {
-        await expect(report(queue)).rejects.toMatchObject({ code: "workflow_human_destination_unavailable" });
+        // A preparation notice says why for the seat's compaction record (rig compact --state); a restore notice's failure
+        // surfaces in its delivery record, as before. Neither invents a recipient.
+        if (kind === "restore") await expect(report(queue)).rejects.toMatchObject({ code: "workflow_human_destination_unavailable" });
+        else expect(await report(queue)).toEqual({ unaddressed: expect.stringContaining(`registered person couldn't be resolved: ${(personError as Error).message}`) });
         expect(queue.list({ limit: 20 })).toEqual([]);
         expect(send).not.toHaveBeenCalled();
         return;

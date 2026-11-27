@@ -83,6 +83,8 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  external_attachment?: { liveness: "unknown"; lastOwnQueueAction: { at: string; qitemId: string; state: string } | null;
+    lastOwnQueueActionRead?: "read" | "unavailable" };
   standby_stopped?: true;
   /** The seat's state as `rig ps --nodes` shows it; absent from an older daemon. */
   lifecycle_state?: string;
@@ -331,8 +333,18 @@ function printHuman(status: SeatStatusResponse): void {
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   // #3185: a bare shell or an unconfirmed pane process keeps the session record running; read the seat as rig ps does.
-  console.log(`Session: ${status.standby_stopped ? "standby (wakes for queued work)" : status.session_status === "running" && status.lifecycle_state === "attention_required"
-    ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
+  const attached = status.external_attachment;
+  if (attached) {
+    // A seat joined with rig attach runs in someone else's program: OpenRig can't see its process, only what it writes.
+    const last = attached.lastOwnQueueAction;
+    console.log("Session: attached from an outside program (rig attach); OpenRig can't see its process, so whether it's running is unknown.");
+    // A history OpenRig couldn't read says so: it's never "none recorded".
+    console.log(`  Its own last queue action: ${attached.lastOwnQueueActionRead === "unavailable" ? "couldn't be read"
+      : last ? `${last.state} on ${last.qitemId} at ${last.at}` : "none recorded"}. Work sent to it waits until that program reads its queue.`);
+  } else {
+    console.log(`Session: ${status.standby_stopped ? "standby (wakes for queued work)" : status.session_status === "running" && status.lifecycle_state === "attention_required"
+      ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
+  }
   const stop = status.permission_stop;
   if (stop && stop.state !== "unavailable") {
     console.log(`Latest permission observation at ${stop.observed_at}: ${stop.command}; harness permission request (${stop.source}, ${stop.actor})`);
@@ -1790,6 +1802,12 @@ exception: an explicit effort choice saved with rig seat set-effort is applied, 
 --plan shows that change. With no saved choice (never set, or cleared with --clear),
 an effort difference refuses as settings_drift, as a pending set-model does; the
 next ordinary managed launch or resume resolves effort instead.
+A developer_instructions command-line difference also doesn't refuse the restart.
+Managed launches use that override for startup guidance, but a manual resume can
+carry a person's own value too. This in-place restart doesn't preserve the override
+or rebuild startup guidance; --plan and the result report when it changes. To
+refresh startup guidance, or adopt new openrig-core in a home other seats share,
+use the normal restore path together: rig down, then rig up --existing.
 This never switches an account (use rig auth switch first), never reads credentials,
 never launches fresh, forks or retries. Peers sharing the Codex home are reported,
 not restarted. An openrig-core upgrade waiting in the seat's Codex home installs
