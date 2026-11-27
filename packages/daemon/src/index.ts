@@ -387,7 +387,7 @@ export async function startServer(port?: number) {
 
   // The fresh-DB Codex probe runs inside createDaemon, before the shutdown handlers below exist.
   const disarmStartupSignals = endProbeGroupsOnStartupSignal();
-  const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket, wakeRecovery } = await createDaemon({
+  const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket, wakeRecovery, walCheckpointer } = await createDaemon({
     dbPath,
     guestActivityPort: guestPort,
     bearerToken,
@@ -534,6 +534,8 @@ export async function startServer(port?: number) {
           throw new Error("slow-operation recorder drain incomplete; records may be lost");
         }
       }],
+      // #3895: after the services that write; the connection checkpoints for itself again from here.
+      ["sqlite-checkpointer", () => walCheckpointer?.stop()],
     ],
     // A service failure, open connection, or lost recorder drain is never clean.
     markClean: () => deps.daemonLifecycleStore.recordStop(deps.daemonBootEpoch, new Date().toISOString()),

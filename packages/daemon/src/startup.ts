@@ -33,6 +33,7 @@ import type Database from "better-sqlite3";
 import type { ArgvExecFn, ExecFn } from "./adapters/tmux.js";
 import type { CmuxTransportFactory } from "./adapters/cmux.js";
 import { createDb } from "./db/connection.js";
+import { startWalCheckpointer, type WalCheckpointer } from "./db/wal-checkpointer.js";
 import { createWakeRecovery, type WakeRecovery } from "./domain/wake-recovery.js";
 import { migrate } from "./db/migrate.js";
 // P8: apply the CANONICAL migration list — the single source of truth (db/all-migrations.ts),
@@ -288,6 +289,8 @@ interface DaemonResult {
   eventLoopMonitor: import("./domain/event-loop-monitor.js").EventLoopMonitor;
   /** Started by index.ts once the daemon listens; stopped first on shutdown. */
   wakeRecovery: WakeRecovery;
+  /** #3895: SQLite checkpoints on a worker thread; null for a memory database. index.ts stops it on shutdown. */
+  walCheckpointer: WalCheckpointer | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   injectWebSocket: (server: any) => void;
 }
@@ -384,6 +387,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const endMigrations = beginStartupPhase("migrations");
   migrate(db, ALL_MIGRATIONS);
   const migrationsTiming = endMigrations();
+  // #3895: from here on a worker thread takes the WAL checkpoints, so their fsyncs don't stop the event loop.
+  const walCheckpointer = await startWalCheckpointer(db);
 
   // 51-09 increment 1 — establish the daemon's durable self-host identity at
   // boot (mint on first boot, reconcile thereafter). host.name is a display-only
@@ -3327,7 +3332,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   deps.selfNameDiscovery = () => discoverTailscaleSelfNames({ timeoutMs: 1500 });
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 
-  return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket, wakeRecovery };
+  return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket, wakeRecovery, walCheckpointer };
 }
 
 /**
