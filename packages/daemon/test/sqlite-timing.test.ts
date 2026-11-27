@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { createDb } from "../src/db/connection.js";
 import Database from "better-sqlite3";
-import { firstKeyword, pragmaName } from "../src/db/sqlite-timing.js";
+import { firstKeyword, pragmaName, withSqliteTiming } from "../src/db/sqlite-timing.js";
 import { configureSyncSiteRecorder } from "../src/domain/sync-site-wrap.js";
 
 // SQLite timing spans in the slow-operations log (#3895, third ask). A fake recorder takes every record it is offered;
@@ -161,6 +161,7 @@ describe("SQLite timing spans", () => {
   it("lets a spy on the driver's prototypes count every call, including a statement cached before the spy (#3645)", () => {
     const d = db();
     const cached = d.prepare("SELECT count(*) AS n FROM t");
+    const cachedInsert = d.prepare("INSERT INTO t (v) VALUES (?)");
     const statement = Object.getPrototypeOf(cached) as Record<"all" | "get" | "run" | "iterate", (...args: unknown[]) => unknown>;
     const connection = Object.getPrototypeOf(d) as Record<"exec" | "pragma" | "transaction" | "prepare", (...args: unknown[]) => unknown>;
     const spies = [
@@ -171,8 +172,10 @@ describe("SQLite timing spans", () => {
       cached.get();
       cached.all();
       expect([...cached.iterate()]).toEqual([{ n: 0 }]);
-      d.prepare("INSERT INTO t (v) VALUES ('a')").run();
-      expect(spies.map((spy) => spy.mock.calls.length)).toEqual([1, 1, 1, 1, 0, 0, 0, 1]);
+      cachedInsert.run("a");
+      cachedInsert.run("b");
+      d.prepare("INSERT INTO t (v) VALUES ('c')").run();
+      expect(spies.map((spy) => spy.mock.calls.length)).toEqual([1, 1, 3, 1, 0, 0, 0, 1]);
       // The driver's own pragma() and transaction() run statements inside, so only the connection's counts are checked.
       d.exec("SELECT 1");
       d.pragma("user_version");
@@ -181,6 +184,24 @@ describe("SQLite timing spans", () => {
     } finally {
       for (const spy of spies) spy.mockRestore();
     }
+    d.close();
+  });
+
+  it("keeps a method the connection or a statement already had as its own", () => {
+    const raw = new Database(":memory:");
+    const execs: string[] = [];
+    const exec = raw.exec.bind(raw);
+    raw.exec = ((source: string) => { execs.push(source); return exec(source); }) as typeof raw.exec;
+    const prepare = raw.prepare.bind(raw);
+    raw.prepare = ((source: string) => {
+      const statement = prepare(source);
+      (statement as unknown as { get: () => unknown }).get = () => "own get";
+      return statement;
+    }) as typeof raw.prepare;
+    const d = withSqliteTiming(raw);
+    d.exec("CREATE TABLE t (v TEXT)");
+    expect(execs).toEqual(["CREATE TABLE t (v TEXT)"]);
+    expect(d.prepare("SELECT 1").get()).toBe("own get");
     d.close();
   });
 

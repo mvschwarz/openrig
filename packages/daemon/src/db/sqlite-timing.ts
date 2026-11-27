@@ -39,22 +39,30 @@ export function withSqliteTiming(db: Database.Database): Database.Database {
 
   // Each wrapper looks the driver's method up on the prototype when it is called, never binding it in advance, so a
   // spy or patch on the Statement or Database prototype still sees every call, including those of a statement that
-  // was prepared and cached before the spy (as the #3645 statement-count test does).
+  // was prepared and cached before the spy (as the #3645 statement-count test does). A method the object already had
+  // as its own when it was wrapped is kept and called instead.
   type Methods = Record<string, (...args: unknown[]) => unknown>;
-  const driver = (target: object, name: string) => (Object.getPrototypeOf(target) as Methods)[name]!;
+  const driver = (target: object, name: string): (() => (...args: unknown[]) => unknown) => {
+    const own = Object.hasOwn(target, name) ? (target as Methods)[name] : undefined;
+    return () => own ?? (Object.getPrototypeOf(target) as Methods)[name]!;
+  };
+  const native = {
+    prepare: driver(db, "prepare"), exec: driver(db, "exec"), pragma: driver(db, "pragma"), transaction: driver(db, "transaction"),
+  };
 
   db.prepare = ((source: string) => {
-    const statement = driver(db, "prepare").call(db, source) as object;
+    const statement = native.prepare().call(db, source) as object;
     const verb = firstKeyword(source);
     const methods = statement as Methods;
+    const step = { run: driver(statement, "run"), get: driver(statement, "get"), all: driver(statement, "all"), iterate: driver(statement, "iterate") };
     for (const method of ["run", "get", "all"] as const) {
-      methods[method] = (...args: unknown[]) => timed(`sqlite.${method}.${verb}`, () => driver(statement, method).apply(statement, args));
+      methods[method] = (...args: unknown[]) => timed(`sqlite.${method}.${verb}`, () => step[method]().apply(statement, args));
     }
     // iterate() is lazy: making the iterator, each next() and return() (which ends the statement on an early break)
     // are each timed.
     methods.iterate = (...args: unknown[]) => {
       const site = `sqlite.iterate.${verb}`;
-      const rows = timed(site, () => driver(statement, "iterate").apply(statement, args)) as IterableIterator<unknown>;
+      const rows = timed(site, () => step.iterate().apply(statement, args)) as IterableIterator<unknown>;
       const timedRows: IterableIterator<unknown> = {
         next: (...step: [] | [unknown]) => timed(site, () => rows.next(...step)),
         return: (value?: unknown) => timed(site, () => rows.return ? rows.return(value) : { done: true, value }),
@@ -65,19 +73,19 @@ export function withSqliteTiming(db: Database.Database): Database.Database {
     return statement;
   }) as typeof db.prepare;
 
-  db.exec = ((source: string) => timed(`sqlite.exec.${firstKeyword(source)}`, () => driver(db, "exec").call(db, source))) as typeof db.exec;
+  db.exec = ((source: string) => timed(`sqlite.exec.${firstKeyword(source)}`, () => native.exec().call(db, source))) as typeof db.exec;
 
   db.pragma = ((source: string, options?: Database.PragmaOptions) =>
-    timed(`sqlite.pragma.${pragmaName(source)}`, () => driver(db, "pragma").call(db, source, options))) as typeof db.pragma;
+    timed(`sqlite.pragma.${pragmaName(source)}`, () => native.pragma().call(db, source, options))) as typeof db.pragma;
 
   // The driver returns four functions (default, deferred, immediate, exclusive) that each carry all four plus
   // `database`. Each is wrapped by an ordinary function, so the caller's `this` reaches the callback, and the wrappers
   // get the same properties, so the shape is the driver's.
   db.transaction = ((fn: (...args: unknown[]) => unknown) => {
-    const native = driver(db, "transaction").call(db, fn) as unknown as Record<"default" | "deferred" | "immediate" | "exclusive", (...args: unknown[]) => unknown>;
+    const modes = native.transaction().call(db, fn) as unknown as Record<"default" | "deferred" | "immediate" | "exclusive", (...args: unknown[]) => unknown>;
     const wrap = (variant: (...args: unknown[]) => unknown) =>
       function (this: unknown, ...args: unknown[]) { return timed("sqlite.transaction", () => variant.apply(this, args)); };
-    const wrapped = { default: wrap(native.default), deferred: wrap(native.deferred), immediate: wrap(native.immediate), exclusive: wrap(native.exclusive) };
+    const wrapped = { default: wrap(modes.default), deferred: wrap(modes.deferred), immediate: wrap(modes.immediate), exclusive: wrap(modes.exclusive) };
     const properties = {
       default: { value: wrapped.default }, deferred: { value: wrapped.deferred },
       immediate: { value: wrapped.immediate }, exclusive: { value: wrapped.exclusive },
