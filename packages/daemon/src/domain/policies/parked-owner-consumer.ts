@@ -94,7 +94,7 @@ export interface ParkedOwnerConsumerDeps {
   backgroundShellGraceMs?: number;
   /** A delivered reminder whose rows are still pending and unclaimed past PARKED_OWNER_ESCALATE_AFTER_MS: tell someone who can
    *  act, once per episode. Returns who was told; nothing is held, refused or re-sent to the seat. */
-  escalateUnclaimed?: (input: { seat: string; qitemIds: string[]; deliveredAt: string; episodeKey: string }) => Promise<string[]>;
+  escalateUnclaimed?: (input: { seat: string; qitemIds: string[]; deliveredAt: string; episodeKey: string; nextReminderAt?: string }) => Promise<string[]>;
 }
 
 export const PARKED_OWNER_POLICY_NAME = "parked-owner-consumer";
@@ -298,7 +298,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
       // sends to that seat (failed and refused attempts don't count). The interval runs from the later of the evaluation
       // that sent it and the delivered note a later scan records on its row, so it never starts before the delivery.
       const minIntervals = ownerMinIntervals(job.context);
-      const lastReminder = (owner: string): { at: number; obligations: string[]; episodeKey: string | null } | null => {
+      const lastReminder = (owner: string): { at: number; obligations: string[]; episodeKey: string | null; primaryRow: string | null } | null => {
         let sends: WatchdogHistoryEntry[] = [];
         try { sends = deps.history.listSentToTarget?.(job.jobId, owner, 5) ?? []; } catch { /* unknown history holds no reminder back */ }
         const e = sends.find(h => h.deliveryTargetSession === owner && deliveryReachedSeat(h.deliveryStatus));
@@ -315,23 +315,25 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           }
         } catch { /* without the note, the evaluation time stands */ }
         return { at: Number.isFinite(deliveredAt) ? Math.max(evaluatedAt, deliveredAt) : evaluatedAt,
-          obligations: Array.isArray(named) ? named.filter((id): id is string => typeof id === "string") : [], episodeKey: key };
+          obligations: Array.isArray(named) ? named.filter((id): id is string => typeof id === "string") : [], episodeKey: key,
+          primaryRow: typeof row === "string" ? row : null };
       };
 
       // A delivered reminder's rows still pending and unclaimed past the bound go to someone who can act, once per
-      // episode: the escalated note may sit on any of the rows it names.
-      const escalateIfDue = async (seat: string, episodeKey: string, deliveredAt: string, unclaimed: string[], noteRows: string[]):
-        Promise<{ episodeKey: string; failure: string } | undefined> => {
+      // episode: the escalated note is written on `noteRow` and looked for on every row in `readRows` (the rows the
+      // reminder named, which may since have been claimed or closed).
+      const escalateIfDue = async (seat: string, episodeKey: string, deliveredAt: string, unclaimed: string[],
+        readRows: string[], noteRow: string, nextReminderAt?: string): Promise<{ episodeKey: string; failure: string } | undefined> => {
         if (!deps.escalateUnclaimed || unclaimed.length === 0
           || (deps.now?.() ?? Date.now()) - Date.parse(deliveredAt) < PARKED_OWNER_ESCALATE_AFTER_MS) return undefined;
         const escalated = (row: string) => {
           try { return deps.rows.listTransitions(row).some(t => t.transitionNote?.startsWith(`${ESCALATED_PREFIX} ${episodeKey} `)); }
           catch { return false; }
         };
-        if ([...new Set([...noteRows, ...unclaimed])].some(escalated)) return undefined;
+        if ([...new Set([noteRow, ...readRows])].some(escalated)) return undefined;
         try {
-          const told = await deps.escalateUnclaimed({ seat, qitemIds: unclaimed, deliveredAt, episodeKey });
-          if (told.length > 0) deps.rows.appendNote(noteRows[0] ?? unclaimed[0]!, `${ESCALATED_PREFIX} ${episodeKey} to ${told.join(", ")}`);
+          const told = await deps.escalateUnclaimed({ seat, qitemIds: unclaimed, deliveredAt, episodeKey, ...(nextReminderAt ? { nextReminderAt } : {}) });
+          if (told.length > 0) deps.rows.appendNote(noteRow, `${ESCALATED_PREFIX} ${episodeKey} to ${told.join(", ")}`);
         } catch (error) {
           // Nothing is marked escalated, so a later pass tries again; this pass's notes say why it didn't land.
           return { episodeKey, failure: (error as { code?: string }).code ?? (error instanceof Error ? error.name : typeof error) };
@@ -474,7 +476,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           // go to someone who can act, once for this episode.
           const deliveredAt = transitions.find(t => t.transitionNote === `${DELIVERED_PREFIX} ${lastKey}`)?.ts;
           const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && namedIds.includes(r.qitemId)).map(r => r.qitemId);
-          const escalationFailure = deliveredAt ? await escalateIfDue(seat.sessionName, lastKey!, deliveredAt, unclaimed, [primaryRow]) : undefined;
+          const escalationFailure = deliveredAt ? await escalateIfDue(seat.sessionName, lastKey!, deliveredAt, unclaimed, [], primaryRow) : undefined;
           skipped.push({ seat: seat.sessionName, why: "unchanged-since-last-wake", ...(escalationFailure ? { escalationFailure } : {}) });
           continue;
         }
@@ -507,11 +509,12 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         if (!terminal && minIntervalS !== undefined && last && seat.activity.needsInput.count === 0
           && (deps.now?.() ?? Date.now()) - last.at < minIntervalS * 1000) {
           const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && last.obligations.includes(r.qitemId)).map(r => r.qitemId);
-          const escalationFailure = last.episodeKey
-            ? await escalateIfDue(seat.sessionName, last.episodeKey, new Date(last.at).toISOString(), unclaimed, unclaimed.slice(0, 1))
+          const nextReminderAt = new Date(last.at + minIntervalS * 1000).toISOString();
+          const escalationFailure = last.episodeKey && unclaimed.length > 0
+            ? await escalateIfDue(seat.sessionName, last.episodeKey, new Date(last.at).toISOString(), unclaimed,
+              [...(last.primaryRow ? [last.primaryRow] : []), ...last.obligations], unclaimed[0]!, nextReminderAt)
             : undefined;
-          skipped.push({ seat: seat.sessionName, why: "owner-min-interval", nextReminderAt: new Date(last.at + minIntervalS * 1000).toISOString(),
-            ...(escalationFailure ? { escalationFailure } : {}) });
+          skipped.push({ seat: seat.sessionName, why: "owner-min-interval", nextReminderAt, ...(escalationFailure ? { escalationFailure } : {}) });
           continue;
         }
         const newSinceLastWake = last ? namedIds.filter(id => !last.obligations.includes(id)) : [];

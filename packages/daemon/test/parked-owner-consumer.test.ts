@@ -1355,9 +1355,9 @@ describe("context.owner_min_interval_s: a minimum time between one owner's remin
       { qitemId: ROW_IDS[1]!, state: "in-progress", summary: null },
       { qitemId: ROW_IDS[2]!, state: "pending", summary: null },
     ], held: [] } });
-    const escalations: Array<{ qitemIds: string[]; episodeKey: string }> = [];
-    const evaluate = (minutesAgo: number) => makeParkedOwnerConsumerPolicy({
-      ...makeDeps([seat], store, [{ ...wake(minutesAgo, [ROW_IDS[0]!, ROW_IDS[1]!]), evaluationNotes: {
+    const escalations: Array<{ qitemIds: string[]; episodeKey: string; nextReminderAt?: string }> = [];
+    const evaluate = (minutesAgo: number, seats = [seat]) => makeParkedOwnerConsumerPolicy({
+      ...makeDeps(seats, store, [{ ...wake(minutesAgo, [ROW_IDS[0]!, ROW_IDS[1]!]), evaluationNotes: {
         episodeSeat: SEAT, episodeKey: `${SEAT}|old#1`, primaryRow: ROW_IDS[0]!, obligations: [ROW_IDS[0]!, ROW_IDS[1]!] } }]),
       now: () => NOW,
       escalateUnclaimed: async (input) => { escalations.push(input); return ["lead@test-rig"]; },
@@ -1368,8 +1368,18 @@ describe("context.owner_min_interval_s: a minimum time between one owner's remin
     // Past it: the pending row the last reminder named goes out once; the row opened after it, and the claimed one, don't.
     expect(await evaluate(20)).toMatchObject({ action: "skip" });
     expect(await evaluate(20)).toMatchObject({ action: "skip" });
-    expect(escalations).toEqual([expect.objectContaining({ qitemIds: [ROW_IDS[0]], episodeKey: `${SEAT}|old#1` })]);
+    // The notice says when the next reminder comes, not that it won't.
+    expect(escalations).toEqual([expect.objectContaining({ qitemIds: [ROW_IDS[0]], episodeKey: `${SEAT}|old#1`,
+      nextReminderAt: new Date(NOW + 40 * 60_000).toISOString() })]);
     expect(store.appended.some((a) => a.note.startsWith(`${ESCALATED_PREFIX} ${SEAT}|old#1 to lead@test-rig`))).toBe(true);
+    // The escalated row is claimed and the reminder's other row goes back to pending: still the same episode, told once.
+    const later = parkedSeat({ obligations: { items: [
+      { qitemId: ROW_IDS[0]!, state: "in-progress", summary: null },
+      { qitemId: ROW_IDS[1]!, state: "pending", summary: null },
+      { qitemId: ROW_IDS[2]!, state: "pending", summary: null },
+    ], held: [] } });
+    expect(await evaluate(20, [later])).toMatchObject({ action: "skip" });
+    expect(escalations).toHaveLength(1);
   });
 
   it("the daemon's spec for the rig job keeps an operator's owner_min_interval_s and drops anything invalid", () => {

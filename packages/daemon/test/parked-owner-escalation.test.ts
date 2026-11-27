@@ -53,6 +53,18 @@ describe("who hears that a delivered reminder's row is still unclaimed", () => {
     } finally { db.close(); }
   });
 
+  it("for a seat held by its minimum reminder interval, says when the next reminder comes instead of that it won't", async () => {
+    const { db, queue } = fixture();
+    try {
+      const row = await queue.create({ sourceSession: asker, destinationSession: seat, body: "Please review", summary: "Review", nudge: false });
+      await escalateUnclaimedReminder(db, queue, { seat, qitemIds: [row.qitemId], deliveredAt: "2026-11-21T03:00:00.000Z",
+        episodeKey: `${seat}|abc#2`, nextReminderAt: "2026-11-21T04:00:00.000Z" });
+      const notice = queue.list({ limit: 50 }).find((q) => q.tags?.includes("parked-owner-escalation"));
+      expect(notice!.body).toContain("its minimum reminder interval holds its next reminder until 2026-11-21T04:00:00.000Z");
+      expect(notice!.body).not.toContain("won't repeat");
+    } finally { db.close(); }
+  });
+
   it("falls back to the seat's escalation owner when the creator isn't a local seat", async () => {
     const { db, queue } = fixture();
     try {
