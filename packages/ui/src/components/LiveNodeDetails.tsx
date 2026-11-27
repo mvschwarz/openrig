@@ -1,3 +1,4 @@
+import { configuredBudgetLabel } from "../lib/configured-context-budget.js";
 // V1 agent-detail canonical surface.
 //
 // V0.3.1 slice 25 reshapes the seat-detail page into a 2-tab
@@ -429,6 +430,7 @@ function ContextUsageSection({ data }: { data: NodeDetailData }) {
         <div className="space-y-0.5 font-mono text-[10px]">
           {contextUsage.source === "runner_reported" && <InfoRow label="Source" value="runner-reported" />}
           <InfoRow label="Used" value={contextUsage.usedPercentage != null ? `${contextUsage.usedPercentage}%` : null} />
+          {contextUsage.source === "claude_statusline_json" && <InfoRow label="Configured budget" value={configuredBudgetLabel(contextUsage.configuredBudget)} />}
           <InfoRow label="Remaining" value={contextUsage.remainingPercentage != null ? `${contextUsage.remainingPercentage}%` : null} />
           <InfoRow label="Window" value={contextUsage.contextWindowSize?.toLocaleString()} />
           <InfoRow label="Input tokens" value={contextUsage.totalInputTokens?.toLocaleString()} />

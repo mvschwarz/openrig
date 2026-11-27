@@ -155,6 +155,22 @@ describe("postinstall ABI check", () => {
     expect(result.message).toContain("npm rebuild better-sqlite3");
   });
 
+  // A Codex sandbox refused the check's child process (spawnSync /usr/bin/node EPERM); the rebuild advice sent the agent
+  // the wrong way.
+  it("passes with a not-checked warning, and no rebuild advice, when the check's child can't start", () => {
+    const result = checkAbi({
+      nodeVersion: "v22.22.1",
+      loadNativeAddon: () => {},
+      openNativeDatabase: () => ({ ok: false, notRun: true, detail: "spawnSync /usr/bin/node EPERM" }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.warning).toContain("database check couldn't run");
+    expect(result.warning).toContain("Opening a database was not checked.");
+    expect(result.warning).toContain("spawnSync /usr/bin/node EPERM");
+    expect(result.warning).not.toContain("npm rebuild");
+  });
+
   it("does not open a database when the addon fails to load", () => {
     let opened = false;
     const result = checkAbi({
@@ -181,6 +197,14 @@ describe("openInChildProcess", () => {
     if (out.ok) return;
     expect(out.detail).toContain("exited 1");
     expect(out.detail).toContain("Error: boom");
+  });
+
+  it("marks a child refused permission to start as not run, and a timeout as a failed open", () => {
+    const refused = (code: string) => fake({ error: Object.assign(new Error(`spawnSync /usr/bin/node ${code}`), { code }) });
+    expect(openInChildProcess("/x/better-sqlite3", refused("EPERM"))).toEqual({ ok: false, notRun: true, detail: "spawnSync /usr/bin/node EPERM" });
+    expect(openInChildProcess("/x/better-sqlite3", refused("EACCES"))).toMatchObject({ ok: false, notRun: true });
+    const timedOut = openInChildProcess("/x/better-sqlite3", refused("ETIMEDOUT"));
+    expect(timedOut).toEqual({ ok: false, detail: "spawnSync /usr/bin/node ETIMEDOUT" });
   });
 
   it("passes the resolved addon path to a fresh Node process", () => {

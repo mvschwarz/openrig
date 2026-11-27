@@ -48,6 +48,7 @@ function respond(cmd: string, failing: string[], composer = false): string {
     case "list-sessions": return `${SESSION}\nalpha\n`;
     case "list-panes": return "%1|0|/w|80|24|1\n";
     case "display-message":
+      if (cmd.includes("#{window_panes}")) return `$7|4242|1700000000|%1|0|${SESSION}|1|1\n`;
       return cmd.includes("#{pid}") ? "$7|4242|1700000000\n" : cmd.includes("session_id") ? "$7\n" : cmd.includes("pane_pid") ? "4242\n" : "1\n";
     // tmux prints just the variable asked for, or every one when none is named.
     case "show-environment": return cmd.endsWith(" OPENRIG_NODE_ID") ? "OPENRIG_NODE_ID=n1\n" : "OPENRIG_NODE_ID=n1\nCLAUDECODE=1\nHERDR_PANE_ID=p1\n";
@@ -151,6 +152,7 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.capturePaneHistoryParts("%1");
   await a.setRemainOnExit("%1", true);
   await a.isPaneDead("%1");
+  expect(await a.standbyPaneIdentity({ ...TARGET, nodeId: "n1" }, false)).toBe("$7|4242|1700000000|%1");
   await a.isPaneInMode("%1");
   await a.cancelPaneMode("%1");
   await a.signalPaneProcess("%1", "TERM");

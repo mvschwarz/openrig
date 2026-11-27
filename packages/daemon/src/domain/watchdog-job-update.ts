@@ -1,6 +1,7 @@
 import { parse as parseYaml, parseDocument } from "yaml";
 import { artifactPoolListProblem, type ArtifactPoolSpec } from "./policies/artifact-pool-helpers.js";
 import { edgeArtifactRequiredSpecProblem } from "./policies/edge-artifact-required.js";
+import { OWNER_MIN_INTERVAL_KEY, PARKED_OWNER_POLICY_NAME } from "./policies/parked-owner-consumer.js";
 import { periodicReminderSpecProblem } from "./policies/periodic-reminder.js";
 import { workflowKeepaliveSpecProblem } from "./policies/workflow-keepalive.js";
 import { isQueueWait, retuneQueueWait } from "./queue-wait-backoff.js";
@@ -42,7 +43,20 @@ export interface WatchdogJobUpdateResult {
 }
 
 /** What each policy's own evaluation requires of a spec (its own check), applied before a spec is stored. */
+/** A context.owner_min_interval_s the policy would ignore is refused here, so an operator's spec edit can't look
+ *  applied and do nothing. `parkedOwnerSpecYaml` keeps only the valid part, so the restart reads the same value. */
+function ownerIntervalProblem(spec: ReturnType<typeof parseWatchdogSpec>): string | null {
+  const raw = spec.context[OWNER_MIN_INTERVAL_KEY];
+  if (raw === undefined) return null;
+  const valid = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+  if (valid(raw)) return null;
+  if (raw !== null && typeof raw === "object" && !Array.isArray(raw)
+    && Object.values(raw).every((v) => valid(v))) return null;
+  return `${OWNER_MIN_INTERVAL_KEY} must be a number of seconds, or a map from owner to a number of seconds`;
+}
+
 const SPEC_PROBLEMS: Record<string, (spec: ReturnType<typeof parseWatchdogSpec>) => string | null | undefined> = {
+  [PARKED_OWNER_POLICY_NAME]: ownerIntervalProblem,
   "periodic-reminder": (spec) => periodicReminderSpecProblem(spec)?.message,
   "edge-artifact-required": (spec) => edgeArtifactRequiredSpecProblem(spec)?.message,
   "artifact-pool-ready": (spec) => artifactPoolListProblem(spec.context["pools"] as ArtifactPoolSpec | ArtifactPoolSpec[] | undefined),
@@ -105,18 +119,31 @@ export function updateWatchdogJob(
   if (intervalSeconds === undefined && message === undefined && specYaml === undefined) {
     throw new WatchdogJobsError("nothing_to_update", "give at least one of intervalSeconds, message or specYaml");
   }
-  if (job.registeredBySession === DAEMON_REGISTRANT) {
+  // A parked-owner job is the daemon's, and it rewrites this job's spec on every start; what it keeps of the prior
+  // spec is context.owner_min_interval_s. So a spec that sets that key is the one edit that survives the restart, and
+  // the job's own cadence stays the daemon's.
+  const specOnly = job.policy === PARKED_OWNER_POLICY_NAME;
+  if (specOnly && message !== undefined) {
     throw new WatchdogJobsError(
-      "policy_not_updatable",
-      `watchdog job ${jobId} was registered by the daemon, which overwrites or replaces its own jobs, so an edit would be lost or change the id`,
-      { jobId, registeredBySession: job.registeredBySession },
+      "field_not_updatable",
+      `watchdog job ${jobId} composes its own reminder text, and the daemon rewrites its spec at start, so a message here would be lost; only ${OWNER_MIN_INTERVAL_KEY} in the spec is kept`,
+      { jobId, policy: job.policy },
     );
   }
-  if (!UPDATABLE_POLICIES.has(job.policy)) {
+  if (specOnly && intervalSeconds !== undefined) {
+    throw new WatchdogJobsError(
+      "interval_not_effective",
+      `watchdog job ${jobId} runs the parked-owner timing the daemon owns; its spec's ${OWNER_MIN_INTERVAL_KEY} is what changes how often one owner is reminded`,
+      { jobId, policy: job.policy },
+    );
+  }
+  if ((job.registeredBySession === DAEMON_REGISTRANT || !UPDATABLE_POLICIES.has(job.policy)) && !specOnly) {
     throw new WatchdogJobsError(
       "policy_not_updatable",
-      `watchdog job ${jobId} runs the daemon's own ${job.policy} timing, which an update would only fight`,
-      { jobId, policy: job.policy },
+      job.registeredBySession === DAEMON_REGISTRANT
+        ? `watchdog job ${jobId} was registered by the daemon, which overwrites or replaces its own jobs, so an edit would be lost or change the id`
+        : `watchdog job ${jobId} runs the daemon's own ${job.policy} timing, which an update would only fight`,
+      { jobId, policy: job.policy, registeredBySession: job.registeredBySession },
     );
   }
   let newInterval = job.intervalSeconds;

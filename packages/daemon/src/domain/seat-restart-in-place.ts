@@ -56,6 +56,9 @@ export interface InPlaceCodexLauncher {
   verifyResumeInPane(tmuxSession: string, resumeToken: string, nodeId?: string, home?: string): Promise<HarnessLaunchResult>;
   /** Types a built command into the pane's shell and verifies the resume, preparing nothing again. */
   sendResumeCommand(tmuxSession: string, command: string, resumeToken: string, nodeId?: string, home?: string): Promise<HarnessLaunchResult>;
+  /** #3385: with the seat's old Codex stopped, complete an openrig-core upgrade waiting in `home` before its Codex starts
+   *  again. Returns why it still waits, if it does. */
+  upgradeCorePluginForResume?(nodeId: string, home: string): Promise<string | undefined>;
 }
 
 /** What one process shows about itself, read without touching any credential: cwd, executable, and only
@@ -320,6 +323,7 @@ export class CodexInPlaceRestart {
         return { ...report, outcome: "native_unknown", recoveryCommand, couldNotSee: ["whether the original Codex exited and the pane's shell is back in the foreground"],
           message: "Signals were sent, but the pane could not be observed afterwards; no resume was attempted." };
       }
+      await this.upgradeCorePlugin(target, report, progress);
       // The shell is back: type the exact resume command the checks ran on, built from the running Codex's
       // choices, and prove the resume. Preparing the launch again here would decide those choices afresh.
       progress.stage = "resume";
@@ -359,6 +363,7 @@ export class CodexInPlaceRestart {
     progress.stage = "stop";
     const terminated = await terminatePaneInPlace(this.deps.tmux, pane, this.timing, "Codex");
     if (!terminated.ok) return this.afterFailedStop(target, report, observed, held, recoveryCommand, terminated.message, progress);
+    await this.upgradeCorePlugin(target, report, progress);
     // Respawn the dead pane WITHOUT -k (scrollback stays) with the resume command as its own command.
     progress.stage = "respawn";
     const respawned = await this.deps.tmux.respawnPane(pane, relaunch.command,
@@ -387,6 +392,18 @@ export class CodexInPlaceRestart {
     }
     progress.paneHeld = undefined;
     return verified;
+  }
+
+  /** #3385: between the old Codex's stop and the new one's start, the one moment this seat runs no Codex, complete an
+   *  openrig-core upgrade waiting in its home. A wait (other seats still run there) or a failed check is a warning; the
+   *  restart goes on either way. */
+  private async upgradeCorePlugin(target: InPlaceRestartTarget, report: InPlaceRestartReport, progress: RestartProgress): Promise<void> {
+    if (!this.deps.codex.upgradeCorePluginForResume) return;
+    progress.stage = "plugin upgrade";
+    let waiting: string | undefined;
+    try { waiting = await this.deps.codex.upgradeCorePluginForResume(target.seat.nodeId, report.codexHome); }
+    catch (error) { waiting = `The openrig-core upgrade check didn't run before the resume: ${error instanceof Error ? error.message : String(error)}`; }
+    if (waiting) report.warnings.push(waiting);
   }
 
   /**
@@ -577,8 +594,13 @@ export class CodexInPlaceRestart {
     };
     effort.changes = effort.running !== effort.relaunch;
     const applyChoice = effort.changes && effort.source === "seat_choice";
+    // Managed launches use `-c developer_instructions` for startup guidance, but observed argv doesn't prove its author:
+    // a manual resume can carry a person's override too. This restart doesn't rebuild startup guidance or preserve that
+    // override. Let the restart proceed, and name the change in its plan/result instead of claiming ownership or retention.
+    const changedSettings = settingsDrift(effective, relaunched);
+    const guidanceChanges = changedSettings.includes(DEVELOPER_INSTRUCTIONS_DRIFT);
     const drift = [
-      ...settingsDrift(effective, relaunched).filter((key) => key !== "effort" || !applyChoice),
+      ...changedSettings.filter((key) => (key !== "effort" || !applyChoice) && key !== DEVELOPER_INSTRUCTIONS_DRIFT),
       ...(facts.cwd && facts.cwd !== cwd ? ["cwd"] : []),
       ...(relaunchHome !== codexHome ? ["codex home"] : []),
     ];
@@ -603,9 +625,10 @@ export class CodexInPlaceRestart {
       activity: this.activity(seat.nodeId),
       childProcesses: descendants(rows, process.pid, chain).map((row) => ({ pid: row.pid, name: executableBase(row) })),
       settings: { effective, saved: target.saved, effort,
-        note: applyChoice
+        note: (applyChoice
           ? `The restart keeps the settings the running Codex uses (effective), except effort: it sends the seat's saved effort choice ${effort.relaunch} in place of ${effort.running ?? "no flag"}. Other saved choices are shown, not applied.`
-          : "The restart keeps the settings the running Codex uses (effective), effort included. Saved choices for the next managed launch are shown, not applied." },
+          : "The restart keeps the settings the running Codex uses (effective), effort included. Saved choices for the next managed launch are shown, not applied.")
+          + (guidanceChanges ? " The observed developer_instructions command-line override changes on restart; it is not preserved. This in-place restart does not rebuild startup guidance. Use rig down, then rig up --existing for the normal restore path." : "") },
       codexHome,
       codexNoDaemonFlag: running.daemonOptOut
         ? { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." }
@@ -1071,8 +1094,9 @@ function runningLaunch(argv: string[]): RunningCodexLaunch {
     else if ((arg === "-c" || arg === "--config") && argv[index + 1] !== undefined) configs.push(argv[++index]!);
     else if (arg.startsWith("--config=")) configs.push(arg.slice("--config=".length));
   }
+  const permissionsConfig = configs.find((entry) => entry.startsWith("permissions="));
   return { networkOverride: configs.includes(CODEX_NETWORK_DEFAULT_OVERRIDE), daemonOptOut: argv.includes("--no-daemon"),
-    nonLoginShell: configs.includes(CODEX_NON_LOGIN_SHELL_OVERRIDE), addDirs };
+    nonLoginShell: configs.includes(CODEX_NON_LOGIN_SHELL_OVERRIDE), addDirs, ...(permissionsConfig !== undefined ? { permissionsConfig } : {}) };
 }
 
 /** The settings a Codex command line runs with. cwd, add-dirs, images and the resume target are not settings. */
@@ -1095,6 +1119,9 @@ export function parseEffectiveSettings(argv: string[]): EffectiveSettings {
   settings.config.sort();
   return settings;
 }
+
+/** The one command-line override exempted from drift refusal; its ownership is not inferred from its key. */
+const DEVELOPER_INSTRUCTIONS_DRIFT = "config developer_instructions";
 
 /** Which settings differ. Config overrides are named by key only; their values may be paths. */
 function settingsDrift(running: EffectiveSettings, relaunch: EffectiveSettings): string[] {

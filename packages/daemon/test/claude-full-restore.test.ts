@@ -217,6 +217,7 @@ describe("pod-aware Claude resume failure outcomes", () => {
       expect(outcome.status).toBe("awaiting-decision");
       expect(outcome.error).toContain("Original session unresumable");
       expect(outcome.error).toContain("no conversation found for the requested session");
+      expect(outcome.error).toContain("no session is running. If this Claude Code may be older than the one that saved the conversation, update it and retry the restore. OpenRig's records can't tell");
       expect(outcome.error).toContain(`If you know this seat was never used, nothing is lost by starting only this seat fresh, in one step: rig seat launch '${node.logicalId}@restore-test' --fresh --reason "<why>".`);
       expect(up.result.warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining("started fresh")]));
       expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);

@@ -8,8 +8,10 @@ import { helperCwd } from "../helper-cwd.js";
 import type { TerminalOpenResult } from "../daemon-client.js";
 
 export function terminalWindowNotice(view: string, result: TerminalOpenResult): string {
+  const core = result.ok && result.placement?.mode === "core" ? result.placement : null;
   return [
     `Terminal view requested: ${view}`,
+    ...(core ? [`Placed in herdr-core on ${core.host} as view ${core.viewId}. Any herdr-app connected to ${core.host} shows it; OpenRig can't see that window.`] : []),
     ...(result.ok && result.reusedWorkspace ? [`Reused Herdr workspace ${result.reusedWorkspace.id}; existing contents were kept.`] : []),
     `${result.opened.length} tiles prepared; ${result.absent.length} absent; ${result.degraded.length} degraded.`,
     ...(result.error ? [result.error] : []),
@@ -34,8 +36,15 @@ export function inHerdrApp(env: NodeJS.ProcessEnv, exists: (path: string) => boo
   return !!env["HC_TERMINAL_ID"] && !!env["HC_TERMINAL_SOCKET"] && exists(join(herdrAppHome(env), "herdr-app.sock"));
 }
 
-/** Where a terminal view opens from this TUI, so a preview's plan matches the open. */
-export type WindowTarget = { provider: "rex" | "herdr" | "cmux" } | { provider: "herdr-app"; appHome: string };
+/** A terminal herdr-core runs with no herdr-app window serving that home on this machine: a window elsewhere, connected
+ *  to this machine's core, may be showing it. Nothing about that window is inferred from the markers. */
+export function inHerdrCoreOnly(env: NodeJS.ProcessEnv, exists: (path: string) => boolean = existsSync): boolean {
+  return !!env["HC_TERMINAL_ID"] && !!env["HC_TERMINAL_SOCKET"] && !exists(join(herdrAppHome(env), "herdr-app.sock"));
+}
+
+/** Where a terminal view opens from this TUI, so a preview's plan matches the open. `placement: "core"`: there's no window
+ *  here, so the daemon places the view in this machine's herdr-core. */
+export type WindowTarget = { provider: "rex" | "herdr" | "cmux" } | { provider: "herdr-app"; appHome: string; placement?: "core" };
 
 const herdrAppTarget = (env: NodeJS.ProcessEnv): WindowTarget => ({
   provider: "herdr-app", appHome: herdrAppHome(env),
@@ -91,19 +100,26 @@ export async function viewerTerminalEnv(): Promise<NodeJS.ProcessEnv | undefined
       const at = entry.indexOf("=");
       return at > 0 ? [[entry.slice(0, at), entry.slice(at + 1)]] : [];
     }));
-    return inHerdr(env) || inRex(env) || inHerdrApp(env) ? Object.fromEntries(MARKER_KEYS.flatMap(key => env[key] === undefined ? [] : [[key, env[key]]])) : undefined;
+    const core = inHerdrApp(env) || inHerdrCoreOnly(env);
+    // A herdr-core client's app home comes from its own HOME when it sets neither HERDR_APP_HOME nor XDG_CONFIG_HOME, and
+    // HOME isn't a marker: carry the home it resolved, so the open targets this client's app rather than the TUI's.
+    return inHerdr(env) || inRex(env) || core
+      ? { ...Object.fromEntries(MARKER_KEYS.flatMap(key => env[key] === undefined ? [] : [[key, env[key]]])), ...(core ? { HERDR_APP_HOME: herdrAppHome(env) } : {}) }
+      : undefined;
   } catch { return undefined; }
 }
 
 /** The viewer markers the window opener is given, or undefined when this TUI's own environment decides. */
 async function viewedFrom(viewer: () => Promise<NodeJS.ProcessEnv | undefined>): Promise<NodeJS.ProcessEnv | undefined> {
-  return inHerdr(process.env) || inRex(process.env) || inCmux(process.env) || inHerdrApp(process.env) ? undefined : await viewer();
+  return inHerdr(process.env) || inRex(process.env) || inCmux(process.env) || inHerdrApp(process.env) || inHerdrCoreOnly(process.env)
+    ? undefined : await viewer();
 }
 
 /**
  * The provider a terminal action uses from this TUI, for its preview and its open alike: Rex or cmux around this TUI;
- * else herdr-app when this TUI runs in a herdr-core terminal with a herdr-app window on this machine (or, for a shared
- * TUI, when the client viewing it does); else Herdr. `--provider herdr-app` opens the view in the herdr-app window you
+ * else herdr-app when this TUI runs in a herdr-core terminal with a herdr-app window on this machine, or in a herdr-core
+ * terminal with no window here (the daemon places the view in this machine's core, for a herdr-app connected to it).
+ * A shared TUI does the same for the herdr-core terminal of the client viewing it. Else Herdr. `--provider herdr-app` opens the view in the herdr-app window you
  * run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same when that window is answering.
  * `--window` always asks for a new desktop window.
  */
@@ -111,9 +127,11 @@ export async function windowTarget(viewer: () => Promise<NodeJS.ProcessEnv | und
   if (inRex(process.env)) return { provider: "rex" };
   if (inCmux(process.env)) return { provider: "cmux" };
   if (!inHerdrPane(process.env) && inHerdrApp(process.env)) return herdrAppTarget(process.env);
+  if (!inHerdrPane(process.env) && inHerdrCoreOnly(process.env)) return { provider: "herdr-app", appHome: herdrAppHome(process.env), placement: "core" };
   const viewed = await viewedFrom(viewer);
   if (viewed && inRex(viewed)) return { provider: "rex" };
   if (viewed && !inHerdrPane(viewed) && inHerdrApp(viewed)) return herdrAppTarget(viewed);
+  if (viewed && !inHerdrPane(viewed) && inHerdrCoreOnly(viewed)) return { provider: "herdr-app", appHome: herdrAppHome(viewed), placement: "core" };
   return { provider: "herdr" };
 }
 

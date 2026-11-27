@@ -22,6 +22,7 @@ import { parseScopeTags } from "./qitem-membership.js";
 import { AsciiLiteralMatcher } from "./ascii-literal-matcher.js";
 import { cooperativeReadFile, readRowsCooperatively } from "../execution-candidate-reader.js";
 import { NODE_FILE_PRECEDENCE, resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
+import { readLegacyMissionStatus } from "../scope/mission-frontmatter.js";
 import { runSyncSite } from "../sync-site-wrap.js";
 
 export type SliceStatus = "active" | "done" | "closed" | "blocked" | "draft";
@@ -561,8 +562,8 @@ export class SliceIndexer {
    *  missions with at least one INDEXED slice (zero-slice missions have no
    *  indexed slices and never appear here — the tree's discovery walk owns
    *  that population). Read semantics are LOCKSTEP with
-   *  routes/missions.ts readMissionStatus (README.md only, raw string, no
-   *  enum validation, non-empty-or-null) — pinned by test. */
+   *  routes/missions.ts readMissionStatus (SPEC.md first, then README.md;
+   *  the top-level YAML status string, no enum validation, non-empty-or-null) — pinned by test. */
   missionAuthoredStatuses(): Record<string, { authoredStatus: string | null }> {
     if (!this.isReady()) return {};
     const now = Date.now();
@@ -597,17 +598,7 @@ export class SliceIndexer {
   /** Lockstep twin of routes/missions.ts readMissionStatus (see the sidecar
    *  doc above; the lockstep test pins both reads agree on the same bytes). */
   private readMissionAuthoredStatus(missionPath: string): string | null {
-    const readmePath = resolveNodeFile(missionPath);
-    if (!readmePath) return null;
-    let raw: string;
-    try {
-      raw = fs.readFileSync(readmePath, "utf8");
-    } catch {
-      return null;
-    }
-    const fm = parseFrontmatter(raw);
-    const value = fm["status"];
-    return typeof value === "string" && value.length > 0 ? value : null;
+    return readLegacyMissionStatus(missionPath);
   }
 
   list(): SliceListEntry[] {

@@ -49,7 +49,7 @@ the same harness can run in many places, and one place can host many harnesses.
 | | Plain community preset | Runner preset (`runner: true`) | OpenRig-hosted protocol runner (`protocol: pi-rpc`) |
 |---|---|---|---|
 | **What runs in the pane** | The harness's own terminal app | A small program you maintain, *the runner*, which hosts the agent (for example an ACP agent over stdio) | OpenRig's own Pi runner, which starts your binary (`command`) in Pi's RPC mode |
-| **How OpenRig reads activity** | From the screen: a changing screen reads working; a quiet one reads **unknown**, never idle | From the runner's reports: working, idle, needs input | From the Pi runner's reports, through the same channel as built-in Pi; identity is the session file Pi's `get_state` reports |
+| **How OpenRig reads activity** | From the screen: a changing screen reads working; a quiet one reads **unknown**, never idle. A preset that declares the hooks its own script posts (`activity_hooks`) reads from those instead | From the runner's reports: working, idle, needs input | From the Pi runner's reports, through the same channel as built-in Pi; identity is the session file Pi's `get_state` reports |
 | **How input arrives** | Typed into the app's prompt | Typed into the runner, which turns each submitted message into one agent prompt; a message sent mid-turn waits | Pi's input: a submitted block is a prompt, a message sent while busy steers the current turn, `/followup` queues after it and `/abort` cancels it |
 | **Choose it when** | The harness has a usable terminal UI (Cursor, Hermes, OpenClaw examples) | The harness speaks a protocol rather than a screen (ACP, JSON-RPC, stream-JSON), or you can report turn boundaries reliably | Your harness is a Pi fork, or speaks Pi's CLI and JSONL RPC protocol |
 
@@ -160,6 +160,12 @@ host hooks, contained guest grants and install-token Pi usage keep their legacy 
 current bound Pi credential. No native input channel or cancellation capability is implied by this credential.
 
 Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer <token>`.
+
+A plain preset needs no runner to report: its harness's own hook script can post on the install-token path, and the preset
+lists the events it posts (`activity_hooks`). Those posts carry the same fields a runner's do, `occurredAt` and an
+increasing `sequence` included, and are ordered the same way; a turn start decides whether its idle holds. See
+[Hook-reporting presets](community-harness-presets.md#hook-reporting-presets-activity_hooks). A runner's preset that also
+declares `activity_hooks` keeps its runner's reports.
 
 The same endpoint accepts an observation-only report from a current run-bound credential:
 
@@ -605,11 +611,11 @@ the person:
 
 | Situation | What happens |
 |---|---|
-| **Someone can be asked** | In order: the person chosen for the seat (`rig seat set-permissions-to`); else the return route of the work the seat is running (the person's own conversation, as `rig queue create --return-route auto` issued it): the one route its open work carries or, when that work comes from several conversations, the route of its newest in-progress work, else of its newest open work, when that route is on this host; else the default person. The reply is `{"ok": true, "askId", "created", "askedOf", "answerBy"}`. |
-| **No one can be asked**, or the seat chose `--deny` | `{"ok": true, "state": "not_asked", "reason"}`. Nothing is decided: no permit, no refusal, and the prompt carries on in the terminal. |
+| **Someone can be asked** | In order: the person chosen for the seat (`rig seat set-permissions-to`); else the return route of the work the seat is running (the person's own conversation, as `rig queue create --return-route auto` issued it): the one route its open work carries or, when that work comes from several conversations, the route of its newest in-progress work, else of its newest open work, when that route is on this host. The default person isn't asked by implication: with neither, no one is. The reply is `{"ok": true, "askId", "created", "askedOf", "answerBy"}`. |
+| **No one can be asked** (no chosen person and no return route on this host), or the seat chose `--deny` | `{"ok": true, "state": "not_asked", "reason"}`. Nothing is decided: no permit, no refusal, and the prompt carries on in the terminal. No ask is open, so the seat's usual prompt alert and routed relay aren't held back. |
 | **A person picks an offered option, or replies just yes or no** (Feed, Steering's Approve or Deny, the TUI, Slack) | Their own answer. It closes the ask as theirs, with no receiving agent in between and no second confirmation. |
 | **A person answers in other words** | The receiving agent judges the exact action against them, as for a runner: allow when it meets them, deny with their words when it doesn't, recorded as its judgment, not their no. Words it can't read are asked back. |
-| **The person's own conversation owns the ask** | Its agent shows them the exact action, then runs `rig seat decide-permission <askId> --option allow\|deny` (or calls the MCP tool `rig_seat_decide_permission`, which takes the same answer), never typing into the seat for it. A plain yes or no takes `--relay --person-said "<their words>"` and is recorded as relayed by that agent, with their words as it reports them: unconfirmed, since OpenRig didn't get that answer from the person. Words or a condition take `--reason` and `--person-said`, and are recorded as the agent's judgment. The decider is the conversation's address: `OPENRIG_SESSION_NAME=<address>` in a shell, and, through the MCP tool with no seat, the address OpenRig issued under that conversation's own key. |
+| **The person's own conversation owns the ask** | Its agent shows them the exact action, then runs `rig seat decide-permission <askId> --option allow\|deny` (or calls the MCP tool `rig_seat_decide_permission`, which takes the same answer), never typing into the seat for it. A plain yes or no takes `--relay --person-said "<their words>"` and is recorded as relayed by that agent, with their words as it reports them: unconfirmed, since OpenRig didn't get that answer from the person. Words or a condition take `--reason` and `--person-said`, and are recorded as the agent's judgment. The decider is the conversation's address: `OPENRIG_SESSION_NAME=<address>` in a shell, and, through the MCP tool, the address OpenRig issued under that conversation's own key, whether or not a seat is configured for its tools (not in one of OpenRig's own seats). |
 | **Closed without an answer** | `unanswered`: never a permit. A queue close is never an approval. |
 | **The prompt is answered in the terminal** | A No or Esc ends the hook, which withdraws the ask (`answered_in_terminal`). A Yes lets the tool run; when its exact call completes (the relay's `PostToolBatch` fingerprints), the ask is withdrawn the same way. A later answer through OpenRig reads as too late. |
 | **The window ends, or the seat restarts** | After 24 hours the hook withdraws the ask (`answer_window_ended`), and the prompt waits in the terminal. A Claude Code that's gone without ending the hook (killed, say) makes it withdraw the ask as `answered_in_terminal`. An earlier occupant's ask reads `stale`. An answer after either is too late, and nothing is sent. |
@@ -652,8 +658,9 @@ the person:
   and its relay task to the routed conversation. The ask is already that conversation's question about the prompt. The
   alert's relay would put the same question there a second time, with text telling it to type keys into the seat, and
   keys typed there answer the prompt in the terminal and end the ask. Once the ask ends (its prompt ended in the
-  terminal, the seat restarted, or 24 hours passed), they go on as before. A hook killed outright leaves its ask open, so
-  the hold lasts until the window ends; an answer meanwhile says it hasn't reached the prompt.
+  terminal, the seat restarted, an agent decided on the person's words, or 24 hours passed), they go on as before. An
+  ask handed on to someone who hasn't decided yet, on this host or another, still holds them. A hook killed outright
+  leaves its ask open, so the hold lasts until the window ends; an answer meanwhile says it hasn't reached the prompt.
 - **A conversation that isn't listening:** an ask to the person's own conversation reaches it through the `openrig`
   plugin's waiter, which listens for about two hours after each of its turns (its hooks' 7200-second timeout). A prompt
   after that waits for the person's next turn there, with the seat's prompt alert held, until they come back or the ask's

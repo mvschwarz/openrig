@@ -2,7 +2,8 @@
 
 A community harness is a coding harness an outside contributor maintains. You install it as one small data file, and a
 rig member runs it by naming it as its `runtime`. OpenRig doesn't qualify every installed harness. It shows them as community
-harnesses; plain presets use screen observations, while declared runners and hosted Pi-RPC programs report their activity.
+harnesses; plain presets use screen observations, or the hooks they declare their own script posts, while declared runners
+and hosted Pi-RPC programs report their activity.
 
 For what an integration author owns end to end, including a runner's duties and running a harness somewhere else, see
 the draft [integration author contracts](author-contracts.md).
@@ -18,8 +19,8 @@ it never reads an unsupported capability as idle, working, ready or verified.
 | Delivery | yes | `rig send` and queue wakes paste the text into the pane and press Enter, as for any seat. A pane that's back at a shell is refused (`target_runtime_unverified`) and nothing is typed. OpenRig doesn't confirm the harness took the message; `rig send --verify` checks the pane afterwards. |
 | Identity | when declared | With `launch_result`, the conversation is shown as reported by its launcher; with `names_conversation`, as named by OpenRig. Neither is observed by OpenRig. Without either, the identity is unavailable. |
 | Resume | when declared | `resume: true` with one of the two above (see [Reopening a conversation](#reopening-a-conversation-resume-true)). Without it, a resume says `Resume is unsupported: community harness "<name>" is launch-only`, and a restore stops and asks. |
-| Activity | partly | Read from the screen only; there are no activity hooks. Work and attention the screen shows are kept, but a screen that looks idle reads `unknown`, never idle, because a quiet prompt can be an approval or a pause. A [runner preset](#runner-presets-runner-true)'s own reports decide it instead. |
-| Attention | partly | Read from the screen: a permission question or numbered choice that OpenRig recognizes reads as needing attention, and `rig send` won't type into it. A prompt it doesn't recognize reads `unknown`. |
+| Activity | partly | Read from the screen only, unless the preset declares hooks. Work and attention the screen shows are kept, but a screen that looks idle reads `unknown`, never idle, because a quiet prompt can be an approval or a pause. A preset that declares the hooks its own script posts ([`activity_hooks`](#hook-reporting-presets-activity_hooks)) has them decide it instead, as a [runner preset](#runner-presets-runner-true)'s own reports do. |
+| Attention | partly | Read from the screen: a permission question or numbered choice that OpenRig recognizes reads as needing attention, and `rig send` won't type into it. Once the harness prints its next empty prompt (a line holding only `❯`, `›` or `»`) below an answered one, the answered one is history, even while it stays on screen. A prompt it doesn't recognize reads `unknown`. With [declared hooks](#hook-reporting-presets-activity_hooks), a screen reading counts only while it's newer than the latest hook. |
 | Approval | no | Approvals stay in the harness's own pane. OpenRig relays none, so a person answers them there. A [runner preset](#runner-presets-runner-true) is the exception: its runner submits the agent's permission requests to OpenRig, which asks a person, and the default is permit (section 7 of the [harness and runner contract](harness-runner-contract.md)). |
 | Cancel | no | A plain preset has no live native cancellation consumer. Its own manual controls remain available; `/abort` is ordinary input unless that program defines it. An implemented runner can support the [named native command](harness-runner-contract.md#optional-run-bound-native-input-and-wake-version-1), subject to its own capability and turn mapping. `rig seat stop` and `rig down` end the seat's tmux session; work outside that pane, such as a gateway, has separate custody and lifecycle. List those limits in the preset. Restarting in place and switching harness are refused. |
 | Transport | yes | The seat is a tmux pane like any other, so `rig capture`, `rig send` and `--host` work as they do for any seat. |
@@ -55,6 +56,7 @@ first_input: true                # optional: launcher takes the first turn from 
 # runner: true                  # optional, needs launch_result: the launcher reports the seat's activity (below)
 # passes_model: true            # optional: the launcher takes the seat's declared model from OPENRIG_MODEL (below)
 # launch_wrapper: true          # optional: a runner applies OPENRIG_LAUNCH_WRAPPER to its native child (below)
+# activity_hooks: [PreToolUse, PostToolUse, Stop]   # optional: the hooks the harness's own hook script posts (below)
 ```
 
 - **`command`** is a single program and its arguments. Shell syntax such as `|`, `&&`, `;`, redirections or `$(…)`
@@ -195,6 +197,62 @@ one at a time and in order, without making the agent wait. It finds the address 
   [harness and runner contract](harness-runner-contract.md).
 
 A runner declaration is not a native-input or wake declaration. The optional [run-bound channel](harness-runner-contract.md#optional-run-bound-native-input-and-wake-version-1) advertises implemented operations through an authenticated live hello; Core supports preset-owned consumers plus input-only managed OMP and hosted Pi-RPC consumers. The dsh example implements input, dedicated wake and named cancellation using its own invocation mapping. Typed remains every program's default, native selection is explicit per seat, and a Pi-compatible wrapper does not qualify or adopt another program's native operations.
+
+## Hook-reporting presets (`activity_hooks`)
+
+Some harnesses run hook scripts of their own at points in a turn. When yours does, its script can report those points to
+OpenRig, and the preset lists the events it posts. The seat's activity and attention then follow those posts, in `rig ps`,
+the MCP team read and the TUI graph. There's no runner and no extra credential: the script posts on the install-token path
+the seat's pane already has.
+
+```yaml
+activity_hooks: [PreToolUse, PostToolUse, Stop]   # the events your script posts; declare a turn start where it posts one
+```
+
+**What the script posts.** Each event goes to `POST <OPENRIG_URL>/api/activity/hooks` with `OPENRIG_ACTIVITY_HOOK_TOKEN`
+as the bearer token, both from the pane's environment. Every post names:
+- the seat, as `sessionName` (`OPENRIG_SESSION_NAME`) and `nodeId` (`OPENRIG_NODE_ID`);
+- `runtime` (`OPENRIG_RUNTIME`, the preset's name) and `generation` (`OPENRIG_OCCUPANT_GENERATION`);
+- `occurredAt`, stamped when the hook fires, and an increasing `sequence` where the harness can supply one, as a
+  runner's posts do;
+- `hookEvent` and `subtype`, as in the table.
+
+| The script posts | The seat reads |
+|---|---|
+| `UserPromptSubmit` or `active` (a turn start) | working |
+| `PreToolUse` or `PostToolUse` | working |
+| `Notification` / `permission_prompt` | needs input |
+| `Stop` / the turn's stop reason | idle |
+
+**The turn-start rule.** Whether a `Stop`'s idle lasts depends on whether the preset declares a turn start
+(`UserPromptSubmit` or `active`):
+- **With one,** idle holds until the next post, as for a runner, so it depends on that turn start's post arriving. A post
+  that states `livenessSeconds` still lapses after two missed intervals.
+- **Without one,** idle lasts the 15-second hook window, and then the screen decides: a changing screen reads working, a
+  quiet one `unknown`, never idle. So a turn your script doesn't report can read idle for the rest of that window.
+- **A working post** counts for 15 seconds. A long tool call with no hook then reads from the screen, never working forever.
+
+**Order.** Posts are taken in the order they happened (`occurredAt`, then `sequence`), not the order they arrived, so a
+delayed `Stop` doesn't read a working seat idle. OpenRig still records the late post. A post without `occurredAt` is
+stamped when it arrives, so a late one can be taken as current: send `occurredAt`. Nothing is refused for missing it.
+
+**Attention from the screen.** A permission question or numbered choice that OpenRig recognizes on screen reads as needs
+input while that reading is fresh (5 seconds) and its capture started after the seat's latest hook. The next hook post
+ends it, as does a screen showing no dialog or a failed read. A draft in the input box isn't a dialog: someone typing,
+or type-ahead during a long tool call, isn't a question. A dialog OpenRig doesn't recognize reads as the hooks and the
+turn-start rule say.
+
+**Good to know:**
+- **The declaration is fixed at launch,** as `runner` is: each launch, a handover's successor included, records it on the
+  session. Editing the preset changes the next launch, not a running seat.
+- **OpenRig trusts the declaration.** A script that doesn't post what the preset declares reads wrongly until the preset
+  is fixed; nothing demotes its hooks automatically.
+- **Ignored with a runner.** With `runner: true` or `protocol: pi-rpc`, the runner's reports decide, and `activity_hooks`
+  is ignored, not refused.
+- **The generation attributes a post; it isn't authentication,** as for a runner. A post with an earlier occupant's
+  generation doesn't count for the live seat.
+- **What to read:** `rig ps`'s ACTIVITY column, and `activity` in `rig ps --json`, show OpenRig's decision.
+  `agentActivity` is the older hook-and-screen reading and can differ from it.
 
 ## Pi-compatible RPC harnesses (`protocol: pi-rpc`)
 
@@ -431,7 +489,7 @@ Its [README](community-harness-examples/dsh/README.md) has the setup and a check
 and maintain them as your own.
 
 The launcher is the contributor's code, in the contributor's package. OpenRig runs no code from a preset and loads no
-module into its daemon. A preset that sets `launch_result`, `names_conversation`, `startup_assisted`, `first_input`, `runner`, `passes_model` or `launch_wrapper` is refused by an older
+module into its daemon. A preset that sets `launch_result`, `names_conversation`, `startup_assisted`, `first_input`, `runner`, `passes_model`, `launch_wrapper` or `activity_hooks` is refused by an older
 OpenRig that doesn't know the field.
 
 ## Community-maintained runner: nodecode (@smota)
@@ -475,7 +533,7 @@ model_catalog:
     - id: example/model-b
 ```
 
-Omit `runtime_version` when it is unknown and omit `effort_levels` when the preset has no per-model effort information. An explicit `models: []` declares an empty list. Missing or invalid catalog metadata makes the [seat catalog](seat-node-targeting.md#model-and-effort-catalog) unavailable and leaves preset launch behavior unchanged. Older OpenRig versions may reject `model_catalog` as an unknown field.
+Omit `runtime_version` when it is unknown and omit `effort_levels` when the preset has no per-model effort information. The API's `runtimeVersion` is this declaration. OpenRig does not read the installed harness version for this response. An explicit `models: []` declares an empty list. Missing or invalid catalog metadata makes the [seat catalog](seat-node-targeting.md#model-and-effort-catalog) unavailable and leaves preset launch behavior unchanged. Older OpenRig versions may reject `model_catalog` as an unknown field.
 
 ## Pass the seat's declared model at launch
 

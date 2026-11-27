@@ -585,7 +585,8 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.nodes.find((n) => n.logicalId === "desk")?.status).toBe("left_attached");
     const named = result.result.warnings.filter((line) => line.includes("conversation"));
     expect(named).toHaveLength(1);
-    expect(named[0]).toMatch(/worker@r99 \([a-z]+\) has the same recorded claude_id conversation as desk-app@r99 \(running\), outside this restore/);
+    // It's named by what OpenRig knows of it: attached from an outside program, its liveness unknown.
+    expect(named[0]).toMatch(/worker@r99 \([a-z]+\) has the same recorded claude_id conversation as desk-app@r99 \(attached\), outside this restore/);
     expect(result.result.warnings.join("\n")).not.toContain("conv-x");
   });
 
@@ -4446,6 +4447,47 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  // The update line is Claude's: another runtime's missing conversation keeps the remedy without it.
+  it("a Codex seat's missing conversation pauses with the same remedy, without the Claude update line", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-missing", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", podId: "pod-codex-missing" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "codex_id", "stale-codex-thread", "scrape");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "codex");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const launchHarness = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: "Codex resume failed: no conversation found for the requested thread", recovery: "retry_fresh", missingConversation: true as const });
+    const mockAdapter = {
+      runtime: "codex",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness,
+    };
+    const tmux = mockTmux();
+    Object.assign(tmux, {
+      setRemainOnExit: vi.fn(async () => ({ ok: true })),
+      signalPaneProcess: vi.fn(async () => ({ ok: true })),
+      isPaneDead: vi.fn(async () => true),
+      getDefaultShell: vi.fn(async () => "/bin/sh"),
+      respawnPane: vi.fn(async () => ({ ok: true })),
+    });
+    const orch = createOrchestrator({ tmux });
+    const result = await orch.launchSingleNode(rig.id, node.logicalId, { snapshotId: snap.id, adapters: { codex: mockAdapter } });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.launched!.find((n) => n.nodeId === node.id);
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.error).toContain("no session is running. OpenRig's records can't tell whether this conversation was ever used.");
+      expect(nodeResult!.error).not.toContain("update it and retry");
+    }
+  });
+
   // A Claude seat stopped before its first message saved its launch's pre-assigned token for a
   // conversation Claude never wrote, and never reached its prompt. The records can't tell that from a used conversation that
   // lives elsewhere, so when Claude reports it missing the blank attempt is rolled back and the seat waits, with the one step
@@ -4493,6 +4535,8 @@ describe("RestoreOrchestrator", () => {
       expect(nodeResult!.error).toContain("Original session unresumable");
       expect(nodeResult!.error).toContain("The blank session was rolled back; no session is running");
       expect(nodeResult!.error).toContain("OpenRig's records can't tell whether this conversation was ever used.");
+      // An older Claude Code than the one that saved the conversation can report it missing: updating comes first.
+      expect(nodeResult!.error).toContain("no session is running. If this Claude Code may be older than the one that saved the conversation, update it and retry the restore. OpenRig's records can't tell");
       // The one-seat commands, not a whole-rig re-run, which is refused while sibling seats run. A new pane is gone after the
       // rollback, so the fresh launch is one step; a reused pane is left at a shell under the seat's own session name, which
       // the fresh launch won't replace until the seat is stopped.

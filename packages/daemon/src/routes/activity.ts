@@ -3,7 +3,8 @@ import type { RunnerReceipt } from "../domain/outbox-handler.js";
 import { RunnerChannel, RunnerChannelError } from "../domain/runner-channel.js";
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
 import { constantTimeEqual } from "../middleware/auth-bearer-token.js";
-import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
+import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedActivityHooks, recordedRunner, sessionActivityHooksSelect,
+  sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -953,8 +954,10 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
   // declaring an inventory (which would reactivate a retired seat).
   const currentSession = oracle && emitted?.nodeId
     ? store.db.prepare(`SELECT s.session_name, s.status, ${sessionCommunityHarnessSelect(store.db)} AS community_harness,
-        ${sessionCommunityRunnerSelect(store.db)} AS community_runner FROM sessions s WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`)
-      .get(emitted.nodeId) as { session_name: string; status: string; community_harness: string | null; community_runner: number | null } | undefined
+        ${sessionCommunityRunnerSelect(store.db)} AS community_runner, ${sessionActivityHooksSelect(store.db)} AS community_hooks
+        FROM sessions s WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`)
+      .get(emitted.nodeId) as { session_name: string; status: string; community_harness: string | null; community_runner: number | null;
+        community_hooks: string | null } | undefined
     : undefined;
   const suppliedSessionName = stringOrNull(body.sessionName);
   if (oracle && emitted?.nodeId && emitted.sessionName
@@ -975,7 +978,8 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
       oracle.declareRungInventory(
         { seatNodeId: emitted.nodeId, sessionName: emitted.sessionName },
         // The same recorded launch facts the reconcile pass reads, so a community seat's first hook gets its own inventory.
-        runtimeRungInventory(runtime, currentSession?.community_harness ?? null, recordedRunner(currentSession?.community_runner)),
+        runtimeRungInventory(runtime, currentSession?.community_harness ?? null, recordedRunner(currentSession?.community_runner),
+          recordedActivityHooks(currentSession?.community_hooks)),
       );
     }
     if (beat) {

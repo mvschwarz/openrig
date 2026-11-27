@@ -131,6 +131,9 @@ Keys:
                          message_inline, message_file_path
   policies.idle_gate_qitem.scan_interval_seconds
   policies.idle_gate_qitem.active_wake_interval_seconds
+  policies.seat_scale.*  enabled, observe, idle_threshold_minutes (60–525600, default 240),
+                         max_reaps_per_24h (1–10000, default 12), protected_rigs, opt_in_rigs
+                         (the idle-seat reaper's opt-in policy; off by default)
   snapshots.periodic.*   enabled, interval_seconds, retention_keep
   queue.*                pickup_stall_threshold_minutes (S04 pickup-receipt stall threshold),
                          stuck_sweep_interval_seconds, stuck_sweep_unclaimed_age_minutes (S02 standing stuck sweep),

@@ -1,3 +1,4 @@
+import type { ConfiguredContextBudget } from "../lib/configured-context-budget.js";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { withHostParam } from "../lib/host-param.js";
 import { useSelectedHostId } from "./useHosts.js";
@@ -60,6 +61,7 @@ export interface NodeInventoryEntry {
   resumeCommandLabel?: string | null;
   latestError: string | null;
   contextUsage?: {
+    configuredBudget?: ConfiguredContextBudget | null;
     usedPercentage: number | null;
     remainingPercentage: number | null;
     contextWindowSize: number | null;

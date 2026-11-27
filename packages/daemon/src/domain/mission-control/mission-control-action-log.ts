@@ -53,6 +53,7 @@ export interface MissionControlActionRecordInput {
 }
 
 export interface MissionControlActionEntry {
+  importedFrom?: string;
   actionId: string;
   actionVerb: MissionControlVerb;
   qitemId: string | null;
@@ -82,6 +83,7 @@ interface ActionRow {
   notify_result: string | null;
   audit_notes_json: string | null;
   identity_provenance?: string | null;
+  imported_from?: string | null;
 }
 
 export class MissionControlActionLogError extends Error {
@@ -108,8 +110,10 @@ function hasIdentityProvenanceColumn(db: Database.Database): boolean {
 
 export class MissionControlActionLog {
   private readonly hasProvenanceCol: boolean;
+  private readonly hasImportedFrom: boolean;
   constructor(private readonly db: Database.Database) {
     this.hasProvenanceCol = hasIdentityProvenanceColumn(db);
+    this.hasImportedFrom = !!db.prepare("SELECT 1 FROM pragma_table_info('mission_control_actions') WHERE name = 'imported_from'").get();
   }
 
   /**
@@ -196,6 +200,7 @@ export class MissionControlActionLog {
   /** Exact all-history reconciliation; unrelated later actions cannot evict a committed operation. */
   findOperation(qitemId: string, operation: string): MissionControlActionEntry | null {
     const row = this.db.prepare(`SELECT * FROM mission_control_actions WHERE qitem_id = ?
+      ${this.hasImportedFrom ? "AND imported_from IS NULL" : ""}
       AND json_valid(audit_notes_json) AND json_extract(audit_notes_json, '$.operation') = ? ORDER BY rowid LIMIT 1`)
       .get(qitemId, operation) as ActionRow | undefined;
     return row ? rowToEntry(row) : null;
@@ -241,6 +246,7 @@ export class MissionControlActionLog {
 
 function rowToEntry(row: ActionRow): MissionControlActionEntry {
   return {
+    ...(row.imported_from ? { importedFrom: row.imported_from } : {}),
     actionId: row.action_id,
     actionVerb: row.action_verb as MissionControlVerb,
     qitemId: row.qitem_id,

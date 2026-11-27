@@ -99,6 +99,7 @@ export class KernelBootTracker {
   private degradedEmitted = false;
   private bootstrapInFlight = false;
   private managedKernelLive = false;
+  private managedKernelDetail: string | null = null;
   private existingRestore = false;
 
   constructor(private readonly deps: KernelBootTrackerDeps) {}
@@ -114,12 +115,14 @@ export class KernelBootTracker {
     this.firstUnreadySince = null;
   }
 
-  /** The daemon skipped its boot because a kernel rig already exists with seats still running. Its
-   *  status then follows those seats when they read ready or partial_ready (the same aggregation as
-   *  a cold boot), instead of always `skipped`. Otherwise it stays `skipped`, as before, so a running
-   *  kernel whose seats are not ready yet never newly blocks `rig start`. */
-  observeManagedKernel(): void {
+  /** The daemon skipped its boot because a kernel rig already exists. Its status then follows that
+   *  rig's seats when they read ready or partial_ready (the same aggregation as a cold boot), including
+   *  seats brought back after this daemon started, instead of always `skipped`; `detailWhenUp` replaces
+   *  the skip detail while they do. Otherwise it stays `skipped`, as before, so a kernel whose seats are
+   *  not ready yet never newly blocks `rig start`. */
+  observeManagedKernel(detailWhenUp: string | null = null): void {
     this.managedKernelLive = true;
+    this.managedKernelDetail = detailWhenUp;
   }
 
   /** Auth-blocked terminal. Operator sees the 3-part error in detail. */
@@ -199,7 +202,9 @@ export class KernelBootTracker {
           ? null
           : this.firstUnreadySince,
       variant: this.variant,
-      detail: lastBootFailure ? null : this.detail,
+      detail: lastBootFailure ? null
+        : state === "skipped" && kernelState !== "skipped" && this.managedKernelDetail !== null ? this.managedKernelDetail
+        : this.detail,
       lastBootFailure,
       existingRestore: this.existingRestore ? (this.bootstrapInFlight ? "in_progress" : "finished") : null,
     };

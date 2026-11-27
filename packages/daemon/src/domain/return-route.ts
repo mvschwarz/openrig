@@ -51,6 +51,17 @@ export function conversationIssuedAddress(db: Database.Database, tags: unknown):
   } catch { return null; }
 }
 
+/** Whether OpenRig issued this address to a person's own conversation on this daemon: a row records it as its `issued` or
+ *  `issued-actor` return route (one carried from another host keeps that host in its route, so it never matches). Nothing
+ *  pushes work there; the conversation reads its own queue. False when no row records it, or the record can't be read. */
+export function isIssuedConversationAddress(db: Database.Database, address: string): boolean {
+  try {
+    // Reads idx_queue_items_open_routed (routed rows only), not the whole queue.
+    return !!db.prepare(`SELECT 1 FROM queue_items WHERE return_route = ? AND return_route_basis IN ('issued', 'issued-actor')
+        LIMIT 1`).get(address);
+  } catch { return false; }
+}
+
 /** Every route note starts with this. They're delivery machinery, never someone picking the row up. */
 export const RETURN_ROUTE_NOTE_PREFIX = "return-route ";
 /** Recorded on the escalation a relay task carries, when an agent at the route claims that task: pickup only. */

@@ -5,8 +5,9 @@
 //
 // When the seat's Claude asks permission for a tool call, this hook submits the exact request to the seat's OpenRig daemon
 // (the permission-request route of the harness runner contract, as a native ask) and waits, for a bounded window, for the
-// answer of whoever OpenRig asks: the person chosen for the seat, the person's own conversation that handed the seat its
-// work (its return route), or the default person. Meanwhile Claude Code's own dialog stays open in the seat's terminal,
+// answer of whoever OpenRig asks: the person chosen for the seat, else the person's own conversation that handed the seat
+// its work (its return route). With neither, no one is asked (not the default person by implication), and the seat's usual
+// prompt escalation runs. Meanwhile Claude Code's own dialog stays open in the seat's terminal,
 // and whichever answer comes first counts (Claude Code 2.1.330, checked on a lane: the dialog is drawn and answerable while
 // this hook waits).
 //

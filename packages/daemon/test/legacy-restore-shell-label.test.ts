@@ -124,6 +124,10 @@ describe.each(runtimes)("legacy $runtime restore with a shell label", (runtime) 
     const { result, launched, killed } = await legacyRestore(runtime, "zsh", () => idleShell);
     expect(result.status).toBe("awaiting-decision");
     expect(result.error).toContain("resume attempted but failed");
+    // An older Claude Code can report a saved conversation as not found; the update line is Claude's alone.
+    if (runtime.runtime === "claude-code") expect(result.error).toContain("no session is running. If this Claude Code may be older than the one that saved the conversation, update it and retry the restore. Otherwise check the harness state manually");
+    else expect(result.error).toContain("no session is running. Check the harness state manually");
+    expect(result.error).toContain("which starts a new conversation and leaves the saved one unused: ");
     expect(killed).toBe(true);
     expect(launched?.status).toBe("superseded");
   });

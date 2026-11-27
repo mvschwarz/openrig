@@ -665,7 +665,7 @@ export class SeatRuntimeSwitchService {
       if (isCommunityHarnessRuntime(target)) {
         const found = loadCommunityHarnessPreset(target);
         sessionRegistry.recordCommunityHarnessSelection(successor.id, target,
-          found.ok ? (found.preset.protocol === "pi-rpc" ? "pi-rpc" : found.preset.runner) : undefined);
+          found.ok ? (found.preset.protocol === "pi-rpc" ? "pi-rpc" : found.preset.runner) : undefined, found.ok ? found.preset.activityHooks : undefined);
       }
       // The successor was launched in the seat's saved folder (stageSuccessor's node.cwd).
       sessionRegistry.recordLaunchedCwd(successor.id, node.cwd);
