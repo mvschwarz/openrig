@@ -336,12 +336,20 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
 
       // A refusal for this agent newer than its last accepted reminder is a return to ability: the attempt met a prompt,
       // the ladder closed that refusal once the prompt cleared, and the owner can take the reminder now. The interval
-      // doesn't hold it back; before the interval existed, that scan sent.
-      const refusedSince = (rows: string[], at: number): boolean => {
+      // doesn't hold it back; before the interval existed, that scan sent. Only this agent's own refusal counts: the
+      // episode is keyed by the seat, and the reserve behind it by the occupant it was sent to.
+      const refusedSince = (rows: string[], at: number, owner: string, generation: string | null,
+        generationOf: (t: RowTransitionView | undefined) => string | null): boolean => {
         for (const id of rows) {
           try {
-            if (deps.rows.listTransitions(id).some(t => t.transitionNote?.startsWith(REFUSED_PREFIX)
-              && Number.isFinite(Date.parse(t.ts)) && Date.parse(t.ts) > at)) return true;
+            const transitions = deps.rows.listTransitions(id);
+            for (const t of transitions) {
+              if (!t.transitionNote?.startsWith(REFUSED_PREFIX) || !(Number.isFinite(Date.parse(t.ts)) && Date.parse(t.ts) > at)) continue;
+              const key = keyOfNote(t.transitionNote);
+              if (!key || !key.startsWith(`${owner}|`)) continue;
+              const prior = generationOf(transitions.find(r => r.transitionNote?.startsWith(RESERVE_PREFIX) && keyOfNote(r.transitionNote) === key));
+              if (generation === null || prior === null || prior === generation) return true;
+            }
           } catch { /* unreadable history holds nothing back */ }
         }
         return false;
@@ -536,7 +544,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         const last = minIntervalS === 0 ? null : lastReminder(seat.sessionName, generation);
         if (!terminal && last && seat.activity.needsInput.count === 0
           && (deps.now?.() ?? Date.now()) - last.at < minIntervalS * 1000
-          && !refusedSince(knownRows, last.at)) {
+          && !refusedSince(knownRows, last.at, seat.sessionName, generation, generationOf)) {
           const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && last.obligations.includes(r.qitemId)
             && namedIds.includes(r.qitemId)).map(r => r.qitemId);
           const nextReminderAt = new Date(last.at + minIntervalS * 1000).toISOString();

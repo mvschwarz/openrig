@@ -123,6 +123,13 @@ export function updateWatchdogJob(
   // spec is context.owner_min_interval_s. So a spec that sets that key is the one edit that survives the restart, and
   // the job's own cadence stays the daemon's.
   const specOnly = job.policy === PARKED_OWNER_POLICY_NAME;
+  if (specOnly && message !== undefined) {
+    throw new WatchdogJobsError(
+      "field_not_updatable",
+      `watchdog job ${jobId} composes its own reminder text, and the daemon rewrites its spec at start, so a message here would be lost; only ${OWNER_MIN_INTERVAL_KEY} in the spec is kept`,
+      { jobId, policy: job.policy },
+    );
+  }
   if (specOnly && intervalSeconds !== undefined) {
     throw new WatchdogJobsError(
       "interval_not_effective",

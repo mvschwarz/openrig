@@ -1551,6 +1551,24 @@ describe("context.owner_min_interval_s: a minimum time between one owner's remin
     expect(after.message).toContain(ROW_IDS[1]!);
   });
 
+  it("only this agent's own refusal is a return to ability: another owner's or another occupant's isn't", async () => {
+    const history = [wake(10, [ROW_IDS[0]!])];
+    // Another owner's refusal on the same row, and this owner's refusal at a reserve armed for an earlier occupant.
+    const otherOwner = `${REFUSED_PREFIX} ${SEAT2}|other#r; Refused: '${SEAT2}' is at an interactive prompt`;
+    const otherOccupant = `${REFUSED_PREFIX} ${SEAT}|old#r; Refused: '${SEAT}' is at an interactive prompt`;
+    for (const [note, reserveGeneration] of [[otherOwner, "gen-1"], [otherOccupant, "gen-0"]] as const) {
+      const store = new RowStore();
+      store.record(ROW_IDS[0]!, "watchdog@system", "in-progress", `${RESERVE_PREFIX} ${SEAT}|old#r; generation ${reserveGeneration}; retention-state dW5rbm93bg; obligations ${ROW_IDS[0]}`, at(9));
+      store.record(ROW_IDS[0]!, "watchdog@system", "in-progress", note, at(5));
+      expect(await run(history, HOUR, NOW, store)).toMatchObject(heldSkip);
+    }
+    // This agent's own refusal, at its own reserve: the interval lets it go.
+    const store = new RowStore();
+    store.record(ROW_IDS[0]!, "watchdog@system", "in-progress", `${RESERVE_PREFIX} ${SEAT}|own#r; generation gen-1; retention-state dW5rbm93bg; obligations ${ROW_IDS[0]}`, at(9));
+    store.record(ROW_IDS[0]!, "watchdog@system", "in-progress", `${REFUSED_PREFIX} ${SEAT}|own#r; Refused: '${SEAT}' is at an interactive prompt`, at(5));
+    expect((await run(history, HOUR, NOW, store)).action).toBe("send");
+  });
+
   it("an unchanged set after the hour stays quiet, and an item closed during the hour isn't named at expiry", async () => {
     const store = new RowStore();
     let open = [ROW_IDS[0]!, ROW_IDS[1]!];

@@ -522,6 +522,8 @@ describe("watchdog update", () => {
       expect(changed.status).toBe(200);
       expect(jobs.getByIdOrThrow(job.jobId).specYaml).toContain(`${OWNER}: 1800`);
       expect(changed.body.job.jobId).toBe(job.jobId);
+      // Its reminder text is composed by the policy and the spec is rewritten at start, so a message would be lost.
+      await refused(job.jobId, { message: "mine" }, 400, "field_not_updatable");
       // A value the policy would ignore is refused rather than stored.
       await refused(job.jobId, { specYaml: spec("  owner_min_interval_s:\n    someone: nope\n") }, 400, "spec_invalid");
     });
