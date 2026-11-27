@@ -25,7 +25,7 @@ function entryFor(session: string | null): NodeInventoryEntry {
 }
 
 function fakeDb(): Database.Database {
-  return { prepare: () => ({ all: () => [] }) } as unknown as Database.Database;
+  return { prepare: () => ({ all: () => [], iterate: () => [][Symbol.iterator]() }) } as unknown as Database.Database;
 }
 
 describe("S19 A8 — the enrichment serves the arbitrated taxonomy state", () => {
