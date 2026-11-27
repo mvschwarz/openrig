@@ -565,9 +565,15 @@ describe("the conversation key", () => {
 
 describe("the conversation hooks, run as Claude Code runs them", () => {
   it("exit at once in a seat and with no hook input, never waiting on stdin or the daemon", () => {
+    const rejectInput = join(data, "reject-hook-input.cjs");
+    writeFileSync(rejectInput, `Object.defineProperty(process, "stdin", {
+      get() { throw new Error("a seat hook must not read stdin"); }
+    });`);
     for (const mode of ["conversation-waiter", "conversation-turn", "codex-start", "codex-end"]) {
       const started = Date.now();
-      execFileSync(process.execPath, [bridgePath, mode], { input: JSON.stringify({ session_id: SESSION }),
+      // The seat guard exits without reading: writing input races that exit (EPIPE on macOS).
+      // Give it no input; the preload also catches a guard moved after the stdin read.
+      execFileSync(process.execPath, ["--require", rejectInput, bridgePath, mode], { stdio: ["ignore", "pipe", "pipe"],
         env: { PATH: process.env.PATH ?? "", OPENRIG_SESSION_NAME: "dev-impl@team", CLAUDE_PLUGIN_DATA: data }, timeout: 10_000 });
       expect(Date.now() - started, mode).toBeLessThan(5_000);
     }
