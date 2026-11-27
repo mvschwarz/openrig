@@ -1790,6 +1790,12 @@ exception: an explicit effort choice saved with rig seat set-effort is applied, 
 --plan shows that change. With no saved choice (never set, or cleared with --clear),
 an effort difference refuses as settings_drift, as a pending set-model does; the
 next ordinary managed launch or resume resolves effort instead.
+A developer_instructions command-line difference also doesn't refuse the restart.
+Managed launches use that override for startup guidance, but a manual resume can
+carry a person's own value too. This in-place restart doesn't preserve the override
+or rebuild startup guidance; --plan and the result report when it changes. To
+refresh startup guidance, or adopt new openrig-core in a home other seats share,
+use the normal restore path together: rig down, then rig up --existing.
 This never switches an account (use rig auth switch first), never reads credentials,
 never launches fresh, forks or retries. Peers sharing the Codex home are reported,
 not restarted. An openrig-core upgrade waiting in the seat's Codex home installs
