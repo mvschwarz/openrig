@@ -489,6 +489,60 @@ edges: []
     expect(logs.join("\n")).toMatch(/valid/i);
   });
 
+  // #2769: a run with no mode flag only validates. A bare "Valid" read as success, so the notice says nothing changed
+  // and names the flags that apply the spec. Each run is checked to have posted only to the validate route.
+  function recordingClient(paths: string[]) {
+    return (baseUrl: string) => {
+      const client = new DaemonClient(baseUrl);
+      const postText = client.postText.bind(client);
+      client.postText = ((path: string, ...rest: unknown[]) => {
+        paths.push(path);
+        return (postText as (...args: unknown[]) => unknown)(path, ...rest);
+      }) as typeof client.postText;
+      return client;
+    };
+  }
+
+  it("import with no mode flag says it only validated and imported nothing, and names the flags that import", async () => {
+    const paths: string[] = [];
+    const program = new Command();
+    program.addCommand(importCommand(importDeps("schema_version: 1\nname: test\n", { clientFactory: recordingClient(paths) })));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml"]));
+    expect(logs).toEqual([
+      "Valid. Nothing was imported: without a mode flag, rig import only validates the spec.\n" +
+      "To import it, add --instantiate (create the rig and launch it) or --materialize-only (create it without launching).",
+    ]);
+    expect(paths).toEqual(["/api/rigs/import/validate"]);
+  });
+
+  it("import --target-rig with no mode flag says nothing was applied to that rig, and names what each apply flag changes", async () => {
+    const paths: string[] = [];
+    capturedImportPath = "";
+    const program = new Command();
+    program.addCommand(importCommand(importDeps(`version: "0.2"\nname: test\npods: []\n`, { clientFactory: recordingClient(paths) })));
+    const exitCodeBefore = process.exitCode;
+    process.exitCode = undefined;
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--target-rig", "rig-123"]));
+    const exitCode = process.exitCode;
+    process.exitCode = exitCodeBefore;
+    expect(logs).toEqual([[
+      "Valid. Nothing was applied to rig rig-123: without a mode flag, rig import only validates the spec.",
+      "To apply it to rig rig-123, add one of:",
+      "  --workspace-only    apply the spec's workspace declaration",
+      "  --materialize-only  add the spec's pods (a pod the rig already has is a conflict)",
+      "Neither changes the pods or members the rig already has.",
+    ].join("\n")]);
+    expect(paths).toEqual(["/api/rigs/import/validate"]);
+    expect(capturedImportPath).toBe("");
+    expect(exitCode ?? 0).toBe(0);
+  });
+
+  it("import help says a run with no mode flag only validates, and which flags use --target-rig", () => {
+    const help = importCommand().helpInformation().replace(/\s+/g, " ");
+    expect(help).toContain("Validate a rig spec from YAML; add --instantiate, --materialize-only or --workspace-only to apply it");
+    expect(help).toContain("--target-rig <rigId> Existing rig to apply to, with --materialize-only or --workspace-only (alone, import only validates)");
+  });
+
   // Test 5: import invalid YAML (400)
   it("import: invalid YAML -> errors", async () => {
     const deps = importDeps("INVALID");
