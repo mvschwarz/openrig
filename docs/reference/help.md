@@ -156,6 +156,10 @@ the continuation command above. A quoted or dismissed login screen is not a curr
 keep their existing readiness handling. Claude's persistent "Not logged in" footer alone is not a login refusal, because a
 configured gateway may authenticate its requests.
 
+When a Claude seat's conversation is resumed and its latest reply is Claude's login refusal ("Not logged in · Please run
+/login"), the resume keeps the seat for its person and says so, not that the resume failed. Its conversation is kept, and
+nothing is typed into it. If the seat isn't signed in, sign in with `/login` in that seat's terminal.
+
 ### You can't tell which instance or configuration is involved
 
 Read [instance layout](instance-layout.md) (`rig context get reference/instance-layout.md`) and
