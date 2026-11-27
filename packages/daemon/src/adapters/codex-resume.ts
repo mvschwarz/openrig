@@ -44,6 +44,9 @@ interface CodexResumeOptions {
   /** Ensure the managed Codex config (hooks, trust) just before a resume, as a runtime-adapter launch does, in the
    *  seat's own home when it has one. */
   ensureManagedConfig?: (codexHome?: string) => Promise<void>;
+  /** #3385: then complete an openrig-core upgrade waiting in that home, before the resumed Codex starts, once no other
+   *  Codex seat runs there (the seat's own home when it has one, as above). */
+  upgradeCorePlugin?: (tmuxSessionName: string, codexHome?: string) => Promise<void>;
   /** Process rows for the idle-shell check; defaults to the OS listing. */
   listProcesses?: NativeProcessLister;
 }
@@ -108,6 +111,7 @@ export class CodexResumeAdapter {
 
     // Only a seat's own home is passed on, so a call for a seat without one is exactly as before.
     await (seatCodexHome ? this.options.ensureManagedConfig?.(seatCodexHome) : this.options.ensureManagedConfig?.());
+    await this.options.upgradeCorePlugin?.(tmuxSessionName, seatCodexHome);
 
     if (codexConfigProfile?.trim()) {
       const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");

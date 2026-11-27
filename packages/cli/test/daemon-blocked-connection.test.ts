@@ -118,7 +118,9 @@ describe("transport render: blocked is not down", () => {
     const { err } = render(await connectionError("EPERM"));
     expect(err).toMatch(/Codex sandbox/);
     expect(err).toMatch(/#275/);
-    expect(err).toMatch(/cannot change its own sandbox/);
+    expect(err).toMatch(/This session can't lift its own sandbox; only the user can, for one command or for the session/);
+    expect(err).toMatch(/Tell the user this session cannot reach OpenRig/);
+    expect(err).not.toMatch(/The seat cannot|this seat cannot/);
     expect(err).toContain("The agent is waiting for permission or can't reach the daemon");
     expect(err).toMatch(/docs\/reference\/help\.md/);
     expect(err).not.toMatch(DOWN_ADVICE);

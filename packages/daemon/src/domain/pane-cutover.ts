@@ -1,4 +1,4 @@
-import type { PaneTerminal, TmuxAdapter } from "../adapters/tmux.js";
+import type { PaneTerminal, StandbySignalWitness, TmuxAdapter } from "../adapters/tmux.js";
 import type { NativeProcessLister } from "./native-process-lineage.js";
 import { exitPaneRuntime, pinTerminal, type RuntimeExitTmux, type TerminalPin } from "./runtime-exit.js";
 
@@ -53,13 +53,23 @@ export async function terminatePaneInPlace(
   label = "Retiree",
   inputTarget = paneId,
   occupant?: PaneOccupant,
+  standby?: { beforeEffect: () => Promise<void>; witness: StandbySignalWitness; processesGone: () => Promise<boolean> },
 ): Promise<PaneTerminationResult> {
   const failures: string[] = [];
   // The pane's terminal (null: unreadable), which the signals and typed input below are held to.
   const terminal = occupant?.terminal !== undefined ? occupant.terminal : occupant && tmux.paneTerminal ? await tmux.paneTerminal(paneId) : undefined;
   const pin = terminal ? pinTerminal(tmux as Pick<TmuxAdapter, "paneTerminal">, terminal) : terminal;
-  const signalPane = paneSignal(tmux, inputTarget, pin);
+  const signalPane = standby ? async (signal: "TERM" | "KILL") => {
+    if (signal === "KILL" && await tmux.isPaneDead(paneId)) {
+      return { ok: false as const, code: "standby_process_unconfirmed", message: "The pane exited but its runner's exit is unconfirmed." };
+    }
+    await standby.beforeEffect();
+    return tmux.signalPaneProcess(inputTarget, signal, standby.witness);
+  } : paneSignal(tmux, inputTarget, pin);
+  const dead = standby ? { isPaneDead: async (pane: string) => await tmux.isPaneDead(pane) && await standby.processesGone() } : tmux;
+  await standby?.beforeEffect();
   const remain = await tmux.setRemainOnExit(paneId, true);
+  if (standby && !remain.ok) return { ok: false, message: remain.message };
   if (!remain.ok) failures.push(`remain-on-exit: ${remain.message}`);
   const detail = () => failures.length > 0 ? ` Tmux failures: ${failures.join("; ")}.` : "";
   const changed = (): PaneTerminationResult => ({ ok: false, code: "guard_target_changed", message: `${label} in pane "${paneId}" was left `
@@ -86,7 +96,7 @@ export async function terminatePaneInPlace(
   const term = await signalPane("TERM");
   if (!term.ok) failures.push(`TERM: ${term.message}`);
   if (pin?.changed) return changed();
-  if (await waitPaneDead(tmux, paneId, timing)) {
+  if (await waitPaneDead(dead, paneId, timing)) {
     // The runtime's own exit wasn't verified. A successful pane-level stop still proceeds, but doesn't prove its shutdown.
     return { ok: true, path: exited ? "forced" : "graceful", detail: exited ? `${exited.detail} The pane's process exited on TERM.` : "The pane's process exited on TERM." };
   }
@@ -94,7 +104,7 @@ export async function terminatePaneInPlace(
   const kill = await signalPane("KILL");
   if (!kill.ok) failures.push(`KILL: ${kill.message}`);
   if (pin?.changed) return changed();
-  if (await waitPaneDead(tmux, paneId, timing)) {
+  if (await waitPaneDead(dead, paneId, timing)) {
     const window = `${(timing.timeoutMs / 1000).toFixed(1)} s`;
     return { ok: true, path: "forced", detail: exited ? `${exited.detail} The pane's process didn't exit within ${window} of TERM and was killed.`
       : `The pane's process didn't exit within ${window} of TERM and was killed.` };

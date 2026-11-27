@@ -50,8 +50,7 @@ export interface PsEntry {
    */
   hasWorkCount: number;
   status: "running" | "partial" | "stopped";
-  /** Folded from members not explicitly stopped. Empty rigs and rigs whose
-   * members are all intentionally stopped derive `stopped`. */
+  /** Folded from members not explicitly stopped or in standby. An empty fold derives `stopped`. */
   lifecycleState: RigLifecycleState;
   uptime: string | null;
   latestSnapshot: string | null;
@@ -112,14 +111,14 @@ export function deriveRigLifecycleState(nodeStates: NodeLifecycleState[]): RigLi
 }
 
 /** Shared display rollup for ps and the rig summaries consumed by the TUI.
- * Intentionally stopped seats remain in process counts and node diagnostics. */
+ * Explicitly stopped and standby seats remain visible in node diagnostics and totals. */
 export function deriveRigLifecycleFromInventory(
   inventory: readonly NodeInventoryEntry[],
   assignedWorkCount: (entry: NodeInventoryEntry) => number,
 ): RigLifecycleState {
   return deriveRigLifecycleState(
     inventory.filter((entry) => {
-      if (entry.intentionallyStopped) return false;
+      if (entry.intentionallyStopped || entry.standbyStopped) return false;
       const work = assignedWorkCount(entry);
       return !(isUnlaunchedHeldWithoutWork(entry, work) && !seatNeedsAttention(entry, null, null, work));
     }).map((entry) => entry.lifecycleState),

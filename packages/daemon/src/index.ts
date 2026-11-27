@@ -434,6 +434,7 @@ export async function startServer(port?: number) {
         // tree post-bind so the HTTP surface is ready before the first
         // tick (matches contextMonitor pattern).
         deps.watchdogScheduler?.start();
+        deps.seatReaper?.start();
         // #2940: keep_alive seats are watched from here on; boot-time recovery stays with the kernel boot in createDaemon.
         deps.keepAliveSupervisor?.start();
         deps.networkConnector?.start();
@@ -512,6 +513,7 @@ export async function startServer(port?: number) {
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
+      ["seat-reaper", async () => { deps.seatReaper?.stop(); await deps.seatReaper?.drain(); }],
       ["terminal-reachability", () => deps.terminalReachability?.stop()],
       ["network-connector", () => deps.networkConnector?.stop()],
       ["stream-intake", () => deps.streamIntakeCoordinator?.stop()],

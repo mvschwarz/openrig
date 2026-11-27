@@ -48,6 +48,7 @@ import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper } from "./launch-wrapper.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { readStandbyStop } from "./seat-standby.js";
 
 // -- Row types for SQL results --
 
@@ -1086,6 +1087,7 @@ function buildInventoryItem(
   // a row recorded before attempts were kept has none), the session reads exited or superseded, and no binding is left.
   const stopConfirmed = row.intentionally_stopped === 1 && row.stop_attempt === null
     && (row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null;
+  const standbyStopped = row.intentionally_stopped === 1 && row.session_status === "exited" && readStandbyStop(db, row.node_id) !== null;
   const lifecycleState = keepAliveIncident?.exhausted && sessionStatus !== "running" ? "attention_required" : deriveNodeLifecycleState({
     sessionStatus,
     startupStatus,
@@ -1116,9 +1118,10 @@ function buildInventoryItem(
     storedSessionStatus: row.session_status,
     // An explicit down records a failed start's rolled-back session without changing its superseded status.
     intentionallyStopped: stopConfirmed,
+    ...(standbyStopped ? { standbyStopped: true as const } : {}),
     // #2940: a stop recorded but not confirmed yet (the session not yet gone, the daemon lost mid-stop, or a request
     // recorded on a row already exited or superseded that no probe has proven absent: its attempt is still set).
-    ...(row.intentionally_stopped === 1 && !stopConfirmed ? { stopRequested: true } : {}),
+    ...(row.intentionally_stopped === 1 && !stopConfirmed && !standbyStopped ? { stopRequested: true } : {}),
     // #2940: the seat declares keep_alive (absent = off, so other seats' output is unchanged).
     ...(row.keep_alive === 1 ? { keepAlive: true } : {}),
     ...(keepAliveIncident ? { keepAliveIncident } : {}),
