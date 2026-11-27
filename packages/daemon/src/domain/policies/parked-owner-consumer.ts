@@ -544,7 +544,8 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         const last = minIntervalS === 0 ? null : lastReminder(seat.sessionName, generation);
         if (!terminal && last && seat.activity.needsInput.count === 0
           && (deps.now?.() ?? Date.now()) - last.at < minIntervalS * 1000
-          && !refusedSince(knownRows, last.at, seat.sessionName, generation, generationOf)) {
+          // The rows the reminder named are read too: a refusal recorded on one of them still counts after it closes.
+          && !refusedSince([...new Set([...knownRows, ...last.obligations])], last.at, seat.sessionName, generation, generationOf)) {
           const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && last.obligations.includes(r.qitemId)
             && namedIds.includes(r.qitemId)).map(r => r.qitemId);
           const nextReminderAt = new Date(last.at + minIntervalS * 1000).toISOString();
