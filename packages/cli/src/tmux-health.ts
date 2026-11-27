@@ -3,26 +3,39 @@ export interface TmuxProbeResult {
   available: boolean;
   version: string | null;
   detail: string | null;
-  /** not_runnable: this shell was refused permission to start tmux (EPERM or EACCES, as in a sandbox), so whether tmux
-   *  is installed is unknown. */
-  code: "available" | "no_server" | "not_installed" | "not_runnable" | "unhealthy";
+  /** not_installed only on evidence that there's no tmux to run. not_runnable: this shell was refused permission to start
+   *  it (EPERM or EACCES, as in a sandbox). check_failed: the version check failed some other way (a timeout, say). In
+   *  both, whether tmux is installed is unknown. */
+  code: "available" | "no_server" | "not_installed" | "not_runnable" | "check_failed" | "unhealthy";
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** A process this shell was refused permission to start (a sandbox can do this) says nothing about whether tmux exists. */
-function refusedToRun(err: unknown): boolean {
-  const code = (err as { code?: unknown } | null)?.code;
-  return code === "EPERM" || code === "EACCES";
+/** What a failed `tmux -V` shows. Only evidence of no tmux to run (no such command or file, a shell's exit 127) is
+ *  not_installed. A process this shell was refused permission to start (a sandbox can do this) is not_runnable. Anything
+ *  else, such as a timeout, is check_failed. The last two say nothing about whether tmux exists. */
+function classifyVersionFailure(err: unknown): "not_installed" | "not_runnable" | "check_failed" {
+  const e = err as { code?: unknown; status?: unknown; stderr?: unknown } | null;
+  if (e?.code === "EPERM" || e?.code === "EACCES") return "not_runnable";
+  if (e?.code === "ENOENT" || e?.status === 127) return "not_installed";
+  return /\bnot found\b|no such file or directory/i.test(`${String(e?.stderr ?? "")} ${errorMessage(err)}`) ? "not_installed" : "check_failed";
 }
 
-export function buildTmuxNotRunnable(detail: string): { message: string; reason: string; fix: string } {
+/** What to say when `tmux -V` failed without showing that tmux is missing (not_runnable or check_failed). */
+export function buildTmuxVersionCheckFailure(code: "not_runnable" | "check_failed", detail: string): { message: string; reason: string; fix: string } {
+  if (code === "not_runnable") {
+    return {
+      message: `tmux couldn't be run from this shell (${detail}).`,
+      reason: "This shell was refused permission to start a process, as a sandbox can do. That doesn't show whether tmux is installed, and OpenRig needs to run it.",
+      fix: "Check with `command -v tmux` from a shell outside the sandbox, and run OpenRig from a shell that can start tmux. Installing tmux won't help if it is already there.",
+    };
+  }
   return {
-    message: `tmux couldn't be run from this shell (${detail}).`,
-    reason: "This shell was refused permission to start a process, as a sandbox can do. That doesn't show whether tmux is installed, and OpenRig needs to run it.",
-    fix: "Check with `command -v tmux` from a shell outside the sandbox, and run OpenRig from a shell that can start tmux. Installing tmux won't help if it is already there.",
+    message: `tmux's version check couldn't be completed (${detail}).`,
+    reason: "`tmux -V` failed without showing whether tmux is installed, and OpenRig needs to run it.",
+    fix: "Run `tmux -V` yourself to see what happens. If it isn't installed, install it (brew install tmux on macOS, apt install tmux on Debian/Ubuntu); if it hangs or errors, fix that tmux first.",
   };
 }
 
@@ -90,7 +103,7 @@ export function probeTmuxControl(exec: (cmd: string) => string): TmuxProbeResult
       available: false,
       version: null,
       detail: errorMessage(err),
-      code: refusedToRun(err) ? "not_runnable" : "not_installed",
+      code: classifyVersionFailure(err),
     };
   }
 
@@ -134,7 +147,7 @@ export async function probeTmuxControlAsync(exec: (cmd: string) => Promise<strin
       available: false,
       version: null,
       detail: errorMessage(err),
-      code: refusedToRun(err) ? "not_runnable" : "not_installed",
+      code: classifyVersionFailure(err),
     };
   }
 

@@ -668,6 +668,29 @@ describe("rig setup", () => {
     expect(execs).not.toContain("brew install tmux");
   });
 
+  // #4028 review X-F1: only evidence that tmux is missing reads as not installed. A version check that timed out (setup's
+  // runner allows 30 s) says nothing either way.
+  it("doesn't install tmux, or call it missing, when its version check timed out, and keeps the check's detail", async () => {
+    const execs: string[] = [];
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        execs.push(cmd);
+        if (cmd === "herdr --version") return "herdr 0.9.3\n";
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") throw Object.assign(new Error("spawnSync /bin/sh ETIMEDOUT"), { code: "ETIMEDOUT", signal: "SIGTERM" });
+        if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
+        return "";
+      },
+    });
+    const result = await runSetup(deps, {});
+
+    const tmux = result.steps.find((s) => s.id === "tmux_install");
+    expect(tmux?.status).toBe("fail");
+    expect(tmux?.message).toBe("tmux's version check couldn't be completed (spawnSync /bin/sh ETIMEDOUT).");
+    expect(tmux?.message).not.toMatch(/not found|isn't installed/);
+    expect(execs).not.toContain("brew install tmux");
+  });
+
   it("uses the extended timeout budget for npm runtime installs", async () => {
     const seenTimeouts = new Map<string, number | undefined>();
     let claudeInstalled = false;

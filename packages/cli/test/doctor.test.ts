@@ -197,6 +197,20 @@ describe("runDoctorChecks", () => {
     expect(tmuxCheck?.fix).not.toContain("brew install");
   });
 
+  it("tmux version check failing some other way (exit 1, no not-found) -> couldn't complete, not 'not found'", () => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") throw Object.assign(new Error("Command failed: tmux -V\nprotocol version mismatch"), { status: 1 });
+        return "";
+      },
+    });
+    const { checks } = runDoctorChecks(deps);
+    const tmuxCheck = checks.find((c) => c.name === "tmux");
+    expect(tmuxCheck?.status).toBe("fail");
+    expect(tmuxCheck?.message).toMatch(/^tmux's version check couldn't be completed \(Command failed: tmux -V/);
+    expect(tmuxCheck?.message).not.toContain("not found");
+  });
+
   it("tmux mouse check is omitted on non-macOS hosts", () => {
     const deps = makeDeps({
       platform: "linux",
