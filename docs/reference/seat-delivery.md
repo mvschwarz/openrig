@@ -494,8 +494,9 @@ indexes or executable requests. Combined wakes retain each original ID and body.
 A held queue wake stays on the existing queue recovery path. A row created straight to
 a `draft-aware` seat, or handed to it with `rig queue handoff`, is tried again when the
 seat next reports idle while it's still in `draft-aware` mode, through the same guarded
-delivery and within `queue.wake_retry_cap`. A try the guard held gets one more offer while
-the seat stays idle with nothing new to report: after about 4.5 s, and not before the
+delivery and within `queue.wake_retry_cap`. A held wake not tried yet, and each try the guard
+held, gets one more offer while the seat stays idle with nothing new to report, so a draft
+deleted or left with no report doesn't strand it: after about 4.5 s, and not before the
 guard's quiet window for activity at the seat's own terminal has ended. An offer that
 couldn't try (a drain, an owed restore, the seat not idle) is offered again later. The
 wake ladder doesn't also retry these rows on its own timer; a handed-off row at a seat

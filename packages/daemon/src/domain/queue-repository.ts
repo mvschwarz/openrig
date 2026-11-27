@@ -2581,11 +2581,13 @@ export class QueueRepository {
     return !!this.outbox && !!this.transport?.draftAwareTarget?.(sessionName);
   }
 
-  /** Seats with draft-held queue wakes that have had a try, each with its newest try's time: the periodic offer gives each
-   *  such try one more offer after the quiet interval (createDraftHeldReoffer). Reads pending rows by state. */
+  /** Seats with draft-held queue wakes, each with its newest try's time, or for a wake not tried yet the time it was held:
+   *  the periodic offer gives each such time one offer after the quiet interval (createDraftHeldReoffer). So a held wake
+   *  whose draft is cleared with no activity report is still tried. Reads pending rows by state. */
   draftHeldWakeSeats(): Array<{ session: string; lastTry: string }> {
-    return this.db.prepare(`SELECT q.destination_session AS session, MAX(t.ts) AS lastTry FROM queue_items q
-      JOIN queue_transitions t ON t.qitem_id = q.qitem_id AND t.transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%'
+    return this.db.prepare(`SELECT q.destination_session AS session, MAX(COALESCE(t.ts, q.last_nudge_attempt)) AS lastTry
+      FROM queue_items q
+      LEFT JOIN queue_transitions t ON t.qitem_id = q.qitem_id AND t.transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%'
       WHERE q.state = 'pending' AND q.claimed_at IS NULL AND q.last_nudge_result = ?
       GROUP BY q.destination_session`).all(DRAFT_HELD_WAKE_RESULT) as Array<{ session: string; lastTry: string }>;
   }

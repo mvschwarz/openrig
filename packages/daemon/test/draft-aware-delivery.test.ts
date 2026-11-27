@@ -1350,6 +1350,29 @@ describe("supported seat and queue integration", () => {
     expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
   });
 
+  // A successor held for a draft that the person then deletes, or walks away from, gives no activity report. It still gets
+  // the sweep's one offer, timed from when its wake was held, so it goes instead of waiting for the owner's escalation.
+  it("offers a held successor with no try yet from the sweep once its draft is cleared with no report, and it goes once", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const src = await f.repo.create({ sourceSession: "sender@test", destinationSession: "sibling@test", body: "queued work", nudge: false });
+    const { created } = await f.repo.handoff({ qitemId: src.qitemId, fromSession: "sibling@test", toSession: "worker@test" });
+    const id = created.qitemId;
+    await vi.waitFor(() => expect(f.repo.getById(id)!.lastNudgeResult).toBe("retained:draft_aware"));
+    expect(notes(f, id, "wake-attempt:")).toEqual([]);   // the handoff's own held wake isn't a try
+    const heldAt = Date.parse(f.repo.getById(id)!.lastNudgeAttempt!);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      f.bodies.a = ""; f.hooks.clients = () => `0|${Math.floor(heldAt / 1000)}\n`;   // the draft cleared then; no report
+      const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20) });
+      attachDraftHeldReoffer(structural, f.repo, () => "idle", { quietUntil: name => f.guard.inputQuietUntil(name) });
+      vi.setSystemTime(heldAt + 4_600);   // past the interval and the terminal's quiet window
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await vi.waitFor(() => expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("delivered"));
+    } finally { vi.useRealTimers(); }
+    expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
+    expect(notes(f, id, "wake-attempt:")).toHaveLength(1);   // the offer's one try, which delivered it
+  });
+
   it("sends no typed notice to a sender who is a person; the owner's escalation still goes out", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.guard.set("a", { mode: "hold" }, "human@test", "manual terminal");
     const item = await f.repo.create({ sourceSession: "human@kernel", destinationSession: "worker@test", body: "queued work" });

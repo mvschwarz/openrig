@@ -33,7 +33,8 @@ export interface DraftHeldReofferDeps {
   /** tmux's last write time for the seat's pane, as the sweep read it (SeatStructuralActivityService.paneActivity); it
    *  changes only when the pane does. Undefined when not known, which counts as changed. */
   paneActivity: (session: string) => number | undefined;
-  /** Seats with draft-held queue wakes that have had a try, with the newest try's time (QueueRepository.draftHeldWakeSeats). */
+  /** Seats with draft-held queue wakes, with the newest try's time, or the held time for a wake not tried yet
+   *  (QueueRepository.draftHeldWakeSeats). */
   heldWakeSeats?: () => Array<{ session: string; lastTry: string }>;
   /** One draft-held wake pass for the seat (QueueRepository.retryDraftHeldWakesOnIdle). */
   deliverWakes?: (session: string) => Promise<DraftHeldPassEnd>;
@@ -61,8 +62,9 @@ export function createDraftHeldReoffer(deps: DraftHeldReofferDeps): () => void {
   const now = deps.now ?? Date.now;
   const offers = new Map<string, Offer>();
   const running = new Set<string>();
-  // Queue wakes: each try the activity path made gets ONE more offer after the quiet interval and once the seat's terminal
-  // is quiet (the guard's window), keyed by that try's time. An offer that made no try isn't spent.
+  // Queue wakes: a held wake not tried yet, and each try the activity path made, gets ONE more offer after the quiet
+  // interval and once the seat's terminal is quiet (the guard's window), keyed by that time. An offer that made no try
+  // isn't spent.
   // #48 counts tries for the owner's escalation, so a person who keeps typing still reaches it after the same number of
   // distinct tries; this only adds the observation a quiet-window hold was missing.
   const wakeOffered = new Map<string, string>();
