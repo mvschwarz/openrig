@@ -127,6 +127,17 @@ describe("seat typing guard commands", () => {
     expect(cmd.options.find(o => o.long === "--reason")?.mandatory).toBe(true);
   });
 
+  it.each([
+    { origin: "launched", line: "Origin: launched by OpenRig" },
+    { origin: "claimed", line: "Origin: adopted (origin=claimed): OpenRig didn't launch this session, so stop, restart and clean refuse it" },
+    { origin: null, line: "Origin: unknown" },
+    { origin: undefined, line: null },
+    { origin: "unreadable", line: "Origin: unknown" },
+  ])("#4003: seat status names the seat's origin ($origin)", async ({ origin, line }) => {
+    const human = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: { ...STATUS, origin } }, []))
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(human.logs.filter((l) => l.startsWith("Origin:"))).toEqual(line ? [line] : []);
+  });
   it("shows body-free current and historical native recovery evidence in human and JSON seat status", async () => {
     const nativeInput = { input: true, wake: true, cancel: false, target: null,
       unresolved: [{ requestId: "uncertain", runId: "old", inCurrentRun: false, kind: "cancel", stage: "completed", outcome: "requested", destination: "dev@rig" }],
@@ -136,6 +147,24 @@ describe("seat typing guard commands", () => {
     expect(human.logs.join("\n")).toContain('"requestId":"uncertain"'); expect(human.logs).toContain(nativeInput.recovery);
     const json = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig", "--json"]).then(() => undefined));
     expect(JSON.parse(json.logs.join("\n")).nativeInput).toEqual(nativeInput);
+  });
+  it.each([
+    { name: "a Claude Code seat with no one chosen", data: { runtime: "claude-code", runner: false, permissions_to: null },
+      line: "Own permission prompts asked of (with openrig-core loaded): its work's return route, else no one" },
+    { name: "a Claude Code seat with --deny", data: { runtime: "claude-code", runner: false, permissions_to: "deny" },
+      line: "Own permission prompts asked of (with openrig-core loaded): no one: they stay in the terminal (--deny)" },
+    { name: "a Claude Code seat with a chosen person", data: { runtime: "claude-code", runner: false, permissions_to: "mike@external" },
+      line: "Own permission prompts asked of (with openrig-core loaded): mike@external" },
+    { name: "a runner with no one chosen", data: { runtime: "codex", runner: true, permissions_to: null },
+      line: "Runner permission requests answered by: the default person" },
+    { name: "a runner with --deny", data: { runtime: "codex", runner: true, permissions_to: "deny" },
+      line: "Runner permission requests answered by: no one: refused (--deny)" },
+    { name: "another seat with no one chosen", data: { runtime: "codex", runner: false, permissions_to: null }, line: null },
+  ])("names who is asked the permission prompts of $name", async ({ data, line }) => {
+    const human = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: { ...STATUS, ...data } }, []))
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    const lines = human.logs.filter((l) => /permission (prompts asked of|requests answered by)/.test(l));
+    expect(lines).toEqual(line ? [line] : []);
   });
   it.each(["request_observed", "completed"])("reports a %s harness observation with time and honest pending state", async state => {
     const permission_stop = { state, command: "Bash: git [arguments hidden]", origin: "harness",

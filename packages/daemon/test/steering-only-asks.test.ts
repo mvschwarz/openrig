@@ -430,7 +430,9 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
   it("an answer set whose return failed is sent again from the Feed with its recorded choice, never closed by a bare Approve", async () => {
     const row = await ask({ questions: true });
     const t = await tui(readers());
-    unreachable = "orch-lead@r"; // the asking seat's rig left the topology, so the return is refused
+    // The return fails once, as a busy database or a stopped process leaves it. (An asking seat whose rig this daemon
+    // doesn't know keeps the answer on the ask instead: human-answer-unknown-source-rig.test.ts.)
+    const failing = vi.spyOn(repo, "create").mockRejectedValueOnce(new Error("database is locked"));
     await expect(t.run((await t.open(row)).act('Answer "A or B?": B'))).rejects.toThrow();
     expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", humanAnswers: { q1: "b" } });
     expect(replies(row)).toEqual([]);
@@ -438,7 +440,7 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     const reopened = await t.open(row);
     expect(reopened.read.items.find((i) => i.id === `queue:${row.qitemId}`)?.answer).toEqual({ verb: "answer", actorSession: `${HUMAN}@kernel` });
     expect(reopened.act("Approve as")).toBeUndefined();
-    unreachable = null;
+    failing.mockRestore();
     expect(await t.run(reopened.act("Send the recorded answers back"))).toMatchObject({ answer: { outcome: "answered" } });
     expect(replies(row)).toHaveLength(1);
     expect(replies(row)[0]!.body).toContain("A or B?: B");

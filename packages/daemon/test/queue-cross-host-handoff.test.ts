@@ -213,16 +213,24 @@ describe("MH-3 C2 — cross-host handoff (route choreography)", () => {
     h = makeHarness({
       fetchImpl: (async (_u: unknown, init?: RequestInit) => {
         const b = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        expect(b).not.toHaveProperty("resolution");
         return jsonResponse({ qitemId: b["qitemId"] }, 201);
       }) as unknown as typeof fetch,
     });
-    await seedSource(h.repo);
-    const res = await post(h.app, "/api/queue/qitem-source-1/handoff-and-complete", { ...HANDOFF, hostId: "vps-b", nudge: false });
+    const source = await seedSource(h.repo);
+    h.db.prepare("UPDATE queue_items SET resolution = ? WHERE qitem_id = ?").run("Earlier outcome", source.qitemId);
+    const path = `/api/queue/${source.qitemId}/handoff-and-complete`;
+    const request = { ...HANDOFF, hostId: "vps-b", nudge: false };
+    const res = await post(h.app, path, { ...request, resolution: "Accepted" });
     expect(res.status).toBe(201);
     const out = (await res.json()) as { closed: { state: string; closureTarget: string } };
     expect(out.closed.state).toBe("done");
     expect(out.closed.closureTarget).toBe(`${deriveCrossHostSuccessorId("qitem-source-1", "dev@rig-b", "vps-b")}@vps-b`);
     expect(rowCount(h.db)).toBe(1);
+    expect(h.repo.getById(source.qitemId)?.resolution).toBe("Earlier outcome\nAccepted");
+    const retry = await post(h.app, path, { ...request, resolution: "Changed verdict" });
+    expect(retry.status).toBe(201);
+    expect(h.repo.getById(source.qitemId)?.resolution).toBe("Earlier outcome\nAccepted");
   });
 
   it("NEVER-DROP: forward fails (unreachable) → 502 structured, source UNTOUCHED (still pending, no close transition)", async () => {

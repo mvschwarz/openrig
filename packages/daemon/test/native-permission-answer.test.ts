@@ -16,6 +16,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { runWakeLadderTick, PROMPT_ALERT_TAG } from "../src/domain/queue-wake-ladder.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
@@ -68,7 +69,9 @@ function fixture(options: { owner?: string | null; people?: string[]; decider?: 
     resolveOccupantGeneration: (id) => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
     isRegisteredOccupantGeneration: (id, generation) => sessions.isOccupantGenerationRegistered(id, generation) });
   const stream = new StreamStore(db, bus);
-  const owner = options.owner === undefined ? null : options.owner;
+  // A person is chosen for the seat unless a case says otherwise (`owner: null`): a native prompt asks the chosen person or
+  // the work's return route, never the default person by implication.
+  const owner = options.owner === undefined ? PERSON : options.owner;
   if (owner) db.prepare("UPDATE nodes SET permissions_to = ? WHERE id = ?").run(owner, node.id);
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -178,6 +181,135 @@ describe("a clear yes or no from the person", () => {
 });
 
 describe("words and conditions go to the receiving agent, which judges the exact action", () => {
+  it("keeps an ask-back and a further handoff holding until the current chain closes", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    await f.answer(askId, { decision: "yes, for that request" });
+    const first = f.db.prepare("SELECT qitem_id FROM queue_items WHERE handed_off_from = ?").get(askId) as { qitem_id: string };
+    const { created: second } = await f.queueRepo.handoff({ qitemId: first.qitem_id, fromSession: DECIDER,
+      toSession: "other@perm-rig", nudge: false });
+    f.db.prepare("UPDATE queue_items SET state = 'blocked' WHERE qitem_id = ?").run(second.qitemId);
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    // The same forwarding form that the native resolver supports on older queue records.
+    f.db.prepare("UPDATE queue_items SET state = 'done', closure_reason = 'handed_off_to' WHERE qitem_id = ?").run(first.qitem_id);
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    f.queueRepo.update({ qitemId: second.qitemId, actorSession: "other@perm-rig", state: "done", closureReason: "no-follow-on" });
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+  });
+
+  it("uses the newest addressed successor, including equal-time ties, instead of an older open branch", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    const old = await f.queueRepo.create({ sourceSession: PERSON, destinationSession: DECIDER, body: "old branch", nudge: false });
+    f.db.prepare("UPDATE queue_items SET handed_off_from = ?, state = 'blocked' WHERE qitem_id = ?").run(askId, old.qitemId);
+    await f.answer(askId, { decision: "yes, for that request" });
+    f.db.prepare("UPDATE queue_items SET ts_created = ? WHERE handed_off_from = ?").run("2026-01-01T00:00:00.000Z", askId);
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    await f.decide(askId, "allow", DECIDER);
+    expect(f.queueRepo.getById(old.qitemId)?.state).toBe("blocked");
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+  });
+
+  it("keeps an unrepresented handoff holding, still bounded by the original answer window", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    await f.answer(askId, { decision: "yes, for that request" });
+    f.db.prepare("UPDATE queue_items SET state = 'handed-off', handed_off_to = ? WHERE handed_off_from = ?")
+      .run("receiver@elsewhere@other-host", askId);
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    const by = f.queueRepo.getById(askId)!.tags!.find(tag => tag.startsWith("permission-answer-by:"))!;
+    const deadline = Date.parse(by.slice("permission-answer-by:".length));
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline)).toBe(true);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline + 1)).toBe(false);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, Number.NaN)).toBe(false);
+  });
+
+  it("lets a later bare prompt alert reach the existing orchestrator after the word answer is decided", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    await f.answer(askId, { decision: "yes, for that request" });
+    let now = new Date();
+    let episode = "native-ask", prompt = now.toISOString();
+    const attemptWake = vi.fn(async (_qitemId: string, _destination: string, _occurrence?: string) => "delivered-ack-pending");
+    const tick = () => runWakeLadderTick({ db: f.db, queueRepo: f.queueRepo, now, attemptWake,
+      resolveOrchestrator: () => DECIDER, readPromptState: (destination) => destination === SEAT ? "blocked" : "clear", log: () => {},
+      readPermissionPrompts: () => [{ destination: SEAT, episode, state: "blocked",
+        prompt, observedAt: now.toISOString(), evidenceRef: "fixture prompt" }] });
+    const alerts = () => f.queueRepo.list({ limit: 100 }).filter(row => row.tags?.includes(PROMPT_ALERT_TAG));
+    await tick();
+    expect(alerts()).toHaveLength(0);
+    await f.decide(askId, "allow", DECIDER);
+    episode = "later-prompt";
+    prompt = new Date(now.getTime() + 5 * 60_000).toISOString();
+    now = new Date(now.getTime() + 10 * 60_000);
+    await tick();
+    expect(alerts()).toEqual([expect.objectContaining({ destinationSession: DECIDER, state: "pending" })]);
+    expect(attemptWake).toHaveBeenCalledWith(expect.any(String), DECIDER, expect.any(String));
+    expect(attemptWake.mock.calls.some(call => call[1] === SEAT)).toBe(false); // wake the owner, never type into the native prompt
+  });
+
+  it("does not let newer decided handoffs hide an older ask that still takes an answer", async () => {
+    const f = fixture();
+    const askId = askIdOf(await f.submit());
+    const by = new Date(Date.now() + 3600_000).toISOString();
+    const tags = JSON.stringify(["runner-permission", "permission-native-hook:claude-code", `permission-answer-by:${by}`]);
+    const put = f.db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session,
+      state, body, tags, handed_off_to, handed_off_from) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)`);
+    f.db.transaction(() => { for (let n = 0; n < 25; n++) {
+      const id = `qitem-closed-native-${n}`, at = new Date(Date.now() + n + 1000).toISOString();
+      put.run(id, at, at, SEAT, PERSON, "handed-off", tags, DECIDER, null);
+      put.run(`${id}-decider`, at, at, PERSON, DECIDER, "done", null, null, id);
+    } })();
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    await f.answer(askId, { optionId: "allow" });
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+  });
+
+  it("keeps the longest answer window inclusive at its boundary and excludes expired history", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit({ holdSeconds: 86400 }));
+    const by = f.queueRepo.getById(askId)!.tags!.find(tag => tag.startsWith("permission-answer-by:"))!;
+    const deadline = Date.parse(by.slice("permission-answer-by:".length));
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline)).toBe(true);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline + 1)).toBe(false);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, Number.NaN)).toBe(false);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, Number.POSITIVE_INFINITY)).toBe(false);
+    // This is a valid old ask: both creation and its one-day answer window are in the past.
+    const old = new Date(deadline - 3 * 86400_000).toISOString();
+    f.db.prepare("UPDATE queue_items SET ts_created = ?, tags = ? WHERE qitem_id = ?")
+      .run(old, JSON.stringify(["runner-permission", "permission-native-hook:claude-code", "permission-answer-by:" + new Date(deadline - 2 * 86400_000).toISOString()]), askId);
+    expect(nativeAskHoldsPrompt(f.db, SEAT, deadline)).toBe(false);
+  });
+
+  it("keeps holding an ask passed on with handoff-and-complete until its colleague's row closes, here or on another host", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    const { created } = await f.queueRepo.handoffAndComplete({ qitemId: askId, fromSession: PERSON, toSession: "other@perm-rig", nudge: false });
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "done", closureReason: "handed_off_to" });
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    f.queueRepo.update({ qitemId: created.qitemId, actorSession: "other@perm-rig", state: "done", closureReason: "no-follow-on" });
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+    // The cross-host form closes the source done too, with no successor on this host: it holds until answer-by.
+    const remote = askIdOf(await f.submit({ requestId: "req-remote" }));
+    f.db.prepare("UPDATE queue_items SET state = 'done', closure_reason = 'handed_off_to', handed_off_to = ? WHERE qitem_id = ?")
+      .run("receiver@elsewhere", remote);
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    const by = f.queueRepo.getById(remote)!.tags!.find(tag => tag.startsWith("permission-answer-by:"))!;
+    expect(nativeAskHoldsPrompt(f.db, SEAT, Date.parse(by.slice("permission-answer-by:".length)) + 1)).toBe(false);
+  });
+
+  it("releases the prompt-alert hold after a word answer is decided on its handoff", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    await f.answer(askId, { decision: "yes, for that request" });
+    expect(f.queueRepo.getById(askId)?.state).toBe("handed-off");
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true);
+    await f.decide(askId, "allow", DECIDER, { reason: "the action meets the answer" });
+    expect(f.queueRepo.getById(askId)?.state).toBe("handed-off");
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+  });
+
   it("allows the action when it meets the person's condition, as the agent's judgment", async () => {
     const f = fixture({ decider: DECIDER });
     const askId = askIdOf(await f.submit());
@@ -186,6 +318,12 @@ describe("words and conditions go to the receiving agent, which judges the exact
       message: `Your words on ${askId} went to ${DECIDER}, the receiving agent, which judges whether this exact action meets them. Its decision`
         + ` is recorded as its judgment, not your own answer, with your words as you gave them. ${SEAT}'s prompt waits until then, and is also open in the seat's terminal.` } } });
     expect(f.rowsTo(DECIDER)).toBe(1);
+    // The receiving agent is told to judge the condition itself, and to ask back only when it can't tell: a condition it
+    // can judge isn't a reason for a second round with the person.
+    const told = f.queueRepo.list({ limit: 100 }).find((row) => row.destinationSession === DECIDER)!.body;
+    expect(told).toContain("A condition is theirs to set and yours to judge: when this exact action plainly meets it, allow it; when it plainly doesn't, take the reject option with their words in your reason.");
+    expect(told).toContain("If you can't tell what they meant, or whether this exact action meets their condition, ask them back");
+    expect(told).not.toContain("unclear or conditional");
     expect((await f.read(askId)).body).toMatchObject({ state: "pending" });
     const decided = await f.decide(askId, "allow", DECIDER, { reason: "it pushes the docs branch, which is their condition" });
     expect(decided.body).toMatchObject({ state: "answered", optionId: "allow", native: { answeredAs: "agent", by: DECIDER,
@@ -225,8 +363,10 @@ describe("words and conditions go to the receiving agent, which judges the exact
 describe("no one to ask: nothing is decided, and the native prompt carries on", () => {
   it.each([
     ["no person is registered", { people: [] as string[] }],
-    ["several people are registered and none is the default", { people: ["mike", "dana"] }],
+    ["several people are registered and none is the default", { owner: null, people: ["mike", "dana"] }],
+    ["the default person is registered, but no one is chosen for the seat and its work has no return route", { owner: null, people: ["mike"] }],
     ["the seat's chosen person is no longer registered", { owner: "gone@external", people: [] as string[] }],
+    ["the chosen person is unavailable while a different default person is registered", { owner: "gone@external", people: ["mike"] }],
   ])("asks no one and permits nothing when %s", async (_case, options) => {
     const f = fixture(options);
     const submitted = await f.submit();
@@ -234,6 +374,21 @@ describe("no one to ask: nothing is decided, and the native prompt carries on", 
     expect(String(submitted.body.reason)).toMatch(/Nothing was decided: Claude Code's own prompt stays open in the seat's terminal\.$/);
     expect(f.asks()).toHaveLength(0);
     expect(f.permits()).toHaveLength(0);
+  });
+
+  it("doesn't ask the default person by implication, so the seat's prompt escalation isn't held back", async () => {
+    const f = fixture({ owner: null, people: ["mike"] });
+    const submitted = await f.submit();
+    expect(submitted).toMatchObject({ status: 200, body: { ok: true, state: "not_asked" } });
+    expect(String(submitted.body.reason)).toContain("No one is chosen for this seat (rig seat set-permissions-to) and its work carries no return route on this host, so no one is asked by implication; the prompt goes through the seat's usual escalation instead");
+    expect(f.asks()).toHaveLength(0);
+    expect(f.rowsTo(PERSON)).toBe(0);
+    // No open native ask, so the wake ladder's prompt alert and routed relay aren't held.
+    expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(false);
+    // A runner's own request still goes to the default person, as before.
+    const runner = await f.submitRunner();
+    expect(runner).toMatchObject({ status: 200 });
+    expect(f.queueRepo.getById(askIdOf(runner))).toMatchObject({ destinationSession: PERSON });
   });
 
   it("refuses nothing on a seat whose operator opted in to refusing runner requests: the native prompt stays", async () => {
@@ -294,12 +449,12 @@ describe("the person's own conversation, through the return route of the work th
       + "it holds open work from 2 conversations, and this one's is in progress");
   });
 
-  it("takes the work in progress over newer work it hasn't started, else the newest open work, ahead of the default person", async () => {
-    const started = fixture();
+  it("takes the work in progress over newer work it hasn't started, else the newest open work", async () => {
+    const started = fixture({ owner: null });
     await started.routedWork(ROUTE);
     await started.routedWork(OTHER_ROUTE, "pending");
     expect((await started.submit()).body).toMatchObject({ askedOf: ROUTE });
-    const waiting = fixture();
+    const waiting = fixture({ owner: null });
     await waiting.routedWork(ROUTE, "pending");
     const newest = await waiting.routedWork(OTHER_ROUTE, "pending");
     const submitted = await waiting.submit();
@@ -308,11 +463,12 @@ describe("the person's own conversation, through the return route of the work th
       + "and this address is that work's return route; it holds open work from 2 conversations, and none is in progress");
   });
 
-  it("asks the default person when the work the seat is running names a conversation on another host, and a chosen person comes first", async () => {
-    const remote = fixture();
+  it("asks no one when the work the seat is running names a conversation on another host and no one is chosen, and a chosen person comes first", async () => {
+    const remote = fixture({ owner: null });
     await remote.routedWork(ROUTE, "pending");
     await remote.routedWork("conversation-0123456789ab@kernel@host-b");
-    expect((await remote.submit()).body).toMatchObject({ askedOf: PERSON });
+    expect((await remote.submit()).body).toMatchObject({ state: "not_asked" });
+    expect(remote.asks()).toHaveLength(0);
     const chosen = fixture({ owner: OTHER_PERSON, people: ["mike", "dana"] });
     await chosen.routedWork(ROUTE);
     await chosen.routedWork(OTHER_ROUTE);
@@ -347,7 +503,7 @@ describe("who decided what: the person's own answer, a relay and an agent's judg
     ["a caller whose header names the registered person", PERSON, "allow"],
     ["the seat whose prompt it is (a deny: no seat approves its own call here)", SEAT, "deny"],
   ])("reads a relay from %s as relayed and unconfirmed, never the person's own answer", async (_case, caller, optionId) => {
-    const f = fixture({ people: ["mike"] });
+    const f = fixture({ owner: null, people: ["mike"] });
     await f.routedWork();
     const askId = askIdOf(await f.submit());
     const by = caller ?? "someone outside a seat";
@@ -765,6 +921,20 @@ describe("the real hook process against the real routes", () => {
     expect(decided.body.native).not.toHaveProperty("notReached");
   });
 
+  it("returns a conditional judgment through the real hook without calling it the person's own yes", async () => {
+    const f = fixture({ decider: DECIDER });
+    const port = await served(f);
+    const run = runHook(f, port, {});
+    const askId = await openAsk(f);
+    await f.answer(askId, { decision: "yes, as long as it is the docs branch" });
+    const decided = await f.decide(askId, "allow", DECIDER, { reason: "this exact action uses the docs branch" });
+    expect(decided.body).toMatchObject({ state: "answered", optionId: "allow", native: { answeredAs: "agent", by: DECIDER } });
+    const { stdout, code } = await run;
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } });
+    expect((await f.read(askId)).body).toMatchObject({ native: { taken: true, answeredAs: "agent", said: "yes, as long as it is the docs branch" } });
+  });
+
   it("says an answer hasn't reached the prompt when the hook was killed outright while its Claude Code lives on", async () => {
     const f = fixture({ people: [] });
     await f.routedWork();
@@ -897,12 +1067,33 @@ describe("the reads on every tool batch and wake-ladder tick cover only the seat
     const [sql] = await preparedDuring(f, (text) => text.includes("state IN ('pending','in-progress','blocked','handed-off')"),
       () => expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true));
     expect(sql).toBeDefined();
-    const read = plan(f, sql!, SEAT);
-    expect(read).toContain(`SEARCH queue_items USING INDEX ${INDEX} (source_session=?)`);
+    // Bounded by the longest answer window: an ask created before it can't still be taking an answer, so a seat's older
+    // native history (handed-off asks stay handed-off) is never read on a tick.
+    const read = plan(f, sql!, SEAT, new Date(0).toISOString());
+    expect(read).toContain(`SEARCH queue_items USING INDEX ${INDEX} (source_session=? AND ts_created>?)`);
     expect(read).not.toMatch(/SCAN queue_items|TEMP B-TREE/);
   });
 });
 
+
+describe("native prompt-hold handoff lookup plan", () => {
+  it("uses the existing successor index while following the current handoff", async () => {
+    const f = fixture({ decider: DECIDER });
+    const askId = askIdOf(await f.submit());
+    await f.answer(askId, { decision: "yes, for that request" });
+    const prepare = f.db.prepare.bind(f.db);
+    let sql = "";
+    const spy = vi.spyOn(f.db, "prepare").mockImplementation((text: string) => {
+      if (text.startsWith("WITH RECURSIVE chain")) sql = text;
+      return prepare(text);
+    });
+    try { expect(nativeAskHoldsPrompt(f.db, SEAT)).toBe(true); } finally { spy.mockRestore(); }
+    expect(sql).not.toBe("");
+    const details = (f.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(JSON.stringify([askId])) as Array<{ detail: string }>).map(r => r.detail).join(" | ");
+    expect(details).toContain("idx_queue_items_handed_off_from");
+    expect(details).not.toMatch(/SCAN queue_items|SCAN next\b/);
+  });
+});
 
 describe("successive prompts for the same tool input", () => {
   it.each(["allow", "deny"])("does not withdraw a later identical prompt when an earlier %s call resolves", async (optionId) => {

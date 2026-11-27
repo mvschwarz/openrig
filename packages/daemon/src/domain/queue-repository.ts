@@ -1,3 +1,4 @@
+import { queueDisplayText, QUEUE_DISPLAY_PREFIX_UNITS } from "./queue-display.js";
 import { RigDeliveryDrainStore } from "./rig-delivery-drain.js";
 import { PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap } from "./queue-wake-ladder.js";
 import { LADDER_ATTEMPT_PREFIX } from "./queue-stuck-sweep.js";
@@ -149,6 +150,11 @@ export type QueueState = (typeof QUEUE_STATES)[number];
  *  `handoff -> state=handed-off`, the highest-volume terminal class. The `satisfies`
  *  clause is the compile guard: removing a state from QUEUE_STATES fails here. */
 export const TERMINAL_QUEUE_STATES = ["done", "handed-off"] as const satisfies readonly QueueState[];
+function appendClosingResolution(previous: string | null, outcome: string | undefined): string | null {
+  if (typeof outcome !== "string" || !outcome.trim()) return previous;
+  return previous ? `${previous}\n${outcome}` : outcome;
+}
+
 export function isTerminalState(state: string): boolean {
   return (TERMINAL_QUEUE_STATES as readonly string[]).includes(state);
 }
@@ -246,6 +252,10 @@ const FALLBACK_ACTOR = "system:queue-fallback";
 
 /** The actor a terminal act is recorded as when it names no responder: explicitly unattributed, never a person. */
 export const UNATTRIBUTED_ACTOR = "human@host";
+/** Recorded on an ask whose answer is kept on it because its source's rig isn't known here (createHumanAnswer). */
+export const ANSWER_NOT_RETURNED_PREFIX = "human-answer not returned:";
+/** The second line of that note: who gave the kept answer. Their words follow it. */
+const KEPT_ANSWER_FROM = "answered by: ";
 
 /**
  * #165: a claim is the destination acting on the row, which is stronger evidence than
@@ -688,7 +698,9 @@ export interface QueueHandoffInput {
  * follow-on. Closure_reason is recorded as `handed_off_to` and the new qitem
  * is created in the same atomic transaction.
  */
-export interface QueueHandoffAndCompleteInput extends QueueHandoffInput {}
+export interface QueueHandoffAndCompleteInput extends QueueHandoffInput {
+  resolution?: string;
+}
 
 export interface QueueClaimInput {
   qitemId: string;
@@ -1068,8 +1080,8 @@ export function detectTable(db: Database.Database, tableName: string): boolean {
  * Phase A wires no-op; Phase B can plug in the rig registry to reject
  * phantom-rig destinations. POC compatibility: `qitem_id` shape preserved.
  */
-// Reduced column set for compact rows. `list`, `findOverdue` and `findUndelivered` all select it
-// (plus summary, through QueueRepository.compactColumns) and pass each row through compactRow, so
+// Reduced column set for compact rows. `list`, `findOverdue` and `findUndelivered` select it plus
+// the authored summary and a bounded body prefix (compactColumns), then pass each row through compactRow, so
 // the compact projection is one thing: present text is shown, and what isn't selected is left out
 // and named in fieldsElided, never backfilled as empty.
 const COMPACT_ELIDED_FIELDS = [
@@ -1079,6 +1091,8 @@ const COMPACT_ELIDED_FIELDS = [
 /** A compact listing row: the elided fields are absent, not empty, and `fieldsElided` names them. */
 export type CompactQueueItem = Omit<QueueItem, (typeof COMPACT_ELIDED_FIELDS)[number] | "fieldsElided"> & {
   fieldsElided: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
+  /** Derived one-line preview; summary and elided content retain their own meaning. */
+  displayText: string;
 };
 
 /** `qitemId` narrows either finder to one row, so a caller can ask again whether that row still qualifies. */
@@ -1087,7 +1101,7 @@ type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?
 type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean; qitemId?: string; waiting?: boolean };
 
 function compactRow(item: QueueItem): CompactQueueItem {
-  const row: Record<string, unknown> = { ...item, fieldsElided: [...COMPACT_ELIDED_FIELDS] };
+  const row: Record<string, unknown> = { ...item, displayText: queueDisplayText(item.summary, item.body, item.qitemId), fieldsElided: [...COMPACT_ELIDED_FIELDS] };
   for (const field of COMPACT_ELIDED_FIELDS) delete row[field];
   return row as unknown as CompactQueueItem;
 }
@@ -2697,13 +2711,49 @@ export class QueueRepository {
     // answered in its ask too: the pairing poll reads it there, and nothing reads a reply.
     const ask = this.getById(input.inboundReplyTo);
     if (ask && (runnerPermissionOrigin(ask) || isHostPairingAsk(ask))) return ask;
+    // A kept answer is already committed, even if its source rig has become known since the interrupted close.
+    if (ask && this.keptAnswer(ask.qitemId)) return ask;
     const qitemId = humanAnswerId(input.inboundReplyTo, episodeKey);
     const existing = episodeKey ? this.getById(qitemId) : this.getHumanAnswer(input.inboundReplyTo, input.sourceSession);
     if (existing) return existing;
     // One reply per ask: another person's answer already returned is the answer, so it comes back, and the caller says so.
     const answered = this.getById(qitemId);
     if (answered) return answered;
-    return this.create({ ...create, qitemId, tags: [...new Set([...(input.tags ?? []), "human-answer"])] }, verifyBeforeCreate);
+    try {
+      return await this.create({ ...create, qitemId, tags: [...new Set([...(input.tags ?? []), "human-answer"])] }, verifyBeforeCreate);
+    } catch (error) {
+      // `rig queue create --source` takes any source, so an ask can name a rig this daemon doesn't know, with no queue
+      // here for the answer to go back to. The person's answer still counts: it's kept on the ask, as a runner's or a
+      // pairing ask's is, and the ask's history says once why it didn't go back.
+      if (!ask || !(error instanceof QueueRepositoryError) || error.code !== "unknown_destination_rig") throw error;
+      // The answer itself, with who gave it, is written here before anything says it's kept. Only the first is: a retry
+      // or another person's answer then consumes it, as they would a returned answer's row (keptAnswer).
+      const note = `${ANSWER_NOT_RETURNED_PREFIX} ${create.destinationSession} references an unknown rig, so the answer is kept on ${ask.qitemId}`
+        + `\n${KEPT_ANSWER_FROM}${create.sourceSession}\n${humanAnswerText(create.body)}`;
+      this.db.transaction(() => {
+        verifyBeforeCreate?.();
+        if (!this.answerNotReturned(ask.qitemId)) {
+          this.transitionLog.append({ qitemId: ask.qitemId, state: this.getById(ask.qitemId)?.state ?? ask.state, actorSession: "daemon@system", transitionNote: note });
+        }
+      })();
+      return ask;
+    }
+  }
+
+  /** Why an ask's answer was kept on it instead of going back to its source (createHumanAnswer), or null. Only the daemon's
+   *  own in-process note counts, with the same trust rule as replyToChoiceFor: a queue note anyone adds can carry the same
+   *  words, and it isn't a person's answer. */
+  answerNotReturned(qitemId: string): string | null {
+    return this.transitionLog.listForQitem(qitemId).find((t) => t.actorSession === "daemon@system" && t.identityProvenance === null
+      && t.transitionNote?.startsWith(ANSWER_NOT_RETURNED_PREFIX))?.transitionNote ?? null;
+  }
+
+  /** The answer kept on an ask whose source's rig isn't known here: who gave it and their words. It's the ask's committed
+   *  answer, as a returned answer's row is for a known source. Null when none is kept. */
+  keptAnswer(qitemId: string): { actorSession: string; words: string } | null {
+    const lines = this.answerNotReturned(qitemId)?.split("\n");
+    if (!lines?.[1]?.startsWith(KEPT_ANSWER_FROM)) return null;
+    return { actorSession: lines[1].slice(KEPT_ANSWER_FROM.length), words: lines.slice(2).join("\n") };
   }
 
   /** Every answer this person returned to the ask (one per park), oldest first: after close, a replay finds the one its
@@ -2831,8 +2881,10 @@ export class QueueRepository {
             && prior.channel === relay.channel && prior.optionId === relay.optionId && prior.answeredAt === relay.answeredAt) return receipt();
           refuse("This question already has a relay; a direct answer can correct it.");
         }
+        // A kept answer (its source's rig wasn't known) is the ask's committed answer, as a returned answer's row is.
         if (ask.state !== "pending" || ask.blockedOn || (named && Object.hasOwn(direct, named.id))
-          || this.getById(humanAnswerId(ask.qitemId)) || (!ask.relayedAnswers && this.answersForAsk(ask.qitemId).length > 0)) {
+          || this.getById(humanAnswerId(ask.qitemId)) || (!ask.relayedAnswers && this.answersForAsk(ask.qitemId).length > 0)
+          || this.keptAnswer(ask.qitemId)) {
           refuse("This question is not waiting for a relayed answer.");
         }
         if (!ask.relayedAnswers && Object.keys(direct).length) {
@@ -3583,10 +3635,11 @@ export class QueueRepository {
                  ts_updated = ?,
                  handed_off_to = ?,
                  closure_reason = 'handed_off_to',
-                 closure_target = ?
+                 closure_target = ?,
+                 resolution = ?
            WHERE qitem_id = ?`
         )
-        .run(ts, input.toSession, input.toSession, source.qitemId);
+        .run(ts, input.toSession, input.toSession, this.handoffClosingResolution(source, input.resolution), source.qitemId);
 
       this.transitionLog.append({
         qitemId: source.qitemId,
@@ -3736,6 +3789,7 @@ export class QueueRepository {
     /** `handed-off` for /handoff; `done` for /handoff-and-complete. */
     terminalState: "handed-off" | "done";
     transitionNote?: string;
+    resolution?: string;
     /** The sender's recorded provenance, as the local handoff records it. Null only for an in-process caller. */
     identityProvenance?: string | null;
     /** The source's claim as the caller read it before forwarding. A claim made since then is overridden by this close,
@@ -3780,10 +3834,11 @@ export class QueueRepository {
                  ts_updated = ?,
                  handed_off_to = ?,
                  closure_reason = 'handed_off_to',
-                 closure_target = ?
+                 closure_target = ?,
+                 resolution = ?
            WHERE qitem_id = ?`
         )
-        .run(input.terminalState, ts, input.toSession, input.closureTarget, input.qitemId);
+        .run(input.terminalState, ts, input.toSession, input.closureTarget, this.handoffClosingResolution(source, input.resolution), input.qitemId);
 
       const note = input.transitionNote ?? `cross-host handoff to ${input.toSession}`;
       const closeTransition = this.transitionLog.append({
@@ -4614,12 +4669,9 @@ export class QueueRepository {
     // The outcome is used only as non-blank text on the update that closes an open row; on any other
     // update the field is ignored and the row answers as it would without it. It goes after what the row
     // already carries (a pod-fallback line, or an earlier close's outcome) on its own line, text as sent.
-    const closingResolution = typeof input.resolution === "string" && input.resolution.trim().length > 0
-      && isBlockerLive(qitem.state) && !isBlockerLive(input.state)
-      ? input.resolution : null;
-    const nextResolution = closingResolution === null
-      ? qitem.resolution
-      : qitem.resolution ? `${qitem.resolution}\n${closingResolution}` : closingResolution;
+    const nextResolution = isBlockerLive(qitem.state) && !isBlockerLive(input.state)
+      ? appendClosingResolution(qitem.resolution, input.resolution)
+      : qitem.resolution;
     const notification = this.classifyOwnerNotification({
       action: "update",
       destinationSession: qitem.destinationSession,
@@ -5142,6 +5194,18 @@ export class QueueRepository {
         return this.closeDirectAsk(item, winner.sourceSession, decision, !this.answersAsk(item, winner.sourceSession),
           this.answerIdentity(winner.qitemId));
       }
+      // An answer kept on the ask (its source's rig isn't known here) is its committed answer the same way: the ask closes
+      // as that person's, with their words, whoever completes it, and false tells another caller theirs didn't settle it.
+      const kept = this.keptAnswer(item.qitemId);
+      if (kept) {
+        mine = kept.actorSession === input.actorSession;
+        const questions = item.humanQuestions ?? [];
+        const decision = questions.length && unansweredQuestions(questions, item.humanAnswers ?? {}).length === 0
+          ? formatHumanAnswers(questions, item.humanAnswers ?? {}).join("; ") : kept.words;
+        return this.closeDirectAsk(item, kept.actorSession, decision,
+          mine ? input.primaryUser === true : !this.answersAsk(item, kept.actorSession),
+          mine ? { provenance: input.identityProvenance ?? null, principal: input.identityPrincipal ?? null } : { provenance: null, principal: null });
+      }
       // A close that consumes this caller's own committed answer carries that answer's identity too, so attribution doesn't
       // depend on who completes it. Only a close with no committed answer takes the caller's.
       const own = this.getHumanAnswer(item.qitemId, input.actorSession, { primaryUser: input.primaryUser === true });
@@ -5212,7 +5276,8 @@ export class QueueRepository {
         `- **Who's who:** ${root.sourceSession} is the agent asking to run the tool; ${item.destinationSession} is the person it asked; ${person} answered.`,
         ...(unattributed ? [terminalAnswerMeaning(UNATTRIBUTED_ACTOR)] : []),
         "Act on a clear answer at once: a clear yes or an allow click is the allow option, a clear no or a reject click the reject option. Don't ask them to confirm a clear answer.",
-        `${askBackRoute(askBack, UNATTRIBUTED_ACTOR, `request ${item.qitemId}`)} Then decide on what they answer.`,
+        "A condition is theirs to set and yours to judge: when this exact action plainly meets it, allow it; when it plainly doesn't, take the reject option with their words in your reason. Don't ask them to confirm a condition you can judge.",
+        `${askBackRoute(askBack, UNATTRIBUTED_ACTOR, `request ${item.qitemId}`, "you can't tell what they meant, or whether this exact action meets their condition")} Then decide on what they answer.`,
         "Until it's decided (by you, or by anyone with that command), the runner keeps waiting, with no timeout that refuses it; if its turn ends first, nothing is sent.",
         RUNNER_CLOSE_WAITS,
       ].join("\n"),
@@ -5319,11 +5384,14 @@ export class QueueRepository {
       : `reply from ${actor}, a registered person, on ${asked}'s ask; not answered by ${asked}`;
     const placed = this.placeTypedReply(item, decision);
     if (placed) transitionNote += `; ${placed}`;
+    // An answer kept on the ask (its source's rig isn't known here) has no reply row to carry it, so the ask keeps it.
+    const kept = this.answerNotReturned(item.qitemId) !== null;
     return this.updateInTransactionalContext({
       qitemId: item.qitemId,
       actorSession: actor,
       state: "done",
       closureReason: "no-follow-on",
+      ...(kept ? { resolution: decision } : {}),
       transitionNote,
       ownerNotificationKind: "human-decision-resolved",
       identityProvenance: identity.provenance,
@@ -5387,6 +5455,9 @@ export class QueueRepository {
       const episodeKey = item.state === "pending" ? undefined : this.currentHumanRequiredEpisode(item.qitemId)?.key;
       const winner = item.state === "pending" || episodeKey ? this.committedAnswerFromAnother(item.qitemId, input.actorSession, episodeKey) : null;
       if (winner) return { status: "not-applicable" as const, reason: "answered", answeredBy: winner.sourceSession };
+      const keptBy = item.state === "pending" ? this.keptAnswer(item.qitemId) : null;
+      // A click cannot replace a committed typed answer, including one from the same person. The continuation below closes with it.
+      if (keptBy) return { status: "not-applicable" as const, reason: "answered", answeredBy: keptBy.actorSession };
       const question = item.humanQuestions.find((q) => q.id === input.questionId);
       if (!question?.options.some((o) => o.id === input.optionId)) return { status: "not-applicable" as const, reason: "unknown-option" };
       const recorded = item.humanAnswers ?? {};
@@ -5641,7 +5712,8 @@ export class QueueRepository {
         return refuse("permission-prompt", "a permission prompt or approval gate is never decided on the person's behalf");
       }
       // A click keeps a multi-question ask pending until every question is answered: once the person has started, it's theirs.
-      if (item.relayedAnswers || (item.humanAnswers && Object.keys(item.humanAnswers).length > 0)) {
+      // So is an answer kept on the ask (its source's rig wasn't known), even when its close was interrupted.
+      if (item.relayedAnswers || (item.humanAnswers && Object.keys(item.humanAnswers).length > 0) || this.keptAnswer(item.qitemId)) {
         return refuse("person-answering", "they've started answering; their answer stands");
       }
       if (item.sourceSession !== input.actorSession) {
@@ -6086,10 +6158,12 @@ export class QueueRepository {
     return rows.map((r) => this.rowToItem(r, opts?.includeWaiting ?? true));
   }
 
-  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for, and a
+  /** The compact listings' columns: the shared set plus the summary, as authored, a bounded prefix for display, and a
    *  routed row's return route, which isn't elided, so a routed row never lists as unrouted. */
   private compactColumns(): string {
-    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "")
+    // Byte slicing preserves embedded NULs (TEXT substr stops there). Four UTF-8 bytes per UTF-16 unit
+    // supply the helper's entire prefix; any partial code point at the SQL edge is beyond its bound.
+    return COMPACT_QUEUE_COLUMNS + `, CAST(substr(CAST(body AS BLOB), 1, ${QUEUE_DISPLAY_PREFIX_UNITS * 4}) AS TEXT) AS body` + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "")
       + (this.hasReturnRouteColumn ? ", return_route, return_route_basis" : "");
   }
 
@@ -6098,8 +6172,8 @@ export class QueueRepository {
    * does NOT itself emit events — callers decide whether to nudge or escalate.
    *
    * Slice 15 (finding 2): optionally rig-scoped, limited, and compact — mirroring
-   * `list` — so `rig queue overdue` is bounded and body-free by default instead of
-   * dumping every rig's full qitem bodies to a single caller. No args = the prior
+   * `list` — so `rig queue overdue` is bounded and the body field stays absent; displayText may show its first useful line.
+   * It doesn't dump every rig's full qitem bodies to a single caller. No args = the prior
    * behavior (all overdue, full rows) for the watchdog.
    */
   findOverdue(opts: FindOverdueOptions & { compact: true }): CompactQueueItem[];
@@ -6728,6 +6802,20 @@ export class QueueRepository {
       const row = this.getById(qitemId);
       if (row?.state === "pending") this.promptRecoveryState.set(row.destinationSession, true);
     }
+  }
+
+  private handoffClosingResolution(source: QueueItem, outcome: string | undefined): string | null {
+    const previous = source.resolution;
+    if (previous && typeof outcome === "string" && outcome.trim() && !isBlockerLive(source.state)) {
+      // A non-live handoff does not leave the live-to-closed transition that signals an appended outcome.
+      // Keep any identifiable fallback line last, where a later reroute can replace it without touching the outcome.
+      const fallbackStart = this.fallbackLineStart(source.qitemId, previous);
+      if (fallbackStart !== null) {
+        const earlierOutcomes = previous.slice(0, Math.max(0, fallbackStart - 1));
+        return `${appendClosingResolution(earlierOutcomes, outcome)}\n${previous.slice(fallbackStart)}`;
+      }
+    }
+    return appendClosingResolution(previous, outcome);
   }
 
   /**

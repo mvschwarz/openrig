@@ -156,7 +156,10 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   Codex SessionStart/UserPromptSubmit/Stop/PermissionRequest): standing for Claude; Codex's
   hook rung starts at trial and is promoted after 50 agreeing observations over at least an
   hour. Exactly-once turn boundaries; SubagentStop filtered (it
-  can fire post-turn and must never revive an idle seat). Hook-rung authority is
+  can fire post-turn and must never revive an idle seat). Working and idle posts are taken
+  in the emitter's own order (event time, then its sequence), so a turn's Stop arriving after
+  the next turn's UserPromptSubmit doesn't win. Attention posts (a permission request,
+  needs-input, a usage limit) are applied as they arrive. Hook-rung authority is
   TIME-BOUNDED: the hook rung is the only rung that does not self-date its evidence, so
   persistent cross-rung contradiction degrades it to identity-only, visibly, with a
   rung-health event.

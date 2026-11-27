@@ -48,6 +48,37 @@ describe("SeatStatusService", () => {
     graph.mockRestore();
   });
 
+  it("#4003: names each seat's origin, launched or adopted, from its newest session", () => {
+    const rig = rigRepo.createRig("origins");
+    const launched = rigRepo.addNode(rig.id, "launched", { runtime: "claude-code" });
+    const adopted = rigRepo.addNode(rig.id, "adopted", { runtime: "claude-code" });
+    rigRepo.addNode(rig.id, "none", { runtime: "claude-code" });
+    const a = sessionRegistry.registerSession(launched.id, "launched@origins");
+    const b = sessionRegistry.registerClaimedSession(adopted.id, "adopted@origins");
+    expect(service.getStatus(a.sessionName)).toMatchObject({ ok: true, status: { origin: "launched" } });
+    expect(service.getStatus(b.sessionName)).toMatchObject({ ok: true, status: { origin: "claimed" } });
+    // A seat with no session yet has no origin to name.
+    expect(service.getStatus("none@origins")).toMatchObject({ ok: true, status: { origin: null } });
+  });
+
+  it("uses registration order for origin even after a wall-clock rollback", () => {
+    const rig = rigRepo.createRig("origin-clock");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+    const a = sessionRegistry.registerSession(node.id, "worker@origin-clock");
+    const b = sessionRegistry.registerClaimedSession(node.id, a.sessionName);
+    db.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run("2030-01-01 00:00:00", a.id);
+    db.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run("2020-01-01 00:00:00", b.id);
+    expect(service.getStatus(b.sessionName)).toMatchObject({ ok: true, status: { origin: "claimed" } });
+  });
+
+  it("reports an unreadable origin as unknown rather than launched", () => {
+    const rig = rigRepo.createRig("origin-unknown");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "worker@origin-unknown");
+    db.prepare("UPDATE sessions SET origin = 'unreadable' WHERE id = ?").run(session.id);
+    expect(service.getStatus(session.sessionName)).toMatchObject({ ok: true, status: { origin: null } });
+  });
+
   it("does not attach a last tool, another actor's prompt or completed activity to a permission diagnostic", () => {
     const rig = rigRepo.createRig("permission-status");
     const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
