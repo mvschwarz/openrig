@@ -52,12 +52,18 @@ in the case named:
 
 ## Bearer tokens
 
+`OPENRIG_AUTH_BEARER_TOKEN` is not a global authentication layer. Only routes that explicitly apply a bearer
+check require that check's configured token. Other routes can have their own requirements, including the
+[Browser access](browser-access.md) boundary and Core app credentials; absence from the list below does not
+mean a route has no checks.
+
 The daemon reads these two bearer-token settings from its environment at start:
 
 - **`OPENRIG_AUTH_BEARER_TOKEN`** checks Mission Control's write routes (`POST /api/mission-control/action` and
   `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`, `pair-decision`) and `GET /api/hosts/pair/<pairId>`, the `/api/rig-mode`
-  binding writes, the `/api/network` writes (`POST /bindings`, `POST /installations` and `POST /bindings/<id>/disconnect`;
-  `GET /bindings` checks no token), `POST /api/apps/v1/credentials` and `DELETE /api/apps/v1/credentials/<id>`, and
+  binding writes, every `POST /api/queue-transfer` route, the `/api/network` writes (`POST /bindings`,
+  `POST /installations`, `PATCH /bindings/<id>` and `POST /bindings/<id>/credential`, `/disconnect` and `/requests`;
+  `GET /bindings` checks no bearer token), `POST /api/apps/v1/credentials` and `DELETE /api/apps/v1/credentials/<id>`, and
   `POST /api/gateway/slack/forwarded`, a shared Slack app's relay. The other `/api/apps/v1` routes take a Core app
   credential instead; see [Core app](core-app.md). `rig host pair` hands this token to the paired machine, so a daemon
   that will be paired with needs it set (see `rig host pair` in [the command reference](../as-built/cli-reference.md)).
@@ -70,6 +76,11 @@ The daemon reads these two bearer-token settings from its environment at start:
 
   When the daemon is bound to an explicit address (`rig daemon start --host`) that isn't loopback or a tailnet
   address, and this token isn't set, these routes check `OPENRIG_AUTH_BEARER_TOKEN` instead.
+
+By default, the daemon binds to loopback and the tailnet address when Tailscale is active. An operator-selected
+bind (`rig daemon start --host` or `OPENRIG_BIND_HOST`) can expose it on other networks. Startup requires a
+non-empty operator bearer token for an explicit bind outside loopback and tailnet (including hostnames that
+resolve outside them). Satisfying that startup check does not add bearer checks to other routes.
 
 The `/api/transcripts` routes (`GET /api/transcripts/<session>/tail`, `/grep` and `/full`) do not check either
 of these bearer tokens. On the default binds (loopback, and the tailnet address when Tailscale is active),
