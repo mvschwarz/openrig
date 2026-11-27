@@ -336,6 +336,8 @@ export type RigEvent =
       requestedBy: string | null; generation: string; previousGeneration: string;
       settings: Record<string, { value: string | null; source: string }>; dropped: Array<{ setting: string; value: string }>;
       permissionSelection: string; claimsMoved: number }
+  | { type: "seat.handover_first_input_passed"; rigId: string; nodeId: string; occupantGeneration: string | null;
+      path: string; submission: "unconfirmed"; consumption: "unconfirmed"; launchCommand: "accepted" | "unconfirmed"; binding: "not_committed" }
   | { type: "seat.handover_completed"; rigId: string; nodeId: string; logicalId: string; previousOccupant: string; currentOccupant: string; source: string; reason: string; operator: string | null;
       /** OPR.0.5.5.5 (fix B2) — the executed source outcome, persisted so the DURABLE
        *  record (not just the command response) carries what primed the successor:
@@ -1076,6 +1078,12 @@ export interface NodeInventoryEntry {
    * heartbeat — process identity only.
    */
   identityVerdict?: SeatIdentityVerdict | null;
+  /** The agent behind a recorded-running agent seat, beside its lifecycle: present only when the current identity check (the
+   *  verdict above) saw a shell as the pane's foreground command and didn't verify the seat's agent there, once its startup
+   *  is no longer pending. It shows a stored shell observation; delivery checks the target again and applies its runtime's
+   *  own policy. It isn't proof the agent stopped: it can run behind a wrapper. Absent otherwise, which claims nothing. Read
+   *  from the stored verdict; nothing new is probed. */
+  agentLiveness?: { state: "not_verified"; reason: "shell_foreground"; command: string; observedAt: string };
   /** OPR.0.3.4.11 — held reason derived from the latest `node.held` event.
    *  Null when no held event, or superseded by a running session / later launch. */
   heldReason?: string | null;

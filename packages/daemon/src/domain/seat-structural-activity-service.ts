@@ -5,6 +5,7 @@ import { communityHarnessOf } from "./built-in-runtimes.js";
 import { detectCodexLimitBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
 import { IDLE_FULL_CAPTURE_MS, windowSnapshot } from "./transcript-rotation.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { looksLikeCodexHookReviewPrompt } from "./native-resume-probe.js";
 
 /** A cached STRUCTURAL pane observation: the classifyPaneActivity verdict plus WHEN the pane was read
  *  as motion. observedAt is a LIVENESS timestamp (last time we saw the pane), NOT a hook-arrival age —
@@ -63,6 +64,7 @@ export class SeatStructuralActivityService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweeping = false; // single-flight guard: one whole-fleet sweep at a time (MUST-FIX 2)
   private activityChanged?: (sessionName: string) => void;
+  private sweepCompleted?: () => void;
   private bannerEmitter:
     | ((sessionName: string, banner: CodexLimitBanner | null, observedAt: Date) => void)
     | null = null;
@@ -87,6 +89,14 @@ export class SeatStructuralActivityService {
 
   /** Notify from the existing captures only, after the cache holds the new verdict. */
   attachActivityChanged(listener: (sessionName: string) => void): void { this.activityChanged = listener; }
+
+  /** Called once at the end of each completed sweep, whether or not any verdict changed: for work that must be offered
+   *  again while a seat's state stays the same (a draft-held message, #3991). It adds no capture. */
+  attachSweepCompleted(listener: () => void): void { this.sweepCompleted = listener; }
+
+  /** tmux's last write time (window_activity, in seconds) for the seat's pane, as the latest sweep read it: it changes
+   *  only when something is written to the pane. Undefined when the sweep had no window listing for it. */
+  paneActivity(sessionName: string): number | undefined { return this.capturedActivity.get(sessionName)?.activity; }
 
   /** The cached structural observation — ONLY while current (capture-FREE read). Returns null AND evicts
    *  once the observation is older than the freshness window, so a stalled/failed poller never leaves a
@@ -129,8 +139,10 @@ export class SeatStructuralActivityService {
       return null;
     }
     // A community seat's screen is read as its runtime's, as `rig send` reads it, so an answered dialog in its scrollback
-    // is history here too. Built-in seats keep the runtime-free read.
-    const c = communityHarnessPaneActivity(classifyPaneActivity(content, communityHarness ? { runtime: communityHarness } : {}), communityHarness, content);
+    // is history here too. Only Codex's hook-review menu changes the built-in structural classification.
+    const c = communityHarnessPaneActivity(classifyPaneActivity(content,
+      communityHarness ? { runtime: communityHarness }
+        : runtime === "codex" && looksLikeCodexHookReviewPrompt(content) ? { runtime } : {}), communityHarness, content);
     // Redraws from an unrecorded Codex layout cannot establish work or completed idle.
     // Keep positive work and attention visible; native hooks are resolved separately by the activity fold.
     const unrecognizedVersion = runtime === "codex" && c.state !== "attention" && c.state !== "agent_active" && namesAnotherClientVersion(content, "codex");
@@ -238,6 +250,7 @@ export class SeatStructuralActivityService {
           else this.capturedActivity.delete(r.session_name);
         } catch { /* isolate: one seat's failure never crashes the sweep */ }
       }));
+      try { this.sweepCompleted?.(); } catch { /* a listener's failure never crashes the sweep */ }
     } finally {
       this.sweeping = false;
     }

@@ -15,6 +15,9 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
 
 const run = promisify(execFile);
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -58,7 +61,9 @@ describe.skipIf(process.platform === "win32")("native draft-aware terminal deliv
       const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name)); adapter.deliveryGuard = guard;
       transport = new SessionTransport({ db, tmuxAdapter: adapter, rigRepo: new RigRepository(db), sessionRegistry: new SessionRegistry(db),
         now: () => new Date(at), sleep: async ms => { if (ms === 200) await hooks.beforeEnter?.(); await pause(ms); } });
-      const send = (id: string, text: string) => transport!.send("worker@test", text, { deliveryId: id, actorSession: "sender@test", verify: true });
+      // Each probe is its own sender: a held message is typed later in its sender's order, so a shared sender would make
+      // one probe's held message decide the next probe's reading (draft_held_behind_earlier) instead of the guard.
+      const send = (id: string, text: string) => transport!.send("worker@test", text, { deliveryId: id, actorSession: `${id}@test`, verify: true });
       await guard.set("a", { mode: "draft-aware" }, "human@test", "native fixture");
       await vi.waitFor(async () => expect(inspectComposerInput(await adapter.captureComposerSnapshot(panes.a!)).state).toBe("empty"), { timeout: 5000 });
 
@@ -72,7 +77,11 @@ describe.skipIf(process.platform === "win32")("native draft-aware terminal deliv
       expect(await send("deferred", "one\nmessage")).toMatchObject({ outcome: "retained" });
       expect(state()).toEqual({ input: "unfinished human draft", submissions: [] });
       await tmux(["send-keys", "-t", panes.a!, "C-u"]); await waitInput("");
-      expect(await send("deferred", "one\nmessage")).toMatchObject({ ok: true, sent: true });
+      // The held message itself goes once the input is clear, through the draft-held pass: no resend, which would wait
+      // behind it (same sender).
+      const repo = new QueueRepository(db, new EventBus(db), { transport, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+      repo.attachOutbox(new OutboxHandler(db));
+      expect(await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle")).toBe("done");
       await vi.waitFor(() => expect(state().submissions).toEqual(["one\nmessage"]));
 
       hooks.beforeEnter = async () => {

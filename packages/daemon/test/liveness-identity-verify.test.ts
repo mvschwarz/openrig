@@ -15,6 +15,8 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { projectRigToGraph, type InventoryOverlay } from "../src/domain/graph-projection.js";
 import type { SeatIdentityVerdict, SeatIdentityVerdictKind } from "../src/domain/types.js";
 import { identityVerdictDownranksRunning } from "../src/domain/types.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SeatStatusService } from "../src/domain/seat-status-service.js";
 
 function seedRunningSeat(db: Database.Database): void {
   db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1','test-rig')").run();
@@ -466,5 +468,98 @@ describe("graph projection consumes the identity verdict (no false-green)", () =
     const node = projectMismatchNode();
     expect(node?.data.identityVerdict?.verdict).toBe("mismatch");
     expect(node?.data.identityVerdict?.reason).toBe("process_identity_mismatch");
+  });
+});
+
+// Slice 60: Hermes was killed and its pane's shell lived on, and the seat read "run" before and after. The identity check
+// already saw the shell; the seat shows it beside the lifecycle, from the stored verdict, with no new reading.
+describe("agent liveness beside the lifecycle", () => {
+  const observed = (kind: SeatIdentityVerdictKind, reason: SeatIdentityVerdict["reason"], command: string | null,
+    extra: Partial<SeatIdentityVerdict> = {}): SeatIdentityVerdict => ({
+    ...verdict(kind, reason), evidence: { registeredPane: "%1", observedPid: 1, observedCommand: command, matchedLayer: null }, ...extra,
+  });
+  const read = (db: Database.Database) => getNodeInventory(db, "rig-1")[0]!;
+
+  it("a running community-harness seat whose identity check saw a shell reads agent not verified, in ps and seat status; its lifecycle stays running", () => {
+    const db = createFullTestDb();
+    try {
+      seedRunningSeat(db);
+      db.prepare("UPDATE nodes SET runtime = 'hermes' WHERE id = 'n1'").run();
+      new SeatIdentityStore(db).upsert(observed("unconfirmed", "process_identity_unconfirmed", "-zsh"));
+      const entry = read(db);
+      expect(entry.agentLiveness).toEqual({ state: "not_verified", reason: "shell_foreground", command: "zsh", observedAt: "2026-07-02T12:00:00.000Z" });
+      expect(entry).toMatchObject({ sessionStatus: "running", lifecycleState: "running", startupStatus: "ready" });
+      const status = new SeatStatusService({ rigRepo: new RigRepository(db) }).getStatusByNodeId("n1");
+      expect(status.ok && status.status.agent_liveness).toEqual(entry.agentLiveness);
+      expect(status.ok && status.status.lifecycle_state).toBe("running");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("a mismatch with a shell reads the same beside its existing attention; the lifecycle isn't changed by it", () => {
+    const db = createFullTestDb();
+    try {
+      seedRunningSeat(db);
+      db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = 'n1'").run();
+      new SeatIdentityStore(db).upsert(observed("mismatch", "process_identity_ambiguous", "bash"));
+      expect(read(db)).toMatchObject({ lifecycleState: "attention_required", agentLiveness: { state: "not_verified", command: "bash" } });
+    } finally {
+      db.close();
+    }
+  });
+
+  // A launch marks the session running on its default shell while startup is pending, before the agent starts there: that
+  // shell isn't an agent that exited. A startup that needs attention keeps the reading beside its att.
+  it("claims nothing while startup is pending, and keeps the reading once startup needs attention", () => {
+    const db = createFullTestDb();
+    try {
+      seedRunningSeat(db);
+      db.prepare("UPDATE nodes SET runtime = 'hermes' WHERE id = 'n1'").run();
+      db.prepare("UPDATE sessions SET startup_status = 'pending' WHERE id = 'sess1'").run();
+      new SeatIdentityStore(db).upsert(observed("unconfirmed", "process_identity_unconfirmed", "bash"));
+      expect(read(db)).toMatchObject({ sessionStatus: "running", startupStatus: "pending" });
+      expect(read(db).agentLiveness).toBeUndefined();
+      db.prepare("UPDATE sessions SET startup_status = 'attention_required' WHERE id = 'sess1'").run();
+      expect(read(db)).toMatchObject({ lifecycleState: "attention_required", agentLiveness: { state: "not_verified", command: "bash" } });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("claims nothing for an agent's own command, a verified check, an unavailable or absent check, a terminal seat, no runtime, a stopped session or another pane's check", () => {
+    const cases: Array<[string, (db: Database.Database) => void]> = [
+      ["the agent's own command", db => new SeatIdentityStore(db).upsert(observed("unconfirmed", "process_identity_unconfirmed", "python3"))],
+      ["a verified check", db => new SeatIdentityStore(db).upsert(observed("verified", null, "zsh"))],
+      ["tmux unavailable", db => new SeatIdentityStore(db).upsert(observed("tmux_unavailable", "tmux_unavailable", null))],
+      ["no check yet", () => {}],
+      ["a terminal seat", db => {
+        db.prepare("UPDATE nodes SET runtime = 'terminal' WHERE id = 'n1'").run();
+        new SeatIdentityStore(db).upsert(observed("unconfirmed", "process_identity_unconfirmed", "zsh"));
+      }],
+      ["no runtime", db => {
+        db.prepare("UPDATE nodes SET runtime = NULL WHERE id = 'n1'").run();
+        new SeatIdentityStore(db).upsert(observed("unconfirmed", "process_identity_unconfirmed", "zsh"));
+      }],
+      ["a stopped session", db => {
+        db.prepare("UPDATE sessions SET status = 'exited' WHERE id = 'sess1'").run();
+        new SeatIdentityStore(db).upsert(observed("unconfirmed", "process_identity_unconfirmed", "zsh"));
+      }],
+      ["another pane's check", db => new SeatIdentityStore(db).upsert({ ...observed("unconfirmed", "process_identity_unconfirmed", "zsh"),
+        evidence: { registeredPane: "%9", observedPid: 1, observedCommand: "zsh", matchedLayer: null } })],
+    ];
+    for (const [label, arrange] of cases) {
+      const db = createFullTestDb();
+      try {
+        seedRunningSeat(db);
+        db.prepare("UPDATE nodes SET runtime = 'hermes' WHERE id = 'n1' AND runtime = 'claude-code'").run();
+        arrange(db);
+        expect(read(db).agentLiveness, label).toBeUndefined();
+        const status = new SeatStatusService({ rigRepo: new RigRepository(db) }).getStatusByNodeId("n1");
+        expect(status.ok && "agent_liveness" in status.status, label).toBe(false);
+      } finally {
+        db.close();
+      }
+    }
   });
 });

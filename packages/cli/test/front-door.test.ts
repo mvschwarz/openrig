@@ -514,15 +514,20 @@ describe("PUBLIC bin ownership (guard finding 1 — the wrapper is the real fron
 describe("script-safety integration (the compiled front door)", () => {
   const cliEntry = join(__dirname, "..", "dist", "index.js");
   it.skipIf(!existsSync(cliEntry))("an unresolved queue actor stays nonzero through a pipe with pipefail", () => {
+    const started = Date.now();
     const result = spawnSync("/bin/bash", ["--noprofile", "--norc", "-o", "pipefail", "-c",
       'env -u OPENRIG_SESSION_NAME -u RIGGED_SESSION_NAME -u TMUX_PANE "$NODE" "$CLI" queue update qitem-pipe-proof --state in-progress --json 2>&1 | cat'], {
-      timeout: 5000,
+      timeout: HANG_LIMIT_MS,
       encoding: "utf-8",
       env: { ...process.env, NODE: process.execPath, CLI: cliEntry },
     });
-    expect(result.status).toBe(1);
+    expect(result.status, JSON.stringify({
+      elapsedMs: Date.now() - started, status: result.status, signal: result.signal,
+      error: result.error && { message: result.error.message, code: (result.error as NodeJS.ErrnoException).code },
+      stdout: result.stdout?.slice(-4096), stderr: result.stderr?.slice(-4096),
+    })).toBe(1);
     expect(result.stdout).toContain("OPENRIG_SESSION_NAME is not set");
-  });
+  }, HANG_TEST_TIMEOUT_MS);
 
   it.skipIf(!existsSync(cliEntry))("`echo x | rig` returns usage fast — no hang (exit code preserves today's clean-help baseline)", () => {
     const started = Date.now();

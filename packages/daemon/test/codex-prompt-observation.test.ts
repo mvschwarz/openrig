@@ -50,6 +50,13 @@ function fixture(first: string) {
 }
 
 describe("a Codex choice prompt read from the structural frame (#2515)", () => {
+  it("keeps the hook-review reason in the existing needs-input oracle", async () => {
+    const f = fixture("OpenAI Codex (v0.171.0)\nHooks need review\n› 1. Review hooks\n  2. Trust all and continue");
+    await f.tick();
+    expect(f.state()).toMatchObject({ needsInput: { count: 1, reason: "hook_trust_gate" },
+      needsInputEvidence: { rung: "needs-input-chrome" } });
+    expect(f.verdict(f.at())).toBe("blocked");
+  });
   it.each([["directory trust (0.156.1)", TRUST], ["update (0.160.0)", UPDATE]])(
     "a native %s choice reads as needs-input; once answered, an empty composer reads as a clear observed after the refusal", async (_name, choice) => {
       const f = fixture(choice);

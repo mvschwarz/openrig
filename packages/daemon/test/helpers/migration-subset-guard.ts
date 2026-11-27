@@ -9,8 +9,12 @@ import { ALL_MIGRATIONS } from "../../src/db/all-migrations.js";
  * list used to fail confusingly (a missing column/table surfacing deep in an unrelated test — the desk
  * paid this at the 064/066/067 folds). This asserts every shipped migration is EITHER in the curated
  * list OR in a named exclusions map WITH a re-evaluable reason. The curated lists' deliberate
- * minimalism stays a design choice — it just has to be DECLARED, never accidental. Assert, don't derive
- * (deriving would auto-include every future migration and quietly destroy that minimalism).
+ * minimalism stays a design choice — it just has to be DECLARED, never accidental.
+ *
+ * migrationsForFullTestDb is now derived (every migration minus its declared exclusions), so a new migration
+ * joins it without editing a shared list; its minimalism lives in the exclusions map, and this guard still
+ * catches a stale exclusion there. A fixture meant to stay small by listing what it includes should keep
+ * listing, and keep asserting here.
  */
 export function assertExplicitSubsetOfAllMigrations(opts: {
   /** Human name of the curated list, used in the training error message. */

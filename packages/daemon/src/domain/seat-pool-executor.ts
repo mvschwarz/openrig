@@ -269,6 +269,10 @@ export interface SeatPoolExecutor {
 /** The queue's reroute actor and note, as the queue records a reroute (the queue's own rule for "was rerouted"). */
 const QUEUE_FALLBACK_ACTOR = "system:queue-fallback";
 const FALLBACK_NOTE = "fallback-routed: ";
+/** The actor and note the queue records when a handover or a fresh launch releases the retiring occupant's claims back
+ *  to pending (`releaseClaimsByGeneration`). */
+const HANDOVER_RELEASE_ACTOR = "system";
+const HANDOVER_RELEASE_NOTE = "released: claimant generation retired (seat handover)";
 /** No cut: list() keeps the newest rows first, so any limit would drop the oldest rows, which move first. */
 const ALL_ROWS = Number.MAX_SAFE_INTEGER;
 /** Refusals that mean the row moved on since it was read: skipped, never a failure. */
@@ -279,12 +283,16 @@ function isWatchdogReminder(row: { sourceSession: string; tags?: string[] | null
   return row.sourceSession === "watchdog@system" && !!row.tags?.includes("watchdog") && row.tags.includes("queue-only");
 }
 
-/** When the row was last rerouted, from its transitions, or null when it never was. */
-function lastReroute(queueRepo: Pick<QueueRepository, "transitionLog">, qitemId: string): string | null {
+/** When the row's waiting clock last restarted, from its transitions: its latest reroute or its latest release back to
+ *  pending by a handover or a fresh launch, or null when neither happened. Only the queue's own records count (no
+ *  identity provenance). */
+function waitingRestartedAt(queueRepo: Pick<QueueRepository, "transitionLog">, qitemId: string): string | null {
   const transitions = queueRepo.transitionLog.listForQitem(qitemId);
   for (let i = transitions.length - 1; i >= 0; i--) {
     const t = transitions[i]!;
-    if (t.actorSession === QUEUE_FALLBACK_ACTOR && t.transitionNote?.startsWith(FALLBACK_NOTE) && t.identityProvenance === null) return t.ts;
+    if (t.identityProvenance !== null) continue;
+    if (t.actorSession === QUEUE_FALLBACK_ACTOR && t.transitionNote?.startsWith(FALLBACK_NOTE)) return t.ts;
+    if (t.state === "pending" && t.actorSession === HANDOVER_RELEASE_ACTOR && t.transitionNote === HANDOVER_RELEASE_NOTE) return t.ts;
   }
   return null;
 }
@@ -303,7 +311,7 @@ export function seatPoolQueueEffects(
           qitemId: row.qitemId,
           rawDestination: row.destinationSession,
           tags: row.tags ?? [],
-          waitingSince: lastReroute(queueRepo, row.qitemId) ?? row.tsCreated,
+          waitingSince: waitingRestartedAt(queueRepo, row.qitemId) ?? row.tsCreated,
         }));
     },
     openRows: (sessionName) => queueRepo.listOpenObligations(sessionName, ALL_ROWS).length,

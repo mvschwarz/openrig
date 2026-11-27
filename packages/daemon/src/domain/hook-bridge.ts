@@ -69,6 +69,9 @@ interface BridgeReceipt {
   /** An automatic delivery (a queue wake that wasn't sent explicitly): a rig's delivery drain holds it, as it holds the
    *  typed path's. A direct send isn't automatic, and passes a drain as a typed direct send does. */
   automatic?: boolean;
+  /** OpenRig's automatic retry of a message held for a draft (#3991): a drain holds it too, as its pass does on the typed
+   *  path. It isn't a queue wake, so it doesn't end when a queue row is claimed, closed or moved. */
+  heldRetry?: boolean;
   armId?: string;
   batchId?: string;
   claimedAt?: string;
@@ -76,7 +79,7 @@ interface BridgeReceipt {
   ackedAt?: string;
 }
 interface QueuedRow { outboxId: string; body: string; senderSession: string; sessionName: string; auditPointer: string | null; queuedAt: string;
-  occupant: string | null; admission: HookBridgeAdmission | null; automatic: boolean }
+  occupant: string | null; admission: HookBridgeAdmission | null; automatic: boolean; heldRetry: boolean }
 
 export type HookBridgeEvent = Extract<RigEvent, { type: `transport.hook_bridge_${string}` }>;
 
@@ -226,11 +229,12 @@ export class HookBridge {
   /** Queue a send for the seat's bridge: outbox rows in send order, bound to the occupant, with the admission the guard
    *  decided on, delivered at its next turn boundary. Called under the seat's guard lease. */
   deposit(target: HookBridgeTarget, sessionName: string, text: string, opts: { actorSession?: string | null; auditPointer?: string; urgent?: unknown;
-    identityProvenance?: string | null; identityPrincipal?: string | null; admission?: HookBridgeAdmission; queueWake?: boolean; drainExempt?: boolean }, ids: string[]) {
+    identityProvenance?: string | null; identityPrincipal?: string | null; admission?: HookBridgeAdmission; queueWake?: boolean; drainExempt?: boolean;
+    retryAdmission?: () => boolean }, ids: string[]) {
     const outbox = new OutboxHandler(this.db);
     const queuedAt = new Date(this.now()).toISOString();
     const receipt: BridgeReceipt = { channel: HOOK_BRIDGE_CHANNEL, state: "queued", queuedAt, ...(opts.admission ? { admission: opts.admission } : {}),
-      ...(opts.queueWake && !opts.drainExempt ? { automatic: true } : {}) };
+      ...(opts.queueWake && !opts.drainExempt ? { automatic: true } : {}), ...(opts.retryAdmission ? { heldRetry: true } : {}) };
     // An id already settled (delivered, failed, held elsewhere) isn't queued again, and isn't reported queued: null, and
     // nothing changed, so the send takes the path a reused id takes without the bridge.
     const settled = this.db.prepare("SELECT 1 FROM outbox_entries WHERE outbox_id = ? AND delivery_state NOT IN ('pending', 'sending')");
@@ -260,14 +264,15 @@ export class HookBridge {
     return rows.map((r) => {
       const receipt = JSON.parse(r.guard_delivery) as BridgeReceipt;
       return { outboxId: r.outbox_id, body: r.body, senderSession: r.sender_session, sessionName: r.destination_session, auditPointer: r.audit_pointer, queuedAt: receipt.queuedAt,
-        occupant: (JSON.parse(r.guard_binding) as HookBridgeTarget).occupant ?? null, admission: receipt.admission ?? null, automatic: receipt.automatic === true };
+        occupant: (JSON.parse(r.guard_binding) as HookBridgeTarget).occupant ?? null, admission: receipt.admission ?? null, automatic: receipt.automatic === true,
+        heldRetry: receipt.heldRetry === true };
     });
   }
 
-  /** Whether a rig's delivery drain holds this queued row now: an automatic delivery to a seat whose rig is drained. A
-   *  drain read that fails delivers and says so, as the drain's own admission does. */
+  /** Whether a rig's delivery drain holds this queued row now: an automatic delivery (a wake, or a held message's retry)
+   *  to a seat whose rig is drained. A drain read that fails delivers and says so, as the drain's own admission does. */
   private drainHolds(row: QueuedRow): boolean {
-    if (!row.automatic || !this.deps.drained) return false;
+    if (!(row.automatic || row.heldRetry) || !this.deps.drained) return false;
     try { return this.deps.drained(row.sessionName); } catch (error) {
       console.error(`[hook-bridge] ${row.sessionName}'s delivery drain couldn't be read; delivering:`, error);
       return false;

@@ -1232,7 +1232,7 @@ interface NeedsInputShape {
 
 /** The pane's own interactive prompts the structural recognizer reads: a picker or question, and a permission or
  *  confirmation. A draft in the input box is not one. */
-const DIALOG_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt"]);
+const DIALOG_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt", "hook_trust_gate"]);
 const CODEX_STRUCTURAL_PROMPT_SOURCE = "codex:structural-prompt";
 /** A declared-hooks community seat's dialog as the structural recognizer reads it. */
 const PRESET_STRUCTURAL_PROMPT_SOURCE = "community:structural-prompt";

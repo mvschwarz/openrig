@@ -148,6 +148,16 @@ describe("seat typing guard commands", () => {
     const json = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig", "--json"]).then(() => undefined));
     expect(JSON.parse(json.logs.join("\n")).nativeInput).toEqual(nativeInput);
   });
+  it("shows the served hook-review reason in human and JSON seat status", async () => {
+    const activityState = { display: "needs-input", needsInput: { count: 1, reason: "hook_trust_gate" } };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, activityState } }, []);
+    const human = await captureLogs(() => makeCommand(deps)
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(human.logs).toContain("Activity: needs-input (hook_trust_gate)");
+    const json = await captureLogs(() => makeCommand(deps)
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig", "--json"]).then(() => undefined));
+    expect(JSON.parse(json.logs.join("\n")).activityState).toEqual(activityState);
+  });
   it.each([
     { name: "a Claude Code seat with no one chosen", data: { runtime: "claude-code", runner: false, permissions_to: null },
       line: "Own permission prompts asked of (with openrig-core loaded): its work's return route, else no one" },
@@ -658,6 +668,21 @@ describe("rig seat status", () => {
       await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
     });
     expect(logs).toContain(expected);
+  });
+
+  // Slice 60: a killed agent's shell lived on, and the seat read running. The daemon's agent_liveness shows it beside that.
+  it("shows an agent that isn't verified beside a running session, and says nothing when the daemon serves no reading", async () => {
+    const run = async (extra: Record<string, unknown>) => {
+      const deps = makeDeps({ status: 200, data: { ...STATUS, runtime: "hermes", lifecycle_state: "running", ...extra } }, []);
+      return (await captureLogs(async () => {
+        await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+      })).logs;
+    };
+    const shown = await run({ agent_liveness: { state: "not_verified", reason: "shell_foreground", command: "zsh", observedAt: "2026-11-27T12:15:30.000Z" } });
+    expect(shown).toContain("Session: running");
+    expect(shown).toContain("Agent: not verified: the pane's foreground is zsh, not a verified hermes agent (identity check at "
+      + "2026-11-27T12:15:30.000Z). It may have exited to its shell, or run behind a wrapper; rig capture dev-impl@seat-rig shows the pane.");
+    expect((await run({})).some(line => line.startsWith("Agent:"))).toBe(false);
   });
 
   // A seat joined with rig attach runs in someone else's program: OpenRig can't see its process, only what it writes.
@@ -1239,6 +1264,26 @@ describe("rig seat status", () => {
     expect(exitCode).toBeUndefined();
     expect(output).toContain(`The captured startup context (restore packet) was typed and submitted to the successor; ${reason}.`);
     expect(output).not.toContain("restore packet) was delivered");
+  });
+
+  it("first-input handover output separates passing the launch file from submission and consumption", async () => {
+    const deps = makeDeps({ status: 200, data: {
+      ...HANDOVER_RESULT_FRESH,
+      restorePacket: { status: "unconfirmed", reason: "passed at launch", consumption: "unconfirmed",
+        firstInput: { path: "/private/first-input/attempt.txt", submission: "unconfirmed" } },
+      sideEffects: { ...HANDOVER_RESULT_FRESH.sideEffects, startupContextDelivered: false },
+    } }, []);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "fresh", "--reason", "context-wall"]);
+    });
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
+    expect(output).toContain("passed at launch through /private/first-input/attempt.txt; submission and consumption are unconfirmed");
+    expect(output).toContain("Do not resend the packet or repeat the handover");
+    expect(output).not.toContain("before sending the context again");
+    expect(output).not.toContain("restore packet) was delivered");
+    expect(output).not.toContain("OpenRig delivered no startup context");
   });
 
   it("handover fresh human output says an unconfirmed restore packet was sent, not that nothing was delivered", async () => {
