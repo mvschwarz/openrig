@@ -494,7 +494,13 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       }
     });
 
-  it("#4047 starts a launch-only community seat the snapshot saw detached with its harness, not a bare shell", async () => {
+  // Saved sessions for the seat, listed newest first; the selection is read from the newest one by id, not by position.
+  it.each([
+    { name: "its only saved session names the harness", harnesses: ["synth-harness"], started: true },
+    { name: "its newest saved session names the harness", harnesses: ["synth-harness", "other-harness"], started: true },
+    { name: "its newest saved session names another harness", harnesses: ["other-harness", "synth-harness"], started: false },
+    { name: "its newest saved session names no harness", harnesses: [undefined, "synth-harness"], started: false },
+  ])("#4047 a launch-only community seat the snapshot saw detached, when $name", async ({ harnesses, started }) => {
     const saved = process.env["OPENRIG_HOME"];
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "subset-community-"));
     const spies = (["project", "deliverStartup", "launchHarness", "checkReady"] as const)
@@ -515,13 +521,22 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       const data = JSON.parse((db.prepare("SELECT data FROM snapshots WHERE id = ?").get(snapshotId) as { data: string }).data);
       data.nodes[0].runtime = "synth-harness";
       // Captured after a reboot: the seat's session was detached, so the snapshot records no occupant for it.
-      Object.assign(data.sessions[0], { status: "detached", communityHarness: "synth-harness", resumeType: null, restorePolicy: "resume_if_possible" });
+      const template = data.sessions[0];
+      data.sessions.splice(0, 1, ...harnesses.map((communityHarness, i) => ({
+        ...template, id: `sess-0-${harnesses.length - i}`, status: "detached", communityHarness, resumeType: null, restorePolicy: "resume_if_possible",
+      })));
       data.activeOccupantsByNode = { [nodeIds[0]!]: { kind: "absent" }, [nodeIds[1]!]: { kind: "absent" } };
       db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snapshotId);
       const adapters = withCommunityHarnessResolver({} as Record<string, RuntimeAdapter>, { tmux: tmux as any, presetsDir: () => presets });
 
       const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"], { snapshotId, adapters });
 
+      if (!started) {
+        // Today's fail-closed reading: no adapter for a selection that doesn't match the seat's runtime.
+        expect(result.launched![0]).toMatchObject({ logicalId: "dev.driver", status: "attention_required" });
+        expect(spies[2]).not.toHaveBeenCalled();
+        return;
+      }
       expect(result.launched![0]).toMatchObject({ logicalId: "dev.driver", status: "fresh-primed" });
       expect(spies[2]).toHaveBeenCalledOnce();
       // The new session keeps the harness selection, so a later `rig seat launch --fresh` still finds the adapter.
