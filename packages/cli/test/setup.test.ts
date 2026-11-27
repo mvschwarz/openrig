@@ -630,7 +630,7 @@ describe("rig setup", () => {
       exec: (cmd: string) => {
         if (cmd === "herdr --version") return "herdr 0.9.3\n";
         if (cmd === "brew --version") return "Homebrew 4.0\n";
-        if (cmd === "tmux -V") throw new Error("not found");
+        if (cmd === "tmux -V") throw Object.assign(new Error("Command failed: tmux -V\n/bin/sh: 1: tmux: not found"), { status: 127 });
         if (cmd === "brew install tmux") throw new Error("brew install failed");
         if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
         return "";

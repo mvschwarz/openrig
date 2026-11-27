@@ -13,14 +13,17 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** What a failed `tmux -V` shows. Only evidence of no tmux to run (no such command or file, a shell's exit 127) is
- *  not_installed. A process this shell was refused permission to start (a sandbox can do this) is not_runnable. Anything
- *  else, such as a timeout, is check_failed. The last two say nothing about whether tmux exists. */
+/** What a failed `tmux -V` shows. not_installed only on evidence that the `tmux` command itself wasn't found: a shell's
+ *  `tmux: not found`, `tmux: command not found` or `command not found: tmux`, or ENOENT from starting `tmux` itself.
+ *  Exit 127 alone isn't that evidence: the dynamic loader exits 127 for an installed tmux missing a shared library. A
+ *  process this shell was refused permission to start (a sandbox can do this) is not_runnable. Anything else, such as a
+ *  timeout, is check_failed. The last two say nothing about whether tmux exists, and keep their detail. */
 function classifyVersionFailure(err: unknown): "not_installed" | "not_runnable" | "check_failed" {
-  const e = err as { code?: unknown; status?: unknown; stderr?: unknown } | null;
+  const e = err as { code?: unknown; path?: unknown; stderr?: unknown } | null;
   if (e?.code === "EPERM" || e?.code === "EACCES") return "not_runnable";
-  if (e?.code === "ENOENT" || e?.status === 127) return "not_installed";
-  return /\bnot found\b|no such file or directory/i.test(`${String(e?.stderr ?? "")} ${errorMessage(err)}`) ? "not_installed" : "check_failed";
+  if (e?.code === "ENOENT" && typeof e.path === "string" && (e.path === "tmux" || e.path.endsWith("/tmux"))) return "not_installed";
+  const said = `${String(e?.stderr ?? "")}\n${errorMessage(err)}`;
+  return /\btmux: (?:command )?not found\b|\bcommand not found: tmux\b/i.test(said) ? "not_installed" : "check_failed";
 }
 
 /** What to say when `tmux -V` failed without showing that tmux is missing (not_runnable or check_failed). */

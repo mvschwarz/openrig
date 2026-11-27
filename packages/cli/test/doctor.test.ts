@@ -171,7 +171,7 @@ describe("runDoctorChecks", () => {
   it("tmux missing -> fail with guidance", () => {
     const deps = makeDeps({
       exec: (cmd: string) => {
-        if (cmd === "tmux -V") throw new Error("not found");
+        if (cmd === "tmux -V") throw Object.assign(new Error("Command failed: tmux -V\n/bin/sh: 1: tmux: not found"), { status: 127 });
         return "";
       },
     });
@@ -195,6 +195,23 @@ describe("runDoctorChecks", () => {
     expect(tmuxCheck?.message).toBe(`tmux couldn't be run from this shell (spawnSync /bin/sh ${code}).`);
     expect(tmuxCheck?.message).not.toContain("not found");
     expect(tmuxCheck?.fix).not.toContain("brew install");
+  });
+
+  // #4028 review X-F1b: exit 127 alone isn't proof tmux is missing. The loader exits 127 for an installed tmux whose shared
+  // library is missing, and that detail is what the person needs.
+  it.each([
+    ["the loader's missing library (exit 127)", "Command failed: tmux -V\ntmux: error while loading shared libraries: libevent_core-2.1.so.7: cannot open shared object file: No such file or directory", "fail", /^tmux's version check couldn't be completed \([\s\S]*libevent_core-2\.1\.so\.7/],
+    ["the shell's own not-found (exit 127)", "Command failed: tmux -V\nbash: line 1: tmux: command not found", "fail", /^tmux not found\.$/],
+  ])("tmux -V failing with %s", (_label, message, status, expected) => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") throw Object.assign(new Error(message), { status: 127 });
+        return "";
+      },
+    });
+    const tmuxCheck = runDoctorChecks(deps).checks.find((c) => c.name === "tmux");
+    expect(tmuxCheck?.status).toBe(status);
+    expect(tmuxCheck?.message).toMatch(expected);
   });
 
   it("tmux version check failing some other way (exit 1, no not-found) -> couldn't complete, not 'not found'", () => {
