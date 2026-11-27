@@ -613,11 +613,16 @@ export class SessionRegistry {
   /** Record that this session was launched for a community harness, selected through its preset. With `runner`, also
    *  record what that launch's preset declared: `runner: true` (1), OpenRig's hosted Pi-protocol runner for
    *  `protocol: pi-rpc` ("pi-rpc", 2), or neither (0), so activity reads the launched occupant's declaration, never a
-   *  later preset edit. Without it (a restore carrying only the selection) the field is left as is. */
-  recordCommunityHarnessSelection(sessionId: string, app: string, runner?: boolean | "pi-rpc"): void {
+   *  later preset edit. Without it (a restore carrying only the selection) the field is left as is. The hooks the preset
+   *  declared its own script posts (`activity_hooks`) are recorded with the runner declaration, none as NULL. */
+  recordCommunityHarnessSelection(sessionId: string, app: string, runner?: boolean | "pi-rpc", activityHooks?: readonly string[]): void {
     if (runner !== undefined && sessionCommunityRunnerSelect(this.db, "sessions") !== "NULL") {
       this.db.prepare("UPDATE sessions SET agent_app = ?, agent_runner = ? WHERE id = ?")
         .run(app, runner === "pi-rpc" ? AGENT_RUNNER_HOSTED_PI_RPC : runner ? AGENT_RUNNER_PRESET : 0, sessionId);
+      if (sessionActivityHooksSelect(this.db, "sessions") !== "NULL") {
+        this.db.prepare("UPDATE sessions SET agent_activity_hooks = ? WHERE id = ?")
+          .run(activityHooks?.length ? JSON.stringify(activityHooks) : null, sessionId);
+      }
       return;
     }
     this.db.prepare("UPDATE sessions SET agent_app = ? WHERE id = ?").run(app, sessionId);
@@ -1083,4 +1088,29 @@ export function sessionCommunityRunnerSelect(db: Database.Database, alias = "s")
     sessionsHaveCommunityRunner.set(db, has);
   }
   return has ? `${alias}.agent_runner` : "NULL";
+}
+
+const sessionsHaveActivityHooks = new WeakMap<Database.Database, boolean>();
+
+/** The SQL that reads the hooks a session's community preset declared at its launch (`activity_hooks`, a JSON list),
+ *  or NULL on a schema without the column. The reconcile pass and the hook route both read it through this, never the
+ *  preset file, so a seat keeps what its launch declared. */
+export function sessionActivityHooksSelect(db: Database.Database, alias = "s"): string {
+  let has = sessionsHaveActivityHooks.get(db);
+  if (has === undefined) {
+    has = (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name?: string }>).some(row => row.name === "agent_activity_hooks");
+    sessionsHaveActivityHooks.set(db, has);
+  }
+  return has ? `${alias}.agent_activity_hooks` : "NULL";
+}
+
+/** A recorded `activity_hooks` declaration's event names, or null when none was recorded or it can't be read. */
+export function recordedActivityHooks(value: string | null | undefined): string[] | null {
+  if (!value) return null;
+  try {
+    const hooks: unknown = JSON.parse(value);
+    return Array.isArray(hooks) && hooks.length > 0 && hooks.every(hook => typeof hook === "string") ? hooks : null;
+  } catch {
+    return null;
+  }
 }

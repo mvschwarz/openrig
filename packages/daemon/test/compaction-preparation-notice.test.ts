@@ -5,6 +5,8 @@ import { dirname, join } from "node:path";
 import { AUTO_PREP_WAIT_MS_DEFAULT, ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE, type PreparationFailure } from "../src/domain/claude-compaction-enforcer.js";
 import type { SessionTransport } from "../src/domain/session-transport.js";
 import { TerminalPolicyRefusal } from "../src/domain/terminal-policy.js";
+import { Hono } from "hono";
+import { compactionRoutes } from "../src/routes/compaction.js";
 const homes: string[] = [];
 afterEach(() => { for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true }); });
 const input = { sessionName: "writer@test", runtime: "claude-code", usedPercentage: 90 };
@@ -187,4 +189,97 @@ it("cancelling a recovered ended record resets the run across another restart", 
   await end(f); await f.e.maybeAutoCompact(input);
   expect(f.notice).toHaveBeenCalledTimes(1);
   expect(f.notice).toHaveBeenCalledWith(expect.objectContaining({ endedAttempts: 3 }));
+});
+
+it("a notice nobody can receive is recorded on the run and shown, tried again on later polls, and opened once someone can receive it", async () => {
+  const f = fixture(); await end(f); await end(f); await end(f);
+  f.notice.mockResolvedValue({ unaddressed: "No recovery recipient could be resolved" } as never);
+  await f.e.maybeAutoCompact(input);
+  expect(f.notice).toHaveBeenCalledWith(expect.objectContaining({ endedAttempts: 3 }));
+  expect(f.e.getPreparationNotice(input.sessionName)).toEqual({ status: "not_addressed",
+    failure: expect.stringContaining("ended 3 automatic attempts"), detail: "No recovery recipient could be resolved" });
+  const saved = JSON.parse(readFileSync(f.notice.mock.calls[0]![0].statePath, "utf8"));
+  expect(saved.preparationFailures).toMatchObject({ endedAttempts: 3, unaddressed: "No recovery recipient could be resolved" });
+  expect(saved.preparationFailures.reportedAttempts).toBeUndefined();
+  const tries = f.notice.mock.calls.length;
+  await end(f); await f.e.maybeAutoCompact(input);
+  expect(f.notice.mock.calls.length).toBeGreaterThan(tries); // still owed: later polls try again
+  expect(f.e.getPreparationNotice(input.sessionName)?.status).toBe("not_addressed");
+  f.notice.mockResolvedValue(undefined as never); // a recipient resolves
+  await end(f); await f.e.maybeAutoCompact(input);
+  expect(f.e.getPreparationNotice(input.sessionName)).toEqual({ status: "opened", failure: expect.stringContaining("automatic attempts") });
+  const opened = f.notice.mock.calls.length;
+  await f.e.maybeAutoCompact(input); expect(f.notice).toHaveBeenCalledTimes(opened);
+  expect(f.e.getPreparationNotice("other@test")).toBeNull();
+});
+
+it("re-checks the seat's held notices on its first poll, on every poll while it can't act, and once when it can again", async () => {
+  const recheck = vi.fn();
+  const f = fixture({ onHeldNoticesRecheck: recheck });
+  await f.e.maybeAutoCompact(input);
+  expect(recheck).toHaveBeenCalledTimes(1); // the first poll since this daemon started
+  await end(f); await end(f); await end(f);
+  expect(recheck).toHaveBeenCalledTimes(1); // able to act throughout: nothing to re-check
+  await f.e.maybeAutoCompact(input); // counts the third ended attempt: unable from this poll on
+  expect(recheck).toHaveBeenCalledTimes(2);
+  await f.e.maybeAutoCompact(input); expect(recheck).toHaveBeenCalledTimes(3);
+  f.e.cancelPreparation(input.sessionName);
+  await f.e.maybeAutoCompact(input); expect(recheck).toHaveBeenCalledTimes(4); // it can act again
+  await f.e.maybeAutoCompact(input); expect(recheck).toHaveBeenCalledTimes(4);
+  f.restart(); await f.e.maybeAutoCompact(input); expect(recheck).toHaveBeenCalledTimes(5);
+  expect(recheck.mock.calls.every(([session]) => session === input.sessionName)).toBe(true);
+});
+
+it("a seat at its context wall, held at the idle gate on every poll, still has its held notices re-checked", async () => {
+  const recheck = vi.fn();
+  const f = fixture({ onHeldNoticesRecheck: recheck });
+  await endDelivered(f); await endDelivered(f); await endDelivered(f);
+  vi.mocked(f.transport.waitUntilIdle).mockResolvedValue({ ok: false } as never);
+  const before = recheck.mock.calls.length;
+  expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false, reason: "waiting_for_idle" });
+  expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false, reason: "waiting_for_idle" });
+  expect(f.e.recoveryInability(input.sessionName)).not.toBeNull();
+  expect(recheck).toHaveBeenCalledTimes(before + 2);
+});
+
+it("a re-check that fails is tried again on the next poll", async () => {
+  const recheck = vi.fn().mockRejectedValueOnce(new Error("database busy"));
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const f = fixture({ onHeldNoticesRecheck: recheck });
+  await f.e.maybeAutoCompact(input); await f.e.maybeAutoCompact(input); await f.e.maybeAutoCompact(input);
+  expect(recheck).toHaveBeenCalledTimes(2);
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining("held-notice re-check failed"), expect.objectContaining({ errorClass: "Error" }));
+  warn.mockRestore();
+});
+
+it("rig compact --state shows the seat's own preparation notice while its run stands, and nothing without one", async () => {
+  const f = fixture();
+  const stateOf = async () => {
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("compactionEnforcer" as never, f.e); await next(); });
+    app.route("/api/compaction", compactionRoutes());
+    return (await app.request(`/api/compaction/state?session=${input.sessionName}`)).json() as Promise<Record<string, unknown>>;
+  };
+  await end(f); await end(f); await end(f);
+  expect(await stateOf()).not.toHaveProperty("preparationNotice");
+  f.notice.mockResolvedValue({ unaddressed: "No recovery recipient could be resolved" } as never);
+  await f.e.maybeAutoCompact(input);
+  expect((await stateOf()).preparationNotice).toEqual({ status: "not_addressed",
+    failure: expect.stringContaining("ended 3 automatic attempts"), detail: "No recovery recipient could be resolved" });
+  f.e.cancelPreparation(input.sessionName);
+  expect(await stateOf()).not.toHaveProperty("preparationNotice");
+});
+
+it("an unsampled poll re-checks the held notices too, with the same dedupe, and only for a Claude seat", async () => {
+  const recheck = vi.fn();
+  const f = fixture({ onHeldNoticesRecheck: recheck });
+  const unsampled = { sessionName: input.sessionName, runtime: "claude-code", cwd: null, lastUsedPercentage: null };
+  await f.e.drainPendingPreparedCompact(unsampled); expect(recheck).toHaveBeenCalledTimes(1); // the first poll since this daemon started
+  await f.e.drainPendingPreparedCompact(unsampled); expect(recheck).toHaveBeenCalledTimes(1); // able to act: nothing to re-check
+  await end(f); await end(f); await end(f); await f.e.maybeAutoCompact(input); // the third ended attempt counts: unable
+  const calls = recheck.mock.calls.length;
+  await f.e.drainPendingPreparedCompact(unsampled); await f.e.drainPendingPreparedCompact(unsampled);
+  expect(recheck).toHaveBeenCalledTimes(calls + 2);
+  await f.e.drainPendingPreparedCompact({ ...unsampled, runtime: "codex" });
+  expect(recheck).toHaveBeenCalledTimes(calls + 2);
 });

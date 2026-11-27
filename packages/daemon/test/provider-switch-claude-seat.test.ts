@@ -34,6 +34,9 @@ const settle = async () => { for (let i = 0; i < 5; i++) await new Promise((r) =
 
 function harness(opts: {
   runtime?: string; running?: boolean; pane?: string | null; ref?: ClaudeSeatTokenRef | null; precedence?: CredentialPrecedence;
+  // A seat that has never launched (read on each lookup), and what its first-launch save finds; `false` leaves the save unwired.
+  pristine?: () => boolean;
+  firstLaunch?: ReturnType<NonNullable<ClaudeSeatRelaunch["saveFirstLaunchTokenRef"]>> | false;
   snapshot?: { resumes: true; conversation: string | null } | { resumes: false; why: string };
   nextLaunch?: ReturnType<ClaudeSeatRelaunch["nextLaunch"]>;
   relaunch?: Relaunched | (() => Promise<Relaunched>);
@@ -47,10 +50,19 @@ function harness(opts: {
   let ref: ClaudeSeatTokenRef | null = opts.ref ?? null;
   let queue: Promise<unknown> = Promise.resolve();
   const claudeSeat: ClaudeSeatRelaunch = {
-    seat: () => (opts.runtime ?? "claude-code") === "claude-code"
-      ? { nodeId: "node-a", rigId: "rig-1", rigName: "rig", logicalId: "dev.a", running: opts.running ?? true, pane: opts.pane === undefined ? "%7" : opts.pane } : null,
+    seat: () => {
+      if ((opts.runtime ?? "claude-code") !== "claude-code") return null;
+      if (opts.pristine?.()) return { nodeId: "node-a", rigId: "rig-1", rigName: "rig", logicalId: "dev.a", running: false, pane: null, pristine: true as const };
+      return { nodeId: "node-a", rigId: "rig-1", rigName: "rig", logicalId: "dev.a", running: opts.running ?? true, pane: opts.pane === undefined ? "%7" : opts.pane };
+    },
     tokenRef: () => ref,
     setTokenRef: (_nodeId, next) => { calls.push(`setTokenRef ${next ? next.label : "null"}`); ref = next; },
+    ...(opts.firstLaunch === false ? {} : { saveFirstLaunchTokenRef: (_nodeId: string, next: ClaudeSeatTokenRef | null, audit: { requestedBy: string | null }) => {
+      calls.push(`first launch reference ${next ? next.label : "null"} by ${audit.requestedBy ?? "nobody named"}`);
+      const result = opts.firstLaunch ?? { ok: true as const };
+      if (result.ok) ref = next;
+      return result;
+    } }),
     snapshot: (rigId) => { calls.push(`snapshot ${rigId}`); return { snapshotId: "snap-1", ...(opts.snapshot ?? { resumes: true as const, conversation: "conv-1" }) }; },
     nextLaunch: (rigId) => { calls.push(`next launch ${rigId}`); return opts.nextLaunch ?? { snapshotId: "snap-0", resumes: true, automatic: false, conversation: "conv-1" }; },
     // The seat's lifecycle lease: one holder at a time, in arrival order.
@@ -416,5 +428,64 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
       safe: true, claude: { label: "work", tokenFile: file, notChecked: CLEAR.notChecked } });
     expect(h.calls).toEqual(["precedence node-a"]);
     expect(h.ref()).toBeNull();
+  });
+});
+
+// A materialized seat that has never launched has no conversation to resume: its first launch starts one. The switch saves its
+// reference for that launch, with a record naming who asked, in the same write that checks it still hasn't launched.
+describe("rig provider switch --seat saves a never-launched Claude seat's reference for its first launch", () => {
+  it("with no resume check, snapshot or relaunch, recording who asked", async () => {
+    const file = tokenFile();
+    const h = harness({ pristine: () => true });
+    expect(await h.svc.precheck({ seat: SEAT, toAccount: "work", tokenFile: file }, h.seatRestart, h.claudeSeat))
+      .toMatchObject({ safe: true, claude: { label: "work", tokenFile: file } });
+    const result = await h.svc.switchAccount({ ...to("work", file), requestedBy: "rig-admin@ops" }, h.seatRestart, h.claudeSeat);
+    expect(result).toMatchObject({ outcome: "succeeded", seat: { seat: SEAT, account: "work", tokenFile: file, conversation: null, loginChanged: true,
+      undo: `rig provider switch --seat ${SEAT} --stored-login` } });
+    expect(result.message).toBe(`${SEAT} has never launched, so nothing was relaunched. Its first launch uses its token reference "work": rig launch rig dev.a.`);
+    const next = result.outcome === "succeeded" ? result.seat?.next ?? "" : "";
+    expect(next).toContain(`rig launch rig dev.a starts it for the first time with its token reference "work".`);
+    expect(next).toContain("The label and a readable file don't prove the account");
+    expect(h.calls).toEqual(["precedence node-a", "exclusive node-a", "precedence node-a", "first launch reference work by rig-admin@ops"]);
+    expect(h.ref()).toEqual({ label: "work", tokenFile: file });
+  });
+
+  it("a first launch that began after the checks leaves it as it is", async () => {
+    const file = tokenFile();
+    const message = "The seat launched after this switch checked it, so its first launch already chose its login. Run the switch again for the launched seat.";
+    const h = harness({ pristine: () => true, ref: { label: "old", tokenFile: "/tokens/old" }, firstLaunch: { ok: false, code: "seat_launched", message } });
+    expect(await h.svc.switchAccount(to("work", file), h.seatRestart, h.claudeSeat))
+      .toEqual({ outcome: "failed_safely", reasons: ["seat_launched"], message: `${message} Nothing changed.` });
+    expect(h.ref()).toEqual({ label: "old", tokenFile: "/tokens/old" });
+    expect(h.calls.filter((c) => /snapshot|relaunch|setTokenRef|next launch/.test(c))).toEqual([]);
+  });
+
+  it("a seat that launched while the switch waited for it takes the running seat's relaunch, never the first-launch save", async () => {
+    const file = tokenFile();
+    let launched = false;
+    const h = harness({ pristine: () => !launched, exclusive: async (fn) => { launched = true; return fn(); } });
+    expect(await h.svc.switchAccount(to("work", file), h.seatRestart, h.claudeSeat)).toMatchObject({ outcome: "rebind_in_progress" });
+    expect(h.calls).toEqual(expect.arrayContaining(["snapshot rig-1", "setTokenRef work", "relaunch rig-1 dev.a snap-1 with work"]));
+    expect(h.calls.some((c) => c.startsWith("first launch reference"))).toBe(false);
+  });
+
+  it("--stored-login clears a reference saved for the first launch, and the way back names it", async () => {
+    const h = harness({ pristine: () => true, ref: { label: "old", tokenFile: "/tokens/old" } });
+    const result = await h.svc.switchAccount(to("stored-login", null), h.seatRestart, h.claudeSeat);
+    expect(result).toMatchObject({ outcome: "succeeded", seat: { account: "stored-login", undo: `rig provider switch --seat ${SEAT} --to-account old --token-file '/tokens/old'` } });
+    expect(h.calls).toContain("first launch reference null by nobody named");
+    expect(h.ref()).toBeNull();
+  });
+
+  it("a daemon that can't save a first-launch reference refuses, unchanged", async () => {
+    const h = harness({ pristine: () => true, firstLaunch: false });
+    expect(await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat)).toMatchObject({ outcome: "failed_safely", reasons: ["rebind_unsupported_for_runtime"] });
+    expect(h.ref()).toBeNull();
+  });
+
+  it("a stopped seat that has launched before still needs its next launch to resume", async () => {
+    const h = harness({ running: false, nextLaunch: { snapshotId: "snap-0", resumes: false, why: "has no resume token for this seat" } });
+    expect(await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat)).toMatchObject({ outcome: "failed_safely", reasons: ["conversation_not_resumable"] });
+    expect(h.calls.some((c) => c.startsWith("first launch reference"))).toBe(false);
   });
 });

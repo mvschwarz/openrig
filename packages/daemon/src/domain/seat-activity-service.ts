@@ -13,7 +13,7 @@ import type {
   RungTrust,
 } from "./activity-taxonomy.js";
 import { COMMUNITY_HARNESS_RUNG_INVENTORY, COMMUNITY_RUNNER_RUNG_INVENTORY, EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
-import { recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
+import { recordedActivityHooks, recordedRunner, sessionActivityHooksSelect, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { hookPrecedes } from "./agent-activity-store.js";
 import type { SeatStructuralActivityService, StructuralObservation } from "./seat-structural-activity-service.js";
 import { DEFAULT_STRUCTURAL_STALE_MS } from "./seat-structural-activity-service.js";
@@ -232,7 +232,9 @@ export class SeatActivityService {
       const seat = this.ladder.get(seatNodeId);
       let codexFrameWorking = false;
       let codexFrameProofAt: string | undefined;
-      const frame = seat?.inventory?.runtime === "codex" && this.structuralActivity
+      // A declared-hooks community seat reads its prompt from the same structural frame as Codex (below).
+      const presetPrompt = seat?.inventory?.activityHooks !== undefined;
+      const frame = (seat?.inventory?.runtime === "codex" || presetPrompt) && this.structuralActivity
         ? this.structuralActivity.getStructuralActivity(paneId) : null;
       if (seat?.inventory?.runtime === "codex" && this.structuralActivity) {
         const capturedAt = frame ? Date.parse(frame.observedAt) : NaN;
@@ -260,15 +262,19 @@ export class SeatActivityService {
       // the working frame's boundary (captured after this seat's inventory began, and fresh), says whether a choice is
       // showing (1) or the composer is complete and empty (0). Any other frame (a draft, work, an unrecognised screen)
       // withdraws this source, so the prompt reads unknown again. A tracked tool approval keeps its own path.
-      if (seat?.inventory?.runtime === "codex" && this.structuralActivity) {
-        const prompt = frame && this.codexFrameQualifies(seat, frame.captureStartedAt, frame.pane, "required")
-          ? codexPromptObservation(frame, paneId) : null;
+      // A declared-hooks community seat reports the recognizer's dialog reading under its own source, on the same boundary
+      // with its pane checked only where known (a plain preset has no verified native process); a frame showing no dialog
+      // withdraws it. It decides only while it is also newer than the seat's latest hook (arbitrate).
+      if (seat && (seat.inventory?.runtime === "codex" || presetPrompt) && this.structuralActivity) {
+        const sourceId = presetPrompt ? PRESET_STRUCTURAL_PROMPT_SOURCE : CODEX_STRUCTURAL_PROMPT_SOURCE;
+        const prompt = frame && this.codexFrameQualifies(seat, frame.captureStartedAt, frame.pane, presetPrompt ? "if-known" : "required")
+          ? presetPrompt ? presetPromptObservation(frame) : codexPromptObservation(frame, paneId) : null;
         if (prompt) {
           seat.structuralPrompt = { freshMs: Date.parse(frame!.checkedAt ?? frame!.observedAt),
-            startedMs: Date.parse(frame!.captureStartedAt!), pane: frame!.pane! };
-          this.reportEvidence({ seatNodeId, sessionName: paneId, rung: "needs-input-chrome", sourceId: CODEX_STRUCTURAL_PROMPT_SOURCE,
+            startedMs: Date.parse(frame!.captureStartedAt!), ...(frame!.pane ? { pane: frame!.pane } : {}) };
+          this.reportEvidence({ seatNodeId, sessionName: paneId, rung: "needs-input-chrome", sourceId,
             seq, observedAt: prompt.observedAt, needsInput: prompt.needsInput });
-        } else if (seat.sources.delete(CODEX_STRUCTURAL_PROMPT_SOURCE)) {
+        } else if (seat.sources.delete(sourceId)) {
           seat.structuralPrompt = undefined;
           this.arbitrate(seat);
         }
@@ -434,14 +440,15 @@ export class SeatActivityService {
       const rows = db.prepare(`
         SELECT s.session_name as session_name, n.id as node_id, n.runtime as runtime,
           COALESCE(b.attachment_type, 'tmux') as attachment_type, ${sessionCommunityHarnessSelect(db)} as community_harness,
-          ${sessionCommunityRunnerSelect(db)} as community_runner
+          ${sessionCommunityRunnerSelect(db)} as community_runner, ${sessionActivityHooksSelect(db)} as community_hooks
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
         LEFT JOIN bindings b ON b.node_id = n.id
         WHERE s.status = 'running'
           AND s.session_name IS NOT NULL
-      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; attachment_type: string; community_harness: string | null; community_runner: number | null }>;
+      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; attachment_type: string; community_harness: string | null;
+        community_runner: number | null; community_hooks: string | null }>;
       const tmuxRows = rows.filter((r) => r.attachment_type === "tmux");
       const liveTmux = new Set(tmuxRows.map((r) => r.session_name));
       for (const pane of this.latestByPaneId.keys()) {
@@ -464,9 +471,11 @@ export class SeatActivityService {
       const identities = new SeatIdentityStore(db);
       for (const r of tmuxRows) {
         const known = this.ladder.get(r.node_id);
-        const inventory = runtimeRungInventory(r.runtime, r.community_harness, recordedRunner(r.community_runner));
+        const inventory = runtimeRungInventory(r.runtime, r.community_harness, recordedRunner(r.community_runner),
+          recordedActivityHooks(r.community_hooks));
         // A replacement occupant can keep the seat's session name; its own recorded app selection (or none) decides.
-        // A plain and a runner launch of the same app read differently, so a change between them re-declares too.
+        // A plain, a declared-hooks and a runner launch of the same app read differently, so a change between them
+        // (or in the declared hooks) re-declares too.
         const communityHarnessChanged = !!known && communityKind(known.inventory) !== communityKind(inventory);
         if (!known || known.inventory === null || known.sessionName !== r.session_name || communityHarnessChanged) {
           this.declareRungInventory({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
@@ -474,10 +483,11 @@ export class SeatActivityService {
         }
         // Once per current occupant, whichever path declared its inventory (a hook can arrive before the first sweep).
         this.restoreUsageLimit({ seatNodeId: r.node_id, sessionName: r.session_name }, r.runtime);
-        if (r.runtime === "codex") {
+        if (r.runtime === "codex" || inventory.activityHooks) {
           // The occupant as OpenRig records it, from the identity reconciler's last verdict for this session: the
           // binding's pane it checked, and the pane process it verified as this session's Codex there. It follows
           // OpenRig's own in-place restart. No verdict (or a defensive read of a store without one) leaves both unknown.
+          // A community seat's process is never verified, so for a declared-hooks seat only its pane is known.
           const verdict = identities.getForNode(r.node_id);
           const current = verdict?.sessionName === r.session_name ? verdict : null;
           this.recordCodexOccupant(r.node_id, { paneId: current?.evidence.registeredPane ?? null,
@@ -554,6 +564,7 @@ export class SeatActivityService {
     seat.inventorySinceMs = this.now().getTime();
     // #2515: a new inventory is a new occupant boundary, so the copied prompt evidence from before it goes too.
     seat.sources.delete(CODEX_STRUCTURAL_PROMPT_SOURCE);
+    seat.sources.delete(PRESET_STRUCTURAL_PROMPT_SOURCE);
     seat.structuralPrompt = undefined;
     seat.trust.clear();
     seat.hooksContradicted = false;
@@ -579,8 +590,9 @@ export class SeatActivityService {
     const prior = seat.sources.get(evidence.sourceId);
     if (prior && evidence.seq <= prior.latest.seq) return; // stale/reordered — dropped
     // Hook posts can arrive out of their own order (the seq above is arrival order): an older boundary arriving later is
-    // dropped. That's any post from a durable source, and a working or idle post from any hook source, so a late Stop
-    // can't make a seat mid-turn read idle. An attention post (a prompt, a usage limit) keeps its own ordering below.
+    // dropped. That's any post from a durable source, and a working or idle post from any hook source (a declared-hooks
+    // preset's included), so a late Stop can't make a seat mid-turn read idle. An attention post (a prompt, a usage limit)
+    // keeps its own ordering below.
     if (prior && (this.durableBoundaries(seat, evidence.rung) || (evidence.rung === "lifecycle-hooks"
         && (evidence.activity === "working" || evidence.activity === "idle-at-prompt")))
         && [prior.latest, prior.latestActivity].some((newer) => newer
@@ -1065,11 +1077,15 @@ export class SeatActivityService {
     this.checkContradiction(seat);
     // #2515: the copied Codex prompt evidence holds only while its frame would: fresh, from this inventory, and from the
     // occupant's pane and process. Read here, so a getter, a failed window read, a new inventory or a new occupant sees
-    // it expire too.
+    // it expire too. A declared-hooks preset's holds the same way, its pane checked where known, and only while its
+    // capture started after the seat's latest hook: the next hook post outranks it at once.
     const prompt = seat.structuralPrompt;
+    const presetPrompt = seat.inventory?.activityHooks !== undefined;
+    const latestHookAt = presetPrompt ? Date.parse(this.latestByRung(seat, "lifecycle-hooks")?.observedAt ?? "") : NaN;
     if (prompt && (this.now().getTime() - prompt.freshMs >= DEFAULT_STRUCTURAL_STALE_MS || prompt.startedMs < seat.inventorySinceMs
-        || !this.fromCodexOccupant(seat, prompt.pane, "required"))) {
-      seat.sources.delete(CODEX_STRUCTURAL_PROMPT_SOURCE);
+        || (prompt.pane ? !this.fromCodexOccupant(seat, prompt.pane, presetPrompt ? "if-known" : "required") : !presetPrompt)
+        || prompt.startedMs <= latestHookAt)) {
+      seat.sources.delete(presetPrompt ? PRESET_STRUCTURAL_PROMPT_SOURCE : CODEX_STRUCTURAL_PROMPT_SOURCE);
       seat.structuralPrompt = undefined;
     }
     const candidate = this.rawCandidate(seat);
@@ -1214,7 +1230,12 @@ interface NeedsInputShape {
   reason: string | null;
 }
 
+/** The pane's own interactive prompts the structural recognizer reads: a picker or question, and a permission or
+ *  confirmation. A draft in the input box is not one. */
+const DIALOG_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt"]);
 const CODEX_STRUCTURAL_PROMPT_SOURCE = "codex:structural-prompt";
+/** A declared-hooks community seat's dialog as the structural recognizer reads it. */
+const PRESET_STRUCTURAL_PROMPT_SOURCE = "community:structural-prompt";
 /** The Claude self-report rung's one source (`pid.json`, read by the sweep). */
 const CLAUDE_SELF_REPORT_SOURCE = "claude:pid-json";
 
@@ -1222,13 +1243,21 @@ const CLAUDE_SELF_REPORT_SOURCE = "claude:pid-json";
  *  complete empty composer (0), observed at the capture's start. Null for anything else. */
 function codexPromptObservation(frame: StructuralObservation, sessionName: string):
   { observedAt: string; needsInput: NeedsInputShape } | null {
-  if (frame.state === "attention" && (frame.reason === "selection_prompt" || frame.reason === "permission_prompt")) {
+  if (frame.state === "attention" && DIALOG_PROMPT_REASONS.has(frame.reason ?? "")) {
     return { observedAt: frame.captureStartedAt!, needsInput: { count: 1, reason: frame.reason } };
   }
   if (frame.idleFrame?.runtime === "codex" && frame.idleFrame.sessionName === sessionName) {
     return { observedAt: frame.idleFrame.captureStartedAt, needsInput: { count: 0, reason: null } };
   }
   return null;
+}
+
+/** What a qualified frame of a declared-hooks community seat says: a picker or permission prompt on screen (1), observed
+ *  at the capture's start. Null for anything else, a draft in the input box included, which withdraws the source: a
+ *  person typing, or type-ahead during a long tool call, isn't a question, and the source never reads idle. */
+function presetPromptObservation(frame: StructuralObservation): { observedAt: string; needsInput: NeedsInputShape } | null {
+  return frame.state === "attention" && DIALOG_PROMPT_REASONS.has(frame.reason ?? "")
+    ? { observedAt: frame.captureStartedAt!, needsInput: { count: 1, reason: frame.reason } } : null;
 }
 
 /** One relay route's consecutive agreements toward promoting a trial rung. */
@@ -1258,8 +1287,9 @@ interface SeatLadderState {
   inventorySinceMs: number;
   /** The Codex occupant's pane and process as OpenRig records them, refreshed by the sweep (#2515). */
   occupant?: { paneId: string | null; pid: number | null };
-  /** What keeps the copied Codex prompt evidence valid where it's read: its frame's freshness, capture start and pane. */
-  structuralPrompt?: { freshMs: number; startedMs: number; pane: { id: string; pid: number } };
+  /** What keeps the copied prompt evidence valid where it's read: its frame's freshness, capture start and pane (always
+   *  named for Codex; a declared-hooks preset's capture may not name one). */
+  structuralPrompt?: { freshMs: number; startedMs: number; pane?: { id: string; pid: number } };
   /** Sweeps in a row whose self-report read returned nothing. */
   selfReportUnread?: number;
   sources: Map<string, { latest: ActivityEvidence; latestActivity: ActivityEvidence | null }>;
@@ -1290,7 +1320,9 @@ export const RUNG_PROMOTION_AGREEMENT_COUNT = 50;
 /** …spread over at least this window of production time. */
 export const RUNG_PROMOTION_MIN_WINDOW_MS = 60 * 60 * 1000;
 
-/** Which community inventory a seat has, if any: the reconcile pass re-declares when this changes for a session. */
-function communityKind(inventory: unknown): "runner" | "plain" | null {
+/** Which community inventory a seat has, if any: the reconcile pass re-declares when this changes for a session. A
+ *  declared-hooks seat's kind names its sorted hooks, so a changed declaration re-declares and an ordinary poll doesn't. */
+function communityKind(inventory: AdapterRungInventory | null): string | null {
+  if (inventory?.activityHooks) return `hooks:${inventory.activityHooks.join(",")}`;
   return inventory === COMMUNITY_RUNNER_RUNG_INVENTORY ? "runner" : inventory === COMMUNITY_HARNESS_RUNG_INVENTORY ? "plain" : null;
 }

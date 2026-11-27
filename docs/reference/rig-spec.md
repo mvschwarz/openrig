@@ -426,8 +426,12 @@ The mapping accepts native `read`, `write` and `deny` values at absolute paths,
 It must be nonempty; nested subpath maps and arbitrary Codex settings are not part
 of this option. Omitted network access becomes `false`. Include the read access
 your tools and installed Codex executable need; this custom profile adds no
-workspace, temporary, queue-state, seat-folder or Git-directory write grants of
-its own. Native Codex decides whether the host can enforce the supplied rules.
+workspace, temporary, queue-state or seat-folder write grants of its own. When
+it lets the seat write its working folder, OpenRig adds a write rule for the
+seat's Git directories, the same ones a plain workspace-write seat gets through
+`--add-dir`, because Codex keeps `.git` read-only inside a writable root unless
+the profile names it. Naming a Git directory yourself, for example as `read`,
+keeps your rule and Codex's protection. Native Codex decides whether the host can enforce the supplied rules.
 Filesystem approval accepts `never` or `on-request`; the retired `untrusted`
 approval is rejected before the selection is saved.
 
@@ -850,6 +854,12 @@ launch would use and restore's automatic periodic carry. It then prints the laun
 `rig launch <rig> <seat>` when the resume comes through the periodic carry, which naming a
 snapshot would turn off. Otherwise it refuses and changes nothing. `rig provider precheck` gives
 the same answer.
+A materialized Claude Code seat that has never launched has no conversation to resume: the switch
+saves its reference for its first launch, in the same write that checks the seat still has no
+session, records who asked (`node.claude_token_ref_changed`), and prints `rig launch <rig> <seat>`.
+A first launch that started in the meantime is left as it is. A saved label or a readable file
+isn't proof of the account: when the launch can't apply a token file, Claude starts on the login it
+would use otherwise and the launch says so.
 For Claude Code, select an API-key file, a subscription-token file, or the home's stored login:
 
 ```sh
@@ -1863,9 +1873,12 @@ request was never delivered or was delivered and no complete restore map followe
 restore-delivery failures. If the seat has no recorded
 parent session (including when it is outside the recorded topology), these notices go to the
 configured registered human operator, or the default registered person when no operator is set.
-If no registered person can be selected, OpenRig creates no notice rather than inventing a
-destination: `rig compact <seat> --state` reports a restore-delivery notice failure, while a
-preparation notice is tried again on later polls. A parent is the source of a `delegates_to` edge
+If no registered person can be selected, they go to the receiving agent (`agents.operator_session`,
+else the kernel operator seat when this host has one), and the notice says it is a receiver fallback,
+not the person's selection. With neither, OpenRig creates no notice rather than inventing a
+destination: `rig compact <seat> --state` reports a restore-delivery notice failure, and for a
+preparation notice its `preparationNotice` reads `not_addressed` with the reason; later polls try
+again. A parent is the source of a `delegates_to` edge
 to the seat; declare one when an agent should receive these notices. With multiple parents, the
 parent session with the latest creation time is selected; `escalates_to` is not used for these
 notices. The restore-delivery notice to a person omits local paths and
@@ -1881,7 +1894,11 @@ named, for the next route. A notice already with an agent that becomes unable th
 same row with its history, to the next capable recipient: a pending notice with a wake, a claimed one
 without. Unknown or unread capacity is not inability. When no capable recipient resolves, the notice
 stays with the first agent the route reached and says plainly that no capable recipient was
-established. Otherwise existing notices keep their destination when the topology changes.
+established. The notices an unable agent holds are re-checked on each of its polls, with or without
+a fresh usage sample and also when nobody can receive its own notice, so a capable recipient chosen
+later takes them at the next poll; once
+the agent can act again, the ones it kept stop saying that no capable recipient was established.
+Otherwise existing notices keep their destination when the topology changes.
 
 A `delegates_to` edge also decides routing. A seat's stuck-row findings and recovery go to its most
 recently started parent. A person's top-level Slack message in the rig's mapped channel goes to the rig's

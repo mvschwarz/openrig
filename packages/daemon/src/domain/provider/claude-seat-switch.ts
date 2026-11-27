@@ -15,7 +15,7 @@ type ClaudeCheck =
 
 /** A Claude seat's checks, before anything changes: the reference it would get, that its file would give Claude the token,
  *  that nothing Claude Code ranks above the token is set, and for a stopped seat that its next launch resumes its
- *  conversation. A move back to the stored login also
+ *  conversation (a seat that has never launched has none: its first launch starts one). A move back to the stored login also
  *  finds a `CLAUDE_CODE_OAUTH_TOKEN` the seat would still receive, and says it's what the seat will use. Managed settings (a
  *  file, MDM or the server) can't be read; the relaunched seat's /status covers them. */
 export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: ClaudeSeat, precedence: ClaudeCredentialPrecedence | undefined,
@@ -46,6 +46,7 @@ export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: Claude
     return refuse("credential_outranks_token", "Claude Code would use these instead, so nothing changed: "
       + `${found.conflicts.map((c) => `${c.name} (${c.source}; ${c.remedy})`).join("; ")}.`, claude);
   }
+  if (seat.pristine) return { ok: true, verdict: { safe: true, claude }, ref, instead };
   if (!seat.running && nextLaunch) {
     const next = nextLaunch(seat.rigId, seat.nodeId);
     if (!next.resumes) {
@@ -105,6 +106,28 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
     undo: before
       ? `rig provider switch --seat ${input.seat} --to-account ${before.label} ${before.kind === "api-key" ? "--api-key-file" : "--token-file"} ${shellQuote(before.tokenFile)}`
       : `rig provider switch --seat ${input.seat} --stored-login` });
+  const uses = checked.ref ? `its token reference "${account}"`
+    : checked.instead ? `${checked.instead}, which Claude Code ranks above its config dir's stored login` : "its config dir's stored login";
+  if (seat.pristine) {
+    // A seat that has never launched has no conversation to resume: its first launch starts one with this reference. The
+    // save checks, in the same write, that it's still this Claude seat with no session, so a first launch that began
+    // after the checks above is left as it is rather than switched live.
+    if (!relaunch.saveFirstLaunchTokenRef) {
+      return { outcome: "failed_safely", reasons: ["rebind_unsupported_for_runtime"], message: `${input.seat} has never launched, and this daemon can't save a reference for a first launch. Nothing changed.` };
+    }
+    const saved = relaunch.saveFirstLaunchTokenRef(nodeId, checked.ref, { requestedBy: input.requestedBy ?? null });
+    if (!saved.ok) return { outcome: "failed_safely", reasons: [saved.code], message: `${saved.message} Nothing changed.` };
+    const report = reportFor(null);
+    report.loginChanged = true;
+    const launch = `rig launch ${rigName} ${logicalId}`;
+    report.next = `${launch} starts it for the first time with ${uses}. `
+      + (checked.instead ? "After a turn with a tool call, its /status shows the token it uses (CLAUDE_CODE_OAUTH_TOKEN), not the stored login."
+        : checked.ref && checked.ref.kind !== "api-key"
+          ? "The label and a readable file don't prove the account: if that launch can't apply the file, Claude starts on the login it would use otherwise, and the launch says so. Check its /status after a turn with a tool call."
+          : "Check its /status after a turn with a tool call.");
+    return { outcome: "succeeded", seat: report,
+      message: `${input.seat} has never launched, so nothing was relaunched. Its first launch uses ${uses}: ${launch}.` };
+  }
   if (!seat.running) {
     // Nothing to relaunch: the reference is saved for the seat's next launch, which the check found resumes its
     // conversation. No snapshot is taken, so the one checked is the one `rig launch` selects.
@@ -115,8 +138,6 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
     report.loginChanged = true;
     // A resume through restore's automatic periodic carry needs the plain launch: naming the snapshot turns the carry off.
     const launch = `rig launch ${rigName} ${logicalId}${next.automatic ? "" : ` --snapshot-id ${next.snapshotId}`}`;
-    const uses = checked.ref ? `its token reference "${account}"`
-      : checked.instead ? `${checked.instead}, which Claude Code ranks above its config dir's stored login` : "its config dir's stored login";
     report.next = `${launch} resumes conversation ${next.conversation ?? "(not recorded in the snapshot)"} with ${uses}`
       + `${next.automatic ? ` (it selects the latest usable snapshot, ${next.snapshotId} now, and resumes through its periodic carry)` : ""}. `
       + (checked.instead ? "After a turn with a tool call, its /status shows the token it uses (CLAUDE_CODE_OAUTH_TOKEN), not the stored login."

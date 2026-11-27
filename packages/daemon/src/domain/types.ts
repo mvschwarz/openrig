@@ -305,6 +305,9 @@ export type RigEvent =
   // A Claude launch that didn't give the seat its own subscription token: Claude started on its config dir's stored
   // login. The reference (label and file path) only; the token value never enters OpenRig.
   | { type: "seat.claude_token_not_applied"; rigId: string; nodeId: string; label: string; tokenFile: string; reason: string }
+  /** A never-launched Claude seat's own credential reference, saved for its first launch (`rig provider switch`): labels and
+   *  the file path only, never its contents. `operator` is the calling seat's session when the request named one. */
+  | { type: "node.claude_token_ref_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; tokenFile: string | null; credential: "subscription_token" | "api_key" | "stored_login"; operator: string | null; effect: "first_launch" }
   | { type: "seat.attention_cleared"; rigId: string; nodeId: string; sessionName: string; from: string; to: "ready"; clearedBy: "evidence" | "operator_attestation"; evidence?: { kind: string; state?: string; reason?: string }; reason?: string; previousError: string | null }
   | { type: "seat.attention_clear_refused"; rigId: string; nodeId: string; sessionId: string; sessionName: string; attentionClass: "restore_outcome"; code: string; attemptId?: number; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   | { type: "rig.imported"; rigId: string; specName: string; specVersion: string }

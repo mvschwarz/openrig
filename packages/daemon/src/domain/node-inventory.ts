@@ -1,4 +1,4 @@
-import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
+import { recordedActivityHooks, recordedRunner, sessionActivityHooksSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { configuredAccount } from "./configured-account.js";
 import { restoreOutcomesByIntendedNode } from "./restore-topology.js";
 import { physicalSessionName } from "./session-registry.js";
@@ -106,6 +106,7 @@ interface InventoryRow {
   session_status: string | null;
   session_community_harness?: string | null;
   session_community_runner?: number | null;
+  session_community_hooks?: string | null;
   intentionally_stopped: number | null;
   stop_attempt: string | null;
   startup_status: string | null;
@@ -934,6 +935,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       s.status as session_status,
       ${sessionCommunityHarnessSelect(db)} as session_community_harness,
       ${sessionCommunityRunnerSelect(db)} as session_community_runner,
+      ${sessionActivityHooksSelect(db)} as session_community_hooks,
       s.intentionally_stopped,
       ${sessionStopAttemptSelect} as stop_attempt,
       s.startup_status,
@@ -1110,7 +1112,7 @@ function buildInventoryItem(
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
     configuredAccount: configuredAccount(row.runtime, Boolean(row.has_claude_token_ref), row.claude_token_ref, row.account_home),
-    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: recordedRunner(row.session_community_runner) }) } : {}),
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: recordedRunner(row.session_community_runner), activityHooks: recordedActivityHooks(row.session_community_hooks) }) } : {}),
     ...(launchWrapper ? { launchWrapper } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,

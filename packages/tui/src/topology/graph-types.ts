@@ -17,6 +17,9 @@ export interface GraphNodeData {
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   contextUsedPercentage: number | null;
   agentActivity?: { state?: string } | null;
+  /** The daemon's activity decision (display: working | idle | needs-input | unknown), as `rig ps` renders it. Null or
+   *  absent from a daemon that doesn't serve it, which leaves the older agentActivity path. */
+  activityState?: { display?: string; needsInput?: { count?: number } } | null;
   terminalActive?: boolean | null;
   heldReason?: string | null;
   canonicalSessionName?: string | null;

@@ -239,7 +239,7 @@ interface SessionRow {
  *  reported it or OpenRig named and passed it, absent when it was read from the runtime itself. */
 type LaunchToken = { token: string; resumeType?: string; provenance?: "launcher" | "passed" };
 /** The community harness a successor was launched for, with its preset's runner declaration at launch. */
-type LaunchedHarness = { app: string; runner: boolean | "pi-rpc" };
+type LaunchedHarness = import("../adapters/community-harness-runtime-adapter.js").LaunchedCommunityHarness;
 
 interface BindingOwnerRow {
   node_id: string;
@@ -1990,10 +1990,11 @@ export class SeatHandoverService {
         this.db.prepare("UPDATE sessions SET origin = 'launched' WHERE id = ?").run(newSession.id);
         // It was launched in the seat's saved folder (the successor launch's node.cwd).
         this.sessionRegistry.recordLaunchedCwd(newSession.id, input.node.cwd);
-        // A successor launched for a community harness records it with its launch's runner declaration, as a start does,
+        // A successor launched for a community harness records it with its launch's runner and hook declarations, as a start does,
         // so its relaunch or restore resolves the same harness. A successor OpenRig didn't launch records none.
         if (input.launchedHarness) {
-          this.sessionRegistry.recordCommunityHarnessSelection(newSession.id, input.launchedHarness.app, input.launchedHarness.runner);
+          this.sessionRegistry.recordCommunityHarnessSelection(newSession.id, input.launchedHarness.app, input.launchedHarness.runner,
+            input.launchedHarness.activityHooks);
         }
       }
       // The receipt's lineage record: that mint is best-effort (a failure is logged and swallowed), so read it back.

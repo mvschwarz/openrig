@@ -31,15 +31,23 @@ export interface StatusGlyph {
 
 export function statusGlyph(data: GraphNodeData): StatusGlyph {
   const activity = data.agentActivity?.state;
+  // The daemon's decision, when served, outranks the older activity word, as in `rig ps`. Failed, startup and held keep
+  // their own branches.
+  const decided = data.activityState?.display;
+  const needsInput = decided != null ? (data.activityState?.needsInput?.count ?? 0) > 0 : activity === "needs_input";
   if (data.startupStatus === "failed" || data.status === "failed" || data.status === "stopped")
     return { glyph: "✕", token: "error", overlay: null };
-  if (data.needsAttention ?? (data.startupStatus === "attention_required" || data.heldReason != null || activity === "needs_input"))
+  if ((decided != null && needsInput)
+    || (data.needsAttention ?? (data.startupStatus === "attention_required" || data.heldReason != null || needsInput)))
     return {
       glyph: "◐",
       token: "actAttention",
       overlay: data.contextUsedPercentage != null ? `${Math.round(data.contextUsedPercentage)}%` : null,
     };
   if (data.startupStatus === "ready" && data.status === "running") {
+    // Served: working and idle split the ● bucket; unknown is the honest-unknown ○, never idle through the fallback below.
+    if (decided === "working" || decided === "idle") return { glyph: "●", token: decided === "working" ? "actActive" : "actIdle", overlay: null };
+    if (decided != null) return { glyph: "○", token: "actDetached", overlay: null };
     // S19 MR3: ACTIVITY splits the ● bucket by color ROLE (glyph honesty
     // unchanged) — actively-working vs idle are visibly distinct
     const working = activity === "running" || data.terminalActive === true;

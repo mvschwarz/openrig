@@ -2,7 +2,7 @@ import type { Migration } from "../migrate.js";
 
 /** Widen runtime switches to stock OMP while retaining history, community harness names, and interrupted cutovers. */
 export const ompTuiRuntimeSwitchesSchema: Migration = {
-  name: "197_omp_tui_runtime_switches.sql",
+  name: "201_omp_tui_runtime_switches.sql",
   sql: `
     CREATE TABLE seat_runtime_switches_omp (
       id TEXT PRIMARY KEY,

@@ -2451,6 +2451,15 @@ describe("SeatHandoverService", () => {
       expect(harnessTmux.sendShellCommand.mock.calls[0]![1]).toContain(`OPENRIG_RESUME_REF=${shellQuote(successor["resume_token"] as string)}`);
     });
 
+    it("keeps the hooks a plain preset declares: the successor's session records them as its launch read them", async () => {
+      install(BASE + "names_conversation: true\nactivity_hooks: [Stop, PreToolUse]\n");
+      const { node } = seedHarnessSeat();
+      const result = await harnessService(harnessAdapters()).handover({ seatRef: SEAT, reason: "replace occupant", source: "fresh" });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      expect(db.prepare("SELECT agent_runner, agent_activity_hooks, origin FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id))
+        .toEqual({ agent_runner: 0, agent_activity_hooks: '["PreToolUse","Stop"]', origin: "launched" });
+    });
+
     it("keeps a Pi-RPC harness's session file as read from its runner, and the next restore resumes that file", async () => {
       install(BASE.replace("command: synth-seat", "command: senpi") + "protocol: pi-rpc\nresume: true\n", "senpi");
       const files: Record<string, string> = {};
