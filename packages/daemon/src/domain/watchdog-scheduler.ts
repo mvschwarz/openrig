@@ -27,6 +27,8 @@ export const yieldToLoop = (): Promise<void> => new Promise<void>((resolve) => s
  *     next tick is delayed; we don't queue overlapping ticks.
  *   - Within a tick, jobs are evaluated sequentially. This bounds
  *     resource use and matches the POC's single-loop behavior.
+ *   - Between due jobs a tick takes one event-loop turn (setImmediate).
+ *     A test that fakes setImmediate must advance it, or fake only Date.
  *
  * Shutdown:
  *   - stop() sets shuttingDown=true, clears the timer, and awaits the

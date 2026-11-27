@@ -1676,7 +1676,7 @@ describe("context.owner_min_interval_s: a minimum time between one owner's remin
   });
 });
 
-// Health1305: the evaluate diagnoses a whole rig; it lets the event loop take a turn between seats (the #2649 pattern),
+// The evaluate diagnoses a whole rig; it lets the event loop take a turn between seats (the #2649 pattern),
 // so a long rig doesn't hold the daemon. Seat order is unchanged.
 describe("parked-owner evaluate yields to the event loop between seats", () => {
   it("runs queued event-loop work between two seats, not after the whole rig, in seat order", async () => {
