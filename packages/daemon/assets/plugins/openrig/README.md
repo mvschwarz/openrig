@@ -66,7 +66,8 @@ new chat in the same process (after `/clear`) still gets the earlier chat's task
   PATH, else the project's own `node_modules/.bin/rig` (in Claude Code, the session's project; in Codex, the session's
   folder), else the first `rig` on a login shell's PATH, run with that PATH. So an OpenRig installed inside one project is
   found only in sessions started there, and one installed after the app started is found once your login profile
-  (such as `~/.zprofile`) puts its folder on PATH. With no `rig`, the hooks
+  (`~/.zprofile` for zsh, `~/.bash_profile` or `~/.profile` for bash, not only `~/.zshrc` or `~/.bashrc`) puts its
+  folder on PATH. With no `rig`, the hooks
   say once in a chat that the team's questions won't come in by themselves: once for the plugin's install, not in every
   session, and again only after a `rig` was found and then lost. Claude Code logs the MCP server's one line saying why it
   didn't start. The hooks themselves start with the `node` on the app's PATH, or the file `OPENRIG_NODE` names: set it

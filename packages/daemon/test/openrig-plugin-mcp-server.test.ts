@@ -86,7 +86,7 @@ describe("the openrig plugin's MCP server in Claude Code", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatch(/^openrig plugin: OpenRig's MCP server can't start: no `rig` found/);
     expect(lines[0]).toContain("npm install -g @openrig/cli");
-    expect(lines[0]).toContain("login profile");
+    expect(lines[0]).toContain("login profile (~/.zprofile for zsh, ~/.bash_profile or ~/.profile for bash)");
     expect(lines[0]).toContain("OPENRIG_RIG_BIN");
     expect(readFileSync(log, "utf8")).toBe("-lc\n");
   });

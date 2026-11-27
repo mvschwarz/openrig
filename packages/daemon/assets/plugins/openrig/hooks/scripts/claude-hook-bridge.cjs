@@ -404,10 +404,11 @@ const NO_RIG_NOTICE = "OpenRig's automatic wake can't run in this conversation: 
   + "(OPENRIG_RIG_BIN doesn't name one, there's none on PATH or on a login shell's PATH, and none in this project's "
   + "node_modules/.bin). Until it finds one, your OpenRig team's questions and replies won't come into this conversation by "
   + "themselves. To fix it, install OpenRig where every session finds it (`npm install -g @openrig/cli`) and check that `rig` "
-  + "runs in a new terminal. If it doesn't, npm installed it into a folder that isn't on PATH: add that folder's `bin` "
-  + "(`npm prefix -g` prints the folder) to PATH in the shell's login profile, such as `~/.zprofile`, and the next "
-  + "conversation finds it. Or set OPENRIG_RIG_BIN to the full path of `rig` in the environment this app starts with. The "
-  + "plugin says this once, not in every session; tell the person in plain words.\n";
+  + "runs in a new terminal. If it doesn't, or it runs there but not here, put the folder that holds `rig` on PATH in the "
+  + "shell's login profile (`~/.zprofile` for zsh, `~/.bash_profile` or `~/.profile` for bash), not only in `~/.zshrc` or "
+  + "`~/.bashrc`, then restart this app. That folder is the `bin` inside the one `npm prefix -g` prints, or inside the one "
+  + "given to a one-off `npm install -g --prefix`. Or set OPENRIG_RIG_BIN to the full path of `rig` in the environment "
+  + "this app starts with. The plugin says this once, not in every session; tell the person in plain words.\n";
 const NO_RIG = "no-rig.json";
 
 /** Says NO_RIG_NOTICE through `say` once for the plugin's install: someone who keeps OpenRig inside one project isn't told

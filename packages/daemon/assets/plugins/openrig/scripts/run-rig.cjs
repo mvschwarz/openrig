@@ -15,7 +15,8 @@ function launch(args, { env = process.env, spawnSync = require("node:child_proce
   if (!rig) {
     stderr.write(`${FAILED} no \`rig\` found (OPENRIG_RIG_BIN doesn't name one, there's none on PATH or on a login shell's PATH, `
       + "and none in this project's node_modules/.bin). Install OpenRig where every session finds it (npm install -g "
-      + "@openrig/cli), with npm's global bin folder on PATH in the shell's login profile, such as ~/.zprofile, or set "
+      + "@openrig/cli), with the folder that holds `rig` on PATH in the shell's login profile (~/.zprofile for zsh, "
+      + "~/.bash_profile or ~/.profile for bash), not only in ~/.zshrc or ~/.bashrc, then restart this app; or set "
       + "OPENRIG_RIG_BIN to the full path of `rig`.\n");
     return 1;
   }

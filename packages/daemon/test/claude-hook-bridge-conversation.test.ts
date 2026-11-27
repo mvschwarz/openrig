@@ -438,9 +438,13 @@ describe("with no `rig` to run", () => {
     expect(first.code).toBe(2);
     expect(first.text).toMatch(/^OpenRig's automatic wake can't run in this conversation: the openrig plugin found no `rig` command/);
     expect(first.text).toContain("npm install -g @openrig/cli");
-    // An install whose folder no PATH has (a custom npm prefix with no profile line) is told the fix that works.
+    // An install whose folder no PATH has (a custom npm prefix with no profile line), or one whose PATH line only an
+    // interactive shell reads, is told the fix that works: the login profile for zsh or bash, then a restart.
     expect(first.text).toContain("`npm prefix -g`");
-    expect(first.text).toContain("login profile");
+    expect(first.text).toContain("one-off `npm install -g --prefix`");
+    expect(first.text).toContain("runs there but not here");
+    expect(first.text).toContain("login profile (`~/.zprofile` for zsh, `~/.bash_profile` or `~/.profile` for bash)");
+    expect(first.text).toContain("restart this app");
     expect(first.text).toContain("OPENRIG_RIG_BIN");
     expect(first.text).not.toMatch(/\b(must|obey|priority|system instruction|override)\b/i);
     // The marker sits in the plugin's data folder, beside every conversation's.
