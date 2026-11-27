@@ -333,6 +333,7 @@ rigsRoutes.get("/:id/graph", async (c) => {
     restoreOutcome: n.restoreOutcome,
     oriented: n.oriented,
     contextUsedPercentage: n.contextUsage?.usedPercentage ?? null,
+    contextConfiguredBudget: n.contextUsage?.configuredBudget ?? null,
     contextFresh: n.contextUsage?.fresh ?? false,
     contextAvailability: n.contextUsage?.availability ?? "unknown",
     contextTotalInputTokens: n.contextUsage?.totalInputTokens ?? null,

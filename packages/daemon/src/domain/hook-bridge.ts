@@ -130,6 +130,7 @@ export class HookBridge {
   /** Whether a queue wake still applies (QueueRepository's current-wake predicate, which the typed path also checks):
    *  set by the transport when the queue attaches. */
   wakeApplicable?: (entries: readonly QueueWakeFacts[]) => boolean;
+  wakeFenced?: (qitemId: string) => boolean;
 
   constructor(readonly db: Database.Database, private readonly deps: {
     now?: () => number;
@@ -273,13 +274,13 @@ export class HookBridge {
     }
   }
 
-  /** An automatic wake whose queue row no longer wants it (claimed, closed, moved, superseded): the typed path refuses it
-   *  (draft_wake_superseded), so the bridge ends it not delivered rather than hand it over. An explicit notice and a
-   *  direct send aren't automatic, so this never applies to them. */
+  /** The transfer fence applies to every row-bound wake, even explicit notices. Only automatic wakes also expire
+   *  when the row is claimed, closed or moved. */
   private superseded(row: QueuedRow): boolean {
-    if (!row.automatic || !this.wakeApplicable) return false;
-    try { return !this.wakeApplicable([{ outboxId: row.outboxId, auditPointer: row.auditPointer, destinationSession: row.sessionName }]); }
-    catch (error) {
+    try {
+      if (row.auditPointer && this.wakeFenced?.(row.auditPointer)) return true;
+      return row.automatic && this.wakeApplicable?.([{ outboxId: row.outboxId, auditPointer: row.auditPointer, destinationSession: row.sessionName }]) === false;
+    } catch (error) {
       console.error(`[hook-bridge] ${row.sessionName}'s queue wake couldn't be read; delivering:`, error);
       return false;
     }

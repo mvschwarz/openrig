@@ -66,3 +66,14 @@ describe("ContextUsageRing (PL-012)", () => {
     expect(screen.getByTestId("context-ring-t").getAttribute("title")).toContain("critical");
   });
 });
+
+describe("configured context budget", () => {
+  it("labels budget and stale state without changing the raw tier", () => {
+    render(<ContextUsageRing percent={15} availability="known" fresh={false}
+      configuredBudget={{ tokens: 200000, usedPercentage: 75, source: "CLAUDE_CODE_AUTO_COMPACT_WINDOW" }} />);
+    const ring = screen.getByTestId("context-ring");
+    expect(ring.getAttribute("data-context-tier")).toBe("low");
+    expect(ring.getAttribute("aria-label")).toContain("75% configured budget");
+    expect(ring.getAttribute("aria-label")).toContain("stale sample");
+  });
+});

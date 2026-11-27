@@ -139,6 +139,43 @@ describe("a wake committed before its seat had a pane (#2789)", () => {
 });
 
 
+it.each([
+  { reason: "its item closes", close: true, pastes: 0, state: "failed" },
+  { reason: "its item stays pending", close: false, pastes: 1, state: "delivered" },
+])("rechecks a lone wake after waiting for the terminal when $reason", async ({ close, pastes, state }) => {
+  const f = unboundSeat();
+  try {
+    f.relaunch("occupant-1", 1, "%1");
+    const seat = "worker@test";
+    await f.guard.set("a", { mode: "off" }, "tester", "exercise the unguarded typing path");
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: seat, body: "work", nudge: false });
+    f.repo.stageWakeIntent(item.qitemId, "sender@test", seat, null, true);
+    expect(f.intentOf(item.qitemId).deliveryState).toBe("pending");
+
+    const terminal = Promise.withResolvers<void>();
+    const held = f.guard.exclusive("a", () => terminal.promise);
+    const operation = vi.spyOn(f.guard, "operation");
+    const drain = f.repo.drainPendingWakeIntents();
+    try {
+      await vi.waitFor(() => expect(operation.mock.calls[0]?.[0]).toBe(seat));
+      expect(f.intentOf(item.qitemId).deliveryState).toBe("sending");
+      expect(f.writes).toEqual([]);
+      if (close) {
+        f.repo.update({ qitemId: item.qitemId, actorSession: seat, state: "done", closureReason: "no-follow-on" });
+        expect(f.repo.getById(item.qitemId)?.state).toBe("done");
+      }
+    } finally {
+      terminal.resolve();
+      await Promise.all([held, drain]);
+    }
+
+    expect(f.sendsFor(item.qitemId)).toBe(pastes);
+    expect(f.intentOf(item.qitemId).deliveryState).toBe(state);
+  } finally {
+    f.db.close();
+  }
+});
+
 describe("a failed queue wake when its seat returns", () => {
   const proof = "queue:wake-pre-input-failure";
   const open: Database.Database[] = [];

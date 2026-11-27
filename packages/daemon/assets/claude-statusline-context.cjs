@@ -41,6 +41,9 @@ process.stdin.on("end", () => {
         total_output_tokens: contextWindow.total_output_tokens ?? null,
         current_usage: contextWindow.current_usage ?? null,
       },
+      // Capture the session environment, never the daemon's environment. Other native
+      // settings and runtime defaults are not observable through this payload.
+      configured_budget_tokens: configuredBudgetTokens(contextWindow.context_window_size),
       session_id: raw.session_id ?? null,
       session_name: raw.session_name ?? null,
       occupant_generation: process.env.OPENRIG_OCCUPANT_GENERATION || process.env.RIGGED_OCCUPANT_GENERATION || null,
@@ -77,6 +80,17 @@ process.stdin.on("end", () => {
     process.exit(0);
   }
 });
+
+function configuredBudgetTokens(windowSize) {
+  const value = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || "";
+  // Plain token counts in the documented range work across versions. Suffixes,
+  // invalid values and native defaults have version-dependent interpretations.
+  if (!/^[0-9]+$/.test(value)) return null;
+  const tokens = Number(value);
+  if (!Number.isSafeInteger(tokens) || tokens < 100000 || tokens > 1000000
+    || !Number.isSafeInteger(windowSize) || windowSize <= 0) return null;
+  return Math.min(tokens, windowSize);
+}
 
 function resolveOutputPath(target, raw) {
   if (target.endsWith(".json")) {

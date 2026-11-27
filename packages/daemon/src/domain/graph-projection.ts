@@ -1,4 +1,4 @@
-import type { RigWithRelations, Session, Binding, Pod, AgentActivity, SeatIdentityVerdict, NodeInventoryEntry } from "./types.js";
+import type { RigWithRelations, Session, Binding, Pod, AgentActivity, SeatIdentityVerdict, NodeInventoryEntry, ConfiguredContextBudget } from "./types.js";
 import { identityVerdictDownranksRunning } from "./types.js";
 
 export interface RigGraphInput extends RigWithRelations {
@@ -35,6 +35,7 @@ interface RFNodeData {
   profile: string | null;
   edgeCount: number;
   contextUsedPercentage: number | null;
+  contextConfiguredBudget?: ConfiguredContextBudget | null;
   contextFresh: boolean;
   contextAvailability: string;
   contextTotalInputTokens: number | null;
@@ -85,6 +86,7 @@ export interface InventoryOverlay {
   restoreOutcome: string;
   oriented?: string;
   contextUsedPercentage?: number | null;
+  contextConfiguredBudget?: ConfiguredContextBudget | null;
   contextFresh?: boolean;
   contextAvailability?: string;
   contextTotalInputTokens?: number | null;
@@ -172,6 +174,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         profile: node.profile ?? null,
         edgeCount: rigEdges.filter((e) => e.sourceId === node.id || e.targetId === node.id).length,
         contextUsedPercentage: overlay?.contextUsedPercentage ?? null,
+        contextConfiguredBudget: overlay?.contextConfiguredBudget ?? null,
         contextFresh: overlay?.contextFresh ?? false,
         contextAvailability: overlay?.contextAvailability ?? "unknown",
         contextTotalInputTokens: overlay?.contextTotalInputTokens ?? null,
