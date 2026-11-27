@@ -438,7 +438,7 @@ export async function startServer(port?: number) {
         // #2940: keep_alive seats are watched from here on; boot-time recovery stays with the kernel boot in createDaemon.
         deps.keepAliveSupervisor?.start();
         deps.networkConnector?.start();
-        deps.sessionTransport?.guardedDelivery?.recover();
+        // Guarded-delivery restart recovery runs in createDaemon, before the hook bridge's sweep can take a claim.
         // S10 — start the gateway subsystem's NETWORK services (replay, outbound poll,
         // Socket Mode inbound) post-bind, contextMonitor pattern: the composed wire is
         // already active; only its dial-out half waits for the supervision tree.

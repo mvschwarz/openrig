@@ -359,7 +359,8 @@ its result says it goes once the input is clear.
   recent typing, a drain or a restore, and at once for a newly held message. A draft
   still in the input after two tries waits until the pane changes.
 - Each message keeps its own outcome, and the pass stops at the first one that isn't
-  delivered. A delivered or uncertain message is never sent again. A drain, a pending
+  delivered, except one whose own paste was just refused, which it goes past (below).
+  A delivered or uncertain message is never sent again. A drain, a pending
   restore or leaving `draft-aware` stops the pass until it clears, including one that
   takes effect while the message waits for its turn to type; nothing is typed then.
 - Order holds per sender: while a sender's marked message is still owed at the seat
@@ -372,8 +373,10 @@ its result says it goes once the input is clear.
   paste, the viewport) is no longer owed: it stays held and readable, its result says to
   send it again changed, and later messages stop waiting behind it: the same pass goes
   on to them.
-- A marked message being tried again when the daemon stopped reads uncertain after the
-  restart: it isn't typed again, and later messages don't wait behind it.
+- A marked message being tried again when the daemon stopped, including one the hook
+  bridge had handed back for typing, reads uncertain after the restart: it isn't typed
+  again, and later messages don't wait behind it. One that was only queued for the bridge
+  stays queued and still owed, and the bridge delivers it (below).
 - A message held for an earlier occupant of the seat stays held and listed. Later
   messages for the current occupant still go.
 - Marked messages aren't coalesced by the one-per-sender rule above. Instead, one
@@ -438,7 +441,7 @@ The bridge is used only for an occupant launched with it, once its waiter has ar
 - A waiter is live while it has polled within 20 s and its seat is idle or within 15 minutes of its turn's start; with no waiter polling, while the seat is in a turn the bridge waits on, for at most 15 minutes.
 - A new message goes behind messages already queued for the seat, even after the seat opts out, so they're typed in order. A send cancelled while it waits for the seat's lease isn't queued.
 - Messages already queued are typed in order, by one sweep at a time (every 5 s) once they've waited 20 s without a live waiter. The sweep takes back each message under the seat's delivery lease, just before typing it; one the bridge took first isn't typed, and nothing behind it overtakes it. A waiter's poll takes the same lease, so it can't take the next message while an earlier one is being typed.
-- A daemon restart leaves messages that were only queued for the bridge queued; they aren't marked indeterminate. A batch a waiter had taken before the restart is named uncertain by the bridge after it, as above.
+- A daemon restart leaves messages that were only queued for the bridge queued; they aren't marked indeterminate, and the bridge delivers each once, by the rules above: to a waiter at the seat's next turn boundary, or typed after the bound. Restart recovery runs before the bridge's sweep can take one. A batch a waiter had taken before the restart reads uncertain after it, and a message the bridge had handed back for typing isn't sent again.
 - A waiter exits by itself shortly before its hook timeout and reports that it expired. The next turn re-arms it.
 
 **What still decides first.** The typing guard: hold and the interruption levels hold or refuse as for typed delivery. A rig's delivery drain holds the bridge's automatic deliveries (queue wakes) as it holds typed ones: while the seat's rig is drained, no waiter takes them and no fallback types them, at any point up to the moment of typing, and they're delivered in their order once the drain ends. A direct send and an explicit queue notification pass a drain, and pass any held wakes, as on the typed path. A queue wake whose row no longer wants it (claimed, closed or moved on) isn't handed over: it ends `failed` (`not-delivered`), as the typed path refuses it. If the drain can't be read, delivery goes ahead and the daemon log says so.

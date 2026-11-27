@@ -704,3 +704,45 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
   });
 
 });
+
+// #3991 round 4: restart recovery and the bridge's queue. A message the bridge positively queued and no waiter took is
+// still owed after a restart, and the bridge delivers it once; one a waiter had claimed stays uncertain.
+describe("restart recovery and the hook bridge's queue", () => {
+  const stateOf = (s: Awaited<ReturnType<typeof seat>>, id: string) => new OutboxHandler(s.db).getById(id)?.deliveryState;
+  const receiptState = (s: Awaited<ReturnType<typeof seat>>, id: string) =>
+    (s.db.prepare("SELECT json_extract(guard_delivery,'$.state') AS st FROM outbox_entries WHERE outbox_id=?").get(id) as { st: string | null } | undefined)?.st;
+
+  it("a message only queued for the bridge stays queued through restart recovery, and the bridge types it once after the bound", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const queued = await s.transport.send(s.sessionName, "From: peer@team\n---\nqueued before the restart\n---", { actorSession: "peer@team" });
+    expect(queued.outcome).toBe("bridged");
+    const id = queued.outboxIds![0]!;
+    // The restart: its waiter is gone, and startup runs recovery before the bridge's sweep.
+    s.bridge.expired(s.nodeId, s.sessionName, armId);
+    s.transport.guardedDelivery!.recover();
+    expect([stateOf(s, id), receiptState(s, id)]).toEqual(["sending", "queued"]);
+    s.advance(HOOK_BRIDGE_LIVE_BOUND_MS);
+    const typed = await s.transport.sweepHookBridge();
+    expect(typed.map(r => r.outboxId)).toEqual([id]);
+    expect(stateOf(s, id)).toBe("delivered");
+    expect(s.writes).toEqual(["paste", "keys"]);
+    expect(await s.transport.sweepHookBridge()).toEqual([]);   // once
+    expect(s.writes).toEqual(["paste", "keys"]);
+  });
+
+  it("a batch a waiter had claimed before the restart reads uncertain after recovery and is never sent again", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const queued = await s.transport.send(s.sessionName, "From: peer@team\n---\nclaimed before the restart\n---", { actorSession: "peer@team" });
+    const id = queued.outboxIds![0]!;
+    expect(s.bridge.poll(s.nodeId, armId)).toMatchObject({ action: "deliver" });   // the waiter took it, with no ack
+    expect(receiptState(s, id)).toBe("claimed");
+    s.bridge.expired(s.nodeId, s.sessionName, armId);
+    s.transport.guardedDelivery!.recover();
+    expect(stateOf(s, id)).toBe("indeterminate");
+    s.advance(HOOK_BRIDGE_LIVE_BOUND_MS);
+    expect(await s.transport.sweepHookBridge()).toEqual([]);
+    expect(s.writes).toEqual([]);
+  });
+});

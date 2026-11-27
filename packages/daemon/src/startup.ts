@@ -1890,6 +1890,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           return true;
         }
       });
+      // The previous process's deliveries are settled first: the sweep below is the first thing in this process that can
+      // take a claim, and it starts before the server binds, so a later recovery could overwrite a live claim's result.
+      t.guardedDelivery?.recover();
       // Slice 13: messages queued for a hook bridge that has no live arm are typed after the bound; claimed batches whose
       // waiter is gone without an ack become indeterminate.
       setInterval(() => { void t.sweepHookBridge().catch(() => {}); }, 5_000).unref();
