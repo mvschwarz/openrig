@@ -25,8 +25,10 @@ import { cooperativeReadFile } from "../domain/execution-candidate-reader.js";
  * checkpoint back until the WAL has been reused: one checkpoint on the main thread, as before this change. A WAL of
  * the cap's size or more after its reuse (a single transaction that large) stays with the main connection.
  *
- * Nothing about durability changes: `synchronous` is left as it is, and a checkpoint syncs the same files in the
- * same order whichever connection runs it.
+ * The `synchronous` mode is left as it is, and a checkpoint syncs the same files in the same order whichever
+ * connection runs it. What changes is when pages are checkpointed: the timer and the cap set that, so checkpoint
+ * timing differs from the automatic checkpoint's. With `synchronous = NORMAL` a power loss can already roll back
+ * recent commits; whether the new timing changes that exposure has not been measured.
  *
  * Not covered:
  * - The WAL append is still a synchronous write on the main thread. It goes to the page cache; a kernel that
