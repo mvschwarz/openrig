@@ -92,6 +92,13 @@ export function createDraftHeldReoffer(deps: DraftHeldReofferDeps): () => void {
         // doesn't wait; the guard still decides at the paste.
         const until = deps.quietUntil ? await deps.quietUntil(session).catch(() => undefined) : undefined;
         if (typeof until === "number" && until > now()) { wakeNotBefore.set(session, until); return; }
+        // A try the seat's own idle report recorded while that read was pending waits its own interval, so it keeps its
+        // one offer.
+        const newest = heldWakeSeats().find(seat => seat.session === session)?.lastTry;
+        if (newest !== undefined && newest !== lastTry && now() - Date.parse(newest) < interval) {
+          wakeNotBefore.set(session, Date.parse(newest) + interval);
+          return;
+        }
         const end = await deliverWakes(session);
         // A pass that made no try (the seat not idle, a drain, an owed restore) keeps the offer, after the interval.
         if (end === "skipped" || end === "paused") { wakeNotBefore.set(session, now() + interval); return; }

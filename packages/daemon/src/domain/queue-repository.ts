@@ -2556,31 +2556,43 @@ export class QueueRepository {
       AND last_nudge_result = ? ORDER BY ts_created, qitem_id`).all(...addresses, DRAFT_HELD_WAKE_RESULT) as Array<{ qitem_id: string }>;
     const cap = resolveWakeRetryCap();
     let held = false;
-    for (const { qitem_id } of rows) {
+    let paused = false;
+    rowsLoop: for (const { qitem_id } of rows) {
       if (this.transferFence(qitem_id)) continue;
-      const intent = `${WAKE_INTENT_PREFIX}${qitem_id}`;
+      // A drain or a restore that started while an earlier row's delivery awaited stops the pass before this row is
+      // reopened: no try, and the offer is kept.
+      if (addresses.some(address => this.deliveryDrains.holds(address))
+        || [sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) { paused = true; break; }
       const after = lastMeaningfulTransition(this.db, qitem_id)?.id ?? 0;
       const tries = (this.db.prepare(`SELECT COUNT(*) AS n FROM queue_transitions WHERE qitem_id = ? AND transition_id > ?
         AND transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%'`).get(qitem_id, after) as { n: number }).n;
       if (tries >= cap) { held = true; continue; }
-      if (!this.outbox.reopenHeld(intent)) continue;
-      const outcome = await this.deliverWakeIntent(intent);
-      const row = this.getById(qitem_id);
-      if (!row) continue;
-      const result = row.lastNudgeResult ?? outcome;
-      if (result === DRAFT_HELD_WAKE_RESULT) {
-        held = true;
-        // One burst of observations is one try: the observations around a single Enter (the agent's Stop, a pane change)
-        // can arrive inside the guard's quiet window together. A hold within that window of this row's previous held try
-        // records nothing, so it doesn't spend the cap that #48's escalation counts.
-        const last = this.db.prepare(`SELECT ts, transition_note AS note FROM queue_transitions WHERE qitem_id = ? AND transition_id > ?
-          AND transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%' ORDER BY transition_id DESC LIMIT 1`).get(qitem_id, after) as { ts: string; note: string } | undefined;
-        if (last && last.note.includes(`outcome=${DRAFT_HELD_WAKE_RESULT}`) && Date.now() - Date.parse(last.ts) < DRAFT_HELD_REOFFER_MS) continue;
+      // The row's held wake, whichever intent holds it: its own, an unpark's or a reroute's, as the ladder's retry selects.
+      const intents = this.db.prepare(`SELECT outbox_id FROM outbox_entries WHERE audit_pointer = ? AND substr(outbox_id, 1, ?) = ?
+        AND delivery_state = 'retained' ORDER BY rowid`).all(qitem_id, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX) as Array<{ outbox_id: string }>;
+      for (const { outbox_id: intent } of intents) {
+        if (!this.outbox.reopenHeld(intent)) continue;
+        const outcome = await this.deliverWakeIntent(intent);
+        // Not sent: a drain or a restore met it at its claim. No try is recorded, and the offer is kept. The entry stays
+        // owed as pending, which the drain's end (or wake recovery) sends again.
+        if (outcome === "skipped") { paused = true; continue; }
+        const row = this.getById(qitem_id);
+        if (!row) continue rowsLoop;
+        const result = row.lastNudgeResult ?? outcome;
+        if (result === DRAFT_HELD_WAKE_RESULT) {
+          held = true;
+          // One burst of observations is one try: the observations around a single Enter (the agent's Stop, a pane change)
+          // can arrive inside the guard's quiet window together. A hold within that window of this row's previous held try
+          // records nothing, so it doesn't spend the cap that #48's escalation counts.
+          const last = this.db.prepare(`SELECT ts, transition_note AS note FROM queue_transitions WHERE qitem_id = ? AND transition_id > ?
+            AND transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%' ORDER BY transition_id DESC LIMIT 1`).get(qitem_id, after) as { ts: string; note: string } | undefined;
+          if (last && last.note.includes(`outcome=${DRAFT_HELD_WAKE_RESULT}`) && Date.now() - Date.parse(last.ts) < DRAFT_HELD_REOFFER_MS) continue;
+        }
+        this.transitionLog.append({ qitemId: qitem_id, state: row.state, actorSession: "wake-ladder@system",
+          transitionNote: `${LADDER_ATTEMPT_PREFIX} ${tries + 1}/${cap} outcome=${result} trigger=seat-idle` });
       }
-      this.transitionLog.append({ qitemId: qitem_id, state: row.state, actorSession: "wake-ladder@system",
-        transitionNote: `${LADDER_ATTEMPT_PREFIX} ${tries + 1}/${cap} outcome=${result} trigger=seat-idle` });
     }
-    return held ? "draft" : "done";
+    return paused ? "paused" : held ? "draft" : "done";
   }
 
   /** Whether this seat's idle report and the periodic offer can retry its draft-held queue wakes: it's in draft-aware
@@ -2593,11 +2605,20 @@ export class QueueRepository {
    *  the periodic offer gives each such time one offer after the quiet interval (createDraftHeldReoffer). So a held wake
    *  whose draft is cleared with no activity report is still tried. Reads pending rows by state. */
   draftHeldWakeSeats(): Array<{ session: string; lastTry: string }> {
-    return this.db.prepare(`SELECT q.destination_session AS session, MAX(COALESCE(t.ts, q.last_nudge_attempt)) AS lastTry
-      FROM queue_items q
-      LEFT JOIN queue_transitions t ON t.qitem_id = q.qitem_id AND t.transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%'
-      WHERE q.state = 'pending' AND q.claimed_at IS NULL AND q.last_nudge_result = ?
-      GROUP BY q.destination_session`).all(DRAFT_HELD_WAKE_RESULT) as Array<{ session: string; lastTry: string }>;
+    const rows = this.db.prepare(`SELECT qitem_id AS qitemId, destination_session AS session, last_nudge_attempt AS heldAt
+      FROM queue_items WHERE state = 'pending' AND claimed_at IS NULL AND last_nudge_result = ?`)
+      .all(DRAFT_HELD_WAKE_RESULT) as Array<{ qitemId: string; session: string; heldAt: string | null }>;
+    // Only this wake's tries count, those after the row's last meaningful transition, as the pass counts them: a try from
+    // an earlier wake of the same row doesn't stand for a new hold that has had none.
+    const since = lastMeaningfulTransitionMany(this.db, rows.map(row => row.qitemId));
+    const lastTry = new Map<string, string>();
+    for (const row of rows) {
+      const tried = (this.db.prepare(`SELECT MAX(ts) AS ts FROM queue_transitions WHERE qitem_id = ? AND transition_id > ?
+        AND transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%'`).get(row.qitemId, since.get(row.qitemId)?.id ?? 0) as { ts: string | null }).ts;
+      const at = tried ?? row.heldAt;
+      if (at !== null && at > (lastTry.get(row.session) ?? "")) lastTry.set(row.session, at);
+    }
+    return [...lastTry].map(([session, at]) => ({ session, lastTry: at }));
   }
 
   /** Seats with a draft-held delivery pass running, so overlapping idle observations don't race each other. */

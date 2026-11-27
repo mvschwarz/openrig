@@ -2943,6 +2943,97 @@ describe("draft-held queue wake offers: the terminal's quiet window, a paused of
     expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
   });
 
+  /** Parks the row on a blocker row, then closes the blocker: the unpark's own wake goes to the seat. */
+  const unpark = async (f: ReturnType<typeof fixture>, qitemId: string) => {
+    const blocker = await f.repo.create({ sourceSession: "sender@test", destinationSession: "sibling@test", body: "blocker", nudge: false });
+    f.repo.update({ qitemId, actorSession: "worker@test", state: "blocked", blockedOn: blocker.qitemId });
+    f.repo.claim({ qitemId: blocker.qitemId, destinationSession: "sibling@test" });
+    f.repo.update({ qitemId: blocker.qitemId, actorSession: "sibling@test", state: "done", closureReason: "no-follow-on" });
+    void f.repo.drainPendingWakeIntents();
+    const intent = () => f.db.prepare("SELECT outbox_id AS id, delivery_state AS state FROM outbox_entries WHERE audit_pointer = ? AND outbox_id LIKE 'wake-intent-blocker-%'")
+      .get(qitemId) as { id: string; state: string } | undefined;
+    await vi.waitFor(() => expect(intent()?.state).toBe("retained"));
+    return intent()!.id;
+  };
+
+  // The ladder leaves a held wake of a row that wasn't handed off to the idle retry, so the retry has to find it whichever
+  // intent holds it: here an unpark's, not the row's own.
+  it("tries a held unpark wake, not only the row's own intent, and it goes once the draft is gone", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "parked work", nudge: false });
+    const wake = await unpark(f, item.qitemId);
+    expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware");
+    f.bodies.a = "";
+    await expect(f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle")).resolves.toBe("done");
+    expect(f.outbox.getById(wake)!.deliveryState).toBe("delivered");
+    expect(f.submissions.filter(s => s.includes(item.qitemId))).toHaveLength(1);
+  });
+
+  // A try from the row's earlier wake doesn't stand for a new hold that has had none: the offer is timed from the new hold.
+  it("times a new hold from when it was held, not from a try of the row's earlier wake", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const id = await heldWake(f);
+    await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");   // a try of the first wake, held by the draft
+    expect(tries(f, id)).toHaveLength(1);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() + 60_000);
+    try {
+      await unpark(f, id);   // a new wake of the same row, held, with no try of its own
+      const heldAt = f.repo.getById(id)!.lastNudgeAttempt!;
+      expect(f.repo.draftHeldWakeSeats()).toEqual([{ session: "worker@test", lastTry: heldAt }]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  // A drain that starts while an earlier row's delivery is under way covers the rest of the pass: no try is recorded for
+  // a wake that wasn't sent, and the pass ends `paused`, so the offer is kept.
+  it("stops the pass before a row a drain now covers: no try for it, and the offer is kept", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const first = await heldWake(f);
+    const second = await heldWake(f);
+    const drain = new RigDeliveryDrainStore(f.db), jobs = new WatchdogJobsRepository(f.db);
+    const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
+    f.bodies.a = "";
+    let begun = false;
+    f.hooks.paste = () => {
+      if (begun) return;
+      begun = true;   // the first row's paste: a drain starts now
+      drain.begin(rigId, { drainId: "fixture-mid-pass", owner: "human@test", reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    };
+    await expect(f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle")).resolves.toBe("paused");
+    expect(begun).toBe(true);
+    expect(tries(f, second)).toEqual([]);
+    expect(f.outbox.getById("wake-intent-" + second)!.deliveryState).toBe("retained");
+    expect(f.submissions.filter(s => s.includes(first))).toHaveLength(1);
+  });
+
+  // The seat's own idle report can record a try while the offer awaits the terminal's quiet read: that try keeps its own
+  // interval and its one offer.
+  it("leaves a try recorded during the offer's quiet read its own interval, and offers it once after", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const id = await heldWake(f);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() - 60_000);
+    try {
+      const t0 = Date.now();
+      await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");   // try 1, held by the draft
+      const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20) });
+      let raced = false;
+      attachDraftHeldReoffer(structural, f.repo, () => "idle", { quietUntil: async () => {
+        // The seat's own report, while the offer reads the quiet window: try 2, held by the draft.
+        if (!raced) { raced = true; await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle"); }
+        return null;
+      } });
+      vi.setSystemTime(t0 + 4_600);   // try 1's interval has passed: the sweep picks the seat
+      const passes = vi.spyOn(f.repo, "retryDraftHeldWakesOnIdle");
+      await structural.pollAllRunningTmuxSeats(f.db); await settle();
+      expect(tries(f, id)).toHaveLength(2);
+      expect(passes).toHaveBeenCalledTimes(1);   // the report's pass only: no offer inside try 2's interval
+      f.bodies.a = "";   // the draft cleared, with no report
+      vi.setSystemTime(t0 + 9_300);   // past try 2's interval
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await vi.waitFor(() => expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("delivered"));
+    } finally { vi.useRealTimers(); }
+    expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
+  });
+
   it("reports a failed read after a wake pass through onError, leaves no unhandled rejection, and keeps the seat eligible", async () => {
     const errors: unknown[] = [], unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
