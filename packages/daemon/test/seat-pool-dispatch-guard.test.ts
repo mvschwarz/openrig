@@ -7,6 +7,7 @@ import {
   SEAT_POOL_DISPATCH_GUARD_VETO_EXIT,
   type SeatPoolDispatchGuardInput,
 } from "../src/domain/seat-pool-dispatch-guard.js";
+import { TMUX_CREDENTIAL_ENV_KEYS } from "../src/adapters/tmux-credential-env.js";
 
 // #4061 (Ask 1): the daemon's runner for the pool block's `dispatch_guard`. Each guard here is this test's own Node, by
 // absolute path, with a script; `--` ends Node's own options, so the runner's arguments reach the script.
@@ -43,9 +44,9 @@ function withChild(file: string, stdio: "ignore" | "inherit", then: string): str
 }
 
 describe("seat-pool dispatch guard runner (#4061)", () => {
-  it("Exit 0 lets the move go, and the command gets its own arguments verbatim, then `--qitem`, `--from` and `--to`.", async () => {
-    const expected = JSON.stringify(["--strict", "a b; $(x)", "--qitem", ROW.qitemId, "--from", ROW.from, "--to", ROW.to]);
-    const script = `process.exit(JSON.stringify(process.argv.slice(-8)) === ${JSON.stringify(expected)} ? 0 : 1)`;
+  it("Exit 0 lets the move go, and the command gets its own arguments verbatim, then `--qitem=`, `--from=` and `--to=`.", async () => {
+    const expected = JSON.stringify(["--strict", "a b; $(x)", `--qitem=${ROW.qitemId}`, `--from=${ROW.from}`, `--to=${ROW.to}`]);
+    const script = `process.exit(JSON.stringify(process.argv.slice(-5)) === ${JSON.stringify(expected)} ? 0 : 1)`;
     expect(await runSeatPoolDispatchGuard(guard(script, ["--strict", "a b; $(x)"]))).toEqual({ verdict: "allow" });
   });
 
@@ -71,18 +72,14 @@ describe("seat-pool dispatch guard runner (#4061)", () => {
   });
 
   it("A guard gets the daemon's environment without its credentials, as a command run through tmux does.", async () => {
-    const set = {
-      OPENRIG_AUTH_BEARER_TOKEN: "bearer-secret",
-      OPENRIG_TERMINAL_BEARER_TOKEN: "terminal-secret",
-      OPENRIG_RELAY_OUTBOUND_TOKEN: "relay-secret",
-      OPENRIG_RUN_GRANT_X: "grant-secret",
-      OPENRIG_POOL_GUARD_PLAIN: "kept",
-    };
+    // every key the tmux client drops, and a run grant, beside an ordinary variable
+    const credentials = [...TMUX_CREDENTIAL_ENV_KEYS, "OPENRIG_RUN_GRANT_X"];
+    const set: Record<string, string> = { ...Object.fromEntries(credentials.map((key) => [key, `${key}-secret`])),
+      OPENRIG_POOL_GUARD_PLAIN: "kept" };
     const before = Object.fromEntries(Object.keys(set).map((key) => [key, process.env[key]]));
     Object.assign(process.env, set);
     try {
-      const credentials = JSON.stringify(Object.keys(set).filter((key) => key !== "OPENRIG_POOL_GUARD_PLAIN"));
-      const script = `const e = process.env; const leaked = ${credentials}.filter((k) => k in e);`
+      const script = `const e = process.env; const leaked = ${JSON.stringify(credentials)}.filter((k) => k in e);`
         + " if (leaked.length) { console.error('leaked ' + leaked.join(',')); process.exit(3); }"
         + " process.exit(e.OPENRIG_POOL_GUARD_PLAIN === 'kept' ? 0 : 4)";
       expect(await runSeatPoolDispatchGuard(guard(script))).toEqual({ verdict: "allow" });

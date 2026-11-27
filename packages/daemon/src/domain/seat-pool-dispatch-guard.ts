@@ -5,9 +5,9 @@ import { isTmuxCredentialEnvKey } from "../adapters/tmux-credential-env.js";
 // `dispatch_guard` (an argv: an absolute executable and its own arguments, never a shell string). The executor runs it
 // once per planned move, before its final re-check, under the model's custody lease, so its timeout is short.
 //
-// The command gets `--qitem <id> --from <session> --to <session>` after its own arguments, no stdin and the daemon's
-// environment without its credentials, like everything else a spec runs (through the tmux client). Exit 0 lets the
-// move go. Exit 75 (EX_TEMPFAIL: try again later) vetoes it: the row is skipped this cycle and planned again on the next
+// The command gets `--qitem=<id> --from=<session> --to=<session>` after its own arguments (the `=` form, so a value
+// that starts with `-` can't read as one of its own options), no stdin and the daemon's environment without its
+// credentials, like everything else a spec runs (through the tmux client). Exit 0 lets the move go. Exit 75 (EX_TEMPFAIL: try again later) vetoes it: the row is skipped this cycle and planned again on the next
 // one. Anything else (it can't be started, it times out, it is killed, it exits with another code) is a guard error, and
 // the move goes ahead: a broken guard never freezes a pool. A dedicated veto code keeps an ordinary crash (exit 1, a
 // shell's `set -e`, an argument error) from reading as a veto.
@@ -74,7 +74,7 @@ export function runSeatPoolDispatchGuard(
     let child: ReturnType<typeof spawn>;
     try {
       // detached: its own process group, so the timeout's kill reaches what it started too.
-      child = spawn(file, [...own, "--qitem", input.qitemId, "--from", input.from, "--to", input.to], {
+      child = spawn(file, [...own, `--qitem=${input.qitemId}`, `--from=${input.from}`, `--to=${input.to}`], {
         shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: guardEnvironment(),
       });
     } catch (error) {
