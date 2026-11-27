@@ -4,7 +4,7 @@ import { deliveryReachedSeat } from "./watchdog-history-log.js";
 import { isTypedGateBlocker } from "./queue-blocker.js";
 import { isHumanSeatSessionRef } from "./session-name.js";
 import { loadHumanRegistry, resolveRegisteredHumanAddress } from "./gateway/human-registry.js";
-import { readWithCurrentParkBoundary } from "./current-park-arm.js";
+import { localQueueWakeSource, readWithCurrentParkBoundary } from "./current-park-arm.js";
 
 export type ParkWakeKind = "watchdog" | "timer" | "blocker";
 export type ParkWakePhase = "armed" | "fired";
@@ -61,6 +61,7 @@ interface WakeRow {
 /** Persistence + live-state projection for transition-bound park wakes. */
 export class QueueWakeRepository {
   private readonly available: boolean;
+  private readonly localWakes: string;
   /** One lookup statement for this connection, prepared on first use: history reads call it once per transition, and
    *  compiling it each time dominated their cost. It holds no result; every call reads afresh. */
   private lookup: Database.Statement | undefined;
@@ -74,6 +75,7 @@ export class QueueWakeRepository {
     this.available = this.db.prepare(
       "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'queue_transition_wakes'",
     ).get() !== undefined;
+    this.localWakes = localQueueWakeSource(db);
   }
 
   record(input: QueueWakeRecord): void {
@@ -102,7 +104,7 @@ export class QueueWakeRepository {
   getStatus(qitemId: string): ParkWakeStatus | null {
     if (!this.available) return null;
     let armed = this.db.prepare(
-      `SELECT * FROM queue_transition_wakes
+      `SELECT * FROM ${this.localWakes}
         WHERE qitem_id = ? AND phase = 'armed'
         ORDER BY transition_id DESC LIMIT 1`,
     ).get(qitemId) as WakeRow | undefined;
@@ -123,7 +125,7 @@ export class QueueWakeRepository {
       return { kind: "blocker", ref: current.blocked_on, phase: "armed", live: true, deliveryStatus: null, unconsumed: false };
     }
     const fired = this.db.prepare(
-      `SELECT * FROM queue_transition_wakes
+      `SELECT * FROM ${this.localWakes}
         WHERE qitem_id = ? AND phase = 'fired' AND wake_ref = ?
           AND transition_id > ?
         ORDER BY transition_id DESC LIMIT 1`,
@@ -157,7 +159,7 @@ export class QueueWakeRepository {
   servedByOwnRepeatingReminder(qitemId: string): boolean {
     if (!this.available) return false;
     const armed = this.db.prepare(
-      `SELECT * FROM queue_transition_wakes
+      `SELECT * FROM ${this.localWakes}
         WHERE qitem_id = ? AND phase = 'armed'
         ORDER BY transition_id DESC LIMIT 1`,
     ).get(qitemId) as WakeRow | undefined;
@@ -179,7 +181,7 @@ export class QueueWakeRepository {
     if (!job || job.row_state !== "blocked" || job.policy !== "periodic-reminder" || job.state !== "active"
       || job.target_session !== job.destination_session || isQueueWait(job.spec_yaml)) return false;
     const fired = this.db.prepare(
-      `SELECT delivery_status FROM queue_transition_wakes
+      `SELECT delivery_status FROM ${this.localWakes}
         WHERE qitem_id = ? AND phase = 'fired' AND wake_ref = ? AND transition_id > ?
         ORDER BY transition_id DESC LIMIT 1`,
     ).get(qitemId, armed.wake_ref, armed.transition_id) as { delivery_status: string | null } | undefined;
@@ -204,19 +206,19 @@ export class QueueWakeRepository {
     if (!this.available) return [];
     const select = (boundary: string) => this.db.prepare(
       `SELECT DISTINCT w.qitem_id, w.wake_kind
-         FROM queue_transition_wakes w
+         FROM ${this.localWakes} w
          JOIN queue_items q ON q.qitem_id = w.qitem_id
         WHERE w.phase = 'armed' AND w.wake_ref = ?
           AND w.wake_kind IN ('watchdog', 'timer') AND q.state = 'blocked'
           -- An operator-owned job can outlive the park that attached it.
           -- Only the latest armed continuation owns this row's wake receipt.
           AND (? = 0 OR w.transition_id = (
-            SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+            SELECT MAX(a.transition_id) FROM ${this.localWakes} a
              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
           ))
           ${boundary}
           AND (? OR NOT EXISTS (
-            SELECT 1 FROM queue_transition_wakes f
+            SELECT 1 FROM ${this.localWakes} f
              WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'
                AND f.wake_ref = w.wake_ref AND f.transition_id > w.transition_id
                -- A retained attempt was not delivered: the one-shot binding still owns the next attempt.
@@ -238,12 +240,12 @@ export class QueueWakeRepository {
     if (!this.available) return [];
     return this.db.prepare(
       `SELECT DISTINCT w.qitem_id
-         FROM queue_transition_wakes w
+         FROM ${this.localWakes} w
          JOIN queue_items q ON q.qitem_id = w.qitem_id
         WHERE w.phase = 'armed' AND w.wake_ref = ?
           AND w.wake_kind IN ('watchdog', 'timer') AND q.state = 'blocked' AND q.destination_session = ?
           AND w.transition_id = (
-            SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+            SELECT MAX(a.transition_id) FROM ${this.localWakes} a
              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
           )
           AND NOT EXISTS (
@@ -251,7 +253,7 @@ export class QueueWakeRepository {
              WHERE t.qitem_id = w.qitem_id AND t.transition_id > w.transition_id AND t.state <> 'blocked'
           )
           AND (? OR (? AND w.wake_kind = 'watchdog') OR NOT EXISTS (
-            SELECT 1 FROM queue_transition_wakes f
+            SELECT 1 FROM ${this.localWakes} f
              WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'
                AND f.wake_ref = w.wake_ref AND f.transition_id > w.transition_id
                AND (f.delivery_status IS NULL OR f.delivery_status != 'retained')
@@ -268,7 +270,7 @@ export class QueueWakeRepository {
     if (!this.available) return [];
     return this.db.prepare(
       `SELECT DISTINCT w.qitem_id, q.state
-         FROM queue_transition_wakes w
+         FROM ${this.localWakes} w
          JOIN queue_items q ON q.qitem_id = w.qitem_id
         WHERE w.phase = 'armed' AND w.wake_ref = ? AND w.wake_kind = 'timer'`,
     ).all(jobId).map((row) => {
@@ -283,17 +285,17 @@ export class QueueWakeRepository {
     if (!this.available) return [];
     return readWithCurrentParkBoundary(boundary => this.db.prepare(
       `SELECT DISTINCT w.qitem_id, q.state
-         FROM queue_transition_wakes w
+         FROM ${this.localWakes} w
          JOIN queue_items q ON q.qitem_id = w.qitem_id
         WHERE w.phase = 'armed' AND w.wake_ref = ? AND w.wake_kind = 'watchdog'
           AND q.state = 'blocked'
           AND w.transition_id = (
-            SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+            SELECT MAX(a.transition_id) FROM ${this.localWakes} a
              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
           )
           ${boundary}
           AND NOT EXISTS (
-            SELECT 1 FROM queue_transition_wakes f
+            SELECT 1 FROM ${this.localWakes} f
              WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'
                AND f.wake_ref = w.wake_ref AND f.transition_id > w.transition_id
                -- A retained attempt never consumes an attachment; a failed one consumes it only on a one-shot timer.
@@ -329,13 +331,13 @@ export class QueueWakeRepository {
     if (!this.available) return [];
     return readWithCurrentParkBoundary(boundary => this.db.prepare(
       `SELECT w.wake_ref
-         FROM queue_transition_wakes w
+         FROM ${this.localWakes} w
          JOIN queue_items q ON q.qitem_id = w.qitem_id
          JOIN watchdog_jobs j ON j.job_id = w.wake_ref
         WHERE w.phase = 'armed' AND w.wake_kind = 'timer'
           AND q.state = 'blocked' AND j.state = 'active' AND j.target_session = q.destination_session
           AND w.transition_id = (
-            SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+            SELECT MAX(a.transition_id) FROM ${this.localWakes} a
              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
           )
           ${boundary}`,
@@ -364,7 +366,7 @@ export class QueueWakeRepository {
   private isRecurringReminder(ref: string): boolean {
     return this.db.prepare(
       `SELECT 1 FROM watchdog_jobs j WHERE j.job_id = ? AND j.state = 'active' AND j.policy = 'periodic-reminder'
-          AND NOT EXISTS (SELECT 1 FROM queue_transition_wakes w WHERE w.wake_ref = j.job_id AND w.wake_kind = 'timer')`,
+          AND NOT EXISTS (SELECT 1 FROM ${this.localWakes} w WHERE w.wake_ref = j.job_id AND w.wake_kind = 'timer')`,
     ).get(ref) !== undefined;
   }
 
@@ -388,7 +390,7 @@ export class QueueWakeRepository {
 
   private usageLimitBlockerExpiry(qitemId: string): string | undefined {
     const row = this.db.prepare(
-      `SELECT wake_ref FROM queue_transition_wakes
+      `SELECT wake_ref FROM ${this.localWakes}
         WHERE qitem_id = ? AND phase = 'armed' AND wake_kind = 'timer'
         ORDER BY transition_id DESC LIMIT 1`,
     ).get(qitemId) as { wake_ref: string } | undefined;

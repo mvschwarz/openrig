@@ -36,4 +36,4 @@ Refusals exit nonzero and do not keep an envelope. Warnings do not prevent stagi
 
 An identical content key (origin host ID, origin minted-at value and digest) returns the original manifest. `staging list` prints manifests, not archive bodies. Discard removes the stored envelope and marks the manifest `discarded`; importing identical content again returns that manifest without restoring the envelope. Discard writes no fence and does not remove the original file or older backups. It is not a secure erase of SQLite pages or journal files.
 
-Treat the archive, database and report as sensitive. The format is not encrypted, and an older archive can contain content erased at the source later. Keep the copies only as long as needed. Activation and reconciliation are not available through these commands.
+Activation and reconciliation are separate commands, `rig queue transfer ...`, described in [Queue transfer activation](queue-transfer-activation.md).

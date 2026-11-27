@@ -7,6 +7,7 @@ import { seatPoolSchema } from "./migrations/178_seat_pool.js";
 import { remoteControlObservationsSchema } from "./migrations/179_remote_control_observations.js";
 import { queueRelayedAnswersSchema } from "./migrations/186_queue_relayed_answers.js";
 import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_staging.js";
+import { queueTransferActivationSchema } from "./migrations/191_queue_transfer_activation.js";
 import { workflowRunTitleSchema } from "./migrations/194_workflow_run_title.js";
 import { workflowStartOperationsSchema } from "./migrations/195_workflow_start_operations.js";
 import { queueItemEvidenceRefRootsSchema } from "./migrations/196_queue_item_evidence_ref_roots.js";
@@ -396,6 +397,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   rigSeatSliceSchema,
   communityHarnessRuntimeSwitchesSchema,
   networkBindingProvidersSchema,
+  queueTransferActivationSchema,
   workflowRunTitleSchema,
   workflowStartOperationsSchema,
   networkRequestsSchema,
