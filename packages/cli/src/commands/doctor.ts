@@ -14,7 +14,7 @@ import {
   readCmuxSocketControlModeFromText,
   resolveCmuxSettingsPath,
 } from "../cmux-config.js";
-import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
+import { buildTmuxCaptureFailure, buildTmuxControlFailure, buildTmuxNotRunnable, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
 import { parse as parseYaml } from "yaml";
 import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
 import { classifyNodeVersion } from "../node-support.js";
@@ -201,6 +201,9 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
       reason: "OpenRig uses tmux to manage agent sessions.",
       fix: "Install tmux: brew install tmux (macOS), apt install tmux (Linux).",
     });
+  } else if (tmuxProbe.code === "not_runnable") {
+    const refused = buildTmuxNotRunnable(tmuxProbe.detail ?? "permission refused");
+    checks.push({ name: "tmux", status: "fail", message: refused.message, reason: refused.reason, fix: refused.fix });
   } else if (tmuxProbe.available && tmuxProbe.version) {
     checks.push({ name: "tmux", status: "pass", message: tmuxProbe.version });
     // #980: a tmux whose server exits on `capture-pane -p` fails every seat at launch.

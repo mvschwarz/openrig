@@ -648,6 +648,26 @@ describe("rig setup", () => {
     expect(herdr?.status).toBe("pass");
   });
 
+  it("doesn't install tmux when this shell was refused permission to run it (a sandbox), and says so", async () => {
+    const execs: string[] = [];
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        execs.push(cmd);
+        if (cmd === "herdr --version") return "herdr 0.9.3\n";
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") throw Object.assign(new Error("spawnSync /bin/sh EPERM"), { code: "EPERM" });
+        if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
+        return "";
+      },
+    });
+    const result = await runSetup(deps, {});
+
+    const tmux = result.steps.find((s) => s.id === "tmux_install");
+    expect(tmux?.status).toBe("fail");
+    expect(tmux?.message).toBe("tmux couldn't be run from this shell (spawnSync /bin/sh EPERM).");
+    expect(execs).not.toContain("brew install tmux");
+  });
+
   it("uses the extended timeout budget for npm runtime installs", async () => {
     const seenTimeouts = new Map<string, number | undefined>();
     let claudeInstalled = false;

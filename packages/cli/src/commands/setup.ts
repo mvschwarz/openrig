@@ -9,7 +9,7 @@ import { parseDocument } from "yaml";
 import { runDoctorChecks, type DoctorDeps } from "./doctor.js";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { ConfigStore } from "../config-store.js";
-import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
+import { buildTmuxCaptureFailure, buildTmuxControlFailure, buildTmuxNotRunnable, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
 import { checkClaudeAuth, checkCodexAuth } from "../provider-auth.js";
 import { describeSkillRouterFootprint } from "@openrig/daemon/router-line";
 
@@ -527,6 +527,10 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
         steps.push({ id: "tmux_install", status: "fail", message: `Failed to install tmux: ${(err as Error).message}` });
       }
     }
+  } else if (tmuxProbe.code === "not_runnable") {
+    // Whether tmux is installed is unknown, so nothing is installed.
+    const refused = buildTmuxNotRunnable(tmuxProbe.detail ?? "permission refused");
+    steps.push({ id: "tmux_install", status: "fail", message: refused.message, reason: refused.reason, fixHint: refused.fix });
   } else if (!tmuxProbe.available) {
     const failure = buildTmuxControlFailure(tmuxProbe.detail ?? "unknown tmux control failure");
     steps.push({

@@ -181,6 +181,22 @@ describe("runDoctorChecks", () => {
     expect(tmuxCheck?.fix).toContain("brew");
   });
 
+  // A Codex sandbox refused to start the check's process; "tmux not found" sent the agent to install a tmux it had.
+  it.each(["EPERM", "EACCES"])("tmux refused permission to run (%s) -> says so, not 'not found' or install", (code) => {
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        if (cmd === "tmux -V") throw Object.assign(new Error(`spawnSync /bin/sh ${code}`), { code });
+        return "";
+      },
+    });
+    const { checks } = runDoctorChecks(deps);
+    const tmuxCheck = checks.find((c) => c.name === "tmux");
+    expect(tmuxCheck?.status).toBe("fail");
+    expect(tmuxCheck?.message).toBe(`tmux couldn't be run from this shell (spawnSync /bin/sh ${code}).`);
+    expect(tmuxCheck?.message).not.toContain("not found");
+    expect(tmuxCheck?.fix).not.toContain("brew install");
+  });
+
   it("tmux mouse check is omitted on non-macOS hosts", () => {
     const deps = makeDeps({
       platform: "linux",

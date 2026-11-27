@@ -3,11 +3,27 @@ export interface TmuxProbeResult {
   available: boolean;
   version: string | null;
   detail: string | null;
-  code: "available" | "no_server" | "not_installed" | "unhealthy";
+  /** not_runnable: this shell was refused permission to start tmux (EPERM or EACCES, as in a sandbox), so whether tmux
+   *  is installed is unknown. */
+  code: "available" | "no_server" | "not_installed" | "not_runnable" | "unhealthy";
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** A process this shell was refused permission to start (a sandbox can do this) says nothing about whether tmux exists. */
+function refusedToRun(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === "EPERM" || code === "EACCES";
+}
+
+export function buildTmuxNotRunnable(detail: string): { message: string; reason: string; fix: string } {
+  return {
+    message: `tmux couldn't be run from this shell (${detail}).`,
+    reason: "This shell was refused permission to start a process, as a sandbox can do. That doesn't show whether tmux is installed, and OpenRig needs to run it.",
+    fix: "Check with `command -v tmux` from a shell outside the sandbox, and run OpenRig from a shell that can start tmux. Installing tmux won't help if it is already there.",
+  };
 }
 
 export function isTmuxNoServerMessage(message: string): boolean {
@@ -74,7 +90,7 @@ export function probeTmuxControl(exec: (cmd: string) => string): TmuxProbeResult
       available: false,
       version: null,
       detail: errorMessage(err),
-      code: "not_installed",
+      code: refusedToRun(err) ? "not_runnable" : "not_installed",
     };
   }
 
@@ -118,7 +134,7 @@ export async function probeTmuxControlAsync(exec: (cmd: string) => Promise<strin
       available: false,
       version: null,
       detail: errorMessage(err),
-      code: "not_installed",
+      code: refusedToRun(err) ? "not_runnable" : "not_installed",
     };
   }
 
