@@ -524,7 +524,15 @@ The parked-owner supervisor also retries current obligations despite an earlier 
 Its first reminder to a seat waits until the seat's waiting state has been unchanged for 5 minutes, then goes on the next
 watchdog tick, so a seat that just handed work off or asked a person isn't interrupted; a seat still holding the work after
 that is reminded as before. A seat at an approval or question prompt gets no grace, so the prompt-blocked alert isn't delayed.
-A recorded success to the same known occupant waits for a change in its obligations. Rotation includes retained attempts,
+A recorded success to the same known occupant waits for a change in its obligations, and then for that owner's
+minimum interval: one hour by default, counted from the reminder that was typed and submitted (an attempt that may or
+may not have been sent, a failed one and a refused one start nothing), and tied to the agent running as the owner, so a
+replacement doesn't inherit it. When it ends, one reminder names the eligible open items and marks the ones that opened
+since the last one. The job's `context.owner_min_interval_s` sets it: a number for every owner, a map from owner session
+to seconds for one at a time, and `0` turns it off; an operator sets it with
+`rig watchdog update <jobId> --spec <file>`, and the daemon keeps the key when it rewrites the job's spec at start.
+An agent at a prompt isn't held: the attempt's refusal is what alerts the prompt, and a refusal for this agent newer than
+the last reminder (a return to ability) doesn't wait out the interval either. Rotation includes retained attempts,
 so a held input cannot starve another owner. Interactive prompts stay with the existing prompt-refusal recovery.
 Its own reminders wait while managed compaction owes the turn boundary, restore or audit, including a fresh check
 at the paste and Enter boundary. A stage that begins after paste leaves an honest partial-input result; OpenRig

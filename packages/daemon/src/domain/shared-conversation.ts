@@ -41,7 +41,9 @@ export interface ConversationComparison {
  */
 export function holdsRecordedConversation(entry: { runtime?: string | null; sessionStatus?: string | null; restorePolicy?: string | null }): boolean {
   if (entry.runtime === "terminal") return false;
-  return entry.sessionStatus === "running" || (entry.restorePolicy ?? "resume_if_possible") === "resume_if_possible";
+  // A seat attached from an outside program (rig attach) holds its conversation there, as it did while its record read running.
+  return entry.sessionStatus === "running" || entry.sessionStatus === "attached"
+    || (entry.restorePolicy ?? "resume_if_possible") === "resume_if_possible";
 }
 
 /** Whether an agent's saved resume data names a conversation the comparison can pair: a resume type other than none

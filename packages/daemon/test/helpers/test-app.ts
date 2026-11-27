@@ -20,8 +20,8 @@ import { rigSeatSliceSchema } from "../../src/db/migrations/189_rig_seat_slice.j
 import { communityHarnessRuntimeSwitchesSchema } from "../../src/db/migrations/179_community_harness_runtime_switches.js";
 import { networkRequestsSchema } from "../../src/db/migrations/184_network_requests.js";
 import { rigDeliveryDrainsSchema } from "../../src/db/migrations/170_rig_delivery_drains.js";
-import { ompTuiRuntimeSwitchesSchema } from "../../src/db/migrations/201_omp_tui_runtime_switches.js";
-import { ompSwitchAdoptionSchema } from "../../src/db/migrations/202_omp_switch_adoption.js";
+import { ompTuiRuntimeSwitchesSchema } from "../../src/db/migrations/202_omp_tui_runtime_switches.js";
+import { ompSwitchAdoptionSchema } from "../../src/db/migrations/203_omp_switch_adoption.js";
 import { queueReturnRouteSchema } from "../../src/db/migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "../../src/db/migrations/165_run_bound_activity_grants.js";
 import { seatRuntimeHomeRecordsSchema } from "../../src/db/migrations/169_seat_runtime_home_records.js";
@@ -267,6 +267,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "195_workflow_start_operations.sql": "workflow receipt table — workflow suites migrate the workflow schema.",
   "053_sessions_node_id_index.sql": "sessions perf index — index/perf suites add it inline; the core edge uses the base sessions table.",
   "054_queue_transitions_archive.sql": "queue-retention EXTENSION table — queue-retention suites migrate it inline.",
+  "201_queue_transitions_archive_actor_index.sql": "indexes the archive table (054 is excluded). Speed only: an attached seat's newest own queue action reads the same row without it; its suites migrate the canonical full list.",
   "112_queue_transitions_ts_qitem.sql": "indexes queue transitions plus the archive table (054 is excluded). Speed only: the recent-activity read returns the same rows without these indexes, and queue-recent-transitions.test.ts tests that read without them (it migrates 054 inline, not 112).",
   "062_usage_samples.sql": "usage-metering subsystem table — usage suites migrate it inline.",
   "094_usage_samples_latest_indexes.sql": "indexes usage_samples (062 is excluded); usage index tests migrate the canonical full schema.",

@@ -17,6 +17,7 @@ import { queueItemEvidenceRefRootsSchema } from "./migrations/196_queue_item_evi
 import { sessionAgentActivityHooksSchema } from "./migrations/197_session_agent_activity_hooks.js";
 import { queueItemsNativePermissionIndexSchema } from "./migrations/199_queue_items_native_permission_index.js";
 import { sessionsEarlierHandoverOriginSchema } from "./migrations/200_sessions_earlier_handover_origin.js";
+import { queueTransitionsArchiveActorIndexSchema } from "./migrations/201_queue_transitions_archive_actor_index.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
 import { providerAccountRefsSchema } from "./migrations/187_provider_account_refs.js";
@@ -27,8 +28,8 @@ import { networkRequestsSchema } from "./migrations/184_network_requests.js";
 
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
-import { ompTuiRuntimeSwitchesSchema } from "./migrations/201_omp_tui_runtime_switches.js";
-import { ompSwitchAdoptionSchema } from "./migrations/202_omp_switch_adoption.js";
+import { ompTuiRuntimeSwitchesSchema } from "./migrations/202_omp_tui_runtime_switches.js";
+import { ompSwitchAdoptionSchema } from "./migrations/203_omp_switch_adoption.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "./migrations/165_run_bound_activity_grants.js";
 import { nodeInputRouteSchema } from "./migrations/171_node_input_route.js";
@@ -414,6 +415,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   seatColdStartStandbyStopSchema,
   contextConfiguredBudgetSchema,
   sessionsEarlierHandoverOriginSchema,
+  queueTransitionsArchiveActorIndexSchema,
   ompTuiRuntimeSwitchesSchema,
   ompSwitchAdoptionSchema,
 ];

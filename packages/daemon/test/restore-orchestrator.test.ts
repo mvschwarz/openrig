@@ -585,7 +585,8 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.nodes.find((n) => n.logicalId === "desk")?.status).toBe("left_attached");
     const named = result.result.warnings.filter((line) => line.includes("conversation"));
     expect(named).toHaveLength(1);
-    expect(named[0]).toMatch(/worker@r99 \([a-z]+\) has the same recorded claude_id conversation as desk-app@r99 \(running\), outside this restore/);
+    // It's named by what OpenRig knows of it: attached from an outside program, its liveness unknown.
+    expect(named[0]).toMatch(/worker@r99 \([a-z]+\) has the same recorded claude_id conversation as desk-app@r99 \(attached\), outside this restore/);
     expect(result.result.warnings.join("\n")).not.toContain("conv-x");
   });
 

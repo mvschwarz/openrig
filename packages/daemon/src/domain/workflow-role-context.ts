@@ -68,6 +68,7 @@ export function roleResolutionContext(
         role: e.role,
         nodeKind: e.nodeKind,
         lifecycleState: e.lifecycleState,
+        externallyAttached: e.externalAttachment !== undefined,
         runtime: e.runtime,
         pendingWorkCount: e.pendingWorkCount ?? 0,
         coordinate: deriveCanonicalFromEntry(e),

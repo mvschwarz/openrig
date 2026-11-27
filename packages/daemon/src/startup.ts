@@ -180,7 +180,7 @@ import { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { resolveWorkflowHumanDestination } from "./domain/workflow-human-destination.js";
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
-import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "./domain/policies/parked-owner-consumer.js";
+import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, parkedOwnerSpecYaml } from "./domain/policies/parked-owner-consumer.js";
 import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
 import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
@@ -2836,6 +2836,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           history: {
             listForJob: (jobId, limit) => watchdogHistoryLogInstance.listForJob(jobId, limit),
             countForJob: (jobId) => watchdogHistoryLogInstance.countForJob(jobId),
+            latestAcceptedSendTo: (jobId, targetSession, occupantGeneration) =>
+              watchdogHistoryLogInstance.latestAcceptedSendTo(jobId, targetSession, occupantGeneration),
+            refusedAttemptSince: (jobId, targetSession, afterHistoryId, occupantGeneration) =>
+              watchdogHistoryLogInstance.refusedAttemptSince(jobId, targetSession, afterHistoryId, occupantGeneration),
           },
           // Best-effort attempt reporting; actual prompt and failure recovery still use the existing ladder.
           rows: {
@@ -2970,6 +2974,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     {
       const parkedOwnerJob = (rigName: string) => {
         const anchor = makeRigAnchor(rigName);
+        // The ensure rewrites the spec: an operator's owner_min_interval_s in the current job's spec is carried over.
+        let priorSpecYaml: string | null = null;
+        try {
+          priorSpecYaml = watchdogJobsRepoInstance.listExactTuple(PARKED_OWNER_POLICY_NAME, anchor, null)
+            .filter((job) => job.state === "active" || job.state === "stopped").at(-1)?.specYaml ?? null;
+        } catch { /* an unreadable prior job keeps the default spec */ }
         return {
           policy: PARKED_OWNER_POLICY_NAME,
           targetSession: anchor,
@@ -2977,7 +2987,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           intervalSeconds: 120,
           activeWakeIntervalSeconds: null,
           scanIntervalSeconds: null,
-          specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${anchor}\ncontext:\n  rig: ${rigName}\n`,
+          specYaml: parkedOwnerSpecYaml(rigName, priorSpecYaml),
         };
       };
       // #3634: a name is armed while it has an unarchived row or a running seat (the seats diagnoseRig reads, so a rig
