@@ -7,11 +7,17 @@ import { ulid } from "ulid";
 // which frees the number too.
 //
 // An add's attempt lives on its row: reserved with a new number, issued under the model's custody lease, then settled
-// running (`live`), settled not running (`drained`, with a reuse hold, never tried again), kept issued with an `unknown`
-// outcome until a later read settles it, or removed (cancelled before the issue, or no node was created). A comeback's
-// attempt lives on the drained slot's own row: reserved, issued, then settled running (`live`), refused (`drained` again,
-// with a reuse hold) or never launched (`drained` again, with no hold). Every write of an attempt checks the row still
-// holds that attempt id in the state the write expects.
+// running (`live`), settled not running (`drained`, with a reuse hold, never tried again), settled `live` and held (a
+// launch that needs attention while a session may run: not free, never drained by the pool), kept issued with an
+// `unknown` outcome until a later read settles it, or removed (cancelled before the issue, or no node was created). A
+// comeback's attempt lives on the drained slot's own row: reserved, issued, then settled running (`live`), already
+// running (`live`, no hold), held (`drained` when nothing runs, `live` when a session may run), refused (`drained`
+// again, with a reuse hold) or never launched (`drained` again, with no hold). Every write of an attempt checks the row
+// still holds that attempt id in the state the write expects.
+//
+// A held slot keeps in `attempt_result` the node's latest session as it was when the hold was set (its id, status and
+// startup status): a later change on the node (a newer session, or a new status on that session) is what can clear the
+// hold, and nothing else does.
 
 export type SeatPoolSlotPhase = "adding" | "live" | "draining" | "drained";
 export type SeatPoolSlotAttemptKind = "add" | "comeback";
@@ -162,8 +168,9 @@ export class SeatPoolSlotsRepository {
     if (changed !== 1) throw new Error(`seat pool: slot ${slotId} no longer waits for the node of attempt ${attemptId}`);
   }
 
-  /** An issued add that runs: settled, with its outcome and the session it settled with, and the slot `live`. */
-  settleAdd(slotId: string, attemptId: string, input: { outcome: string; result: string; at: string }): boolean {
+  /** An issued add or comeback that runs: settled, with its outcome and the session it settled with (null when it can't
+   *  be told apart, as for a comeback that found a live session), and the slot `live`. */
+  settleAdd(slotId: string, attemptId: string, input: { outcome: string; result: string | null; at: string }): boolean {
     return this.db.prepare(
       `UPDATE seat_pool_slots SET attempt_state = 'settled', attempt_outcome = ?, attempt_result = ?, phase = 'live', phase_changed_at = ?
         WHERE slot_id = ? AND attempt_id = ? AND attempt_state = 'issued'`,
@@ -172,11 +179,22 @@ export class SeatPoolSlotsRepository {
 
   /** An issued add that settled without running (its latest session exited, or its executor is confirmed stopped):
    *  settled, with its outcome, and the slot `drained` with a reuse hold, so it is never tried again. */
-  settleAddNotRunning(slotId: string, attemptId: string, input: { outcome: string; hold: string; at: string }): boolean {
+  settleAddNotRunning(slotId: string, attemptId: string, input: { outcome: string; hold: string; at: string; result?: string | null }): boolean {
     return this.db.prepare(
-      `UPDATE seat_pool_slots SET attempt_state = 'settled', attempt_outcome = ?, reuse_hold = ?, phase = 'drained', phase_changed_at = ?
+      `UPDATE seat_pool_slots SET attempt_state = 'settled', attempt_outcome = ?, reuse_hold = ?, attempt_result = ?, phase = 'drained',
+         phase_changed_at = ?
         WHERE slot_id = ? AND attempt_id = ? AND attempt_kind = 'add' AND attempt_state = 'issued' AND phase = 'adding'`,
-    ).run(input.outcome, input.hold, input.at, slotId, attemptId).changes === 1;
+    ).run(input.outcome, input.hold, input.result ?? null, input.at, slotId, attemptId).changes === 1;
+  }
+
+  /** An issued add whose launch needs attention while its session may run (`attention_required`, `left_attached`, or a
+   *  failure with its session still running): settled, with its outcome, and the slot `live` and held. */
+  settleAddHeldLive(slotId: string, attemptId: string, input: { outcome: string; hold: string; result: string | null; at: string }): boolean {
+    return this.db.prepare(
+      `UPDATE seat_pool_slots SET attempt_state = 'settled', attempt_outcome = ?, reuse_hold = ?, attempt_result = ?, phase = 'live',
+         phase_changed_at = ?
+        WHERE slot_id = ? AND attempt_id = ? AND attempt_kind = 'add' AND attempt_state = 'issued' AND phase = 'adding'`,
+    ).run(input.outcome, input.hold, input.result, input.at, slotId, attemptId).changes === 1;
   }
 
   /** A reserved add that is not issued: its row goes, which frees its number. Only while it is still reserved. */
@@ -220,18 +238,81 @@ export class SeatPoolSlotsRepository {
   /** A `drained` slot no snapshot qualifies for, or whose newest usable snapshot recorded conflicting occupants: it
    *  stays `drained` with the pool's own reuse hold, and no attempt.
    *  False when the slot is no longer `drained` or already has a hold. */
-  holdComeback(slotId: string, hold: string): boolean {
-    return this.db.prepare("UPDATE seat_pool_slots SET reuse_hold = ? WHERE slot_id = ? AND phase = 'drained' AND reuse_hold IS NULL")
-      .run(hold, slotId).changes === 1;
+  holdComeback(slotId: string, hold: string, result?: string): boolean {
+    return this.db.prepare(
+      `UPDATE seat_pool_slots SET reuse_hold = ?, attempt_result = COALESCE(?, attempt_result)
+        WHERE slot_id = ? AND phase = 'drained' AND reuse_hold IS NULL`,
+    ).run(hold, result ?? null, slotId).changes === 1;
   }
 
   /** An issued comeback refused before any launch: settled with its outcome, and the slot `drained` again with the
    *  reuse hold, so the same snapshot is never sent again. */
-  settleComebackRefused(slotId: string, attemptId: string, input: { outcome: string; hold: string }): boolean {
+  settleComebackRefused(slotId: string, attemptId: string, input: { outcome: string; hold: string; result?: string | null }): boolean {
     return this.db.prepare(
-      `UPDATE seat_pool_slots SET attempt_state = 'settled', attempt_outcome = ?, reuse_hold = ?, phase = 'drained'
+      `UPDATE seat_pool_slots SET attempt_state = 'settled', attempt_outcome = ?, reuse_hold = ?, attempt_result = ?, phase = 'drained'
         WHERE slot_id = ? AND attempt_id = ? AND attempt_kind = 'comeback' AND attempt_state = 'issued'`,
-    ).run(input.outcome, input.hold, slotId, attemptId).changes === 1;
+    ).run(input.outcome, input.hold, input.result ?? null, slotId, attemptId).changes === 1;
+  }
+
+  /** An issued comeback that settled without proof that it runs: held, `drained` when nothing runs (a decision is
+   *  awaited, or it failed with no session running) or `live` when a session may run (it needs attention, is left
+   *  attached, or failed with its session still running). A `drained` one keeps the drain's time, as a refusal does. */
+  settleComebackHeld(slotId: string, attemptId: string, input: {
+    phase: "drained" | "live"; outcome: string; hold: string; result: string | null; at: string;
+  }): boolean {
+    return this.db.prepare(
+      `UPDATE seat_pool_slots SET attempt_state = 'settled', attempt_outcome = ?, reuse_hold = ?, attempt_result = ?, phase = ?,
+         phase_changed_at = CASE WHEN ? = 'drained' THEN phase_changed_at ELSE ? END
+        WHERE slot_id = ? AND attempt_id = ? AND attempt_kind = 'comeback' AND attempt_state = 'issued' AND phase = 'adding'`,
+    ).run(input.outcome, input.hold, input.result, input.phase, input.phase, input.at, slotId, attemptId).changes === 1;
+  }
+
+  /** What a held slot's hold is measured from, kept where the hold has none yet (a hold written before it was kept), only
+   *  while the row still has the result it was read with. */
+  recordHeldSession(slotId: string, attemptId: string | null, readResult: string | null, result: string): boolean {
+    return this.db.prepare(
+      "UPDATE seat_pool_slots SET attempt_result = ? WHERE slot_id = ? AND attempt_id IS ? AND reuse_hold IS NOT NULL AND attempt_result IS ?",
+    ).run(result, slotId, attemptId, readResult).changes === 1;
+  }
+
+  /** A held slot whose node got a later session that has not settled: back to `adding`, its settled attempt issued again
+   *  with the outcome given (an unknown result, read again every cycle), and the hold it had kept. */
+  reopenHeld(input: { slotId: string; attemptId: string; from: "drained" | "live"; outcome: string }): boolean {
+    return this.db.prepare(
+      `UPDATE seat_pool_slots SET phase = 'adding', attempt_state = 'issued', attempt_outcome = ?
+        WHERE slot_id = ? AND attempt_id = ? AND phase = ? AND reuse_hold IS NOT NULL AND attempt_state = 'settled'`,
+    ).run(input.outcome, input.slotId, input.attemptId, input.from).changes === 1;
+  }
+
+  /** An issued attempt, of either kind, settled by its node's latest session rather than by its call: the slot goes to
+   *  `phase` with the hold given (null: none), the outcome and what the hold is measured from (null: nothing). A slot that
+   *  goes to `drained` keeps its phase time. */
+  settleIssuedByLater(input: {
+    slotId: string; attemptId: string; phase: "drained" | "live"; hold: string | null; outcome: string; result: string | null; at: string;
+  }): boolean {
+    return this.db.prepare(
+      `UPDATE seat_pool_slots SET attempt_state = 'settled', phase = ?, reuse_hold = ?, attempt_outcome = ?, attempt_result = ?,
+         phase_changed_at = CASE WHEN ? = 'drained' THEN phase_changed_at ELSE ? END
+        WHERE slot_id = ? AND attempt_id = ? AND attempt_state = 'issued' AND phase = 'adding'`,
+    ).run(input.phase, input.hold, input.outcome, input.result, input.phase, input.at, input.slotId, input.attemptId).changes === 1;
+  }
+
+  /**
+   * A later change on a held slot's node, only while the slot is still held in `from` under the same attempt: the slot
+   * goes to `to` with the hold given (null clears it), the outcome given and the session it was read with. A slot that
+   * stays where it is keeps its phase time; one that moves takes the change's time (a `live` slot whose session ended is
+   * `drained` from then, which the cooldown counts as any drain step).
+   */
+  changeHeld(input: {
+    slotId: string; attemptId: string | null; from: "drained" | "live"; to: "drained" | "live"; hold: string | null;
+    outcome: string | null; result: string | null; at: string;
+  }): boolean {
+    return this.db.prepare(
+      `UPDATE seat_pool_slots SET phase = ?, reuse_hold = ?, attempt_outcome = ?, attempt_result = ?,
+         phase_changed_at = CASE WHEN phase = ? THEN phase_changed_at ELSE ? END
+        WHERE slot_id = ? AND attempt_id IS ? AND phase = ? AND reuse_hold IS NOT NULL AND (attempt_state IS NULL OR attempt_state = 'settled')`,
+    ).run(input.to, input.hold, input.outcome, input.result, input.to, input.at, input.slotId, input.attemptId, input.from)
+      .changes === 1;
   }
 
   /** A comeback that was never launched (not issued, or held after its issue): settled with its outcome, and the slot
