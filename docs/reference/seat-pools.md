@@ -221,6 +221,31 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
   it returns. So a job stopped during an evaluation records nothing; the executor's own check only stops the moves
   and adds left in that evaluation.
 
+### The dispatch guard
+
+A `dispatch_guard` in the pool block is a check the operator runs before each move: for example, to keep a row whose
+work another seat already took in another system from going to a free agent. It is opt-in: without it, nothing changes.
+`dispatch_tag` stays the coarse alternative.
+
+- **What runs.** The block's list, run as a command with its arguments, never through a shell, with
+  `--qitem <id> --from <session> --to <session>` added after them: the row, where it waits (as stored) and the agent it
+  would go to. It gets no stdin and the daemon's environment.
+- **When.** Once per planned move, under the model's custody lease, after the move's job and block checks (a block
+  changed since the plan is never guarded with its old command) and before the re-checks that come just before the
+  move. Those stay as they are, with the job and the block read again after the guard: while the guard runs, a row
+  claimed or rerouted, or an agent no longer free, is skipped, and a block changed or a job stopped ends the
+  evaluation's moves, as without a guard.
+- **Exit 0** lets the move go.
+- **Exit 75** (`EX_TEMPFAIL`) vetoes it: that move alone is skipped, named in the notes' `skipped` with the code
+  `guard_refused` and the first line of the guard's stdout as `message`, if any. The row stays pending where it was,
+  with its history and its waiting time unchanged: nothing is written to it. The next evaluation plans it again, with no
+  cooldown, requeue or priority change. The other moves of the evaluation go on.
+- **Anything else** is a guard error, and the move goes ahead: the command can't be started, it runs past its timeout
+  (2 seconds, after which it is killed with its process group), it is killed by a signal, or it exits with another code.
+  A broken guard never freezes a pool. The notes name each one in `guardErrors`, with the row, `from`, `to`, the code
+  `guard_error` and what happened (for example `exited 1: <the first line of its stderr>` or `timed out after 2000 ms`).
+  A dedicated veto code keeps an ordinary crash (exit 1, or a shell's `set -e`) from reading as a veto.
+
 ### When the model node is deleted
 
 Deleting a model node removes its slot rows but leaves its agent nodes and sessions as ordinary members of the rig,

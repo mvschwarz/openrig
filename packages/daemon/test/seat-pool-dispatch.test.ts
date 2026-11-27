@@ -26,6 +26,7 @@ import {
   type SeatPoolExecutorDeps,
 } from "../src/domain/seat-pool-executor.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
+import type { SeatPoolDispatchGuardInput, SeatPoolDispatchGuardVerdict } from "../src/domain/seat-pool-dispatch-guard.js";
 
 // #3395 (Piece 1): the seat-pool executor moves rows waiting for the model, or for a drained agent, to free pool agents.
 // The job is unarmed in the daemon, so each test composes the executor and an engine that has the seat-pool policy.
@@ -62,7 +63,8 @@ function fullDb(): Database.Database {
   return db;
 }
 
-function poolWorld(db: Database.Database = fullDb()) {
+/** `guardRunner: false` composes the executor without a dispatch guard runner. */
+function poolWorld(db: Database.Database = fullDb(), opts: { guardRunner?: boolean } = {}) {
   const bus = new EventBus(db);
   const rigRepo = new RigRepository(db);
   const podRepo = new PodRepository(db);
@@ -78,7 +80,13 @@ function poolWorld(db: Database.Database = fullDb()) {
   const clock = { now: new Date(Date.now() + 3_600_000) }; // past dispatch_after_s for rows created now
   /** beforeCustody runs when a cycle, its plan read, asks for the model's custody; afterMove after each real move,
    *  before the cycle sees its result. */
-  const hooks: { beforeCustody?: () => void; afterMove?: () => void } = {};
+  const hooks: {
+    beforeCustody?: () => void; afterMove?: () => void;
+    /** The dispatch guard's answer for one move; unset: allow. */
+    guard?: (input: SeatPoolDispatchGuardInput) => Promise<SeatPoolDispatchGuardVerdict>;
+  } = {};
+  /** Every call the executor made to the dispatch guard runner. */
+  const guardCalls: SeatPoolDispatchGuardInput[] = [];
   const effects = seatPoolQueueEffects(queue);
   const deps: SeatPoolExecutorDeps = {
     db, rigRepo, slots, jobsRepo,
@@ -88,6 +96,12 @@ function poolWorld(db: Database.Database = fullDb()) {
     seatState: (id) => activity.get(id) ?? null,
     custody: (ids, fn) => { hooks.beforeCustody?.(); return guard.custody(ids, fn); },
     now: () => clock.now,
+    ...(opts.guardRunner === false ? {} : {
+      dispatchGuard: async (input: SeatPoolDispatchGuardInput) => {
+        guardCalls.push(input);
+        return hooks.guard ? hooks.guard(input) : { verdict: "allow" as const };
+      },
+    }),
   };
   const executor = makeSeatPoolExecutor(deps);
   const engine = new WatchdogPolicyEngine({
@@ -151,7 +165,7 @@ function poolWorld(db: Database.Database = fullDb()) {
     observedAt: new Date(Date.now() + 1000).toISOString(),
   });
   return {
-    db, bus, rigRepo, slots, sessions, queue, outbox, jobsRepo, history, guard, activity, clock, hooks, deps, executor, engine,
+    db, bus, rigRepo, slots, sessions, queue, outbox, jobsRepo, history, guard, activity, clock, hooks, guardCalls, deps, executor, engine,
     model, agent, idle, working, row, jobFor, evaluate, lastNotes, read, destinationOf, rerouted, holdMessage, holdModel, paneExited,
   };
 }
@@ -549,6 +563,207 @@ describe("seat-pool dispatch: also tested, without a numbered control", () => {
       expect(notes).toMatchObject({ block: "stored", spec: tagged });
       expect(notes).not.toHaveProperty("moved");
       expect(w.queue.getById(q)).toMatchObject({ state: "pending", destinationSession: m.session });
+      expect(w.rerouted(q)).toEqual([]);
+    } finally {
+      w.db.close();
+    }
+  });
+});
+
+describe("seat-pool dispatch: the dispatch guard (#4061)", () => {
+  const GUARD = ["/usr/local/bin/pool-guard", "--strict"];
+  const GUARDED: SeatPoolSpec = { ...SPEC, dispatchGuard: GUARD };
+
+  it("With no `dispatch_guard` in the block, the guard runner is never called and the rows move as before.", async () => {
+    const w = poolWorld();
+    try {
+      const m = w.model();
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1);
+      const job = w.jobFor(m);
+      const q = await w.row(m.session);
+      w.hooks.guard = async () => ({ verdict: "veto" });
+
+      await w.evaluate(job.jobId);
+      expect(w.guardCalls).toEqual([]);
+      const notes = w.lastNotes(job.jobId)!;
+      expect(notes.moved).toEqual([{ qitemId: q, from: m.session, to: s1.session }]);
+      expect(notes).not.toHaveProperty("skipped");
+      expect(notes).not.toHaveProperty("guardErrors");
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("The guard is asked once per planned move, with the block's argv, the row, where it waits and the agent it would go to; a block that keeps the same guard is not read as changed between two moves.", async () => {
+    const w = poolWorld();
+    try {
+      const m = w.model(GUARDED);
+      const s1 = w.agent(m, 1, "live");
+      const s2 = w.agent(m, 2, "live");
+      w.idle(s1);
+      w.idle(s2);
+      const job = w.jobFor(m);
+      const q1 = await w.row(m.session);
+      const q2 = await w.row(m.session);
+
+      await w.evaluate(job.jobId);
+      const notes = w.lastNotes(job.jobId)!;
+      const moved = notes.moved as Array<{ qitemId: string; to: string }>;
+      expect(moved).toHaveLength(2);
+      expect(w.guardCalls).toEqual(moved.map((mv) => ({ argv: GUARD, qitemId: mv.qitemId, from: m.session, to: mv.to })));
+      expect(new Set(moved.map((mv) => mv.qitemId))).toEqual(new Set([q1, q2]));
+      expect(new Set(moved.map((mv) => mv.to))).toEqual(new Set([s1.session, s2.session]));
+      expect(notes).not.toHaveProperty("skipped");
+      expect(notes).not.toHaveProperty("guardErrors");
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A veto skips just that move with `guard_refused`: the row stays pending where it was, with no transition and the same waiting clock, the other rows still move, and the next cycle plans it again with no cooldown.", async () => {
+    const w = poolWorld();
+    try {
+      const m = w.model(GUARDED);
+      const s1 = w.agent(m, 1, "live");
+      const s2 = w.agent(m, 2, "live");
+      w.idle(s1);
+      w.idle(s2);
+      const job = w.jobFor(m);
+      const q1 = await w.row(m.session);
+      const q2 = await w.row(m.session);
+      const transitionsBefore = w.queue.transitionLog.listForQitem(q1);
+      const waitingBefore = w.read(m).pending.find((p) => p.qitemId === q1)!.waitingSince;
+      w.hooks.guard = async (input) => (input.qitemId === q1 ? { verdict: "veto", message: "leased by another seat" } : { verdict: "allow" });
+
+      await w.evaluate(job.jobId);
+      let notes = w.lastNotes(job.jobId)!;
+      const vetoed = notes.skipped as Array<{ qitemId: string; from: string; to: string; code: string; message?: string }>;
+      expect(vetoed).toHaveLength(1);
+      expect(vetoed[0]).toMatchObject({ qitemId: q1, from: m.session, code: "guard_refused", message: "leased by another seat" });
+      expect(notes.moved).toEqual([{ qitemId: q2, from: m.session, to: expect.any(String) }]);
+      expect(notes).not.toHaveProperty("failed");
+      expect(notes).not.toHaveProperty("guardErrors");
+      expect(w.queue.getById(q1)).toMatchObject({ state: "pending", destinationSession: m.session });
+      expect(w.queue.transitionLog.listForQitem(q1)).toEqual(transitionsBefore);
+      expect(w.rerouted(q1)).toEqual([]);
+      expect(w.read(m).pending.find((p) => p.qitemId === q1)!.waitingSince).toBe(waitingBefore);
+
+      // the next cycle, the guard letting it go: planned again and moved, with no cooldown in between
+      w.hooks.guard = async () => ({ verdict: "allow" });
+      const freeAgent = vetoed[0]!.to;
+      await w.evaluate(job.jobId);
+      notes = w.lastNotes(job.jobId)!;
+      expect(notes.moved).toEqual([{ qitemId: q1, from: m.session, to: freeAgent }]);
+      expect(w.destinationOf(q1)).toBe(freeAgent);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it.each([
+    ["returns an error", "error"],
+    ["throws", "throws"],
+    ["is not composed", "missing"],
+  ] as const)("When the guard runner %s, the move goes ahead and the notes name the guard error.", async (_title, mode) => {
+    const w = poolWorld(undefined, { guardRunner: mode !== "missing" });
+    try {
+      const m = w.model(GUARDED);
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1);
+      const job = w.jobFor(m);
+      const q = await w.row(m.session);
+      if (mode === "error") w.hooks.guard = async () => ({ verdict: "error", message: "timed out after 2000 ms" });
+      if (mode === "throws") w.hooks.guard = async () => { throw new Error("runner broke"); };
+
+      await w.evaluate(job.jobId);
+      const notes = w.lastNotes(job.jobId)!;
+      expect(notes.moved).toEqual([{ qitemId: q, from: m.session, to: s1.session }]);
+      const message = { error: "timed out after 2000 ms", throws: "runner broke", missing: "no guard runner composed" }[mode];
+      expect(notes.guardErrors).toEqual([{ qitemId: q, from: m.session, to: s1.session, code: "guard_error", message }]);
+      expect(notes).not.toHaveProperty("skipped");
+      expect(notes).not.toHaveProperty("failed");
+      expect(w.destinationOf(q)).toBe(s1.session);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A block changed while the cycle waits for the model's custody is read before the guard: the guard planned under the old block is never run, and the moves are skipped with `pool_block_changed`.", async () => {
+    const w = poolWorld();
+    try {
+      const m = w.model(GUARDED);
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1);
+      const job = w.jobFor(m);
+      const q = await w.row(m.session);
+
+      const held = w.holdModel(m);
+      const cycle = w.engine.evaluate(w.jobsRepo.getByIdOrThrow(job.jobId));
+      await Promise.race([held.planned, cycle]);
+      w.rigRepo.setNodePool(m.nodeId, { spec: SPEC });
+      await held.release();
+      await cycle;
+
+      expect(w.guardCalls).toEqual([]);
+      const notes = w.lastNotes(job.jobId)!;
+      expect(notes.skipped).toEqual([{ qitemId: q, from: m.session, to: s1.session, code: "pool_block_changed" }]);
+      expect(notes).not.toHaveProperty("moved");
+      expect(w.queue.getById(q)).toMatchObject({ state: "pending", destinationSession: m.session });
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A block changed while the guard runs ends the moves with `pool_block_changed`, even when that guard vetoed: the old guard's answer is not recorded.", async () => {
+    const w = poolWorld();
+    try {
+      const m = w.model(GUARDED);
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1);
+      const job = w.jobFor(m);
+      const q = await w.row(m.session);
+      w.hooks.guard = async () => {
+        w.rigRepo.setNodePool(m.nodeId, { spec: SPEC });
+        return { verdict: "veto", message: "old guard" };
+      };
+
+      await w.evaluate(job.jobId);
+      const notes = w.lastNotes(job.jobId)!;
+      expect(notes.skipped).toEqual([{ qitemId: q, from: m.session, to: s1.session, code: "pool_block_changed" }]);
+      expect(notes).toMatchObject({ block: "stored", spec: SPEC });
+      expect(w.queue.getById(q)).toMatchObject({ state: "pending", destinationSession: m.session });
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it.each([
+    ["the agent starts working", "agent_not_free"],
+    ["the row is claimed", "fallback_state_mismatch"],
+    ["a re-apply changes the block", "pool_block_changed"],
+  ] as const)("The guard runs before the final re-check, which stays as it is: when %s while the guard runs, the move is skipped with `%s`.", async (_title, code) => {
+    const w = poolWorld();
+    try {
+      const m = w.model(GUARDED);
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1);
+      const job = w.jobFor(m);
+      const q = await w.row(m.session);
+      w.hooks.guard = async () => {
+        if (code === "agent_not_free") w.working(s1);
+        else if (code === "fallback_state_mismatch") w.queue.claim({ qitemId: q, destinationSession: m.session });
+        else w.rigRepo.setNodePool(m.nodeId, { spec: { ...GUARDED, dispatchTag: "pool" } });
+        return { verdict: "allow" };
+      };
+
+      await w.evaluate(job.jobId);
+      expect(w.guardCalls).toHaveLength(1);
+      const notes = w.lastNotes(job.jobId)!;
+      expect(notes.skipped).toEqual([{ qitemId: q, from: m.session, to: s1.session, code }]);
+      expect(notes).not.toHaveProperty("moved");
+      expect(notes).not.toHaveProperty("failed");
+      expect(w.queue.getById(q)!.destinationSession).toBe(m.session);
       expect(w.rerouted(q)).toEqual([]);
     } finally {
       w.db.close();
