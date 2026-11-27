@@ -69,6 +69,7 @@ interface QueueOwnerRow {
 }
 
 export interface WorkflowKeepaliveDeps {
+  isFenced?: (qitemId: string) => boolean;
   db: Database.Database;
   /** OPR.0.4.6.WF5 FR-2 class (b): when supplied, a non-healthy deadline
    *  verdict ENSURES the durable exception item at detection time as a
@@ -135,7 +136,10 @@ export function makeWorkflowKeepalivePolicy(deps: WorkflowKeepaliveDeps): Policy
       if (packetId && !wholeFrontier.includes(packetId)) {
         return { action: "terminal", reason: "workflow_packet_not_live", notes: { instanceId, packetId } };
       }
-      const frontier = packetId ? [packetId] : wholeFrontier;
+      const frontier = (packetId ? [packetId] : wholeFrontier).filter(id => !deps.isFenced?.(id));
+      if (frontier.length === 0 && wholeFrontier.length > 0) {
+        return { action: "skip", reason: "empty_frontier" };
+      }
       let currentStepId = instance.current_step_id;
       if (packetId) {
         try {

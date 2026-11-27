@@ -38,3 +38,9 @@ it("daemon start --port with a bindable port still reaches startup on that port"
   expect(startDaemon).toHaveBeenCalledTimes(1);
   expect(vi.mocked(startDaemon).mock.calls[0]![0]).toMatchObject({ port: 7434 });
 });
+
+it("daemon start --port 0 reaches startup asking for any free port", async () => {
+  await daemonCommand({} as never).parseAsync(["start", "--port", "0"], { from: "user" });
+  expect(startDaemon).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(startDaemon).mock.calls[0]![0]).toMatchObject({ port: 0 });
+});
