@@ -41,6 +41,15 @@ export class QueueTransferStaging {
     return this.db.prepare<[], StoredManifest>(`SELECT ${columns} FROM queue_transfer_staging ORDER BY staged_at, import_id`).all().map(manifest);
   }
 
+  manifest(importId: string) {
+    const row = this.db.prepare<[string], StoredManifest>(`SELECT ${columns} FROM queue_transfer_staging WHERE import_id = ?`).get(importId);
+    return row ? manifest(row) : null;
+  }
+
+  markActivated(importId: string, now: string): void {
+    this.db.prepare("UPDATE queue_transfer_staging SET status = 'activated', updated_at = ? WHERE import_id = ?").run(now, importId);
+  }
+
   discard(importId: string) {
     const record = this.db.prepare<[string, string], StoredManifest>(`UPDATE queue_transfer_staging
       SET envelope = NULL, status = 'discarded', updated_at = ? WHERE import_id = ? AND status = 'staged'
@@ -58,7 +67,8 @@ export class QueueTransferStaging {
       return { status: "rejected", dryRun, replayed: false, stage: null, archive: null, counts: null,
         wouldBecomeRunnable: [], warnings: [], refusals: [{ code, message: error.message }] };
     }
-    const { rows, erasedIds: _erasedIds, ...archive } = parsed;
+    const { transferId, origin, selection, digest, rows } = parsed;
+    const archive = { transferId, origin, selection, digest };
     const evidence = new Map(rows.flatMap(row => row.evidenceRef ? [[row.qitemId, this.evidenceExists(row.evidenceRef)] as const] : []));
     const envelope = dryRun ? null : Buffer.from(text);
     const operation = this.db.transaction((): Report => {

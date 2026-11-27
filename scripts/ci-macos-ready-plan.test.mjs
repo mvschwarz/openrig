@@ -305,6 +305,27 @@ test("a fork's approval runs both suites; its peer runs also carry a PR-number t
   assert.deepEqual(checks(await repeat.plan(forkApproval(), 201)), [PLACEHOLDER_CHECK]);
 });
 
+test("a fork approval can report the base repository while its PR title still binds peer runs", async () => {
+  // #3917's new merge head: GitHub reports the workflow's base repository, no PR links, and the fork branch.
+  const forkRun = (id, head = HEAD, extra = {}) => run(id, head, { pull_requests: [],
+    head_repository: { full_name: "mvschwarz/openrig" }, head_branch: "feature",
+    display_title: "macOS package tests PR #7", ...extra });
+  const e = approval(); const event = { ...e, repository: { full_name: "mvschwarz/openrig" },
+    pull_request: { ...e.pull_request, head: { ...e.pull_request.head, ref: "feature", repo: { full_name: "contrib/openrig" } } } };
+  const f = fixture({ current: forkRun(200), runs: [forkRun(10, OLDER),
+    forkRun(11, OLDER, { display_title: "legacy human title" }),
+    forkRun(12, OLDER, { display_title: "macOS package tests PR #8" }),
+    forkRun(13, OLDER, { head_repository: { full_name: "other/openrig" } })] });
+  assert.deepEqual(checks(await f.plan(event)), REQUIRED_MACOS);
+  assert.deepEqual(f.posts().map(c => c.path), ["/actions/runs/10/cancel"]);
+  const repeat = fixture({ current: forkRun(201), runs: [forkRun(20, HEAD,
+    { status: "completed", conclusion: "success" })], jobs: { 20: passedJobs() } });
+  assert.deepEqual(checks(await repeat.plan(event)), [PLACEHOLDER_CHECK]);
+  const otherPR = fixture({ current: forkRun(202), runs: [forkRun(21, HEAD,
+    { display_title: "macOS package tests PR #8", status: "completed", conclusion: "success" })], jobs: { 21: passedJobs() } });
+  assert.deepEqual(checks(await otherPR.plan(event)), REQUIRED_MACOS);
+});
+
 test("the GitHub adapter uses the scoped token and preserves a native refusal", async () => {
   assert.throws(() => githubApi("owner/repo", ""), /GITHUB_TOKEN/);
   let captured;

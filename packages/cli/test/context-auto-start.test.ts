@@ -171,7 +171,8 @@ describe("context add local auto-start", () => {
 
   it("keeps preflight failures visible and does not spawn", async () => {
     const f = fixture();
-    f.preflightExec.mockRejectedValue(new Error("tmux missing"));
+    // A shell's own not-found, the evidence the tmux probe reads as not installed (#4028 X-F1).
+    f.preflightExec.mockRejectedValue(Object.assign(new Error("Command failed: tmux -V\n/bin/sh: 1: tmux: not found"), { status: 127 }));
     await f.add();
     expect(process.exitCode).toBe(1);
     expect(vi.mocked(console.error).mock.calls.flat().join("\n")).toContain("tmux was not found");

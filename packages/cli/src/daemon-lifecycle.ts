@@ -1,5 +1,6 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { createServer } from "node:net";
 import type { ChildProcess } from "node:child_process";
 import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
 import { daemonFetch, SandboxProxyError } from "./daemon-transport.js";
@@ -279,6 +280,8 @@ export interface LifecycleDeps {
   /** Exclusive bind check of the launch address: after a no-state health probe times out, and before spawning
    *  over a daemon.json whose PID is dead or not an OpenRig daemon. */
   isPortOccupied?: (host: string, port: number) => Promise<boolean>;
+  /** A port that is free on this host now, for a start asked for port 0. Absent = listen on port 0 and read the port. */
+  pickFreePort?: (host: string) => Promise<number>;
   kill: (pid: number, signal: string) => boolean;
   readFile: (path: string) => string | null;
   fileSize?: (path: string) => number;
@@ -731,6 +734,19 @@ export async function verifyRequiredListeners(input: {
 class StartupIdentityError extends Error {}
 class StartupChildPendingError extends Error {}
 
+/** A port the OS reports free on `host` now: listen on port 0, read the port it gave, close. */
+function pickFreePort(host: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen({ host, port: 0, exclusive: true }, () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close(() => port > 0 ? resolve(port) : reject(new Error(`Could not find a free port on ${host}`)));
+    });
+  });
+}
+
 export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Promise<DaemonState> {
   if (!deps.acquireStartLock) throw new Error("Daemon startup requires a local launch reservation");
   const lock = deps.acquireStartLock();
@@ -746,7 +762,6 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
 }
 
 async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: DaemonStartLock): Promise<DaemonState> {
-  const port = opts.port ?? DEFAULT_PORT;
   const db = opts.db ?? DEFAULT_DB;
   // bug-fix slice auth-bearer-tailscale-trust: preserve the
   // user-explicit-vs-default distinction. `opts.host` is undefined when
@@ -756,6 +771,9 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
   // (loopback + tailscale auto-detect).
   const explicitHost = opts.host;
   const probeHost = explicitHost ?? DEFAULT_HOST;
+  // Port 0 (--port 0 or daemon.port 0) means any free port. Choose it here, so the child, the readiness probes and
+  // daemon.json all name the port the daemon listens on; a child given 0 would pick one this launcher can't see.
+  const port = opts.port === 0 ? await (deps.pickFreePort ?? pickFreePort)(probeHost) : opts.port ?? DEFAULT_PORT;
   const readinessWaitMs = opts.readinessWaitSeconds !== undefined ? opts.readinessWaitSeconds * 1000 : STARTUP_READINESS_DEADLINE_MS;
 
   // Check if already running

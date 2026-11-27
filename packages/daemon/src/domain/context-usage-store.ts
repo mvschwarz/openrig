@@ -42,6 +42,7 @@ interface SidecarRaw {
     total_output_tokens?: number;
     current_usage?: unknown;
   };
+  configured_budget_tokens?: number | null;
   session_id?: string;
   session_name?: string;
   /** Managed seat generation inherited by the status-line collector. Lets consumers distinguish
@@ -68,6 +69,7 @@ interface ContextUsageRow {
   total_input_tokens: number | null;
   total_output_tokens: number | null;
   current_usage: string | null;
+  configured_budget_tokens: number | null;
   transcript_path: string | null;
   sampled_at: string | null;
   occupant_generation?: string | null;
@@ -302,6 +304,7 @@ export class ContextUsageStore {
       totalInputTokens: cw.total_input_tokens ?? null,
       totalOutputTokens: cw.total_output_tokens ?? null,
       currentUsage: this.normalizeCurrentUsage(cw.current_usage),
+      configuredBudget: configuredBudget(raw.configured_budget_tokens, cw.context_window_size, cw.current_usage),
       transcriptPath: raw.transcript_path ?? null,
       sessionId: raw.session_id ?? null,
       sessionName: raw.session_name ?? null,
@@ -364,8 +367,8 @@ export class ContextUsageStore {
         node_id, session_id, session_name, availability, reason, source,
         used_percentage, remaining_percentage, context_window_size,
         total_input_tokens, total_output_tokens, current_usage,
-        transcript_path, sampled_at, occupant_generation, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        transcript_path, sampled_at, occupant_generation, configured_budget_tokens, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(node_id) DO UPDATE SET
         session_id = excluded.session_id,
         session_name = excluded.session_name,
@@ -381,6 +384,7 @@ export class ContextUsageStore {
         transcript_path = excluded.transcript_path,
         sampled_at = excluded.sampled_at,
         occupant_generation = excluded.occupant_generation,
+        configured_budget_tokens = excluded.configured_budget_tokens,
         updated_at = datetime('now')
     `).run(
       nodeId,
@@ -398,6 +402,7 @@ export class ContextUsageStore {
       usage.transcriptPath,
       usage.sampledAt,
       usage.occupantGeneration ?? null,
+      usage.configuredBudget?.tokens ?? null,
     );
   }
 
@@ -542,6 +547,8 @@ export class ContextUsageStore {
       totalInputTokens: row.total_input_tokens,
       totalOutputTokens: row.total_output_tokens,
       currentUsage: row.current_usage,
+      configuredBudget: row.source === "claude_statusline_json"
+        ? configuredBudget(row.configured_budget_tokens, row.context_window_size, row.current_usage) : null,
       transcriptPath: row.transcript_path,
       sessionId: row.session_id,
       sessionName: row.session_name,
@@ -643,4 +650,25 @@ function safeHomeDir(): string | null {
   } catch {
     return null;
   }
+}
+
+/** Derive a display-only ratio from the same sample as the raw percentage. */
+function configuredBudget(tokens: number | null | undefined, window: number | null | undefined, current: unknown): ContextUsage["configuredBudget"] {
+  if (typeof tokens !== "number" || !Number.isSafeInteger(tokens) || tokens <= 0 || tokens > 1000000
+    || typeof window !== "number" || !Number.isSafeInteger(window) || window <= 0 || tokens > window) return null;
+  let usage = current;
+  if (typeof usage === "string") {
+    try { usage = JSON.parse(usage); } catch { usage = null; }
+  }
+  let usedPercentage: number | null = null;
+  if (usage && typeof usage === "object" && !Array.isArray(usage)) {
+    const counts = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
+      .map(key => (usage as Record<string, unknown>)[key]);
+    if (counts.every((count): count is number => typeof count === "number" && Number.isSafeInteger(count) && count >= 0)) {
+      const used = counts.reduce((sum, count) => sum + count, 0);
+      // Null/all-zero samples occur after compaction before the next response.
+      if (Number.isSafeInteger(used) && used > 0) usedPercentage = Math.round(used / tokens * 100);
+    }
+  }
+  return { tokens, usedPercentage, source: "CLAUDE_CODE_AUTO_COMPACT_WINDOW" };
 }

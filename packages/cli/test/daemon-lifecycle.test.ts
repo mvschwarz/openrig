@@ -454,6 +454,33 @@ describe("Daemon Lifecycle", () => {
     expect(state.startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
+  // `rig daemon start --port 0` gave the child port 0 and probed :0, so it never saw its own child ready and kept the
+  // start reservation, while the child listened on a port nothing recorded.
+  it("start: port 0 uses one free port for the child, the readiness probe and daemon.json", async () => {
+    const pickFreePort = vi.fn(async () => 41234);
+    const deps = startableDeps({ pickFreePort });
+    const result = await startDaemon({ port: 0, db: "test.sqlite" }, deps);
+
+    expect(pickFreePort).toHaveBeenCalledWith("127.0.0.1");
+    const [, , opts] = (deps.spawn as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(opts.env.OPENRIG_PORT).toBe("41234");
+    expect(deps.fetch).toHaveBeenCalledWith("http://127.0.0.1:41234/healthz");
+    expect((deps.fetch as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[0])).not.toContainEqual(expect.stringContaining(":0/"));
+    expect(result.port).toBe(41234);
+    expect(writtenState(deps).port).toBe(41234);
+  });
+
+  it("start: port 0 without an injected picker gets a free port from the OS", async () => {
+    const deps = startableDeps();
+    const result = await startDaemon({ port: 0, db: "test.sqlite" }, deps);
+
+    expect(result.port).toBeGreaterThan(0);
+    const [, , opts] = (deps.spawn as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(opts.env.OPENRIG_PORT).toBe(String(result.port));
+    expect(deps.fetch).toHaveBeenCalledWith(`http://127.0.0.1:${result.port}/healthz`);
+    expect(writtenState(deps).port).toBe(result.port);
+  });
+
   // Test 4: start already running -> error
   it("start: already running -> throws error", async () => {
     const deps = mockDeps({

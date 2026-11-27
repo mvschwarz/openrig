@@ -279,6 +279,69 @@ function queueFixture() {
   return {db,guard,transport,outbox,bus,repo,writes,tmux,rigRepo,sessionRegistry};
 }
 
+function fenceQueueWake(db: Database.Database, id: string): void {
+  db.exec(`INSERT INTO queue_transfer_ledger (record_id, side, kind, transfer_id, archive_digest, origin_host_id,
+    origin_minted_at, destination_host_id, authorization_digest, mapping_digest, actor, recorded_at)
+    VALUES ('rel', 'origin', 'relinquished', 'transfer', 'digest', 'origin', 'minted', 'target', 'auth', 'map', 'operator', '1')`);
+  db.prepare(`INSERT INTO queue_transfer_relinquished (qitem_id, record_id, archive_digest, destination_host_id, source_state)
+    VALUES (?, 'rel', 'digest', 'target', 'pending')`).run(id);
+}
+
+describe("queue transfer fencing during a seat lease wait", () => {
+  it("does not paste a legacy nudge fenced after entering transport", async () => {
+    const f = queueFixture();
+    try {
+      const row = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "work", nudge: false });
+      const pasted = vi.spyOn(f.tmux, "sendText").mockResolvedValue({ ok: true });
+      const release = signal();
+      const entered = signal();
+      const lease = f.guard.operation("worker@test", async () => { entered.release(); await release.ready; });
+      await entered.ready;
+      const delivery = f.repo.maybeNudge(row.qitemId, "worker@test", true);
+      try { fenceQueueWake(f.db, row.qitemId); } finally { release.release(); await Promise.all([lease, delivery]); }
+      expect(pasted).not.toHaveBeenCalled();
+    } finally { f.db.close(); }
+  });
+  it.each([
+    { held: false, groupSize: 1, fencedIndex: 0 },
+    { held: true, groupSize: 1, fencedIndex: 0 },
+    { held: false, groupSize: 2, fencedIndex: 1 },
+    { held: true, groupSize: 2, fencedIndex: 1 },
+    { held: false, groupSize: 2, fencedIndex: 0 },
+  ])("excludes a fenced member (held=$held, group=$groupSize, index=$fencedIndex)", async ({ held, groupSize, fencedIndex }) => {
+    const f = queueFixture();
+    const ids = await Promise.all(Array.from({ length: groupSize }, async () => {
+      const row = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "work", nudge: false });
+      f.repo.stageWakeIntent(row.qitemId, "sender@test", "worker@test", null, true);
+      f.db.prepare("UPDATE outbox_entries SET tags = ? WHERE audit_pointer = ?").run(JSON.stringify(["queue:return:common"]), row.qitemId);
+      return row.qitemId;
+    }));
+    if (held) await f.guard.set("a", true, "person", "pause");
+    const release = signal();
+    const entered = signal();
+    const lease = f.guard.operation("worker@test", async () => { entered.release(); await release.ready; },
+      async () => { entered.release(); await release.ready; });
+    await entered.ready;
+    const pasted = vi.spyOn(f.tmux, "sendText").mockResolvedValue({ ok: true });
+    const delivery = f.repo.deliverWakeForSuccessor(ids[0]!, "worker@test", true, "sender@test");
+    try {
+      expect(ids.map(id => f.outbox.getById(`wake-intent-${id}`)?.deliveryState)).toEqual(ids.map(() => "sending"));
+      fenceQueueWake(f.db, ids[fencedIndex]!);
+      release.release();
+      await delivery;
+      const live = ids.filter((_, i) => i !== fencedIndex);
+      expect(pasted.mock.calls.map(([, text]) => text)).toEqual(held ? [] : live.map(id => expect.stringContaining(id)));
+      for (const [, text] of pasted.mock.calls) expect(text).not.toContain(ids[fencedIndex]);
+      expect(f.outbox.heldForNode("a").items.map(item => item.auditPointer)).toEqual(held ? live : []);
+      expect(f.outbox.getById(`wake-intent-${ids[fencedIndex]}`)?.deliveryState).toBe("pending");
+    } finally {
+      release.release();
+      await Promise.allSettled([lease, delivery]);
+      f.db.close();
+    }
+  });
+});
+
 describe("real queue transaction and retained delivery",()=>{
   async function createWithFullHeldQuota() {
     const f=queueFixture();
