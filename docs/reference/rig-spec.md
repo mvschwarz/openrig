@@ -1844,8 +1844,9 @@ named, for the next route. A notice already with an agent that becomes unable th
 same row with its history, to the next capable recipient: a pending notice with a wake, a claimed one
 without. Unknown or unread capacity is not inability. When no capable recipient resolves, the notice
 stays with the first agent the route reached and says plainly that no capable recipient was
-established. The notices an unable agent holds are re-checked on each of its polls, also when nobody
-can receive its own notice, so a capable recipient chosen later takes them at the next poll; once
+established. The notices an unable agent holds are re-checked on each of its polls, with or without
+a fresh usage sample and also when nobody can receive its own notice, so a capable recipient chosen
+later takes them at the next poll; once
 the agent can act again, the ones it kept stop saying that no capable recipient was established.
 Otherwise existing notices keep their destination when the topology changes.
 

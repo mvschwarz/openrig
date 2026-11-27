@@ -269,3 +269,17 @@ it("rig compact --state shows the seat's own preparation notice while its run st
   f.e.cancelPreparation(input.sessionName);
   expect(await stateOf()).not.toHaveProperty("preparationNotice");
 });
+
+it("an unsampled poll re-checks the held notices too, with the same dedupe, and only for a Claude seat", async () => {
+  const recheck = vi.fn();
+  const f = fixture({ onHeldNoticesRecheck: recheck });
+  const unsampled = { sessionName: input.sessionName, runtime: "claude-code", cwd: null, lastUsedPercentage: null };
+  await f.e.drainPendingPreparedCompact(unsampled); expect(recheck).toHaveBeenCalledTimes(1); // the first poll since this daemon started
+  await f.e.drainPendingPreparedCompact(unsampled); expect(recheck).toHaveBeenCalledTimes(1); // able to act: nothing to re-check
+  await end(f); await end(f); await end(f); await f.e.maybeAutoCompact(input); // the third ended attempt counts: unable
+  const calls = recheck.mock.calls.length;
+  await f.e.drainPendingPreparedCompact(unsampled); await f.e.drainPendingPreparedCompact(unsampled);
+  expect(recheck).toHaveBeenCalledTimes(calls + 2);
+  await f.e.drainPendingPreparedCompact({ ...unsampled, runtime: "codex" });
+  expect(recheck).toHaveBeenCalledTimes(calls + 2);
+});

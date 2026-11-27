@@ -923,7 +923,8 @@ export class ClaudeCompactionEnforcer {
     this.reconcilePreparations();
     this.checkRestoreUptake(input.sessionName);
     const gated = await this.endedAttemptGate(input);
-    // Every poll of a Claude seat, the gate's too: a seat at its context wall may wait at the gate on every poll.
+    // Every sampled poll of a Claude seat, the gate's too: a seat at its context wall may wait at the gate on every poll.
+    // An unsampled poll re-checks in drainPendingPreparedCompact.
     if (input.runtime === "claude-code" && input.usedPercentage != null) await this.recheckHeldNotices(input.sessionName);
     if (gated) return gated;
     return this.withDeliveryGuard(input, () => this.maybeAutoCompactUnchecked(input));
@@ -1104,8 +1105,13 @@ export class ClaudeCompactionEnforcer {
     this.recoverSeat(input);
     this.reconcilePreparations();
     this.checkRestoreUptake(input.sessionName);
-    // #3389: this runs every poll for a seat with no fresh sample, the one that owes a late report's sequence.
-    if (input.runtime === "claude-code") this.reseedIfOwed(input.sessionName);
+    if (input.runtime === "claude-code") {
+      // #3389: this runs every poll for a seat with no fresh sample, the one that owes a late report's sequence.
+      this.reseedIfOwed(input.sessionName);
+      // The held-notice re-check of a sampled poll, on the retained record: a seat at its context wall may take no turn,
+      // so its sample goes stale while it still can't act.
+      await this.recheckHeldNotices(input.sessionName);
+    }
     const attempt = this.pendingPreCompactPrep.get(input.sessionName);
     if (input.runtime !== "claude-code" || attempt?.mode !== "automatic" || attempt.status !== "waiting"
       || attempt.delivery === "pending") return { triggered: false, reason: "no_pending_stage" };
@@ -2454,7 +2460,8 @@ export class ClaudeCompactionEnforcer {
 
   /** D3 follow-through: the compaction notices a seat holds are re-checked on its first poll after a daemon start, on every
    *  poll while OpenRig records that it can't act (so a capable recipient chosen since then takes them), and once when it
-   *  can act again (so the ones it kept stop saying nobody capable holds them). It rides the seat's existing poll. */
+   *  can act again (so the ones it kept stop saying nobody capable holds them). It rides the seat's existing poll, with a
+   *  fresh usage sample (`maybeAutoCompact`) or without one (`drainPendingPreparedCompact`). */
   private async recheckHeldNotices(session: string): Promise<void> {
     if (!this.onHeldNoticesRecheck) return;
     const unable = this.recoveryInability(session) !== null;
