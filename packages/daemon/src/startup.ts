@@ -2679,9 +2679,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       historyLog: watchdogHistoryLogInstance,
       eventBus,
       deliver: makeWatchdogDeliver({
-        wakeStandby: (destination, owed) => seatColdStarter.wakeStandby(destination, owed),
         sessionTransport,
         outbox: outboxHandlerInstance,
+        wakeStandby: (destination, owed) => seatColdStarter.wakeStandby(destination, owed),
         readUsageLimitState,
         isTerminalSeat: (sessionName) => isBoundTerminalSeat(db, sessionName),
         hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
