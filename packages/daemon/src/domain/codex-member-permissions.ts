@@ -163,10 +163,15 @@ function isGitMetadataPath(path: string): boolean {
 }
 
 /** The envelope a running Codex was launched with, read back from its `permissions=` override: the authored envelope plus
- *  only the git-dir write rules withSeatGitDirs adds (a path the git-dir resolver gives now, `gitDirs`, or git metadata by
- *  its path, so a failed resolver doesn't change the relaunch), so an in-place restart emits the override exactly as it
- *  runs. Undefined when the override can't be read or the authored choice has changed since, a removed write grant
- *  included, so the restart's drift check still reports a real change. */
+ *  only extra write rules that are git dirs, so an in-place restart emits the override exactly as it runs. An extra rule
+ *  counts as a git dir when the git-dir resolver gives its path now (`gitDirs`) or when its path looks like git metadata
+ *  (ends in `.git`, or sits inside a `.git` folder). Undefined when the override can't be read or the authored choice has
+ *  changed since, so the restart emits the saved envelope fresh and its drift check reports the change.
+ *  Two accepted limits: a removed authored write rule whose own path looks like git metadata is still carried, until
+ *  the next ordinary launch; and a generated git dir with a nonstandard path (a separate git dir not named `.git`, outside
+ *  the repository) is carried only while the resolver still gives it, so if discovery fails or changes, the drift check
+ *  refuses that restart until an ordinary launch. Standard layouts, worktree and submodule git dirs under `.git`
+ *  included, keep the running policy. */
 export function runningSeatPermissions(authored: CodexFilesystemPermissions, permissionsConfig: string,
   gitDirs: readonly string[] = []): CodexFilesystemPermissions | undefined {
   let ran: unknown;

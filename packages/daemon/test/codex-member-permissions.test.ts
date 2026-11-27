@@ -648,6 +648,12 @@ describe("runningSeatPermissions: the envelope a running Codex was launched with
     expect(config(carried!)).toBe(config(withGit));
   });
 
+  // Accepted limit 1: a removed authored write rule whose own path looks like git metadata is still carried.
+  it("still carries a removed authored write rule whose path looks like git metadata (an accepted limit)", () => {
+    const launched = envelope({ ":workspace_roots": "write", ":minimal": "read", "/other/repo.git": "write" });
+    expect(runningSeatPermissions(authored, config(launched), [])).toEqual(launched);
+  });
+
   it("carries git-dir write rules by the resolver's current answer or by their git-metadata path, so a failed resolver keeps them", () => {
     const linked = envelope({ ":workspace_roots": "write", ":minimal": "read", "/repo/.git/worktrees/side": "write", "/repo/.git": "write" });
     expect(runningSeatPermissions(authored, config(linked), [])).toEqual(linked);

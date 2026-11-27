@@ -944,10 +944,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /** The seat's codex_permissions as its launch emits them: a filesystem envelope that lets the seat write its working
    *  folder also names its git dirs as writable (withSeatGitDirs), from the resolver plain launches use. On an in-place
-   *  restart a running Codex keeps the override it runs with when that is the saved envelope plus only git-dir write
-   *  rules (runningSeatPermissions), as a plain launch's add-dirs carry over, so a resolver that now fails or differs
-   *  doesn't change the relaunch. Any other difference, a removed write grant included, is emitted fresh from the saved
-   *  envelope, and the restart's drift check reports it. */
+   *  restart a running Codex keeps the override it runs with when that is the saved envelope plus only git-dir write rules
+   *  (runningSeatPermissions, which names two accepted limits), as a plain launch's add-dirs carry over. Any other
+   *  difference is emitted fresh from the saved envelope, and the restart's drift check reports it. Every launch and
+   *  in-place restart of such a seat runs git discovery, under the resolver's existing 5 s git timeout. */
   private async seatPermissions(binding: NodeBinding, running?: RunningCodexLaunch): Promise<CodexMemberPermissions | undefined> {
     const authored = binding.codexPermissions;
     if (!authored || !("filesystem" in authored)) return authored;
