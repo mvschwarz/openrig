@@ -370,7 +370,10 @@ its result says it goes once the input is clear.
   that can't be saved goes as it would without it.
 - A marked message whose own paste is then refused (control characters, a long Codex
   paste, the viewport) is no longer owed: it stays held and readable, its result says to
-  send it again changed, and later messages stop waiting behind it.
+  send it again changed, and later messages stop waiting behind it: the same pass goes
+  on to them.
+- A marked message being tried again when the daemon stopped reads uncertain after the
+  restart: it isn't typed again, and later messages don't wait behind it.
 - A message held for an earlier occupant of the seat stays held and listed. Later
   messages for the current occupant still go.
 - Marked messages aren't coalesced by the one-per-sender rule above. Instead, one

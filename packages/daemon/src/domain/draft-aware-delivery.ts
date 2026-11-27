@@ -220,6 +220,11 @@ export class DraftAwareDelivery {
   /** Preserve uncertainty in old history without scheduling a replay. */
   recover(): void {
     this.db.prepare("UPDATE outbox_entries SET delivery_state='indeterminate' WHERE guard_delivery IS NOT NULL AND delivery_state='sending'").run();
+    // A draft-held message claimed with no receipt yet, such as one the hook bridge handed back for typing
+    // (HookBridge.releaseForTyping) before the typed send wrote its own: whether it was typed is unknown, and it would
+    // otherwise hold its sender's later messages behind it for good.
+    this.db.prepare(`UPDATE outbox_entries SET delivery_state='indeterminate' WHERE guard_delivery IS NULL AND delivery_state='sending'
+      AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)`).run(DRAFT_HELD_ELIGIBLE_TAG);
   }
 
   async stop(): Promise<void> { await Promise.allSettled([...this.sends]); }

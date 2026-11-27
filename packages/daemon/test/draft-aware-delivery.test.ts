@@ -11,6 +11,7 @@ import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { COALESCED_INTO, DRAFT_HELD_BEHIND_EARLIER, DRAFT_HELD_PER_SENDER, OutboxHandler } from "../src/domain/outbox-handler.js";
 import { attachDraftHeldReoffer } from "../src/domain/draft-held-reoffer.js";
+import { HookBridge } from "../src/domain/hook-bridge.js";
 import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { RigDeliveryDrainStore } from "../src/domain/rig-delivery-drain.js";
@@ -2493,15 +2494,21 @@ describe("draft-held order across routes and refusals", () => {
       handbackRefusal: () => null, wakeFenced: () => false, wakeApplicable: () => true,
       deposit: (_target: unknown, session: string, text: string, _opts: unknown, ids: string[]) => {
         deposited.push(text.includes("request A") ? "A" : text.includes("request B") ? "B" : "?");
-        return { ok: true, sessionName: session, outcome: "queued", sent: false, verified: false, inputPhase: "not_reached", outboxIds: ids };
+        // HookBridge.deposit's own result: the bridge keeps custody until the seat's turn boundary hands it over.
+        return { ok: true, sessionName: session, outcome: "bridged", sent: false, verified: false, inputPhase: "not_reached", outboxIds: ids };
       } };
     (f.transport as unknown as { hookBridge: unknown }).hookBridge = bridge;
     const b = await f.transport.send("worker@test", "request B", { actorSession: "pm@test" });
     expect(b).toMatchObject({ outcome: "retained", reason: DRAFT_HELD_BEHIND_EARLIER });
     expect(deposited).toEqual([]);
+    const idA = a.outboxIds![0]!;
     await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
     expect(deposited).toEqual(["A"]);
-    f.outbox.finalizeDelivery(a.outboxIds![0]!, "delivered");   // the bridge hands A to the agent
+    expect(f.outbox.getById(idA)!.deliveryState).toBe("sending");   // with the bridge, not yet handed over
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(deposited).toEqual(["A"]);   // B still waits behind A
+    f.outbox.finalizeDelivery(idA, "delivered");   // the bridge hands A to the agent
+    expect(f.outbox.getById(idA)!.deliveryState).toBe("delivered");
     await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
     expect(deposited).toEqual(["A", "B"]);
     expect(f.writes).toEqual([]);
@@ -2537,5 +2544,60 @@ describe("draft-held order across routes and refusals", () => {
     expect(f.submissions.some(s => s.includes("tab"))).toBe(false);
     await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
     expect(f.submissions.some(s => s.includes("tab"))).toBe(false);
+  });
+
+  it("through the sweep's offers on an unchanged pane, a held follower goes once its earlier message's own paste is refused", async () => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 }); f.bodies.a = "a person's draft";
+    const nowSec = () => Math.floor(Date.now() / 1000);
+    const eligible = (id: string) => (JSON.parse((f.db.prepare("SELECT tags FROM outbox_entries WHERE outbox_id=?").get(id) as { tags: string | null }).tags ?? "[]") as string[])
+      .includes("delivery:draft-eligible");
+    const a = await f.transport.send("worker@test", "tab\there", { actorSession: "pm@test", verify: false });
+    const b = await f.transport.send("worker@test", "plain follow-up", { actorSession: "pm@test", verify: false });
+    const [idA, idB] = [a.outboxIds![0]!, b.outboxIds![0]!];
+    expect([a.outcome, b.outcome]).toEqual(["retained", "retained"]);   // both held while the person had a draft
+    let clock = Date.now();
+    const written = Math.floor(clock / 1000) - 60;   // the pane isn't written to again
+    const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20),
+      readAllSessionWindows: async () => new Map([["worker@test", { activity: written, size: "160x45" }]]) }, () => new Date(clock));
+    const passes = vi.spyOn(f.repo, "deliverDraftHeldMessagesOnIdle");
+    attachDraftHeldReoffer(structural, f.repo, () => "idle", { now: () => clock });
+    const sweep = async () => { await structural.pollAllRunningTmuxSeats(f.db); await Promise.all(passes.mock.results.map(r => r.value)); };
+    // The person clears the draft, active this second: the first offer meets the quiet window and holds A again.
+    f.bodies.a = "";
+    f.hooks.clients = () => `0|${nowSec()}\n`;
+    await sweep();
+    expect(passes).toHaveBeenCalledTimes(1);
+    expect([idA, idB].map(id => f.outbox.getById(id)!.deliveryState)).toEqual(["retained", "retained"]);
+    expect(eligible(idA)).toBe(true);
+    // Past the quiet window, the next offer meets A's own paste refusal, which withdraws A; the same pass goes on to B.
+    f.hooks.clients = () => `0|${nowSec() - 10}\n`;
+    for (let i = 0; i < 4; i++) { clock += 4_500; await sweep(); }
+    expect(f.outbox.getById(idB)!.deliveryState).toBe("delivered");
+    expect(f.submissions.filter(s => s.includes("plain follow-up"))).toHaveLength(1);
+    expect(f.outbox.getById(idA)!.deliveryState).toBe("retained"); expect(eligible(idA)).toBe(false);
+    expect(f.submissions.some(s => s.includes("tab"))).toBe(false);
+  });
+
+  it("after a restart, a held message the hook bridge handed back for typing reads uncertain and holds nothing behind it", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const a = await f.transport.send("worker@test", "request A", { actorSession: "pm@test" });
+    const idA = a.outboxIds![0]!;
+    const entry = f.outbox.getById(idA)!;
+    // The real handback state: the bridge queues A, then hands it to a typed send, and the daemon stops before that send
+    // writes its own receipt.
+    const bridge = new HookBridge(f.db);
+    expect(f.outbox.reopenHeld(idA)).toBe(true);
+    expect(bridge.deposit(entry.guardBinding as never, "worker@test", entry.body, { actorSession: "pm@test" }, [idA])).toMatchObject({ outcome: "bridged" });
+    expect(bridge.releaseForTyping(entry.guardBinding!.nodeId, "worker@test", idA, "typed fallback")).toBe(true);
+    expect(f.db.prepare("SELECT delivery_state, guard_delivery FROM outbox_entries WHERE outbox_id=?").get(idA))
+      .toEqual({ delivery_state: "sending", guard_delivery: null });
+    f.guarded.recover();   // the daemon's next start
+    expect(f.outbox.getById(idA)!.deliveryState).toBe("indeterminate");
+    f.bodies.a = "";
+    const b = await f.transport.send("worker@test", "request B", { actorSession: "pm@test" });
+    expect(b.outcome).not.toBe("retained");
+    expect(f.submissions.some(s => s.includes("request B"))).toBe(true);
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.submissions.some(s => s.includes("request A"))).toBe(false);   // never replayed
   });
 });
