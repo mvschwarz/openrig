@@ -847,7 +847,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * authored activity hooks into `content`. Keep the supplied, resolved-folder and resolved-file
    * spellings compatible without choosing one native identity for every Codex release. The command
    * string is the value Codex deserializes from our TOML literal `'node "<relay>"'` — i.e.
-   * `node "<relay>"` WITHOUT the outer TOML quote delimiters. Timeout=5, matcher/status None.
+   * `node "<relay>"` WITHOUT the outer TOML quote delimiters. Retained inline handlers
+   * may have a status message even when Codex has moved them outside the managed block.
    */
   private applyCodexActivityHookTrust(content: string, configPath: string, relay: string): string {
     const keySources = codexHookSourcePaths(configPath);
@@ -862,14 +863,18 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const parsed = parseToml(begin >= 0 ? content.slice(0, begin) : content) as {
       hooks?: Partial<Record<(typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number], unknown[]>>;
     };
+    const full = parseToml(content) as {
+      hooks?: Partial<Record<(typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number], Array<{ hooks?: Array<{ statusMessage?: string }> }>>>;
+    };
     let next = content;
     for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
       const groupIndex = begin >= 0 ? parsed.hooks?.[event]?.length ?? 0 : openRigInlineGroupIndex(parsed, event);
       if (groupIndex < 0) continue;
       const label = CODEX_HOOK_EVENT_KEY_LABEL[event];
       const disabled = keySources.some(source => state[`${source}:${label}:${groupIndex}:0`]?.enabled === false);
+      const statusMessage = full.hooks?.[event]?.[groupIndex]?.hooks?.[0]?.statusMessage;
       for (const keySource of keySources) {
-        const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex });
+        const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex, statusMessage });
         next = upsertCodexHookTrust(next, key, hash);
         if (disabled && state[key]?.enabled === undefined) next = upsertCodexHookDisabled(next, key);
       }
