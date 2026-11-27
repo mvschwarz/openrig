@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { DRAFT_HELD_BEHIND_EARLIER, DRAFT_HELD_ELIGIBLE_TAG, DRAFT_HELD_PER_SENDER, DRAFT_HELD_REASONS, HELD_QUOTA_BYTES, HELD_QUOTA_COUNT, OutboxHandler, OutboxHandlerError, type OutboxEntry } from "./outbox-handler.js";
 import { isOpenRigSender } from "../lib/pane-envelope.js";
+import { HOOK_BRIDGE_CHANNEL } from "./hook-bridge.js";
 
 /** OpenRig's own senders, which have their own schedules: the daemon and its subsystem actors (`isOpenRigSender`), and the
  *  `…@system` machinery (a watchdog, the wake ladder), as the stuck sweep reads them. */
@@ -217,9 +218,13 @@ export class DraftAwareDelivery {
     } catch { return false; }
   }
 
-  /** Preserve uncertainty in old history without scheduling a replay. */
+  /** At daemon start, before anything in this process can take a claim (startup runs it before the hook bridge's sweep
+   *  starts): preserve uncertainty in old history without scheduling a replay. A message the hook bridge queued that no
+   *  waiter took was never handed to anyone, so it stays queued for the bridge to deliver, once, by its own rules. */
   recover(): void {
-    this.db.prepare("UPDATE outbox_entries SET delivery_state='indeterminate' WHERE guard_delivery IS NOT NULL AND delivery_state='sending'").run();
+    this.db.prepare(`UPDATE outbox_entries SET delivery_state='indeterminate' WHERE guard_delivery IS NOT NULL AND delivery_state='sending'
+      AND NOT (CASE WHEN json_valid(guard_delivery) THEN json_extract(guard_delivery,'$.channel') = ?
+        AND json_extract(guard_delivery,'$.state') = 'queued' ELSE 0 END)`).run(HOOK_BRIDGE_CHANNEL);
     // A draft-held message claimed with no receipt yet, such as one the hook bridge handed back for typing
     // (HookBridge.releaseForTyping) before the typed send wrote its own: whether it was typed is unknown, and it would
     // otherwise hold its sender's later messages behind it for good.
