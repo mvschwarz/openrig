@@ -2575,6 +2575,12 @@ export class QueueRepository {
     return held ? "draft" : "done";
   }
 
+  /** Whether this seat's idle report and the periodic offer can retry its draft-held queue wakes: it's in draft-aware
+   *  mode. While it is, a draft-held handoff successor's retries are theirs; otherwise the wake ladder keeps them (#344). */
+  draftHeldIdleRetryOwns(sessionName: string): boolean {
+    return !!this.outbox && !!this.transport?.draftAwareTarget?.(sessionName);
+  }
+
   /** Seats with draft-held queue wakes that have had a try, each with its newest try's time: the periodic offer gives each
    *  such try one more offer after the quiet interval (createDraftHeldReoffer). Reads pending rows by state. */
   draftHeldWakeSeats(): Array<{ session: string; lastTry: string }> {
@@ -7518,7 +7524,7 @@ export class QueueRepository {
         view.nextBackstop = quiet;
         return view;
       }
-      const recovery = readWakeLadderBackstop(this.db, qitemId, target => this.acceptsDestination(target));
+      const recovery = readWakeLadderBackstop(this.db, qitemId, target => this.acceptsDestination(target), session => this.draftHeldIdleRetryOwns(session));
       if (recovery && !localOnly) {
         if (!awaitingHuman && !humanUpdate) view.laterBackstop = { ...view.nextBackstop, note: "Conditional safety net; current delivery/recovery ownership is evaluated first." };
         view.nextBackstop = recovery;
