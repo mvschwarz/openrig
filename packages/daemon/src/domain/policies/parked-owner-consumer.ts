@@ -124,6 +124,13 @@ export const OWNER_MIN_INTERVAL_KEY = "owner_min_interval_s";
 /** The minimum interval of an owner the job's context doesn't set. */
 export const DEFAULT_OWNER_MIN_INTERVAL_S = 3600;
 
+/** An interval in the words the reminder uses: hours when it is whole hours, minutes when whole minutes. */
+export function intervalWords(seconds: number): string {
+  if (seconds % 3600 === 0) return `every ${seconds / 3600} h`;
+  if (seconds % 60 === 0) return `every ${seconds / 60} min`;
+  return `every ${seconds} s`;
+}
+
 const validInterval = (seconds: unknown): seconds is number => typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0;
 
 /** The valid part of context.owner_min_interval_s: a number of seconds that is not negative, or an object keeping
@@ -327,6 +334,19 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           episodeKey: key, primaryRow: typeof row === "string" ? row : null };
       };
 
+      // A refusal for this agent newer than its last accepted reminder is a return to ability: the attempt met a prompt,
+      // the ladder closed that refusal once the prompt cleared, and the owner can take the reminder now. The interval
+      // doesn't hold it back; before the interval existed, that scan sent.
+      const refusedSince = (rows: string[], at: number): boolean => {
+        for (const id of rows) {
+          try {
+            if (deps.rows.listTransitions(id).some(t => t.transitionNote?.startsWith(REFUSED_PREFIX)
+              && Number.isFinite(Date.parse(t.ts)) && Date.parse(t.ts) > at)) return true;
+          } catch { /* unreadable history holds nothing back */ }
+        }
+        return false;
+      };
+
       // A delivered reminder's rows still pending and unclaimed past the bound go to someone who can act, once per
       // episode: the escalated note is written on `noteRow` and looked for on every row in `readRows` (the rows the
       // reminder named, which may since have been claimed or closed).
@@ -515,7 +535,8 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         const minIntervalS = ownerMinInterval(job.context, seat.sessionName);
         const last = minIntervalS === 0 ? null : lastReminder(seat.sessionName, generation);
         if (!terminal && last && seat.activity.needsInput.count === 0
-          && (deps.now?.() ?? Date.now()) - last.at < minIntervalS * 1000) {
+          && (deps.now?.() ?? Date.now()) - last.at < minIntervalS * 1000
+          && !refusedSince(knownRows, last.at)) {
           const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && last.obligations.includes(r.qitemId)
             && namedIds.includes(r.qitemId)).map(r => r.qitemId);
           const nextReminderAt = new Date(last.at + minIntervalS * 1000).toISOString();
@@ -556,7 +577,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           `After a recorded delivery to this occupant, this check waits for your rows to change. An interrupted or unconfirmed attempt may repeat; interactive-prompt recovery stays with the wake-or-escalate ladder. ` +
           `Held rows stay listed in rig view show held; for a claimed in-progress row, the wake-or-escalate ladder also retries a failed wake.` +
           (!last ? "" :
-            ` This check reminds you at most once per ${minIntervalS} s; this reminder covers every obligation still open` +
+            ` This check reminds you at most once ${intervalWords(minIntervalS)}; this reminder covers the eligible items listed here` +
             ` since the last one at ${new Date(last.at).toISOString()}` +
             (newSinceLastWake.length > 0 ? `, new since then: ${newSinceLastWake.join(", ")}` : "") + ".");
         return {

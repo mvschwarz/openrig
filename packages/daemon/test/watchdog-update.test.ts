@@ -512,6 +512,20 @@ describe("watchdog update", () => {
       await refused(job.jobId, { intervalSeconds: 600 }, 409, "interval_not_effective");
     });
 
+    it("a parked-owner job: its spec's owner_min_interval_s changes in place, its own cadence doesn't", async () => {
+      const spec = (context: string) => `policy: parked-owner-consumer\ntarget:\n  session: parked-owner-consumer@rig\ncontext:\n  rig: rig\n${context}`;
+      const job = register({ policy: "parked-owner-consumer", specYaml: spec(""),
+        targetSession: "parked-owner-consumer@rig", registeredBySession: "daemon@kernel" });
+      // The cadence is the daemon's, and a spec that names another policy is still refused.
+      await refused(job.jobId, { intervalSeconds: 600 }, 409, "interval_not_effective");
+      const changed = await update(job.jobId, { specYaml: spec(`  owner_min_interval_s:\n    ${OWNER}: 1800\n`) });
+      expect(changed.status).toBe(200);
+      expect(jobs.getByIdOrThrow(job.jobId).specYaml).toContain(`${OWNER}: 1800`);
+      expect(changed.body.job.jobId).toBe(job.jobId);
+      // A value the policy would ignore is refused rather than stored.
+      await refused(job.jobId, { specYaml: spec("  owner_min_interval_s:\n    someone: nope\n") }, 400, "spec_invalid");
+    });
+
     it("a daemon-owned timing policy", async () => {
       const job = register({ policy: "quiet-release", specYaml: "policy: quiet-release\ntarget: worker@rig\nmessage: x\n" });
       await refused(job.jobId, { intervalSeconds: 600 }, 409, "policy_not_updatable");

@@ -21,6 +21,7 @@ import {
   NUDGE_FAIL_PREFIX,
   PARKED_OWNER_POLICY_NAME,
   parkedOwnerSpecYaml,
+  intervalWords,
   type ParkedOwnerConsumerDeps,
   type ParkedSeatDiagnosisView,
   type RowTransitionView,
@@ -1512,6 +1513,72 @@ describe("context.owner_min_interval_s: a minimum time between one owner's remin
     // C closes: the set is the reminder's again, delivered and unchanged; the same reminder isn't escalated twice.
     expect(await evaluate([A, B], [sent])).toMatchObject({ action: "skip" });
     expect(escalations).toEqual([[B]]);
+  });
+
+  it("a return to ability doesn't wait out the hour: refused at a prompt, cleared, and the reminder goes", async () => {
+    const store = new RowStore();
+    let prompt = 0;
+    let open = [ROW_IDS[0]!];
+    store.openIds = () => open;
+    const seatNow = () => parkedSeat({
+      activity: prompt > 0
+        ? { value: "needs-input", needsInput: { count: prompt, reason: "permission" }, since: at(3) }
+        : { value: "idle-at-prompt", needsInput: { count: 0, reason: null }, since: at(24 * 60) },
+      obligations: { items: open.map((qitemId) => ({ qitemId, state: "in-progress", summary: null })), held: [] },
+    });
+    const evaluate = (history: WatchdogHistoryEntry[], now: number) =>
+      makeParkedOwnerConsumerPolicy({ ...makeDeps([seatNow()], store, history), now: () => now } as ParkedOwnerConsumerDeps)
+        .evaluate(makeJob({ context: HOUR }));
+    // T0: the reminder to A goes, typed and submitted (ten minutes ago).
+    const first = await evaluate([], NOW - 10 * 60_000);
+    expect(first.action).toBe("send");
+    if (first.action !== "send") return;
+    const sent: WatchdogHistoryEntry = { ...wake(10, [ROW_IDS[0]!]), evaluationNotes: { ...first.notes, deliveryFact: "accepted" } };
+    // A new item arrives while the seat is at a prompt: the attempt is refused there.
+    open = [ROW_IDS[0]!, ROW_IDS[1]!];
+    prompt = 1;
+    const atPrompt = await evaluate([sent], NOW - 5 * 60_000);
+    expect(atPrompt.action, JSON.stringify(atPrompt.notes).slice(0, 400)).toBe("send");
+    store.record(ROW_IDS[1]!, "watchdog@system", "in-progress", `${REFUSED_PREFIX} ${SEAT}|x#r; Refused: '${SEAT}' is at an interactive prompt`, at(5));
+    // The prompt clears and the ladder closes that refusal without sending.
+    store.record(ROW_IDS[1]!, "watchdog@system", "in-progress", `${CLOSE_PREFIX} ${SEAT}|x#r (interactive prompt cleared)`, at(4));
+    prompt = 0;
+    // Past the grace, inside the hour: the owner got its ability back, so the reminder goes instead of waiting to T0+1h.
+    const after = await evaluate([sent], NOW);
+    expect(after).toMatchObject({ action: "send", target: { session: SEAT } });
+    if (after.action !== "send") return;
+    expect(after.notes?.["newSinceLastWake"]).toEqual([ROW_IDS[1]]);
+    expect(after.message).toContain(ROW_IDS[1]!);
+  });
+
+  it("an unchanged set after the hour stays quiet, and an item closed during the hour isn't named at expiry", async () => {
+    const store = new RowStore();
+    let open = [ROW_IDS[0]!, ROW_IDS[1]!];
+    store.openIds = () => open;
+    const first = await run([], HOUR, NOW - 70 * 60_000, store);
+    expect(first.action).toBe("send");
+    if (first.action !== "send") return;
+    // What the daemon leaves after that send: the accepted one in the history, and the delivered note on its row.
+    const key = first.notes?.["episodeKey"] as string;
+    store.record(first.notes?.["primaryRow"] as string, "watchdog@system", "in-progress", `${DELIVERED_PREFIX} ${key}`, at(70));
+    const sent: WatchdogHistoryEntry = { ...wake(70, [...ROW_IDS]), evaluationNotes: { ...first.notes, deliveryFact: "accepted" } };
+    // An hour gone by, the same delivered set: nothing to say.
+    expect(await run([sent], HOUR, NOW, store)).toMatchObject({ action: "skip" });
+    // The set changed by one item closing: the reminder at expiry names what is still open, not what closed.
+    open = [ROW_IDS[0]!];
+    const result = await run([sent], HOUR, NOW, store,
+      [parkedSeat({ obligations: { items: [{ qitemId: ROW_IDS[0]!, state: "in-progress", summary: null }], held: [] } })]);
+    expect(result.action).toBe("send");
+    if (result.action !== "send") return;
+    expect(result.message).toContain(ROW_IDS[0]!);
+    expect(result.message).not.toContain(ROW_IDS[1]!);
+  });
+
+  it("the interval in the reminder's words: hours, minutes, seconds", () => {
+    expect(intervalWords(3600)).toBe("every 1 h");
+    expect(intervalWords(7200)).toBe("every 2 h");
+    expect(intervalWords(1800)).toBe("every 30 min");
+    expect(intervalWords(45)).toBe("every 45 s");
   });
 
   it("the daemon's spec for the rig job keeps an operator's owner_min_interval_s and drops anything invalid", () => {
