@@ -47,7 +47,7 @@ function unauthorizedBody(reason: string, diagnosticContext?: "terminal"): {
 } {
   return {
     error: "unauthorized",
-    message: `${diagnosticContext === "terminal" ? "Terminal" : "Mission Control"} auth failed: ${reason}`,
+    message: `${diagnosticContext === "terminal" ? "Terminal" : "Operator bearer"} auth failed: ${reason}`,
     what_failed: reason,
     why_it_matters: diagnosticContext === "terminal"
       ? "Terminal and transport requests require the configured terminal bearer token to protect terminal access and input."

@@ -163,7 +163,7 @@ describe("terminal and transport bearer diagnostics", () => {
       expect(body.what_to_do).toContain("Authorization: Bearer <token>");
       const text = JSON.stringify(body);
       for (const secret of [terminalToken, missionControlToken, "SYNTHETIC_HEADER_SECRET"]) expect(text).not.toContain(secret);
-      expect(text).not.toContain("Mission Control auth failed");
+      expect(text).not.toContain("Operator bearer auth failed");
     });
 
     it.each([
@@ -177,12 +177,12 @@ describe("terminal and transport bearer diagnostics", () => {
     });
   });
 
-  it("keeps default Mission Control diagnostics and refuses a separate terminal token", async () => {
+  it("names the operator bearer gate and refuses a separate terminal token", async () => {
     const { app, effect } = fixture();
     const denied = await app.request("/mission-control", { method: "POST", headers: { Authorization: `Bearer ${terminalToken}` } });
     expect(denied.status).toBe(401);
     const body = await denied.json();
-    expect(body.message).toBe("Mission Control auth failed: bearer token does not match");
+    expect(body.message).toBe("Operator bearer auth failed: bearer token does not match");
     expect(body.what_to_do).toBe("Send the daemon's configured OPENRIG_AUTH_BEARER_TOKEN with `Authorization: Bearer <token>`. This token applies only to routes that check it.");
     expect(body.why_it_matters).toBe("This route requires the daemon's configured operator bearer token.");
     expect(JSON.stringify(body)).not.toContain(terminalToken);

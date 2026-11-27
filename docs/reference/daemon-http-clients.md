@@ -78,9 +78,9 @@ The daemon reads these two bearer-token settings from its environment at start:
   address, and this token isn't set, these routes check `OPENRIG_AUTH_BEARER_TOKEN` instead.
 
 By default, the daemon binds to loopback and the tailnet address when Tailscale is active. An operator-selected
-bind (`rig daemon start --host` or `OPENRIG_BIND_HOST`) can expose it on other networks. Startup requires a
-non-empty operator bearer token for an explicit bind outside loopback and tailnet (including hostnames that
-resolve outside them). Satisfying that startup check does not add bearer checks to other routes.
+bind (`rig daemon start --host`, the file's `daemon.host` setting or `OPENRIG_BIND_HOST`) can expose it on
+other networks. Startup requires a non-empty operator bearer token for an explicit bind outside loopback and
+tailnet (including hostnames that resolve outside them). Satisfying that startup check does not add bearer checks to other routes.
 
 The `/api/transcripts` routes (`GET /api/transcripts/<session>/tail`, `/grep` and `/full`) do not check either
 of these bearer tokens. On the default binds (loopback, and the tailnet address when Tailscale is active),
