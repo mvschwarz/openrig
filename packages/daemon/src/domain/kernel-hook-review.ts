@@ -11,7 +11,7 @@ export interface HookReviewObservation {
   observedAt: string;
 }
 
-/** Read-only, visible-screen evidence for the selected kernel Codex case. No stored
+/** Read-only, visible-screen evidence for managed Codex seats. No stored
  * startup error, generic attention flag or scrollback can start an alert. */
 export function makeKernelHookReviewReader(deps: {
   db: Database.Database;
@@ -24,7 +24,7 @@ export function makeKernelHookReviewReader(deps: {
         b.tmux_pane AS pane, s.id AS sessionId
       FROM bindings b JOIN nodes n ON n.id = b.node_id JOIN rigs r ON r.id = n.rig_id
       JOIN sessions s ON s.node_id = n.id AND s.session_name = b.tmux_session
-      WHERE r.name = 'kernel' AND n.runtime = 'codex' AND r.archived_at IS NULL AND b.attachment_type = 'tmux'
+      WHERE n.runtime = 'codex' AND r.archived_at IS NULL AND b.attachment_type = 'tmux'
         AND b.tmux_pane IS NOT NULL AND s.id = (SELECT latest.id FROM sessions latest
           WHERE latest.node_id = n.id ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
         AND s.status NOT IN ('stopped','exited','detached','superseded')`).all() as Array<{

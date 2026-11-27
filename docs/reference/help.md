@@ -156,6 +156,11 @@ the continuation command above. A quoted or dismissed login screen is not a curr
 keep their existing readiness handling. Claude's persistent "Not logged in" footer alone is not a login refusal, because a
 configured gateway may authenticate its requests.
 
+A managed Codex seat at its active "Hooks need review" menu reports `needs-input` with reason `hook_trust_gate`.
+`rig seat status <seat>` and `rig ps --nodes` show the question, and the existing prompt escalation includes the command
+to attach to that seat's terminal. Review the hooks in Codex there; OpenRig does not choose or approve them for you.
+Old hook-review text above a later conversation prompt is not an active review menu.
+
 ### You can't tell which instance or configuration is involved
 
 Read [instance layout](instance-layout.md) (`rig context get reference/instance-layout.md`) and

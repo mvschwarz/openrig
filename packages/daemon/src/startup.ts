@@ -716,7 +716,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       if (activity.state === "unknown") return null;
       if (runtime === "claude-code" && activity.state === "needs_input"
           && !["permission_prompt", "selection_prompt"].includes(activity.reason)) return null;
-      return activity.state === "needs_input" && ["permission_prompt", "selection_prompt"].includes(activity.reason);
+      return activity.state === "needs_input" && ["permission_prompt", "selection_prompt", "hook_trust_gate"].includes(activity.reason);
     },
     permissionPromptChanged: (sessionName, confirmed, runtime) => {
       const latest = agentActivityStore.getLatestForNode({ sessionName });

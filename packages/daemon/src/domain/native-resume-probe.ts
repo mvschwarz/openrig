@@ -1206,7 +1206,7 @@ function looksLikeCurrentCodexTrustPrompt(paneContent: string): boolean {
   return false;
 }
 
-function looksLikeCodexHookReviewPrompt(paneContent: string): boolean {
+export function looksLikeCodexHookReviewPrompt(paneContent: string): boolean {
   // A newer header supersedes a dismissed prompt retained in scrollback.
   const current = paneContent.slice(Math.max(0, paneContent.lastIndexOf("OpenAI Codex (v")));
   // Closing a review panel may redraw only the input prompt, without a new

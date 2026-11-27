@@ -709,10 +709,10 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(posts).toHaveLength(1);
   });
 
-  function shellHookReaderFixture() {
+  function shellHookReaderFixture(rigName = "kernel") {
     const rigs = new RigRepository(db); const sessions = new SessionRegistry(db);
-    const rig = rigs.createRig("kernel"); const node = rigs.addNode(rig.id, "operator", { runtime: "codex" });
-    const destination = "operator@kernel";
+    const rig = rigs.createRig(rigName); const node = rigs.addNode(rig.id, "operator", { runtime: "codex" });
+    const destination = `operator@${rigName}`;
     const session = sessions.registerSession(node.id, destination); sessions.updateStatus(session.id, "running");
     sessions.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: destination, tmuxPane: "%17" });
     const hookScreen = "OpenAI Codex (v0.164.0)\nHooks need review\nTrust all and continue";
@@ -737,6 +737,17 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       screen: (value: string) => { screen = value; }, changeNative: () => { nativePid++; },
       changePanePid: () => { panePid += 1000; }, changeBinding: () => sessions.updateBinding(node.id, { tmuxPane: "%18" }) };
   }
+
+  it("escalates a verified non-kernel Codex hook review with the attach route and no menu input", async () => {
+    const f = shellHookReaderFixture("product-team");
+    expect((await f.read())[0]?.state).toBe("blocked");
+    const posts: unknown[] = [];
+    await tick(engine(posts), { now: f.now, readHookReviews: f.read });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(alerts()[0]!.body).toContain("hook_trust_gate");
+    expect(alerts()[0]!.body).toContain(tmuxAttachCommand(f.destination));
+    expect(alerts()[0]!.body).toContain("No input was sent");
+  });
 
   it("escalates a verified shell-backed kernel Codex and leaves its alert unresolved while lineage is unknown", async () => {
     const f = shellHookReaderFixture();
