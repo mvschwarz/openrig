@@ -432,7 +432,7 @@ describe("with no `rig` to run", () => {
     const waiter = (session: string, env = noRig()) => {
       const s = sink();
       return bridge.conversationWaiter({ input: { ...input, session_id: session }, out: s.out,
-        deps: { env, alive: () => true, key: KEY, waiterMs: 15_000, ...clock() } }).then((code) => ({ code, text: s.text() }));
+        deps: { env, alive: () => true, key: KEY, waiterMs: 15_000, loginPath: () => null, ...clock() } }).then((code) => ({ code, text: s.text() }));
     };
     const first = await waiter(SESSION);
     expect(first.code).toBe(2);
@@ -455,6 +455,34 @@ describe("with no `rig` to run", () => {
     const fourth = await waiter("fourth-session");
     expect(fourth).toEqual({ code: 2, text: first.text });
     expect(await waiter("fifth-session")).toEqual({ code: 0, text: "" });
+  });
+
+  // Reproduced on Claude Code 2.1.330: `rig` installed into a new ~/.local/bin after the app started is on a login shell's
+  // PATH, not on the app's, which the hooks inherit, so every later Stop or SessionStart waiter found none.
+  it("Claude Code: a `rig` only on a login shell's PATH is found, run with that PATH, and its task wakes the conversation", async () => {
+    const loginBin = join(data, "login-bin");
+    const log = join(data, "rig-calls.log");
+    const rows = { goals: JSON.stringify([goal()]), pending: JSON.stringify([question()]),
+      transitions: JSON.stringify(created("dev-build@starter", "transport:v1")) };
+    mkdirSync(loginBin, { recursive: true });
+    writeFileSync(join(loginBin, "rig"), [
+      "#!/bin/sh",
+      `echo "$*" >> '${log}'`,
+      'case "$*" in',
+      `  "queue list --tag "*) echo '${rows.goals}' ;;`,
+      `  "queue list --destination "*) echo '${rows.pending}' ;;`,
+      `  "queue transitions "*) echo '${rows.transitions}' ;;`,
+      "  *) echo null ;;",
+      "esac",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    const s = sink();
+    const code = await bridge.conversationWaiter({ input, out: s.out,
+      deps: { env: noRig(), alive: () => true, key: KEY, waiterMs: 15_000, loginPath: () => [loginBin, "/usr/bin", "/bin"].join(delimiter), ...clock() } });
+    expect(code).toBe(2);
+    expect(s.text()).toContain("- qitem-q1: May I run the test suite?");
+    expect(readFileSync(log, "utf8")).toContain(`queue list --tag conversation-key:${KEY} --all --limit 100 --json\n`);
+    expect(existsSync(join(data, "no-rig.json"))).toBe(false);
   });
 
   it("Claude Code: a seat, or a conversation with no key, is never told", async () => {
