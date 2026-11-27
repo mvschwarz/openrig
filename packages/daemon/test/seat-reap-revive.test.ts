@@ -12,8 +12,9 @@ import { classifyColdStartStop } from "../src/domain/seat-cold-start.js";
 // seat through the REAL checked-stop path (only OS terminal effects replaced), and cold
 // start must read that exact stop as revivable; a human stop on the same seat must not be.
 
-function wiring(f: ReturnType<typeof fixture>, processState: "gone" | "unknown" | "survives" | "regrouped" | "exit unknown" = "gone") {
+function wiring(f: ReturnType<typeof fixture>, processState: "gone" | "unknown" | "survives" | "regrouped" | "backgrounded" | "exit unknown" = "gone") {
   let dead = false;
+  const backgrounded = processState === "backgrounded";
   const tmux = new TmuxAdapter(async command => {
     if (command.includes("has-session")) return "";
     if (command.includes("list-panes")) return "%1|0|/fixture|120|40|1";
@@ -22,6 +23,7 @@ function wiring(f: ReturnType<typeof fixture>, processState: "gone" | "unknown" 
     if (command.includes("detach-client")) return "";
     if (command.includes("set-option")) return "";
     if (command === "kill -TERM -4300") return "";
+    if (backgrounded && command === "kill -TERM -4242") { dead = true; return ""; }
     if (command === "kill -TERM 4242") { dead = true; return ""; }
     if (command.includes("#{session_windows}")) return `$7|4242|1700000000|%1|${Number(dead)}|worker@test|1|1`;
     if (command.includes("#{pane_pid}")) return "4242";
@@ -31,11 +33,13 @@ function wiring(f: ReturnType<typeof fixture>, processState: "gone" | "unknown" 
   });
   tmux.standbyProcessCensus = async () => {
     if (processState === "unknown" || (dead && processState === "exit unknown")) throw new Error("process table unavailable");
-    const common = { tpgid: 4300, startedAt: "fixture", executableName: "fixture", command: "fixture" };
+    const common = { tpgid: backgrounded ? 4242 : 4300, startedAt: "fixture", executableName: "fixture", command: "fixture" };
     return { permissionHiddenPids: [], rows: [
       ...(!dead ? [{ ...common, pid: 4242, ppid: 1, pgid: 4242 }] : []),
-      ...(!dead || processState === "survives" || processState === "regrouped"
-        ? [{ ...common, pid: 4300, ppid: dead ? 1 : 4242, pgid: dead && processState === "regrouped" ? 4400 : 4300 }] : []),
+      ...(backgrounded && !dead ? [{ ...common, pid: 4299, ppid: 4242, pgid: 4300 }] : []),
+      ...(!dead || backgrounded || processState === "survives" || processState === "regrouped"
+        ? [{ ...common, pid: 4300, ppid: dead ? 1 : backgrounded ? 4299 : 4242,
+          pgid: dead && processState === "regrouped" ? 4400 : 4300 }] : []),
     ] };
   };
   const guard = new SeatDeliveryGuard(f.db, name => resolveGuardTarget(f.db, name));
@@ -43,7 +47,7 @@ function wiring(f: ReturnType<typeof fixture>, processState: "gone" | "unknown" 
   const lifecycle = new SeatLifecycleService({ db: f.db, rigRepo: new RigRepository(f.db),
     sessionRegistry: new SessionRegistry(f.db), eventBus: f.bus, tmuxAdapter: tmux,
     inPlaceRestartTiming: { timeoutMs: 100, sleep: async () => {} } });
-  return { guard, lifecycle, tmux };
+  return { guard, lifecycle, tmux, paneExited: () => dead };
 }
 
 it("a reaper stop is recorded generation-exactly and classifies as revivable", async () => {
@@ -70,6 +74,20 @@ it.each(["unknown", "survives", "regrouped", "exit unknown"] as const)("does not
   const result = await lifecycle.stopSeat({ seatRef: "worker@test", expected: pre.expected,
     operator: "daemon:seat-reaper", reason: "idle_reap" });
   expect(result.ok).toBe(false);
+  expect(f.bus.replayAll(0)).not.toContainEqual(expect.objectContaining({ type: "session.stopped" }));
+});
+
+it("does not record standby when an already backgrounded runner outlives its shell and wrapper", async () => {
+  const f = fixture();
+  const { lifecycle, paneExited } = wiring(f, "backgrounded");
+  const pre = lifecycle.stopPrecondition("worker@test");
+  if (!("expected" in pre)) throw new Error("fixture missing stop selection");
+
+  const result = await lifecycle.stopSeat({ seatRef: "worker@test", expected: pre.expected,
+    operator: "daemon:seat-reaper", reason: "idle_reap" });
+
+  expect(paneExited()).toBe(true);
+  expect(result).toMatchObject({ ok: false, code: "stop_uncertain" });
   expect(f.bus.replayAll(0)).not.toContainEqual(expect.objectContaining({ type: "session.stopped" }));
 });
 

@@ -15,7 +15,7 @@ import type { TmuxControlExec } from "./tmux-control.js";
 import { tmuxOnDaemonServer } from "./tmux-server.js";
 import { TMUX_SERVER_LIMIT_PREFIX, TMUX_SERVER_NO_SESSION_BUS, TMUX_SERVER_SESSION_BUS } from "../tmux-server-start.js";
 import { SEAT_SCOPE_SLICE, rigSeatSlice } from "./seat-slice.js";
-import { readProcessTableCensusNow } from "../domain/process-table.js";
+import { readProcessChildrenNow, readProcessTableCensusNow } from "../domain/process-table.js";
 
 export interface StandbyProcesses {
   readonly pid: number;
@@ -3028,20 +3028,41 @@ export class TmuxAdapter {
     }
   }
 
-  standbyProcessCensus(): ReturnType<typeof readProcessTableCensusNow> {
-    return readProcessTableCensusNow();
+  async standbyProcessCensus(panePid?: number): ReturnType<typeof readProcessTableCensusNow> {
+    const census = await readProcessTableCensusNow();
+    if (panePid !== undefined) {
+      const children = await readProcessChildrenNow(panePid);
+      if (children?.some(pid => !census.rows.some(row => row.pid === pid && row.ppid === panePid))) {
+        throw new Error("The pane's child processes could not all be observed.");
+      }
+    }
+    return census;
   }
 
   async observeStandbyProcesses(paneId: string): Promise<StandbyProcesses | null> {
     const pid = await this.getPanePid(paneId);
     if (pid === null || pid <= 1) return null;
-    const census = await this.standbyProcessCensus().catch(() => null);
+    const census = await this.standbyProcessCensus(pid).catch(() => null);
     const root = census?.rows.find(row => row.pid === pid);
-    if (!census || !root || root.state === "Z" || !Number.isSafeInteger(root.tpgid) || root.tpgid <= 1) return null;
+    if (!census || census.permissionHiddenPids.length > 0 || !root || root.state === "Z"
+      || !Number.isSafeInteger(root.tpgid) || root.tpgid <= 1) return null;
     const foreground = census.rows.filter(row => row.pgid === root.tpgid && row.state !== "Z");
     if (!foreground.some(row => row.tpgid === root.tpgid)) return null;
-    return { pid, startedAt: root.startedAt, group: root.tpgid, rootGroup: root.pgid,
-      members: new Map(foreground.map(row => [row.pid, row.startedAt])) };
+    const children = new Map<number, typeof census.rows>();
+    for (const row of census.rows) {
+      const siblings = children.get(row.ppid);
+      if (siblings) siblings.push(row);
+      else children.set(row.ppid, [row]);
+    }
+    // Follow PPIDs before signalling; after the shell exits only PID + start time still identifies an orphaned runner.
+    const members = new Map<number, string>();
+    const pending = [root, ...foreground];
+    for (const row of pending) {
+      if (members.has(row.pid)) continue;
+      members.set(row.pid, row.startedAt);
+      for (const child of children.get(row.pid) ?? []) pending.push(child);
+    }
+    return { pid, startedAt: root.startedAt, group: root.tpgid, rootGroup: root.pgid, members };
   }
 
   async standbyProcessesGone(processes: StandbyProcesses): Promise<boolean> {
