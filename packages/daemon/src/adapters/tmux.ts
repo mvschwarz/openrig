@@ -29,6 +29,9 @@ export interface StandbySignalWitness {
   readonly target: { session: string; pane: string; nodeId: string };
   readonly identity: string;
   readonly processes: StandbyProcesses;
+  /** Every pre-signal observation this stop accepted, earliest first; the exit check reads all of them so a runner
+   *  first seen in a later look is still required to be gone. */
+  readonly observations?: StandbyProcesses[];
 }
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -3018,6 +3021,8 @@ export class TmuxAdapter {
     if (paneChanged) {
       return { ok: false, code: "guard_target_changed", message: `Pane "${paneId}" is no longer in the tmux session and server it was first read in; nothing was signalled.` };
     }
+    // This observation was accepted by the checks above and is what the signal uses: keep it for the exit check too.
+    if (current && standby?.observations && !standby.observations.includes(current)) standby.observations.push(current);
     try {
       beforeWrite();
       if (current && signal !== "HUP") await this.signalForegroundGroup(current.group, signal);

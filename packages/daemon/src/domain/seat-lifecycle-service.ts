@@ -2475,10 +2475,16 @@ export class SeatLifecycleService {
     try {
       const processes = await this.tmuxAdapter.observeStandbyProcesses(target.pane);
       if (!processes) return { ok: false, code: "standby_unconfirmed", message: "The pane's foreground runner could not be observed." };
+      // The exit check reads every observation this stop accepted before signalling, not just the first: a runner
+      // first seen in a later pre-signal look is still required to be gone (only looks after the last signal are out of scope).
+      const accepted = [processes];
       const result = await terminatePaneInPlace(this.tmuxAdapter, target.pane,
         { pollMs: 100, timeoutMs: 3_000, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), ...this.inPlaceRestartTiming },
-        "Standby process", target.nodeId, undefined, { witness: { target, identity, processes },
-          processesGone: () => this.tmuxAdapter.standbyProcessesGone(processes), beforeEffect: async () => {
+        "Standby process", target.nodeId, undefined, { witness: { target, identity, processes, observations: accepted },
+          processesGone: async () => {
+            for (const observed of accepted) if (!await this.tmuxAdapter.standbyProcessesGone(observed)) return false;
+            return true;
+          }, beforeEffect: async () => {
           if (await this.tmuxAdapter.standbyPaneIdentity(target, false) !== identity) {
             throw Object.assign(new Error("The standby pane changed before stop."), { code: "selection_changed" });
           }

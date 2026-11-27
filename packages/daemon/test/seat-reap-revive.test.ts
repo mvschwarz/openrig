@@ -91,6 +91,55 @@ it("does not record standby when an already backgrounded runner outlives its she
   expect(f.bus.replayAll(0)).not.toContainEqual(expect.objectContaining({ type: "session.stopped" }));
 });
 
+it("does not record standby when a runner first appears in the second observation, outside the signalled group", async () => {
+  const f = fixture();
+  let dead = false;
+  let looks = 0;
+  const tmux = new TmuxAdapter(async command => {
+    if (command.includes("has-session")) return "";
+    if (command.includes("list-panes")) return "%1|0|/fixture|120|40|1";
+    if (command.includes("show-environment")) return "OPENRIG_NODE_ID=a";
+    if (command.includes("kill-session")) return "";
+    if (command.includes("detach-client")) return "";
+    if (command.includes("set-option")) return "";
+    if (command === "kill -TERM -4300") { dead = true; return ""; }
+    if (command.includes("#{session_windows}")) return `$7|4242|1700000000|%1|${Number(dead)}|worker@test|1|1`;
+    if (command.includes("#{pane_pid}")) return "4242";
+    if (command.includes("#{pane_dead}")) return String(Number(dead));
+    if (command.startsWith("tmux display-message")) return "$7|4242|1700000000";
+    throw Error(`unexpected command ${command}`);
+  });
+  tmux.standbyProcessCensus = async () => {
+    looks += 1;
+    const common = { tpgid: 4300, startedAt: "fixture", executableName: "fixture", command: "fixture" };
+    if (!dead) {
+      // The second look (the one the signal verifier takes) also sees a runner the shell started in its own group.
+      return { permissionHiddenPids: [], rows: [
+        { ...common, pid: 4242, ppid: 1, pgid: 4242 },
+        { ...common, pid: 4300, ppid: 4242, pgid: 4300 },
+        ...(looks >= 2 ? [{ ...common, pid: 4500, ppid: 4242, pgid: 4500 }] : []),
+      ] };
+    }
+    // The shell and its foreground wrapper are gone; the out-of-group runner survives.
+    return { permissionHiddenPids: [], rows: [{ ...common, pid: 4500, ppid: 1, pgid: 4500 }] };
+  };
+  const guard = new SeatDeliveryGuard(f.db, name => resolveGuardTarget(f.db, name));
+  tmux.deliveryGuard = guard;
+  const lifecycle = new SeatLifecycleService({ db: f.db, rigRepo: new RigRepository(f.db),
+    sessionRegistry: new SessionRegistry(f.db), eventBus: f.bus, tmuxAdapter: tmux,
+    inPlaceRestartTiming: { timeoutMs: 100, sleep: async () => {} } });
+  const pre = lifecycle.stopPrecondition("worker@test");
+  if (!("expected" in pre)) throw new Error("fixture missing stop selection");
+
+  const result = await lifecycle.stopSeat({ seatRef: "worker@test", expected: pre.expected,
+    operator: "daemon:seat-reaper", reason: "idle_reap" });
+
+  expect(looks).toBeGreaterThanOrEqual(2);
+  expect(dead).toBe(true);
+  expect(result).toMatchObject({ ok: false, code: "stop_uncertain" });
+  expect(f.bus.replayAll(0)).not.toContainEqual(expect.objectContaining({ type: "session.stopped" }));
+});
+
 it("a human stop of the same seat is never revivable", async () => {
   // Given the same seat stopped by an operator through the same stop path.
   const f = fixture();
