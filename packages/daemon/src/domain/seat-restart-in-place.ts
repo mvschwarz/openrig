@@ -1071,8 +1071,9 @@ function runningLaunch(argv: string[]): RunningCodexLaunch {
     else if ((arg === "-c" || arg === "--config") && argv[index + 1] !== undefined) configs.push(argv[++index]!);
     else if (arg.startsWith("--config=")) configs.push(arg.slice("--config=".length));
   }
+  const permissionsConfig = configs.find((entry) => entry.startsWith("permissions="));
   return { networkOverride: configs.includes(CODEX_NETWORK_DEFAULT_OVERRIDE), daemonOptOut: argv.includes("--no-daemon"),
-    nonLoginShell: configs.includes(CODEX_NON_LOGIN_SHELL_OVERRIDE), addDirs };
+    nonLoginShell: configs.includes(CODEX_NON_LOGIN_SHELL_OVERRIDE), addDirs, ...(permissionsConfig !== undefined ? { permissionsConfig } : {}) };
 }
 
 /** The settings a Codex command line runs with. cwd, add-dirs, images and the resume target are not settings. */

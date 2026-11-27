@@ -1,5 +1,5 @@
 import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
-import { codexMemberLaunch, observeCodexEnvelope, readProfileFingerprint, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
+import { codexFilesystemOverrides, codexMemberLaunch, observeCodexEnvelope, readProfileFingerprint, withSeatGitDirs, type CodexMemberPermissions, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
 import { codexPolicyWarning, resolveCodexFilesystemHome, verifyCodexFilesystemPolicy, type CodexFilesystemDecision, type CodexFilesystemVerifier } from "../domain/codex-filesystem-preflight.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
@@ -95,6 +95,8 @@ type CodexProcess = NativeProcessRow;
  *  reader, the --no-daemon support probe) or by preparing directories (add-dirs). A relaunch that must keep the
  *  running Codex's effective settings takes these from its argv instead. */
 export interface RunningCodexLaunch {
+  /** Its `permissions=` config override, when it runs a filesystem envelope. */
+  permissionsConfig?: string;
   networkOverride: boolean;
   daemonOptOut: boolean;
   /** Whether it was launched with tool commands in a non-login shell (`allow_login_shell=false`). */
@@ -940,10 +942,22 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return decision.verified ? { ok: true } : { ok: true, warnings: [codexPolicyWarning(decision.reason)] };
   }
 
+  /** The seat's codex_permissions as its launch emits them: a filesystem envelope that lets the seat write its working
+   *  folder also names its git dirs as writable (withSeatGitDirs), from the resolver plain launches use. A running Codex
+   *  keeps the rules it runs with, as a plain launch's add-dirs carry over: one launched before those rules existed
+   *  restarts in place with the authored envelope. */
+  private async seatPermissions(binding: NodeBinding, running?: RunningCodexLaunch): Promise<CodexMemberPermissions | undefined> {
+    const authored = binding.codexPermissions;
+    if (!authored || !("filesystem" in authored)) return authored;
+    if (running?.permissionsConfig !== undefined && running.permissionsConfig === codexFilesystemOverrides(authored)[1]) return authored;
+    return withSeatGitDirs(authored, await this.resolveGitAddDirs(binding.cwd), binding.cwd);
+  }
+
   private async checkFilesystemPolicy(binding: NodeBinding): Promise<CodexFilesystemDecision | undefined> {
-    if (!binding.codexPermissions || !("filesystem" in binding.codexPermissions)) return undefined;
+    const permissions = await this.seatPermissions(binding);
+    if (!permissions || !("filesystem" in permissions)) return undefined;
     try {
-      return await this.verifyFilesystemPolicy({ permissions: binding.codexPermissions, cwd: binding.cwd,
+      return await this.verifyFilesystemPolicy({ permissions, cwd: binding.cwd,
         codexHome: this.homeFor(binding), launchPath: this.launchPath, launchWrapper: binding.launchWrapper,
         codexConfigProfile: binding.codexConfigProfile?.trim() || undefined });
     } catch {
@@ -1166,9 +1180,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
     const profile = binding.codexConfigProfile?.trim();
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
-    const filesystemPermissions = binding.codexPermissions && "filesystem" in binding.codexPermissions ? binding.codexPermissions : undefined;
+    const codexPermissions = await this.seatPermissions(binding, running);
+    const filesystemPermissions = codexPermissions && "filesystem" in codexPermissions ? codexPermissions : undefined;
     // An authored filesystem policy always wins over a stale observed legacy envelope. Legacy rebuilds keep their carry behavior.
-    const memberChoice = binding.codexPermissions && (!binding.codexRebuildPermissions || filesystemPermissions) ? codexMemberLaunch(binding.codexPermissions) : undefined;
+    const memberChoice = codexPermissions && (!binding.codexRebuildPermissions || filesystemPermissions) ? codexMemberLaunch(codexPermissions) : undefined;
     const envelope = memberChoice ? undefined : binding.codexRebuildPermissions;
     const posture = memberChoice ? profileArg + memberChoice.args : envelope
       ? profileArg + codexEnvelopeArgs(envelope)

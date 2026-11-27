@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { open } from "node:fs/promises";
+import { homedir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import type { CodexPermissionEnvelope } from "./codex-rebuild-permissions.js";
 import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
@@ -113,6 +114,38 @@ export function codexFilesystemOverrides(permissions: CodexFilesystemPermissions
   const entries = Object.entries(permissions.filesystem).map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(",");
   return [`default_permissions=${JSON.stringify(CODEX_SEAT_PERMISSION_PROFILE)}`,
     `permissions={${JSON.stringify(CODEX_SEAT_PERMISSION_PROFILE)}={filesystem={${entries}},network={enabled=${permissions.network_access === true}}}}`];
+}
+
+/** The access an envelope's flat rules give `target`: its closest authored root's, or undefined when no rule covers it or
+ *  the closest ones disagree. Native selectors with no fixed root here (:minimal, :tmpdir, :slash_tmp, patterns) don't
+ *  count, so they never make it "write". */
+function flatAccessAt(filesystem: CodexFilesystemPermissions["filesystem"], target: string, cwd: string, home: string): CodexFilesystemAccess | undefined {
+  const within = (path: string, root: string) => path === root || path.startsWith(root === sep ? sep : root + sep);
+  const rules: Array<{ root: string; access: CodexFilesystemAccess }> = [];
+  for (const [key, access] of Object.entries(filesystem)) {
+    const anchor = key === ":root" ? sep : key === ":workspace_roots" || key === ":project_roots" ? cwd
+      : key.startsWith("~/") ? join(home, key.slice(2)) : isAbsolute(key) ? key : undefined;
+    if (anchor === undefined || /[?*\[\]{}]/.test(key)) continue;
+    const root = resolve(anchor);
+    if (within(resolve(target), root)) rules.push({ root, access });
+  }
+  rules.sort((a, b) => b.root.length - a.root.length);
+  const closest = rules[0];
+  return closest && !rules.some((rule) => rule.root === closest.root && rule.access !== closest.access) ? closest.access : undefined;
+}
+
+/** #2000 for a filesystem envelope. A plain workspace-write launch gives the seat its git metadata dirs as writable roots,
+ *  so it can commit; under a permissions profile Codex keeps `.git` read-only inside a writable root unless the profile
+ *  names an explicit write rule for it. So an envelope that lets the seat write its working folder gets a write rule for
+ *  each of those dirs (the same ones, from the same resolver). One that doesn't, a read-only one, or a dir the envelope
+ *  already names keeps what was authored. */
+export function withSeatGitDirs(permissions: CodexMemberPermissions, gitDirs: readonly string[], cwd: string,
+  home = homedir()): CodexMemberPermissions {
+  if (!("filesystem" in permissions) || gitDirs.length === 0) return permissions;
+  if (flatAccessAt(permissions.filesystem, cwd, cwd, home) !== "write") return permissions;
+  const added = gitDirs.filter((dir) => !Object.hasOwn(permissions.filesystem, dir));
+  if (added.length === 0) return permissions;
+  return { ...permissions, filesystem: { ...permissions.filesystem, ...Object.fromEntries(added.map((dir) => [dir, "write" as const])) } };
 }
 
 /** The same authored choice reaches launch, both resumes and the status plan. This reports argv, not enforcement. */

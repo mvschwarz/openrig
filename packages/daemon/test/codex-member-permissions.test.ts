@@ -19,7 +19,7 @@ import nodePath from "node:path";
 import { execFileSync } from "node:child_process";
 import { codexEnvelopeArgs } from "../src/domain/codex-rebuild-permissions.js";
 import { clearCodexMemberPermissions, codexMemberEnvelope, codexRigReach, codexRigReachWarning, readCodexMemberPermissions, readProfileFingerprint,
-  validateCodexMemberPermissions, type CodexMemberPermissions, type CodexProfileObservation, type CodexRigReachGap } from "../src/domain/codex-member-permissions.js";
+  validateCodexMemberPermissions, withSeatGitDirs, type CodexMemberPermissions, type CodexProfileObservation, type CodexRigReachGap } from "../src/domain/codex-member-permissions.js";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import { seatRoutes } from "../src/routes/seat.js";
 import { createTestApp } from "./helpers/test-app.js";
@@ -595,3 +595,29 @@ describe("the setter's profile hash is bounded evidence, never a blocker", () =>
 function fixtureLess(f: ReturnType<typeof fixture>): SeatLifecycleService {
   return new SeatLifecycleService({ db: f.db, rigRepo: f.rigRepo, sessionRegistry: new SessionRegistry(f.db), eventBus: f.eventBus, tmuxAdapter: {} as TmuxAdapter });
 }
+
+describe("withSeatGitDirs: a filesystem envelope's git dirs, as a plain launch's add-dirs (#2000)", () => {
+  const envelope = (filesystem: Record<string, "read" | "write" | "deny">) => ({ approval: "never" as const, filesystem, network_access: false });
+  const dirs = ["/repo/.git", "/common/repo.git"];
+
+  it("adds a write rule for each git dir when the envelope lets the seat write its folder", () => {
+    for (const rules of [{ ":workspace_roots": "write" as const }, { ":project_roots": "write" as const }, { "/repo": "write" as const },
+      { "/": "write" as const }, { "~/work": "write" as const }]) {
+      const cwd = Object.hasOwn(rules, "~/work") ? "/home/me/work/repo" : "/repo";
+      const out = withSeatGitDirs(envelope(rules), dirs, cwd, "/home/me");
+      expect(out).toEqual(envelope({ ...rules, "/repo/.git": "write", "/common/repo.git": "write" }));
+    }
+  });
+
+  it("leaves a read-only, denied or unrelated envelope, a legacy envelope and an authored git-dir rule as they were", () => {
+    for (const rules of [{ ":workspace_roots": "read" as const }, { "/": "write" as const, "/repo": "deny" as const }, { "/elsewhere": "write" as const },
+      { ":minimal": "read" as const }, { "/repo": "write" as const, "/repo/.git": "read" as const, "/common/repo.git": "deny" as const }]) {
+      const authored = envelope(rules);
+      expect(withSeatGitDirs(authored, dirs, "/repo", "/home/me")).toBe(authored);
+    }
+    const legacy = { sandbox: "workspace-write" as const, approval: "never" as const, network_access: true };
+    expect(withSeatGitDirs(legacy as never, dirs, "/repo")).toBe(legacy);
+    const partial = withSeatGitDirs(envelope({ "/repo": "write", "/repo/.git": "read" }), dirs, "/repo", "/home/me");
+    expect(partial).toEqual(envelope({ "/repo": "write", "/repo/.git": "read", "/common/repo.git": "write" }));
+  });
+});
