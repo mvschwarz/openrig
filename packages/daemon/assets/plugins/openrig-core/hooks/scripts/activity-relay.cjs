@@ -89,6 +89,41 @@ function promptBoundaryFields(hookEvent, providerPayload) {
   };
 }
 
+/** JSON with every object's keys sorted, so the same value reads the same however a harness ordered its keys. */
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+/** One Claude tool call's fingerprint: its conversation, its actor (the main session or a subagent), its tool and its exact
+ *  input, hashed. Claude's PermissionRequest carries no tool-call id, so this is how a permission ask and the tool call that
+ *  later completes are matched: by content, within one conversation. The permission-answer hook computes the same value for
+ *  its ask. Only the hash leaves this process. */
+function claudeToolCallFingerprint(sessionId, agentId, toolName, toolInput) {
+  if (typeof sessionId !== "string" || !sessionId || typeof toolName !== "string" || !toolName) return null;
+  const key = `${sessionId}\0${typeof agentId === "string" && agentId ? agentId : "main"}\0${toolName}\0${canonicalJson(toolInput)}`;
+  return crypto.createHash("sha256").update(key, "utf8").digest("hex").slice(0, 32);
+}
+
+// A Claude PostToolBatch: the fingerprint of each tool call in the batch (at most 64), so the daemon can tell a waiting
+// permission ask that its tool call completed (answered in the seat's terminal). No tool input or result leaves the relay.
+function toolCallFingerprintFields(runtime, hookEvent, providerPayload) {
+  if (runtime !== "claude-code" || hookEvent !== "PostToolBatch" || !Array.isArray(providerPayload.tool_calls)) return {};
+  try {
+    const sessionId = firstString(providerPayload.session_id);
+    const agentId = firstString(providerPayload.agent_id);
+    const fingerprints = providerPayload.tool_calls.slice(0, 64)
+      .map((call) => call && typeof call === "object" ? claudeToolCallFingerprint(sessionId, agentId, call.tool_name, call.tool_input) : null)
+      .filter(Boolean);
+    return fingerprints.length ? { toolCallFingerprints: fingerprints } : {};
+  } catch {
+    return {};
+  }
+}
+
 // The route this run reports by, so the daemon can count one event once per route: "plugin" for the plugin's hook
 // (started with --from-plugin), "managed" for the settings or managed hook copy.
 function buildOpenRigPayload(providerPayload, env = process.env, now = () => new Date(), argv = process.argv) {
@@ -163,6 +198,7 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
       ? { hookAgentId: firstString(providerPayload.agent_id) } : {}),
     turnId: firstString(providerPayload.turn_id, providerPayload.turnId),
     ...promptBoundaryFields(hookEvent, providerPayload),
+    ...toolCallFingerprintFields(runtime, hookEvent, providerPayload),
     occurredAt: now().toISOString(),
     relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed",
     ...limitResetField(runtime, hookEvent, subtype, providerPayload, now),
@@ -559,6 +595,7 @@ if (require.main === module) {
 module.exports = {
   buildOpenRigPayload,
   claudeLimitResetAt,
+  claudeToolCallFingerprint,
   claimFirstLaunchHook,
   buildSessionIdentityPayload,
   parseJson,

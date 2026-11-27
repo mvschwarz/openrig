@@ -10,3 +10,10 @@ export function readWithCurrentParkBoundary<T>(read: (boundary: string) => T): T
     return read("");
   }
 }
+import type Database from "better-sqlite3";
+
+export function localQueueWakeSource(db: Database.Database): string {
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transfer_transition_origins'").get()
+    ? "(SELECT * FROM queue_transition_wakes WHERE transition_id NOT IN (SELECT transition_id FROM queue_transfer_transition_origins))"
+    : "queue_transition_wakes";
+}

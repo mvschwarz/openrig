@@ -32,8 +32,9 @@ export interface ViewerRecord {
   /** Local seats run the view's own tile for the seat (openrig-tile); remote seats run their own ssh command. */
   attach: "local" | "remote";
   terminal: string | null;
-  /** planned: journalled, not confirmed started; start-unknown: hc run outcome unknown; live: its terminal is known; ended: written as an ended cell. */
-  state: "planned" | "start-unknown" | "live" | "ended";
+  /** planned: journalled, not confirmed started; start-unknown: hc run outcome unknown; live: its terminal is known; ended: written as an ended cell;
+   *  replaced (core placement): herdr-core brought its terminal back as a plain shell, left running and never ended. */
+  state: "planned" | "start-unknown" | "live" | "ended" | "replaced";
 }
 
 export interface ViewRecord {
@@ -42,6 +43,8 @@ export interface ViewRecord {
   /** The OpenRig view argument and page this was opened for. */
   source: { view: string; page: number };
   createdAt: string;
+  /** core: placed in herdr-core for a window on another machine, in no layout file. Absent: a view in the Rig layout. */
+  placement?: "core";
   columns?: number;
   viewers: ViewerRecord[];
 }
@@ -55,6 +58,8 @@ export interface PendingEnd {
   argv: string[];
   revision: string;
   since: string;
+  /** core: from a core-placed view, so no layout revision has to be acknowledged before it ends. */
+  placement?: "core";
 }
 
 export interface ClientState {

@@ -1,4 +1,5 @@
 import { parse as parseYaml } from "yaml";
+import { isClaudeJsonFragmentType } from "./types.js";
 import type {
   AgentSpec, ImportSpec, StartupBlock, StartupFile, StartupAction,
   LifecycleDefaults, AgentResources, ProfileSpec,
@@ -301,6 +302,11 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
               if (!entries[i]!["type"] || typeof entries[i]!["type"] !== "string") {
                 errors.push(`resources.runtime_resources[${i}].type: required non-empty string`);
               }
+              const onRestore = entries[i]!["on_restore"];
+              if (onRestore !== undefined && onRestore !== "keep_saved"
+                  && (onRestore !== "follow_source" || entries[i]!["runtime"] !== "claude-code" || !isClaudeJsonFragmentType(entries[i]!["type"]))) {
+                advisories.push(`resources.runtime_resources[${i}].on_restore: follow_source is supported for Claude MCP and settings fragments; using "keep_saved"`);
+              }
             }
           }
         }
@@ -494,6 +500,8 @@ function normalizeResources(raw: unknown): AgentResources {
       ? (obj["runtime_resources"] as Record<string, unknown>[]).map((r) => ({
           id: r["id"] as string, path: r["path"] as string,
           runtime: r["runtime"] as string, type: r["type"] as string,
+          ...(r["on_restore"] === "follow_source" && r["runtime"] === "claude-code" && isClaudeJsonFragmentType(r["type"])
+            ? { onRestore: "follow_source" as const } : {}),
         }))
       : [],
   };

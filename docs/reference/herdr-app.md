@@ -6,9 +6,10 @@ full grid. Rig views live in OpenRig's own herdr-app layout, **Rig** (`layouts/r
 above them switches between **Your tabs** and each view.
 
 Nothing here needs a desktop display or SSH: the view opens in the herdr-app window the request came from.
-herdr-app has to run on the same machine as the OpenRig daemon: OpenRig reaches it through its control socket
-(`<app home>/herdr-app.sock`) and writes its mods and layout into that app home. An app on another machine, connected
-to this machine's herdr-core over SSH, isn't supported.
+A Rig view needs herdr-app on the same machine as the OpenRig daemon: OpenRig reaches it through its control socket
+(`<app home>/herdr-app.sock`) and writes its mods and layout into that app home. When no window runs on the daemon's
+machine, a view can be placed in that machine's herdr-core instead, for a herdr-app on another machine connected to it
+([below](#a-herdr-app-on-another-machine)).
 
 ## Set up
 
@@ -123,6 +124,45 @@ pending ends. If `hc events` can't run (herdr-core missing or down), the watcher
 twice as long each time, up to 5 minutes. Stopping the daemon ends only its own `hc events` watcher and timers; viewers
 and views stay.
 
+## A herdr-app on another machine
+
+When the daemon runs on a machine with no herdr-app window (nothing at the app home's socket) and its herdr-core
+answers, `rig terminal open <view> --provider herdr-app` places the view in that herdr-core instead. Any herdr-app
+connected to that machine shows it. The TUI does the same when it runs in a herdr-core terminal with no window on its
+machine, and so does a shared TUI viewed from such a terminal (on Linux, where it can read the viewing terminal's
+markers): its preview says "Opens in this machine's herdr-core (<host>)".
+
+- **One space per view, one tab per seat.** Each viewer starts with herdr's own labels, `herdr.space=openrig-<view id>`
+  and `herdr.tab=openrig-<cell>`, which a connected herdr-app adopts. Each tab shows its seat's label (herdr names an
+  unnamed tab after its program, and a viewer's command leads with the seat's label), and herdr orders the tabs. herdr
+  names the space after the folder the viewers start in, `$OPENRIG_HOME/private/herdr-app/spaces/<view name>-<view id>`,
+  where a rig's view is named after the rig (when that folder is inside a git checkout, herdr-app 0.1.18 keeps the
+  folder's name and shows the repo's beside it). Names are only for display: OpenRig identifies its viewers by their
+  `openrig.*` labels and exact command.
+- **Nothing is written to an app home:** no mods, no `rig.json`. These views never appear in the Rig layout.
+- **Input:** an interactive cell takes input as soon as its viewer runs, as a cell for a seat on another host does. A
+  read-only cell only shows. The headless-size rule under [the keyboard](#the-keyboard) still applies.
+- **The result says placed, not seen.** `ok` and `opened` mean the viewers started. `placement` is
+  `{ mode: "core", visibility: "unconfirmed", core, viewId, host }`, and the CLI prints "Placed in herdr-core on <host>
+  as view <id>. Any herdr-app connected to <host> shows it; OpenRig can't see that window."
+- **Status:** `rig terminal status --provider herdr-app` reports `available: true` with `placement: "core"` and `host`.
+  That means a view can be placed in this core, not that a window is here. A plain `rig terminal open <view>` in a
+  herdr-app terminal whose window doesn't answer still opens a desktop window.
+- **Close:** `rig terminal close <rv-id>` ends the view's verified viewers straight away, with no window to wait for.
+  A connected herdr-app removes the tabs of the viewers OpenRig ended when it next refreshes; tabs left running stay,
+  and OpenRig can't see that window. Closing a tab in herdr-app ends its viewer, and OpenRig records that.
+
+Limits:
+- Nothing on the daemon's machine can see the window, so OpenRig never reports a view as seen.
+- herdr's labels give each seat a tab, with no split direction, sizes or order of OpenRig's choosing.
+- Once a window adopts a viewer, herdr-core keeps it. If herdr-core then loses the viewer's program (a core restart, a
+  reboot, or a signal other than `hc kill`, such as an out-of-memory kill), it brings the terminal back as a plain
+  shell in the same tab. The daemon logs that as soon as it notices, or at its next start if it was down ("<seat>:
+  viewer <t> came back as a plain shell after herdr-core lost its program …"), leaves the shell running and never types
+  into it. Close its tab.
+- Before any window has adopted a view, keep isn't on, so a reboot then doesn't bring its viewers back.
+- A window that is there but doesn't answer isn't placed past: the open fails, as before.
+
 ## Which herdr-core
 
 ```sh
@@ -136,7 +176,8 @@ terminals, or none, in the view's cells. Open failures (`herdr_app_unavailable`,
 when a window has not acknowledged a write also name the daemon's core (`HC_SESSION`/`HC_SOCKET`) so a mismatch is
 visible straight away.
 
-A status or a preview only reads: it starts no herdr-core process and creates nothing. OpenRig watches herdr-core's
+A status or a preview only reads: it starts no herdr-core process and creates nothing. With no window here, it lists
+this daemon's own terminals (`hc ls`) to see whether a view could be placed in the core. OpenRig watches herdr-core's
 events (`hc events`) and creates its viewers folder only when it opens or closes a view, or when it starts with views
 already recorded.
 

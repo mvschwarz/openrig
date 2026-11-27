@@ -26,6 +26,8 @@ export const QUEUE_TRANSFER_COLUMNS = {
     "content_erased_at", "return_route", "return_route_basis",
     // 186: relay journal for the asking-seat's answer history
     "relayed_answers",
+    // 196: the shared roots the evidence_ref's writer may read, which limit what the Slack connector attaches from it
+    "evidence_ref_roots",
   ],
   // 025:17–24, 067:15, 140:15, 076:11–12. Archive base and archived_at 054:38–46; additions 082:7, 140:16, 076:13–14.
   queue_transitions: ["transition_id", "qitem_id", "ts", "state", "transition_note", "actor_session", "closure_reason",
@@ -117,7 +119,7 @@ export function readQueueTransfer(db: Database.Database, selection: QueueExportS
       const scrubbed = item.content_erased_at !== null;
       if (scrubbed) {
         item.body = "";
-        for (const key of ["summary", "resolution", "tags", "blocked_on", "chain_of_record", "evidence_ref", "human_detail",
+        for (const key of ["summary", "resolution", "tags", "blocked_on", "chain_of_record", "evidence_ref", "evidence_ref_roots", "human_detail",
           "human_questions", "human_answers", "delegated_decision", "last_nudge_input_box"]) item[key] = null;
         scrubClosureTarget(item);
       }

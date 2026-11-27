@@ -13,3 +13,9 @@ export function claudeResumeLaunchEnv(token: string): Record<string, string> {
 export function claudeResumeLaunchPrefix(token: string): string {
   return `${CLAUDE_RESUME_LAUNCH_ENV}=${shellQuote(token)} `;
 }
+
+/** A launch's own variables as command-scoped assignments, as above: they reach the Claude process and never the pane
+ *  shell. Empty for none. */
+export function commandEnvPrefix(env: Readonly<Record<string, string>>): string {
+  return Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)} `).join("");
+}

@@ -455,7 +455,7 @@ export class SeatRuntimeSwitchService {
     let stagedLimits: import("../adapters/tmux.js").SeatProcessLimitsNotice | undefined;
     const abandon = async (why: string): Promise<RuntimeSwitchRefusal> => {
       if (activityGrantId) new ActivityGrantStore(db).revoke({ grantId: activityGrantId }, "cutover_abandoned");
-      const retired = await this.retireStaging(row.staging_session, node.id, "Uncommitted successor");
+      const retired = await this.retireStaging(row.staging_session, node.id, "Uncommitted successor", target);
       db.prepare(`UPDATE seat_runtime_switches SET phase = 'abandoned', outcome = ?, attention = ?, updated_at = ? WHERE id = ? AND committed_at IS NULL`)
         .run(why, retired.ok ? null : `The staged successor couldn't be retired: ${retired.message}`, stamp(), id);
       tmux.finishLaunchBinding(row.staging_session);
@@ -665,7 +665,7 @@ export class SeatRuntimeSwitchService {
       if (isCommunityHarnessRuntime(target)) {
         const found = loadCommunityHarnessPreset(target);
         sessionRegistry.recordCommunityHarnessSelection(successor.id, target,
-          found.ok ? (found.preset.protocol === "pi-rpc" ? "pi-rpc" : found.preset.runner) : undefined);
+          found.ok ? (found.preset.protocol === "pi-rpc" ? "pi-rpc" : found.preset.runner) : undefined, found.ok ? found.preset.activityHooks : undefined);
       }
       // The successor was launched in the seat's saved folder (stageSuccessor's node.cwd).
       sessionRegistry.recordLaunchedCwd(successor.id, node.cwd);
@@ -739,7 +739,7 @@ export class SeatRuntimeSwitchService {
   private async finishCommitted(row: Pick<SwitchRow, "id" | "node_id" | "canonical_session" | "staging_session" | "to_runtime" | "from_runtime" | "successor_generation">): Promise<{ ok: true } | { ok: false; message: string }> {
     const { db, tmuxAdapter: tmux } = this.deps;
     const problems: string[] = [];
-    const retired = await this.retireStaging(row.staging_session, row.node_id, "Predecessor");
+    const retired = await this.retireStaging(row.staging_session, row.node_id, "Predecessor", row.from_runtime);
     if (!retired.ok) problems.push(`the ${row.from_runtime} predecessor couldn't be retired (${retired.message})`);
     const env = await tmux.setRuntimeSwitchEnvironment(row.canonical_session, row.to_runtime, row.successor_generation);
     if (!env.ok) problems.push(`the seat's session environment couldn't be updated (${env.message})`);
@@ -764,13 +764,14 @@ export class SeatRuntimeSwitchService {
   }
 
   /** Terminate and remove a staging session this switch created (holding either the uncommitted successor or, after the
-   *  exchange, the predecessor). Requires the seat's lifecycle lease and the staging session's custody. */
-  private async retireStaging(stagingSession: string, _nodeId: string, label: string): Promise<{ ok: true } | { ok: false; message: string }> {
+   *  exchange, the predecessor). Requires the seat's lifecycle lease and the staging session's custody. `runtime` is its
+   *  occupant's, so a Claude Code or Codex occupant exits through its own shutdown first (#3901). */
+  private async retireStaging(stagingSession: string, _nodeId: string, label: string, runtime: string): Promise<{ ok: true } | { ok: false; message: string }> {
     const tmux = this.deps.tmuxAdapter;
     const probe = await tmux.probeSession(stagingSession).catch(() => ({ state: "unknown" as const }));
     if (probe.state === "absent") return { ok: true };
     if (probe.state !== "present") return { ok: false, message: "the staging session's presence couldn't be established" };
-    const terminated = await terminatePaneInPlace(tmux, stagingSession, { pollMs: 100, timeoutMs: 3000, sleep: this.sleep }, label);
+    const terminated = await terminatePaneInPlace(tmux, stagingSession, { pollMs: 100, timeoutMs: 3000, sleep: this.sleep }, label, stagingSession, { runtime });
     if (!terminated.ok) return { ok: false, message: terminated.message };
     const removed = await tmux.killSession(stagingSession);
     if (!removed.ok && removed.code !== "session_not_found") return { ok: false, message: removed.message };
@@ -847,7 +848,7 @@ export class SeatRuntimeSwitchService {
         // The predecessor's pane is current, but the successor is still in another of the seat's windows: it keeps its hold.
         return stuck(`The staged successor's pane (${row.successor_pane}) is still in another window of the seat's session; nothing was touched.`);
       }
-      const retired = await this.retireStaging(row.staging_session, nodeId, "Uncommitted successor");
+      const retired = await this.retireStaging(row.staging_session, nodeId, "Uncommitted successor", row.to_runtime);
       if (!retired.ok) return stuck(`The staged successor couldn't be retired: ${retired.message}`);
       tmux.finishLaunchBinding(row.staging_session);
       // An abandoned switch keeps why it stopped; recovery only settles the successor it couldn't retire then.

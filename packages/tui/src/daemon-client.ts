@@ -11,6 +11,10 @@ export const USAGE_HOSTS_VIEW_WAIT_MS = 20_000;
 /** The fleet Projects view: the daemon answers within its own 10 s view deadline
  *  whatever the registry's size, plus its 5 s read and the transfer. */
 export const FLEET_SCOPES_VIEW_WAIT_MS = 20_000;
+/** Topology's own reads (rigs, seats, hosts and the daemon's identity). A daemon busy with one long request answers
+ *  every other request after it, so these wait as long as the slower views above: a late answer shows as pending,
+ *  never as a failed Topology. Other reads keep 5 s. */
+export const TOPOLOGY_READ_WAIT_MS = 20_000;
 
 export interface DaemonClientOptions {
   baseUrl?: string;
@@ -57,6 +61,8 @@ export interface TerminalOpenResult {
   code?: string;
   notes?: string[];
   reusedWorkspace?: { id: string; tabId: string; view: string };
+  /** herdr-app placed the view in the daemon machine's herdr-core for a window elsewhere: started, never seen. */
+  placement?: { mode: "core"; visibility: "unconfirmed"; viewId: string; host: string };
 }
 
 export interface LaunchNodeResult {
@@ -132,8 +138,8 @@ export class DaemonClient {
     }
   }
 
-  private async get(route: string, fetchImpl = this.fetchImpl): Promise<unknown> {
-    const res = await fetchImpl(`${this.baseUrl}${route}`, { headers: this.headers, signal: AbortSignal.timeout(5_000) });
+  private async get(route: string, fetchImpl = this.fetchImpl, waitMs = 5_000): Promise<unknown> {
+    const res = await fetchImpl(`${this.baseUrl}${route}`, { headers: this.headers, signal: AbortSignal.timeout(waitMs) });
     if (!res.ok) {
       const parsed = await res.json().catch(() => null);
       const detail = parsed && typeof parsed === "object" && "error" in parsed ? ` — ${(parsed as { error: unknown }).error}` : "";
@@ -206,7 +212,7 @@ export class DaemonClient {
   }
 
   health() {
-    return this.get("/healthz");
+    return this.get("/healthz", this.fetchImpl, TOPOLOGY_READ_WAIT_MS);
   }
 
   /** Slice 01 — the provider read model, as `rig provider status --json` prints it. GET only: the daemon answers it
@@ -297,23 +303,23 @@ export class DaemonClient {
 
   // --- Topology (§4.A rows 1–3) ---
   rigGraph(rigId: string) {
-    return this.get(`/api/rigs/${encodeURIComponent(rigId)}/graph`);
+    return this.get(`/api/rigs/${encodeURIComponent(rigId)}/graph`, this.fetchImpl, TOPOLOGY_READ_WAIT_MS);
   }
   ps() {
-    return this.get(`/api/ps`);
+    return this.get(`/api/ps`, this.fetchImpl, TOPOLOGY_READ_WAIT_MS);
   }
   /** With `host`, the rigs of that registered host, read through this daemon (its read-only `?host=` forwarding). */
   rigsSummary(host?: string) {
-    return this.get(host ? `/api/rigs/summary?host=${encodeURIComponent(host)}` : `/api/rigs/summary`);
+    return this.get(host ? `/api/rigs/summary?host=${encodeURIComponent(host)}` : `/api/rigs/summary`, this.fetchImpl, TOPOLOGY_READ_WAIT_MS);
   }
   /** The registered hosts (`rig host list`), each with a quick reachability probe. */
   hosts() {
-    return this.get(`/api/hosts`);
+    return this.get(`/api/hosts`, this.fetchImpl, TOPOLOGY_READ_WAIT_MS);
   }
   /** A rig's node inventory. With `host`, the same route read through this daemon's `?host=` forwarding for a
    *  registered http-transport host (the read-only allowlist covers /api/rigs/:rigId/nodes). */
   rigNodes(rigId: string, host?: string) {
-    return this.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes${host ? `?host=${encodeURIComponent(host)}` : ""}`);
+    return this.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes${host ? `?host=${encodeURIComponent(host)}` : ""}`, this.fetchImpl, TOPOLOGY_READ_WAIT_MS);
   }
   /** The existing per-seat effort report: requested, saved, emitted and observed.
    * A refusal is an answer, so the page reader doesn't count it as a failed read. */

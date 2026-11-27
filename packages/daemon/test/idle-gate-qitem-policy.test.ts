@@ -106,6 +106,14 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
 
   afterEach(() => db.close());
 
+  it("does not wake an idle seat for a transferred gate row", async () => {
+    seedGateQitem("transferred-gate");
+    setOracleState("idle-at-prompt");
+    const policy = makeIdleGateQitemPolicy({ db, seatActivity, isFenced: id => id === "transferred-gate" });
+
+    expect(await policy.evaluate(makeJob())).toMatchObject({ action: "skip", reason: "no_pending_gate" });
+  });
+
   it("uses the arbitrated oracle when raw hook activity disagrees", async () => {
     seedGateQitem("q-opposed-activity");
     const rawStore = new AgentActivityStore({ db, eventBus, now: () => NOW });

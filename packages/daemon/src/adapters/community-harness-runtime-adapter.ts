@@ -96,10 +96,30 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     };
   }
 
+  /** What a launch refuses before it starts anything, checked before a handover ends the predecessor: a contained harness
+   *  given a launch wrapper, or without its environment operations; a preset that doesn't load; a launch wrapper this seat
+   *  can't apply. Whether the harness's own command starts, signs in or gets ready is known only by launching it. */
+  async preflightLaunch(binding: NodeBinding): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (this.contained()) return binding.launchWrapper?.length ? { ok: false, error: WRAPPER_UNAVAILABLE } : { ok: true };
+    const found = loadCommunityHarnessPreset(this.runtime, this.deps.presetsDir?.() ?? communityHarnessesDir());
+    if (!found.ok) return { ok: false, error: found.message };
+    const wrapper = this.resolveWrapper(binding, found.preset);
+    return wrapper.ok ? { ok: true } : wrapper;
+  }
+
+  /** The seat's launch wrapper as this preset applies it, or the refusal a launch makes before starting anything. */
+  private resolveWrapper(binding: NodeBinding, preset: CommunityHarnessPreset): { ok: true; resolved?: string[] } | { ok: false; error: string } {
+    if (!binding.launchWrapper?.length) return { ok: true };
+    if (!this.deps.seatLaunchEnvironment) return { ok: false, error: WRAPPER_UNAVAILABLE };
+    if (preset.runner && !preset.launchWrapper) return { ok: false, error: unsupportedCommunityRunnerLaunchWrapperMessage(this.runtime) };
+    try { return { ok: true, resolved: this.deps.seatLaunchEnvironment.resolveLaunchWrapper(binding.launchWrapper) }; }
+    catch { return { ok: false, error: WRAPPER_UNAVAILABLE }; }
+  }
+
   async launchHarness(binding: NodeBinding, opts: { name: string; resumeToken?: string; resumeType?: string; forkSource?: ForkSource; firstInputText?: string; beforeNativeDispatch?: () => boolean }): Promise<HarnessLaunchResult> {
     const contained = this.contained();
     if (contained) {
-      if (binding.launchWrapper?.length) return { ok: false, error: "launch_wrapper unavailable; no agent started." };
+      if (binding.launchWrapper?.length) return { ok: false, error: WRAPPER_UNAVAILABLE };
       return contained.launch(binding, opts, this.deps.tmux);
     }
     if (opts.forkSource) {
@@ -121,20 +141,9 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
         : { ok: false, error: `Resume is unsupported: community harness "${this.runtime}" is launch-only. No session was started.` };
     }
     if (!found.ok) return { ok: false, error: found.message };
-    let resolvedWrapper: string[] | undefined;
-    if (binding.launchWrapper?.length) {
-      if (!this.deps.seatLaunchEnvironment) {
-        return { ok: false, error: "launch_wrapper unavailable; no agent started." };
-      }
-      if (found.preset.runner && !found.preset.launchWrapper) {
-        return { ok: false, error: unsupportedCommunityRunnerLaunchWrapperMessage(this.runtime) };
-      }
-      try {
-        resolvedWrapper = this.deps.seatLaunchEnvironment.resolveLaunchWrapper(binding.launchWrapper);
-      } catch {
-        return { ok: false, error: "launch_wrapper unavailable; no agent started." };
-      }
-    }
+    const wrapper = this.resolveWrapper(binding, found.preset);
+    if (!wrapper.ok) return wrapper;
+    const resolvedWrapper = wrapper.resolved;
     const session = binding.tmuxSession ?? opts.name;
     let firstInput: FirstInputPassed | undefined;
     try {
@@ -208,8 +217,11 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     try {
       let command: string;
       try {
+        // A handover's successor reuses the pane, whose tmux environment still names the predecessor's generation: the
+        // successor takes its own reserved one (a runner's grant names it), so its own hook posts count for it.
+        const generation = authority?.generation ?? binding.launchGeneration;
         command = this.deps.seatLaunchEnvironment
-          ? await this.deps.seatLaunchEnvironment.command(session, preset.command, { runtime: this.runtime, nodeId: binding.nodeId, launcherPrefix, ...(authority ? { generation: authority.generation } : {}),
+          ? await this.deps.seatLaunchEnvironment.command(session, preset.command, { runtime: this.runtime, nodeId: binding.nodeId, launcherPrefix, ...(generation ? { generation } : {}),
             ...(binding.launchWrapper?.length ? { failClosed: true, ...(!preset.runner ? { launchWrapper: binding.launchWrapper } : {}) } : {}) })
           : launcherPrefix + preset.command;
       } catch (error) {
@@ -279,6 +291,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     try {
       command = this.deps.seatLaunchEnvironment
         ? await this.deps.seatLaunchEnvironment.command(session, preset, { runtime: this.runtime, nodeId: binding.nodeId, launcherPrefix,
+          ...(binding.launchGeneration ? { generation: binding.launchGeneration } : {}),
           ...(binding.launchWrapper?.length ? { launchWrapper: binding.launchWrapper, failClosed: true } : {}) })
         : launcherPrefix + preset;
     } catch (error) {
@@ -318,6 +331,13 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     return found.ok && found.preset.runner;
   }
 
+  /** The events this launch's preset declares its own hook script posts (`activity_hooks`), recorded on the session with
+   *  the launch beside its runner declaration. It reads the declaration only: the adapter installs no hook or relay. */
+  activityEvents(): string[] {
+    const found = loadCommunityHarnessPreset(this.runtime, this.deps.presetsDir?.() ?? communityHarnessesDir());
+    return found.ok ? found.preset.activityHooks ?? [] : [];
+  }
+
   /** A process running isn't proof that the startup paste was submitted. */
   startupAssisted(): boolean {
     const found = loadCommunityHarnessPreset(this.runtime, this.deps.presetsDir?.() ?? communityHarnessesDir());
@@ -326,6 +346,21 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
 }
 
 const withdrawnBeforeInput = "The launch was withdrawn before community harness input";
+const WRAPPER_UNAVAILABLE = "launch_wrapper unavailable; no agent started.";
+
+/** What a launch records about the community harness it started: the harness, its runner declaration and the hooks its
+ *  preset declares its own script posts. */
+export interface LaunchedCommunityHarness { app: string; runner: boolean | "pi-rpc"; activityHooks?: string[] }
+
+/** The community harness a launch with this adapter is for, with its preset's runner and hook declarations read now: what
+ *  a launch records on its session (a start, a handover's successor), so a relaunch or restore resolves the same harness
+ *  and its activity follows the occupant as launched. Null for a built-in adapter. */
+export function launchedCommunityHarness(adapter: RuntimeAdapter): LaunchedCommunityHarness | null {
+  // A protocol: pi-rpc preset runs under OpenRig's hosted Pi-protocol runner, and its launch records that protocol.
+  if (adapter instanceof PiCommunityRuntimeAdapter) return { app: adapter.runtime, runner: "pi-rpc" };
+  if (adapter instanceof CommunityHarnessRuntimeAdapter) return { app: adapter.runtime, runner: adapter.runner(), activityHooks: adapter.activityEvents() };
+  return null;
+}
 
 /** #2940: the caller withdrew the launch while it was prepared (a grant, the seat's command): nothing was typed. */
 function withdrawn(runtime: string): HarnessLaunchResult {

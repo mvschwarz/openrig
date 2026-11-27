@@ -2,7 +2,8 @@
 export interface SeatActivityFields {
   agentActivity?: { state: string } | null;
   activityState?: { display: string; needsInput: { count: number } } | null;
-  communityHarness?: unknown;
+  /** Present on a community harness's seat; `activityHooks` when its own hooks decide its activity. */
+  communityHarness?: { activityHooks?: unknown } | null;
 }
 
 /** The activity word for a seat, shared by rig ps and the MCP team read. A seat the daemon knows nothing about is
@@ -13,9 +14,10 @@ export function formatSeatActivity(n: SeatActivityFields): string {
   const tax = n.activityState;
   if (tax) {
     if (tax.needsInput.count > 0) return `needs-input x${tax.needsInput.count}`;
-    // A community harness has no needs-input source in that state, so its zero isn't a clearance: a prompt the
-    // screen shows is kept.
-    if (n.communityHarness && n.agentActivity?.state === "needs_input") return "needs-input (screen)";
+    // A screen-only community harness has no needs-input source in that state, so its zero isn't a clearance: a prompt
+    // the screen shows is kept. A seat whose declared hooks decide its activity has one (its hooks and the screen's
+    // dialog, ordered against them), so its decision is rendered as served.
+    if (n.communityHarness && !n.communityHarness.activityHooks && n.agentActivity?.state === "needs_input") return "needs-input (screen)";
     return tax.display;
   }
   // Legacy fallback (a daemon without the S19 enrichment) — retires with the

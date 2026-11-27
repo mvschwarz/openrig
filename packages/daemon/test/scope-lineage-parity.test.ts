@@ -77,7 +77,9 @@ it("the shared derivation behaves identically through BOTH package-local modules
     "approved-spec-by: a@r\napproved-spec-at: t1\napproved-spec-priors: 0",
     'approved-spec-by: "q@r"\napproved-spec-at: t\napproved-spec-priors: not-a-number',
   ];
-  for (const fm of fixtures) {
+  const missingSigner = "approved-by: \napproved-at: t2\napproved-priors: 1";
+  expect(cli.attestationLineage(missingSigner)?.delivery).toEqual({ by: "?", at: "t2", priors: 1 });
+  for (const fm of [...fixtures, missingSigner]) {
     expect(daemon.attestationLineage(fm)).toEqual(cli.attestationLineage(fm));
   }
 });

@@ -333,12 +333,15 @@ rigsRoutes.get("/:id/graph", async (c) => {
     restoreOutcome: n.restoreOutcome,
     oriented: n.oriented,
     contextUsedPercentage: n.contextUsage?.usedPercentage ?? null,
+    contextConfiguredBudget: n.contextUsage?.configuredBudget ?? null,
     contextFresh: n.contextUsage?.fresh ?? false,
     contextAvailability: n.contextUsage?.availability ?? "unknown",
     contextTotalInputTokens: n.contextUsage?.totalInputTokens ?? null,
     contextTotalOutputTokens: n.contextUsage?.totalOutputTokens ?? null,
     needsAttention: n.needsAttention,
     agentActivity: n.agentActivity ?? null,
+    // The oracle's decision, as rig ps renders it: the graph's glyph reads it before the older agentActivity.
+    activityState: n.activityState ?? null,
     currentQitems: n.canonicalSessionName
       ? currentQitemsBySession.get(n.canonicalSessionName) ?? []
       : [],

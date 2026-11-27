@@ -12,6 +12,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
 import { SeatLifecycleService, claimedSessionRoutes } from "../src/domain/seat-lifecycle-service.js";
+import { sessionsEarlierHandoverOriginSchema } from "../src/db/migrations/200_sessions_earlier_handover_origin.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { Reconciler } from "../src/domain/reconciler.js";
@@ -629,10 +630,13 @@ describe("SeatLifecycleService", () => {
     expect(sessionRegistry.getBindingForNode(a.node.id)).not.toBeNull();
   });
 
-  // #2440 records a launched handover's successor as launched from 0.7.9; one handed over earlier keeps origin=claimed.
+  // #2440 records a launched handover's successor as launched from 0.7.9; one handed over earlier keeps origin=claimed
+  // until migration 200 records it as launched at upgrade. Its successor is registered in the handover's own commit.
   function recordHandover(nodeId: string, outcome: string | null) {
     db.prepare("UPDATE nodes SET continuity_outcome = ?, handover_result = 'complete', handover_at = ? WHERE id = ?")
       .run(outcome, "2026-11-01T10:00:00.000Z", nodeId);
+    db.prepare("UPDATE sessions SET created_at = '2026-11-01 10:00:00' WHERE node_id = ?").run(nodeId);
+    db.prepare("UPDATE occupant_tenures SET kind = 'handover', boot_at = '2026-11-01 10:00:00' WHERE node_id = ?").run(nodeId);
   }
 
   it.each(["fresh", "forked", "rebuilt"])("a seat handed over (%s) before 0.7.9 is refused as that case, never pointed at rig unclaim", async (outcome) => {
@@ -650,6 +654,22 @@ describe("SeatLifecycleService", () => {
       expect(result.guidance).not.toContain("rig unclaim");
     }
     expect(tmux.killed).toEqual([]);
+  });
+
+  it("after the upgrade (#4003), a seat handed over before 0.7.9 stops in one step, like any seat OpenRig launched", async () => {
+    const seat = seatFixture("s5-rig", "dev.handed", { origin: "claimed" });
+    recordHandover(seat.node.id, "fresh");
+    db.exec(sessionsEarlierHandoverOriginSchema.sql);
+    const result = await service.stopSeat({ seatRef: seat.sessionName, reason: "idle seat" });
+    expect(result).toMatchObject({ ok: true });
+    expect(tmux.killed).toEqual([seat.sessionName]);
+    // A session adopted after a launched handover is not its successor, and keeps the adopted routes.
+    const later = seatFixture("s5-rig", "dev.later", { origin: "claimed" });
+    db.prepare("UPDATE nodes SET continuity_outcome = 'fresh', handover_result = 'complete', handover_at = ? WHERE id = ?")
+      .run("2026-11-01T10:00:00.000Z", later.node.id);
+    db.exec(sessionsEarlierHandoverOriginSchema.sql);
+    expect(await service.stopSeat({ seatRef: later.sessionName, reason: "x" }))
+      .toMatchObject({ ok: false, code: "claimed_session", guidance: expect.stringContaining("rig unclaim") });
   });
 
   it("an adopted seat with no handover, or a discovered one, still points at rig unclaim", async () => {

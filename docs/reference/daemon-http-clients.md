@@ -52,12 +52,18 @@ in the case named:
 
 ## Bearer tokens
 
+`OPENRIG_AUTH_BEARER_TOKEN` is not a global authentication layer. Only routes that explicitly apply a bearer
+check require that check's configured token. Other routes can have their own requirements, including the
+[Browser access](browser-access.md) boundary and Core app credentials; absence from the list below does not
+mean a route has no checks.
+
 The daemon reads these two bearer-token settings from its environment at start:
 
 - **`OPENRIG_AUTH_BEARER_TOKEN`** checks Mission Control's write routes (`POST /api/mission-control/action` and
   `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`, `pair-decision`) and `GET /api/hosts/pair/<pairId>`, the `/api/rig-mode`
-  binding writes, the `/api/network` writes (`POST /bindings`, `POST /installations` and `POST /bindings/<id>/disconnect`;
-  `GET /bindings` checks no token), `POST /api/apps/v1/credentials` and `DELETE /api/apps/v1/credentials/<id>`, and
+  binding writes, every `POST /api/queue-transfer` route, the `/api/network` writes (`POST /bindings`,
+  `POST /installations`, `PATCH /bindings/<id>` and `POST /bindings/<id>/credential`, `/disconnect` and `/requests`;
+  `GET /bindings` checks no bearer token), `POST /api/apps/v1/credentials` and `DELETE /api/apps/v1/credentials/<id>`, and
   `POST /api/gateway/slack/forwarded`, a shared Slack app's relay. The other `/api/apps/v1` routes take a Core app
   credential instead; see [Core app](core-app.md). `rig host pair` hands this token to the paired machine, so a daemon
   that will be paired with needs it set (see `rig host pair` in [the command reference](../as-built/cli-reference.md)).
@@ -70,6 +76,11 @@ The daemon reads these two bearer-token settings from its environment at start:
 
   When the daemon is bound to an explicit address (`rig daemon start --host`) that isn't loopback or a tailnet
   address, and this token isn't set, these routes check `OPENRIG_AUTH_BEARER_TOKEN` instead.
+
+By default, the daemon binds to loopback and the tailnet address when Tailscale is active. An operator-selected
+bind (`rig daemon start --host`, the file's `daemon.host` setting or `OPENRIG_BIND_HOST`) can expose it on
+other networks. Startup requires a non-empty operator bearer token for an explicit bind outside loopback and
+tailnet (including hostnames that resolve outside them). Satisfying that startup check does not add bearer checks to other routes.
 
 The `/api/transcripts` routes (`GET /api/transcripts/<session>/tail`, `/grep` and `/full`) do not check either
 of these bearer tokens. On the default binds (loopback, and the tailnet address when Tailscale is active),
@@ -411,6 +422,38 @@ What reads these declarations:
   showed it, `deliveryRenderVerified: true`. Exceptions and receipt reconciliation may have no fact; absence of a fact
   or render flag establishes no positive delivery or verification claim. These are outcome words, not a capability
   gate: the reminder's status, receipts and retries don't change with them.
+
+## Display a compact queue row
+
+`displayText` is a derived one-line label for a queue row; use it as the row's one-line label.
+It does not replace the authored summary or full body, or say the body is short or empty.
+It appears on compact reads only; the body field stays absent, while `displayText` may show its first useful line.
+
+`GET /api/queue/list?compact=1` and compact overdue/undelivered reads supply it.
+`rig queue list` carries it in its JSON output; MCP `rig_queue_list` carries it in its rows.
+The stored `summary` (including null), `fieldsElided` and full reads keep their shapes.
+Full reads do not add `displayText`. MCP retains one JSON text part and its
+`structuredContent` page metadata (`items`, `limit`, `truncated`).
+
+The exact rule lives in `packages/daemon/src/domain/queue-display.ts`:
+
+1. Inspect at most 1,024 UTF-16 code units per candidate, dropping a trailing unmatched high
+   surrogate. Split on CRLF, CR, LF, U+2028 or U+2029. On each line, collapse whitespace runs
+   to a space, drop remaining C0 controls and DEL, then trim.
+2. Prefer the authored summary's first nonempty line. Otherwise consider the body prefix:
+   drop leading whitespace and `#`, `>`, `*`, `+`, `-` Markdown markers, and choose the first
+   line containing a Unicode letter or number. SQL transfers at most the first 4,096 bytes of
+   the stored body; byte slicing preserves embedded NULs for the display helper to remove.
+3. Keep at most 160 UTF-16 units. If longer, take the first 159, drop a trailing unmatched
+   high surrogate, and append `…`. If neither prefix supplies a line, apply the summary-line
+   rule to the qitem id, then fall back to `Queue item`. An unhelpful prefix does not mean
+   the whole body is empty; later text is unknown, and full reads keep the original content.
+
+The same `queueLabelLine` body rule labels held and pending work in refocus, with its own
+240-unit limit. Refocus preserves an explicitly authored summary whole, as before.
+These bounds cover text transferred into JavaScript and display processing, not SQLite disk
+reads: `substr` may still read the stored body. A short label is not a speedup claim.
+Detail reads remain separate; clients need not fetch every body just to label compact rows.
 
 ## Route details
 

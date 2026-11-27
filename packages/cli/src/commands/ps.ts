@@ -1,5 +1,6 @@
 import { modelObservation, formatModelObservation, type ModelObservation } from "../lib/model-observation.js";
 import { formatCheckIn } from "../lib/check-in.js";
+import { fitCell } from "../lib/terminal-cell.js";
 import { Command } from "commander";
 import stringWidth from "string-width";
 import { resolveEffectiveHost } from "../host-selection.js";
@@ -70,6 +71,7 @@ export interface NodeEntry {
   remoteControl?: { sessionId: string | null; observedAt: string } | null;
   sessionStatus: string | null;
   intentionallyStopped?: boolean;
+  standbyStopped?: true;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: string;
   /** The conversation outcome restore or handover recorded for the current occupant: `resumed` when a restore's resume
@@ -99,7 +101,8 @@ export interface NodeEntry {
   /** The registry's recorded session status, kept when the served sessionStatus is corrected. */
   storedSessionStatus?: string | null;
   /** A community harness's seat: its label, maintainer and declared limits. */
-  communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
+  communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string;
+    activityHooks?: string[] };
   /** Configured literal argv prefix wrapping local built-in Pi/Codex launches; omitted when absent. */
   launchWrapper?: string[];
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
@@ -133,6 +136,7 @@ export interface NodeEntry {
     source?: string | null;
     availability: "known" | "unknown";
     usedPercentage: number | null;
+    configuredBudget?: { tokens: number; usedPercentage: number | null; source: string } | null;
     fresh: boolean;
     state?: "critical" | "warning" | "low" | "unknown";
     sampledAt: string | null;
@@ -240,6 +244,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "remoteControl",
   "sessionStatus",
   "intentionallyStopped",
+  "standbyStopped",
   "startupStatus",
   "restoreOutcome",
   "oriented",
@@ -801,6 +806,9 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       oriented: n.oriented ?? "n-a",
       lifecycleState: n.lifecycleState,
       // Keep the current usage limit visible without classifying it as human attention.
+      // The decided activity word, as the table shows it (the oracle's, with the screen fallback where it applies);
+      // agentActivity below is the older hook-and-screen reading.
+      activity: formatActivity(n),
       agentActivity: keepDiagnostics || hasCurrentUsageLimit(n)
         ? { state: n.agentActivity?.state ?? "unknown", reason: n.agentActivity?.reason }
         : { state: n.agentActivity?.state ?? "unknown" },
@@ -819,6 +827,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       lastActivity: n.agentActivity?.sampledAt ?? n.startupCompletedAt ?? null,
     };
     if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
+    if (n.standbyStopped) compact.standbyStopped = true;
     // #3513: only a served observation; its time says when it was last seen.
     if (n.remoteControl) compact.remoteControl = { sessionId: n.remoteControl.sessionId, observedAt: n.remoteControl.observedAt };
     // The served identity evidence (verdict, reason, observation time) and the registry's recorded
@@ -1048,7 +1057,7 @@ activeCount, hasWorkCount, attentionCount, status, lifecycleState, uptime,
 latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
 podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, configuredAccount, communityHarness, launchWrapper, model, sessionStatus,
-intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
+intentionallyStopped, standbyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, resumeCommandLabel, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
 agentActivity, activityState, needsAttention, arbitratedNeedsInput, needsInputEvidence,
@@ -1614,6 +1623,12 @@ async function handleNodes(
   }
   for (const line of modelLines(humanList as NodeEntry[])) console.log(line);
   for (const n of humanList as NodeEntry[]) {
+    if (n.contextUsage?.source === "claude_statusline_json" && n.contextUsage.configuredBudget) {
+      const budget = n.contextUsage.configuredBudget;
+      const detail = `configured ${budget.tokens} tokens from ${budget.source}`;
+      const percent = budget.usedPercentage == null ? "?" : `${budget.usedPercentage}%`;
+      console.log(`Context (${n.canonicalSessionName ?? n.logicalId}): ${formatContextUsage(n.contextUsage)} / ${percent} budget; ${detail}; sample ${n.contextUsage.sampledAt ?? "unknown"}`);
+    }
     if (n.contextUsage?.source === "runner_reported") {
       console.log(`Context (${n.canonicalSessionName ?? n.logicalId}): ${formatContextUsage(n.contextUsage)} (runner-reported); sample ${n.contextUsage.sampledAt ?? "unknown"}`);
     }
@@ -1656,23 +1671,6 @@ function truncate(s: string, max: number): string {
 }
 
 const RIG_COLUMN_SEPARATOR = "  ";
-const cellSegmenter = new Intl.Segmenter();
-
-function fitCell(value: string, width: number): string {
-  if (stringWidth(value) > width) {
-    const limit = width - 1;
-    let prefix = "";
-    let used = 0;
-    for (const { segment } of cellSegmenter.segment(value)) {
-      const segmentWidth = stringWidth(segment);
-      if (used + segmentWidth > limit) break;
-      prefix += segment;
-      used += segmentWidth;
-    }
-    value = prefix + "…";
-  }
-  return value + " ".repeat(width - stringWidth(value));
-}
 
 function padRigRow(cells: string[], widths: number[]): string {
   return cells.map((cell, i) => i < widths.length ? fitCell(cell, widths[i]!) : cell).join(RIG_COLUMN_SEPARATOR);

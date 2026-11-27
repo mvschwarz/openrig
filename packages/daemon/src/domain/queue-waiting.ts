@@ -8,6 +8,7 @@ import { nextDueAt } from "./watchdog-due.js";
 import { isQueueOnlyDeliveryCode } from "./watchdog-history-log.js";
 import type { WatchdogJob } from "./watchdog-jobs-repository.js";
 import { readWithCurrentParkBoundary } from "./current-park-arm.js";
+import { isRosterReadyNotice } from "./roster-ready-notice.js";
 
 export type WaitingActivityReader = (session: string) => Pick<ArbitratedSeatState, "activity" | "needsInput" | "decidedBy" | "backgroundWork"> | null;
 
@@ -198,6 +199,12 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
     if (row.state === "pending" && row.source_session === "watchdog@system" && hasTags(row.tags, ["watchdog", "queue-only"])) {
       view.nextBackstop = { owner: row.destination_session, dueAt: null, intervalSeconds: null,
         mechanism: "none (queue-only reminder row: it waits for someone to pick it up or for the agent's next ordinary turn; no timed sweep)" };
+    }
+    // OpenRig's roster-ready notice is information about the team, not work: the stuck sweep files no finding for it,
+    // pending or claimed, so none is promised here.
+    if (isRosterReadyNotice(row)) {
+      view.nextBackstop = { owner: row.destination_session, dueAt: null, intervalSeconds: null,
+        mechanism: "none (OpenRig's team notice: information only, with nothing to claim or do; no timed sweep)" };
     }
   }
   if (row.state === "blocked") {

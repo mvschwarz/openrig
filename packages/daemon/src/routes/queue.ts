@@ -15,8 +15,8 @@ import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelf
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, SENDER_IDENTITY_HEADER, RELAY_HEADER, IDENTITY_PROVENANCE_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
-import { inheritedReturnRoute, issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
+import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, SENDER_IDENTITY_HEADER, RELAY_HEADER, IDENTITY_PROVENANCE_HEADER, transportSenderSession, canonicalSenderSession, evidenceRefRootsFrom, fromLocalClient } from "./require-sender-identity.js";
+import { conversationIssuedAddress, inheritedReturnRoute, isConversationKeyTag, issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
   routeIsPersonMessage, routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
@@ -36,6 +36,8 @@ import {
   deriveRole,
   deriveWorkCandidates,
   listProjectMissions,
+  resolveWorkNodeDirs,
+  tagValues,
   evaluateCreateScope,
   skippedCreateScopeAdvisory,
   toCreateScopeAdvisory,
@@ -45,7 +47,7 @@ import {
   type RoleOrientation,
 } from "../domain/current-work.js";
 import { listProjects, namesProject, projectCatalogPaths, projectIds as projectIdsOf } from "../domain/workspace/project-read.js";
-import { inferCatalogProject, ProjectReadError, readProjectCatalog, rigFromSession, selectCatalogProject } from "../domain/workspace/project-catalog.js";
+import { catalogRigClaims, inferCatalogProject, ProjectReadError, readProjectCatalog, rigFromSession, selectCatalogProject } from "../domain/workspace/project-catalog.js";
 import { physicalSessionName } from "../domain/session-registry.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
@@ -106,6 +108,17 @@ export function hostQualifiedRoute(route: string): string | null {
 function withRouteNotCarriedTag(tags: string[] | undefined, notCarried: string | null): string[] | undefined {
   if (!notCarried) return tags;
   return [...(tags ?? []).filter(t => t !== RETURN_ROUTE_NOT_CARRIED_TAG), RETURN_ROUTE_NOT_CARRIED_TAG];
+}
+
+/** The tags a request gives a row, as this daemon keeps them. A `conversation-key:` tag names a person's own conversation
+ *  (slice 15): the openrig plugin's hooks take every address OpenRig issued beside it as that conversation's, and an `auto`
+ *  create under it reuses that address (conversationIssuedAddress). Only OpenRig writes it, through the CLI's
+ *  `--return-route auto` and the stdio MCP server, so it's kept only from a client on this machine (fromLocalClient). From
+ *  any other caller, such as another host, the MCP HTTP adapter's callers or a proxied request, it's dropped and the
+ *  request goes on, as the MCP server drops OpenRig's other provenance tags from an external caller. */
+function keptConversationKeys<T>(c: Context, tags: T): T {
+  if (!Array.isArray(tags) || !tags.some(isConversationKeyTag) || fromLocalClient(c)) return tags;
+  return tags.filter((tag) => !isConversationKeyTag(tag)) as T;
 }
 
 /** How a named route was established: a route carried from another host keeps the basis it was sent with there. */
@@ -415,6 +428,7 @@ export function queueRoutes(): Hono {
         : err.code === "reopen_not_applicable" ? 400
         : err.code === "claim_destination_mismatch" ? 403
         : err.code === "qitem_not_claimable" ? 409
+        : err.code === "qitem_fenced" ? 409
         : err.code === "qitem_not_in_progress" ? 409
         : err.code === "qitem_already_terminal" ? 409
         : err.code === "relayed_answer_refused" ? 409
@@ -626,6 +640,7 @@ export function queueRoutes(): Hono {
       toSession: string;
       body?: string;
       transitionNote?: string;
+      resolution?: string;
       priority?: QueuePriority;
       tier?: string;
       tags?: string[];
@@ -716,6 +731,7 @@ export function queueRoutes(): Hono {
         closureTarget: closeTarget,
         terminalState,
         transitionNote: body.transitionNote,
+        resolution: body.resolution,
         identityProvenance: body.identityProvenance ?? null,
         claimedAtBeforeForward: source.claimedAt ?? null,
         successorQitemId: successorId,
@@ -845,16 +861,18 @@ export function queueRoutes(): Hono {
       returnRouteBasis?: string;
     }>().catch(() => ({} as never));
 
-    // The return route, when the caller asks for one: `auto` issues a conversation address for this create (from its id, so
-    // an exact retry issues the same one), `self` takes the caller's own identity, and anything else is an address the
-    // caller named. Absent, the create is exactly as before.
+    body.tags = keptConversationKeys(c, body.tags);
+    // The return route, when the caller asks for one: `auto` issues a conversation address (the one the conversation this
+    // create names by its key was already issued, else one from this create's id, so an exact retry issues the same one),
+    // `self` takes the caller's own identity, and anything else is an address the caller named. Absent, the create is
+    // exactly as before.
     const requestedRoute = typeof body.returnRoute === "string" ? body.returnRoute.trim() : undefined;
     if (body.returnRoute !== undefined && (!requestedRoute
       || (requestedRoute !== "auto" && requestedRoute !== "self" && !isRouteAddress(canonicalSenderSession(requestedRoute))))) {
       return c.json({ error: "invalid_return_route", message: "A return route is auto, self, or an agent conversation's queue address (member@rig). A person is reached through the gateway, not a return route." }, 400);
     }
     const createId = body.qitemId ?? (requestedRoute ? newQitemId() : undefined);
-    const issued = requestedRoute === "auto" ? issuedReturnAddress(createId!) : null;
+    const issued = requestedRoute === "auto" ? conversationIssuedAddress(getRepo(c).db, body.tags) ?? issuedReturnAddress(createId!) : null;
 
     // P21 I3 — the source is the transport-derived sender (X-OpenRig-Session), NEVER the body claim.
     // P18 deliver-and-label: absent header + a body sourceSession → recorded as the claimed-era stamp
@@ -868,7 +886,7 @@ export function queueRoutes(): Hono {
     const sourceSession = identity.session;
     c.set("refusalSource" as never, sourceSession as never); // read by traceCreateOutcome
     let route: { address: string; basis: ReturnRouteBasis } | null = requestedRoute === undefined ? null
-      : requestedRoute === "auto" ? { address: issued!, basis: sourceSession === issued ? "issued-actor" : "issued" }
+      : requestedRoute === "auto" ? { address: issued!, basis: derived.ok ? "issued" : "issued-actor" }
         : requestedRoute === "self" ? { address: sourceSession, basis: "caller" }
           : { address: canonicalSenderSession(requestedRoute), basis: carriedRouteBasis(requestedRoute, body.returnRouteBasis) };
     if (route && !isRouteAddress(route.address)) {
@@ -969,6 +987,7 @@ export function queueRoutes(): Hono {
         humanQuestions: body.humanQuestions,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
+        evidenceRefRoots: evidenceRefRootsFrom(c),
         nudge: (body as { nudge?: boolean }).nudge,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
         ...(route ? { returnRoute: route.address, returnRouteBasis: route.basis } : {}),
@@ -1198,6 +1217,7 @@ export function queueRoutes(): Hono {
         wakeAfterSeconds: body.wakeAfterSeconds,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
+        evidenceRefRoots: evidenceRefRootsFrom(c),
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
       const advisories = [body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null, ...unstoredAdvisories(body, item)]
@@ -1223,7 +1243,8 @@ export function queueRoutes(): Hono {
       return c.json({ error: "tags_required", message: "add takes one or more non-blank tags; nothing was written" }, 400);
     }
     try {
-      const { item, added } = getRepo(c).addTags({ qitemId, actorSession, tags: add as string[], ...resolveRecordedIdentity(c, identity) });
+      // A conversation's key, from a caller it isn't kept from, adds nothing (and refuses nothing).
+      const { item, added } = getRepo(c).addTags({ qitemId, actorSession, tags: keptConversationKeys(c, add as string[]), ...resolveRecordedIdentity(c, identity) });
       return c.json({ ...item, added });
     } catch (err) {
       return errorResponse(c, err);
@@ -1252,6 +1273,8 @@ export function queueRoutes(): Hono {
       // "" / "local" = today's local transactional path, byte-identical.
       hostId?: string;
     }>().catch(() => ({} as never));
+    // The new item keeps the work's issued address, so a conversation's key is kept only as for a create.
+    body.tags = keptConversationKeys(c, body.tags);
     // P21 I3: the handoff actor is the transport header, never body.fromSession.
     const identity = requireSenderIdentity(c, { verb: "queue handoff", bodyClaim: body.fromSession });
     if (!identity.ok) return identity.response;
@@ -1306,6 +1329,7 @@ export function queueRoutes(): Hono {
         targetRepo: body.targetRepo,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
+        evidenceRefRoots: evidenceRefRootsFrom(c),
         nudge: (body as { nudge?: boolean }).nudge,
         humanAlert: body.humanAlert,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
@@ -1337,6 +1361,7 @@ export function queueRoutes(): Hono {
       toSession?: string;
       body?: string;
       transitionNote?: string;
+      resolution?: string;
       priority?: QueuePriority;
       tier?: string;
       tags?: string[];
@@ -1348,6 +1373,7 @@ export function queueRoutes(): Hono {
       // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (BR-1).
       hostId?: string;
     }>().catch(() => ({} as never));
+    body.tags = keptConversationKeys(c, body.tags);
     // P21 I3: the handoff-and-complete actor is the transport header, never body.fromSession.
     const identity = requireSenderIdentity(c, { verb: "queue handoff-and-complete", bodyClaim: body.fromSession });
     if (!identity.ok) return identity.response;
@@ -1362,7 +1388,9 @@ export function queueRoutes(): Hono {
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
     }
 
+    const resolution = typeof body.resolution === "string" ? body.resolution : undefined;
     const crossHostBody = {
+      resolution,
       fromSession,
       toSession: body.toSession,
       body: body.body,
@@ -1394,12 +1422,14 @@ export function queueRoutes(): Hono {
         toSession: body.toSession,
         body: body.body,
         transitionNote: body.transitionNote,
+        resolution,
         priority: body.priority,
         tier: body.tier,
         tags: body.tags,
         targetRepo: body.targetRepo,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
+        evidenceRefRoots: evidenceRefRootsFrom(c),
         nudge: body.nudge,
         humanAlert: body.humanAlert,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
@@ -1578,10 +1608,31 @@ export function queueRoutes(): Hono {
         } else workProject = unselected(error);
       }
     }
+    // A row that names a mission but no project is read in the one healthy catalog project this seat's rig is associated
+    // with (workspace.yaml `projects[].rigs`, the rule inferCatalogProject applies), labelled as inferred, never as the
+    // row's own declaration: the project the rig selects, or the only catalog entry when that entry lists this rig. Any
+    // other selection (an only entry that doesn't list the rig, the seat's folder, the only unclaimed entry), none, or an
+    // unhealthy entry keeps the configured root, as before.
+    const rigName = rigFromSession(session);
+    const rigProject = workProject && "root" in workProject && (workProject.selectedBy === "rig"
+      || (workProject.selectedBy === "single" && rigName && catalogPath
+        && catalogRigClaims(catalogPath).claims.get(workProject.id)?.includes(rigName))) ? workProject.id : null;
+    const rigProjectRoot = rigProject ? projectMissionsRoots.get(rigProject) : undefined;
+    const inferredRoot = rigProject && rigProjectRoot?.root && !rigProjectRoot.error ? rigProjectRoot.root : null;
     const currentWorkRoot: MissionsRootResolver = (row: CurrentWorkRow) => {
-      const projectIds = [...new Set((row.tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim()))
-        .filter((tag) => tag.startsWith("project:") && tag.slice("project:".length).trim())
-        .map((tag) => tag.slice("project:".length).trim()))];
+      const projectTags = (row.tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim()))
+        .filter((tag) => tag.startsWith("project:"));
+      const projectIds = [...new Set(projectTags.map((tag) => tag.slice("project:".length).trim()).filter(Boolean))];
+      // It stands in for the row's own project, and the configured root could hold a mission of the same name: ambiguous,
+      // so a held or pending row's scope carries the label too.
+      if (projectTags.length === 0 && inferredRoot) {
+        // A row that resolves under the configured root today, and whose mission the inferred root doesn't hold, keeps
+        // the configured root, unlabelled as before: two roots in a fixed order, never a search for the mission.
+        const missions = tagValues(row.tags ?? [], "mission:");
+        if (missionsRoot && missions.length === 1 && resolveWorkNodeDirs(inferredRoot, missions[0]!).length === 0
+          && resolveWorkNodeDirs(missionsRoot, missions[0]!).length === 1) return { root: missionsRoot };
+        return { root: inferredRoot, reason: `project ${rigProject} inferred from this seat's rig; the row names no project; add project:<id> to the row to name it`, ambiguous: true };
+      }
       if (projectIds.length === 0) return { root: missionsRoot };
       // Whether another root could hold a same-named mission when the configured root stands in for the row's project:
       // an unreadable catalogue can't say, and a readable one can only if it lists project roots. With no catalogue
@@ -1974,8 +2025,10 @@ export function queueRoutes(): Hono {
     // The owner notification level is what the Slack selector keys on: a registered person who
     // is also a seat with a pane is pane-bound, yet the gateway may still post the row to them.
     const closing = repo.closingTransition(qitemId, item.state);
+    const transfer = repo.transferFence(qitemId);
     return c.json({
       ...item,
+      ...(transfer ? { transfer } : {}),
       ...(waited ? { waited } : {}),
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),

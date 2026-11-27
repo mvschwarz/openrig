@@ -24,9 +24,15 @@ export interface ClaudeSeatTokenRef {
 
 const LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$/;
 
+/** Why a string can't be an operator's account label, or null when it can. */
+export function accountLabelProblem(label: string): string | null {
+  return LABEL_RE.test(label) ? null : "the label must start with a letter or digit, then use letters, digits, '.', '_', '@' or '-' (at most 64)";
+}
+
 /** Why a label or token-file path can't be a seat's reference, or null when it can. */
 export function claudeSeatTokenRefProblem(ref: ClaudeSeatTokenRef): string | null {
-  if (!LABEL_RE.test(ref.label)) return "the label must start with a letter or digit, then use letters, digits, '.', '_', '@' or '-' (at most 64)";
+  const labelProblem = accountLabelProblem(ref.label);
+  if (labelProblem) return labelProblem;
   if (!path.isAbsolute(ref.tokenFile) || /[\0\n\r]/.test(ref.tokenFile)) return "the token file must be an absolute path on one line";
   return null;
 }

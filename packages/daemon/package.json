@@ -8,6 +8,7 @@
     "./topology-trace": { "types": "./dist/topology-trace-surface.d.ts", "import": "./dist/topology-trace-surface.js" },
     "./queue-transfer-export": { "types": "./dist/queue-transfer-export-surface.d.ts", "import": "./dist/queue-transfer-export-surface.js" },
     "./queue-transfer-staging": { "types": "./dist/queue-transfer-staging-surface.d.ts", "import": "./dist/queue-transfer-staging-surface.js" },
+    "./queue-transfer-records": { "types": "./dist/queue-transfer-records-surface.d.ts", "import": "./dist/queue-transfer-records-surface.js" },
     "./terminal-viewer-guard": { "types": "./dist/terminal-viewer-guard-surface.d.ts", "import": "./dist/terminal-viewer-guard-surface.js" },
     "./tmux-server-start": { "types": "./dist/tmux-server-start-surface.d.ts", "import": "./dist/tmux-server-start-surface.js" },
     "./bundle-behaviour": { "types": "./dist/bundle-behaviour-surface.d.ts", "import": "./dist/bundle-behaviour-surface.js" },
@@ -21,6 +22,7 @@
     "./attention": { "types": "./dist/attention-surface.d.ts", "import": "./dist/attention-surface.js" },
     "./project-catalog": { "types": "./dist/project-catalog-surface.d.ts", "import": "./dist/project-catalog-surface.js" },
     "./mission-parent": { "types": "./dist/mission-parent-surface.d.ts", "import": "./dist/mission-parent-surface.js" },
+    "./scope-manifest": { "types": "./dist/scope-manifest-surface.d.ts", "import": "./dist/scope-manifest-surface.js" },
     "./transcript-redaction": { "types": "./dist/transcript-redaction-surface.d.ts", "import": "./dist/transcript-redaction-surface.js" },
     "./daemon-shutdown": {
       "types": "./dist/daemon-shutdown.d.ts",
@@ -105,6 +107,10 @@
     "./codex-auth": {
       "types": "./dist/codex-auth-surface.d.ts",
       "import": "./dist/codex-auth-surface.js"
+    },
+    "./conversation-key": {
+      "types": "./dist/conversation-key-surface.d.ts",
+      "import": "./dist/conversation-key-surface.js"
     },
     "./herdr-live-workspace": {
       "types": "./dist/herdr-live-workspace-surface.d.ts",

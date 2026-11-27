@@ -23,6 +23,9 @@ import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { CodexThreadIdResolver, type CodexThreadEvidence } from "../src/domain/codex-thread-id.js";
 import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
+import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
+import { ProviderAccountRefsRepository } from "../src/domain/provider/provider-account-refs.js";
+import { ProviderAccountAssignmentsRepository } from "../src/domain/provider/provider-account-assignments.js";
 
 // No test here may read a real Codex home: the fake io answers every native-thread read. The real resolver is watched for
 // the whole file, and any call fails the test that made it.
@@ -99,6 +102,9 @@ interface WorldOptions {
   launchWrapper?: string[];
   /** Build the resume command through the production CodexRuntimeAdapter (and SeatLaunchEnvironment when "env"). */
   realResumeBuilder?: "env" | "without_env";
+  /** A real Codex home: the running Codex and its session run on it, and the real resume builder brings that home's
+   *  config.toml to OpenRig's managed hooks block whenever it builds a restart's command (never a preview's). */
+  codexConfigHome?: string;
   /** Executables placed on the daemon launch PATH when realResumeBuilder === "env". */
   wrapperEnvBins?: string[];
   /** Shell-backed root shell process name (default "bash"). */
@@ -107,6 +113,8 @@ interface WorldOptions {
   defaultShell?: string | null | "omitted";
   /** Initial foreground command returned by getPaneCommand before stop (default "codex"). */
   paneCommandBefore?: string;
+  /** #3385: the launcher's openrig-core upgrade step, recorded in `calls`; its answer is why the upgrade still waits. */
+  upgrade?: (nodeId: string, home: string) => Promise<string | undefined>;
 }
 
 const dbs: Database.Database[] = [];
@@ -205,7 +213,7 @@ function world(options: WorldOptions = {}) {
       ? {}
       : { getDefaultShell: async () => (options.defaultShell === undefined ? "/bin/bash" : options.defaultShell) }),
     getSessionEnv: async (_s: string, key: string) =>
-      key === "CODEX_HOME" ? HOME
+      key === "CODEX_HOME" ? options.codexConfigHome ?? HOME
       : options.realResumeBuilder === "env" && key === "OPENRIG_NODE_ID" ? node.id
       : options.realResumeBuilder === "env" && key === "OPENRIG_SESSION_NAME" ? SEAT
       : options.realResumeBuilder === "env" && key === "OPENRIG_RUNTIME" ? "codex"
@@ -283,7 +291,16 @@ function world(options: WorldOptions = {}) {
         HOME,
       )
     : undefined;
-  const realBuilder = options.realResumeBuilder
+  const configHome = options.codexConfigHome;
+  const realBuilder = configHome
+    ? new CodexRuntimeAdapter({
+        tmux,
+        fsOps: { homedir: os.tmpdir(), readFile: (p: string) => fs.readFileSync(p, "utf8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c),
+          exists: fs.existsSync, mkdirp: (p: string) => { fs.mkdirSync(p, { recursive: true }); } },
+        codexHome: configHome, activityRelayPath: path.join(configHome, "activity-relay.cjs"),
+        resolveManagedConfigSettings: async () => ({ enabled: true, codexVersion: "0.155.1" }),
+      })
+    : options.realResumeBuilder
     ? new CodexRuntimeAdapter({
         tmux,
         fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {} },
@@ -329,12 +346,18 @@ function world(options: WorldOptions = {}) {
       maybeThrow("verifyResumeInPane");
       return options.launch ?? { ok: true };
     },
+    ...(options.upgrade ? {
+      async upgradeCorePluginForResume(nodeId: string, home: string): Promise<string | undefined> {
+        calls.push(`upgrade ${nodeId === node.id ? "this seat" : nodeId} ${home}; codex ${rows.some((row) => row.executableName === "codex") ? "running" : "stopped"}; resumes ${launches.length}`);
+        return options.upgrade!(nodeId, home);
+      },
+    } : {}),
   };
 
   const io: Partial<InPlaceRestartIo> = {
     readProcess: async (pid) => {
       if (relaunched) maybeThrow("readProcessAfter");
-      return options.facts && pid in options.facts ? options.facts[pid] ?? null : facts();
+      return options.facts && pid in options.facts ? options.facts[pid] ?? null : facts(options.codexConfigHome ? { env: { CODEX_HOME: options.codexConfigHome } } : {});
     },
     readThreadId: async (pid) => (pid === 200 ? options.threadId : undefined),
     // Always answered here, never by the real reader. With no evidence given, the fake readThreadId's answer, as a read
@@ -485,6 +508,51 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     const kept = await same.service.restartInPlace({ seatRef: SEAT, plan: true });
     expect(kept).toMatchObject({ ok: true, settings: { effort: { running: "high", relaunch: "high", changes: false, source: "authored" } } });
     expect((kept as { settings: { note: string } }).settings.note).toContain("effort included");
+  });
+
+  it("doesn't refuse a changed developer_instructions override, and reports that it is not preserved", async () => {
+    // The running Codex started with earlier guidance; this in-place relaunch does not rebuild it.
+    const earlier = `-m gpt-5.5 -c developer_instructions="earlier-openrig-guidance" -s workspace-write resume ${TOKEN}`;
+    const w = world({ runningArgs: earlier });
+    const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(plan).toMatchObject({ ok: true });
+    expect((plan as { settings: { note: string } }).settings.note)
+      .toContain("The observed developer_instructions command-line override changes on restart");
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "adopt the new openrig-core" }))
+      .toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    // A setting someone chose still refuses beside it, and the guidance isn't named.
+    expect(await world({ savedModel: "gpt-5.6", runningArgs: earlier }).service.restartInPlace({ seatRef: SEAT, plan: true }))
+      .toMatchObject({ ok: false, code: "settings_drift", detail: { differs: ["model"] } });
+    // So does any other config override.
+    expect(await world({ runningArgs: `-m gpt-5.5 -c tools.web_search=true -s workspace-write resume ${TOKEN}` }).service.restartInPlace({ seatRef: SEAT, plan: true }))
+      .toMatchObject({ ok: false, code: "settings_drift", detail: { differs: ["config tools.web_search"] } });
+    // Unchanged guidance adds nothing to the note.
+    const same = await world().service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect((same as { settings: { note: string } }).settings.note).not.toContain("developer_instructions");
+  });
+
+  it.each(["earlier-openrig-guidance", "person-chosen-guidance"])("reports the observed %s override changing through the real resume builder", async (value) => {
+    const w = world({ realResumeBuilder: "without_env",
+      runningArgv: ["/usr/local/bin/codex", "-m", "gpt-5.5", "-s", "workspace-write", "-c", "check_for_update_on_startup=false",
+        "-c", `developer_instructions=${JSON.stringify(value)}`, "resume", TOKEN] });
+    const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(plan).toMatchObject({ ok: true });
+    const restarted = await w.service.restartInPlace({ seatRef: SEAT, reason: "adopt the updated installation" });
+    expect(restarted).toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    expect((restarted as { settings: { note: string } }).settings.note).toBe((plan as { settings: { note: string } }).settings.note);
+    expect(w.launches).toHaveLength(1);
+    expect(w.launches[0]!.command).not.toContain("developer_instructions");
+    expect(w.launches[0]!.resumeToken).toBe(TOKEN);
+    expect((plan as { settings: { note: string } }).settings.note).toContain("The observed developer_instructions command-line override changes on restart");
+    expect((plan as { settings: { note: string } }).settings.note).not.toContain("resume carries the current guidance");
+  });
+
+  it.each(["developer_instructions_extra", "prefix_developer_instructions", "developer_instructions.nested"])("still compares the distinct config key %s", async (key) => {
+    const w = world({ runningArgv: ["/usr/local/bin/codex", "-m", "gpt-5.5", "-s", "workspace-write",
+      "-c", 'developer_instructions="earlier-openrig-guidance"', "-c", `${key}="keep-me"`, "resume", TOKEN] });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true }))
+      .toMatchObject({ ok: false, code: "settings_drift", detail: { differs: [`config ${key}`] } });
+    expect(w.launches).toEqual([]);
   });
 
   it("refuses drift in home and cwd, naming each", async () => {
@@ -733,6 +801,9 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
       .toMatchObject({ ok: false, code: "claimed_session", guidance: expect.stringContaining("rig unclaim") });
     w.db.prepare("UPDATE nodes SET continuity_outcome = 'rebuilt', handover_result = 'complete', handover_at = ? WHERE id = ?")
       .run("2026-11-01T10:00:00.000Z", w.node.id);
+    // The handover's successor is registered in its own commit (#4003): a session adopted later isn't its successor.
+    w.db.prepare("UPDATE sessions SET created_at = '2026-11-01 10:00:00' WHERE id = ?").run(w.session.id);
+    w.db.prepare("UPDATE occupant_tenures SET kind = 'handover', boot_at = '2026-11-01 10:00:00' WHERE node_id = ?").run(w.node.id);
     const result = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
     expect(result).toMatchObject({ ok: false, code: "claimed_session",
       guidance: "It keeps that origin until its next launched handover or managed launch." });
@@ -2034,5 +2105,241 @@ describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () =
     expect(w.calls).toEqual([]);
     expect(w.launches).toEqual([]);
     expect(w.events()).toEqual([]);
+  });
+});
+
+describe("#3385: the restart completes an openrig-core upgrade waiting in the seat's Codex home", () => {
+  const RESUME = `codex -m 'gpt-5.5' -s workspace-write resume '${TOKEN}'`;
+
+  it("shell-backed: after the old Codex has stopped and before the resume, in the home the running Codex used", async () => {
+    const w = world({ upgrade: async () => undefined });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "pick up openrig-core" });
+    expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified", warnings: [] });
+    expect(w.calls).toEqual(["signalPid 200 TERM", `upgrade this seat ${HOME}; codex stopped; resumes 0`]);
+    expect(w.launches).toHaveLength(1);
+  });
+
+  it("direct-native: after the pane's Codex has ended and before the respawn", async () => {
+    const w = world({ shape: "direct_native", remainOnExit: null, upgrade: async () => undefined });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "pick up openrig-core" });
+    expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    expect(w.calls).toEqual(["remain-on-exit on", "remain-on-exit on", "signalPaneProcess TERM", `upgrade this seat ${HOME}; codex stopped; resumes 0`,
+      `respawn env CODEX_HOME='${HOME}' ${RESUME}`, "verifyResumeInPane", "restore remain-on-exit null"]);
+  });
+
+  it("an upgrade still held by another seat is a warning naming it; the restart goes on", async () => {
+    const waiting = "openrig-core 9.9.9 waits to install in /home/u/.codex: … Codex seats running there: dev-peer@r.";
+    const w = world({ upgrade: async () => waiting });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "pick up openrig-core" });
+    expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified", warnings: [waiting] });
+    expect(w.launches).toHaveLength(1);
+  });
+
+  it("a failed upgrade step is a warning, not a stopped seat left unresumed", async () => {
+    const w = world({ upgrade: async () => { throw new Error("config lock broke"); } });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "pick up openrig-core" });
+    expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified",
+      warnings: ["The openrig-core upgrade check didn't run before the resume: config lock broke"] });
+    expect(w.launches).toHaveLength(1);
+  });
+
+  it("a plan, and a restart that never stopped Codex, run no upgrade", async () => {
+    const planned = world({ upgrade: async () => undefined });
+    expect(await planned.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, planOnly: true });
+    expect(planned.calls).toEqual([]);
+    const survived = world({ codexIgnoresSignals: true, upgrade: async () => undefined });
+    expect(await survived.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ ok: true, outcome: "not_started" });
+    expect(survived.calls).toEqual(["signalPid 200 TERM", "signalPid 200 KILL"]);
+  });
+});
+
+describe("rig provider assign's plan over a Codex seat", () => {
+  // #3625: the plan checks a Codex seat's restart with the restart preview (#3707), so it changes nothing, its Codex home's
+  // config.toml included; a check that built the restart's own command would bring that file to the managed hooks block.
+  const USER_CONFIG = '# user sentinel\nmodel = "fixture"\n';
+  const roots: string[] = [];
+  afterEach(() => { for (const r of roots.splice(0)) fs.rmSync(r, { recursive: true, force: true }); });
+
+  function setup() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "assign-plan-preview-")); roots.push(root);
+    const home = path.join(root, "codex");
+    fs.mkdirSync(path.join(home, "auth-profiles"), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(home, "auth-profiles", "team.json"), "synthetic", { mode: 0o600 });
+    fs.writeFileSync(path.join(home, "activity-relay.cjs"), "");
+    const config = path.join(home, "config.toml");
+    fs.writeFileSync(config, USER_CONFIG);
+    // The running Codex's arguments are the ones the real builder relaunches with, so the check gets as far as the command.
+    const w = world({ codexConfigHome: home, runningArgs: `-m gpt-5.5 -s workspace-write -c check_for_update_on_startup=false resume ${TOKEN}` });
+    new ProviderAccountRefsRepository(w.db).add({ provider: "codex", label: "team", codexHome: home, login: "team" });
+    const svc = new ProviderServiceImpl({ db: w.db, listRigs: () => w.db.prepare("SELECT id FROM rigs").all() as Array<{ id: string }>,
+      env: { HOME: root, CODEX_HOME: home }, platform: "linux",
+      claudePrecedence: async () => ({ conflicts: [], checked: [], notChecked: [] }) });
+    const seatRestart = { plan: (seat: string) => w.service.restartInPlace({ seatRef: seat, plan: true }), run: vi.fn() };
+    const plan = async () => {
+      const planned = await svc.assignmentPlan({ rig: "r", provider: "codex", label: "team", includeOverrides: false, daemon: "host-a" }, seatRestart as never);
+      if (!planned.ok) throw new Error(planned.message);
+      return planned.plan;
+    };
+    const before = fs.readFileSync(config);
+    const unchanged = () => {
+      expect(fs.readFileSync(config)).toEqual(before);
+      expect(fs.readFileSync(config, "utf8")).not.toContain("OPENRIG MANAGED");
+    };
+    return { w, home, plan, unchanged };
+  }
+
+  it("checks a seat it would switch with the preview, and leaves the home's config.toml byte-for-byte as it was", async () => {
+    const { w, plan, unchanged } = setup();
+    const p = await plan();
+    expect(p.rows).toEqual([expect.objectContaining({ seat: SEAT, effect: "change", precheck: { safe: true, reasons: [] } })]);
+    expect(w.previews).toEqual([true]);
+    unchanged();
+    expect(w.calls).toEqual([]);
+  });
+
+  it("checks an unchanged seat that restarts with the home the same way", async () => {
+    const { w, home, plan, unchanged } = setup();
+    const rigId = (w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(w.node.id) as { rig_id: string }).rig_id;
+    // Another seat of the rig on the same home switches it; this seat is on team as an earlier apply left it.
+    const other = new RigRepository(w.db).addNode(rigId, "dev.other", { runtime: "codex", cwd: "/work" });
+    new SessionRegistry(w.db).registerSession(other.id, "dev-other@r");
+    const repo = new ProviderAccountAssignmentsRepository(w.db);
+    repo.setIntent({ rigId, provider: "codex", label: "team", reference: "the login team", requestedBy: null, at: "t" });
+    repo.saveResult({ rigId, provider: "codex", nodeId: w.node.id, seat: SEAT, label: "team", kind: "switched", detail: "d", recovery: null,
+      activity: "idle", at: "t", applied: { account: { kind: "codex_saved_login", file: null, codexHome: home, login: "team" }, file: null, fileKind: null, codexHome: home, codexLogin: "team" } });
+    const p = await plan();
+    expect(p.rows.find((r) => r.seat === SEAT)).toMatchObject({ effect: "unchanged", asApplied: true, precheck: { safe: true, reasons: [] } });
+    expect(p.rows.find((r) => r.seat === "dev-other@r")).toMatchObject({ effect: "change" });
+    expect(w.previews.length).toBeGreaterThan(0);
+    expect(w.previews.every(Boolean)).toBe(true);
+    unchanged();
+    expect(w.calls).toEqual([]);
+  });
+
+  it.each([
+    ["another rig takes", "taken"],
+    ["another rig shares (both rigs active)", "shared"],
+    ["no seat has (the rig is archived, with no replacement)", "gone"],
+  ] as const)("the switch's restart carries the seat it was selected as: a name %s while the switch awaits its check restarts nothing", async (_case, mode) => {
+    const { w, home } = setup();
+    const rigs = new RigRepository(w.db);
+    const rigId = (w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(w.node.id) as { rig_id: string }).rig_id;
+    const svc = new ProviderServiceImpl({ db: w.db, listRigs: () => w.db.prepare("SELECT id FROM rigs").all() as Array<{ id: string }>,
+      env: { HOME: path.dirname(home), CODEX_HOME: home }, platform: "linux",
+      codexLogins: { list: () => ["team"], save: () => ({ ok: false, reason: "not_configured" }), activate: () => ({ ok: true }) },
+      claudePrecedence: async () => ({ conflicts: [], checked: [], notChecked: [] }) });
+    // While the switch awaits its own check, the rig is archived and another rig named r, with the same member, is the one
+    // the name resolves to (or, archived alone, the name resolves to nothing).
+    let otherNode: string | null = null;
+    let moved = false;
+    const takeName = () => {
+      moved = true;
+      rigs.archiveRig(rigId);
+      if (mode === "gone") return;
+      const other = rigs.createRig("r");
+      const node = rigs.addNode(other.id, "dev.codex", { runtime: "codex", cwd: "/work" });
+      const registry = new SessionRegistry(w.db);
+      registry.updateStatus(registry.registerSession(node.id, SEAT).id, "running");
+      otherNode = node.id;
+      // Both rigs active: the name reaches two seats.
+      if (mode === "shared") rigs.unarchiveRig(rigId);
+    };
+    let checks = 0;
+    // The route's in-place restart, passing the node it's given.
+    const seatRestart = {
+      plan: async (seat: string, nodeId?: string) => {
+        const r = await w.service.restartInPlace({ seatRef: seat, plan: true, ...(nodeId !== undefined ? { nodeId } : {}) });
+        // The plan's check, the apply's own plan, then the switch's check: the name moves on the last.
+        if (++checks === 3) takeName();
+        return r;
+      },
+      run: vi.fn((seat: string, reason: string, nodeId?: string) => w.service.restartInPlace({ seatRef: seat, reason, ...(nodeId !== undefined ? { nodeId } : {}) })),
+    };
+    const request = { rig: "r", provider: "codex" as const, label: "team", includeOverrides: false, daemon: "host-a" };
+    const planned = await svc.assignmentPlan(request, seatRestart);
+    if (!planned.ok) throw new Error(planned.message);
+    const applied = await svc.applyAssignment({ ...request, digest: planned.plan.digest, requestedBy: null }, { seatRestart });
+    if (!applied.ok) throw new Error(applied.message);
+    expect(moved).toBe(true);
+    expect(seatRestart.run).toHaveBeenCalledWith(SEAT, expect.any(String), w.node.id);
+    // Nothing was restarted, in either seat's pane, and the result is the selected seat's, with no command by its name.
+    expect(w.calls).toEqual([]);
+    expect(w.events().filter((e) => e.type !== "seat.restart_in_place.planned")).toEqual([]);
+    const [result] = applied.report.results;
+    expect(result).toMatchObject({ seat: SEAT, kind: "unknown" });
+    expect(result!.detail).toContain(mode === "shared" ? "now names more than one seat, not only the one this restart was for; nothing was restarted"
+      : mode === "gone" ? `"${SEAT}" no longer names the seat this restart was for, or any seat; nothing was restarted`
+      : `now names the seat in rig r (${(w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(otherNode) as { rig_id: string }).rig_id}), not the one this restart was for; nothing was restarted`);
+    expect(result!.recovery).toBeUndefined();
+    expect(result!.detail).not.toContain("rig seat restart");
+    expect(result!.detail).toContain("It has no restart command: a restart reaches a seat by its session name, and that name doesn't reach this seat alone.");
+    const saved = new ProviderAccountAssignmentsRepository(w.db).results(rigId, "codex");
+    expect(saved.map((r) => [r.nodeId, r.kind])).toEqual([[w.node.id, "unknown"]]);
+  });
+
+  it.each([true, false])("a restart queued behind the seat's removal (its lease held first) finds no seat: by the node it was for, refused by name (pinned: %s)", async (pinned) => {
+    const w = world();
+    // The removal holds the seat's lifecycle lease; the restart reads its target only after the node is gone.
+    Object.defineProperty(w.tmux, "deliveryGuard", { value: { preference: () => undefined, ownsLifecycle: () => false,
+      lifecycle: async (_ids: string[], fn: () => Promise<unknown>) => { new RigRepository(w.db).deleteNode(w.node.id); return fn(); } } });
+    const r = await w.service.restartInPlace({ seatRef: SEAT, reason: "moved", ...(pinned ? { nodeId: w.node.id } : {}) });
+    expect(r).toMatchObject(pinned
+      ? { ok: false, code: "seat_name_shared", message: `"${SEAT}" no longer names the seat this restart was for, or any seat; nothing was restarted.` }
+      : { ok: false, code: "seat_not_found" });
+    expect(w.calls).toEqual([]);
+  });
+
+  it("the switch's check again after waiting for the home carries the seat too: a name another rig took meanwhile is refused before any effect", async () => {
+    const { w, home } = setup();
+    const rigs = new RigRepository(w.db);
+    const rigId = (w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(w.node.id) as { rig_id: string }).rig_id;
+    const svc = new ProviderServiceImpl({ db: w.db, listRigs: () => w.db.prepare("SELECT id FROM rigs").all() as Array<{ id: string }>,
+      env: { HOME: path.dirname(home), CODEX_HOME: home }, platform: "linux",
+      codexLogins: { list: () => ["team"], save: () => ({ ok: false, reason: "not_configured" }), activate: () => ({ ok: true }) },
+      claudePrecedence: async () => ({ conflicts: [], checked: [], notChecked: [] }) });
+    // Another switch of the home (a plain rig provider switch) holds it until released.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let holding!: () => void;
+    const holds = new Promise<void>((resolve) => { holding = resolve; });
+    const other = svc.switchAccount({ seat: SEAT, toAccount: "team", forceUnsafe: false }, {
+      plan: (seat: string) => w.service.restartInPlace({ seatRef: seat, plan: true }),
+      run: async () => { holding(); await held; return { ok: false, code: "seat_not_found", message: "held" } as never; } });
+    await holds;
+    const checkedAs: Array<string | undefined> = [];
+    let takenBy: string | null = null;
+    const seatRestart = {
+      plan: async (seat: string, nodeId?: string) => {
+        checkedAs.push(nodeId);
+        const r = await w.service.restartInPlace({ seatRef: seat, plan: true, ...(nodeId !== undefined ? { nodeId } : {}) });
+        // The plan's check, the apply's own plan, then the switch's first check, which passes; then, while the switch waits
+        // for the home, the rig is archived and another rig named r, with the same member, takes the name. The other switch
+        // then lets the home go.
+        if (checkedAs.length === 3) {
+          rigs.archiveRig(rigId);
+          takenBy = rigs.createRig("r").id;
+          const node = rigs.addNode(takenBy, "dev.codex", { runtime: "codex", cwd: "/work" });
+          const registry = new SessionRegistry(w.db);
+          registry.updateStatus(registry.registerSession(node.id, SEAT).id, "running");
+          setTimeout(release, 0);
+        }
+        return r;
+      },
+      run: vi.fn(),
+    };
+    const request = { rig: "r", provider: "codex" as const, label: "team", includeOverrides: false, daemon: "host-a" };
+    const planned = await svc.assignmentPlan(request, seatRestart);
+    if (!planned.ok) throw new Error(planned.message);
+    const applied = await svc.applyAssignment({ ...request, digest: planned.plan.digest, requestedBy: null }, { seatRestart });
+    await other;
+    if (!applied.ok) throw new Error(applied.message);
+    // The switch's check and its check again after the wait both carry the selected node.
+    expect(checkedAs).toEqual([undefined, undefined, w.node.id, w.node.id]);
+    expect(seatRestart.run).not.toHaveBeenCalled();
+    expect(w.calls).toEqual([]);
+    const [result] = applied.report.results;
+    expect(result).toMatchObject({ seat: SEAT, kind: "failed_before_effect" });
+    expect(result!.detail).toBe(`seat_name_shared: "dev-codex@r" now names the seat in rig r (${takenBy}), not the one this restart was for; nothing was restarted.`);
+    expect(result!.recovery).toBeUndefined();
   });
 });

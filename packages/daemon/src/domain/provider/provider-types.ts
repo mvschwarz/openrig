@@ -91,6 +91,32 @@ export interface BindingSeatAccount {
   launched?: UnknownSeatObservation;
   /** A provider-observed identity tied to this seat's launch. */
   verified?: UnknownSeatObservation;
+  /** #3625: the rig's assignment for this seat's provider and this seat's last applied result. Claude and Codex seats. */
+  assignment?: SeatAssignment;
+}
+
+/** #3625: a seat against its rig's assignment (`rig provider assign`). Configuration and stored results only: an account
+ *  label here is the operator's name for a reference, never proof of the login a running session uses.
+ *  - follows: configured as the assigned account, or still as this assignment's apply left it;
+ *  - override: configured as its own choice of another account (kept by an apply, or changed since);
+ *  - not_applied: the rig has an assignment and the seat isn't on it yet (no result, or its last result didn't move it);
+ *  - no_assignment: the rig has no assignment for this provider. */
+export interface SeatAssignment {
+  provider: "claude" | "codex";
+  state: "follows" | "override" | "not_applied" | "no_assignment";
+  /** The rig's assignment: label, the reference it named, who asked and when. */
+  intended: { label: string; reference: string; requestedBy: string | null; at: string } | null;
+  /** The seat's last applied result, from any apply to its rig. */
+  /** `activity` is what the seat was doing when the apply reached it (as rig ps reads it), when recorded. */
+  applied: { kind: string; label: string; detail: string; at: string; recovery?: string; activity?: string } | null;
+  /** The seat's own choice, in words, when it's an override. */
+  override?: string;
+  /** Follows only as the apply of this label left its home: its configuration names no login, and the login active in
+   *  that home isn't read, so a later change there isn't seen. */
+  asApplied?: true;
+  /** The assigned label has been removed from this daemon's accounts. The seat is compared only with what an apply left
+   *  it (follows) or not (not_applied), since there's no reference to compare its configuration with. */
+  referenceMissing?: true;
 }
 
 export type SignalSourceClass =
@@ -154,6 +180,7 @@ export type PrecheckReason =
   | "signal_unknown_or_stale"
   | "rebind_unsupported_for_runtime"
   | "seat_restart_refused" // the seat's in-place restart plan refused, so nothing would change
+  | "seat_name_shared" // the seat's name now reaches another seat than the one an assignment selected, or no seat
   | "target_not_in_seat_home" // no login by that name is saved in the Codex home the seat runs on
   | "token_file_required" // a Claude seat moves to a token file (--token-file), or back to its stored login (--stored-login)
   | "invalid_token_reference" // the label or the token file's path can't be a seat's reference
@@ -240,6 +267,8 @@ export interface SeatConfiguredAccount {
    *  fresh readings disagree with it (possibly a different login, never a verdict). `withheld` when several
    *  seats share this session name, so samples keyed by it can't be attributed to one seat. */
   observed?: { windowsSampled?: boolean; lastSampledAt?: string; differsFrom?: string[]; withheld?: true; note?: string };
+  /** #3625: the seat against its rig's assignment, as on its `bindings[]` row. */
+  assignment?: SeatAssignment;
 }
 
 /** Slice 01 — allowance identity: the usage answer's accountId, else the workspace account/read
