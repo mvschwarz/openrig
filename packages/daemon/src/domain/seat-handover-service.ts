@@ -747,8 +747,8 @@ export class SeatHandoverService {
           failedStep: launch.step, failureCode: launch.code }) : false;
         // The conversation start a committed handover records before its commit, recorded for the successor that may run.
         if (recorded && failedToken) recordPrompt(failedToken.token);
-        // #3003's text, unchanged (no "retry"): with the attempt recorded it only gains the --recover line in front.
-        const unadoptedNote = `The handover was not committed: the seat's registry binding is unchanged and OpenRig has not registered the successor as the seat's occupant. The previous occupant was already ended, and a successor was launched in pane "${pane}" of ${session}; it may still be starting there or already working. Look at the pane before acting: rig capture ${quoted}. Another handover, or rig seat launch ${quoted} --fresh --stop --reason "<why>", ends that successor if it goes ahead. Shell-looking output alone does not confirm that the successor has stopped; check the launch and process state before another handover.`;
+        // With the attempt recorded, the guidance gains the --recover line in front.
+        const unadoptedNote = `${firstInput ? "The restore packet was passed at launch, but submission and consumption are unconfirmed. " : ""}The handover was not committed: the seat's registry binding is unchanged and OpenRig has not registered the successor as the seat's occupant. The previous occupant was already ended, and a successor was launched in pane "${pane}" of ${session}; it may still be starting there or already working. Look at the pane before acting: rig capture ${quoted}. Another handover, or rig seat launch ${quoted} --fresh --stop --reason "<why>", ends that successor if it goes ahead. Shell-looking output alone does not confirm that the successor has stopped; check the launch and process state before another handover.`;
         return {
           ok: false,
           code: "successor_create_failed",
@@ -770,7 +770,7 @@ export class SeatHandoverService {
         // its provider session file (never destroyed). Inspect tmux/daemon logs and retry.
         ...limitsFailure,
         guidance: (firstInput
-          ? "The seat's binding is unchanged. The restore packet was passed at launch, but submission and consumption are unconfirmed. Inspect the pane and launch logs; do not resend the packet or repeat the handover on that basis."
+          ? "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. The restore packet was passed at launch, but submission and consumption are unconfirmed. Inspect the pane and launch logs; do not resend the packet or repeat the handover on that basis."
           : !launch.replacementStarted
           ? `The handover didn't end the predecessor, and its binding is unchanged. ${launch.message}`
           : "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry."),

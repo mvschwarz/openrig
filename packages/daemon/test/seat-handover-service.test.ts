@@ -2396,6 +2396,8 @@ describe("SeatHandoverService", () => {
       harnessTmux.getPaneCommand.mockResolvedValue("sh");
       const result = await harnessService(harnessAdapters()).handover({ seatRef: SEAT, reason: "replace occupant", source: "fresh" });
       expect(result).toMatchObject({ ok: false, code: "successor_create_failed" });
+      if (result.ok) return;
+      expect(result.guidance).toContain("The restore packet was passed at launch");
       expect(sessionRegistry.getBindingForNode(node.id)).toEqual(bindingBefore);
       expect(sendText).not.toHaveBeenCalled(); expect(sendKeys).not.toHaveBeenCalled();
       const events = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'seat.handover_first_input_passed'").all(node.id) as Array<{ payload: string }>;
@@ -2426,6 +2428,9 @@ describe("SeatHandoverService", () => {
       expect(result).toMatchObject({ ok: false, code: "successor_create_failed" });
       if (result.ok) return;
       expect(result.message).toMatch(/Argument list too long|E2BIG/i);
+      expect.soft(result.guidance).toContain("re-wakeable from its provider session file");
+      expect.soft(result.guidance).toContain("The restore packet was passed at launch");
+      expect.soft(result.guidance).toContain("do not resend the packet or repeat the handover");
       expect(sessionRegistry.getBindingForNode(node.id)).toEqual(bindingBefore);
       expect(packetFile).toBeDefined();
       const packet = fs.readFileSync(packetFile!, "utf8");
