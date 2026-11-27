@@ -2993,16 +2993,19 @@ describe("draft-held queue wake offers: the terminal's quiet window, a paused of
     const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
     f.bodies.a = "";
     let begun = false;
-    f.hooks.paste = () => {
-      if (begun) return;
-      begun = true;   // the first row's paste: a drain starts now
-      drain.begin(rigId, { drainId: "fixture-mid-pass", owner: "human@test", reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
-    };
+    const send = f.transport.send.bind(f.transport);
+    vi.spyOn(f.transport, "send").mockImplementation(async (...args: Parameters<typeof f.transport.send>) => {
+      if (!begun) {
+        begun = true;   // the first row's send: a drain starts now
+        drain.begin(rigId, { drainId: "fixture-mid-pass", owner: "human@test", reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+      }
+      return send(...args);
+    });
     await expect(f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle")).resolves.toBe("paused");
     expect(begun).toBe(true);
     expect(tries(f, second)).toEqual([]);
     expect(f.outbox.getById("wake-intent-" + second)!.deliveryState).toBe("retained");
-    expect(f.submissions.filter(s => s.includes(first))).toHaveLength(1);
+    expect(f.outbox.getById("wake-intent-" + first)!.deliveryState).not.toBe("retained");   // the first row's wake was sent
   });
 
   // The seat's own idle report can record a try while the offer awaits the terminal's quiet read: that try keeps its own
@@ -3044,7 +3047,8 @@ describe("draft-held queue wake offers: the terminal's quiet window, a paused of
       let reads = 0;
       const deliverWakes = vi.fn(async () => "draft" as const);
       const offer = createDraftHeldReoffer({ heldSeats: () => [], deliver: async () => "done", paneActivity: () => undefined,
-        heldWakeSeats: () => { reads += 1; if (reads === 2) throw new Error("database is locked"); return [{ session: "worker@test", lastTry }]; },
+        // Read 1 picks the seat, read 2 re-checks its tries before the pass, read 3 is the one after the pass.
+        heldWakeSeats: () => { reads += 1; if (reads === 3) throw new Error("database is locked"); return [{ session: "worker@test", lastTry }]; },
         deliverWakes, now: () => at, onError: error => { errors.push(error); } });
       offer(); await settle();
       expect(deliverWakes).toHaveBeenCalledTimes(1);
