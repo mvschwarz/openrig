@@ -33,7 +33,7 @@ describe.each(runtimes)("an upgrade keeps OpenRig's packaged skills on a %s seat
     entries: resolvePluginSkills({ pluginId, pluginRoot: root, runtime }).entries,
   });
 
-  function seatWithLaunch(opts: { otherSkills?: Record<string, Record<string, string>>; launchFrom?: (core: SkillLoadout["entries"], other: SkillLoadout["entries"]) => SkillLoadout["entries"]; launchThroughAlias?: boolean } = {}) {
+  function seatWithLaunch(opts: { otherSkills?: Record<string, Record<string, string>>; launchFrom?: (core: SkillLoadout["entries"], other: SkillLoadout["entries"]) => SkillLoadout["entries"]; launchThroughAlias?: boolean; beforeLaunch?: (core: string) => void } = {}) {
     const pluginsDir = join(home, "plugins");
     const core = join(pluginsDir, "openrig-core");
     const other = join(home, "shared", "other-plugin");
@@ -43,6 +43,7 @@ describe.each(runtimes)("an upgrade keeps OpenRig's packaged skills on a %s seat
       "queue-handoff": { "SKILL.md": "queue v1" },
     });
     plugin(other, opts.otherSkills ?? { "third-party": { "SKILL.md": "third v1" } });
+    opts.beforeLaunch?.(core);
     const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime }, home);
     if (runtime === "claude-code") ensureSeatSkillPlugin(paths);
     // The launch: one loadout of both plugins' skills, written into the seat's storage and recorded.
@@ -266,6 +267,56 @@ describe.each(runtimes)("an upgrade keeps OpenRig's packaged skills on a %s seat
     expect(statSync(join(s.paths.skillsRoot, "claude-compaction-restore", "scripts", "precompact-hook.mjs")).mode & 0o777).toBe(0o755);
     const later = reconcileSkillLoadout({ loadout: s.loadout(), runtime, cwd: home, apply: false, location: seatSkillLocation(s.paths, runtime) });
     expect(later.receipts.find((r) => r.id === "claude-compaction-restore")?.status).toBe("current");
+  });
+
+  // npm applies the installing shell's umask to a package's files: the vendored plugin's 0644 files and its 0755 helper
+  // read 0600 and 0700 after an install under 077. An upgrade installed under another umask changes every packaged mode.
+  const installUnder = (core: string, umask: number) => {
+    const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]);
+    for (const file of walk(join(core, "skills"))) chmodSync(file, (file.endsWith(".mjs") ? 0o755 : 0o644) & ~umask);
+  };
+  const helperIn = (skillsRoot: string) => join(skillsRoot, "claude-compaction-restore", "scripts", "precompact-hook.mjs");
+  const modeOf = (file: string) => statSync(file).mode & 0o777;
+  /** The launch under one umask; the upgrade under another, changing the helper's bytes; then rig down by the upgraded
+   *  daemon, which removes the copies whose bytes the source still has and keeps the helper, whose source moved on. */
+  function upgradedUnder(before: number, after: number) {
+    const s = seatWithLaunch({ beforeLaunch: (core) => installUnder(core, before) });
+    put(helperIn(join(s.core, "skills")), "hook v2");
+    installUnder(s.core, after);
+    cleanSeatSkills(s.paths);
+    expect([existsSync(helperIn(s.paths.skillsRoot)), existsSync(join(s.paths.skillsRoot, "claude-compaction-restore", "SKILL.md"))]).toEqual([true, false]);
+    return s;
+  }
+  const BROUGHT_ALL = "Restore: brought OpenRig's packaged skills up to the current packaged source: claude-compaction-restore, queue-handoff, seat-continuity-and-handover";
+
+  it.each([["077", "022", 0o077, 0o022], ["022", "077", 0o022, 0o077], ["077", "077", 0o077, 0o077]] as const)(
+    "follows an upgrade whose install's umask was %s, then %s, when rig down came after it", (_before, _after, before, after) => {
+      if (process.platform === "win32") return;
+      const s = upgradedUnder(before, after);
+      const { followed } = s.restore();
+      expect(followed.warnings.filter((warning) => warning.includes("file modes OpenRig didn't write"))).toEqual([]);
+      // Under one umask, only the skill whose bytes changed moves; under another, every packaged mode moved too.
+      expect(followed.warnings).toContain(before === after
+        ? "Restore: brought OpenRig's packaged skills up to the current packaged source: claude-compaction-restore" : BROUGHT_ALL);
+      // Today's packaged bytes, at today's packaged modes: what the follow writes.
+      expect([readFileSync(helperIn(s.paths.skillsRoot), "utf8"), modeOf(helperIn(s.paths.skillsRoot))]).toEqual(["hook v2", 0o755 & ~after]);
+      expect(modeOf(join(s.paths.skillsRoot, "claude-compaction-restore", "SKILL.md"))).toBe(0o644 & ~after);
+      const later = reconcileSkillLoadout({ loadout: s.loadout(), runtime, cwd: home, apply: false, location: seatSkillLocation(s.paths, runtime) });
+      expect(later.receipts.find((r) => r.id === "claude-compaction-restore")?.status).toBe("current");
+    });
+
+  it.each([
+    ["its mode", (file: string) => chmodSync(file, 0o750), "has file modes OpenRig didn't write", ["hook v1", 0o750]],
+    ["its bytes", (file: string) => writeFileSync(file, "hook (my edit)"), "was edited", ["hook (my edit)", 0o700]],
+  ] as const)("still keeps a seat's own change to %s on a present file across an upgrade installed under another umask", (_what, change, why, kept) => {
+    if (process.platform === "win32") return;
+    const s = upgradedUnder(0o077, 0o022);
+    change(helperIn(s.paths.skillsRoot));
+    const { followed } = s.restore();
+    const dir = join(s.paths.skillsRoot, "claude-compaction-restore");
+    const reason = why === "was edited" ? `${helperIn(s.paths.skillsRoot)} was edited` : `${dir} has file modes OpenRig didn't write`;
+    expect(followed.warnings).toContain(`Restore: kept ${dir} as it is: ${reason}`);
+    expect([readFileSync(helperIn(s.paths.skillsRoot), "utf8"), modeOf(helperIn(s.paths.skillsRoot))]).toEqual(kept);
   });
 });
 
