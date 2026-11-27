@@ -363,12 +363,6 @@ function runRig(args, { env = process.env, bin = "rig", spawnSync = require("nod
   } catch { return null; }
 }
 
-/** OpenRig read through findRig's `rig`; null when there's no `rig` to run. */
-function rigReader(env, projectDir) {
-  const bin = findRig({ env, projectDir });
-  return bin ? (args) => runRig(args, { env, bin }) : null;
-}
-
 /** The PATH a login shell of this user gets. Codex runs a session's own commands in a login shell (`bash -lc`), so a `rig`
  *  in a folder the login profile adds, such as a `~/.local/bin` made after this app started, runs for the session's agent
  *  while the app's own PATH, which its hooks inherit, lacks it. Null when no login shell answers in time. */
@@ -385,22 +379,36 @@ function loginShellPath({ env = process.env, spawnSync = require("node:child_pro
   } catch { return null; }
 }
 
-/** OpenRig read through the `rig` this session's own commands would run: findRig's, else the first on a login shell's PATH,
- *  run with that PATH so its `node` resolves the same way. Null when neither has one. */
-function sessionRigReader(env, projectDir, loginPath = () => loginShellPath({ env })) {
-  const direct = rigReader(env, projectDir);
-  if (direct) return direct;
+/** The `rig` this session's own commands would run, with the environment to run it in: findRig's, else the first on a login
+ *  shell's PATH, run with that PATH so its `node` resolves the same way. Null when neither has one. The hooks read OpenRig
+ *  through it, and in Claude Code the plugin's MCP server launcher (scripts/run-rig.cjs) starts the server with it. */
+function sessionRig(env, projectDir, loginPath = () => loginShellPath({ env })) {
+  const bin = findRig({ env, projectDir });
+  if (bin) return { bin, env };
   const login = loginPath();
-  return login && login !== env.PATH ? rigReader({ ...env, PATH: login }, projectDir) : null;
+  if (!login || login === env.PATH) return null;
+  const loginEnv = { ...env, PATH: login };
+  const found = findRig({ env: loginEnv, projectDir });
+  return found ? { bin: found, env: loginEnv } : null;
+}
+
+/** OpenRig read through sessionRig's `rig`; null when there's no `rig` to run. */
+function sessionRigReader(env, projectDir, loginPath) {
+  const rig = sessionRig(env, projectDir, loginPath);
+  return rig ? (args) => runRig(args, rig) : null;
 }
 
 /** What a conversation is told when there's no `rig`: without it the hooks read nothing, and nothing else would tell the
  *  person that the team's questions won't come in by themselves. */
 const NO_RIG_NOTICE = "OpenRig's automatic wake can't run in this conversation: the openrig plugin found no `rig` command "
-  + "(OPENRIG_RIG_BIN doesn't name one, there's none on PATH, and none in this project's node_modules/.bin). Until it finds "
-  + "one, your OpenRig team's questions and replies won't come into this conversation by themselves. To fix it, install "
-  + "OpenRig where every session finds it (`npm install -g @openrig/cli`), or set OPENRIG_RIG_BIN to the full path of `rig` "
-  + "in the environment this app starts with. The plugin says this once, not in every session; tell the person in plain words.\n";
+  + "(OPENRIG_RIG_BIN doesn't name one, there's none on PATH or on a login shell's PATH, and none in this project's "
+  + "node_modules/.bin). Until it finds one, your OpenRig team's questions and replies won't come into this conversation by "
+  + "themselves. To fix it, install OpenRig where every session finds it (`npm install -g @openrig/cli`) and check that `rig` "
+  + "runs in a new terminal. If it doesn't, or it runs there but not here, put the folder that holds `rig` on PATH in the "
+  + "shell's login profile (`~/.zprofile` for zsh, `~/.bash_profile` or `~/.profile` for bash), not only in `~/.zshrc` or "
+  + "`~/.bashrc`, then restart this app. That folder is the `bin` inside the one `npm prefix -g` prints, or inside the one "
+  + "given to a one-off `npm install -g --prefix`. Or set OPENRIG_RIG_BIN to the full path of `rig` in the environment "
+  + "this app starts with. The plugin says this once, not in every session; tell the person in plain words.\n";
 const NO_RIG = "no-rig.json";
 
 /** Says NO_RIG_NOTICE through `say` once for the plugin's install: someone who keeps OpenRig inside one project isn't told
@@ -817,5 +825,5 @@ if (require.main === module) void main();
 module.exports = {
   render, waiter, endpoint,
   CONVERSATION_KEY_TAG_PREFIX, conversationKey, conversationKeyTag, processReader, conversationRoutes, renderConversationTasks,
-  conversationWaiter, conversationTurn, codexStart, codexEnd, codexWatch, findRig, loginShellPath,
+  conversationWaiter, conversationTurn, codexStart, codexEnd, codexWatch, findRig, loginShellPath, sessionRig,
 };
