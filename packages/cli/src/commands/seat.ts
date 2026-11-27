@@ -1791,7 +1791,9 @@ an effort difference refuses as settings_drift, as a pending set-model does; the
 next ordinary managed launch or resume resolves effort instead.
 This never switches an account (use rig auth switch first), never reads credentials,
 never launches fresh, forks or retries. Peers sharing the Codex home are reported,
-not restarted.
+not restarted. An openrig-core upgrade waiting in the seat's Codex home installs
+between the old Codex's stop and the new one's start, unless another Codex seat still
+runs there; then a warning names those seats.
 Mid-turn activity and child processes are shown in --plan and the result; deciding
 whether to interrupt them is the operator's call.
 An adopted seat (origin=claimed) refuses with claimed_session. The stored conversation
