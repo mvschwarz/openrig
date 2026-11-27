@@ -6,7 +6,7 @@ import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { currentClaudeThemeMenu } from "./claude-theme-menu.js";
 import { currentClaudeModelMenu, currentCodexModelPicker, isModelPickerHeader } from "./native-model-picker.js";
-import { currentClaudeResumePicker } from "./native-resume-probe.js";
+import { currentClaudeResumePicker, looksLikeCodexHookReviewPrompt } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -841,6 +841,10 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
 
   const piConfirmation = findCurrentPiDialog(paneContent);
   if (piConfirmation) return { state: "attention", reason: "selection_prompt", evidence: piConfirmation };
+
+  if (options.runtime === "codex" && looksLikeCodexHookReviewPrompt(paneContent)) {
+    return { state: "attention", reason: "hook_trust_gate", evidence: "Codex is waiting for a hook-review decision" };
+  }
 
   const recentLines = lastNonBlank.slice(-8);
   const claudeComposer = findClaudeComposer(paneContent, options);
@@ -4726,7 +4730,7 @@ export class SessionTransport {
             captureObserver: privateInput ? undefined : this.captureObserver,
             binding,
           });
-          if (paneVeto.state === "needs_input" && paneVeto.reason === "selection_prompt") return paneVeto;
+          if (paneVeto.state === "needs_input" && (paneVeto.reason === "selection_prompt" || paneVeto.reason === "hook_trust_gate")) return paneVeto;
         }
         // A community harness's own hook script needn't post every dialog it shows (`activity_hooks` can leave out
         // Notification), so after any fresh hook short of a permission request its pane gets the read the hookless
@@ -5179,7 +5183,7 @@ export class SessionTransport {
    *  The pane size is read only when the captured screen shows a prompt. */
   private async capturePromptPane(sessionName: string, content: string, runtime: string | null | undefined): Promise<CaptureResult["promptPane"]> {
     const prompt = classifyPaneActivity(content, { runtime });
-    if (prompt.reason !== "permission_prompt" && prompt.reason !== "selection_prompt") return undefined;
+    if (prompt.reason !== "permission_prompt" && prompt.reason !== "selection_prompt" && prompt.reason !== "hook_trust_gate") return undefined;
     const panes = await this.tmuxAdapter.listPanes(sessionName).catch(() => []);
     const pane = panes.find(entry => entry.active) ?? panes[0];
     if (!pane || (pane.width >= 80 && pane.height >= 24)) return undefined;
