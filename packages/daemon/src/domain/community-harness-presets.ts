@@ -4,8 +4,9 @@
 // conversation id for each launch (see `community-harness-launch-result.ts`); OpenRig records it as reported, not observed.
 // With `names_conversation: true`, OpenRig names the conversation itself and passes the name to the command; it records it
 // as named by OpenRig, not observed. OpenRig hasn't tested these harnesses: it shows them as community harnesses,
-// labels launcher identity separately from observation. A declared managed runner can report activity through hooks;
-// other presets use the screen. Built-in runtime names are
+// labels launcher identity separately from observation. A declared managed runner can report activity through hooks, and
+// so can a plain preset whose own hook script posts the events it declares (`activity_hooks`); other presets use the
+// screen. Built-in runtime names are
 // reserved, so a preset can't replace one.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -16,7 +17,7 @@ import { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime } from "./built-in-runtime
 export { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime };
 
 export const COMMUNITY_HARNESS_PRESET_FORMAT = 1;
-const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted", "first_input", "runner", "passes_model", "launch_wrapper", "protocol", "model_catalog"] as const;
+const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted", "first_input", "runner", "passes_model", "launch_wrapper", "protocol", "activity_hooks", "model_catalog"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 export type CommunityHarnessProtocol = "pi-rpc";
@@ -50,6 +51,10 @@ export interface CommunityHarnessPreset {
   /** The command is an OpenRig-aware runner: it submits each pasted block as one prompt and posts the seat's turn
    *  boundaries as activity hooks, so its seat's activity reads from those hooks. Requires `launch_result`. */
   runner: boolean;
+  /** The OpenRig hook events the harness's own hook script posts on the install-token path (`activity_hooks`), sorted and
+   *  without repeats; absent when none are declared. On a plain preset these hooks decide its activity; a runner (or a
+   *  pi-rpc preset) keeps its own reports and the declaration is ignored. */
+  activityHooks?: string[];
   /** Optional settings-editor metadata. It has no effect on launching the harness. */
   modelCatalog?: PresetModelCatalog;
   path: string;
@@ -110,6 +115,10 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
   if (raw.launch_wrapper !== undefined && typeof raw.launch_wrapper !== "boolean") return bad("launch_wrapper must be true or false", "launch_wrapper");
   if (raw.names_conversation !== undefined && typeof raw.names_conversation !== "boolean") return bad("names_conversation must be true or false", "names_conversation");
   if (raw.runner !== undefined && typeof raw.runner !== "boolean") return bad("runner must be true or false", "runner");
+  const declaredHooks = raw.activity_hooks ?? [];
+  if (!Array.isArray(declaredHooks) || declaredHooks.some(hook => typeof hook !== "string" || !hook.trim())) {
+    return bad("activity_hooks must be a list of hook event names, such as [PreToolUse, PostToolUse, Stop]", "activity_hooks");
+  }
   if (raw.protocol !== undefined) {
     if (typeof raw.protocol !== "string" || raw.protocol !== "pi-rpc") {
       return bad("protocol must be 'pi-rpc' when specified", "protocol");
@@ -147,7 +156,8 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
     ...(catalog?.modelCatalog ? { modelCatalog: catalog.modelCatalog } : {}),
     launchResult: raw.launch_result === true, namesConversation: raw.names_conversation === true, resume: raw.resume === true,
     startupAssisted: raw.startup_assisted === true, firstInput: raw.first_input === true, runner: raw.runner === true, passesModel: raw.passes_model === true,
-    launchWrapper: raw.launch_wrapper === true, path } };
+    launchWrapper: raw.launch_wrapper === true,
+    ...(declaredHooks.length ? { activityHooks: [...new Set((declaredHooks as string[]).map(hook => hook.trim()))].sort() } : {}), path } };
 }
 
 function parseModelCatalog(value: unknown):
@@ -287,12 +297,16 @@ export interface CommunityHarnessLabel {
   /** The conversation name OpenRig passed to the harness for this launch. */
   namedConversation?: string;
   needsInput: "from the screen only: no harness prompt pattern" | "from structured activity and screen observations";
+  /** The hooks this seat's launch recorded its preset's own script posting, when they decide its activity (never on a
+   *  runner's seat, whose runner reports instead): its activity and attention words then come from OpenRig's decision. */
+  activityHooks?: string[];
   /** Set when the preset is missing or can't be used. */
   presetError?: string;
 }
 
 export function communityHarnessLabel(runtime: string, dir: string = communityHarnessesDir(),
-  session?: { resumeType: string | null; resumeToken: string | null; resumeProvenance: string | null; runner?: boolean }): CommunityHarnessLabel {
+  session?: { resumeType: string | null; resumeToken: string | null; resumeProvenance: string | null; runner?: boolean;
+    activityHooks?: readonly string[] | null }): CommunityHarnessLabel {
   // A conversation is labelled reported only when the launcher reported it, and named only when OpenRig named it and passed
   // it: a resume that needed attention keeps the conversation it attempted, with neither provenance.
   const own = session?.resumeType === `community:${runtime}` && session.resumeToken ? session.resumeToken : undefined;
@@ -307,7 +321,8 @@ export function communityHarnessLabel(runtime: string, dir: string = communityHa
     identity: reported ? "reported by its launcher, not observed" : named ? "named by OpenRig, not observed" : isPiRpc && own ? "reported by its launcher, not observed" : "not confirmed",
     ...(reported || (isPiRpc && own) ? { reportedConversation: reported ?? own } : {}),
     ...(named ? { namedConversation: named } : {}),
-    needsInput: isPiRpc || session?.runner === true ? "from structured activity and screen observations" : "from the screen only: no harness prompt pattern",
+    needsInput: isPiRpc || session?.runner === true || session?.activityHooks?.length ? "from structured activity and screen observations" : "from the screen only: no harness prompt pattern",
+    ...(session?.runner !== true && session?.activityHooks?.length ? { activityHooks: [...session.activityHooks] } : {}),
     ...(found.ok ? {} : { presetError: found.message }),
   };
 }

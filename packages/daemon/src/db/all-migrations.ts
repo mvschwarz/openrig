@@ -8,11 +8,14 @@ import { seatPoolSchema } from "./migrations/178_seat_pool.js";
 import { remoteControlObservationsSchema } from "./migrations/179_remote_control_observations.js";
 import { queueRelayedAnswersSchema } from "./migrations/186_queue_relayed_answers.js";
 import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_staging.js";
+import { seatReapStateSchema } from "./migrations/191_seat_reap_state.js";
+import { seatColdStartStandbyStopSchema } from "./migrations/200_seat_cold_start_standby_stop.js";
 import { queueTransferActivationSchema } from "./migrations/191_queue_transfer_activation.js";
 import { workflowRunTitleSchema } from "./migrations/194_workflow_run_title.js";
 import { workflowStartOperationsSchema } from "./migrations/195_workflow_start_operations.js";
 import { queueItemEvidenceRefRootsSchema } from "./migrations/196_queue_item_evidence_ref_roots.js";
 import { seatIdentityProcessStartedAtSchema } from "./migrations/197_seat_identity_process_started_at.js";
+import { sessionAgentActivityHooksSchema } from "./migrations/197_session_agent_activity_hooks.js";
 import { queueItemsNativePermissionIndexSchema } from "./migrations/199_queue_items_native_permission_index.js";
 import { sessionsEarlierHandoverOriginSchema } from "./migrations/200_sessions_earlier_handover_origin.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
@@ -397,6 +400,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   providerAccountRefsSchema,
   providerAccountAssignmentsSchema,
   rigSeatSliceSchema,
+  seatReapStateSchema,
   communityHarnessRuntimeSwitchesSchema,
   networkBindingProvidersSchema,
   queueTransferActivationSchema,
@@ -405,7 +409,9 @@ export const ALL_MIGRATIONS: Migration[] = [
   networkRequestsSchema,
   queueItemEvidenceRefRootsSchema,
   seatIdentityProcessStartedAtSchema,
+  sessionAgentActivityHooksSchema,
   queueItemsNativePermissionIndexSchema,
+  seatColdStartStandbyStopSchema,
   contextConfiguredBudgetSchema,
   sessionsEarlierHandoverOriginSchema,
 ];

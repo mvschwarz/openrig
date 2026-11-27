@@ -245,7 +245,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   }
 
   // -- AC-1: token-safe default (the regression) --
-  it.each(["observed", "unknown"])("r2: AC-1 compact stays below full /2.8 with real %s observations on every row", async status => {
+  it.each(["observed", "unknown"])("r2: AC-1 compact stays below full /2.7 with real %s observations on every row", async status => {
     const originals = ALL_NODES.map(n => n.modelObservation);
     if (status === "unknown") for (const n of ALL_NODES) n.modelObservation = {
       status: "unknown", model: null, source: null, observedAt: null,
@@ -266,9 +266,11 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     // slice 13 fix 2: hostSelfId is one ruled scalar added to BOTH projections
     // (host attribution must ride the token-safe default — a merged roster
     // without it reads as authoritative), which moves the ratio without any
-    // heavy field returning. The real regression guard — heavy fields stay
+    // heavy field returning. Re-based /2.8 → /2.7 when compact gained the one
+    // decided `activity` word per row (the word rig ps and MCP show), again no
+    // heavy field. The real regression guard — heavy fields stay
     // omitted from compact — is asserted directly in AC-7.
-    expect(defaultOutput.length).toBeLessThan(fullOutput.length / 2.8);
+    expect(defaultOutput.length).toBeLessThan(fullOutput.length / 2.7);
     // Sanity: full output exists and is nontrivial
     expect(fullOutput.length).toBeGreaterThan(1000);
     } finally { ALL_NODES.forEach((n, i) => n.modelObservation = originals[i]!); }
@@ -523,8 +525,8 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(Array.isArray(full)).toBe(true);
     expect(compact.length).toBe(full.length);
 
-    // Compact is much smaller (re-based /3 → /2.8 with AC-1 — see its comment)
-    expect(compactLogs.join("").length).toBeLessThan(fullLogs.join("").length / 2.8);
+    // Compact is much smaller (re-based /3 → /2.8 → /2.7 with AC-1 — see its comment)
+    expect(compactLogs.join("").length).toBeLessThan(fullLogs.join("").length / 2.7);
 
     // Full preserves all fields; compact omits heavy ones
     expect(full[0].contextUsage).toBeDefined();

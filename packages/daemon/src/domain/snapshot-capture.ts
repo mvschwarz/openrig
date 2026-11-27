@@ -62,6 +62,18 @@ export class SnapshotCapture {
   /** Capture truthful occupancy and, on periodic ticks, eligible whole-session resume sources. */
   captureSnapshot(rigId: string, kind: string, opts?: { intendedNodeIds?: string[]; /** Slice 16: notify after the caller's own
     transaction commits, not from inside it. */ deferNotify?: (event: PersistedEvent) => void }): Snapshot {
+    const data = this.readSnapshotData(rigId, kind, opts);
+    const { snapshot, persistedEvent } = this.db.transaction(() => {
+      const snapshot = this.snapshotRepo.createSnapshot(rigId, kind, data);
+      const persistedEvent = this.eventBus.persistWithinTransaction({ type: "snapshot.created", rigId, snapshotId: snapshot.id, kind });
+      return { snapshot, persistedEvent };
+    })();
+    if (opts?.deferNotify) opts.deferNotify(persistedEvent);
+    else this.eventBus.notifySubscribers(persistedEvent);
+    return snapshot;
+  }
+
+  readSnapshotData(rigId: string, kind: string, opts?: { intendedNodeIds?: string[] }): SnapshotData {
     // 1. Get rig with nodes, edges, bindings
     const rig = this.rigRepo.getRig(rigId);
     if (!rig) {
@@ -204,25 +216,7 @@ export class SnapshotCapture {
       }
     }
 
-    // 5. Atomic: persist snapshot + event in one transaction
-    const txn = this.db.transaction(() => {
-      const snapshot = this.snapshotRepo.createSnapshot(rigId, kind, data);
-      const persistedEvent = this.eventBus.persistWithinTransaction({
-        type: "snapshot.created",
-        rigId,
-        snapshotId: snapshot.id,
-        kind,
-      });
-      return { snapshot, persistedEvent };
-    });
-
-    const { snapshot, persistedEvent } = txn();
-
-    // 6. Notify subscribers after commit (best-effort)
-    if (opts?.deferNotify) opts.deferNotify(persistedEvent);
-    else this.eventBus.notifySubscribers(persistedEvent);
-
-    return snapshot;
+    return data;
   }
 
   private materializedRoster(rigId: string): string[] | null {

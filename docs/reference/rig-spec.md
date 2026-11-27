@@ -426,8 +426,12 @@ The mapping accepts native `read`, `write` and `deny` values at absolute paths,
 It must be nonempty; nested subpath maps and arbitrary Codex settings are not part
 of this option. Omitted network access becomes `false`. Include the read access
 your tools and installed Codex executable need; this custom profile adds no
-workspace, temporary, queue-state, seat-folder or Git-directory write grants of
-its own. Native Codex decides whether the host can enforce the supplied rules.
+workspace, temporary, queue-state or seat-folder write grants of its own. When
+it lets the seat write its working folder, OpenRig adds a write rule for the
+seat's Git directories, the same ones a plain workspace-write seat gets through
+`--add-dir`, because Codex keeps `.git` read-only inside a writable root unless
+the profile names it. Naming a Git directory yourself, for example as `read`,
+keeps your rule and Codex's protection. Native Codex decides whether the host can enforce the supplied rules.
 Filesystem approval accepts `never` or `on-request`; the retired `untrusted`
 approval is rejected before the selection is saved.
 
@@ -850,6 +854,12 @@ launch would use and restore's automatic periodic carry. It then prints the laun
 `rig launch <rig> <seat>` when the resume comes through the periodic carry, which naming a
 snapshot would turn off. Otherwise it refuses and changes nothing. `rig provider precheck` gives
 the same answer.
+A materialized Claude Code seat that has never launched has no conversation to resume: the switch
+saves its reference for its first launch, in the same write that checks the seat still has no
+session, records who asked (`node.claude_token_ref_changed`), and prints `rig launch <rig> <seat>`.
+A first launch that started in the meantime is left as it is. A saved label or a readable file
+isn't proof of the account: when the launch can't apply a token file, Claude starts on the login it
+would use otherwise and the launch says so.
 For Claude Code, select an API-key file, a subscription-token file, or the home's stored login:
 
 ```sh

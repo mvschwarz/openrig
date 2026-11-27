@@ -83,6 +83,7 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  standby_stopped?: true;
   /** The seat's state as `rig ps --nodes` shows it; absent from an older daemon. */
   lifecycle_state?: string;
   launch_cwd?: string | null;
@@ -330,7 +331,7 @@ function printHuman(status: SeatStatusResponse): void {
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   // #3185: a bare shell or an unconfirmed pane process keeps the session record running; read the seat as rig ps does.
-  console.log(`Session: ${status.session_status === "running" && status.lifecycle_state === "attention_required"
+  console.log(`Session: ${status.standby_stopped ? "standby (wakes for queued work)" : status.session_status === "running" && status.lifecycle_state === "attention_required"
     ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
   const stop = status.permission_stop;
   if (stop && stop.state !== "unavailable") {
@@ -1789,9 +1790,17 @@ exception: an explicit effort choice saved with rig seat set-effort is applied, 
 --plan shows that change. With no saved choice (never set, or cleared with --clear),
 an effort difference refuses as settings_drift, as a pending set-model does; the
 next ordinary managed launch or resume resolves effort instead.
+A developer_instructions command-line difference also doesn't refuse the restart.
+Managed launches use that override for startup guidance, but a manual resume can
+carry a person's own value too. This in-place restart doesn't preserve the override
+or rebuild startup guidance; --plan and the result report when it changes. To
+refresh startup guidance, or adopt new openrig-core in a home other seats share,
+use the normal restore path together: rig down, then rig up --existing.
 This never switches an account (use rig auth switch first), never reads credentials,
 never launches fresh, forks or retries. Peers sharing the Codex home are reported,
-not restarted.
+not restarted. An openrig-core upgrade waiting in the seat's Codex home installs
+between the old Codex's stop and the new one's start, unless another Codex seat still
+runs there; then a warning names those seats.
 Mid-turn activity and child processes are shown in --plan and the result; deciding
 whether to interrupt them is the operator's call.
 An adopted seat (origin=claimed) refuses with claimed_session. The stored conversation

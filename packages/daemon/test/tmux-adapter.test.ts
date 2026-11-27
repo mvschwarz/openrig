@@ -1789,6 +1789,53 @@ describe("TmuxAdapter", () => {
   });
 
   describe("signalPaneProcess", () => {
+    const witness = { target: { session: "worker@test", pane: "%3", nodeId: "a" }, identity: "$1|42|100|%3",
+      processes: { pid: 4242, startedAt: "fixture", group: 4300, rootGroup: 4242, members: new Map([[4300, "fixture"]]) } };
+    /** The real adapter's standby witness reads, with only the pane pid and foreground group controlled. */
+    const witnessExec = (calls: string[], identity = "$1|42|100|%3|0|worker@test|1|1") => vi.fn<ExecFn>(async cmd => {
+      calls.push(cmd);
+      if (cmd.includes("#{session_windows}")) return identity + "\n";
+      if (cmd.includes("show-environment")) return "OPENRIG_NODE_ID=a\n";
+      if (cmd.includes("#{pane_pid}")) return "4242\n";
+      return "";
+    });
+
+    it.each(["TERM", "KILL"] as const)("signals the runner's own process group with standby %s, then the pane pid", async signal => {
+      const calls: string[] = [];
+      const adapter = new TmuxAdapter(witnessExec(calls));
+      adapter.observeStandbyProcesses = async () => witness.processes;
+
+      const result = await adapter.signalPaneProcess("%3", signal, witness);
+
+      expect(result.ok).toBe(true);
+      const groupIndex = calls.indexOf(`kill -${signal} -4300`);
+      const pidIndex = calls.indexOf(`kill -${signal} 4242`);
+      expect(groupIndex).toBeGreaterThanOrEqual(0);
+      expect(groupIndex).toBeLessThan(pidIndex);
+    });
+
+    it("does not signal only the pane pid when the foreground group is unproven", async () => {
+      const calls: string[] = [];
+      const adapter = new TmuxAdapter(witnessExec(calls));
+      adapter.standbyProcessCensus = async () => ({ permissionHiddenPids: [], rows: [
+        { pid: 4242, ppid: 1, pgid: 4242, tpgid: -1, executableName: "sh", startedAt: "fixture", command: "sh" },
+      ] });
+
+      expect(await adapter.signalPaneProcess("%3", "TERM", witness)).toMatchObject({ ok: false, code: "standby_process_unconfirmed" });
+      expect(calls.some(cmd => cmd.startsWith("kill "))).toBe(false);
+    });
+
+    it.each(["TERM", "KILL"] as const)("refuses standby %s when the pane changed before the signal", async signal => {
+      const exec = witnessExec([], "$1|43|101|%3|0|worker@test|1|1");
+      const adapter = new TmuxAdapter(exec);
+      adapter.observeStandbyProcesses = async () => witness.processes;
+
+      const result = await adapter.signalPaneProcess("%3", signal, witness);
+
+      expect(result).toMatchObject({ ok: false, code: "guard_target_changed" });
+      expect(exec.mock.calls.some(([cmd]) => cmd.startsWith("kill "))).toBe(false);
+    });
+
     it("sends the given signal to the pane's foreground pid (graceful TERM / fallback KILL)", async () => {
       const calls: string[] = [];
       const exec = vi.fn<ExecFn>(async (cmd: string) => { calls.push(cmd); return cmd.includes("pane_pid") ? "4242\n" : ""; });

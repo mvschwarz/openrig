@@ -63,7 +63,9 @@ export async function reconcileMacosPackageTests(eventName, event, runId, api, l
   const fromFork = !!forkRepo && !!event.repository?.full_name && forkRepo !== event.repository.full_name;
   const isThisPR = run => run.workflow_id === current.workflow_id && run.event === "pull_request_review"
     && (run.pull_requests?.some(pr => pr.number === number) || (fromFork && !run.pull_requests?.length
-      && run.head_repository?.full_name === forkRepo && run.head_branch === event.pull_request.head.ref
+      // Review runs can name the workflow's base repository even when the approved head lives in a fork.
+      && [forkRepo, event.repository.full_name].includes(run.head_repository?.full_name)
+      && run.head_branch === event.pull_request.head.ref
       && (run.id === current.id || run.display_title === `macOS package tests PR #${number}`)));
   if (!isThisPR(current) || current.head_sha !== plan.head) throw new Error("Run identity does not match the approved PR head");
   const live = () => api(`/pulls/${number}`);

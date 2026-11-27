@@ -736,6 +736,32 @@ describe("SessionTransport", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
+  // A preset's own hook script (`activity_hooks`) can post PreToolUse and then show a dialog it posts no Notification
+  // for; a fresh hook mustn't let a send type into that dialog.
+  it.each([
+    ["PreToolUse", "Bash", " Do you want to proceed?\n❯ 1. Yes\n  2. No, and tell the agent what to do differently", false],
+    ["Stop", "end_turn", "› 1. Yes, continue\n  2. No, cancel\n\nPress enter to continue", false],
+    ["PreToolUse", "Bash", "  · working 3/20\n❯ ", true],
+  ])("community contract: a fresh %s/%s hook from the preset's own script doesn't let a send type into a dialog (case %#)", async (hookEvent, subtype, screen, delivers) => {
+    const { session } = seedCanonicalRig("synth");
+    sessionRegistry.recordCommunityHarnessSelection(session.id, "synth", false, ["PostToolUse", "PreToolUse", "Stop"]);
+    const agentActivityStore = new AgentActivityStore({ db, eventBus: new EventBus(db) });
+    agentActivityStore.recordHookEvent({ runtime: "synth", sessionName: "dev-impl@my-rig", hookEvent, subtype });
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "node", capturePaneContent: async () => screen, sendText, sendKeys }),
+      { agentActivityStore, sleep: async () => {} });
+    const result = await transport.send("dev-impl@my-rig", "ordinary work");
+    if (delivers) {
+      expect(result.ok).toBe(true);
+      expect(sendText).toHaveBeenCalledOnce();
+    } else {
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input" });
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    }
+  });
+
   function seedExternalCliRig() {
     const rig = rigRepo.createRig("rigged-buildout");
     const node = rigRepo.addNode(rig.id, "orch1.lead", {

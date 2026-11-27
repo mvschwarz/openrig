@@ -71,6 +71,7 @@ export interface NodeEntry {
   remoteControl?: { sessionId: string | null; observedAt: string } | null;
   sessionStatus: string | null;
   intentionallyStopped?: boolean;
+  standbyStopped?: true;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: string;
   /** The conversation outcome restore or handover recorded for the current occupant: `resumed` when a restore's resume
@@ -100,7 +101,8 @@ export interface NodeEntry {
   /** The registry's recorded session status, kept when the served sessionStatus is corrected. */
   storedSessionStatus?: string | null;
   /** A community harness's seat: its label, maintainer and declared limits. */
-  communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
+  communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string;
+    activityHooks?: string[] };
   /** Configured literal argv prefix wrapping local built-in Pi/Codex launches; omitted when absent. */
   launchWrapper?: string[];
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
@@ -242,6 +244,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "remoteControl",
   "sessionStatus",
   "intentionallyStopped",
+  "standbyStopped",
   "startupStatus",
   "restoreOutcome",
   "oriented",
@@ -803,6 +806,9 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       oriented: n.oriented ?? "n-a",
       lifecycleState: n.lifecycleState,
       // Keep the current usage limit visible without classifying it as human attention.
+      // The decided activity word, as the table shows it (the oracle's, with the screen fallback where it applies);
+      // agentActivity below is the older hook-and-screen reading.
+      activity: formatActivity(n),
       agentActivity: keepDiagnostics || hasCurrentUsageLimit(n)
         ? { state: n.agentActivity?.state ?? "unknown", reason: n.agentActivity?.reason }
         : { state: n.agentActivity?.state ?? "unknown" },
@@ -821,6 +827,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       lastActivity: n.agentActivity?.sampledAt ?? n.startupCompletedAt ?? null,
     };
     if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
+    if (n.standbyStopped) compact.standbyStopped = true;
     // #3513: only a served observation; its time says when it was last seen.
     if (n.remoteControl) compact.remoteControl = { sessionId: n.remoteControl.sessionId, observedAt: n.remoteControl.observedAt };
     // The served identity evidence (verdict, reason, observation time) and the registry's recorded
@@ -1050,7 +1057,7 @@ activeCount, hasWorkCount, attentionCount, status, lifecycleState, uptime,
 latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
 podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, configuredAccount, communityHarness, launchWrapper, model, sessionStatus,
-intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
+intentionallyStopped, standbyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, resumeCommandLabel, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
 agentActivity, activityState, needsAttention, arbitratedNeedsInput, needsInputEvidence,
