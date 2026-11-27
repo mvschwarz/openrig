@@ -1543,6 +1543,16 @@ Separate instances should use separate databases; the check is a startup observa
 not a lock against later concurrent starts. Changing the setting applies on the next
 daemon start.
 
+A second `OPENRIG_HOME` on the same user account isn't an isolated test environment.
+Unless its `HOME` and `CODEX_HOME` also point inside it, its daemon still refreshes
+OpenRig's own skills in that account's `~/.claude/skills` and `~/.agents/skills`. With
+Codex hooks enabled, its managed setup can also update `~/.codex/config.toml` and, when
+present, `~/.codex/hooks.json` with OpenRig's activity hooks. That setup runs at daemon
+start and at later Codex launches, so a Codex home that several daemons use follows
+whichever set it up most recently. The startup "home isolation advisory" names which of
+these apply. For a test that needs its own OpenRig, use another machine, such as a VM
+or VPS.
+
 ## Daemon start wait
 
 `rig daemon start` waits up to 180 seconds for the child it started to answer on its

@@ -4,8 +4,8 @@
 // the ONE bounded consumer of the shipped parked derivation: ONE rig-level
 // supervisor job per rig (anchor `parked-owner-consumer@<rigName>`), diagnosing
 // the WHOLE rig through the same derivation `rig parked` serves and sending ONE
-// wake to the first eligible parked owner per evaluation. The S01 ladder owns
-// retries/escalation; the watchdog engine owns scheduling.
+// wake to the first eligible parked or activity-unknown owner per evaluation.
+// The S01 ladder owns retries/escalation; the watchdog engine owns scheduling.
 //
 // Row notes describe attempts and preserve positive prompt-refusal recovery. They
 // do not veto an undelivered reminder. Recorded success and actual prompt holds
@@ -406,10 +406,6 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           skipped.push({ seat: seat.sessionName, why: "terminal-server-unreachable" });
           continue;
         }
-        if (seat.parked === "indeterminate") {
-          skipped.push({ seat: seat.sessionName, why: "indeterminate-not-parked" });
-          continue;
-        }
         const knownRows = [
           ...seat.obligations.items.map((r) => r.qitemId),
           ...seat.obligations.held.map((h) => h.qitemId),
@@ -466,8 +462,9 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         // A seat idle for moments has just handed off or asked someone, not got stuck holding work. The diagnosis says
         // how long its waiting state has been unchanged; with no start known, the reminder goes as before. A seat at a
         // prompt gets no grace: this attempt's refusal is what alerts whoever can clear the prompt.
+        // Unknown activity does not establish a recent idle handoff, so it gets no waiting-state grace.
         const waitingSince = seat.activity.since ? Date.parse(seat.activity.since) : Number.NaN;
-        if (seat.activity.needsInput.count === 0 && Number.isFinite(waitingSince)
+        if (seat.parked === true && seat.activity.needsInput.count === 0 && Number.isFinite(waitingSince)
           && (deps.now?.() ?? Date.now()) - waitingSince < PARKED_OWNER_IDLE_GRACE_MS) {
           skipped.push({ seat: seat.sessionName, why: "waiting-grace" });
           continue;
@@ -591,8 +588,11 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           continue;
         }
 
+        const observation = seat.parked === "indeterminate"
+          ? "Your activity is unknown, and you hold"
+          : "You are parked (arbitrated: idle at prompt) while holding";
         const message =
-          `You are parked (arbitrated: idle at prompt) while holding ${namedIds.length} open ` +
+          `${observation} ${namedIds.length} open ` +
           `obligation${namedIds.length === 1 ? "" : "s"}: ${namedIds.join(", ")}. ` +
           `Resume the work or update each row honestly (close, park-with-wake, or hand off). ` +
           `If you're waiting on a person's answer, don't ask again; hold the row with rig queue block <id> --on <who> --wake-after <duration> ` +
@@ -616,7 +616,9 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
             // The occupant this reminder goes to: its interval is that occupant's, never a successor's.
             ...(generation === null ? {} : { occupantGeneration: generation }),
             ...(last ? { ownerMinIntervalS: minIntervalS, newSinceLastWake } : {}),
-            evidence: Number.isFinite(shell) && seat.activity.needsInput.count === 0 ? "arbitrated-idle-at-prompt; background-shell-past-ceiling" : "arbitrated-idle-at-prompt",
+            evidence: seat.parked === "indeterminate" ? "activity-unknown; reminder-fail-open"
+              : Number.isFinite(shell) && seat.activity.needsInput.count === 0
+                ? "arbitrated-idle-at-prompt; background-shell-past-ceiling" : "arbitrated-idle-at-prompt",
             episodeClosures: closures,
             skippedSeats: skipped,
           },

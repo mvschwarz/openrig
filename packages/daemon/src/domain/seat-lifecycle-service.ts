@@ -60,7 +60,7 @@ import {
   type InPlaceRestartReport, type InPlaceRestartTarget, type InPlaceVerifyResult,
 } from "./seat-restart-in-place.js";
 import { CommunityHarnessRuntimeAdapter, seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
-import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { seatRecordedCommunityHarness, sessionCommunityHarnessSelect } from "./session-registry.js";
 import { seatLaunchAdditionsReport } from "./seat-launch-additions.js";
 import { seatSkillPaths } from "./seat-skill-storage.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
@@ -629,7 +629,7 @@ export class SeatLifecycleService {
       return { ok: false, code: "startup_context_runtime_mismatch", message: "The saved startup context belongs to a different runtime." };
     }
     // Resolved as launch resolves it, so a recorded community harness finds its adapter too.
-    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, this.latestSession(node.id)?.community_harness);
+    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, seatRecordedCommunityHarness(this.db, node.id));
     if (!adapter) return { ok: false, code: "runtime_adapter_missing", message: "The configured runtime adapter is unavailable." };
 
     const warnings: string[] = [];
@@ -1573,7 +1573,9 @@ export class SeatLifecycleService {
         message: `Persisted startup context runtime '${startup.context.runtime}' does not match current node runtime '${node.runtime ?? "missing"}'.`,
       };
     }
-    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, this.latestSession(node.id)?.community_harness);
+    // The harness the seat was last launched for, even when a newer session lost the selection (#4047: a restore launch
+    // that couldn't tell the harness left a bare shell's row on top), so this fresh launch is how such a seat recovers.
+    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, seatRecordedCommunityHarness(this.db, node.id));
     if (!adapter) {
       return {
         ok: false as const,

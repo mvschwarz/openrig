@@ -65,8 +65,9 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
   and it is never below the busy agents plus the agents still starting. Agents that run and agents still starting
   (phase `adding`) both count toward the target, so an add already reserved or issued is not repeated. The job adds
   the difference, limited to the room left under `max` (every slot except a `drained` one takes room), outside the
-  `cooldown_s` after the latest drain. Each agent is
-  named `<member>-s<n>`, added the same way as `rig add`, and launched right away:
+  `cooldown_s` after the latest drain. Each agent added first brings back the lowest-numbered eligible `drained` slot
+  (see *Bringing a drained agent back*), and that counts as one add; only when no eligible slot is left is a new
+  number taken. Each new agent is named `<member>-s<n>`, added the same way as `rig add`, and launched right away:
   - it takes the model member's launch settings as the rig export writes them, without `pool`, `id`, `label`, `cwd`
     and `session_source`, and its launch additions are copied from the model; it starts without the model's
     conversation. Its member `startup` files resolve from the model's launch root, also when the rig export leaves
@@ -103,8 +104,18 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
     operation id with what it was issued on, which never runs the add again. With no node recorded, its slot row goes
     and it is reported `no_node`, `not launched (interrupted before create)`; with a node, it settles by the table
     above. What settles this way is reported with the evaluation's other settlements, and kept in the job's history;
-  - while a slot is `drained`, no new number is added, and the notes report `held: drained slot awaiting comeback`
-    for the add only: rows still move.
+    an add it settles `not_running` drains its slot (see the cooldown below);
+  - a drain step newer than the plan's read, as an add that settles `not_running` here or while the moves await
+    starts, holds that evaluation inside the `cooldown_s` after it: its drains (read before the moves) and its add
+    (read again right before it), comebacks included (`add.skipped: cooldown`), wait, except under `drain: true`;
+    rows still move;
+  - while an add that settled `not_running` keeps its slot `drained` with its reuse hold, no new number is taken: an
+    evaluation whose add would take a new number (no eligible `drained` slot left to bring back) reports `add.held`
+    (`held: failed add <id> (slot <n>) settled not_running (<observed>)`), and `add.failedAdd` names that attempt, its
+    slot and its reuse hold, with no limit on how many; when no add runs (the pool is at its target or at `max`, or
+    inside a cooldown), the hold shows only in that slot's `reuseHold` under `slots`. Rows still move, and the other
+    eligible `drained` slots still come back, outside a cooldown. An ordinary `drained` slot, a comeback's reuse hold
+    and an `unknown` add hold no new number.
 - **Latency.** The job runs every 60 seconds, so a row that has waited `dispatch_after_s` is considered by the next
   evaluation, up to one more interval later, before it is moved and before an agent is added. That is not a dispatch
   deadline: a row moves only to an agent that is
@@ -144,14 +155,58 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
   | `changed_owner` | The seat or its latest session changed before anything was stopped (`selection_changed`). | `live` |
   | `unconfirmed` | Anything else, with the real code and message (for example `stop_uncertain`). | `draining`. When the stop attempted a kill, the next evaluation stops the same session again, with no new capture, once the agent is free and the pool still has surplus (an agent that still runs and got work or a wake is not stopped); a session relaunched since is `changed_owner`. When the stop had no effect, the next evaluation gives the slot back to `live`, and a later drain starts again with a new capture. |
 
-  A drained agent keeps its node, its sessions and its history: nothing is removed. `rig up` leaves it stopped.
-  Bringing a drained agent back is done by a later change.
+  A drained agent keeps its node, its sessions and its history: nothing is removed. `rig up` leaves it stopped until
+  the pool brings it back.
+- **Bringing a drained agent back.** A `drained` slot is eligible while it has no reuse hold. The add brings the
+  lowest-numbered eligible slot back on its own node, under its own name, with its own sessions and stored settings,
+  in the folder recorded in the snapshot it comes back from:
+  - the snapshot is the newest one, of any kind, that is restore-usable, holds the slot's node with its logical id in
+    its intended topology, and recorded exactly one active occupant for that node (a running session; in an
+    `auto-rehydrate` capture, the retained session that has not exited). The drain's own capture qualifies; a snapshot
+    taken before the agent existed, or an `auto-periodic` one taken after it stopped, does not;
+  - the comeback is reserved on the slot's own row and issued under the model's custody lease, and after the lease is
+    released the agent is launched through `launchSingleNode` with that explicit `snapshotId`, never without one, so
+    the automatic ranking (which prefers `auto-periodic` snapshots) never picks it. The agent's own restore setting
+    decides whether its conversation resumes (`resume_if_possible` with a usable token) or it starts fresh
+    (`relaunch_fresh`);
+  - with no qualifying snapshot, nothing is launched and the slot stays `drained` with the reuse hold
+    `no_qualifying_snapshot`, the node id, how many snapshots were read and the condition (1: restore-usable, 2: holds
+    the node, 3: one active occupant) each one failed. The add then tries the next eligible slot, or a new number
+    unless an add that settled `not_running` holds new numbers (see *Adding agents*);
+  - a newer capture that passes conditions 1 and 2 and whose own occupant map recorded two or more live occupants for
+    the node (candidates whose captured sessions were running) stops the search for that slot: no older snapshot is
+    picked over it, nothing is launched, and the slot stays `drained` with the reuse hold `conflicting_occupants`,
+    naming that snapshot and its candidate session ids, with the snapshots read before it. Only that slot is held: the
+    add tries the next eligible slot, or a new number unless an add that settled `not_running` holds new numbers. A
+    node recorded absent, and an occupancy the metadata can't tell (a legacy relation, or candidates that were not
+    running at capture, as after a reboot), fail condition 3 and the
+    search goes on; an unknown occupancy is named (`unknown` on its failed condition, and `unknownOccupants` on the
+    comeback issued from an older snapshot) and skipped;
+  - a launch refused before it starts (`snapshot_not_found`, `snapshot_wrong_rig`, `snapshot_unusable`,
+    `no_matching_nodes` or `selection_changed`) is reported `refused` with its code, and the slot goes back to
+    `drained` with that code and the snapshot as its reuse hold: the same snapshot is never sent again. A comeback that
+    is held or refused keeps the drain's time, so it does not restart the `cooldown_s`;
+  - right before its launch, the comeback reads the job and the rig again: with the job stopped or the rig down, it is
+    never launched, the slot is `drained` again with no reuse hold, and the comeback is reported `refused` with the
+    code `held`;
+  - a comeback that runs is reported `running`, with the `snapshotSelection` it was launched from (`mode:
+    "explicit"`), and the slot is `live` again. It comes back with its own stored settings, never the model's: the
+    model, effort, Codex profile and permission posture follow the slot's latest saved choices, as in any restore.
+    Its folder is the one that snapshot recorded (the stored one only when it recorded none): a `rig seat set-cwd` on the slot after that capture does not reach the
+    comeback; it is used only by the slot's next fresh launch (`rig seat launch --fresh --stop`, or `rig handover
+    --source rebuild`; see [Change an existing seat's working
+    directory](agent-startup-guide.md#change-an-existing-seats-working-directory));
+  - when the slot's stored settings differ from the model's, the report of a comeback that runs carries a warning
+    naming the fields that differ (`cwd` is compared only without `cwd_template`, when the slot took the model's
+    folder). The warning compares the slot's stored settings: a `cwd` set after the capture is compared at its new
+    value while the agent comes back in the captured folder;
+  - every evaluation reports a slot's reuse hold with the slot.
 - **After `pool: {}`.** Clearing the block on re-apply leaves the job running: it drains the free agents with the
   block it was last ensured with (`context.pool`), leaves busy agents `live` until they are free, and ends
   (`terminal`) once every agent is `drained` and the block is still absent. A `live` agent positively gone (its latest
   session `exited`, or its node confirmed stopped) with no work is drained by the checked stop for its recorded session,
   with no capture; an unknown or stale status is not gone.
-- **Holds.** The whole pool is held, and nothing is moved, drained or added, while:
+- **Holds.** The whole pool is held, and nothing is moved, drained, added or brought back, while:
   - the job is not `active` (stopped by an operator, or ended);
   - the stored block can't be read (the notes carry an advisory; nothing is removed);
   - the rig's latest `rig.stopped` has no `restore.completed` after it. Any later `restore.completed` ends the hold,
@@ -171,12 +226,15 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
 Deleting a model node removes its slot rows but leaves its agent nodes and sessions as ordinary members of the rig,
 so their pool association and any phase or hold kept only on a slot go with it. Recreating a model with the same name
 doesn't recover its former slot numbers, and the next add skips a logical id the rig still has. While the model node is
-gone, its job moves, drains and adds nothing and reports `held: model node gone`.
+gone, its job moves, drains, adds and brings back nothing and reports `held: model node gone`.
 
 ## What the job does not do yet
 
-It does not bring drained agents back, and while a slot is `drained` (an add that settled `not_running` included) it
-adds no new number. An add whose launch failed or needs attention while its session still runs is reported `unknown`
-and stays issued; nothing yet settles it. So does an add whose node was created but has no session when the daemon
-restarts: nothing launches it again, and deleting that node removes its slot row, which frees its number. An add that
-settles running after `rig down` keeps running: the pool does not yet stop an add it issued before the rig went down.
+An add whose launch failed or needs attention while its session still runs is reported `unknown` and stays issued;
+nothing yet settles it. So does an add whose node was created but has no session when the daemon restarts: nothing
+launches it again, and deleting that node removes its slot row, which frees its number. The same holds for a comeback
+whose launch does not run and is not refused before it starts (for example one that awaits a decision, finds a live
+session or fails): it stays in flight with its outcome kept. One a daemon restart cut off before its launch stays in
+flight, with no outcome. Nothing yet clears a reuse hold: an add that settled
+`not_running` holds new numbers until its node is deleted, which removes its slot row. An add, or a comeback whose launch
+had already started, that settles running after `rig down` keeps running.

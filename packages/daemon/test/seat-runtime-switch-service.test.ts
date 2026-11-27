@@ -1237,6 +1237,23 @@ describe("live seat runtime switch", () => {
       .toMatchObject({ ok: false, code: "runtime_target_unavailable" });
   });
 
+  it("#4047: a community seat can still switch when a newer session lost its harness selection", async () => {
+    fs.mkdirSync(presetsDir, { recursive: true });
+    fs.writeFileSync(path.join(presetsDir, "cursor.yaml"), "format: 1\nname: cursor\ncommand: node C:/fixture/cursor.mjs\nmaintainer: test\n", "utf8");
+    db.prepare("UPDATE nodes SET runtime = 'cursor' WHERE id = ?").run(nodeId);
+    const launched = (db.prepare("SELECT id FROM sessions WHERE node_id = ?").get(nodeId) as { id: string }).id;
+    sessionRegistry.recordCommunityHarnessSelection(launched, "cursor");
+    sessionRegistry.updateStatus(launched, "superseded");
+    // A restore launch that couldn't tell the harness left a newer row, without the selection, as the seat's occupant.
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(nodeId, SEAT).id, "running");
+    const builtIns = { codex: adapter("codex"), "claude-code": adapter("claude-code"), pi: adapter("pi") };
+    const withResolver = withCommunityHarnessResolver(builtIns as Record<string, RuntimeAdapter>, {
+      tmux: fakeTmux as unknown as TmuxAdapter, presetsDir: () => presetsDir });
+    const result = await service({ runtimeAdapters: withResolver }).setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Back to a built-in", dryRun: true });
+    expect((result as { code?: string }).code, JSON.stringify(result)).toBeUndefined();
+    expect(result).toMatchObject({ ok: true, dryRun: true, from: "cursor", to: "codex" });
+  });
+
   it("without a confirmation in time nothing changes: the current occupant keeps the seat and its claim, and the staged successor is retired", async () => {
     const claimed = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "review" });
     queueRepo.claim({ qitemId: claimed.qitemId, destinationSession: SEAT });

@@ -18,6 +18,7 @@ import { sessionAgentActivityHooksSchema } from "./migrations/197_session_agent_
 import { queueItemsNativePermissionIndexSchema } from "./migrations/199_queue_items_native_permission_index.js";
 import { sessionsEarlierHandoverOriginSchema } from "./migrations/200_sessions_earlier_handover_origin.js";
 import { queueTransitionsArchiveActorIndexSchema } from "./migrations/201_queue_transitions_archive_actor_index.js";
+import { rosterEventIndexSchema } from "./migrations/201_roster_event_index.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
 import { providerAccountRefsSchema } from "./migrations/187_provider_account_refs.js";
@@ -416,6 +417,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   contextConfiguredBudgetSchema,
   sessionsEarlierHandoverOriginSchema,
   queueTransitionsArchiveActorIndexSchema,
+  rosterEventIndexSchema,
   ompTuiRuntimeSwitchesSchema,
   ompSwitchAdoptionSchema,
 ];

@@ -2701,8 +2701,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start. The policy hands each
     // evaluation to the executor, composed with the queue, the outbox's held messages, the delivery guard's custody,
     // the seats' activity and the rig's events, the drain's effects (the delivery guard's lifecycle lease, the
-    // `auto-rehydrate` capture and the checked seat stop), and the add: the model member as the export writes it, and the
-    // member add of `rig add` (convergeOp over this daemon's instantiator); it runs only through the policy.
+    // `auto-rehydrate` capture and the checked seat stop), the add: the model member as the export writes it, and the
+    // member add of `rig add` (convergeOp over this daemon's instantiator), and the comeback: the snapshot selection for
+    // a retained node and the restore orchestrator's launchSingleNode with that explicit snapshotId, this daemon's
+    // runtime adapters and the filesystem; it runs only through the policy.
     const seatPoolSlots = new SeatPoolSlotsRepository(db);
     const seatPoolStops = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter });
     const seatPoolExecutor = makeSeatPoolExecutor({
@@ -2733,6 +2735,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         exportMember: (rigId, modelNodeId) => rigSpecExporter.exportedRawMemberFromNode(rigId, modelNodeId),
         converge: (rigId, op, rigRoot, opts) => convergeOp({ instantiator: podInstantiator }, rigId, op, rigRoot, opts),
         makeFolder: (folder) => { fs.mkdirSync(folder, { recursive: true }); },
+      },
+      comeback: {
+        select: (rigId, nodeId, logicalId) => snapshotRepo.selectComebackSnapshot(rigId, nodeId, logicalId),
+        launch: (rigId, logicalId, { snapshotId }) => restoreOrchestrator.launchSingleNode(rigId, logicalId, {
+          snapshotId,
+          adapters: runtimeAdaptersMap,
+          fsOps: { exists: (path: string) => fs.existsSync(path) },
+        }),
       },
     });
     const seatPoolPolicy = makeSeatPoolPolicy({ cycle: (job) => seatPoolExecutor.cycle(job) });

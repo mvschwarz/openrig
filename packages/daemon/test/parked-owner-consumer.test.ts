@@ -425,12 +425,13 @@ describe("parked-owner-consumer policy — unit contract (OPR.0.5.6.24)", () => 
     expect(String(second.notes?.["idsHash"])).not.toBe(String(first.notes?.["idsHash"]));
   });
 
-  it("cells: usage-limit defers to S16; indeterminate is not parked; empty union is honest", async () => {
+  it("cells: usage-limit defers to S16; unknown activity is reminded; empty union is honest", async () => {
     const store = new RowStore();
     const limited = parkedSeat({ activity: { value: "idle-at-prompt", needsInput: { count: 1, reason: "usage limit" } } });
     expect(JSON.stringify((await makeParkedOwnerConsumerPolicy(makeDeps([limited], store)).evaluate(makeJob())).notes)).toMatch(/usage[-_]limit[-_]defer[-_]s16/);
-    const indet = parkedSeat({ parked: "indeterminate" });
-    expect(JSON.stringify(await makeParkedOwnerConsumerPolicy(makeDeps([indet], store)).evaluate(makeJob()))).toMatch(/indeterminate/);
+    const indet = parkedSeat({ parked: "indeterminate", activity: { value: "unknown", needsInput: { count: 0, reason: null } } });
+    expect(await makeParkedOwnerConsumerPolicy(makeDeps([indet], store)).evaluate(makeJob()))
+      .toMatchObject({ action: "send", notes: { evidence: "activity-unknown; reminder-fail-open" } });
     const bare = parkedSeat({ obligations: { items: [], held: [{ qitemId: "q-h", healthy: true }] } });
     expect(JSON.stringify((await makeParkedOwnerConsumerPolicy(makeDeps([bare], store)).evaluate(makeJob())).notes)).toMatch(/no[-_]park[-_]driving/);
   });
@@ -1319,6 +1320,44 @@ describe("context.owner_min_interval_s: a minimum time between one owner's remin
     for (const id of ROW_IDS) expect(sent.message).toContain(id);
     expect(sent.notes?.["newSinceLastWake"]).toEqual([ROW_IDS[1], ROW_IDS[2]]);
     expect(sent.message).toContain(`new since then: ${ROW_IDS[1]}, ${ROW_IDS[2]}`);
+  });
+
+  it("reminds unknown activity truthfully without idle grace, then keeps the same owner's hourly interval", async () => {
+    const store = new RowStore();
+    const seats = [parkedSeat({ parked: "indeterminate", activity: { value: "unknown", since: new Date(NOW).toISOString(),
+      needsInput: { count: 0, reason: null } } })];
+    const first = await run([], {}, NOW, store, seats);
+    expect(first.action).toBe("send");
+    if (first.action !== "send") return;
+    expect(first.target.session).toBe(SEAT);
+    expect(first.message).toContain("Your activity is unknown");
+    expect(first.message).not.toContain("idle at prompt");
+    expect(first.notes).toMatchObject({ evidence: "activity-unknown; reminder-fail-open", obligations: ROW_IDS });
+    // The actual accepted-send history, not a mere reservation, starts the owner's interval.
+    const history = [wake(0, ROW_IDS, { sentMinutesAgo: 0, notes: first.notes ?? {} })];
+    expect(await run(history, {}, NOW + 10 * 60_000, store, seats)).toMatchObject(heldSkip);
+    // New work cannot spend another reminder before the same owner's interval ends.
+    const added = "qitem-d-unknown";
+    store.openIds = () => [...ROW_IDS, added];
+    store.record(added, SEAT, "in-progress", "new work");
+    const grown = [parkedSeat({ ...seats[0]!, obligations: { items: [...seats[0]!.obligations.items,
+      { qitemId: added, state: "in-progress", summary: null }], held: [] } })];
+    const held = await run(history, {}, NOW + 59 * 60_000, store, grown);
+    expect(held).toMatchObject(heldSkip);
+    expect(JSON.stringify(held.notes)).toContain("owner-min-interval");
+    expect(store.appended.filter(a => a.note.startsWith(RESERVE_PREFIX))).toHaveLength(1);
+    expect(await run(history, {}, NOW + 61 * 60_000, store, grown)).toMatchObject({ action: "send" });
+    expect(store.appended.filter(a => a.note.startsWith(RESERVE_PREFIX))).toHaveLength(2);
+  });
+
+  it("does not remind positively working activity or unknown activity with only healthy held rows", async () => {
+    for (const seat of [parkedSeat({ parked: false, activity: { value: "working", needsInput: { count: 0, reason: null } } }),
+      parkedSeat({ parked: "indeterminate", activity: { value: "unknown", needsInput: { count: 0, reason: null } },
+        obligations: { items: [], held: [{ qitemId: ROW_IDS[0]!, healthy: true }] } })]) {
+      const store = new RowStore();
+      expect((await run([], {}, NOW, store, [seat])).action).toBe("skip");
+      expect(store.appended.filter(a => a.note.startsWith(RESERVE_PREFIX))).toEqual([]);
+    }
   });
 
   it("the interval is configurable: a number for every owner, an entry per owner, 0 for none; anything invalid keeps the hour", async () => {
