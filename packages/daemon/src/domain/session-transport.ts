@@ -3266,7 +3266,11 @@ export class SessionTransport {
       let bridgeWarning: string | undefined;
       const result = await guard.operation(sessionName, async () => {
         // A held message's retry re-reads its own admission here, under the lease, before any route is chosen.
-        if (opts?.retryAdmission && !opts.retryAdmission()) return heldRetryNotAdmitted(sessionName);
+        if (opts?.retryAdmission) {
+          let admitted = false;
+          try { admitted = opts.retryAdmission(); } catch { /* a check that can't be read keeps the message held */ }
+          if (!admitted) return heldRetryNotAdmitted(sessionName);
+        }
         const taken = this.takeFromHookBridge(sessionName, ids, opts);
         if (taken) return taken;
         const members = recheck(false);
@@ -3285,6 +3289,15 @@ export class SessionTransport {
           }
           if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
           return this.admitNative(sessionName, memberText, memberOpts, currentIds);
+        }
+        // Same-sender order before the hook bridge can take this send: while the sender's earlier message is still owed to
+        // the draft, this one goes through the guarded delivery, which records it and holds it behind that one.
+        if (this.guardedDelivery && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract && guard.needsInputCheck(sessionName)) {
+          const guardIds = memberOpts?.committedOutboxIds ?? [memberOpts?.expectedIdentity && memberOpts.deliveryId ? memberOpts.deliveryId : `guard-send-${randomUUID()}`];
+          if (this.guardedDelivery.holdsBehindEarlier(guard.target(sessionName), memberText, memberOpts ?? {}, guardIds)) {
+            if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
+            return this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {}, guardIds);
+          }
         }
         // Slice 13: an occupant launched with its hook bridge gets the message at its next turn boundary, nothing typed.
         // Admission (hold, the levels) has already decided above. With no live arm, it's typed, with a warning; messages

@@ -362,10 +362,15 @@ its result says it goes once the input is clear.
   delivered. A delivered or uncertain message is never sent again. A drain, a pending
   restore or leaving `draft-aware` stops the pass until it clears, including one that
   takes effect while the message waits for its turn to type; nothing is typed then.
-- Order holds per sender: while a sender's marked message is still held at the seat,
-  that sender's later plain message is held behind it (`draft_held_behind_earlier`),
-  marked too, and typed after it, even with the input clear. Other senders' messages
-  aren't held behind it.
+- Order holds per sender: while a sender's marked message is still owed at the seat
+  (held, or being tried again), that sender's later plain message is held behind it
+  (`draft_held_behind_earlier`), marked too, and typed after it, even with the input
+  clear or with the seat's hook bridge live. Other senders' messages aren't held behind
+  it. This holds for messages that are saved with room in the seat's held quota; one
+  that can't be saved goes as it would without it.
+- A marked message whose own paste is then refused (control characters, a long Codex
+  paste, the viewport) is no longer owed: it stays held and readable, its result says to
+  send it again changed, and later messages stop waiting behind it.
 - A message held for an earlier occupant of the seat stays held and listed. Later
   messages for the current occupant still go.
 - Marked messages aren't coalesced by the one-per-sender rule above. Instead, one
