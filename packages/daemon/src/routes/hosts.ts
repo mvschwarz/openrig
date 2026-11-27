@@ -53,6 +53,7 @@ import { connect } from "node:net";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { getOpenRigHome } from "../openrig-compat.js";
 import { addHostEntry, updateHostEntry, removeHostEntry } from "../domain/hosts/hosts-registry-writer.js";
+import { credentialPointerRefusal } from "../domain/hosts/host-credential-pointer.js";
 import { defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, type HostEntry } from "../domain/hosts/hosts-registry-reader.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { UNATTRIBUTED_ACTOR, type QueueItem, type QueueRepository } from "../domain/queue-repository.js";
@@ -631,6 +632,11 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         error: "no_secret_values",
         message: `field '${secretField}' looks like a secret VALUE — hosts.yaml carries bearer POINTERS only (bearer_env / bearer_file). Nothing was written.`,
       }, 400);
+    }
+    // The same rule for pointers: the pointer decides whose credential travels to this entry's url.
+    const pointerRefusal = credentialPointerRefusal(body, getOpenRigHome());
+    if (pointerRefusal) {
+      return c.json({ error: pointerRefusal.code, message: pointerRefusal.message }, 400);
     }
     const res = addHostEntry(body);
     if (!res.ok) {
