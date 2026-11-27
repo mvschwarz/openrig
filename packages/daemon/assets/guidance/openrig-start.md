@@ -21,10 +21,23 @@ where you are or what you were doing. And if a predecessor's transcript looks th
 know that transcript capture is unreliable on some runtimes — **little or no output does not
 mean the session was quiet.**
 
+## Running `rig` from Claude Code
+
+Run one plain `rig` command per Bash tool call, without shell variable assignments,
+command substitutions (`$(...)`) or loops. Put queue-row text in a file and pass
+`--body-file` instead of embedding it in a compound command. Give the file's literal absolute
+path, with no shell variable assignment or command substitution: Claude Code's allow rules don't match past an
+assignment (apart from a few known-safe variables), and an ask or deny rule still wins.
+A compound command can stop at an approval prompt even when `Bash(rig:*)` is allowed,
+with nobody at the seat to answer.
+
 ## Reaching a peer
 
 ```bash
 rig send <session> "message"     # types into their terminal and presses enter
+```
+
+```bash
 rig capture <session>            # reads what is on their screen
 ```
 
