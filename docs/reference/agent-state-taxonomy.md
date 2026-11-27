@@ -31,6 +31,14 @@ to have exited (identity reason `pane_exited`) reads `exited`, with `startupStat
 record is running but the LIFECYCLE is `attention_required` (for example, the seat's startup or restore needs
 attention, or OpenRig can't confirm the pane's process as the seat's runtime, such as a bare shell), its human
 output reads `Session: needs attention`, as `rig ps` reads `att`.
+Beside the LIFECYCLE, a recorded-running agent seat whose current identity check saw a shell as the pane's foreground
+command, without verifying the seat's agent there, serves `agentLiveness` (`agent_liveness` in `rig seat status`):
+`{ state: "not_verified", reason: "shell_foreground", command, observedAt }`. That's the reading a send is refused on
+(`target_runtime_unverified`). A community harness's seat can read it with its LIFECYCLE still `running`, because OpenRig
+can't prove that harness's process. `rig ps --nodes` shows `agent not verified` as the REASON and a `Liveness` line, and
+`rig seat status` shows an `Agent:` line. It isn't proof the agent stopped, since an agent can run behind a wrapper.
+Otherwise the field is absent, which claims nothing. It's read from the identity check's stored verdict, so showing it
+reads nothing new.
 
 The axes never blend. Reachability is strict; revival optimism is a different field
 (omnigent's strict-liveness split). `unknown` is a first-class honest value — the oracle

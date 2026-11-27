@@ -11,6 +11,7 @@ import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
 import { identityVerdictConfirmsSessionMissing, identityVerdictConfirmsExecutorStopped, identityVerdictDownranksRunning } from "./types.js";
+import { isShellForeground } from "./shell-classifier.js";
 import { resolveSeatEffort } from "./seat-effort.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
@@ -396,6 +397,17 @@ function computeRecoveryGuidance(input: {
 
 function deriveNodeKind(runtime: string | null): "agent" | "infrastructure" {
   return runtime === "terminal" ? "infrastructure" : "agent";
+}
+
+/** NodeInventoryEntry.agentLiveness, from the applicable stored verdict: a running agent seat whose current identity check saw
+ *  a shell in the foreground and didn't verify its agent. Undefined otherwise. */
+function deriveAgentLiveness(
+  runtime: string | null, sessionStatus: string | null, verdict: SeatIdentityVerdict | null,
+): NodeInventoryEntry["agentLiveness"] {
+  const command = verdict?.evidence.observedCommand?.trim().toLowerCase();
+  if (sessionStatus !== "running" || deriveNodeKind(runtime) !== "agent" || !verdict || verdict.verdict === "verified"
+    || !command || !isShellForeground(command)) return undefined;
+  return { state: "not_verified", reason: "shell_foreground", command: command.replace(/^-/, ""), observedAt: verdict.observedAt };
 }
 
 /**
@@ -1107,6 +1119,7 @@ function buildInventoryItem(
     usableSnapshot,
     identityVerdict: identityVerdict?.verdict ?? null,
   });
+  const agentLiveness = deriveAgentLiveness(row.runtime, sessionStatus, identityVerdict);
   const entry: NodeInventoryEntry = {
     nodeId: row.node_id,
     rigId: row.rig_id,
@@ -1194,6 +1207,7 @@ function buildInventoryItem(
     // OPR.0.4.3.19 — the liveness identity verdict (third axis). null when
     // never observed; carries evidence on mismatch/missing.
     identityVerdict,
+    ...(agentLiveness ? { agentLiveness } : {}),
     heldReason: deriveHeldReason(db, row.rig_id, row.node_id, sessionStatus),
     ...(row.handover_at ? startedWithoutRequired(db, row.node_id, row.session_id) : {}),
   };

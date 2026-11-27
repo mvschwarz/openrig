@@ -56,6 +56,9 @@ export interface SeatStatus {
   /** The seat's state as `rig ps --nodes` shows it (node-inventory's lifecycleState): `attention_required`, never
    *  `running`, while startup needs attention or the pane's process identity down-ranks it. */
   lifecycle_state: NodeInventoryEntry["lifecycleState"];
+  /** Beside the lifecycle, as `rig ps --nodes` reads it (node-inventory's agentLiveness): the current identity check saw a
+   *  shell in the pane's foreground and didn't verify the seat's agent. Absent otherwise. */
+  agent_liveness?: NonNullable<NodeInventoryEntry["agentLiveness"]>;
   session_reason: SeatIdentityVerdict["reason"];
   startup_status: NodeInventoryEntry["startupStatus"];
   occupant_lifecycle: NodeInventoryEntry["occupantLifecycle"];
@@ -200,6 +203,7 @@ export class SeatStatusService {
       ...(entry.externalAttachment ? { external_attachment: entry.externalAttachment } : {}),
       ...(entry.standbyStopped ? { standby_stopped: true as const } : {}),
       lifecycle_state: entry.lifecycleState,
+      ...(entry.agentLiveness ? { agent_liveness: entry.agentLiveness } : {}),
       session_reason: entry.identityVerdict?.reason ?? null,
       startup_status: entry.startupStatus,
       occupant_lifecycle: entry.occupantLifecycle,

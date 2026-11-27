@@ -98,6 +98,9 @@ export interface NodeEntry {
     decidedBy: string | null;
   } | null;
   identityVerdict?: { verdict?: string; reason?: string | null; observedAt?: string | null; evidence?: { observedCommand?: string | null } | null } | null;
+  /** The daemon's reading beside the lifecycle: the current identity check saw a shell in the foreground and didn't verify
+   *  the seat's agent. Absent otherwise. */
+  agentLiveness?: { state: "not_verified"; reason: "shell_foreground"; command: string; observedAt: string };
   /** The registry's recorded session status, kept when the served sessionStatus is corrected. */
   storedSessionStatus?: string | null;
   /** A community harness's seat: its label, maintainer and declared limits. */
@@ -681,6 +684,19 @@ function livenessLine(seat: string, node: NodeEntry): string {
   return `Liveness (${seat}): recorded running, not confirmed: tmux was unavailable at the last observation (${node.identityVerdict?.observedAt ?? "time unknown"}).`;
 }
 
+/** A recorded-running seat whose current identity check saw a shell in the pane's foreground and didn't verify its agent
+ *  (the daemon's agentLiveness): the reading a send is refused on. Not known stopped: the agent can run behind a wrapper. */
+function agentNotVerified(node: NodeEntry): boolean {
+  return node.agentLiveness?.state === "not_verified";
+}
+
+function agentLivenessLine(seat: string, node: NodeEntry): string {
+  const { command, observedAt } = node.agentLiveness!;
+  return `Liveness (${seat}): recorded running, agent not verified: the pane's foreground is ${command}, not a verified `
+    + `${node.runtime ?? "agent"} agent (identity check at ${observedAt}). It may have exited to its shell, or run behind a `
+    + `wrapper; rig capture ${seat} shows the pane.`;
+}
+
 // OPR.0.4.0.34 — the compact orch field set (PRD FR-4). Carries the
 // source-available identity + state + resume-summary fields an orchestrator
 // needs at a glance, WITHOUT leaking the resume token value or resumeCommand
@@ -838,6 +854,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // Only what was served: an absent time stays absent, never filled in.
       compact.identityVerdict = { ...(verdict ? { verdict } : {}), ...(reason ? { reason } : {}), ...(observedAt ? { observedAt } : {}) };
     }
+    if (n.agentLiveness) compact.agentLiveness = n.agentLiveness;
     // held/attention reason (short) when present.
     if (n.heldReason) compact.heldReason = n.heldReason;
     if (n.startedWithoutRequired?.length) compact.startedWithoutRequired = n.startedWithoutRequired;
@@ -1578,7 +1595,7 @@ async function handleNodes(
         ? (n.needsAttention === true && servesQuestion(n) ? questionReason(n) ?? "reason unavailable"
           : n.latestError ? truncate(n.latestError, 40) : n.startedWithoutRequired?.length ? truncate(startedWithoutLine(n.startedWithoutRequired), 40)
           : n.agentActivity?.reason ?? "—")
-        : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—");
+        : livenessUnconfirmed(n) ? "liveness unconfirmed" : agentNotVerified(n) ? "agent not verified" : "—");
       console.log(padCompactNodeRow(
         n.rigName,
         n.canonicalSessionName ?? "—",
@@ -1615,7 +1632,7 @@ async function handleNodes(
         n.restoreOutcome,
         missingSessionGuidance(n) ?? (n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}`
           : n.startedWithoutRequired?.length ? truncate(startedWithoutLine(n.startedWithoutRequired), 30)
-          : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—"),
+          : livenessUnconfirmed(n) ? "liveness unconfirmed" : agentNotVerified(n) ? "agent not verified" : "—"),
         n.runtime === "claude-code" ? n.configuredAccount ?? "unknown" : "—",
       ));
     }
@@ -1647,6 +1664,7 @@ async function handleNodes(
   await printConnectedAssistants(client, opts.rig, requestHeaders);
   for (const n of humanList as NodeEntry[]) {
     if (livenessUnconfirmed(n)) console.log(livenessLine(n.canonicalSessionName ?? n.logicalId, n));
+    if (agentNotVerified(n)) console.log(agentLivenessLine(n.canonicalSessionName ?? n.logicalId, n));
     if (!n.intentionallyStopped && n.identityVerdict?.verdict === "pane_missing"
       && ["session_missing", "pane_pid_gone", "pane_exited"].includes(n.identityVerdict.reason ?? "")) {
       const missing = n.identityVerdict.reason === "session_missing" ? "session" : "pane";

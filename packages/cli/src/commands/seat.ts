@@ -88,6 +88,8 @@ interface SeatStatusResponse {
   standby_stopped?: true;
   /** The seat's state as `rig ps --nodes` shows it; absent from an older daemon. */
   lifecycle_state?: string;
+  /** Beside the lifecycle: the identity check saw a shell in the pane's foreground and didn't verify the seat's agent. */
+  agent_liveness?: { state: "not_verified"; reason: "shell_foreground"; command: string; observedAt: string };
   launch_cwd?: string | null;
   permissions_to?: string | null;
   runner?: boolean;
@@ -344,6 +346,13 @@ function printHuman(status: SeatStatusResponse): void {
   } else {
     console.log(`Session: ${status.standby_stopped ? "standby (wakes for queued work)" : status.session_status === "running" && status.lifecycle_state === "attention_required"
       ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
+  }
+  // Beside the lifecycle, as rig ps shows it: a shell where the seat's agent should be, not proof the agent stopped.
+  const agent = status.agent_liveness;
+  if (agent?.state === "not_verified") {
+    console.log(`Agent: not verified: the pane's foreground is ${agent.command}, not a verified ${status.runtime ?? "agent"} agent `
+      + `(identity check at ${agent.observedAt}). It may have exited to its shell, or run behind a wrapper; rig capture `
+      + `${status.seat_ref} shows the pane.`);
   }
   const stop = status.permission_stop;
   if (stop && stop.state !== "unavailable") {
