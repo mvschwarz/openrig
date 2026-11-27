@@ -197,6 +197,7 @@ export function needsInputSeatToFeedCard(seat: NeedsInputSeat): FeedCard {
     kind: "action-required",
     title: `${seat.logicalId} needs input${seat.source !== "hook" ? " (activity-grade)" : ""}`,
     body: seat.sessionName ?? undefined,
+    authorSession: seat.sessionName ?? undefined,
     rigId: seat.rigId,
     source: syntheticEvent,
     receivedAt,

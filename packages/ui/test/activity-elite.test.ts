@@ -145,6 +145,14 @@ describe("AC-4 honesty regression", () => {
     expect(card.source.seq).toBe(-1);
   });
 
+  it("carries the waiting seat's session as the card author when available", () => {
+    const seat = { logicalId: "dev.impl", source: "hook" } as const;
+    expect(needsInputSeatToFeedCard({ ...seat, sessionName: "dev-impl@rig" }).authorSession)
+      .toBe("dev-impl@rig");
+    expect(needsInputSeatToFeedCard(seat).authorSession).toBeUndefined();
+    expect(needsInputSeatToFeedCard({ ...seat, sessionName: null }).authorSession).toBeUndefined();
+  });
+
   it("cross-rig logicalId collision produces distinct card ids", () => {
     const card1 = needsInputSeatToFeedCard({ logicalId: "dev.impl", source: "hook", rigId: "rig-a" });
     const card2 = needsInputSeatToFeedCard({ logicalId: "dev.impl", source: "hook", rigId: "rig-b" });
