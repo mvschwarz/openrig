@@ -148,6 +148,16 @@ describe("seat typing guard commands", () => {
     const json = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig", "--json"]).then(() => undefined));
     expect(JSON.parse(json.logs.join("\n")).nativeInput).toEqual(nativeInput);
   });
+  it("shows the served hook-review reason in human and JSON seat status", async () => {
+    const activityState = { display: "needs-input", needsInput: { count: 1, reason: "hook_trust_gate" } };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, activityState } }, []);
+    const human = await captureLogs(() => makeCommand(deps)
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(human.logs).toContain("Activity: needs-input (hook_trust_gate)");
+    const json = await captureLogs(() => makeCommand(deps)
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig", "--json"]).then(() => undefined));
+    expect(JSON.parse(json.logs.join("\n")).activityState).toEqual(activityState);
+  });
   it.each([
     { name: "a Claude Code seat with no one chosen", data: { runtime: "claude-code", runner: false, permissions_to: null },
       line: "Own permission prompts asked of (with openrig-core loaded): its work's return route, else no one" },
@@ -658,6 +668,24 @@ describe("rig seat status", () => {
       await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
     });
     expect(logs).toContain(expected);
+  });
+
+  // A seat joined with rig attach runs in someone else's program: OpenRig can't see its process, only what it writes.
+  it.each([
+    [{ at: "2026-11-27T08:00:00.000Z", qitemId: "qitem-1", state: "in-progress" },
+      "  Its own last queue action: in-progress on qitem-1 at 2026-11-27T08:00:00.000Z. Work sent to it waits until that program reads its queue."],
+    [null, "  Its own last queue action: none recorded. Work sent to it waits until that program reads its queue."],
+    // A history OpenRig couldn't read is never "none recorded".
+    [null, "  Its own last queue action: couldn't be read. Work sent to it waits until that program reads its queue.", "unavailable"],
+  ])("says a seat attached from an outside program is attached with liveness unknown, never running or detached (case %#)", async (last, line, read = "read") => {
+    const deps = makeDeps({ status: 200, data: { ...STATUS, session_status: "attached", lifecycle_state: "unknown",
+      external_attachment: { liveness: "unknown", lastOwnQueueAction: last, lastOwnQueueActionRead: read } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    expect(logs).toContain("Session: attached from an outside program (rig attach); OpenRig can't see its process, so whether it's running is unknown.");
+    expect(logs).toContain(line);
+    expect(logs.join("\n")).not.toMatch(/Session: (running|detached)/);
   });
 
   it("returns a nonzero status for an unknown seat", async () => {
@@ -1221,6 +1249,26 @@ describe("rig seat status", () => {
     expect(exitCode).toBeUndefined();
     expect(output).toContain(`The captured startup context (restore packet) was typed and submitted to the successor; ${reason}.`);
     expect(output).not.toContain("restore packet) was delivered");
+  });
+
+  it("first-input handover output separates passing the launch file from submission and consumption", async () => {
+    const deps = makeDeps({ status: 200, data: {
+      ...HANDOVER_RESULT_FRESH,
+      restorePacket: { status: "unconfirmed", reason: "passed at launch", consumption: "unconfirmed",
+        firstInput: { path: "/private/first-input/attempt.txt", submission: "unconfirmed" } },
+      sideEffects: { ...HANDOVER_RESULT_FRESH.sideEffects, startupContextDelivered: false },
+    } }, []);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "fresh", "--reason", "context-wall"]);
+    });
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
+    expect(output).toContain("passed at launch through /private/first-input/attempt.txt; submission and consumption are unconfirmed");
+    expect(output).toContain("Do not resend the packet or repeat the handover");
+    expect(output).not.toContain("before sending the context again");
+    expect(output).not.toContain("restore packet) was delivered");
+    expect(output).not.toContain("OpenRig delivered no startup context");
   });
 
   it("handover fresh human output says an unconfirmed restore packet was sent, not that nothing was delivered", async () => {

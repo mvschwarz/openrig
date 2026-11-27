@@ -1,153 +1,13 @@
-import { contextConfiguredBudgetSchema } from "../../src/db/migrations/200_context_configured_budget.js";
-import { sessionsEarlierHandoverOriginSchema } from "../../src/db/migrations/200_sessions_earlier_handover_origin.js";
-import { nodeKeepAliveSchema } from "../../src/db/migrations/181_node_keep_alive.js";
-import { sessionStopAttemptSchema } from "../../src/db/migrations/180_session_stop_attempt.js";
-import { nodeProcessLimitsSchema } from "../../src/db/migrations/173_node_process_limits.js";
-import { sessionLaunchedCwdSchema } from "../../src/db/migrations/174_session_launched_cwd.js";
-import { nodeStatuslineThrottleSchema } from "../../src/db/migrations/176_node_statusline_throttle.js";
-import { seatPoolSchema } from "../../src/db/migrations/178_seat_pool.js";
-import { queueRelayedAnswersSchema } from "../../src/db/migrations/186_queue_relayed_answers.js";
-import { remoteControlObservationsSchema } from "../../src/db/migrations/179_remote_control_observations.js";
-import { queueTransferStagingSchema } from "../../src/db/migrations/190_queue_transfer_staging.js";
-import { queueTransferActivationSchema } from "../../src/db/migrations/191_queue_transfer_activation.js";
-import { missionControlActionsSchema } from "../../src/db/migrations/037_mission_control_actions.js";
-import { identityProvenanceSchema } from "../../src/db/migrations/065_identity_provenance.js";
-import { queueItemsBlockedOnIndexSchema } from "../../src/db/migrations/182_queue_items_blocked_on_index.js";
-import { queueItemsScanIndexesSchema } from "../../src/db/migrations/183_queue_items_scan_indexes.js";
-import { providerAccountRefsSchema } from "../../src/db/migrations/187_provider_account_refs.js";
-import { providerAccountAssignmentsSchema } from "../../src/db/migrations/188_provider_account_assignments.js";
-import { rigSeatSliceSchema } from "../../src/db/migrations/189_rig_seat_slice.js";
-import { communityHarnessRuntimeSwitchesSchema } from "../../src/db/migrations/179_community_harness_runtime_switches.js";
-import { networkRequestsSchema } from "../../src/db/migrations/184_network_requests.js";
-import { rigDeliveryDrainsSchema } from "../../src/db/migrations/170_rig_delivery_drains.js";
-import { queueReturnRouteSchema } from "../../src/db/migrations/172_queue_return_route.js";
-import { runBoundActivityGrantsSchema } from "../../src/db/migrations/165_run_bound_activity_grants.js";
-import { seatRuntimeHomeRecordsSchema } from "../../src/db/migrations/169_seat_runtime_home_records.js";
-import { claudeAutoModeSchema } from "../../src/db/migrations/171_claude_auto_mode.js";
-import { nodeInputRouteSchema } from "../../src/db/migrations/171_node_input_route.js";
-import { coreAppAccessSchema } from "../../src/db/migrations/175_core_app_access.js";
-import { piAccountSwitchesSchema } from "../../src/db/migrations/151_pi_account_switches.js";
-import { eventsRetentionMarksSchema } from "../../src/db/migrations/153_events_retention_marks.js";
-import { queueErasureSchema } from "../../src/db/migrations/155_queue_erasure.js";
-import { queueErasureBatchesSchema } from "../../src/db/migrations/157_queue_erasure_batches.js";
-import { queueInboxCheckinsSchema } from "../../src/db/migrations/158_queue_inbox_checkins.js";
-import { queueItemsHandedOffFromIndexSchema } from "../../src/db/migrations/159_queue_items_handed_off_from_index.js";
-import { networkBindingsSchema } from "../../src/db/migrations/160_network_bindings.js";
-import { networkBindingProvidersSchema } from "../../src/db/migrations/191_network_binding_providers.js";
-import { seatReapStateSchema } from "../../src/db/migrations/191_seat_reap_state.js";
-import { seatColdStartStandbyStopSchema } from "../../src/db/migrations/200_seat_cold_start_standby_stop.js";
-import { queueItemsNativePermissionIndexSchema } from "../../src/db/migrations/199_queue_items_native_permission_index.js";
-import { networkReceiptsSchema } from "../../src/db/migrations/161_network_receipts.js";
-import { networkInstallationsSchema } from "../../src/db/migrations/163_network_installations.js";
-import { queueItemsReplyToIndexSchema } from "../../src/db/migrations/164_queue_items_reply_to_index.js";
-import { activityGrantsSchema } from "../../src/db/migrations/143_activity_grants.js";
-import { environmentBindingsSchema } from "../../src/db/migrations/144_environment_bindings.js";
-import { nodePermissionsToSchema } from "../../src/db/migrations/145_node_permissions_to.js";
-import { nodeStartupGuidanceFileSchema } from "../../src/db/migrations/146_node_startup_guidance_file.js";
-import { managedBlockWritesSchema } from "../../src/db/migrations/147_managed_block_writes.js";
-import { streamIntakeCursorSchema } from "../../src/db/migrations/149_stream_intake_cursor.js";
-import { nodeLaunchWrapperSchema } from "../../src/db/migrations/150_node_launch_wrapper.js";
-import { nodeAccountHomeSchema } from "../../src/db/migrations/141_node_account_home.js";
-import { escalationTargetRefsSchema } from "../../src/db/migrations/126_escalation_target_refs.js";
-import { nodeClaudePermissionsSchema } from "../../src/db/migrations/139_node_claude_permissions.js";
-import { nodeClaudeMcpSchema } from "../../src/db/migrations/142_node_claude_mcp.js";
-import { nodeCodexPermissionsSchema } from "../../src/db/migrations/137_node_codex_permissions.js";
-import { claudeTokenReadingsSchema } from "../../src/db/migrations/134_claude_token_readings.js";
-import { terminalPolicySchema } from "../../src/db/migrations/128_terminal_policy.js";
-import { seatRuntimeSwitchesSchema } from "../../src/db/migrations/132_seat_runtime_switches.js";
-import { seatIdentityPanePidSchema } from "../../src/db/migrations/119_seat_identity_pane_pid.js";
-import { seatIdentityProcessEvidenceSchema } from "../../src/db/migrations/135_seat_identity_process_evidence.js";
-import { nodeClaudeTokenRefSchema } from "../../src/db/migrations/138_node_claude_token_ref.js";
-import { rigStartupLayersSchema } from "../../src/db/migrations/121_rig_startup_layers.js";
-import { humanOperatingModesSchema } from "../../src/db/migrations/122_human_operating_modes.js";
-import { queueDelegatedDecisionSchema } from "../../src/db/migrations/123_queue_delegated_decision.js";
-import { rigInstallRootSchema } from "../../src/db/migrations/096_rig_install_root.js";
-import { threadPartMapSchema } from "../../src/db/migrations/097_thread_part_map.js";
-import { queueTransitionsQitemIdOrderSchema } from "../../src/db/migrations/098_queue_transitions_qitem_id_order.js";
-import { queueItemsRecoveryTagsSchema } from "../../src/db/migrations/099_queue_items_recovery_tags.js";
-import { resumeRotationSchema } from "../../src/db/migrations/101_claude_resume_rotation.js";
-import { nodeAdvisorSchema } from "../../src/db/migrations/125_node_advisor.js";
-import { operationCorrelationSchema } from "../../src/db/migrations/127_operation_correlation.js";
-import { sessionStopIntentSchema } from "../../src/db/migrations/103_session_stop_intent.js";
-import { nodeEffortChoiceSchema } from "../../src/db/migrations/104_node_effort_choice.js";
-import { seatEnvSchema } from "../../src/db/migrations/111_seat_env.js";
-import { appliedLaunchDaemonOptOutSchema } from "../../src/db/migrations/113_applied_launch_daemon_opt_out.js";
-import { sessionAgentAppSchema as sessionCommunityHarnessSchema } from "../../src/db/migrations/114_session_agent_app.js";
-import { sessionAgentRunnerSchema } from "../../src/db/migrations/141_session_agent_runner.js";
-import { threadSeatMapChannelKeySchema } from "../../src/db/migrations/115_thread_seat_map_channel_key.js";
-import { nodeLaunchRecipeSchema } from "../../src/db/migrations/136_node_launch_recipe.js";
-import { queueItemWakeInputBoxSchema } from "../../src/db/migrations/116_queue_item_wake_input_box.js";
-import { providerAccountReadingsSchema } from "../../src/db/migrations/117_provider_account_readings.js";
-import { humanQuietWindowsSchema } from "../../src/db/migrations/118_human_quiet_windows.js";
-import { modePostureCoexistSchema } from "../../src/db/migrations/109_mode_posture_coexist.js";
-import { rigNonInterruptiveSchema } from "../../src/db/migrations/095_rig_non_interruptive.js";
 import { mockShellCommand } from "./shell-command-mock.js";
 import { vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../../src/db/connection.js";
 import { migrate } from "../../src/db/migrate.js";
-import { coreSchema } from "../../src/db/migrations/001_core_schema.js";
-import { bindingsSessionsSchema } from "../../src/db/migrations/002_bindings_sessions.js";
-import { eventsSchema } from "../../src/db/migrations/003_events.js";
-import { snapshotsSchema } from "../../src/db/migrations/004_snapshots.js";
-import { checkpointsSchema } from "../../src/db/migrations/005_checkpoints.js";
-import { resumeMetadataSchema } from "../../src/db/migrations/006_resume_metadata.js";
-import { nodeSpecFieldsSchema } from "../../src/db/migrations/007_node_spec_fields.js";
-import { packagesSchema } from "../../src/db/migrations/008_packages.js";
-import { installJournalSchema } from "../../src/db/migrations/009_install_journal.js";
-import { journalSeqSchema } from "../../src/db/migrations/010_journal_seq.js";
-import { bootstrapSchema } from "../../src/db/migrations/011_bootstrap.js";
-import { discoverySchema } from "../../src/db/migrations/012_discovery.js";
-import { discoveryFkFix } from "../../src/db/migrations/013_discovery_fk_fix.js";
-import { agentspecRebootSchema } from "../../src/db/migrations/014_agentspec_reboot.js";
-import { startupContextSchema } from "../../src/db/migrations/015_startup_context.js";
-import { chatMessagesSchema } from "../../src/db/migrations/016_chat_messages.js";
-import { podNamespaceSchema } from "../../src/db/migrations/017_pod_namespace.js";
-import { contextUsageSchema } from "../../src/db/migrations/018_context_usage.js";
-import { externalCliAttachmentSchema } from "../../src/db/migrations/019_external_cli_attachment.js";
-import { rigServicesSchema } from "../../src/db/migrations/020_rig_services.js";
-import { seatHandoverObservabilitySchema } from "../../src/db/migrations/021_seat_handover_observability.js";
-import { nodePermissionPolicySchema } from "../../src/db/migrations/055_node_permission_policy.js";
-import { rigPermissionPolicySchema } from "../../src/db/migrations/056_rig_permission_policy.js";
-import { nodePolicyProvenanceSchema } from "../../src/db/migrations/057_node_policy_provenance.js";
-import { rigPolicyProvenanceSchema } from "../../src/db/migrations/058_rig_policy_provenance.js";
-import { selfHostIdentitySchema } from "../../src/db/migrations/059_self_host_identity.js";
-import { occupantTenuresSchema } from "../../src/db/migrations/060_occupant_tenures.js";
-import { daemonLifecycleSchema } from "../../src/db/migrations/061_daemon_lifecycle.js";
-import { watchdogJobsSchema } from "../../src/db/migrations/031_watchdog_jobs.js";
-import { occupantGenerationStampsSchema } from "../../src/db/migrations/063_occupant_generation_stamps.js";
-import { projectionManifestSchema } from "../../src/db/migrations/064_projection_manifest.js";
-import { watchdogTargetGenerationSchema } from "../../src/db/migrations/066_watchdog_target_generation.js";
-import { appliedLaunchObservationsSchema } from "../../src/db/migrations/069_applied_launch_observations.js";
-import { appliedLaunchObservationInvalidationsSchema } from "../../src/db/migrations/070_applied_launch_observation_invalidations.js";
-import { threadSeatMapSchema } from "../../src/db/migrations/072_thread_seat_map.js";
-import { queueTransitionWakesSchema } from "../../src/db/migrations/073_queue_transition_wakes.js";
-import { nodeCodexConfigProfileSchema } from "../../src/db/migrations/022_node_codex_config_profile.js";
-import { nodeSessionSourceSchema } from "../../src/db/migrations/077_node_session_source.js";
+import { ALL_MIGRATIONS } from "../../src/db/all-migrations.js";
 // PL-019: GET /api/rigs/:id/graph + GET /api/rigs/:rigId/nodes/:logicalId
 // now perform a read-side join over queue_items (in-progress qitem
 // ownership per session). The route returns 500 if the table is absent,
 // so the integration harness needs the queue migrations through 025.
-import { streamItemsSchema } from "../../src/db/migrations/023_stream_items.js";
-import { queueItemsSchema } from "../../src/db/migrations/024_queue_items.js";
-import { queueTransitionsSchema } from "../../src/db/migrations/025_queue_transitions.js";
-import { scopedOperatingPostureSchema } from "../../src/db/migrations/080_scoped_operating_posture.js";
-import { humanNotificationIntentSchema } from "../../src/db/migrations/081_human_notification_intent.js";
-import { reviewReadIndexesSchema } from "../../src/db/migrations/083_review_read_indexes.js";
-import { inventoryEventIndexesSchema } from "../../src/db/migrations/084_inventory_event_indexes.js";
-import { rigClaudeManagedBlockFileSchema } from "../../src/db/migrations/085_rig_claude_managed_block_file.js";
-import { nodePermissionSelectionsSchema } from "../../src/db/migrations/088_node_permission_selections.js";
-import { humanReplyToSchema } from "../../src/db/migrations/090_human_reply_to.js";
-import { humanQuestionsSchema } from "../../src/db/migrations/091_human_questions.js";
-import { nodeEffortSchema } from "../../src/db/migrations/092_node_effort.js";
-import { rigPolicySchema } from "../../src/db/migrations/041_rig_policy.js";
-import { rigArchiveSchema } from "../../src/db/migrations/042_rig_archive.js";
-import { sessionAddressReadIndexesSchema } from "../../src/db/migrations/162_session_address_read_indexes.js";
-import { seatHandoverAttemptsSchema } from "../../src/db/migrations/167_seat_handover_attempts.js";
-import { contextUsageOccupantGenerationSchema } from "../../src/db/migrations/168_context_usage_occupant_generation.js";
-import { resumeProvenanceSchema } from "../../src/db/migrations/043_resume_provenance.js";
-import { resumeVerificationSchema } from "../../src/db/migrations/045_resume_verification.js";
-import { seatIdentityVerdictsSchema } from "../../src/db/migrations/046_seat_identity_verdicts.js";
 import { BootstrapRepository } from "../../src/domain/bootstrap-repository.js";
 import { RuntimeVerifier } from "../../src/domain/runtime-verifier.js";
 import { RequirementsProbeRegistry } from "../../src/domain/requirements-probe.js";
@@ -202,13 +62,6 @@ import { AgentActivityStore } from "../../src/domain/agent-activity-store.js";
 import { SeatAttentionReconciler } from "../../src/domain/seat-attention-reconciler.js";
 import { createApp, createAppWithWebSocket } from "../../src/server.js";
 import fs from "node:fs";
-import { seatColdStartsSchema } from "../../src/db/migrations/185_seat_cold_starts.js";
-
-/** Seam B R6: the canonical full-fixture migration list, exported so file-backed
- *  DB-reopen tests migrate IDENTICALLY to createFullTestDb. */
-export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoveryFkFix, discoverySchema, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, selfHostIdentitySchema, occupantTenuresSchema, daemonLifecycleSchema, watchdogJobsSchema, occupantGenerationStampsSchema, projectionManifestSchema, watchdogTargetGenerationSchema, appliedLaunchObservationsSchema, appliedLaunchObservationInvalidationsSchema, threadSeatMapSchema, queueTransitionWakesSchema, nodeSessionSourceSchema, scopedOperatingPostureSchema, humanNotificationIntentSchema, reviewReadIndexesSchema, inventoryEventIndexesSchema, rigClaudeManagedBlockFileSchema, nodePermissionSelectionsSchema, humanReplyToSchema, humanQuestionsSchema, nodeEffortSchema, rigNonInterruptiveSchema, rigInstallRootSchema, threadPartMapSchema, queueTransitionsQitemIdOrderSchema, queueItemsRecoveryTagsSchema, resumeRotationSchema, sessionStopIntentSchema, nodeEffortChoiceSchema, modePostureCoexistSchema, seatEnvSchema, appliedLaunchDaemonOptOutSchema, sessionCommunityHarnessSchema, threadSeatMapChannelKeySchema, queueItemWakeInputBoxSchema, providerAccountReadingsSchema, humanQuietWindowsSchema, seatIdentityPanePidSchema, seatIdentityProcessEvidenceSchema, rigStartupLayersSchema, humanOperatingModesSchema, queueDelegatedDecisionSchema, nodeAdvisorSchema, operationCorrelationSchema, terminalPolicySchema, seatRuntimeSwitchesSchema, claudeTokenReadingsSchema, nodeLaunchRecipeSchema, nodeClaudeTokenRefSchema, nodeClaudePermissionsSchema, nodeCodexPermissionsSchema, escalationTargetRefsSchema, sessionAgentRunnerSchema, nodeAccountHomeSchema, nodeClaudeMcpSchema, activityGrantsSchema, environmentBindingsSchema, nodePermissionsToSchema, nodeStartupGuidanceFileSchema, managedBlockWritesSchema, streamIntakeCursorSchema, nodeLaunchWrapperSchema, piAccountSwitchesSchema, eventsRetentionMarksSchema, queueErasureSchema, queueErasureBatchesSchema, queueInboxCheckinsSchema, queueItemsHandedOffFromIndexSchema, networkBindingsSchema, networkReceiptsSchema, sessionAddressReadIndexesSchema, networkInstallationsSchema, queueItemsReplyToIndexSchema, runBoundActivityGrantsSchema, seatHandoverAttemptsSchema, contextUsageOccupantGenerationSchema, contextConfiguredBudgetSchema, seatRuntimeHomeRecordsSchema, rigDeliveryDrainsSchema, claudeAutoModeSchema, nodeInputRouteSchema, queueReturnRouteSchema, nodeProcessLimitsSchema, sessionLaunchedCwdSchema, coreAppAccessSchema, nodeStatuslineThrottleSchema, seatPoolSchema, queueRelayedAnswersSchema, remoteControlObservationsSchema, sessionStopAttemptSchema, nodeKeepAliveSchema, queueItemsBlockedOnIndexSchema, queueItemsScanIndexesSchema, seatColdStartsSchema, networkRequestsSchema, communityHarnessRuntimeSwitchesSchema, providerAccountRefsSchema, providerAccountAssignmentsSchema];
-
-migrationsForFullTestDb.push(queueTransferStagingSchema, rigSeatSliceSchema, networkBindingProvidersSchema, queueItemsNativePermissionIndexSchema, seatReapStateSchema, seatColdStartStandbyStopSchema, missionControlActionsSchema, identityProvenanceSchema, queueTransferActivationSchema, sessionsEarlierHandoverOriginSchema);
 
 /**
  * P24 — the DECLARED exclusions for {@link migrationsForFullTestDb}. That list is deliberately a
@@ -217,12 +70,12 @@ migrationsForFullTestDb.push(queueTransferStagingSchema, rigSeatSliceSchema, net
  * migration intentionally omitted so the shared fixture stays lean. The exclusion is SAFE evidence,
  * not a guess: the fixture omits these AND all ~135 consumers pass, which proves no createFullTestDb
  * consumer reads them — a subsystem that needs its table migrates that migration in its own suite's
- * inline list. The P24 guard (migration-fixture-parity.test.ts) fails LOUD if a shipped migration is
- * neither in the list above nor declared here (the 064/066/067 silent-omission tax).
+ * inline list. migrationsForFullTestDb below is every shipped migration except these, so a new migration
+ * joins the fixture with no edit here; the P24 guard (migration-fixture-parity.test.ts) still fails loud on a
+ * stale entry (one naming no shipped migration).
  *
  * TO RE-EVALUATE any entry: check whether a createFullTestDb consumer now reads that table/column
- * (e.g. a new shared read). If one does, the migration must MOVE INTO migrationsForFullTestDb (delete
- * its exclusion); the guard's redundant-exclusion check then keeps the two in sync.
+ * (e.g. a new shared read). If one does, delete its exclusion and the fixture carries it.
  */
 export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "171_seat_hook_bridge.sql": "the hook bridge's own tables (slice 13), read only by its suites, which migrate ALL_MIGRATIONS (they also need outbox_entries).",
@@ -264,6 +117,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "195_workflow_start_operations.sql": "workflow receipt table — workflow suites migrate the workflow schema.",
   "053_sessions_node_id_index.sql": "sessions perf index — index/perf suites add it inline; the core edge uses the base sessions table.",
   "054_queue_transitions_archive.sql": "queue-retention EXTENSION table — queue-retention suites migrate it inline.",
+  "201_queue_transitions_archive_actor_index.sql": "indexes the archive table (054 is excluded). Speed only: an attached seat's newest own queue action reads the same row without it; its suites migrate the canonical full list.",
   "112_queue_transitions_ts_qitem.sql": "indexes queue transitions plus the archive table (054 is excluded). Speed only: the recent-activity read returns the same rows without these indexes, and queue-recent-transitions.test.ts tests that read without them (it migrates 054 inline, not 112).",
   "062_usage_samples.sql": "usage-metering subsystem table — usage suites migrate it inline.",
   "094_usage_samples_latest_indexes.sql": "indexes usage_samples (062 is excluded); usage index tests migrate the canonical full schema.",
@@ -284,6 +138,10 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "124_context_usage_watchdog_units.sql": "context watchdog token and percent units, extending 074 and 075 (excluded here); migrated inline by the context-usage watchdog units suite.",
   "079_workflow_lifecycle_parallel.sql": "workflow lifecycle identity, frontier, and failure tables — workflow suites migrate the canonical workflow schema inline; the shared core fixture does not read them.",
 };
+
+/** Seam B R6: the full-fixture migration list, exported so file-backed DB-reopen tests migrate IDENTICALLY to
+ *  createFullTestDb: every shipped migration except the declared exclusions above. */
+export const migrationsForFullTestDb = ALL_MIGRATIONS.filter((migration) => !(migration.name in migrationsForFullTestDbExclusions));
 
 export function createFullTestDb(): Database.Database {
   const db = createDb();

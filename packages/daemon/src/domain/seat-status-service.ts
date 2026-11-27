@@ -3,7 +3,8 @@ import type { ClaudeCompactionEnforcer, ObservedCompaction } from "./claude-comp
 import path from "node:path";
 import { TerminalPolicyStore } from "./terminal-policy.js";
 import type { RigRepository } from "./rig-repository.js";
-import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
+import { attachTerminalActivityAndWork, deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
+import type { SeatActivityService } from "./seat-activity-service.js";
 import { parseSessionName } from "./session-name.js";
 import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
 import type { NodeInventoryEntry, SeatIdentityVerdict } from "./types.js";
@@ -49,6 +50,11 @@ export interface SeatStatus {
   /** The session record's own status. A pane OpenRig can't confirm as the seat's runtime (a bare shell) keeps it
    *  `running`; `lifecycle_state` says how the seat reads. */
   session_status: string | null;
+  /** The same capture-free activity projection served by rig ps --nodes. */
+  activityState?: NodeInventoryEntry["activityState"];
+  /** A seat attached from an outside program (`rig attach`): its liveness is unknown to OpenRig, and its own newest queue
+   *  action is the only evidence (node-inventory's externalAttachment). */
+  external_attachment?: NonNullable<NodeInventoryEntry["externalAttachment"]>;
   standby_stopped?: true;
   /** The seat's state as `rig ps --nodes` shows it (node-inventory's lifecycleState): `attention_required`, never
    *  `running`, while startup needs attention or the pane's process identity down-ranks it. */
@@ -104,10 +110,12 @@ export class SeatStatusService {
   private env: NodeJS.ProcessEnv;
   private compactionEnforcer?: Pick<ClaudeCompactionEnforcer, "recoverSeat" | "observedCompaction" | "getOwedRestore">;
   private activityStore?: Pick<AgentActivityStore, "getPermissionStopForNode">;
+  private seatActivity?: SeatActivityService;
 
   constructor(deps: { rigRepo: RigRepository; env?: NodeJS.ProcessEnv; compactionEnforcer?: SeatStatusService["compactionEnforcer"];
-    activityStore?: SeatStatusService["activityStore"] }) {
+    activityStore?: SeatStatusService["activityStore"]; seatActivity?: SeatActivityService }) {
     this.activityStore = deps.activityStore;
+    this.seatActivity = deps.seatActivity;
     this.compactionEnforcer = deps.compactionEnforcer;
     this.rigRepo = deps.rigRepo;
     this.env = deps.env ?? process.env;
@@ -172,7 +180,8 @@ export class SeatStatusService {
   }
 
   private entriesForRig(rigId: string): NodeInventoryEntry[] {
-    return getNodeInventory(this.rigRepo.db, rigId);
+    const entries = getNodeInventory(this.rigRepo.db, rigId);
+    return this.seatActivity ? attachTerminalActivityAndWork(entries, { db: this.rigRepo.db, seatActivity: this.seatActivity }) : entries;
   }
 
   private projectStatus(seatRef: string, entry: NodeInventoryEntry): SeatStatus {
@@ -194,8 +203,10 @@ export class SeatStatusService {
       origin: this.sessionOrigin(entry.nodeId),
       current_occupant: entry.canonicalSessionName,
       session_status: entry.sessionStatus,
+      ...(entry.externalAttachment ? { external_attachment: entry.externalAttachment } : {}),
       ...(entry.standbyStopped ? { standby_stopped: true as const } : {}),
       lifecycle_state: entry.lifecycleState,
+      ...(entry.activityState !== undefined ? { activityState: entry.activityState } : {}),
       session_reason: entry.identityVerdict?.reason ?? null,
       startup_status: entry.startupStatus,
       occupant_lifecycle: entry.occupantLifecycle,

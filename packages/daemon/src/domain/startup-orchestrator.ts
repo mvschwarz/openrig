@@ -665,7 +665,7 @@ export class StartupOrchestrator {
     const communityHarness = launchedCommunityHarness(input.adapter);
     if (communityHarness) {
       try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, communityHarness.app,
-        input.skipHarnessLaunch ? undefined : communityHarness.runner); }
+        input.skipHarnessLaunch ? undefined : communityHarness.runner, communityHarness.activityHooks); }
       catch (err) { errors.push(`Couldn't record the community harness selection: ${(err as Error).message}`); return this.fail(input, "failed", errors); }
     }
 

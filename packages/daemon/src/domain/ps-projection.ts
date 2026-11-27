@@ -91,6 +91,9 @@ export { seatNeedsAttention, arbitratedNeedsInputSignal } from "./node-inventory
  *   - all nodes non-running, none recoverable → stopped.
  *   - mixed running + non-running          → degraded.
  *   - empty rig (no nodes)                 → stopped.
+ *   - a seat attached from an outside program (`unknown`: rig attach, an external CLI) counts with the running ones, as
+ *     it did while its record read running: OpenRig has nothing to start there and it hasn't been released, so attaching
+ *     one never makes a team read degraded or stopped. Its own row says its liveness is unknown.
  *
  * `recoverable` at rig level depends on per-node recoverability, which already accounts
  * for whether the rig's latest usable snapshot has a resume token for that node.
@@ -99,7 +102,7 @@ export function deriveRigLifecycleState(nodeStates: NodeLifecycleState[]): RigLi
   if (nodeStates.length === 0) return "stopped";
   if (nodeStates.some((s) => s === "attention_required")) return "attention_required";
 
-  const runningCount = nodeStates.filter((s) => s === "running").length;
+  const runningCount = nodeStates.filter((s) => s === "running" || s === "unknown").length;
   const totalCount = nodeStates.length;
 
   if (runningCount === totalCount) return "running";
@@ -145,6 +148,9 @@ export function deriveRigLifecycleFromInventory(
  * reads the verdict; it NEVER mutates `sessions.status`.
  */
 export function isEffectivelyRunning(node: NodeInventoryEntry): boolean {
+  // A seat attached from an outside program (rig attach) counts as it did while its record read running: OpenRig can't
+  // see its process, and it hasn't been released, so attaching one never makes a team read partial.
+  if (node.sessionStatus === "attached") return true;
   if (node.sessionStatus !== "running") return false;
   // Positive evidence that no harness started: restore left the pane as a bare shell (its own marker). Other attention
   // keeps the existing running count; that count alone doesn't establish a useful harness when runtime evidence is unknown.

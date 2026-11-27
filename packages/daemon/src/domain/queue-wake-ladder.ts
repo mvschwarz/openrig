@@ -229,8 +229,10 @@ export interface WakeLadderDeps {
   readPromptKind?: (destination: string) => PromptKind;
   /** Current-occupant permission hooks; no capture or attempted wake is needed. */
   readPermissionPrompts?: (destination?: string) => PermissionPromptObservation[];
-  /** Fresh bound kernel Codex screens only; no native input or new scheduler. */
-  readHookReviews?: () => Promise<HookReviewObservation[]>;
+  /** Capture-free hook-review candidates from the existing activity and structural caches. */
+  readHookReviewCandidates?: () => readonly string[];
+  /** Live proof only for the selected destinations; no native input or new scheduler. */
+  readHookReviews?: (destinations: readonly string[]) => Promise<HookReviewObservation[]>;
   now?: Date;
   log?: (line: string) => void;
   /** OPR.0.5.6.1 — the operator rung's delivery leg. dispatchEscalation delivers
@@ -1339,6 +1341,13 @@ export function makePermissionPromptReader(deps: {
 /** Marks the row that asks a person to resolve a seat stuck at a permission or approval prompt. */
 export const PROMPT_ALERT_TAG = "wake-prompt-refusal";
 const PROMPT_EPISODE_TAG = "prompt-episode:";
+
+function promptAlertDestination(tags: unknown): string | undefined {
+  if (!Array.isArray(tags)) return undefined;
+  const tag = tags.find(t => typeof t === "string"
+    && (t.startsWith("prompt-destination:") || t.startsWith("consumed-prompt-destination:")));
+  return tag?.slice(tag.startsWith("consumed-") ? "consumed-prompt-destination:".length : "prompt-destination:".length);
+}
 const LEGACY_PROMPT_RETIRED_NOTE = "prompt escalation retired: prompt cleared or original episode ended; not a delivery receipt";
 const PROMPT_RETIRED_NOTE = "prompt escalation retired: the seat's prompt read clear; not a delivery receipt";
 /** The ladder's positive-clear boundary, independent of whether the alert's owner still holds its custody.
@@ -1660,12 +1669,26 @@ async function advancePromptRefusals(
     }
   } catch { /* An unreadable hook is unknown; existing obligations keep their own evidence. */ }
 
+  const aggregates = deps.db.prepare(`SELECT qitem_id, tags FROM queue_items WHERE state IN ('pending','in-progress','blocked')
+    AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`)
+    .all(PROMPT_ALERT_TAG) as Array<{ qitem_id: string; tags: string }>;
   const hookObservations = new Map<string, HookReviewObservation>();
   const freshHook = (observation: HookReviewObservation): boolean =>
     Number.isFinite(Date.parse(observation.observedAt)) && Math.abs(now.getTime() - Date.parse(observation.observedAt)) <= 15_000;
   if (deps.readHookReviews) {
+    const candidates = new Set<string>();
+    try { for (const destination of deps.readHookReviewCandidates?.() ?? []) candidates.add(destination); }
+    catch { /* An unavailable cache cannot nominate a new alert; existing episodes still get their live proof. */ }
+    for (const aggregate of aggregates) {
+      const tags: unknown = JSON.parse(aggregate.tags);
+      const destination = promptAlertDestination(tags);
+      if (destination && Array.isArray(tags)
+        && tags.some(tag => typeof tag === "string" && tag.startsWith(`${PROMPT_EPISODE_TAG}${destination}|hook-review:`))) {
+        candidates.add(destination);
+      }
+    }
     try {
-      for (const observation of await deps.readHookReviews()) {
+      for (const observation of candidates.size ? await deps.readHookReviews([...candidates]) : []) {
         if (!freshHook(observation) || deps.queueRepo.deliveryDrains.holds(observation.destination)) continue;
         hookObservations.set(observation.destination, observation);
         const key = `${PROMPT_EPISODE_TAG}${observation.destination}|hook-review:${observation.episode}|after:${clearedAlert(observation.destination)?.qitemId ?? "start"}`;
@@ -1745,16 +1768,10 @@ async function advancePromptRefusals(
       && now.getTime() - Date.parse(group.choiceSince) >= intervalS * 1000) return "blocked";
     return state;
   };
-  const aggregates = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE state IN ('pending','in-progress','blocked')
-    AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`)
-    .all(PROMPT_ALERT_TAG) as Array<{ qitem_id: string }>;
   for (const { qitem_id } of aggregates) {
     const aggregate = deps.queueRepo.getById(qitem_id);
     if (!aggregate || !Array.isArray(aggregate.tags)) continue;
-    const destinationTag = aggregate.tags.find(t => typeof t === "string"
-      && (t.startsWith("prompt-destination:") || t.startsWith("consumed-prompt-destination:")));
-    const dest = destinationTag?.slice(destinationTag.startsWith("consumed-")
-      ? "consumed-prompt-destination:".length : "prompt-destination:".length);
+    const dest = promptAlertDestination(aggregate.tags);
     if (!dest) continue;
     // Incomplete membership is not evidence that an episode ended.
     if (unreadableDestinations.has(dest)) continue;
@@ -2007,7 +2024,7 @@ async function advancePromptRefusals(
           || current.episode !== permissionObservations.get(dest)?.episode) continue;
     }
     if (group.hookReview) {
-      const current = (await deps.readHookReviews?.().catch(() => []) ?? []).find(o => o.destination === dest);
+      const current = (await deps.readHookReviews?.([dest]).catch(() => []) ?? []).find(o => o.destination === dest);
       if (!current || !freshHook(current) || current.state !== "blocked"
         || current.episode !== hookObservations.get(dest)?.episode) continue;
     }

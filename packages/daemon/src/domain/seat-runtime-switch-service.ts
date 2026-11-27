@@ -12,7 +12,7 @@ import { ulid } from "ulid";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
-import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { seatRecordedCommunityHarness } from "./session-registry.js";
 import { communityHarnessOf, isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
 import type { RuntimeHint } from "./discovery-types.js";
@@ -157,17 +157,13 @@ interface SwitchRow {
 /** What to do about a seat with no pane to switch. */
 const NO_PANE = "it has no bound tmux pane";
 
-/** The community harness a seat was launched for, from its bound session's retained selection. Null when it has none,
- *  or when the schema predates that column.
+/** The community harness a seat was launched for: the newest session selection that records one (#4047: a newer row
+ *  without it doesn't hide it). Null when it has none, or when the schema predates that column.
  *
  *  Ordered by creation, not `updated_at`: a session row has no `updated_at` column (migration 002 creates it with
  *  `created_at` only), so ordering by it threw and the catch below turned every community seat into "no selection". */
 function seatCommunityHarnessSelect(db: Database.Database, nodeId: string): string | null {
-  try {
-    const row = db.prepare(`SELECT ${sessionCommunityHarnessSelect(db)} AS app FROM sessions s
-      WHERE s.node_id = ? ORDER BY s.created_at DESC, s.id DESC LIMIT 1`).get(nodeId) as { app?: string | null } | undefined;
-    return row?.app ?? null;
-  } catch { return null; }
+  try { return seatRecordedCommunityHarness(db, nodeId); } catch { return null; }
 }
 const NO_PANE_GUIDANCE = "If the seat is stopped, start it first, then switch it. If it has never started, there's nothing to switch: "
   + "declare the other runtime for this member in its rig spec and bring the team up again from that spec. That makes a new "
@@ -665,7 +661,7 @@ export class SeatRuntimeSwitchService {
       if (isCommunityHarnessRuntime(target)) {
         const found = loadCommunityHarnessPreset(target);
         sessionRegistry.recordCommunityHarnessSelection(successor.id, target,
-          found.ok ? (found.preset.protocol === "pi-rpc" ? "pi-rpc" : found.preset.runner) : undefined);
+          found.ok ? (found.preset.protocol === "pi-rpc" ? "pi-rpc" : found.preset.runner) : undefined, found.ok ? found.preset.activityHooks : undefined);
       }
       // The successor was launched in the seat's saved folder (stageSuccessor's node.cwd).
       sessionRegistry.recordLaunchedCwd(successor.id, node.cwd);

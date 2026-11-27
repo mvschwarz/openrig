@@ -3,7 +3,7 @@
 // route; a notice already with it moves on as the same row; the preparation notice carries what a recipient needs.
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as humanSelection from "../src/domain/workflow-human-destination.js";
 import * as queueOwner from "../src/domain/queue-owner.js";
@@ -15,9 +15,11 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
-import { recordedRecoveryInability, moveNoticesFromUnableRecipient, newestCompleteMap, reportPreparationFailure, reportRestoreDeliveryFailure,
+import { recheckHeldNotices, recordedRecoveryInability, moveNoticesFromUnableRecipient, newestCompleteMap, reportPreparationFailure, reportRestoreDeliveryFailure,
   reportRestoreUptakeUnknown } from "../src/domain/compaction-restore-notice.js";
 import { ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE, type PreparationFailure, type RestoreDeliveryFailure } from "../src/domain/claude-compaction-enforcer.js";
+import { ContextMonitor } from "../src/domain/context-monitor.js";
+import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
 
 const PERSON = "alice@external";
@@ -116,12 +118,22 @@ describe("who receives a recovery notice", () => {
     } finally { db.close(); }
   });
 
-  it("with no person and no agent at all, nothing is created and the failure surfaces as before", async () => {
+  it("with no person and no agent at all, none is created or invented: the result says why, and the notices it holds still say so", async () => {
     const { db, queue } = world({ person: false });
     try {
-      vi.spyOn(queueOwner, "defaultResolveOrchestrator").mockReturnValue(null);
-      await expect(reportPreparationFailure(db, queue, prep("writer@rr"), unableSet())).rejects.toMatchObject({ code: "workflow_human_destination_unavailable" });
-      expect(queue.list({ limit: 10 })).toEqual([]);
+      await reportRestoreDeliveryFailure(db, queue, restore("writer@rr"));
+      const [held] = noticesAbout(queue, "writer@rr");
+      // owner, the top of the rig, fails its own preparation: nobody can receive its notice.
+      const outcome = await reportPreparationFailure(db, queue, prep("owner@rr"), unableSet("owner@rr")) as { unaddressed: string };
+      expect(outcome.unaddressed).toContain("No recovery recipient could be resolved, so no notice was created");
+      expect(outcome.unaddressed).toContain("rig gateway participants --json"); // the person resolution's own remedy
+      expect(outcome.unaddressed).toContain("rig config set agents.operator_session");
+      expect(noticesAbout(queue, "owner@rr")).toEqual([]);
+      expect(queue.getById(held!.qitemId)).toMatchObject({ destinationSession: "owner@rr", state: "pending" });
+      expect(queue.getById(held!.qitemId)!.summary).toMatch(/; no capable recovery recipient$/);
+      // Any other failure surfaces as before.
+      vi.spyOn(queueOwner, "defaultResolveOrchestrator").mockImplementation(() => { throw new Error("database closed"); });
+      await expect(reportPreparationFailure(db, queue, prep("reviewer@rr"), unableSet())).rejects.toThrow("database closed");
     } finally { db.close(); }
   });
 });
@@ -144,8 +156,9 @@ describe("a notice already with a recipient that becomes unable", () => {
       expect(moved).toMatchObject({ destinationSession: PERSON, state: "pending" });
       expect(moved.chainOfRecord).toContain("fallback-from:owner@rr");
       expect(movedClaimed).toMatchObject({ destinationSession: PERSON, state: "in-progress" });
-      const note = queue.listTransitions(pending!.qitemId).at(-1)!.transitionNote;
-      expect(note).toContain(`owner@rr can't act on this recovery notice now: ${EVIDENCE}`);
+      const note = queue.listTransitions(pending!.qitemId).at(-1)!.transitionNote!;
+      expect(note).toContain(`owner@rr can't act on it now: ${EVIDENCE}`);
+      expect(note.split(EVIDENCE)).toHaveLength(2); // the evidence is named once
       expect(queue.list({ tag: "compaction", limit: 50 })).toHaveLength(3);
       // One new wake, to the person, for the pending row only.
       expect(wakesTo(pending!.qitemId)).toEqual([...before.pending, PERSON]);
@@ -177,6 +190,43 @@ describe("a notice already with a recipient that becomes unable", () => {
       expect(queue.getById(row!.qitemId)!.summary).toMatch(/^Managed restore for writer@rr: [^;]*; no capable recovery recipient$/);
       const notes = queue.listTransitions(row!.qitemId).map((t) => t.transitionNote).filter((n) => n?.includes("No capable recovery recipient"));
       expect(notes).toHaveLength(1);
+    } finally { db.close(); }
+  });
+});
+
+describe("the poll re-checks the notices an agent holds", () => {
+  it("while it can't act, a capable recipient chosen later takes them, unmarked", async () => {
+    const { db, queue } = world({ person: false, receiver: true });
+    vi.mocked(queueOwner.readReceivingAgentSetting).mockReturnValue({ session: null });
+    try {
+      await reportRestoreDeliveryFailure(db, queue, restore("writer@rr"));
+      const [row] = noticesAbout(queue, "writer@rr");
+      recheckHeldNotices(db, queue, "owner@rr", unableSet("owner@rr"));
+      expect(queue.getById(row!.qitemId)!.summary).toMatch(/; no capable recovery recipient$/);
+      vi.mocked(queueOwner.readReceivingAgentSetting).mockReturnValue({ session: "receiver@rr" });
+      recheckHeldNotices(db, queue, "owner@rr", unableSet("owner@rr"));
+      const moved = queue.getById(row!.qitemId)!;
+      expect(moved).toMatchObject({ destinationSession: "receiver@rr", state: "pending" });
+      expect(moved.summary).not.toContain("no capable");
+    } finally { db.close(); }
+  });
+
+  it("once it can act again, the ones it kept lose the mark, once", async () => {
+    const { db, queue } = world({ person: false });
+    try {
+      await reportRestoreDeliveryFailure(db, queue, restore("writer@rr"));
+      const [row] = noticesAbout(queue, "writer@rr");
+      recheckHeldNotices(db, queue, "owner@rr", unableSet("owner@rr"));
+      expect(queue.getById(row!.qitemId)!.summary).toMatch(/; no capable recovery recipient$/);
+      recheckHeldNotices(db, queue, "owner@rr", unableSet());
+      const kept = queue.getById(row!.qitemId)!;
+      expect(kept).toMatchObject({ destinationSession: "owner@rr", state: "pending" });
+      expect(kept.summary).toMatch(/^Managed restore for writer@rr: [^;]*$/);
+      expect(queue.listTransitions(row!.qitemId).at(-1)!.transitionNote)
+        .toContain("Managed restore for writer@rr: owner@rr can act on it again: OpenRig no longer records its own managed compaction as failing.");
+      const history = queue.listTransitions(row!.qitemId).length;
+      recheckHeldNotices(db, queue, "owner@rr", unableSet());
+      expect(queue.listTransitions(row!.qitemId)).toHaveLength(history);
     } finally { db.close(); }
   });
 });
@@ -285,5 +335,108 @@ it.each([
     const [row] = noticesAbout(queue, "writer@rr");
     expect(row!.destinationSession).toBe(replaced ? "owner@rr" : PERSON);
     expect(transport.send).toHaveBeenCalledTimes(sends);
+  } finally { db.close(); }
+});
+
+it("end to end: an unable top agent nobody can receive from says why in its state, and its held notice moves once a receiver is chosen", async () => {
+  const { db, queue } = world({ person: false, receiver: true });
+  vi.mocked(queueOwner.readReceivingAgentSetting).mockReturnValue({ session: null });
+  const home = mkdtempSync(join(tmpdir(), "recipient-none-")); dirs.push(home);
+  let clock = 10000;
+  const input = { sessionName: "owner@rr", runtime: "claude-code", usedPercentage: 90, cwd: null };
+  const transport = { send: vi.fn(async () => { clock++; return { ok: false, sent: false, inputPhase: "not_reached", reason: "draft_input_busy" }; }),
+    waitUntilIdle: vi.fn(async () => ({ ok: true })) };
+  const policy = { enabled: true, thresholdPercent: 80, preCompactInstruction: "Write a map.", compactInstruction: "" };
+  const unable = (s: string) => recordedRecoveryInability(db, enforcer, s);
+  const enforcer: ClaudeCompactionEnforcer = new ClaudeCompactionEnforcer({ resolveClaudeCompactionPolicy: () => policy } as any, transport as any,
+    { openrigHome: home, now: () => clock, resolveOccupantGeneration: () => "g1", autoRetryAfterStopMs: 1,
+      onPreparationFailure: (failure) => reportPreparationFailure(db, queue, failure, unable),
+      onHeldNoticesRecheck: (s) => recheckHeldNotices(db, queue, s, unable) });
+  try {
+    await reportRestoreDeliveryFailure(db, queue, restore("writer@rr"));
+    const [held] = noticesAbout(queue, "writer@rr");
+    expect(held!.destinationSession).toBe("owner@rr");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let ended = false;
+      for (let poll = 0; poll < 4; poll++) {
+        await enforcer.maybeAutoCompact(input);
+        if (enforcer.getPreparationState(input.sessionName)?.status === "stopped") { ended = true; clock += 2; break; }
+      }
+      expect(ended).toBe(true);
+    }
+    await enforcer.maybeAutoCompact(input);
+    expect(noticesAbout(queue, "owner@rr")).toEqual([]);
+    expect(enforcer.getPreparationNotice("owner@rr")).toEqual({ status: "not_addressed",
+      failure: expect.stringContaining("ended 3 automatic attempts without /compact"),
+      detail: expect.stringContaining("No recovery recipient could be resolved, so no notice was created") });
+    expect(queue.getById(held!.qitemId)).toMatchObject({ destinationSession: "owner@rr", state: "pending" });
+    expect(queue.getById(held!.qitemId)!.summary).toMatch(/; no capable recovery recipient$/);
+    // A receiving agent is chosen afterwards: the next poll moves the held notice to it, unmarked, with no new attempt counted.
+    vi.mocked(queueOwner.readReceivingAgentSetting).mockReturnValue({ session: "receiver@rr" });
+    await enforcer.maybeAutoCompact(input);
+    expect(queue.getById(held!.qitemId)).toMatchObject({ destinationSession: "receiver@rr", state: "pending" });
+    expect(queue.getById(held!.qitemId)!.summary).not.toContain("no capable");
+  } finally { db.close(); }
+});
+
+it.each(["stale", "unknown"])("a real monitor poll with a %s sample re-checks an unable seat's held notices after a restart: a receiver chosen later takes the same row, with no new preparation", async (sample) => {
+  const { db, queue } = world({ person: false, receiver: true });
+  vi.mocked(queueOwner.readReceivingAgentSetting).mockReturnValue({ session: null });
+  const home = mkdtempSync(join(tmpdir(), "recipient-monitor-")); dirs.push(home);
+  let clock = 10000;
+  const input = { sessionName: "owner@rr", runtime: "claude-code", usedPercentage: 90, cwd: null };
+  const transport = { send: vi.fn(async () => { clock++; return { ok: false, sent: false, inputPhase: "not_reached", reason: "draft_input_busy" }; }),
+    waitUntilIdle: vi.fn(async () => ({ ok: true })) };
+  const policy = { enabled: true, thresholdPercent: 80, preCompactInstruction: "Write a map.", compactInstruction: "" };
+  const make = (daemonInstance: string): ClaudeCompactionEnforcer => {
+    const unable = (s: string) => recordedRecoveryInability(db, enforcer, s);
+    const enforcer: ClaudeCompactionEnforcer = new ClaudeCompactionEnforcer({ resolveClaudeCompactionPolicy: () => policy } as any, transport as any,
+      { openrigHome: home, now: () => clock, daemonInstance, resolveOccupantGeneration: () => "g1", autoRetryAfterStopMs: 1,
+        onPreparationFailure: (failure) => reportPreparationFailure(db, queue, failure, unable),
+        onHeldNoticesRecheck: (s) => recheckHeldNotices(db, queue, s, unable) });
+    return enforcer;
+  };
+  try {
+    await reportRestoreDeliveryFailure(db, queue, restore("writer@rr"));
+    const [held] = noticesAbout(queue, "writer@rr");
+    // owner's own managed compaction ends three automatic attempts on fresh samples, before a daemon restart.
+    const before = make("before");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let ended = false;
+      for (let poll = 0; poll < 4; poll++) {
+        await before.maybeAutoCompact(input);
+        if (before.getPreparationState(input.sessionName)?.status === "stopped") { ended = true; clock += 2; break; }
+      }
+      expect(ended).toBe(true);
+    }
+    await before.maybeAutoCompact(input);
+    expect(queue.getById(held!.qitemId)).toMatchObject({ destinationSession: "owner@rr" });
+    expect(queue.getById(held!.qitemId)!.summary).toMatch(/; no capable recovery recipient$/);
+    const attemptBefore = before.getPreparationState(input.sessionName)?.attemptId ?? null;
+    // The daemon restarts, owner's sample is stale or unknown, and a receiving agent is chosen.
+    const after = make("after");
+    const store = new ContextUsageStore(db, { stateDir: home, codexHomeDir: home });
+    if (sample === "stale") {
+      const sidecar = store.getSidecarPath("owner@rr");
+      mkdirSync(dirname(sidecar), { recursive: true });
+      writeFileSync(sidecar, JSON.stringify({ session_id: "s1", session_name: "owner@rr", transcript_path: null,
+        sampled_at: new Date(Date.now() - 30 * 60_000).toISOString(),
+        context_window: { context_window_size: 200000, used_percentage: 90, remaining_percentage: 10 } }));
+    }
+    const monitor = new ContextMonitor(db, store, undefined, after);
+    vi.mocked(queueOwner.readReceivingAgentSetting).mockReturnValue({ session: "receiver@rr" });
+    const sends = transport.send.mock.calls.length;
+    await monitor.pollOnce();
+    const owner = db.prepare("SELECT id FROM nodes WHERE logical_id = 'owner'").get() as { id: string };
+    const observed = store.getForNode(owner.id, "owner@rr");
+    expect(observed).toMatchObject({ availability: sample === "stale" ? "known" : "unknown", fresh: false });
+    expect(after.recoveryInability("owner@rr")).toContain("ended 3 automatic attempts");
+    const moved = queue.getById(held!.qitemId)!;
+    expect(moved).toMatchObject({ destinationSession: "receiver@rr", state: "pending" });
+    expect(moved.summary).not.toContain("no capable");
+    // No new preparation: nothing was sent, and the only attempt is the one the earlier daemon had started.
+    expect(transport.send).toHaveBeenCalledTimes(sends);
+    expect(after.getPreparationState("owner@rr")?.attemptId ?? null).toBe(attemptBefore);
+    monitor.stop();
   } finally { db.close(); }
 });

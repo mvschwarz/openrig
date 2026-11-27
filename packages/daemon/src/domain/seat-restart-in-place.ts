@@ -178,6 +178,8 @@ export interface InPlaceRestartReport {
 export interface AccountEvidence {
   verdict: "unverified";
   credentialStore: { value: string | null; state: "read" | "unset" | "unreadable"; detail: string };
+  /** `changedBeforeRestart` means the same in a plan and a result: auth.json changed after the running Codex started
+   *  (and, in a result, before its replacement started). null when the file or a start time can't be read. */
   authFile: { changedBeforeRestart: boolean | null; detail: string };
   startupGate: string | null;
   /** The native resume probe's code for that gate (for example `hook_trust_gate`), when the launch named one. */
@@ -594,8 +596,13 @@ export class CodexInPlaceRestart {
     };
     effort.changes = effort.running !== effort.relaunch;
     const applyChoice = effort.changes && effort.source === "seat_choice";
+    // Managed launches use `-c developer_instructions` for startup guidance, but observed argv doesn't prove its author:
+    // a manual resume can carry a person's override too. This restart doesn't rebuild startup guidance or preserve that
+    // override. Let the restart proceed, and name the change in its plan/result instead of claiming ownership or retention.
+    const changedSettings = settingsDrift(effective, relaunched);
+    const guidanceChanges = changedSettings.includes(DEVELOPER_INSTRUCTIONS_DRIFT);
     const drift = [
-      ...settingsDrift(effective, relaunched).filter((key) => key !== "effort" || !applyChoice),
+      ...changedSettings.filter((key) => (key !== "effort" || !applyChoice) && key !== DEVELOPER_INSTRUCTIONS_DRIFT),
       ...(facts.cwd && facts.cwd !== cwd ? ["cwd"] : []),
       ...(relaunchHome !== codexHome ? ["codex home"] : []),
     ];
@@ -620,9 +627,10 @@ export class CodexInPlaceRestart {
       activity: this.activity(seat.nodeId),
       childProcesses: descendants(rows, process.pid, chain).map((row) => ({ pid: row.pid, name: executableBase(row) })),
       settings: { effective, saved: target.saved, effort,
-        note: applyChoice
+        note: (applyChoice
           ? `The restart keeps the settings the running Codex uses (effective), except effort: it sends the seat's saved effort choice ${effort.relaunch} in place of ${effort.running ?? "no flag"}. Other saved choices are shown, not applied.`
-          : "The restart keeps the settings the running Codex uses (effective), effort included. Saved choices for the next managed launch are shown, not applied." },
+          : "The restart keeps the settings the running Codex uses (effective), effort included. Saved choices for the next managed launch are shown, not applied.")
+          + (guidanceChanges ? " The observed developer_instructions command-line override changes on restart; it is not preserved. This in-place restart does not rebuild startup guidance. Use rig down, then rig up --existing for the normal restore path." : "") },
       codexHome,
       codexNoDaemonFlag: running.daemonOptOut
         ? { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." }
@@ -840,7 +848,10 @@ export class CodexInPlaceRestart {
         : Number.isNaN(newStart)
           ? { changedBeforeRestart: Number.isNaN(oldStart) ? null : auth.mtimeMs > oldStart,
               detail: "Whether auth.json changed after the running Codex started (stat only; never read). A change is not proof of which account." }
-          : { changedBeforeRestart: auth.mtimeMs < newStart, detail: "auth.json was last modified before the replacement started (stat only; never read)." },
+          : { changedBeforeRestart: Number.isNaN(oldStart) ? null : auth.mtimeMs > oldStart && auth.mtimeMs < newStart,
+              detail: auth.mtimeMs < newStart
+                ? "Whether auth.json changed after the old Codex started and before its replacement started (stat only; never read). A change is not proof of which account."
+                : "auth.json changed at or after the replacement started, so whether the replacement read that change is unknown (stat only; never read)." },
       startupGate: null,
       startupGateKind: null,
       notVerified: NOT_VERIFIED,
@@ -1088,8 +1099,9 @@ function runningLaunch(argv: string[]): RunningCodexLaunch {
     else if ((arg === "-c" || arg === "--config") && argv[index + 1] !== undefined) configs.push(argv[++index]!);
     else if (arg.startsWith("--config=")) configs.push(arg.slice("--config=".length));
   }
+  const permissionsConfig = configs.find((entry) => entry.startsWith("permissions="));
   return { networkOverride: configs.includes(CODEX_NETWORK_DEFAULT_OVERRIDE), daemonOptOut: argv.includes("--no-daemon"),
-    nonLoginShell: configs.includes(CODEX_NON_LOGIN_SHELL_OVERRIDE), addDirs };
+    nonLoginShell: configs.includes(CODEX_NON_LOGIN_SHELL_OVERRIDE), addDirs, ...(permissionsConfig !== undefined ? { permissionsConfig } : {}) };
 }
 
 /** The settings a Codex command line runs with. cwd, add-dirs, images and the resume target are not settings. */
@@ -1112,6 +1124,9 @@ export function parseEffectiveSettings(argv: string[]): EffectiveSettings {
   settings.config.sort();
   return settings;
 }
+
+/** The one command-line override exempted from drift refusal; its ownership is not inferred from its key. */
+const DEVELOPER_INSTRUCTIONS_DRIFT = "config developer_instructions";
 
 /** Which settings differ. Config overrides are named by key only; their values may be paths. */
 function settingsDrift(running: EffectiveSettings, relaunch: EffectiveSettings): string[] {

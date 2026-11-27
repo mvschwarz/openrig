@@ -10,7 +10,7 @@ import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
 import { isBoundTerminalSeat } from "./domain/terminal-seat.js";
 import { seatRuntimeHomeBySession, seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
-import { recordedRecoveryInability, reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
+import { recheckHeldNotices, recordedRecoveryInability, reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
 import { TerminalPolicyStore } from "./domain/terminal-policy.js";
@@ -175,7 +175,7 @@ import { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { resolveWorkflowHumanDestination } from "./domain/workflow-human-destination.js";
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
-import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "./domain/policies/parked-owner-consumer.js";
+import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, parkedOwnerSpecYaml } from "./domain/policies/parked-owner-consumer.js";
 import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
 import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
@@ -717,7 +717,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       if (activity.state === "unknown") return null;
       if (runtime === "claude-code" && activity.state === "needs_input"
           && !["permission_prompt", "selection_prompt"].includes(activity.reason)) return null;
-      return activity.state === "needs_input" && ["permission_prompt", "selection_prompt"].includes(activity.reason);
+      return activity.state === "needs_input" && ["permission_prompt", "selection_prompt", "hook_trust_gate"].includes(activity.reason);
     },
     permissionPromptChanged: (sessionName, confirmed, runtime) => {
       const latest = agentActivityStore.getLatestForNode({ sessionName });
@@ -2658,8 +2658,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start. The policy hands each
     // evaluation to the executor, composed with the queue, the outbox's held messages, the delivery guard's custody,
     // the seats' activity and the rig's events, the drain's effects (the delivery guard's lifecycle lease, the
-    // `auto-rehydrate` capture and the checked seat stop), and the add: the model member as the export writes it, and the
-    // member add of `rig add` (convergeOp over this daemon's instantiator); it runs only through the policy.
+    // `auto-rehydrate` capture and the checked seat stop), the add: the model member as the export writes it, and the
+    // member add of `rig add` (convergeOp over this daemon's instantiator), and the comeback: the snapshot selection for
+    // a retained node and the restore orchestrator's launchSingleNode with that explicit snapshotId, this daemon's
+    // runtime adapters and the filesystem; it runs only through the policy.
     const seatPoolSlots = new SeatPoolSlotsRepository(db);
     const seatPoolStops = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter });
     const seatPoolExecutor = makeSeatPoolExecutor({
@@ -2690,6 +2692,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         exportMember: (rigId, modelNodeId) => rigSpecExporter.exportedRawMemberFromNode(rigId, modelNodeId),
         converge: (rigId, op, rigRoot, opts) => convergeOp({ instantiator: podInstantiator }, rigId, op, rigRoot, opts),
         makeFolder: (folder) => { fs.mkdirSync(folder, { recursive: true }); },
+      },
+      comeback: {
+        select: (rigId, nodeId, logicalId) => snapshotRepo.selectComebackSnapshot(rigId, nodeId, logicalId),
+        launch: (rigId, logicalId, { snapshotId }) => restoreOrchestrator.launchSingleNode(rigId, logicalId, {
+          snapshotId,
+          adapters: runtimeAdaptersMap,
+          fsOps: { exists: (path: string) => fs.existsSync(path) },
+        }),
       },
     });
     const seatPoolPolicy = makeSeatPoolPolicy({ cycle: (job) => seatPoolExecutor.cycle(job) });
@@ -2793,6 +2803,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           history: {
             listForJob: (jobId, limit) => watchdogHistoryLogInstance.listForJob(jobId, limit),
             countForJob: (jobId) => watchdogHistoryLogInstance.countForJob(jobId),
+            latestAcceptedSendTo: (jobId, targetSession, occupantGeneration) =>
+              watchdogHistoryLogInstance.latestAcceptedSendTo(jobId, targetSession, occupantGeneration),
+            refusedAttemptSince: (jobId, targetSession, afterHistoryId, occupantGeneration) =>
+              watchdogHistoryLogInstance.refusedAttemptSince(jobId, targetSession, afterHistoryId, occupantGeneration),
           },
           // Best-effort attempt reporting; actual prompt and failure recovery still use the existing ladder.
           rows: {
@@ -2926,6 +2940,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     {
       const parkedOwnerJob = (rigName: string) => {
         const anchor = makeRigAnchor(rigName);
+        // The ensure rewrites the spec: an operator's owner_min_interval_s in the current job's spec is carried over.
+        let priorSpecYaml: string | null = null;
+        try {
+          priorSpecYaml = watchdogJobsRepoInstance.listExactTuple(PARKED_OWNER_POLICY_NAME, anchor, null)
+            .filter((job) => job.state === "active" || job.state === "stopped").at(-1)?.specYaml ?? null;
+        } catch { /* an unreadable prior job keeps the default spec */ }
         return {
           policy: PARKED_OWNER_POLICY_NAME,
           targetSession: anchor,
@@ -2933,7 +2953,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           intervalSeconds: 120,
           activeWakeIntervalSeconds: null,
           scanIntervalSeconds: null,
-          specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${anchor}\ncontext:\n  rig: ${rigName}\n`,
+          specYaml: parkedOwnerSpecYaml(rigName, priorSpecYaml),
         };
       };
       // #3634: a name is armed while it has an unarchived row or a running seat (the seats diagnoseRig reads, so a rig
@@ -3165,6 +3185,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         // gate is inert (never compares a stale generation as if live).
         {
           onPreparationFailure: (failure) => reportPreparationFailure(db, queueRepoInstance, failure, recoveryInability),
+          onHeldNoticesRecheck: (sessionName) => recheckHeldNotices(db, queueRepoInstance, sessionName, recoveryInability),
           onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure, { unable: recoveryInability }),
           onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true, unable: recoveryInability }),
           onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown, recoveryInability),

@@ -248,6 +248,7 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
         : err.code === "answer_not_closed" ? 409
         : err.code === "answer_not_recorded" ? 400
         : err.code === "decision_revision_changed" ? 409
+        : err.code === "not_an_update" ? 409
         : 500;
       return c.json(
         { error: err.code, message: err.message, ...(err.details ?? {}) },

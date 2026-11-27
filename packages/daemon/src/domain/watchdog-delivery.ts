@@ -150,7 +150,9 @@ export function makeWatchdogDeliver(deps: {
         // so a queued reminder would read delivered before anything took it (#3270).
         { actorSession: "watchdog@system", openrigNotice: true, auditPointer: source.jobId, noHookBridge: true, notificationCurrent, ...(beforeWrite ? { beforeWrite } : {}) });
       const fact = readSendOutcome(result, writtenFact(result));
-      if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted, fact };
+      // A held reminder keeps the transport's own reason (what held it), as a failure does, so its history can name it.
+      if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted, fact,
+        ...(result.reason ? { transportReason: result.reason } : {}) };
       return result.ok
         ? { status: "ok", continuityActionCompleted, fact, ...(sharedReminder === null ? {} : { sentMessage: message }) }
         : { status: "failed", fact, error: result.error, sent: result.sent, ...(result.reason ? { transportReason: result.reason } : {}),

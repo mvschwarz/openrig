@@ -1,3 +1,4 @@
+import { isRosterReadyNotice } from "./roster-ready-notice.js";
 import { queueDisplayText, QUEUE_DISPLAY_PREFIX_UNITS } from "./queue-display.js";
 import { RigDeliveryDrainStore } from "./rig-delivery-drain.js";
 import { DRAFT_HELD_WAKE_RESULT, PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap } from "./queue-wake-ladder.js";
@@ -124,6 +125,7 @@ import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, 
 import { slackMicros } from "./gateway/slack/state-store.js";
 import { askBackRoute, RUNNER_CLOSE_WAITS, terminalAnswerMeaning } from "./receiver-context.js";
 import { runSyncSite, runSyncSiteWhenSlow } from "./sync-site-wrap.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 /** A direct ask's answer row ID: from the ask, or from the ask and the park episode its answer belongs to. */
 function humanAnswerId(askId: string, episodeKey?: string): string {
@@ -6177,22 +6179,30 @@ export class QueueRepository {
    *  about this seat's own prompt that nobody holds is left out: with no operator seat to carry it, the alert falls back
    *  to the seat itself, and the escalation is the wake, not the content, so it is never that seat's work. One its owner
    *  explicitly holds (blocked) stays, so that hold and its wake are diagnosed as before; so does a row whose tags aren't
-   *  a JSON array. Each row carries its blocker and last update, so a hold is shown with what it waits on and its age. */
+   *  a JSON array. OpenRig's roster-ready notice (isRosterReadyNotice) is also left out: information, not an obligation.
+   *  Each row carries its blocker and last update, so a hold is shown with what it waits on and its age. */
   listOpenObligations(destinationSession: string, limit: number): Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null; blockedOn: string | null; updatedAt: string }> {
+    if (limit === 0) return [];
     const addresses = this.resolveSessionAddresses(destinationSession);
     const slots = addresses.map(() => "?").join(",");
     const ownPrompt = addresses.flatMap((address) => [`prompt-destination:${address}`, `consumed-prompt-destination:${address}`]);
     const rows = this.db.prepare(
-      `SELECT qitem_id, state, blocked_on, ts_updated${this.hasSummaryColumn ? ", summary" : ""} FROM queue_items
+      `SELECT qitem_id, source_session, state, blocked_on, ts_updated${this.hasSummaryColumn ? ", summary" : ""} FROM queue_items
         WHERE destination_session IN (${slots}) AND state IN ('pending', 'in-progress', 'blocked')
           AND ${this.dispatchableTransferRow()}
           AND NOT CASE WHEN state != 'blocked' AND json_valid(tags) THEN CASE WHEN json_type(tags) = 'array' THEN
             EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)
             AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value IN (${ownPrompt.map(() => "?").join(",")}))
           ELSE 0 END ELSE 0 END
-        ORDER BY ts_created DESC LIMIT ?`,
-    ).all(...addresses, WAKE_ESCALATION_TAG, ...ownPrompt, limit) as Array<{ qitem_id: string; state: "pending" | "in-progress" | "blocked"; summary?: string | null; blocked_on: string | null; ts_updated: string }>;
-    return rows.map((r) => ({ qitemId: r.qitem_id, state: r.state, summary: r.summary ?? null, blockedOn: r.blocked_on, updatedAt: r.ts_updated }));
+        ORDER BY ts_created DESC`,
+    ).iterate(...addresses, WAKE_ESCALATION_TAG, ...ownPrompt) as IterableIterator<{ qitem_id: string; source_session: string; state: "pending" | "in-progress" | "blocked"; summary?: string | null; blocked_on: string | null; ts_updated: string }>;
+    const result: ReturnType<QueueRepository["listOpenObligations"]> = [];
+    for (const row of rows) {
+      if (isRosterReadyNotice(row)) continue;
+      result.push({ qitemId: row.qitem_id, state: row.state, summary: row.summary ?? null, blockedOn: row.blocked_on, updatedAt: row.ts_updated });
+      if (limit > 0 && result.length >= limit) break;
+    }
+    return result;
   }
 
   list(opts: QueueListOptions & { compact: true }): CompactQueueItem[];
@@ -6767,7 +6777,27 @@ export class QueueRepository {
       isHostedMember: (dest) => this.hostedMemberFn(dest),
       hostedCheckIn: (dest) => this.hostedMemberCheckIn(dest),
       isIssuedConversation: (dest) => this.isIssuedConversation(dest),
+      isExternalCliSeat: (dest) => this.isExternalCliSeat(dest),
     });
+  }
+
+  /** Whether this address is a seat joined with `rig attach` as an external CLI, in an active rig: by its session or its
+   *  binding's external name, or as the canonical `<pod>-<member>@<rig>` of such a node. OpenRig can't type into it
+   *  (seat-kinds: no inbound transport), so its work waits for that program's own read. An unreadable record reads false. */
+  isExternalCliSeat(destination: string): boolean {
+    try {
+      const external = (rows: Array<{ attachment_type: string | null }>) =>
+        rows.some((row) => seatProcessOwner(resolveSeatKind(row.attachment_type)) === "external");
+      if (external(this.db.prepare(`SELECT b.attachment_type FROM bindings b JOIN nodes n ON n.id = b.node_id JOIN rigs r ON r.id = n.rig_id
+        WHERE r.archived_at IS NULL
+          AND (b.external_session_name = ? OR EXISTS (SELECT 1 FROM sessions s WHERE s.node_id = n.id AND s.session_name = ?))`)
+        .all(destination, destination) as Array<{ attachment_type: string | null }>)) return true;
+      const at = destination.lastIndexOf("@");
+      if (at <= 0) return false;
+      return external(this.db.prepare(`SELECT b.attachment_type FROM bindings b JOIN nodes n ON n.id = b.node_id JOIN rigs r ON r.id = n.rig_id
+        WHERE r.archived_at IS NULL AND r.name = ? AND REPLACE(n.logical_id, '.', '-') = ?`)
+        .all(destination.slice(at + 1), destination.slice(0, at)) as Array<{ attachment_type: string | null }>);
+    } catch { return false; }
   }
 
   /** Whether OpenRig issued this address to a person's own conversation here (#3964): its work waits for that conversation

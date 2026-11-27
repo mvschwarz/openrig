@@ -219,6 +219,17 @@ describe("the community harness adapter", () => {
     expect(tmux.sendShellCommand).toHaveBeenCalledWith("w@r", "/usr/bin/env OPENRIG_RUNTIME=synth /usr/bin/env -u OPENRIG_LAUNCH_WRAPPER synth-harness --serve", undefined, { stageIfLong: true, execInScript: true });
   });
 
+  // A handover's successor reuses the pane, whose tmux environment still names the predecessor's generation; a
+  // declared-hooks preset's posts count only under the successor's own.
+  it.each(["", "names_conversation: true\n"])("launches a successor under its own reserved generation (%s)", async declaration => {
+    const dir = presets({ "synth.yaml": GOOD + declaration });
+    const { tmux } = adapter(dir);
+    const command = vi.fn(async (_session: string, program: string, target?: { launcherPrefix?: string }) => (target?.launcherPrefix ?? "") + program);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, seatLaunchEnvironment: { command, resolveLaunchWrapper: wrapper => [...wrapper] }, presetsDir: () => dir });
+    expect(await app.launchHarness({ ...binding, nodeId: "node-1", launchGeneration: "gen-2" }, { name: "w@r" })).toMatchObject({ ok: true });
+    expect(command).toHaveBeenCalledWith("w@r", "synth-harness --serve", expect.objectContaining({ nodeId: "node-1", generation: "gen-2" }));
+  });
+
   it.each(["", "runner: false\n"])("forwards a runner-less wrapper at the existing command seam (%s)", async declaration => {
     const dir = presets({ "synth.yaml": GOOD + declaration });
     const { tmux } = adapter(dir);

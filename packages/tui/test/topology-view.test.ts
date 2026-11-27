@@ -302,6 +302,19 @@ describe("Phase-3 live-glyph honesty (the states the fleet GENUINELY serves)", (
     expect(seat(null, false)).toMatchObject({ glyph: "●", token: "actIdle" });
     expect(seat(undefined, null)).toMatchObject({ glyph: "●", token: "actIdle" });
   });
+
+  it("reads the served activity decision before the older activity word: its display, and needs-input by count", async () => {
+    const { statusGlyph } = await import("../src/topology/glyphs.js");
+    const seat = (display: string, count = 0) => statusGlyph({
+      logicalId: "dev.impl", podNamespace: "dev", runtime: "synth", model: null, status: "running", nodeKind: "agent",
+      startupStatus: "ready", contextUsedPercentage: null, agentActivity: { state: "idle" }, terminalActive: true,
+      activityState: { display, needsInput: { count } },
+    });
+    expect(seat("working")).toMatchObject({ glyph: "●", token: "actActive" });
+    expect(seat("idle")).toMatchObject({ glyph: "●", token: "actIdle" });
+    expect(seat("unknown")).toMatchObject({ glyph: "○", token: "actDetached" });
+    expect(seat("needs-input", 1)).toMatchObject({ glyph: "◐", token: "actAttention" });
+  });
 });
 
 describe("R2 HIGH-3 — keyboard content focus stays VISIBLE under truecolor (segs path)", () => {

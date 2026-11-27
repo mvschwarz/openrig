@@ -5,6 +5,7 @@ import { communityHarnessOf } from "./built-in-runtimes.js";
 import { detectCodexLimitBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
 import { IDLE_FULL_CAPTURE_MS, windowSnapshot } from "./transcript-rotation.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { looksLikeCodexHookReviewPrompt } from "./native-resume-probe.js";
 
 /** A cached STRUCTURAL pane observation: the classifyPaneActivity verdict plus WHEN the pane was read
  *  as motion. observedAt is a LIVENESS timestamp (last time we saw the pane), NOT a hook-arrival age —
@@ -138,8 +139,10 @@ export class SeatStructuralActivityService {
       return null;
     }
     // A community seat's screen is read as its runtime's, as `rig send` reads it, so an answered dialog in its scrollback
-    // is history here too. Built-in seats keep the runtime-free read.
-    const c = communityHarnessPaneActivity(classifyPaneActivity(content, communityHarness ? { runtime: communityHarness } : {}), communityHarness, content);
+    // is history here too. Only Codex's hook-review menu changes the built-in structural classification.
+    const c = communityHarnessPaneActivity(classifyPaneActivity(content,
+      communityHarness ? { runtime: communityHarness }
+        : runtime === "codex" && looksLikeCodexHookReviewPrompt(content) ? { runtime } : {}), communityHarness, content);
     // Redraws from an unrecorded Codex layout cannot establish work or completed idle.
     // Keep positive work and attention visible; native hooks are resolved separately by the activity fold.
     const unrecognizedVersion = runtime === "codex" && c.state !== "attention" && c.state !== "agent_active" && namesAnotherClientVersion(content, "codex");

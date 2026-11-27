@@ -107,6 +107,9 @@ export type ReconcileNodeResult =
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 /** A subset launch's refusal (selection_changed) for a saved seat no current seat matches by both id and logical id. */
 const SNAPSHOT_SEAT_CHANGED = "A snapshot seat was removed or recreated. Select history for the current seat.";
+/** A Claude resume that failed with its conversation saved: a newer Claude Code can resume some conversations an older one
+ *  reports as not found, so updating comes before a fresh start, which leaves the saved conversation unused. */
+const CLAUDE_UPDATE_AND_RETRY = "If this Claude Code may be older than the one that saved the conversation, update it and retry the restore.";
 
 // OPR.0.5.7.1 consumer alignment: the four-way active-occupant ladder lives
 // in the pure leaf module active-occupant.ts, shared with preview, snapshot
@@ -2622,7 +2625,8 @@ export class RestoreOrchestrator {
           // a confirmed blank agent (precision guard trigger (i)). Roll back to
           // zero sessions; the stop-and-ask is realized as awaiting-decision.
           { const kept = await rollbackOwnBlank(); if (kept) return kept; }
-          return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", stage: "resume_rolled_back", error: `Original session unresumable: resume attempted but failed. The blank session was rolled back; no session is running. Check the harness state manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.` };
+          const check = node.runtime === "claude-code" ? `${CLAUDE_UPDATE_AND_RETRY} Otherwise check` : "Check";
+          return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", stage: "resume_rolled_back", error: `Original session unresumable: resume attempted but failed. The blank session was rolled back; no session is running. ${check} the harness state manually, or deliberately start only this seat fresh, which starts a new conversation and leaves the saved one unused: ${this.freshSeatCommand(rigId, data, node.logicalId)}.` };
         }
       }
     } else if (resumeRequested && isPodAware) {
@@ -3025,14 +3029,16 @@ export class RestoreOrchestrator {
                 // pane leaves the seat's own tmux session at a shell, which the fresh launch won't replace until it's stopped.
                 const fresh = this.freshSeatCommand(rigId, data, node.logicalId);
                 const steps = opts?.keepPane ? `in two steps: ${this.stopSeatCommand(rigId, data, node.logicalId)}, then ${fresh}` : `in one step: ${fresh}`;
+                // Claude's own "No conversation found" can come from an older Claude Code than the one that saved it.
+                const update = node.runtime === "claude-code" ? ` ${CLAUDE_UPDATE_AND_RETRY}` : "";
                 return {
                   nodeId: node.id,
                   logicalId: node.logicalId,
                   status: "awaiting-decision",
                   stage: "resume_rolled_back",
                   error: resumeWithoutContext
-                    ? `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. ${noContextFresh} Restore the original session manually.`
-                    : `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. OpenRig's records can't tell whether this conversation was ever used. If you know this seat was never used, nothing is lost by starting only this seat fresh, ${steps}. Otherwise restore the original session manually.`,
+                    ? `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running.${update} ${noContextFresh} Restore the original session manually.`
+                    : `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running.${update} OpenRig's records can't tell whether this conversation was ever used. If you know this seat was never used, nothing is lost by starting only this seat fresh, ${steps}. Otherwise restore the original session manually.`,
                 };
               }
               return {

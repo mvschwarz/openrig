@@ -78,8 +78,38 @@ export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): s
       candidates.push({ file, relative });
     }
     if (!candidates.length) return warnings;
-    const peers = git(root, ["worktree", "list", "--porcelain", "-z"]).split("\0\0")
-      .map(record => record.split("\0"))
+    let records: string[][];
+    try {
+      records = git(root, ["worktree", "list", "--porcelain", "-z"]).split("\0\0").map(record => record.split("\0"));
+    } catch (error) {
+      if ((error as { status?: number }).status !== 129) throw error;
+      // Git < 2.36 has no -z. Its porcelain paths are raw, not C-quoted.
+      records = git(root, ["worktree", "list", "--porcelain"]).split("\n\n").filter(Boolean).map(record => record.split("\n"));
+      const seen = new Set<string>();
+      for (const fields of records) {
+        const peer = fields[0]?.startsWith("worktree ") ? fields[0].slice(9) : "";
+        if (!path.isAbsolute(peer) || !fields.slice(1).every(field =>
+          /^(HEAD [0-9a-f]+|bare|detached|branch refs\/.*|locked(?: .*)?|prunable .*)$/.test(field))) {
+          throw new Error("Git worktree listing cannot represent these paths unambiguously");
+        }
+        const canonical = fs.realpathSync(peer);
+        if (seen.has(canonical)) throw new Error("Git worktree listing contains an ambiguous path");
+        seen.add(canonical);
+        // A newline in a path can resemble porcelain fields or records. Each
+        // parsed path must be an actual worktree root in this repository, once.
+        if (fields.includes("bare")) {
+          if (canonical !== fs.realpathSync(common) || git(peer, ["rev-parse", "--is-bare-repository"]).trim() !== "true") {
+            throw new Error("Git worktree listing has an invalid bare path");
+          }
+        } else {
+          const [top, peerCommon] = git(peer, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"]).split("\n");
+          if (top !== canonical || !peerCommon || fs.realpathSync(peerCommon) !== fs.realpathSync(common)) {
+            throw new Error("Git worktree listing has an invalid worktree path");
+          }
+        }
+      }
+    }
+    const peers = records
       .filter(fields => !fields.includes("bare"))
       .map(fields => fields.find(field => field.startsWith("worktree "))?.slice(9))
       .filter((peer): peer is string => !!peer);

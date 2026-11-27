@@ -432,12 +432,19 @@ describe("with no `rig` to run", () => {
     const waiter = (session: string, env = noRig()) => {
       const s = sink();
       return bridge.conversationWaiter({ input: { ...input, session_id: session }, out: s.out,
-        deps: { env, alive: () => true, key: KEY, waiterMs: 15_000, ...clock() } }).then((code) => ({ code, text: s.text() }));
+        deps: { env, alive: () => true, key: KEY, waiterMs: 15_000, loginPath: () => null, ...clock() } }).then((code) => ({ code, text: s.text() }));
     };
     const first = await waiter(SESSION);
     expect(first.code).toBe(2);
     expect(first.text).toMatch(/^OpenRig's automatic wake can't run in this conversation: the openrig plugin found no `rig` command/);
     expect(first.text).toContain("npm install -g @openrig/cli");
+    // An install whose folder no PATH has (a custom npm prefix with no profile line), or one whose PATH line only an
+    // interactive shell reads, is told the fix that works: the login profile for zsh or bash, then a restart.
+    expect(first.text).toContain("`npm prefix -g`");
+    expect(first.text).toContain("one-off `npm install -g --prefix`");
+    expect(first.text).toContain("runs there but not here");
+    expect(first.text).toContain("login profile (`~/.zprofile` for zsh, `~/.bash_profile` or `~/.profile` for bash)");
+    expect(first.text).toContain("restart this app");
     expect(first.text).toContain("OPENRIG_RIG_BIN");
     expect(first.text).not.toMatch(/\b(must|obey|priority|system instruction|override)\b/i);
     // The marker sits in the plugin's data folder, beside every conversation's.
@@ -455,6 +462,34 @@ describe("with no `rig` to run", () => {
     const fourth = await waiter("fourth-session");
     expect(fourth).toEqual({ code: 2, text: first.text });
     expect(await waiter("fifth-session")).toEqual({ code: 0, text: "" });
+  });
+
+  // Reproduced on Claude Code 2.1.330: `rig` installed into a new ~/.local/bin after the app started is on a login shell's
+  // PATH, not on the app's, which the hooks inherit, so every later Stop or SessionStart waiter found none.
+  it("Claude Code: a `rig` only on a login shell's PATH is found, run with that PATH, and its task wakes the conversation", async () => {
+    const loginBin = join(data, "login-bin");
+    const log = join(data, "rig-calls.log");
+    const rows = { goals: JSON.stringify([goal()]), pending: JSON.stringify([question()]),
+      transitions: JSON.stringify(created("dev-build@starter", "transport:v1")) };
+    mkdirSync(loginBin, { recursive: true });
+    writeFileSync(join(loginBin, "rig"), [
+      "#!/bin/sh",
+      `echo "$*" >> '${log}'`,
+      'case "$*" in',
+      `  "queue list --tag "*) echo '${rows.goals}' ;;`,
+      `  "queue list --destination "*) echo '${rows.pending}' ;;`,
+      `  "queue transitions "*) echo '${rows.transitions}' ;;`,
+      "  *) echo null ;;",
+      "esac",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    const s = sink();
+    const code = await bridge.conversationWaiter({ input, out: s.out,
+      deps: { env: noRig(), alive: () => true, key: KEY, waiterMs: 15_000, loginPath: () => [loginBin, "/usr/bin", "/bin"].join(delimiter), ...clock() } });
+    expect(code).toBe(2);
+    expect(s.text()).toContain("- qitem-q1: May I run the test suite?");
+    expect(readFileSync(log, "utf8")).toContain(`queue list --tag conversation-key:${KEY} --all --limit 100 --json\n`);
+    expect(existsSync(join(data, "no-rig.json"))).toBe(false);
   });
 
   it("Claude Code: a seat, or a conversation with no key, is never told", async () => {

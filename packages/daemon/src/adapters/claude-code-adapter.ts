@@ -18,7 +18,7 @@ import type {
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ClaudeFragmentEntry, ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
-import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, claudeTrustPromptDrawing, claudeTrustPromptFocus, hasClaudeDrawnInput, noConversationFoundOwner } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, claudeResumeSignInEvidence, claudeResumeSignInMessage, claudeTrustPromptDrawing, claudeTrustPromptFocus, hasClaudeDrawnInput, noConversationFoundOwner } from "../domain/native-resume-probe.js";
 import { resumeProbeEvidence } from "../domain/native-resume-probe-evidence.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProcesses, listNativeProcessesOrThrow, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
@@ -1060,17 +1060,22 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // A gate Claude draws once its process is up (workspace trust, project MCP approval) waits on a person, as the resume
     // adapter reads it. A different occupant keeps main's result, as below, and so does a shell that's provably back and
     // idle: the gate's text above it is what Claude left when it exited.
+    // A conversation that resumed to Claude's login refusal as its latest reply (login_required) waits the same way: Claude
+    // is up, and its person signs in. Its report names the refusal and leaves out the screen, whose refused turn may be the
+    // seat's startup text.
     let returned: boolean | undefined;
     const returnedToShell = async () => returned ??= await this.paneReturnedToShell(binding, finalCommand);
-    const gate = finalProbe.code === "trust_gate" || finalProbe.code === "mcp_gate";
+    const signIn = finalProbe.code === "login_required";
+    const gate = finalProbe.code === "trust_gate" || finalProbe.code === "mcp_gate" || signIn;
     if (finalProbe.status === "attention_required" || finalProbe.code === "claude_auto_identity_required"
       || (gate && !await returnedToShell() && await this.paneOccupant(binding, false) !== "another")) {
+      const evidence = signIn ? claudeResumeSignInEvidence(finalProbe) : finalContent.split("\n").slice(-12).join("\n");
       return {
         ok: false,
         probe: probeEvidence,
-        error: finalProbe.detail,
+        error: signIn ? claudeResumeSignInMessage(finalProbe) : finalProbe.detail,
         recovery: "attention_required",
-        evidence: finalContent.split("\n").slice(-12).join("\n"),
+        ...(evidence !== undefined ? { evidence } : {}),
       };
     }
 
