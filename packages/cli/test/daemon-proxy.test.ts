@@ -379,3 +379,20 @@ describe("daemon requests through the sandbox's supplied HTTP proxy", () => {
     expect(f.connects).toHaveLength(6);
   });
 });
+
+// #3957: every lifecycle health probe asks for a connection of its own, including a read that brings its own abort signal
+// (the missing-record stop's identity read), so the first probe after a stop signal never reuses a socket the daemon closed.
+describe("lifecycle health probes on a connection of their own", () => {
+  it.each([false, true])("sends connection: close (with a caller's abort signal: %s)", async (withSignal) => {
+    for (const name of ["http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"]) vi.stubEnv(name, "");
+    const seen: Array<string | undefined> = [];
+    const url = await listen(http.createServer((req, res) => {
+      seen.push(req.headers.connection);
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ pid: 4242 }));
+    }));
+    const res = await realDeps().fetch(`${url}/healthz`, withSignal ? { signal: new AbortController().signal } : undefined);
+    expect(await res.json?.()).toEqual({ pid: 4242 });
+    expect(seen).toEqual(["close"]);
+  });
+});

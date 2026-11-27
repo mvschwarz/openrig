@@ -10,7 +10,7 @@ import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
 import { isBoundTerminalSeat } from "./domain/terminal-seat.js";
 import { seatRuntimeHomeBySession, seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
-import { reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
+import { recordedRecoveryInability, reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
 import { TerminalPolicyStore } from "./domain/terminal-policy.js";
@@ -2687,6 +2687,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         createQueueRow: (row) => queueRepoInstance.create({ ...row, sourceSession: "watchdog@system", nudge: false, wakeTrigger: "openrig" })
           .then(({ qitemId, state }) => ({ qitemId, state })),
         resolveParkedRows: ({ jobId, targetSession }) => queueRepoInstance.parkedRowsOwnedBy(jobId, targetSession),
+        notificationCurrent: jobId => !queueRepoInstance.watchdogReminderSuperseded(jobId),
+        resolveSharedParkReminder: jobId => queueRepoInstance.resolveSharedParkReminder(jobId),
         noteParkedRows: ({ owner, notes }) => queueRepoInstance.noteParkedRows(owner, notes),
         noteQueuedRow: ({ jobId, destinationSession, note }) => queueRepoInstance.noteOpenWatchdogRow(jobId, destinationSession, note),
       }),
@@ -2723,13 +2725,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       additionalPolicies: [
         makeWorkflowKeepalivePolicy({
           db,
+          isFenced: id => !!queueRepoInstance.transferFence(id),
           // OPR.0.4.6.WF5 FR-2 class (b): detection-time exception items,
           // dedup by occurrence; dial resolved via the runtime's cached
           // spec (registered-human selection inside the helper).
           ensureStuckExceptionItem: workflowExceptionEnsurer,
           reconcileStuckExceptions: (id) => workflowRuntime?.reconcileStuckExceptions(id) ?? 0,
         }),
-        makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService, isQueueOnlySeat: isQueueOnlyGuardSeat }),
+        makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService, isQueueOnlySeat: isQueueOnlyGuardSeat, isFenced: id => !!queueRepoInstance.transferFence(id) }),
         // OPR.0.5.6.24 F-14: the parked-owner consumer — the WHOLE shipped
         // parked diagnosis (diagnoseRigParked over the arbitrated oracle +
         // destination-scoped obligations + wake status; the same derivation
@@ -3115,6 +3118,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // the type narrow for downstream consumers).
   const { ContextMonitor } = await import("./domain/context-monitor.js");
   const { ClaudeCompactionEnforcer } = await import("./domain/claude-compaction-enforcer.js");
+  // Who can act on a recovery notice: an agent whose own managed compaction this enforcer records as failing can't.
+  // Called only from later polls and notices, after compactionEnforcer (next line) is initialized; a constructor-time call would hit its TDZ.
+  const recoveryInability = (session: string): string | null => compactionEnforcer ? recordedRecoveryInability(db, compactionEnforcer, session) : null;
   const compactionEnforcer = deps.sessionTransport
     ? new ClaudeCompactionEnforcer(
         new ContextPackSettingsStore(),
@@ -3123,10 +3129,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         // so a stage minted by a retired generation is refused for the successor. null = UNKNOWN → the
         // gate is inert (never compares a stale generation as if live).
         {
-          onPreparationFailure: (failure) => reportPreparationFailure(db, queueRepoInstance, failure),
-          onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure),
-          onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true }),
-          onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown),
+          onPreparationFailure: (failure) => reportPreparationFailure(db, queueRepoInstance, failure, recoveryInability),
+          onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure, { unable: recoveryInability }),
+          onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true, unable: recoveryInability }),
+          onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown, recoveryInability),
           // #3688: a cancel, a new attempt or a replaced occupant settles the notices its debt opened.
           onCompactionDebtEnded: (ended) => settleCompactionNotices(queueRepoInstance, ended),
           terminalPolicies: new TerminalPolicyStore(db),
@@ -3321,7 +3327,11 @@ export async function createHerdrAppProviders(opts: {
     env: opts.hcEnv,
     ...(opts.spawnFn ? { spawnFn: opts.spawnFn } : {}),
     reconcileAll: () => {
-      for (const provider of providers.values()) void provider.reconcile().catch(() => {});
+      // What the running daemon notices (a viewer herdr-core brought back as a shell, one that ended) is reported as at
+      // start: once recorded, a later start has nothing new to report.
+      for (const provider of providers.values()) {
+        void provider.reconcile().then((notes) => { for (const note of notes) console.warn(`[herdr-app] ${note}`); }).catch(() => {});
+      }
     },
   });
   const ownWork = () => {
@@ -3367,7 +3377,8 @@ export async function createHerdrAppProviders(opts: {
         const provider = resolve({ appHome: recorded.appHome });
         if (!provider) continue;
         ownWork();
-        await provider.reconcile().catch(() => {});
+        // What changed while the daemon was down is reported here, a viewer herdr-core brought back as a shell included.
+        for (const note of await provider.reconcile().catch(() => [] as string[])) console.warn(`[herdr-app] ${note}`);
         // A gate still pending when the daemon stopped is followed again, within its recorded window.
         await provider.resumePendingGates().catch(() => {});
       } catch { /* an unreadable journal stays as it is; an open of that app home reports it */ }

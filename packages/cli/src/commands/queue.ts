@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
 import { Command, InvalidArgumentError } from "commander";
-import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError, remoteDaemonClient, type DaemonResponse } from "../client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError, operatorAuthHeaders, remoteDaemonClient, type DaemonResponse } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard, resolveOriginSelfHostId } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { sessionRigOf, isHumanSeatSessionRef, parseSessionName } from "../session-name.js";
@@ -21,6 +21,7 @@ import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "
 import { resolveSenderSession } from "../sender-identity.js";
 import { queueExportCommand } from "./queue-export.js";
 import { queueImportCommand, queueStagingCommand } from "./queue-import.js";
+import { queueTransferCommand } from "./queue-transfer.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -1328,6 +1329,15 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
   };
+  cmd.addCommand(queueTransferCommand(({ path, body, host }) => {
+    const deps = getDeps();
+    return withClient(deps, async local => {
+      const target = await queueHostTarget(deps, local, host, body !== undefined);
+      if ("error" in target) return { status: 400, data: target };
+      const options = { ...target.options, headers: target.remote ? target.options.headers : operatorAuthHeaders() };
+      return body === undefined ? target.client.get(path, options) : target.client.post(path, body, options);
+    }, remoteHostOf(host) !== undefined, host);
+  }));
 
   cmd
     .command("create")
@@ -2109,7 +2119,8 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .requiredOption("--to <session>", "Destination seat receiving the new qitem")
     .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
     .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
-    .option("--note <text>", "Transition note")
+    .option("--note <text>", "Transition note on the source row for the audit log")
+    .option("--resolution <text>", "The outcome stored on the closed source row and shown by rig queue show (requires source daemon support)")
     .option("--priority <priority>", "Override priority for the new qitem: routine | urgent | critical", queuePriorityArg)
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
@@ -2128,6 +2139,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       body?: string;
       bodyFile?: string;
       note?: string;
+      resolution?: string;
       priority?: string;
       tier?: string;
       tags?: string;
@@ -2188,6 +2200,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           evidenceRef: opts.evidenceRef,
           ...(opts.alert ? { humanAlert: true } : {}),
           transitionNote: opts.note,
+          resolution: opts.resolution,
           priority: opts.priority,
           tier: opts.tier,
           tags,

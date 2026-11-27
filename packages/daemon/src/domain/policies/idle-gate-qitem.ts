@@ -24,6 +24,7 @@ import type { SeatActivityService } from "../seat-activity-service.js";
 import type { Policy, PolicyEvaluation, PolicyJob } from "./types.js";
 
 export interface IdleGateQitemDeps {
+  isFenced?: (qitemId: string) => boolean;
   db: Database.Database;
   /**
    * Consume the same arbitrated activity oracle as the public surfaces. Only
@@ -73,6 +74,7 @@ export function makeIdleGateQitemPolicy(deps: IdleGateQitemDeps): Policy {
         )
         .all(seat) as PendingGateRow[];
       const gated = rows
+        .filter(r => !deps.isFenced?.(r.qitem_id))
         .map((r) => ({
           qitemId: r.qitem_id,
           roles: effectiveGateRoles({ tags: parseTags(r.tags), tier: r.tier }),

@@ -19,7 +19,7 @@ it never reads an unsupported capability as idle, working, ready or verified.
 | Identity | when declared | With `launch_result`, the conversation is shown as reported by its launcher; with `names_conversation`, as named by OpenRig. Neither is observed by OpenRig. Without either, the identity is unavailable. |
 | Resume | when declared | `resume: true` with one of the two above (see [Reopening a conversation](#reopening-a-conversation-resume-true)). Without it, a resume says `Resume is unsupported: community harness "<name>" is launch-only`, and a restore stops and asks. |
 | Activity | partly | Read from the screen only; there are no activity hooks. Work and attention the screen shows are kept, but a screen that looks idle reads `unknown`, never idle, because a quiet prompt can be an approval or a pause. A [runner preset](#runner-presets-runner-true)'s own reports decide it instead. |
-| Attention | partly | Read from the screen: a permission question or numbered choice that OpenRig recognizes reads as needing attention, and `rig send` won't type into it. A prompt it doesn't recognize reads `unknown`. |
+| Attention | partly | Read from the screen: a permission question or numbered choice that OpenRig recognizes reads as needing attention, and `rig send` won't type into it. Once the harness prints its next empty prompt (a line holding only `❯`, `›` or `»`) below an answered one, the answered one is history, even while it stays on screen. A prompt it doesn't recognize reads `unknown`. |
 | Approval | no | Approvals stay in the harness's own pane. OpenRig relays none, so a person answers them there. A [runner preset](#runner-presets-runner-true) is the exception: its runner submits the agent's permission requests to OpenRig, which asks a person, and the default is permit (section 7 of the [harness and runner contract](harness-runner-contract.md)). |
 | Cancel | no | A plain preset has no live native cancellation consumer. Its own manual controls remain available; `/abort` is ordinary input unless that program defines it. An implemented runner can support the [named native command](harness-runner-contract.md#optional-run-bound-native-input-and-wake-version-1), subject to its own capability and turn mapping. `rig seat stop` and `rig down` end the seat's tmux session; work outside that pane, such as a gateway, has separate custody and lifecycle. List those limits in the preset. Restarting in place and switching harness are refused. |
 | Transport | yes | The seat is a tmux pane like any other, so `rig capture`, `rig send` and `--host` work as they do for any seat. |
@@ -277,8 +277,11 @@ Copy the launcher and the preset for your mode, and maintain them as your own.
 processes, a gateway say, may keep running after it. OpenRig doesn't stop them, and whether they survive isn't exercised
 by OpenRig's tests, so check the harness's own processes after `rig down`. Each preset's limits say what to expect.
 
-**Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats) and
-switching harness on a running seat. Each says so before anything changes.
+**Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats). It says
+so before anything changes. To move a running single-pane seat to or from an installed harness, use
+`rig seat set-runtime <seat> --runtime <target> --reason <text>`, where the target is the harness's name, or `codex`,
+`claude-code` or `pi` to move off it. It starts a new conversation with a handover. A later resume of a harness
+successor's conversation works only when that harness's preset declares `resume`.
 
 ## An example: Cursor
 
@@ -472,7 +475,7 @@ model_catalog:
     - id: example/model-b
 ```
 
-Omit `runtime_version` when it is unknown and omit `effort_levels` when the preset has no per-model effort information. An explicit `models: []` declares an empty list. Missing or invalid catalog metadata makes the [seat catalog](seat-node-targeting.md#model-and-effort-catalog) unavailable and leaves preset launch behavior unchanged. Older OpenRig versions may reject `model_catalog` as an unknown field.
+Omit `runtime_version` when it is unknown and omit `effort_levels` when the preset has no per-model effort information. The API's `runtimeVersion` is this declaration. OpenRig does not read the installed harness version for this response. An explicit `models: []` declares an empty list. Missing or invalid catalog metadata makes the [seat catalog](seat-node-targeting.md#model-and-effort-catalog) unavailable and leaves preset launch behavior unchanged. Older OpenRig versions may reject `model_catalog` as an unknown field.
 
 ## Pass the seat's declared model at launch
 

@@ -287,6 +287,50 @@ describe("daemon start with an existing kernel rig", () => {
     expect(restore).not.toHaveBeenCalled();
   });
 
+  // A kernel brought back after this daemon started (`rig up kernel --existing`) is reported from its seats, like one that was
+  // running at start: kernel_state doesn't stay `skipped`, and the "bring it back" hint doesn't outlive the restore.
+  const bringBack = (h: ReturnType<typeof host>) => {
+    for (const { node, name } of h.nodes) {
+      const session = h.sessionRegistry.registerSession(node.id, name);
+      h.sessionRegistry.updateStatus(session.id, "running");
+      h.sessionRegistry.updateStartupStatus(session.id, "ready");
+      h.live.add(name);
+    }
+  };
+
+  it("a kernel that was already down at start follows its seats once it is brought back", async () => {
+    const h = host();
+    h.reboot();
+    process.env.OPENRIG_NO_KERNEL = "1";
+    await h.daemonStart();
+    delete process.env.OPENRIG_NO_KERNEL;
+    const tracker = await h.daemonStart(vi.fn(async () => ({ errors: [] })));
+    expect(tracker.getStatus().kernelState).toBe("skipped");
+    bringBack(h);
+    expect(tracker.getStatus()).toMatchObject({ kernelState: "ready", detail: "kernel rig already managed" });
+  });
+
+  it("a kernel stopped with `rig down kernel` before this start follows its seats once it is brought back", async () => {
+    const h = host();
+    await h.down();
+    const tracker = await h.daemonStart(vi.fn(async () => ({ errors: [] })));
+    expect(tracker.getStatus().kernelState).toBe("skipped");
+    bringBack(h);
+    expect(tracker.getStatus().kernelState).toBe("ready");
+  });
+
+  it("a kernel brought back with no seat ready yet still reads skipped", async () => {
+    const h = host();
+    await h.down();
+    const tracker = await h.daemonStart(vi.fn(async () => ({ errors: [] })));
+    for (const { node, name } of h.nodes) {
+      const session = h.sessionRegistry.registerSession(node.id, name);
+      h.sessionRegistry.updateStatus(session.id, "running");
+      h.live.add(name);
+    }
+    expect(tracker.getStatus().kernelState).toBe("skipped");
+  });
+
   it("a running kernel is left alone and reported from its seats", async () => {
     const h = host();
     // Its current seats are Claude-only, but the original selection is still the dual-runtime template.

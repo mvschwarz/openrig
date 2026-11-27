@@ -1402,6 +1402,23 @@ describe("QueueRepository", () => {
   });
 
   describe("R1 handoff-and-complete", () => {
+    it.each(["local", "cross-host"] as const)("preserves a %s handoff resolution from a failed row through a later fallback", async (mode) => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      const qitemId = item.qitemId;
+      repo.update({ qitemId, actorSession: "bob@rig", state: "failed" });
+      repo.routeToFallback(qitemId, "carol@rig", "retry");
+      const resolution = "Accepted\nfallback: retry";
+      const handoff = { qitemId, fromSession: "carol@rig", toSession: "dave@rig", resolution };
+      if (mode === "local") {
+        await repo.handoffAndComplete({ ...handoff, nudge: false });
+      } else {
+        repo.closeCrossHostHandoffSource({ ...handoff, terminalState: "done", closureTarget: "successor@other" });
+      }
+      repo.update({ qitemId, actorSession: "carol@rig", state: "pending", reopen: true, transitionNote: "retry after handoff" });
+      const rerouted = repo.routeToFallback(qitemId, "bob@rig", "replacement");
+      expect(rerouted.resolution).toBe(`${resolution}\nfallback: replacement`);
+    });
+
     it("closes source as state=done with closure_reason=handed_off_to (terminal) and creates new qitem", async () => {
       const original = await repo.create({
         sourceSession: "alice@rig",

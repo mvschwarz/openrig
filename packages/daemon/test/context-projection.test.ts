@@ -79,7 +79,10 @@ describe("Context Usage Projection", () => {
     const rig = setup.rigRepo.createRig("test-rig");
     const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
     setup.sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
-    store.persist(node.id, KNOWN_USAGE);
+    store.persist(node.id, { ...KNOWN_USAGE,
+      currentUsage: JSON.stringify({ input_tokens: 100000, cache_read_input_tokens: 30000, cache_creation_input_tokens: 4000 }),
+      configuredBudget: { tokens: 150000, usedPercentage: 89, source: "CLAUDE_CODE_AUTO_COMPACT_WINDOW" },
+    });
 
     // Test via HTTP route which uses context-aware inventory
     const res = await setup.app.request(`/api/rigs/${rig.id}/graph`);
@@ -88,6 +91,7 @@ describe("Context Usage Projection", () => {
     const graphNode = body.nodes.find((n: any) => n.data?.logicalId === "dev.impl");
     expect(graphNode?.data?.contextAvailability).toBe("known");
     expect(graphNode?.data?.contextUsedPercentage).toBe(67);
+    expect(graphNode?.data?.contextConfiguredBudget).toEqual({ tokens: 150000, usedPercentage: 89, source: "CLAUDE_CODE_AUTO_COMPACT_WINDOW" });
     expect(graphNode?.data?.contextTotalInputTokens).toBe(120000);
     expect(graphNode?.data?.contextTotalOutputTokens).toBe(14000);
   });
