@@ -407,10 +407,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   networkRequestsSchema,
   queueItemEvidenceRefRootsSchema,
   queueItemsNativePermissionIndexSchema,
-<<<<<<< HEAD
   seatColdStartStandbyStopSchema,
-=======
   contextConfiguredBudgetSchema,
   sessionsEarlierHandoverOriginSchema,
->>>>>>> a6d72c5159edd344f9ffc2b7f0ddfd681245c8eb
 ];
