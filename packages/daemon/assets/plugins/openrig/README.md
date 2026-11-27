@@ -64,7 +64,9 @@ new chat in the same process (after `/clear`) still gets the earlier chat's task
   `rig`. A chat that never handed work over this way has nothing to read, and they do nothing in OpenRig's own seats.
 - **Which `rig`:** the hooks, and in Claude Code the MCP server, run the file `OPENRIG_RIG_BIN` names, else `rig` on your
   PATH, else the project's own `node_modules/.bin/rig` (in Claude Code, the session's project; in Codex, the session's
-  folder). So an OpenRig installed inside one project is found only in sessions started there. With no `rig`, the hooks
+  folder), else the first `rig` on a login shell's PATH, run with that PATH. So an OpenRig installed inside one project is
+  found only in sessions started there, and one installed after the app started is found once your login profile
+  (such as `~/.zprofile`) puts its folder on PATH. With no `rig`, the hooks
   say once in a chat that the team's questions won't come in by themselves: once for the plugin's install, not in every
   session, and again only after a `rig` was found and then lost. Claude Code logs the MCP server's one line saying why it
   didn't start. The hooks themselves start with the `node` on the app's PATH, or the file `OPENRIG_NODE` names: set it
