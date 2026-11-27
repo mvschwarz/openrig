@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { withSqliteTiming } from "./sqlite-timing.js";
 
 /**
  * Create a SQLite database connection.
@@ -15,5 +16,6 @@ export function createDb(filePath?: string): Database.Database {
   // which fails nested writes inside a transaction with SQLITE_CANTOPEN.
   db.pragma("temp_store = MEMORY");
 
-  return db;
+  // Slow statements, pragmas and transactions are named in the slow-operations log (#3895).
+  return withSqliteTiming(db);
 }
