@@ -129,6 +129,17 @@ export class WatchdogHistoryLog {
     return rows.map(rowToEntry);
   }
 
+  /** The job's newest sends recorded as reaching one target session (outcome `sent`), newest first. */
+  listSentToTarget(jobId: string, targetSession: string, limit = 5): WatchdogHistoryEntry[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM watchdog_history WHERE job_id = ? AND delivery_target_session = ? AND outcome = 'sent'
+         ORDER BY evaluated_at DESC, history_id DESC LIMIT ?`,
+      )
+      .all(jobId, targetSession, limit) as HistoryRow[];
+    return rows.map(rowToEntry);
+  }
+
   listAll(limit = 100): WatchdogHistoryEntry[] {
     const rows = this.db
       .prepare(

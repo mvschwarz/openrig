@@ -19,6 +19,7 @@ import {
   currentParkedOwnerNoInputFailure,
   NUDGE_FAIL_PREFIX,
   PARKED_OWNER_POLICY_NAME,
+  parkedOwnerSpecYaml,
   type ParkedOwnerConsumerDeps,
   type ParkedSeatDiagnosisView,
   type RowTransitionView,
@@ -130,6 +131,8 @@ function makeDeps(
     history: {
       listForJob: (_j, limit) => history.slice(0, limit),
       countForJob: () => history.length,
+      listSentToTarget: (_j, target, limit) =>
+        history.filter((e) => e.deliveryTargetSession === target && e.outcome === "sent").slice(0, limit),
     },
     rows: store.deps(),
     occupantGeneration,
@@ -585,6 +588,46 @@ describe("parked-owner-consumer — R2 integration hard checks (OPR.0.5.6.24)", 
     // The row's old receipt survives, but no longer vetoes the current reminder:
     const again = await makeParkedOwnerConsumerPolicy(deps).evaluate(makeJob({ jobId: job.jobId }));
     expect(again.action).toBe("send");
+  });
+
+  it("at the real history log: an owner's last delivered reminder holds its interval behind any number of newer rows", async () => {
+    const qitemId = await mkClaimedRow();
+    const seat = parkedSeat({ obligations: { items: [{ qitemId, state: "in-progress", summary: null }], held: [] } });
+    const log = new WatchdogHistoryLog(db);
+    const job = new WatchdogJobsRepository(db).register({
+      policy: PARKED_OWNER_POLICY_NAME,
+      specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${makeRigAnchor(RIG)}\n`,
+      targetSession: makeRigAnchor(RIG),
+      intervalSeconds: 120,
+      activeWakeIntervalSeconds: null,
+      registeredBySession: "daemon@kernel",
+    });
+    const NOW = Date.now();
+    log.record({ jobId: job.jobId, evaluatedAt: new Date(NOW - 10 * 60_000).toISOString(), outcome: "sent",
+      deliveryTargetSession: SEAT, deliveryStatus: "ok", evaluationNotes: { obligations: ["qitem-earlier"] } });
+    for (let i = 0; i < 300; i++) {
+      log.record({ jobId: job.jobId, evaluatedAt: new Date(NOW - 60_000 + i).toISOString(), outcome: "skipped",
+        skipReason: "all-parked-owners-deferred" });
+    }
+    // Attempts at the same seat that never reached it, newer than the reminder: they don't hide it either.
+    for (let i = 0; i < 80; i++) {
+      log.record({ jobId: job.jobId, evaluatedAt: new Date(NOW - 5 * 60_000 + i).toISOString(), outcome: "failed",
+        deliveryTargetSession: SEAT, deliveryStatus: "failed", evaluationNotes: { obligations: [qitemId] } });
+    }
+    const deps: ParkedOwnerConsumerDeps = {
+      diagnoseRig: () => ({ seats: [seat] }),
+      history: { listForJob: (j, l) => log.listForJob(j, l), countForJob: (j) => log.countForJob(j),
+        listSentToTarget: (j, s, l) => log.listSentToTarget(j, s, l) },
+      rows: realRows(),
+      now: () => NOW,
+    };
+    const context = { owner_min_interval_s: { [SEAT]: 3600 } };
+    const held = await makeParkedOwnerConsumerPolicy(deps).evaluate(makeJob({ jobId: job.jobId, context }));
+    expect(held).toMatchObject({ action: "skip", reason: "all-parked-owners-deferred" });
+    expect(JSON.stringify(held.notes)).toContain("owner-min-interval");
+    const later = await makeParkedOwnerConsumerPolicy({ ...deps, now: () => NOW + 51 * 60_000 })
+      .evaluate(makeJob({ jobId: job.jobId, context }));
+    expect(later).toMatchObject({ action: "send", notes: { newSinceLastWake: [qitemId] } });
   });
 
   it("B2 hard check (real-persistence discriminator): consumer failure enters the ladder, SURVIVES the ladder's own generic overwrite, retries to cap, and reaches escalation", async () => {
@@ -1210,5 +1253,133 @@ describe("#3315 a parked owner on a tmux server the daemon can't reach", () => {
     expect(store.nudges).toEqual([]);
     gone = false;
     expect((await policy().evaluate(makeJob())).action).toBe("send");
+  });
+});
+
+describe("context.owner_min_interval_s: a minimum time between one owner's reminders", () => {
+  const NOW = Date.parse("2026-10-11T12:00:00.000Z");
+  const at = (minutesAgo: number) => new Date(NOW - minutesAgo * 60_000).toISOString();
+  const wake = (minutesAgo: number, obligations: string[], deliveryStatus = "ok"): WatchdogHistoryEntry => ({
+    ...sentHistory({ episodeKey: `${SEAT}|old#${minutesAgo}`, primaryRow: obligations[0]!, deliveryStatus }),
+    historyId: `h-wake-${minutesAgo}`,
+    evaluatedAt: at(minutesAgo),
+    evaluationNotes: { episodeSeat: SEAT, episodeKey: `${SEAT}|old#${minutesAgo}`, primaryRow: obligations[0]!, obligations },
+  });
+  const deferredScan = (minutesAgo: number): WatchdogHistoryEntry => ({
+    historyId: `h-skip-${minutesAgo}`, jobId: "job-poc-1", evaluatedAt: at(minutesAgo), outcome: "skipped",
+    skipReason: "all-parked-owners-deferred", deliveryTargetSession: null, deliveryStatus: null, deliveryMessage: null,
+    evaluationNotes: null,
+  });
+  const run = (history: WatchdogHistoryEntry[], context: Record<string, unknown>, now = NOW, store = new RowStore(),
+    seats = [parkedSeat()]) =>
+    makeParkedOwnerConsumerPolicy({ ...makeDeps(seats, store, history), now: () => now } as ParkedOwnerConsumerDeps)
+      .evaluate(makeJob({ context }));
+
+  it("two obligations opened inside the interval give no wake until it ends, then one wake with both in the digest", async () => {
+    // The last reminder named only the first row; the two others opened after it.
+    const history = [wake(10, [ROW_IDS[0]!])];
+    const store = new RowStore();
+    const held = await run(history, { owner_min_interval_s: { [SEAT]: 3600 } }, NOW, store);
+    expect(held).toMatchObject({ action: "skip", reason: "all-parked-owners-deferred" });
+    expect(JSON.stringify(held.notes)).toContain("owner-min-interval");
+    // Nothing is reserved while the owner waits out its interval: no reserve note per scan.
+    expect(store.appended.filter((a) => a.note.startsWith(RESERVE_PREFIX))).toEqual([]);
+
+    const sent = await run(history, { owner_min_interval_s: { [SEAT]: 3600 } }, NOW + 51 * 60_000, store);
+    expect(sent.action).toBe("send");
+    if (sent.action !== "send") return;
+    expect(sent.target.session).toBe(SEAT);
+    for (const id of ROW_IDS) expect(sent.message).toContain(id);
+    expect(sent.notes?.["newSinceLastWake"]).toEqual([ROW_IDS[1], ROW_IDS[2]]);
+    expect(sent.message).toContain(`new since then: ${ROW_IDS[1]}, ${ROW_IDS[2]}`);
+  });
+
+  it("the interval is measured from the last delivered reminder however many scans came after it", async () => {
+    // Far more history rows than the consumer reads for rotation, all newer than the reminder.
+    const history = [...Array.from({ length: 6000 }, (_, i) => deferredScan((i + 1) / 200)), wake(45, [ROW_IDS[0]!])];
+    expect(await run(history, { owner_min_interval_s: { [SEAT]: 3600 } }))
+      .toMatchObject({ action: "skip", reason: "all-parked-owners-deferred" });
+  });
+
+  it("the interval runs from the delivery a later scan recorded, not from the evaluation that sent it", async () => {
+    const store = new RowStore();
+    // Evaluated 61 min ago; the scan after it recorded the delivery on its row 59 min ago.
+    store.record(ROW_IDS[0]!, "watchdog@system", "in-progress", `${DELIVERED_PREFIX} ${SEAT}|old#61`, at(59));
+    expect(await run([wake(61, [ROW_IDS[0]!])], { owner_min_interval_s: { [SEAT]: 3600 } }, NOW, store))
+      .toMatchObject({ action: "skip", reason: "all-parked-owners-deferred" });
+    expect((await run([wake(61, [ROW_IDS[0]!])], { owner_min_interval_s: { [SEAT]: 3600 } }, NOW + 2 * 60_000, store)).action)
+      .toBe("send");
+  });
+
+  it("a reminder that never reached the seat does not start the interval", async () => {
+    const history = [wake(10, [ROW_IDS[0]!], "failed")];
+    expect((await run(history, { owner_min_interval_s: { [SEAT]: 3600 } })).action).toBe("send");
+  });
+
+  it("an owner held by its interval does not hold another parked owner", async () => {
+    const store = new RowStore();
+    store.openIds = (dest) => dest === SEAT2 ? ["qitem-other-1"] : ROW_IDS;
+    const other = parkedSeat({ sessionName: SEAT2,
+      obligations: { items: [{ qitemId: "qitem-other-1", state: "pending", summary: null }], held: [] } });
+    // The rotation comes back to the held owner first: the latest attempt went to the other seat.
+    const toOther: WatchdogHistoryEntry = { ...wake(2, ["qitem-other-1"], "failed"), historyId: "h-other",
+      deliveryTargetSession: SEAT2 };
+    const result = await run([toOther, wake(10, [ROW_IDS[0]!])], { owner_min_interval_s: { [SEAT]: 3600 } }, NOW, store,
+      [parkedSeat(), other]);
+    expect(JSON.stringify(result.notes)).toContain("owner-min-interval");
+    expect(result).toMatchObject({ action: "send", target: { session: SEAT2 } });
+  });
+
+  it("an owner outside the map, a job without it, and an entry that is not a positive number keep today's reminder", async () => {
+    const history = [wake(10, [ROW_IDS[0]!])];
+    for (const context of [{}, { owner_min_interval_s: { [SEAT2]: 3600 } }, { owner_min_interval_s: { [SEAT]: "3600" } },
+      { owner_min_interval_s: { [SEAT]: -1 } }, { owner_min_interval_s: [3600] }]) {
+      const result = await run(history, context);
+      expect(result.action).toBe("send");
+      if (result.action !== "send") continue;
+      expect(result.message).not.toContain("new since then");
+      expect(result.notes?.["newSinceLastWake"]).toBeUndefined();
+    }
+  });
+
+  it("a seat at a prompt is not held by its interval: the attempt whose refusal alerts the prompt still goes", async () => {
+    const atPrompt = parkedSeat({ activity: { value: "needs-input", needsInput: { count: 1, reason: "permission" } } });
+    const result = await run([wake(10, [ROW_IDS[0]!])], { owner_min_interval_s: { [SEAT]: 3600 } }, NOW, new RowStore(), [atPrompt]);
+    expect(result).toMatchObject({ action: "send", target: { session: SEAT } });
+  });
+
+  it("the last reminder's rows still pending and unclaimed past the bound are escalated once while the interval holds", async () => {
+    const store = new RowStore();
+    const seat = parkedSeat({ obligations: { items: [
+      { qitemId: ROW_IDS[0]!, state: "pending", summary: null },
+      { qitemId: ROW_IDS[1]!, state: "in-progress", summary: null },
+      { qitemId: ROW_IDS[2]!, state: "pending", summary: null },
+    ], held: [] } });
+    const escalations: Array<{ qitemIds: string[]; episodeKey: string }> = [];
+    const evaluate = (minutesAgo: number) => makeParkedOwnerConsumerPolicy({
+      ...makeDeps([seat], store, [{ ...wake(minutesAgo, [ROW_IDS[0]!, ROW_IDS[1]!]), evaluationNotes: {
+        episodeSeat: SEAT, episodeKey: `${SEAT}|old#1`, primaryRow: ROW_IDS[0]!, obligations: [ROW_IDS[0]!, ROW_IDS[1]!] } }]),
+      now: () => NOW,
+      escalateUnclaimed: async (input) => { escalations.push(input); return ["lead@test-rig"]; },
+    } as ParkedOwnerConsumerDeps).evaluate(makeJob({ context: { owner_min_interval_s: { [SEAT]: 3600 } } }));
+    // Inside the bound: held, nobody told.
+    expect(await evaluate(10)).toMatchObject({ action: "skip" });
+    expect(escalations).toEqual([]);
+    // Past it: the pending row the last reminder named goes out once; the row opened after it, and the claimed one, don't.
+    expect(await evaluate(20)).toMatchObject({ action: "skip" });
+    expect(await evaluate(20)).toMatchObject({ action: "skip" });
+    expect(escalations).toEqual([expect.objectContaining({ qitemIds: [ROW_IDS[0]], episodeKey: `${SEAT}|old#1` })]);
+    expect(store.appended.some((a) => a.note.startsWith(`${ESCALATED_PREFIX} ${SEAT}|old#1 to lead@test-rig`))).toBe(true);
+  });
+
+  it("the daemon's spec for the rig job keeps an operator's owner_min_interval_s and drops anything invalid", () => {
+    const fresh = parkedOwnerSpecYaml(RIG);
+    expect(fresh).toBe(`policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${makeRigAnchor(RIG)}\ncontext:\n  rig: ${RIG}\n`);
+    const operator = `${fresh}  owner_min_interval_s:\n    ${SEAT}: 3600\n    ${SEAT2}: nope\n`;
+    const kept = parkedOwnerSpecYaml(RIG, operator);
+    expect(kept).toContain(`owner_min_interval_s: {"${SEAT}":3600}`);
+    expect(kept).not.toContain(SEAT2);
+    expect(parkedOwnerSpecYaml(RIG, "{not yaml")).toBe(fresh);
+    expect(parkedOwnerSpecYaml(RIG, null)).toBe(fresh);
   });
 });
