@@ -70,7 +70,12 @@ function poolWorld(db: Database.Database = fullDb(), opts: { guardRunner?: boole
   const podRepo = new PodRepository(db);
   const slots = new SeatPoolSlotsRepository(db);
   const sessions = new SessionRegistry(db);
-  const queue = new QueueRepository(db, bus, { resolveSessionAddresses: (name) => sessions.sessionAddresses(name) });
+  /** Each seat's current occupant generation, as the queue stamps it on a claim. */
+  const generations = new Map<string, string>();
+  const queue = new QueueRepository(db, bus, {
+    resolveSessionAddresses: (name) => sessions.sessionAddresses(name),
+    resolveOccupantGeneration: (name) => generations.get(name) ?? null,
+  });
   const outbox = new OutboxHandler(db);
   queue.attachOutbox(outbox); // a move's wake needs it
   const jobsRepo = new WatchdogJobsRepository(db);
@@ -165,8 +170,9 @@ function poolWorld(db: Database.Database = fullDb(), opts: { guardRunner?: boole
     observedAt: new Date(Date.now() + 1000).toISOString(),
   });
   return {
-    db, bus, rigRepo, slots, sessions, queue, outbox, jobsRepo, history, guard, activity, clock, hooks, guardCalls, deps, executor, engine,
-    model, agent, idle, working, row, jobFor, evaluate, lastNotes, read, destinationOf, rerouted, holdMessage, holdModel, paneExited,
+    db, bus, rigRepo, slots, sessions, generations, queue, outbox, jobsRepo, history, guard, activity, clock, hooks,
+    guardCalls, deps, executor, engine, model, agent, idle, working, row, jobFor, evaluate, lastNotes, read, destinationOf,
+    rerouted, holdMessage, holdModel, paneExited,
   };
 }
 
@@ -765,6 +771,124 @@ describe("seat-pool dispatch: the dispatch guard (#4061)", () => {
       expect(notes).not.toHaveProperty("failed");
       expect(w.queue.getById(q)!.destinationSession).toBe(m.session);
       expect(w.rerouted(q)).toEqual([]);
+    } finally {
+      w.db.close();
+    }
+  });
+});
+
+describe("seat-pool dispatch: a handover's release restarts the waiting clock (#4061)", () => {
+  /** A row to the model, created at `createdAt`, claimed by the model's retiring occupant and released by its handover. */
+  const releasedByHandover = async (w: ReturnType<typeof poolWorld>, m: Model, createdAt: string) => {
+    const q = await w.row(m.session);
+    w.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(createdAt, q);
+    w.generations.set(m.session, "gen-retiring");
+    w.queue.claim({ qitemId: q, destinationSession: m.session });
+    const before = w.queue.transitionLog.listForQitem(q);
+    expect(w.queue.releaseClaimsByGeneration("gen-retiring")).toBe(1);
+    const release = w.queue.transitionLog.listForQitem(q).at(-1)!;
+    return { q, before, release };
+  };
+
+  it("A row a handover released back to the model waits `dispatch_after_s` again from the release, and its creation time and history do not change.", async () => {
+    const w = poolWorld();
+    try {
+      w.clock.now = new Date(); // the queue stamps rows and transitions with the real clock
+      const m = w.model();
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1, w.clock.now.toISOString());
+      const job = w.jobFor(m);
+      const twoHoursAgo = new Date(Date.now() - 2 * 3_600_000).toISOString();
+      const { q, before, release } = await releasedByHandover(w, m, twoHoursAgo);
+
+      expect(w.read(m).pending).toEqual([{ qitemId: q, destination: m.session, waitingSince: release.ts, tags: [] }]);
+      w.clock.now = new Date(Date.parse(release.ts) + (SPEC.dispatchAfterSeconds - 1) * 1000);
+      await w.evaluate(job.jobId);
+      expect(w.lastNotes(job.jobId)).not.toHaveProperty("moved");
+      expect(w.destinationOf(q)).toBe(m.session);
+
+      w.clock.now = new Date(Date.parse(release.ts) + (SPEC.dispatchAfterSeconds + 1) * 1000);
+      await w.evaluate(job.jobId);
+      expect(w.lastNotes(job.jobId)!.moved).toEqual([{ qitemId: q, from: m.session, to: s1.session }]);
+      expect(w.queue.getById(q)!.tsCreated).toBe(twoHoursAgo);
+      const history = w.queue.transitionLog.listForQitem(q);
+      expect(history.slice(0, before.length)).toEqual(before);
+      expect(history[before.length]).toEqual(release);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A released row goes behind a row that has waited longer at the model, even one created after it.", async () => {
+    const w = poolWorld();
+    try {
+      w.clock.now = new Date();
+      const m = w.model();
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1, w.clock.now.toISOString());
+      const job = w.jobFor(m);
+      const { q: released } = await releasedByHandover(w, m, new Date(Date.now() - 2 * 3_600_000).toISOString());
+      const waiting = await w.row(m.session);
+      w.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(new Date(Date.now() - 30 * 60_000).toISOString(), waiting);
+
+      w.clock.now = new Date(Date.now() + 3_600_000); // both rows past dispatch_after_s; one free agent
+      await w.evaluate(job.jobId);
+      expect(w.lastNotes(job.jobId)!.moved).toEqual([{ qitemId: waiting, from: m.session, to: s1.session }]);
+      expect(w.destinationOf(released)).toBe(m.session);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("The latest of a reroute and a release restarts the clock, in either order.", async () => {
+    const w = poolWorld();
+    try {
+      w.clock.now = new Date();
+      const m = w.model();
+      const threeHoursAgo = new Date(Date.now() - 3 * 3_600_000).toISOString();
+      const twoHoursAgo = new Date(Date.now() - 2 * 3_600_000).toISOString();
+      const backdate = (transitionId: number) =>
+        w.db.prepare("UPDATE queue_transitions SET ts = ? WHERE transition_id = ?").run(twoHoursAgo, transitionId);
+      const rerouteAndBack = (q: string) => {
+        w.queue.routeToFallback(q, `other@${RIG}`, "operator");
+        w.queue.routeToFallback(q, m.session, "operator");
+        return w.rerouted(q).at(-1)!;
+      };
+
+      // released two hours ago, then rerouted back to the model now: the reroute counts
+      const { q: releasedFirst, release } = await releasedByHandover(w, m, threeHoursAgo);
+      backdate(release.transitionId);
+      const reroute = rerouteAndBack(releasedFirst);
+      // rerouted back to the model two hours ago, then released now: the release counts
+      const reroutedFirst = await w.row(m.session);
+      w.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(threeHoursAgo, reroutedFirst);
+      backdate(rerouteAndBack(reroutedFirst).transitionId);
+      w.queue.claim({ qitemId: reroutedFirst, destinationSession: m.session });
+      expect(w.queue.releaseClaimsByGeneration("gen-retiring")).toBe(1);
+      const lateRelease = w.queue.transitionLog.listForQitem(reroutedFirst).at(-1)!;
+
+      const waiting = new Map(w.read(m).pending.map((p) => [p.qitemId, p.waitingSince]));
+      expect(waiting.get(releasedFirst)).toBe(reroute.ts);
+      expect(waiting.get(reroutedFirst)).toBe(lateRelease.ts);
+      expect(lateRelease.ts).not.toBe(twoHoursAgo);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("Only the queue's own release restarts the clock: the release's note recorded by an identified caller, or with a state other than pending, does not.", async () => {
+    const w = poolWorld();
+    try {
+      w.clock.now = new Date();
+      const m = w.model();
+      const twoHoursAgo = new Date(Date.now() - 2 * 3_600_000).toISOString();
+      const q = await w.row(m.session);
+      w.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(twoHoursAgo, q);
+      const note = "released: claimant generation retired (seat handover)";
+      w.queue.transitionLog.append({ qitemId: q, state: "pending", actorSession: "system", identityProvenance: "transport:v1", transitionNote: note });
+      w.queue.transitionLog.append({ qitemId: q, state: "in-progress", actorSession: "system", transitionNote: note });
+
+      expect(w.read(m).pending).toEqual([{ qitemId: q, destination: m.session, waitingSince: twoHoursAgo, tags: [] }]);
     } finally {
       w.db.close();
     }

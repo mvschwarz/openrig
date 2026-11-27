@@ -83,7 +83,8 @@ export interface SeatPoolAgentFacts {
 export interface SeatPoolPendingRow {
   qitemId: string;
   destination: string;
-  /** When the row reached its current destination (its creation or its latest reroute), as an ISO time. */
+  /** When the row started waiting where it is (its creation, its latest reroute or its latest release back to pending by a
+   *  handover or a fresh launch), as an ISO time. */
   waitingSince: string;
   tags: readonly string[];
 }
