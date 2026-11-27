@@ -183,7 +183,7 @@ describe("SuccessorSessionLauncher", () => {
     });
     expect(res.ok).toBe(true);
     const opts = respawnPane.mock.calls[0]![2];
-    expect(opts.env).toMatchObject({ MODE: "fast", REGION: "eu", OPENRIG_SEAT_ENV_KEYS: "MODE,REGION", OPENRIG_NODE_ID: "node-1" });
+    expect(opts.env).toMatchObject({ MODE: "fast", REGION: "eu", OPENRIG_SEAT_ENV_KEYS: "MODE,REGION", OPENRIG_NODE_ID: "node-1", OPENRIG_SEAT_PROJECT_DIR: "/w" }); // #3328: every successor, no plugin selected here
   });
 
   it.each(["codex", "claude-code"])("a selected %s plugin keeps its interpreter on handover", async runtime => {

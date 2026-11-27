@@ -255,9 +255,10 @@ export class NodeLauncher {
       ...(node.runtime ? this.runtimeSessionEnv[node.runtime] : undefined),
       // A one-off CLAUDE_CONFIG_DIR or CODEX_HOME is left out: a seat's home comes from its stored env: alone.
       ...seatEnvLaunchVars(withPluginDirs(mergeSeatEnv(specEnv, oneOff && withoutRuntimeHomes(oneOff)), [corePluginDir, seatSkillDir, ...additionPluginDirs])),
-      // The launch project of a seat that loads the plugin, so a Claude started elsewhere inside the seat is not taken for it.
-      // For a Codex seat it is also the selection signal its plugin hooks check, beside the interpreter they run with.
-      [SEAT_PROJECT_DIR_ENV]: corePluginDir || codexCorePluginDir ? sessionCwd : undefined,
+      // #3328: every managed seat gets its launch project, regardless of plugin selection, so a seat-scoped tool
+      // inherited by an agent process can find its seat's directory. The plugin's own hooks still need both this
+      // and OPENRIG_NODE (below), which stays limited to seats that selected the plugin.
+      [SEAT_PROJECT_DIR_ENV]: sessionCwd,
       [SEAT_NODE_ENV]: corePluginDir || codexCorePluginDir ? process.execPath : undefined,
       OPENRIG_OCCUPANT_GENERATION: occupantGeneration ?? undefined,
     });

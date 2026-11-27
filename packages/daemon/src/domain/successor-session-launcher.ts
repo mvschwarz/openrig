@@ -247,7 +247,8 @@ export class SuccessorSessionLauncher {
       ...this.sessionEnv,
       ...(input.node.runtime ? this.runtimeSessionEnv[input.node.runtime] : undefined),
       ...seatEnvLaunchVars(input.node.seatEnv ?? {}),
-      ...(input.node.seatProjectDir ? { [SEAT_PROJECT_DIR_ENV]: input.node.seatProjectDir } : {}),
+      // #3328: every successor gets its seat's launch directory; the plugin's interpreter stays selection-gated.
+      ...(input.node.cwd ? { [SEAT_PROJECT_DIR_ENV]: input.node.cwd } : {}),
       // Selected Claude and Codex plugin hooks use this interpreter, as at launch (node-launcher.ts).
       ...(input.node.seatProjectDir && (input.node.runtime === "codex" || input.node.runtime === "claude-code") ? { [SEAT_NODE_ENV]: process.execPath } : {}),
       OPENRIG_OCCUPANT_GENERATION: input.occupantGeneration ?? undefined,
@@ -446,7 +447,8 @@ export class SuccessorSessionLauncher {
       ...this.sessionEnv,
       ...(input.node.runtime ? this.runtimeSessionEnv[input.node.runtime] : undefined),
       ...seatEnvLaunchVars(input.node.seatEnv ?? {}),
-      ...(input.node.seatProjectDir ? { [SEAT_PROJECT_DIR_ENV]: input.node.seatProjectDir } : {}),
+      // #3328: every successor gets its seat's launch directory; the plugin's interpreter stays selection-gated.
+      ...(input.node.cwd ? { [SEAT_PROJECT_DIR_ENV]: input.node.cwd } : {}),
       ...(input.node.seatProjectDir && (input.node.runtime === "codex" || input.node.runtime === "claude-code") ? { [SEAT_NODE_ENV]: process.execPath } : {}),
       OPENRIG_OCCUPANT_GENERATION: input.occupantGeneration,
     });

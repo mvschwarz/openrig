@@ -109,7 +109,7 @@ describe("the launch signal: selected, unselected and personal", () => {
     } as unknown as TmuxAdapter;
   }
 
-  it("only a Codex seat that selected the plugin gets the project signal and the explicit interpreter; never Claude's plugin list", async () => {
+  it("every seat gets its launch project; only a plugin seat gets the explicit interpreter; never Claude's plugin list", async () => {
     const { pluginsDir, dir } = vendored();
     const db = createFullTestDb();
     try {
@@ -125,7 +125,7 @@ describe("the launch signal: selected, unselected and personal", () => {
       expect((await launcher.launchNode(rig.id, "claude-selected", { pluginPaths: [dir] })).ok).toBe(true);
       expect(created[0]!.env).toMatchObject({ [SEAT_PROJECT_DIR_ENV]: "/work/codex-selected", [SEAT_NODE_ENV]: process.execPath });
       expect(created[0]!.env).not.toHaveProperty("CLAUDE_CODE_PLUGIN_DIRS");
-      expect(created[1]!.env).not.toHaveProperty(SEAT_PROJECT_DIR_ENV);
+      expect(created[1]!.env).toMatchObject({ [SEAT_PROJECT_DIR_ENV]: "/work/codex-unselected" }); // #3328
       expect(created[1]!.env).not.toHaveProperty(SEAT_NODE_ENV);
       expect(created[2]!.env).toMatchObject({ [SEAT_PROJECT_DIR_ENV]: "/work/claude-selected", CLAUDE_CODE_PLUGIN_DIRS: dir });
       expect(created[2]!.env).toHaveProperty(SEAT_NODE_ENV, process.execPath);

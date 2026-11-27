@@ -95,6 +95,6 @@ export function readRefocusRecord(home: string, sessionName: string, resumeToken
           : lastRecordedAt
             ? `OpenRig's refocus hook last recorded this seat at ${lastRecordedAt}, but ${currentConversation === "unknown"
               ? "the seat has no resume token to tell whether that's its current conversation" : "not in its current conversation yet"}. It records at the first prompt or compaction it sees.`
-            : "OpenRig's refocus hook has no record for this seat. It runs only where the seat selected the openrig-core plugin, and for Codex only in a launch that set OPENRIG_SEAT_PROJECT_DIR, so a Codex seat launched before that needs its next launch. Other refocus hooks aren't inspected.";
+            : "OpenRig's refocus hook has no record for this seat. It runs only where the seat selected the openrig-core plugin; for Codex it also needs OPENRIG_NODE, which that selection sets at launch, so a Codex seat launched before the plugin was selected needs its next launch. Other refocus hooks aren't inspected.";
   return { lastRecordedAt, currentConversation, ...(noIdentity ? { noIdentity: true as const } : {}), detail };
 }

@@ -47,7 +47,7 @@ describe("seat status reads what OpenRig's own refocus hook recorded", () => {
       const record = readRefocusRecord(home, session, conversation);
       expect(record).toMatchObject({ lastRecordedAt: null, currentConversation: false });
       expect(record.detail).toContain("has no record for this seat");
-      expect(record.detail).toContain("OPENRIG_SEAT_PROJECT_DIR");
+      expect(record.detail).toContain("OPENRIG_NODE");
     });
   });
 

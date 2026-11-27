@@ -324,7 +324,7 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     for (const c of created.slice(1)) expect(c.env).not.toHaveProperty(PLUGIN_ENV);
   });
 
-  it("fresh launch: a seat that loads the plugin is told its launch project, and one that doesn't is not", async () => {
+  it("fresh launch: every seat is told its launch project, and only a plugin seat gets the plugin interpreter", async () => {
     const { pluginsDir, vendored } = vendoredPlugins(root);
     const db = createFullTestDb(); dbs.push(db);
     const rigRepo = new RigRepository(db);
@@ -341,7 +341,7 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     expect(created[0]!.env![SEAT_PROJECT_DIR_ENV]).toBe("/work/seat");
     expect(created[0]!.env![SEAT_NODE_ENV]).toBe(process.execPath);
     expect(created[1]!.env![SEAT_PROJECT_DIR_ENV]).toBe("/work/moved"); // the folder the session actually starts in
-    expect(created[2]!.env).not.toHaveProperty(SEAT_PROJECT_DIR_ENV);
+    expect(created[2]!.env![SEAT_PROJECT_DIR_ENV]).toBe("/work/none"); // #3328: every managed seat, not just plugin seats
     expect(created[2]!.env).not.toHaveProperty(SEAT_NODE_ENV);
   });
 
@@ -764,7 +764,7 @@ describe("handover successor, on a real tmux server", () => {
     expect(selecting[SEAT_PROJECT_DIR_ENV]).toBe(scratch); // the seat's launch project, for the plugin's hooks
     const other = await successorEnviron("coreplug-no", [{ category: "plugin", absolutePath: "/elsewhere" }]);
     expect(other).not.toHaveProperty(PLUGIN_ENV);
-    expect(other).not.toHaveProperty(SEAT_PROJECT_DIR_ENV);
+    expect(other[SEAT_PROJECT_DIR_ENV]).toBe(scratch); // #3328: launch project on every successor
   }, 90_000);
 
   it.runIf(available)("has the seat's own skill plugin, the same storage as its predecessor's", async () => {
@@ -859,18 +859,21 @@ printf '{"PLUGIN_DIRS":"%s","LEAKED":"%s","PROJECT":"%s","NODE":"%s"}' "\${CLAUD
     }
   });
 
-  it("does not forward the variable for a seat whose saved selection lacks the plugin, even from an old session list", async () => {
+  it("forwards the launch project but not the plugin variable for a seat whose saved selection lacks the plugin", async () => {
     const f = fixture({ sessionKeys: undefined, saved: [{ category: "plugin", absolutePath: "/elsewhere" }] });
-    expect((await f.run(await launch(f), { [PLUGIN_ENV]: "/from/the/shell" })).PLUGIN_DIRS).toBe("absent");
+    const seen = await f.run(await launch(f), { [PLUGIN_ENV]: "/from/the/shell", [SEAT_PROJECT_DIR_ENV]: "/seat/project" });
+    expect(seen.PLUGIN_DIRS).toBe("absent");
+    expect(seen.PROJECT).toBe("/seat/project"); // #3328: the directory is every seat's, the plugin list isn't
   });
 
-  it("changes nothing for a seat that didn't select the plugin, whatever its pane shell happens to hold", async () => {
+  it("keeps a non-plugin seat's launch project from its pane, but not its plugin variables", async () => {
     const f = fixture({});
     const command = await launch(f);
     expect(command).not.toContain(PLUGIN_ENV);
     const seen = await f.run(command, { [PLUGIN_ENV]: "/from/the/shell", [SEAT_PROJECT_DIR_ENV]: "/from/the/shell" });
     expect(seen.PLUGIN_DIRS).toBe("absent");
-    expect(seen.PROJECT).toBe("absent");
+    expect(seen.PROJECT).toBe("/from/the/shell");
+    expect(seen.NODE).toBe("absent");
   });
 });
 
