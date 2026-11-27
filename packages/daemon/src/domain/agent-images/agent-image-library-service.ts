@@ -16,6 +16,7 @@
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, unlinkSync, rmSync } from "node:fs";
 import { join, relative, dirname } from "node:path";
 import { parseAgentImageManifest } from "./manifest-parser.js";
+import { agentImageNameRefusal } from "./agent-image-name.js";
 import {
   AgentImageError,
   type AgentImageEntry,
@@ -310,6 +311,16 @@ export class AgentImageLibraryService {
     manifest: AgentImageManifest,
     fileContents: Map<string, string>,
   ): string {
+    // The name becomes the directory name below. Refuse one that would choose a different directory
+    // (the captured file paths are checked the same way further down).
+    const nameRefusal = agentImageNameRefusal(manifest.name);
+    if (nameRefusal) {
+      throw new AgentImageError(
+        "manifest_invalid",
+        `agent image was not written: ${nameRefusal}. Pick a name without a separator, '..' or a colon; the library decides the directory.`,
+        { name: manifest.name, root: targetRootPath },
+      );
+    }
     const targetDir = join(targetRootPath, manifest.name);
     if (existsSync(targetDir)) {
       throw new AgentImageError(
