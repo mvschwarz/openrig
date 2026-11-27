@@ -26,6 +26,9 @@ export const MISSION_CONTROL_VERBS = [
   // answer: the person's answer to an ask addressed to them (a choice or their words), recorded on that row and
   // returned to the asking seat as Slack's answers are.
   "answer",
+  // dismiss: the person closes an open informational update addressed to them (state=done, no-follow-on). Not approval,
+  // proof of delivery or a reply: the update's body and history stay inspectable.
+  "dismiss",
 ] as const;
 
 export type MissionControlVerb = (typeof MISSION_CONTROL_VERBS)[number];
