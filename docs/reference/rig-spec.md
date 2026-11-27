@@ -854,6 +854,12 @@ launch would use and restore's automatic periodic carry. It then prints the laun
 `rig launch <rig> <seat>` when the resume comes through the periodic carry, which naming a
 snapshot would turn off. Otherwise it refuses and changes nothing. `rig provider precheck` gives
 the same answer.
+A materialized Claude Code seat that has never launched has no conversation to resume: the switch
+saves its reference for its first launch, in the same write that checks the seat still has no
+session, records who asked (`node.claude_token_ref_changed`), and prints `rig launch <rig> <seat>`.
+A first launch that started in the meantime is left as it is. A saved label or a readable file
+isn't proof of the account: when the launch can't apply a token file, Claude starts on the login it
+would use otherwise and the launch says so.
 For Claude Code, select an API-key file, a subscription-token file, or the home's stored login:
 
 ```sh
