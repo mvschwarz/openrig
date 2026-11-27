@@ -1,7 +1,7 @@
 # What changed in OpenRig 0.7.24
 
 This note is for an agent on an install that was just upgraded to 0.7.24.
-OpenRig 0.7.24 is a patch for people who work with their team from their own Claude Code or Codex conversation. The team's questions can now come back to that conversation by themselves, and a team seat's Claude Code permission prompt can be answered from there. The TUI's Topology view opens on a busy daemon, and the notice a new agent gets when its team is recorded reads as information, not work.
+OpenRig 0.7.24 is a patch for people who work with their OpenRig team from a Claude Code or Codex conversation that is not an OpenRig seat. The team's questions can now come back to that conversation by themselves, and a team seat's Claude Code permission prompt can be answered from there. The TUI's Topology view opens on a busy daemon, and the notice a new agent gets when its team is recorded reads as information, not work.
 
 ## Before you upgrade
 
