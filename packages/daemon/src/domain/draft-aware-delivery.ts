@@ -13,7 +13,7 @@ const draftAwareOn = (guard: SeatDeliveryGuard, nodeId: string): boolean => {
   const policy = guard.configuration(nodeId);
   return policy.desired.mode === "draft-aware" || policy.effective.mode === "draft-aware";
 };
-import { DeliveryGuardError, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
+import { DeliveryGuardError, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import type { SendOpts, SendResult } from "./session-transport.js";
 
 export interface GuardedDeliverySummary {
@@ -105,8 +105,7 @@ export class DraftAwareDelivery {
       // it instead of being typed first (a stale request would then follow its correction). It's held, with its own
       // outcome, and typed after the earlier one; nothing is refused. Only a saved message with room in the quota waits,
       // and only while draft-aware delivery is on, the one mode in which the earlier message is typed once the input clears.
-      if (recorded && plainMessage(opts) && draftAwareOn(this.guard, target.nodeId)
-        && this.outbox.fitsWithoutCoalescing(target.nodeId, text) && this.outbox.hasEarlierDraftHeld(opts.actorSession, target, receipt.ids)) {
+      if (recorded && this.holdsBehindEarlier(target, text, opts, receipt.ids)) {
         throw new DeliveryGuardError(DRAFT_HELD_BEHIND_EARLIER, "An earlier message from this sender is held for this seat's draft. This one is held behind it and typed after it, in order; nothing was pasted.");
       }
       // A paste the guard left unsubmitted (#2429) is recognized here, to be submitted ahead of this delivery, unless the
@@ -145,11 +144,15 @@ export class DraftAwareDelivery {
     // coalesced into its newest (supersedeDraftHeld), so one sender can't fill the quota.
     // A refusal about the message itself (tabs or control characters, a long Codex paste, a viewport too small for it)
     // asks the sender to send it differently: typing it later would only meet the same refusal, so it's held as before.
+    // A refusal of this message's own paste: it can't be typed as it is, so a held one stops being owed to the draft.
+    const ownPasteRefused = noWrite && !!result.inputReadFailure?.reason.startsWith("paste_");
     const draftHeld = noWrite && plainMessage(opts) && DRAFT_HELD_REASONS.has(result.reason ?? "")
       && !result.inputReadFailure?.reason.startsWith("paste_")
       && !!target.nodeId && this.outbox.fitsWithoutCoalescing(target.nodeId, text);
     if (noWrite) result = { ...result, ok: true, sent: false, verified: false, outcome: "retained",
-      warning: draftHeld && result.reason === DRAFT_HELD_BEHIND_EARLIER
+      warning: ownPasteRefused
+        ? "Held, not delivered: this message can't be typed as it is (the error says why). Send it again changed; this one won't be typed later."
+        : draftHeld && result.reason === DRAFT_HELD_BEHIND_EARLIER
         ? "Held, not delivered yet: an earlier message of yours is held for this seat's draft. This one is typed right after it once the input is clear, while draft-aware delivery stays on; nothing else is replayed."
         : draftHeld
         ? "Held, not delivered yet: the input shows a draft. It's typed once the input is clear while draft-aware delivery stays on, after any earlier held message; nothing else is replayed."
@@ -171,6 +174,7 @@ export class DraftAwareDelivery {
           superseded.length = 0;
           for (const id of receipt.ids) {
             this.outbox.finalizeDelivery(id, state);
+            if (ownPasteRefused) this.outbox.withdrawDraftHeld(id);
             if (draftHeld) {
               this.db.prepare(`UPDATE outbox_entries SET tags=json_insert(COALESCE(tags,'[]'),'$[#]',?)
                 WHERE outbox_id=? AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)`)
@@ -199,6 +203,18 @@ export class DraftAwareDelivery {
     // Past the per-sender bound, the sender learns which of its held messages this one superseded.
     if (superseded.length) result = { ...result, warning: [result.warning, `This supersedes your earlier held message${superseded.length === 1 ? "" : "s"} ${superseded.join(", ")} here (past ${DRAFT_HELD_PER_SENDER} from one sender); ${superseded.length === 1 ? "it stays" : "they stay"} readable by ID and won't be typed.`].filter(Boolean).join(" ") };
     return { ...result, outboxIds: receipt.ids };
+  }
+
+  /** Same-sender order, one rule for the typed path and for the transport before a hook bridge can take a send: while
+   *  this sender's earlier plain message is still owed to the draft (held, or claimed by its retry) at this exact
+   *  occupant, this one waits behind it. Only a plain message, with room in the seat's held quota, while draft-aware
+   *  delivery is on. A read that fails lets the message go as before. */
+  holdsBehindEarlier(target: GuardTarget, text: string, opts: SendOpts, ids: readonly string[]): boolean {
+    if (!plainMessage(opts) || !target.nodeId) return false;
+    try {
+      return draftAwareOn(this.guard, target.nodeId) && this.outbox.fitsWithoutCoalescing(target.nodeId, text)
+        && this.outbox.hasEarlierDraftHeld(opts.actorSession, target, ids);
+    } catch { return false; }
   }
 
   /** Preserve uncertainty in old history without scheduling a replay. */

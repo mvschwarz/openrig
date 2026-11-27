@@ -737,17 +737,27 @@ export class OutboxHandler {
       .run(outboxId).changes === 1;
   }
 
-  /** Whether this sender still has a draft-held message for this exact occupant binding, dispatched before `ids[0]` (the
-   *  request being sent, already recorded). A later message from the sender goes behind it, so a stale request never
-   *  follows its correction; a held message's own retry never waits behind one sent after it. */
+  /** Whether this sender has a draft-held message for this exact occupant binding that's still owed (held, or claimed by
+   *  its retry), dispatched before `ids[0]`, the request being sent. A request not recorded yet comes after all of them. A
+   *  later message from the sender goes behind it, so a stale request never follows its correction; a held message's own
+   *  retry never waits behind one sent after it. A crash can't leave one owed: startup settles guarded `sending` entries. */
   hasEarlierDraftHeld(senderSession: string, binding: { nodeId: string }, ids: readonly string[]): boolean {
     if (!ids.length) return false;
-    const rows = this.db.prepare(`SELECT outbox_id FROM outbox_entries WHERE delivery_state='retained' AND sender_session=?
+    const recorded = this.db.prepare("SELECT 1 FROM outbox_entries WHERE outbox_id=?").get(ids[0]) !== undefined;
+    const rows = this.db.prepare(`SELECT outbox_id FROM outbox_entries WHERE delivery_state IN ('retained','sending') AND sender_session=?
       AND json_extract(guard_binding,'$.nodeId')=? AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value=?)
-      AND (ts_dispatched, rowid) < (SELECT ts_dispatched, rowid FROM outbox_entries WHERE outbox_id=?)`)
-      .all(senderSession, binding.nodeId, DRAFT_HELD_ELIGIBLE_TAG, ids[0]) as Array<{ outbox_id: string }>;
+      ${recorded ? "AND (ts_dispatched, rowid) < (SELECT ts_dispatched, rowid FROM outbox_entries WHERE outbox_id=?)" : ""}`)
+      .all(senderSession, binding.nodeId, DRAFT_HELD_ELIGIBLE_TAG, ...(recorded ? [ids[0]] : [])) as Array<{ outbox_id: string }>;
     const exact = JSON.stringify(binding);
     return rows.some(({ outbox_id }) => !ids.includes(outbox_id) && JSON.stringify(this.getById(outbox_id)?.guardBinding) === exact);
+  }
+
+  /** A held message that can't be typed as it is (its own paste was refused) is no longer owed to a clearing draft: it
+   *  keeps its custody and result, and later work stops waiting behind it. */
+  withdrawDraftHeld(outboxId: string): void {
+    this.db.prepare(`UPDATE outbox_entries SET tags=(SELECT json_group_array(value) FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value != ?)
+      WHERE outbox_id=? AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value = ?)`)
+      .run(DRAFT_HELD_ELIGIBLE_TAG, outboxId, DRAFT_HELD_ELIGIBLE_TAG);
   }
 
   /** The seats with draft-held messages, each with its newest one's dispatch time: what the periodic offer reads once per

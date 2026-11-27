@@ -2552,3 +2552,67 @@ describe("draft-held queue wakes after the person's Enter", () => {
     expect(f.writes).toEqual([]);
   });
 });
+
+
+// Same-sender order across the routes and refusals around the draft-held pass: a hook bridge that has come live, a
+// held message its retry has claimed, and a held message whose own paste is then refused.
+describe("draft-held order across routes and refusals", () => {
+  const order = (f: ReturnType<typeof fixture>, texts: string[]) =>
+    f.submissions.map(s => texts.findIndex(t => s.includes(t))).filter(i => i >= 0);
+
+  it("holds a sender's message behind its held one even when the hook bridge has come live, and the bridge gets them in order", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const a = await f.transport.send("worker@test", "request A", { actorSession: "pm@test" });
+    expect(a.outcome).toBe("retained");
+    f.bodies.a = "";
+    const deposited: string[] = [];
+    const bridge = { routes: () => true, live: () => true, queuedForTyping: () => [], unavailable: () => "off",
+      handbackRefusal: () => null, wakeFenced: () => false, wakeApplicable: () => true,
+      deposit: (_target: unknown, session: string, text: string, _opts: unknown, ids: string[]) => {
+        deposited.push(text.includes("request A") ? "A" : text.includes("request B") ? "B" : "?");
+        return { ok: true, sessionName: session, outcome: "queued", sent: false, verified: false, inputPhase: "not_reached", outboxIds: ids };
+      } };
+    (f.transport as unknown as { hookBridge: unknown }).hookBridge = bridge;
+    const b = await f.transport.send("worker@test", "request B", { actorSession: "pm@test" });
+    expect(b).toMatchObject({ outcome: "retained", reason: DRAFT_HELD_BEHIND_EARLIER });
+    expect(deposited).toEqual([]);
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(deposited).toEqual(["A"]);
+    f.outbox.finalizeDelivery(a.outboxIds![0]!, "delivered");   // the bridge hands A to the agent
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(deposited).toEqual(["A", "B"]);
+    expect(f.writes).toEqual([]);
+  });
+
+  it("holds a live send behind a held message its retry has claimed, and types it after", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const a = await f.transport.send("worker@test", "request A", { actorSession: "pm@test" });
+    const idA = a.outboxIds![0]!;
+    f.bodies.a = "";
+    expect(f.outbox.reopenHeld(idA) && f.outbox.claimForDelivery(idA)).toBe(true);   // claimed, waiting for the lease
+    const b = await f.transport.send("worker@test", "request B", { actorSession: "pm@test" });
+    expect(b).toMatchObject({ outcome: "retained", reason: DRAFT_HELD_BEHIND_EARLIER });
+    expect(f.submissions).toEqual([]);
+    f.outbox.retainUnwritten(idA);   // that retry ended without writing
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(order(f, ["request A", "request B"])).toEqual([0, 1]);
+  });
+
+  it("stops owing a held message whose own paste is refused, and lets the sender's next message go", async () => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 }); f.bodies.a = "a person's draft";
+    const a = await f.transport.send("worker@test", "tab\there", { actorSession: "pm@test", verify: false });
+    const idA = a.outboxIds![0]!;
+    const eligible = () => (JSON.parse((f.db.prepare("SELECT tags FROM outbox_entries WHERE outbox_id=?").get(idA) as { tags: string | null }).tags ?? "[]") as string[])
+      .includes("delivery:draft-eligible");
+    expect(a.outcome).toBe("retained"); expect(eligible()).toBe(true);   // held for the draft before its paste was read
+    f.bodies.a = "";
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");   // its retry meets the paste refusal
+    expect(f.outbox.getById(idA)!.deliveryState).toBe("retained"); expect(eligible()).toBe(false);
+    const b = await f.transport.send("worker@test", "plain follow-up", { actorSession: "pm@test", verify: false });
+    expect(b.outcome).not.toBe("retained");
+    expect(f.submissions.some(s => s.includes("plain follow-up"))).toBe(true);
+    expect(f.submissions.some(s => s.includes("tab"))).toBe(false);
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.submissions.some(s => s.includes("tab"))).toBe(false);
+  });
+});
