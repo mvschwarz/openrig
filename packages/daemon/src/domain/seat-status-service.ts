@@ -49,6 +49,7 @@ export interface SeatStatus {
   /** The session record's own status. A pane OpenRig can't confirm as the seat's runtime (a bare shell) keeps it
    *  `running`; `lifecycle_state` says how the seat reads. */
   session_status: string | null;
+  standby_stopped?: true;
   /** The seat's state as `rig ps --nodes` shows it (node-inventory's lifecycleState): `attention_required`, never
    *  `running`, while startup needs attention or the pane's process identity down-ranks it. */
   lifecycle_state: NodeInventoryEntry["lifecycleState"];
@@ -193,6 +194,7 @@ export class SeatStatusService {
       origin: this.sessionOrigin(entry.nodeId),
       current_occupant: entry.canonicalSessionName,
       session_status: entry.sessionStatus,
+      ...(entry.standbyStopped ? { standby_stopped: true as const } : {}),
       lifecycle_state: entry.lifecycleState,
       session_reason: entry.identityVerdict?.reason ?? null,
       startup_status: entry.startupStatus,

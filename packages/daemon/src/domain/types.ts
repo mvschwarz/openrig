@@ -209,7 +209,8 @@ export type RigEvent =
   | { type: "node.codex_permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; replaced?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.codex_profile_changed"; rigId: string; nodeId: string; from: string | null; to: string | null; observation?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
-  | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; sessionId?: string; reason: string; operator: string | null }
+  | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; sessionId?: string; reason: string; operator: string | null; standbyPane?: string }
+  | import("./seat-reaper-events.js").SeatReapedEvent
   // #2940: the keep_alive supervisor's recovery of a fallen seat. `attempted` is persisted with the attempt's count before
   // its launch starts; `exhausted` once per incident, when the attempts ran out or a launch outcome needs a person.
   | { type: "seat.keep_alive.attempted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number }
@@ -921,6 +922,7 @@ export interface NodeInventoryEntry {
   /** The latest session was explicitly stopped and has no replacement binding.
    * It remains non-running, but is not a missing member in the rig lifecycle. */
   intentionallyStopped?: boolean;
+  standbyStopped?: true;
   /** #2940: a supported stop was requested and is not confirmed yet; the seat is not reported as exited. */
   stopRequested?: boolean;
   /** #2940: the seat declares keep_alive, so the daemon relaunches it when it falls; absent = off. */
