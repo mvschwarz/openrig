@@ -10,10 +10,11 @@ import { ConfigStore } from "../src/config-store.js";
 import { preflightCommand } from "../src/commands/preflight.js";
 import type { DaemonStatus } from "../src/daemon-lifecycle.js";
 
-function makeExec(tmuxMode: "healthy" | "missing" | "unhealthy" = "healthy"): (cmd: string) => Promise<string> {
+function makeExec(tmuxMode: "healthy" | "missing" | "unhealthy" | "refused" = "healthy"): (cmd: string) => Promise<string> {
   return async (cmd: string) => {
     if (cmd === "tmux -V") {
       if (tmuxMode === "missing") throw new Error("command not found: tmux");
+      if (tmuxMode === "refused") throw Object.assign(new Error("spawnSync /bin/sh EPERM"), { code: "EPERM" });
       return "tmux 3.6a";
     }
     if (cmd === "tmux list-sessions") {
@@ -45,7 +46,7 @@ describe("SystemPreflight", () => {
   });
 
   function createPreflight(opts?: {
-    tmuxMode?: "healthy" | "missing" | "unhealthy";
+    tmuxMode?: "healthy" | "missing" | "unhealthy" | "refused";
     configOverrides?: Record<string, unknown>;
     daemonStatus?: Partial<DaemonStatus>;
   }) {
@@ -110,6 +111,17 @@ describe("SystemPreflight", () => {
     expect(tmuxCheck!.ok).toBe(false);
     expect(tmuxCheck!.error).toContain("not found");
     expect(tmuxCheck!.fix).toContain("install tmux");
+  });
+
+  // A Codex sandbox refused the probe's process: "not found" with install advice sent the agent the wrong way.
+  it("tmux refused permission to run → ready: false, says so, no install advice", async () => {
+    const pf = createPreflight({ tmuxMode: "refused" });
+    const result = await pf.run({ port: 0 });
+    expect(result.ready).toBe(false);
+    const tmuxCheck = result.checks.find((c) => c.name === "tmux");
+    expect(tmuxCheck!.ok).toBe(false);
+    expect(tmuxCheck!.error).toBe("tmux couldn't be run from this shell (spawnSync /bin/sh EPERM).");
+    expect(tmuxCheck!.fix).not.toContain("brew install");
   });
 
   it("tmux installed but default control socket unhealthy → ready: false with guidance", async () => {
