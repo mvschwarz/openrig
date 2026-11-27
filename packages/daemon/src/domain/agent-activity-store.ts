@@ -1,6 +1,7 @@
 import { FRESHNESS_THRESHOLD_MS } from "./context-usage-store.js";
 import { ActivityGrantStore, type ActivityGrant } from "./activity-grants.js";
 import { usableCommunityNativeRef } from "./community-harness-launch-result.js";
+import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 import { validateSessionFileFormat } from "./resume-token-validation.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
@@ -770,6 +771,9 @@ export class AgentActivityStore {
  *  no session file; a preset's own runner (`runner: true`) only records it (harness-runner-contract). */
 export function hookEventState(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null, communityRunner = false, piRpc = false): AgentActivity["state"] {
   if (rawEvent === "UserPromptSubmit" || rawEvent === "PreToolUse" || rawEvent === "active") return "running";
+  // A community preset's own hook script posts PostToolUse as a working beat (`activity_hooks`). No built-in hook
+  // config sends it, and a built-in runtime keeps reading it as noise.
+  if (rawEvent === "PostToolUse") return isCommunityHarnessRuntime(seatRuntime) ? "running" : "unknown";
   if (rawEvent === "PermissionRequest") return seatRuntime === "codex" ? "unknown" : "needs_input";
   if (rawEvent === "PermissionPromptConfirmed") return "needs_input";
   if (rawEvent === "Notification") {

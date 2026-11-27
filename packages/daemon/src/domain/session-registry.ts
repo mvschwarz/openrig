@@ -613,11 +613,16 @@ export class SessionRegistry {
   /** Record that this session was launched for a community harness, selected through its preset. With `runner`, also
    *  record what that launch's preset declared: `runner: true` (1), OpenRig's hosted Pi-protocol runner for
    *  `protocol: pi-rpc` ("pi-rpc", 2), or neither (0), so activity reads the launched occupant's declaration, never a
-   *  later preset edit. Without it (a restore carrying only the selection) the field is left as is. */
-  recordCommunityHarnessSelection(sessionId: string, app: string, runner?: boolean | "pi-rpc"): void {
+   *  later preset edit. Without it (a restore carrying only the selection) the field is left as is. The hooks the preset
+   *  declared its own script posts (`activity_hooks`) are recorded with the runner declaration, none as NULL. */
+  recordCommunityHarnessSelection(sessionId: string, app: string, runner?: boolean | "pi-rpc", activityHooks?: readonly string[]): void {
     if (runner !== undefined && sessionCommunityRunnerSelect(this.db, "sessions") !== "NULL") {
       this.db.prepare("UPDATE sessions SET agent_app = ?, agent_runner = ? WHERE id = ?")
         .run(app, runner === "pi-rpc" ? AGENT_RUNNER_HOSTED_PI_RPC : runner ? AGENT_RUNNER_PRESET : 0, sessionId);
+      if (sessionActivityHooksSelect(this.db, "sessions") !== "NULL") {
+        this.db.prepare("UPDATE sessions SET agent_activity_hooks = ? WHERE id = ?")
+          .run(activityHooks?.length ? JSON.stringify(activityHooks) : null, sessionId);
+      }
       return;
     }
     this.db.prepare("UPDATE sessions SET agent_app = ? WHERE id = ?").run(app, sessionId);
@@ -864,7 +869,7 @@ export class SessionRegistry {
    *  (running / idle / unknown), with the fields the resume-metadata refresher
    *  needs. Lifted from rig-teardown so both the teardown pre-down path and the
    *  FR-4 periodic/manual snapshot refresh call ONE query (no duplication). */
-  getLatestLiveSessions(rigId: string): LatestLiveSession[] {
+  getLatestLiveSessions(rigId: string, includeStandby = false): LatestLiveSession[] {
     const rows = this.db.prepare(`
       SELECT n.id as node_id, s.id as session_id, s.session_name, s.status, n.runtime, n.cwd, s.resume_type, s.resume_token,
         s.origin, ${sessionCommunityHarnessSelect(this.db)} as community_harness
@@ -872,7 +877,10 @@ export class SessionRegistry {
       JOIN sessions s ON s.node_id = n.id
       WHERE n.rig_id = ?
         AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1)
-        AND s.status IN ('running', 'idle', 'unknown')
+        AND (s.status IN ('running', 'idle', 'unknown') ${includeStandby ? `OR (s.status = 'exited' AND s.intentionally_stopped = 1
+          AND EXISTS (SELECT 1 FROM bindings b WHERE b.node_id = s.node_id AND b.tmux_session = s.session_name)
+          AND EXISTS (SELECT 1 FROM events e WHERE e.seq = (SELECT MAX(seq) FROM events WHERE node_id = s.node_id AND type = 'session.stopped')
+            AND json_extract(e.payload, '$.sessionId') = s.id AND json_extract(e.payload, '$.standbyPane') IS NOT NULL))` : ""})
     `).all(rigId) as Array<{ node_id: string; session_id: string; session_name: string; status: string; runtime: string | null; cwd: string | null; resume_type: string | null; resume_token: string | null; origin: string | null; community_harness: string | null }>;
 
     return rows.map((r) => ({
@@ -920,7 +928,9 @@ export class SessionRegistry {
             WHERE node_id = ?`
           )
           .run(
-            fields.attachmentType ?? existing.attachment_type ?? "tmux",
+            // A write that names a tmux session and no type binds a tmux pane (rig bind, a launch, a pane repair): it's a
+            // tmux binding, even over a node attached from an outside program, so its readers never call it attached.
+            fields.attachmentType ?? (fields.tmuxSession ? "tmux" : existing.attachment_type) ?? "tmux",
             fields.tmuxSession ?? existing.tmux_session,
             fields.tmuxWindow ?? existing.tmux_window,
             fields.tmuxPane ?? existing.tmux_pane,
@@ -1060,6 +1070,18 @@ export function sessionCommunityHarnessSelect(db: Database.Database, alias = "s"
   return has ? `${alias}.agent_app` : "NULL";
 }
 
+/** The community harness a seat was last launched for: the selection on the newest of its session rows that records one.
+ *  A newer row without one, such as the provisional session of a restore launch that couldn't tell the harness (#4047),
+ *  doesn't hide it. Null when no row records one, or on a schema without the column. Callers still require it to name the
+ *  seat's current runtime (`communityHarnessOf`), so a seat never launched for an installed preset gets no adapter. */
+export function seatRecordedCommunityHarness(db: Database.Database, nodeId: string): string | null {
+  const app = sessionCommunityHarnessSelect(db);
+  if (app === "NULL") return null;
+  const row = db.prepare(`SELECT ${app} AS app FROM sessions s WHERE s.node_id = ? AND ${app} IS NOT NULL
+    ORDER BY s.created_at DESC, s.id DESC LIMIT 1`).get(nodeId) as { app: string } | undefined;
+  return row?.app ?? null;
+}
+
 const sessionsHaveCommunityRunner = new WeakMap<Database.Database, boolean>();
 
 /** The SQL that reads whether a session's community app was launched as a runner: 1, 0, or NULL. NULL also on a schema
@@ -1080,4 +1102,29 @@ export function sessionCommunityRunnerSelect(db: Database.Database, alias = "s")
     sessionsHaveCommunityRunner.set(db, has);
   }
   return has ? `${alias}.agent_runner` : "NULL";
+}
+
+const sessionsHaveActivityHooks = new WeakMap<Database.Database, boolean>();
+
+/** The SQL that reads the hooks a session's community preset declared at its launch (`activity_hooks`, a JSON list),
+ *  or NULL on a schema without the column. The reconcile pass and the hook route both read it through this, never the
+ *  preset file, so a seat keeps what its launch declared. */
+export function sessionActivityHooksSelect(db: Database.Database, alias = "s"): string {
+  let has = sessionsHaveActivityHooks.get(db);
+  if (has === undefined) {
+    has = (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name?: string }>).some(row => row.name === "agent_activity_hooks");
+    sessionsHaveActivityHooks.set(db, has);
+  }
+  return has ? `${alias}.agent_activity_hooks` : "NULL";
+}
+
+/** A recorded `activity_hooks` declaration's event names, or null when none was recorded or it can't be read. */
+export function recordedActivityHooks(value: string | null | undefined): string[] | null {
+  if (!value) return null;
+  try {
+    const hooks: unknown = JSON.parse(value);
+    return Array.isArray(hooks) && hooks.length > 0 && hooks.every(hook => typeof hook === "string") ? hooks : null;
+  } catch {
+    return null;
+  }
 }

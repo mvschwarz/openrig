@@ -1,4 +1,4 @@
-import type { RigWithRelations, Session, Binding, Pod, AgentActivity, SeatIdentityVerdict } from "./types.js";
+import type { RigWithRelations, Session, Binding, Pod, AgentActivity, SeatIdentityVerdict, NodeInventoryEntry, ConfiguredContextBudget } from "./types.js";
 import { identityVerdictDownranksRunning } from "./types.js";
 
 export interface RigGraphInput extends RigWithRelations {
@@ -35,12 +35,15 @@ interface RFNodeData {
   profile: string | null;
   edgeCount: number;
   contextUsedPercentage: number | null;
+  contextConfiguredBudget?: ConfiguredContextBudget | null;
   contextFresh: boolean;
   contextAvailability: string;
   contextTotalInputTokens: number | null;
   contextTotalOutputTokens: number | null;
   needsAttention?: boolean;
   agentActivity?: AgentActivity | null;
+  /** The served oracle state: its display and needs-input count decide the graph's glyph. Null when it has no answer. */
+  activityState?: NodeInventoryEntry["activityState"];
   currentQitems?: CurrentQitemSummary[];
   terminalActive?: boolean | null;
   hasAssignedWork?: boolean;
@@ -83,12 +86,15 @@ export interface InventoryOverlay {
   restoreOutcome: string;
   oriented?: string;
   contextUsedPercentage?: number | null;
+  contextConfiguredBudget?: ConfiguredContextBudget | null;
   contextFresh?: boolean;
   contextAvailability?: string;
   contextTotalInputTokens?: number | null;
   contextTotalOutputTokens?: number | null;
   needsAttention?: boolean;
   agentActivity?: AgentActivity | null;
+  /** The served oracle state: its display and needs-input count decide the graph's glyph. Null when it has no answer. */
+  activityState?: NodeInventoryEntry["activityState"];
   currentQitems?: CurrentQitemSummary[];
   terminalActive?: boolean | null;
   hasAssignedWork?: boolean;
@@ -168,12 +174,14 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         profile: node.profile ?? null,
         edgeCount: rigEdges.filter((e) => e.sourceId === node.id || e.targetId === node.id).length,
         contextUsedPercentage: overlay?.contextUsedPercentage ?? null,
+        contextConfiguredBudget: overlay?.contextConfiguredBudget ?? null,
         contextFresh: overlay?.contextFresh ?? false,
         contextAvailability: overlay?.contextAvailability ?? "unknown",
         contextTotalInputTokens: overlay?.contextTotalInputTokens ?? null,
         contextTotalOutputTokens: overlay?.contextTotalOutputTokens ?? null,
         needsAttention: overlay?.needsAttention,
         agentActivity: overlay?.agentActivity ?? null,
+        activityState: overlay?.activityState ?? null,
         currentQitems: overlay?.currentQitems ?? [],
         terminalActive: overlay?.terminalActive,
         hasAssignedWork: overlay?.hasAssignedWork ?? false,

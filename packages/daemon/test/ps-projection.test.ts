@@ -281,6 +281,23 @@ describe("PsProjectionService", () => {
 
   // L2 rig-level lifecycleState
   describe("lifecycleState (L2)", () => {
+    it.each([true, false])("does not fold a retained standby pane as degraded (running peer: %s)", livePeer => {
+      const rigId = seedRig("standby");
+      const nodeId = seedNode(rigId, "qa");
+      const sessionId = seedSession(nodeId, "running");
+      const sessionName = `tmux-${nodeId}`;
+      const registry = new SessionRegistry(db);
+      registry.updateBinding(nodeId, { attachmentType: "tmux", tmuxSession: sessionName, tmuxPane: "%1" });
+      registry.markIntentionallyStopped(sessionId);
+      new EventBus(db).emit({ type: "session.stopped", rigId, nodeId, sessionId, sessionName,
+        operator: "daemon:seat-reaper", reason: "idle_reap", standbyPane: "$1|42|100|%1" });
+      if (livePeer) seedSession(seedNode(rigId, "dev"), "running");
+
+      expect(getNodeInventory(db, rigId).find(entry => entry.nodeId === nodeId)).toMatchObject({ standbyStopped: true });
+      expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: livePeer ? "running" : "stopped",
+        status: livePeer ? "partial" : "stopped", runningCount: Number(livePeer) });
+    });
+
     function seedSnapshotForRig(rigId: string, sessions: Array<{ nodeId: string; resumeToken: string | null }>): void {
       const data = {
         rig: { id: rigId, name: "rig-name", createdAt: "2026-04-28T00:00:00Z", updatedAt: "2026-04-28T00:00:00Z" },

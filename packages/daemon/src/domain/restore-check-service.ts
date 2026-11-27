@@ -283,6 +283,13 @@ interface HostInfraCheckResult {
 // --- Service ---
 
 const DAEMON_HEALTHY_PATTERN = /^Daemon running\b/m;
+/** A seat attached from an outside program (rig attach) counts as it did while its record read running: restore leaves it
+ *  attached, so a routine poll, the startup-context check and the recovery count have nothing to bring back for it. The
+ *  seat's own readiness line still says restore leaves it as it is. */
+function runningOrAttached(node: Pick<NodeInventoryEntry, "sessionStatus">): boolean {
+  return node.sessionStatus === "running" || node.sessionStatus === "attached";
+}
+
 export class RestoreCheckService {
   private deps: RestoreCheckDeps;
 
@@ -373,7 +380,7 @@ export class RestoreCheckService {
       let notRestored: ReadonlySet<string> | undefined;
       let restoreRoster: Set<string> | null | undefined;
       const allReady = nodes.length > 0 && nodes.every((node) =>
-        Boolean(node.canonicalSessionName) && node.sessionStatus === "running" && node.startupStatus === "ready"
+        Boolean(node.canonicalSessionName) && runningOrAttached(node) && node.startupStatus === "ready"
       );
       if (!opts.recoveryOnly || !allReady) {
         const preconditions = this.checkRestorePreconditions(rig, nodes);
@@ -1040,7 +1047,7 @@ export class RestoreCheckService {
     { check: CheckEntry } | { unknownChecks: CheckEntry[] } {
     const session = node.canonicalSessionName ?? node.logicalId;
     const check = `seat.${session}.startup-context`;
-    const runningReady = node.sessionStatus === "running" && node.startupStatus === "ready";
+    const runningReady = runningOrAttached(node) && node.startupStatus === "ready";
 
     if (!node.nodeId) {
       return {
@@ -1821,7 +1828,7 @@ export class RestoreCheckService {
       const nodeChecks = input.checks.filter((check) => check.check.startsWith(`seat.${session}.`));
       const hasBlocking = nodeChecks.some((check) => check.status === "red");
       const hasCaveat = nodeChecks.some((check) => check.status === "yellow");
-      const runningReady = Boolean(node.canonicalSessionName) && node.sessionStatus === "running" && node.startupStatus === "ready";
+      const runningReady = Boolean(node.canonicalSessionName) && runningOrAttached(node) && node.startupStatus === "ready";
       if (runningReady) runningReadyNodes += 1;
       if (hasBlocking) blockedNodes += 1;
       else if (hasCaveat) caveatNodes += 1;

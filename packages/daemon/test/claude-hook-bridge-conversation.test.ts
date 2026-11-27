@@ -25,6 +25,7 @@ const bridge = require(bridgePath) as {
   codexWatch(opts: { sessionId: string; transcriptPath: string; codexPid?: number; codexPidStart?: string; deps: Deps }): Promise<number>;
   renderConversationTasks(fresh: unknown[]): string;
   findRig(opts?: { env?: Record<string, string | undefined>; projectDir?: string }): string | null;
+  loginShellPath(opts?: { env?: Record<string, string | undefined> }): string | null;
 };
 
 const KEY = "claude:1a2b3c4d.5000:4242";
@@ -431,7 +432,7 @@ describe("with no `rig` to run", () => {
     const waiter = (session: string, env = noRig()) => {
       const s = sink();
       return bridge.conversationWaiter({ input: { ...input, session_id: session }, out: s.out,
-        deps: { env, alive: () => true, key: KEY, waiterMs: 15_000, ...clock() } }).then((code) => ({ code, text: s.text() }));
+        deps: { env, alive: () => true, key: KEY, waiterMs: 15_000, loginPath: () => null, ...clock() } }).then((code) => ({ code, text: s.text() }));
     };
     const first = await waiter(SESSION);
     expect(first.code).toBe(2);
@@ -456,6 +457,34 @@ describe("with no `rig` to run", () => {
     expect(await waiter("fifth-session")).toEqual({ code: 0, text: "" });
   });
 
+  // Reproduced on Claude Code 2.1.330: `rig` installed into a new ~/.local/bin after the app started is on a login shell's
+  // PATH, not on the app's, which the hooks inherit, so every later Stop or SessionStart waiter found none.
+  it("Claude Code: a `rig` only on a login shell's PATH is found, run with that PATH, and its task wakes the conversation", async () => {
+    const loginBin = join(data, "login-bin");
+    const log = join(data, "rig-calls.log");
+    const rows = { goals: JSON.stringify([goal()]), pending: JSON.stringify([question()]),
+      transitions: JSON.stringify(created("dev-build@starter", "transport:v1")) };
+    mkdirSync(loginBin, { recursive: true });
+    writeFileSync(join(loginBin, "rig"), [
+      "#!/bin/sh",
+      `echo "$*" >> '${log}'`,
+      'case "$*" in',
+      `  "queue list --tag "*) echo '${rows.goals}' ;;`,
+      `  "queue list --destination "*) echo '${rows.pending}' ;;`,
+      `  "queue transitions "*) echo '${rows.transitions}' ;;`,
+      "  *) echo null ;;",
+      "esac",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    const s = sink();
+    const code = await bridge.conversationWaiter({ input, out: s.out,
+      deps: { env: noRig(), alive: () => true, key: KEY, waiterMs: 15_000, loginPath: () => [loginBin, "/usr/bin", "/bin"].join(delimiter), ...clock() } });
+    expect(code).toBe(2);
+    expect(s.text()).toContain("- qitem-q1: May I run the test suite?");
+    expect(readFileSync(log, "utf8")).toContain(`queue list --tag conversation-key:${KEY} --all --limit 100 --json\n`);
+    expect(existsSync(join(data, "no-rig.json"))).toBe(false);
+  });
+
   it("Claude Code: a seat, or a conversation with no key, is never told", async () => {
     for (const [extra, key] of [[{ OPENRIG_SESSION_NAME: "dev-impl@team" }, KEY], [{}, null]] as const) {
       const s = sink();
@@ -464,18 +493,26 @@ describe("with no `rig` to run", () => {
     }
   });
 
-  it("Codex: the watcher queues the same notice once for the plugin's install and stops; a found `rig` re-arms it", async () => {
+  it("Codex: the watcher queues the same notice once for the plugin's install and keeps looking until its session ends; a found `rig` re-arms it", async () => {
     const queued: string[] = [];
     const queue = (text: string) => { queued.push(text); return { ok: true, detail: "" }; };
     const OTHER = "0f1e2d3c-4b5a-6978-8a9b-acbdcedf0011";
     const THIRD = "1f1e2d3c-4b5a-6978-8a9b-acbdcedf0022";
-    const watch = (sessionId: string, deps: Record<string, unknown> = {}) => bridge.codexWatch({ sessionId, transcriptPath: "",
-      deps: { env: noRig(), projectDir: join(data, "project"), queue, pid: 77, ...clock(), ...deps } });
+    // Each watch with no `rig` looks again after a wait; its session ends during that wait, as a SessionEnd would.
+    const watch = (sessionId: string, deps: Record<string, unknown> = {}) => {
+      const c = clock();
+      const sleep = async () => { bridge.codexEnd({ input: { session_id: sessionId }, deps: { env: noRig() } }); await c.sleep(); };
+      return bridge.codexWatch({ sessionId, transcriptPath: "",
+        deps: { env: noRig(), projectDir: join(data, "project"), queue, pid: 77, loginPath: () => null, now: c.now, sleep, ...deps } });
+    };
     // The same session started twice, then another session: one notice.
     for (const session of [SESSION, SESSION, OTHER]) expect(await watch(session)).toBe(0);
     expect(queued).toHaveLength(1);
     expect(queued[0]).toMatch(/^OpenRig's automatic wake can't run in this conversation/);
     expect(existsSync(join(data, "no-rig.json"))).toBe(true);
+    const log = readFileSync(join(data, "conversations", `codex-${OTHER}`, "wake.log"), "utf8");
+    expect(log).toMatch(/no rig yet: looking again every 30 s while this session runs/);
+    expect(log).toMatch(/stopped: the session ended/);
     // A watcher that finds a `rig` clears the marker; the next session without one is told again.
     let ticks = 0;
     const c = clock();
@@ -484,6 +521,68 @@ describe("with no `rig` to run", () => {
     expect(existsSync(join(data, "no-rig.json"))).toBe(false);
     expect(await watch("2f1e2d3c-4b5a-6978-8a9b-acbdcedf0033")).toBe(0);
     expect(queued).toHaveLength(2);
+  });
+
+  // wake1 attempt 1 (0.7.24): the person's shell started before `npm install -g --prefix ~/.local` made ~/.local/bin, so
+  // Codex's PATH, which the hooks inherit, had no `rig`, while the agent's own commands (run in a login shell) found it.
+  // The watcher queued its notice and returned, and the team's question never came in.
+  it("Codex: a `rig` that turns up later on a login shell's PATH is found at a later tick, run with that PATH, and its tasks come in", async () => {
+    const codexKey = `codex:${SESSION}`;
+    const loginBin = join(data, "login-bin");
+    const log = join(data, "rig-calls.log");
+    // A stand-in `rig` that answers the watcher's three reads and records each call.
+    const rows = { goals: JSON.stringify([goal(codexKey)]), pending: JSON.stringify([question()]),
+      transitions: JSON.stringify(created("dev-build@starter", "transport:v1")) };
+    const installRig = () => {
+      mkdirSync(loginBin, { recursive: true });
+      writeFileSync(join(loginBin, "rig"), [
+        "#!/bin/sh",
+        `echo "$*" >> '${log}'`,
+        'case "$*" in',
+        `  "queue list --tag "*) echo '${rows.goals}' ;;`,
+        `  "queue list --destination "*) echo '${rows.pending}' ;;`,
+        `  "queue transitions "*) echo '${rows.transitions}' ;;`,
+        "  *) echo null ;;",
+        "esac",
+        "",
+      ].join("\n"), { mode: 0o755 });
+    };
+    const loginPaths: string[] = [];
+    const loginPath = () => { const p = [loginBin, "/usr/bin", "/bin"].join(delimiter); loginPaths.push(p); return p; };
+    const queued: string[] = [];
+    const queue = (text: string) => { queued.push(text); return { ok: true, detail: "" }; };
+    const c = clock();
+    let ticks = 0;
+    const sleep = async () => {
+      ticks += 1;
+      if (ticks === 2) installRig(); // Installed during the session, after the notice.
+      if (ticks === 5) bridge.codexEnd({ input: { session_id: SESSION }, deps: { env: noRig() } });
+      await c.sleep();
+    };
+    const code = await bridge.codexWatch({ sessionId: SESSION, transcriptPath: "",
+      deps: { env: noRig(), projectDir: join(data, "project"), queue, pid: 77, loginPath, now: c.now, sleep } });
+    expect(code).toBe(0);
+    expect(queued[0]).toMatch(/^OpenRig's automatic wake can't run in this conversation/);
+    expect(queued).toHaveLength(2);
+    expect(queued[1]).toContain("- qitem-q1: May I run the test suite?");
+    expect(readFileSync(log, "utf8")).toContain(`queue list --tag conversation-key:${codexKey} --all --limit 100 --json\n`);
+    const wake = readFileSync(stateFile("wake.log", "codex"), "utf8");
+    expect(wake).toMatch(/no rig yet: looking again every 30 s/);
+    expect(wake).toMatch(new RegExp(`watching for ${codexKey}`));
+    expect(wake).toMatch(/queued for the thread \(stored, not proof it was read\): qitem-q1/);
+    // Found, the `rig` clears the install's marker, so a later loss is told again.
+    expect(existsSync(join(data, "no-rig.json"))).toBe(false);
+    // The login shell was asked only while no `rig` was found: at the start and after each wait until the install.
+    expect(loginPaths.length).toBeGreaterThanOrEqual(2);
+    expect(loginPaths.length).toBeLessThanOrEqual(3);
+  });
+
+  it("reads a login shell's PATH from after whatever its profile prints", () => {
+    const shell = join(data, "fake-shell");
+    writeFileSync(shell, ["#!/bin/sh", "echo 'Welcome to the lane'", "PATH='/opt/x/bin:/usr/bin'", 'eval "$2"', ""].join("\n"), { mode: 0o755 });
+    expect(bridge.loginShellPath({ env: { SHELL: shell, PATH: "/usr/bin:/bin" } })).toBe("/opt/x/bin:/usr/bin");
+    writeFileSync(shell, ["#!/bin/sh", "exit 3", ""].join("\n"), { mode: 0o755 });
+    expect(bridge.loginShellPath({ env: { SHELL: shell, PATH: "/usr/bin:/bin" } })).toBeNull();
   });
 
   it("finds a `rig` installed only in the project and reads OpenRig through it (Claude Code's project, a Codex session's folder)", async () => {
@@ -565,9 +664,15 @@ describe("the conversation key", () => {
 
 describe("the conversation hooks, run as Claude Code runs them", () => {
   it("exit at once in a seat and with no hook input, never waiting on stdin or the daemon", () => {
+    const rejectInput = join(data, "reject-hook-input.cjs");
+    writeFileSync(rejectInput, `Object.defineProperty(process, "stdin", {
+      get() { throw new Error("a seat hook must not read stdin"); }
+    });`);
     for (const mode of ["conversation-waiter", "conversation-turn", "codex-start", "codex-end"]) {
       const started = Date.now();
-      execFileSync(process.execPath, [bridgePath, mode], { input: JSON.stringify({ session_id: SESSION }),
+      // The seat guard exits without reading: writing input races that exit (EPIPE on macOS).
+      // Give it no input; the preload also catches a guard moved after the stdin read.
+      execFileSync(process.execPath, ["--require", rejectInput, bridgePath, mode], { stdio: ["ignore", "pipe", "pipe"],
         env: { PATH: process.env.PATH ?? "", OPENRIG_SESSION_NAME: "dev-impl@team", CLAUDE_PLUGIN_DATA: data }, timeout: 10_000 });
       expect(Date.now() - started, mode).toBeLessThan(5_000);
     }

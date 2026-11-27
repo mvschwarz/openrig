@@ -67,6 +67,8 @@ export interface ProviderSwitchInput {
   tokenFile?: string | null;
   /** Claude API key read from this file at launch; never credential bytes. */
   apiKeyFile?: string;
+  /** Who asked (the calling seat's session, when the request names one), for the record a saved reference leaves. */
+  requestedBy?: string | null;
 }
 
 /**
@@ -93,10 +95,15 @@ export interface SeatRestart {
 /** A Claude seat's relaunch on the same conversation, in its own pane, by restore's own resume path, lent by the route for
  *  one call. */
 export interface ClaudeSeatRelaunch {
-  /** The seat, when it's a managed Claude seat; null for any other runtime. `pane` is its bound tmux pane. */
-  seat(seat: string): { nodeId: string; rigId: string; rigName: string; logicalId: string; running: boolean; pane: string | null } | null;
+  /** The seat, when it's a managed Claude seat; null for any other runtime. `pane` is its bound tmux pane. `pristine`: a
+   *  materialized seat that has never launched (no session yet), so its first launch starts its first conversation. */
+  seat(seat: string): { nodeId: string; rigId: string; rigName: string; logicalId: string; running: boolean; pane: string | null; pristine?: true } | null;
   tokenRef(nodeId: string): ClaudeSeatTokenRef | null;
   setTokenRef(nodeId: string, ref: ClaudeSeatTokenRef | null): void;
+  /** A never-launched seat's reference for its first launch, saved with an attributed record in the same write that checks
+   *  it's still that Claude seat and still has no session, so a first launch that began meanwhile is never switched. */
+  saveFirstLaunchTokenRef?(nodeId: string, ref: ClaudeSeatTokenRef | null, audit: { requestedBy: string | null }):
+    { ok: true } | { ok: false; code: "seat_launched" | "seat_changed"; message: string };
   /** A snapshot taken now, and whether restoring this seat from it resumes its conversation. */
   snapshot(rigId: string, nodeId: string): { snapshotId: string; resumes: true; conversation: string | null } | { snapshotId: string; resumes: false; why: string };
   /** For a stopped seat: the snapshot a plain `rig launch <rig> <seat>` selects, read without taking a new one, and whether

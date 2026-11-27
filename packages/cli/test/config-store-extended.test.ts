@@ -188,6 +188,12 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       // B6 founder ruling — auto-registration is not default-on.
       "policies.idle_gate_qitem.auto_register",
       "policies.idle_gate_qitem.opt_in_sessions",
+      "policies.seat_scale.enabled",
+      "policies.seat_scale.observe",
+      "policies.seat_scale.idle_threshold_minutes",
+      "policies.seat_scale.max_reaps_per_24h",
+      "policies.seat_scale.protected_rigs",
+      "policies.seat_scale.opt_in_rigs",
       "snapshots.periodic.enabled",
       "snapshots.periodic.interval_seconds",
       "snapshots.periodic.retention_keep",

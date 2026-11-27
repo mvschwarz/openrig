@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
 import { Command, InvalidArgumentError } from "commander";
-import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError, remoteDaemonClient, type DaemonResponse } from "../client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError, operatorAuthHeaders, remoteDaemonClient, type DaemonResponse } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard, resolveOriginSelfHostId } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { sessionRigOf, isHumanSeatSessionRef, parseSessionName } from "../session-name.js";
@@ -21,6 +21,7 @@ import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "
 import { resolveSenderSession } from "../sender-identity.js";
 import { queueExportCommand } from "./queue-export.js";
 import { queueImportCommand, queueStagingCommand } from "./queue-import.js";
+import { queueTransferCommand } from "./queue-transfer.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -1328,6 +1329,15 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
   };
+  cmd.addCommand(queueTransferCommand(({ path, body, host }) => {
+    const deps = getDeps();
+    return withClient(deps, async local => {
+      const target = await queueHostTarget(deps, local, host, body !== undefined);
+      if ("error" in target) return { status: 400, data: target };
+      const options = { ...target.options, headers: target.remote ? target.options.headers : operatorAuthHeaders() };
+      return body === undefined ? target.client.get(path, options) : target.client.post(path, body, options);
+    }, remoteHostOf(host) !== undefined, host);
+  }));
 
   cmd
     .command("create")

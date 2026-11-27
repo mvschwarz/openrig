@@ -428,6 +428,7 @@ export function queueRoutes(): Hono {
         : err.code === "reopen_not_applicable" ? 400
         : err.code === "claim_destination_mismatch" ? 403
         : err.code === "qitem_not_claimable" ? 409
+        : err.code === "qitem_fenced" ? 409
         : err.code === "qitem_not_in_progress" ? 409
         : err.code === "qitem_already_terminal" ? 409
         : err.code === "relayed_answer_refused" ? 409
@@ -2024,8 +2025,10 @@ export function queueRoutes(): Hono {
     // The owner notification level is what the Slack selector keys on: a registered person who
     // is also a seat with a pane is pane-bound, yet the gateway may still post the row to them.
     const closing = repo.closingTransition(qitemId, item.state);
+    const transfer = repo.transferFence(qitemId);
     return c.json({
       ...item,
+      ...(transfer ? { transfer } : {}),
       ...(waited ? { waited } : {}),
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),

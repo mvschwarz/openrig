@@ -137,7 +137,9 @@ export function attentionRoutes(): Hono {
         const item: AttentionItem = { id: `queue-update:${q.qitemId}`, kind: "update", recipient: q.destinationSession,
           summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Update summary unavailable",
           urgency: q.priority, unblocks: null, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown",
-          project: p ? { id: p.id, root: p.root } : null, source: `/api/queue/${encodeURIComponent(q.qitemId)}` };
+          project: p ? { id: p.id, root: p.root } : null, source: `/api/queue/${encodeURIComponent(q.qitemId)}`,
+          // An open update can be dismissed where it's read; a closed one (opened by id) shows its state and offers nothing.
+          ...(q.state === "pending" || q.state === "in-progress" || q.state === "blocked" ? { dismiss: { actorSession: q.destinationSession } } : {}) };
         add(item, () => ["Informational update; no action needed. Viewing is not approval or proof of delivery.",
           q.body, ...(q.humanDetail ? ["Supplemental detail:", q.humanDetail] : []),
           `State: ${q.state}`, `To: ${q.destinationSession}`, `From: ${q.sourceSession}`,

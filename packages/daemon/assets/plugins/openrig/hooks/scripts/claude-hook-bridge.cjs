@@ -170,6 +170,8 @@ const RETRY_MAX_MS = 5 * 60 * 1000;
 const CONVERSATION_WAITER_MS = (7200 - 120) * 1000;
 /** Without a Codex pid to observe, stop an orphan watcher after this long without rollout growth. */
 const CODEX_IDLE_EXIT_MS = 6 * 3600 * 1000;
+/** How often a Codex watcher that found no `rig` looks again. */
+const NO_RIG_RETRY_MS = 30 * 1000;
 /** A watcher that hasn't ticked for this long isn't live, whatever its recorded pid says. */
 const WATCHER_LIVE_MS = 3 * CONVERSATION_POLL_MS;
 /** A conversation's state folder untouched for this long, the folder and every file in it, is removed, unless the Claude
@@ -367,6 +369,31 @@ function rigReader(env, projectDir) {
   return bin ? (args) => runRig(args, { env, bin }) : null;
 }
 
+/** The PATH a login shell of this user gets. Codex runs a session's own commands in a login shell (`bash -lc`), so a `rig`
+ *  in a folder the login profile adds, such as a `~/.local/bin` made after this app started, runs for the session's agent
+ *  while the app's own PATH, which its hooks inherit, lacks it. Null when no login shell answers in time. */
+function loginShellPath({ env = process.env, spawnSync = require("node:child_process").spawnSync } = {}) {
+  // A profile may print; the PATH is what follows the last mark.
+  const mark = "__OPENRIG_LOGIN_PATH__";
+  try {
+    const result = spawnSync(first(env.SHELL) || "/bin/sh", ["-lc", `printf '%s%s' '${mark}' "$PATH"`],
+      { env, encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] });
+    if (result.error || result.status !== 0) return null;
+    const out = String(result.stdout ?? "");
+    const at = out.lastIndexOf(mark);
+    return at < 0 ? null : out.slice(at + mark.length).trim() || null;
+  } catch { return null; }
+}
+
+/** OpenRig read through the `rig` this session's own commands would run: findRig's, else the first on a login shell's PATH,
+ *  run with that PATH so its `node` resolves the same way. Null when neither has one. */
+function sessionRigReader(env, projectDir, loginPath = () => loginShellPath({ env })) {
+  const direct = rigReader(env, projectDir);
+  if (direct) return direct;
+  const login = loginPath();
+  return login && login !== env.PATH ? rigReader({ ...env, PATH: login }, projectDir) : null;
+}
+
 /** What a conversation is told when there's no `rig`: without it the hooks read nothing, and nothing else would tell the
  *  person that the team's questions won't come in by themselves. */
 const NO_RIG_NOTICE = "OpenRig's automatic wake can't run in this conversation: the openrig plugin found no `rig` command "
@@ -547,7 +574,9 @@ async function conversationWaiter({ input = {}, out = process.stderr, deps = {} 
   if (!state) return 0;
   const now = deps.now ?? Date.now;
   const wait = deps.sleep ?? sleep;
-  const rig = deps.rig !== undefined ? deps.rig : rigReader(env);
+  // The app's PATH, which the hooks inherit, lacks a folder the login profile adds after it started (a new ~/.local/bin from
+  // `npm install -g --prefix ~/.local`), so look on a login shell's PATH too, as the Codex watcher does.
+  const rig = deps.rig !== undefined ? deps.rig : sessionRigReader(env, undefined, deps.loginPath);
   // Nothing to read with: tell the conversation the way a task wakes it, once for the plugin's install.
   if (!rig) return (await sayNoRigOnce(state, (text) => writeAll(out, text), now)) ? 2 : 0;
   forgetNoRig(state);
@@ -688,16 +717,21 @@ async function codexWatch({ sessionId = "", transcriptPath = "", codexPid = 0, c
   const now = deps.now ?? Date.now;
   const wait = deps.sleep ?? sleep;
   // codex-start runs the watcher in the session's folder, which stands in for Claude Code's CLAUDE_PROJECT_DIR.
-  const rig = deps.rig !== undefined ? deps.rig : rigReader(env, deps.projectDir ?? process.cwd());
+  const projectDir = deps.projectDir ?? process.cwd();
+  const lookForRig = deps.rig !== undefined ? () => deps.rig : () => sessionRigReader(env, projectDir, deps.loginPath);
+  let rig = lookForRig();
   const queue = deps.queue ?? codexQueuer(sessionId, state, { env, now });
   const statSize = deps.statSize ?? ((p) => fs.statSync(p).size);
   const me = deps.pid ?? process.pid;
   state.write("watcher.json", { pid: me, beat: now() });
   state.prune(deps.read);
-  if (!rig) { await sayNoRigOnce(state, (text) => queue(text).ok, now); return 0; }
-  forgetNoRig(state);
-  state.log(`watching for ${key}`);
-  const routes = routeWatch(key, transcriptPath, rig, now, statSize);
+  if (!rig) {
+    // The person may install OpenRig in this very conversation, as the rigs skill has them do: keep looking, and watch from
+    // the tick a `rig` turns up, instead of leaving the conversation without wakes until a new session.
+    await sayNoRigOnce(state, (text) => queue(text).ok, now);
+    state.log(`no rig yet: looking again every ${NO_RIG_RETRY_MS / 1000} s while this session runs`);
+  }
+  let routes = null;
   let size = null;
   let grewAt = now();
   // Consecutive ticks whose read or queue failed: each waits twice as long as the one before, up to RETRY_MAX_MS, so a
@@ -717,6 +751,16 @@ async function codexWatch({ sessionId = "", transcriptPath = "", codexPid = 0, c
     try { current = transcriptPath ? statSize(transcriptPath) : null; } catch { current = null; }
     if (current !== size) { size = current; grewAt = now(); }
     if (codexPid <= 0 && now() - grewAt > CODEX_IDLE_EXIT_MS) { state.log("stopped: the session's rollout went idle"); return 0; }
+    if (!rig) {
+      await wait(NO_RIG_RETRY_MS);
+      rig = lookForRig();
+      continue; // The session's checks above run again before the first read.
+    }
+    if (!routes) {
+      forgetNoRig(state);
+      state.log(`watching for ${key}`);
+      routes = routeWatch(key, transcriptPath, rig, now, statSize);
+    }
     const read = routes();
     const fresh = read && freshTasks(read, state, rig);
     if (!fresh) {
@@ -773,5 +817,5 @@ if (require.main === module) void main();
 module.exports = {
   render, waiter, endpoint,
   CONVERSATION_KEY_TAG_PREFIX, conversationKey, conversationKeyTag, processReader, conversationRoutes, renderConversationTasks,
-  conversationWaiter, conversationTurn, codexStart, codexEnd, codexWatch, findRig,
+  conversationWaiter, conversationTurn, codexStart, codexEnd, codexWatch, findRig, loginShellPath,
 };

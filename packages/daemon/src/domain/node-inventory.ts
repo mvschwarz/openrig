@@ -1,6 +1,6 @@
 import { isRosterReadyNotice } from "./roster-ready-notice.js";
 import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
-import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
+import { recordedActivityHooks, recordedRunner, sessionActivityHooksSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { configuredAccount } from "./configured-account.js";
 import { restoreOutcomesByIntendedNode } from "./restore-topology.js";
 import { physicalSessionName } from "./session-registry.js";
@@ -50,6 +50,8 @@ import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper } from "./launch-wrapper.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { readStandbyStop } from "./seat-standby.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 // -- Row types for SQL results --
 
@@ -107,6 +109,7 @@ interface InventoryRow {
   session_status: string | null;
   session_community_harness?: string | null;
   session_community_runner?: number | null;
+  session_community_hooks?: string | null;
   intentionally_stopped: number | null;
   stop_attempt: string | null;
   startup_status: string | null;
@@ -658,7 +661,8 @@ function mapStatus(status: string): NodeRestoreOutcome {
 }
 
 function deriveHeldReason(db: Database.Database, rigId: string, nodeId: string, sessionStatus: string | null): string | null {
-  if (sessionStatus === "running") return null;
+  // A seat attached from an outside program (rig attach) isn't held back from a launch, as it wasn't while its record read running.
+  if (sessionStatus === "running" || sessionStatus === "attached") return null;
 
   const heldRow = db.prepare(
     "SELECT seq, payload FROM events WHERE node_id = ? AND type = 'node.held' ORDER BY seq DESC LIMIT 1"
@@ -935,6 +939,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       s.status as session_status,
       ${sessionCommunityHarnessSelect(db)} as session_community_harness,
       ${sessionCommunityRunnerSelect(db)} as session_community_runner,
+      ${sessionActivityHooksSelect(db)} as session_community_hooks,
       s.intentionally_stopped,
       ${sessionStopAttemptSelect} as stop_attempt,
       s.startup_status,
@@ -1072,7 +1077,13 @@ function buildInventoryItem(
   // Keep registry history intact; only an applicable, explicit absence changes
   // the current status. Unavailable tmux and process mismatches are not absence.
   const paneExited = row.session_status === "running" && identityVerdict?.reason === "pane_exited";
-  const sessionStatus = paneExited ? "exited"
+  // A seat joined with `rig attach` runs in someone else's program (seat-kinds: no inbound transport, an external process
+  // owner), so OpenRig can't see whether it runs: a stored running, or a detached a tmux probe once wrote, isn't its state.
+  // It reads attached, with liveness unknown and its own newest queue action as the only evidence.
+  const externallyAttached = row.binding_attachment_type != null
+    && seatProcessOwner(resolveSeatKind(row.binding_attachment_type)) === "external"
+    && (row.session_status === "running" || row.session_status === "detached");
+  const sessionStatus = externallyAttached ? "attached" : paneExited ? "exited"
     : row.session_status === "running" && identityVerdictConfirmsSessionMissing(identityVerdict) ? "detached" : row.session_status;
   const startupStatus = paneExited || (sessionStatus === "running" && identityVerdictDownranksRunning(identityVerdict?.verdict))
     ? "attention_required" : row.startup_status as NodeInventoryEntry["startupStatus"];
@@ -1086,7 +1097,9 @@ function buildInventoryItem(
   // a row recorded before attempts were kept has none), the session reads exited or superseded, and no binding is left.
   const stopConfirmed = row.intentionally_stopped === 1 && row.stop_attempt === null
     && (row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null;
-  const lifecycleState = keepAliveIncident?.exhausted && sessionStatus !== "running" ? "attention_required" : deriveNodeLifecycleState({
+  const standbyStopped = row.intentionally_stopped === 1 && row.session_status === "exited" && readStandbyStop(db, row.node_id) !== null;
+  const lifecycleState = keepAliveIncident?.exhausted && sessionStatus !== "running" ? "attention_required"
+    : externallyAttached && startupStatus !== "attention_required" && restoreOutcome !== "attention_required" ? "unknown" : deriveNodeLifecycleState({
     sessionStatus,
     startupStatus,
     restoreOutcome,
@@ -1110,15 +1123,17 @@ function buildInventoryItem(
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
     configuredAccount: configuredAccount(row.runtime, Boolean(row.has_claude_token_ref), row.claude_token_ref, row.account_home),
-    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: recordedRunner(row.session_community_runner) }) } : {}),
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: recordedRunner(row.session_community_runner), activityHooks: recordedActivityHooks(row.session_community_hooks) }) } : {}),
     ...(launchWrapper ? { launchWrapper } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
+    ...(externallyAttached ? { externalAttachment: { liveness: "unknown" as const, ...lastOwnQueueAction(db, row.session_name) } } : {}),
     // An explicit down records a failed start's rolled-back session without changing its superseded status.
     intentionallyStopped: stopConfirmed,
+    ...(standbyStopped ? { standbyStopped: true as const } : {}),
     // #2940: a stop recorded but not confirmed yet (the session not yet gone, the daemon lost mid-stop, or a request
     // recorded on a row already exited or superseded that no probe has proven absent: its attempt is still set).
-    ...(row.intentionally_stopped === 1 && !stopConfirmed ? { stopRequested: true } : {}),
+    ...(row.intentionally_stopped === 1 && !stopConfirmed && !standbyStopped ? { stopRequested: true } : {}),
     // #2940: the seat declares keep_alive (absent = off, so other seats' output is unchanged).
     ...(row.keep_alive === 1 ? { keepAlive: true } : {}),
     ...(keepAliveIncident ? { keepAliveIncident } : {}),
@@ -1607,6 +1622,23 @@ export function seatNeedsAttention(
     || (entry.heldReason != null && !isUnlaunchedHeldWithoutWork(entry, assignedWorkCount))
     || entry.latestError != null
     || (entry.startedWithoutRequired?.length ?? 0) > 0;
+}
+
+/** The newest queue transition a seat wrote itself (a claim, note or handoff): for a seat attached from an outside program,
+ *  the one sign OpenRig has that it's working. It reads the live history and the archive retention moves finished work to
+ *  (one indexed row from each), so an archived action still counts. Null when it has written none; "unavailable" when its
+ *  history couldn't be read, so a failed read never reads as none. */
+function lastOwnQueueAction(db: Database.Database, session: string | null):
+  Pick<NonNullable<NodeInventoryEntry["externalAttachment"]>, "lastOwnQueueAction" | "lastOwnQueueActionRead"> {
+  if (!session) return { lastOwnQueueAction: null, lastOwnQueueActionRead: "read" };
+  try {
+    const newest = ["queue_transitions", "queue_transitions_archive"]
+      .map((table) => db.prepare(`SELECT transition_id, ts, qitem_id, state FROM ${table} WHERE actor_session = ? ORDER BY transition_id DESC LIMIT 1`)
+        .get(session) as { transition_id: number; ts: string; qitem_id: string; state: string } | undefined)
+      .filter((row) => row !== undefined)
+      .sort((a, b) => b.transition_id - a.transition_id)[0];
+    return { lastOwnQueueAction: newest ? { at: newest.ts, qitemId: newest.qitem_id, state: newest.state } : null, lastOwnQueueActionRead: "read" };
+  } catch { return { lastOwnQueueAction: null, lastOwnQueueActionRead: "unavailable" }; }
 }
 
 /**

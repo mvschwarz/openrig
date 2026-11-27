@@ -118,6 +118,7 @@ import { viewsRoutes } from "./routes/views.js";
 import { watchdogRoutes } from "./routes/watchdog.js";
 import { workflowRoutes } from "./routes/workflow.js";
 import { missionControlRoutes } from "./routes/mission-control.js";
+import { queueTransferRoutes } from "./routes/queue-transfer.js";
 import { slicesRoutes } from "./routes/slices.js";
 import { reviewRoutes } from "./routes/review.js";
 import { rigModeRoutes } from "./routes/rig-mode.js";
@@ -262,6 +263,7 @@ export interface AppDeps {
   watchdogHistoryLog?: WatchdogHistoryLog;
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
+  seatReaper?: import("./domain/seat-reaper-service.js").SeatReaperService;
   /** #2940: relaunches a keep_alive seat that falls while the daemon runs. Started after the listener binds; stopped first. */
   keepAliveSupervisor?: import("./domain/keep-alive-supervisor.js").KeepAliveSupervisor;
   /** The outbound network connector (`rig network`); started after the listener binds. */
@@ -922,6 +924,8 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/rigs/:rigId/chat", chatRoutes());
   app.route("/api/stream", streamRoutes());
   app.route("/api/queue", queueRoutes());
+  app.route("/api/queue-transfer", queueTransferRoutes({ db: deps.rigRepo.db, repo: deps.queueRepo,
+    bearerToken: deps.missionControlBearerToken ?? null }));
   app.route("/api/workspace", workspaceRoutes());
   app.route("/api/projects", projectsRoutes());
   app.route("/api/views", viewsRoutes());

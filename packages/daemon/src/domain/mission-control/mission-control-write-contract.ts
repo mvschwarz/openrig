@@ -44,7 +44,7 @@ import type { NotifyRegister } from "../event-bus.js";
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
-import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, QueueRepositoryError, type QueueRepository, type QueueItem } from "../queue-repository.js";
+import { isBlockerLive, isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, QueueRepositoryError, type QueueRepository, type QueueItem } from "../queue-repository.js";
 import { askBackRoute, terminalAnswerMeaning } from "../receiver-context.js";
 import type { PersistedEvent } from "../types.js";
 import {
@@ -226,9 +226,23 @@ export class MissionControlWriteContract {
     }
 
     const source = this.requireMutableQitem(input.qitemId);
-    // Whose ask this settles: the person a row is parked on, else a person it's addressed to.
+    // Dismiss closes only an open update: a failed, denied or canceled one is already closed, and stays as it is.
+    if (input.verb === "dismiss" && !isBlockerLive(source.state)) {
+      throw new MissionControlWriteContractError("qitem_already_terminal",
+        `qitem ${input.qitemId} is already closed (state=${source.state}), so it can't be dismissed; nothing was written.`,
+        { qitemId: input.qitemId, state: source.state });
+    }
+    // Dismiss closes only an informational update addressed to a person; a request is answered, never dismissed.
+    if (input.verb === "dismiss" && (source.humanIntent !== "update" || !isHumanSeatSessionRef(source.destinationSession))) {
+      throw new MissionControlWriteContractError("not_an_update",
+        `qitem ${input.qitemId} isn't an informational update addressed to a person, so it can't be dismissed; nothing was written.`,
+        { qitemId: input.qitemId, state: source.state });
+    }
+    // Whose ask this settles: the person a row is parked on, else a person it's addressed to. A dismissed update is
+    // always its recipient's, whoever it's parked on.
     const parkedOn = source.state === "blocked" && source.blockedOn && isHumanSeatSessionRef(source.blockedOn) ? source.blockedOn : null;
-    const asked = parkedOn ?? (this.queueRepo.isPersonAddress(source.destinationSession) ? source.destinationSession : null);
+    const asked = input.verb === "dismiss" ? source.destinationSession
+      : parkedOn ?? (this.queueRepo.isPersonAddress(source.destinationSession) ? source.destinationSession : null);
     const acting = this.asActor(input, runnerPermissionOrigin(source) && this.queueRepo.answersAsk(source, input.actorSession) ? null : asked);
     input = acting.input;
 
@@ -638,9 +652,10 @@ export class MissionControlWriteContract {
           { register, afterCommit: wake => { afterCommit.push(wake); } });
           input.appSubmission?.checkpoint(receipt.item);
           return this.recordAnswer(input, before, input.decision ?? input.optionId ?? "", {
-            outcome: receipt.unplaced || receipt.unanswered.length ? "recorded" : "answered",
+            outcome: receipt.historyOnly || receipt.unplaced || receipt.unanswered.length ? "recorded" : "answered",
             unanswered: (ask.humanQuestions ?? []).filter(q => receipt.unanswered.includes(q.id)).map(q => q.question),
-            ...(receipt.unplaced ? { message: `Reply returned to ${ask.sourceSession} as ${receipt.replyQitemId} without changing any answer.` }
+            ...(receipt.historyOnly ? { message: "Answer retained in transfer history; no reply was sent." }
+              : receipt.unplaced ? { message: `Reply returned to ${ask.sourceSession} as ${receipt.replyQitemId} without changing any answer.` }
               : receipt.corrected ? { message: `Direct correction returned to ${ask.sourceSession} as ${receipt.replyQitemId}. The relay remains in history.` } : {}),
           }, receipt.replyQitemId, undefined, register);
         });
@@ -971,9 +986,10 @@ export class MissionControlWriteContract {
     // The terminal names no responder, whatever it claims and whoever is registered: the act is unattributed.
     const actor = UNNAMED_PRIMARY_USER;
     const auditNotes = { ...input.auditNotes, authority: "primary-user", asked };
+    const row = input.verb === "dismiss" ? "update" : "ask";
     const note = !asked || asked === actor ? ""
-      : actor === UNNAMED_PRIMARY_USER ? `; by someone at the terminal OpenRig can't name (${UNNAMED_PRIMARY_USER}), unattributed, on ${asked}'s ask`
-      : `; by ${actor}, the primary user at the terminal, on ${asked}'s ask`;
+      : actor === UNNAMED_PRIMARY_USER ? `; by someone at the terminal OpenRig can't name (${UNNAMED_PRIMARY_USER}), unattributed, on ${asked}'s ${row}`
+      : `; by ${actor}, the primary user at the terminal, on ${asked}'s ${row}`;
     return { input: { ...input, actorSession: actor, auditNotes }, note };
   }
 
@@ -1040,6 +1056,12 @@ function verbToClosure(input: MissionControlActionInput): ClosureMapping {
         closureReason: "blocked_on",
         closureTarget: input.reason!,
         blockedOn: input.reason!,
+      };
+    case "dismiss":
+      return {
+        state: "done",
+        closureReason: "no-follow-on",
+        closureTarget: input.reason ?? "dismissed",
       };
     case "drop":
       return {

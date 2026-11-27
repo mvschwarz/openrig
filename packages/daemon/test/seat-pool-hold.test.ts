@@ -45,10 +45,11 @@ import { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import type { ConvergeResult } from "../src/domain/topology-converge.js";
 
-// #3395 (Piece 1): the seat pool's whole-rig holds. While a hold stands, a cycle moves and adds nothing and records the
-// cause; drain and comeback join these holds in later changes. The job is unarmed in the daemon, so each test composes
-// the executor and an engine that has the seat-pool policy, and drives `rig down`, `rig up` and `rig launch --seats`
-// through the real teardown and restore orchestrators. The add's call is a fake that records it and creates no node.
+// #3395 (Piece 1): the seat pool's whole-rig holds. While a hold stands, a cycle moves, drains, adds and brings back
+// nothing and records the cause. The job is unarmed in the daemon, so each test composes the executor and an engine
+// that has the seat-pool policy, and drives `rig down`, `rig up` and `rig launch --seats` through the real teardown and
+// restore orchestrators. The add's call is a fake that records it and creates no node; the comeback's launch, when
+// composed, is the real restore orchestrator's launchSingleNode.
 
 const RIG = "pool-rig";
 const SPEC: SeatPoolSpec = {
@@ -141,8 +142,9 @@ function claudeAdapter(): RuntimeAdapter {
 type Model = { rigId: string; nodeId: string; logicalId: string; podId: string; session: string };
 type Agent = { nodeId: string; session: string };
 
-/** `drain`: compose the drain's effects, with the capture and the stop as spies (the stop succeeds). */
-function poolWorld(db: Database.Database = fullDb(), opts: { drain?: boolean } = {}) {
+/** `drain`: compose the drain's effects, with the capture and the stop as spies (the stop succeeds). `comeback`: compose
+ *  the comeback, with the selection and the launch (the restore orchestrator's own) as spies. */
+function poolWorld(db: Database.Database = fullDb(), opts: { drain?: boolean; comeback?: boolean } = {}) {
   const bus = new EventBus(db);
   const rigRepo = new RigRepository(db);
   const podRepo = new PodRepository(db);
@@ -215,6 +217,10 @@ function poolWorld(db: Database.Database = fullDb(), opts: { drain?: boolean } =
     listProcesses: async () => resumedClaudeRows(),
   });
   const adapters = { "claude-code": claudeAdapter() };
+  const select = vi.fn((rigId: string, nodeId: string, logicalId: string) => snapshotRepo.selectComebackSnapshot(rigId, nodeId, logicalId));
+  const launch = vi.fn((rigId: string, logicalId: string, launchOpts: { snapshotId: string }) =>
+    restorer.launchSingleNode(rigId, logicalId, { snapshotId: launchOpts.snapshotId, adapters }));
+  if (opts.comeback) deps.comeback = { select, launch };
   /** `rig up`: restore the snapshot with the runtime adapters, as the route does. */
   const up = (snapshotId: string, opts: { cwdOverride?: string } = {}) => restorer.restore(snapshotId, { adapters, ...opts });
   /** `rig launch --seats`. */
@@ -284,7 +290,7 @@ function poolWorld(db: Database.Database = fullDb(), opts: { drain?: boolean } =
   });
   return {
     db, bus, rigRepo, podRepo, slots, sessions, queue, outbox, jobsRepo, history, guard, activity, clock, hooks, deps, reg, refresh, capture, stopSeat,
-    exporter, converge,
+    exporter, converge, select, launch, snapshotRepo,
     get engine() { return composed.engine; }, get executor() { return composed.executor; },
     restart, compose, teardown, downTmux, restorer, up, launchSeats, snapshotCapture, checkpointStore,
     model, agent, ready, row, jobOf, jobFor, evaluate, notesOf, destinationOf, rerouted, events, down, addTrace,
@@ -849,6 +855,98 @@ describe("seat-pool holds: no drain while held (#3395 Piece 1)", () => {
       const notes = await w.notesOf(job.jobId);
       expect(notes.held).toEqual({ cause: "pool block unreadable", message: "held: pool block unreadable" });
       expectNoDrain(w, m, notes);
+    } finally {
+      w.db.close();
+    }
+  });
+});
+
+describe("seat-pool holds: no comeback while held (#3395 Piece 1)", () => {
+  /** A pool with one `drained` agent, a pool capture taken while it ran, and a row waiting for the model: unheld, the
+   *  cycle brings the agent back. */
+  const comebackablePool = async () => {
+    const w = poolWorld(fullDb(), { comeback: true });
+    const m = w.model();
+    const s1 = w.agent(m, 1);
+    const capture = w.snapshotCapture.captureSnapshot(m.rigId, "auto-rehydrate");
+    const latest = w.db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1").get(s1.nodeId) as { id: string };
+    w.sessions.updateStatus(latest.id, "stopped");
+    const slot = w.slots.forModel(m.nodeId)[0]!;
+    expect(w.slots.setPhase({ slotId: slot.slotId, from: "live", to: "drained", at: IDLE_SINCE })).toBe(true);
+    const job = w.jobFor(m);
+    const q = await w.row(m.session);
+    return { w, m, s1, job, q, snapshotId: capture.id };
+  };
+  const sessionsOf = (w: ReturnType<typeof poolWorld>, nodeId: string) =>
+    w.db.prepare("SELECT id, status FROM sessions WHERE node_id = ? ORDER BY created_at, id").all(nodeId);
+  const expectNoComeback = async (w: ReturnType<typeof poolWorld>, m: Model, s1: Agent, notes: Record<string, unknown>, sessionsBefore: unknown) => {
+    // no comeback is reserved or issued
+    expect(notes).not.toHaveProperty("add");
+    await w.executor.idle();
+    expect(w.select).not.toHaveBeenCalled();
+    expect(w.launch).not.toHaveBeenCalled();
+    expect(w.slots.forModel(m.nodeId).map((s) => [s.phase, s.attemptKind, s.reuseHold])).toEqual([["drained", null, null]]);
+    expect(sessionsOf(w, s1.nodeId)).toEqual(sessionsBefore);
+  };
+
+  it("While the job is stopped, no comeback is reserved or issued.", async () => {
+    const { w, m, s1, job } = await comebackablePool();
+    try {
+      const before = sessionsOf(w, s1.nodeId);
+      w.jobsRepo.stop(job.jobId);
+      // the engine evaluates only active jobs: the executor is asked directly, as the policy would hand it the job
+      const stored = w.jobsRepo.getByIdOrThrow(job.jobId);
+      const result = await w.executor.cycle({ jobId: stored.jobId, context: (parseYaml(stored.specYaml) as { context: Record<string, unknown> }).context });
+      const notes = (result as { notes: Record<string, unknown> }).notes;
+      expect(notes.held).toEqual({ cause: "job stopped", message: "held: job stopped" });
+      await expectNoComeback(w, m, s1, notes, before);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("From `rig down` until a later `restore.completed`, no comeback is reserved or issued; once released, the drained agent comes back from its pool capture.", async () => {
+    const { w, m, s1, job, snapshotId } = await comebackablePool();
+    try {
+      const { snapshotId: downSnapshot } = await w.down(m.rigId);
+      const stopped = w.events(m.rigId, "rig.stopped").at(-1)!;
+      const before = sessionsOf(w, s1.nodeId);
+      for (let cycle = 0; cycle < 2; cycle++) {
+        const notes = await w.notesOf(job.jobId);
+        expect(notes.held).toEqual(rigStopped(stopped));
+        await expectNoComeback(w, m, s1, notes, before);
+      }
+
+      const restored = await w.up(downSnapshot!);
+      expect(restored.ok, JSON.stringify(restored)).toBe(true);
+      // `rig up` keeps the drained agent down
+      expect(w.slots.forModel(m.nodeId)[0]!.phase).toBe("drained");
+      expect(sessionsOf(w, s1.nodeId)).toEqual(before);
+      const released = await w.notesOf(job.jobId);
+      expect(released).not.toHaveProperty("held");
+      expect((released.add as { comebacks: Array<Record<string, unknown>> }).comebacks).toEqual([
+        expect.objectContaining({ slotNumber: 1, nodeId: s1.nodeId, snapshotId, attempt: expect.objectContaining({ status: "in_flight" }) }),
+      ]);
+      await w.executor.idle();
+      expect(w.launch.mock.calls).toEqual([[m.rigId, "dev.impl-s1", { snapshotId }]]);
+      // the comeback settled: the same slot is `live` and its node has a new running session
+      expect(w.slots.forModel(m.nodeId).map((s) => [s.slotNumber, s.nodeId, s.phase])).toEqual([[1, s1.nodeId, "live"]]);
+      const after = sessionsOf(w, s1.nodeId) as Array<{ status: string }>;
+      expect(after).toHaveLength((before as unknown[]).length + 1);
+      expect(after.at(-1)!.status).toBe("running");
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("While the stored block can't be read, no comeback is reserved or issued.", async () => {
+    const { w, m, s1, job } = await comebackablePool();
+    try {
+      const before = sessionsOf(w, s1.nodeId);
+      w.db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(JSON.stringify({ max: 2, min: 5 }), m.nodeId);
+      const notes = await w.notesOf(job.jobId);
+      expect(notes.held).toEqual({ cause: "pool block unreadable", message: "held: pool block unreadable" });
+      await expectNoComeback(w, m, s1, notes, before);
     } finally {
       w.db.close();
     }

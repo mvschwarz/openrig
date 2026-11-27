@@ -608,8 +608,9 @@ export type Action =
   | { type: "act"; act: "open-terminal"; view: string; expectedPlan?: string }
   | { type: "act"; act: "run"; rigId: string; agent: string }
   /** Answer a request on its own row, as the person the Feed served: Steering's Approve, or a choice
-   * (questionId + optionId) or their own words (decision) through mission control's answer. */
-  | { type: "act"; act: "answer"; qitemId: string; verb: "approve" | "answer" | "resolve"; actorSession: string; questionId?: string; optionId?: string; decision?: string }
+   * (questionId + optionId) or their own words (decision) through mission control's answer; or dismiss an open
+   * informational update addressed to them. */
+  | { type: "act"; act: "answer"; qitemId: string; verb: "approve" | "answer" | "resolve" | "dismiss"; actorSession: string; questionId?: string; optionId?: string; decision?: string }
   /** Decide a pairing request directly on this host, as `rig host approve|deny` does, by its approval row. */
   | { type: "act"; act: "pair-decision"; request: string; decision: "approve" | "deny"; code: string; requester: string }
   /** Answer the open request in your own words (the `reply` command); main resolves it to the served answer act. */
