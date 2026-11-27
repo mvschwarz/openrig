@@ -78,6 +78,34 @@ current Claude session. A visible custom status line alone does not verify
 collection or end-to-end adoption/handover recovery. The wrapper above suppresses
 collector errors; remove its stderr redirection temporarily when diagnosing it.
 
+## Raw context and configured budget
+
+Claude's raw percentage measures input tokens against the full model context
+window. `rig ps --nodes` also shows a configured-budget percentage when the
+collector sees `CLAUDE_CODE_AUTO_COMPACT_WINDOW` as a plain integer from 100,000
+to 1,000,000 tokens. The graph badge, its context ring, and seat context details
+show the same sampled budget. For example, 150,000 input tokens in a 1M window
+with a 200,000-token budget reads as 15% raw and 75% budget.
+
+The budget is capped at the reported model window. It is a configured limit,
+not an observed compaction trigger or countdown; OpenRig subtracts no fixed
+reserve. OpenRig deliberately leaves other native settings, defaults, suffix
+values such as `200k`, and out-of-range values unknown. Suffix support depends on
+the Claude version; settings can change during a session. OpenRig does not
+inspect native settings files to guess a limit. In particular, a budget set only
+through `autoCompactWindow`, `/autocompact` or `--autocompact` remains unknown.
+The CLI omits a budget footer when no budget is known; JSON and seat context
+details retain the unknown state. See Claude's
+[auto-compaction settings](https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction).
+
+The ratio uses current input, cache-read and cache-creation tokens, excluding
+output. Missing, invalid or all-zero current usage leaves the ratio unknown,
+including immediately after compaction. Budget data shares the raw sample's
+freshness and session/occupant checks. Existing watchdog thresholds, filters,
+health colors and compaction automation continue to use the raw percentage.
+JSON exposes the additional value as `contextUsage.configuredBudget`, with
+`tokens`, `usedPercentage` and `source`; older samples have no known budget.
+
 ## Claude usage-limit detection
 
 The status line supplies subscription usage windows and their reset timestamps.
