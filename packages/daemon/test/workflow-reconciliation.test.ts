@@ -75,7 +75,8 @@ describe("one preserved running graph and recoverable revision decision", () => 
     expect(inspectGraph(db, run.instanceId)).toBe(view);
     const execution = await buildExecutionView({ db, slicesRoot: () => join(root, "missions"), rigsRoot: () => join(root, "no-rigs"), buildInfo: { semver: null, commit: null, dirty: null, builtAt: null } }, { mission: "trial" }) as any;
     expect(execution.lifecycle_instances[0].reconciliation).toEqual(view);
-    expect(db.serialize()).toEqual(before);
+    // Compare the complete SQLite bytes natively; deep equality walks every Buffer element on slow runners.
+    expect(db.serialize().equals(before)).toBe(true);
     const receipt = reviseGraph(db, bus, apply(run.instanceId));
     expect(receipt.receipt.sourceOnly).toBe(true);
     expect(runtime.inspect(run.instanceId).boundaryObligations.find(s => s.stepId === "plan")).toMatchObject({ state: "closed", receiptState: "recorded" });
@@ -110,7 +111,7 @@ describe("one preserved running graph and recoverable revision decision", () => 
     expect(inspectGraph(db, run.instanceId)).toMatchObject({ status: "incompatible", compatible: false });
     expect(inspectGraph(db, run.instanceId).reasons.join(" ")).toContain("explicit reconsideration");
     expect(() => reviseGraph(db, bus, apply(run.instanceId, "refused"))).toThrow("Revision refused");
-    expect(db.serialize()).toEqual(before);
+    expect(db.serialize().equals(before)).toBe(true);
   });
 
   it("refuses a lost obligation, even beside newly ready work it would otherwise project", async () => {
@@ -187,7 +188,7 @@ describe("one preserved running graph and recoverable revision decision", () => 
     // The same decision again, as after a lost response: no packet and no wake.
     const after = db.serialize(), woke = sends.length;
     expect(await runtime.reviseGraph(input)).toMatchObject({ replayed: true, projected: [] });
-    expect(db.serialize()).toEqual(after);
+    expect(db.serialize().equals(after)).toBe(true);
     expect(sends.length).toBe(woke);
     expect(inspectGraph(db, id).status).toBe("current");
     // Ordinary projection carries on from the revised graph; the adoption closes on its own.
@@ -255,7 +256,7 @@ describe("one preserved running graph and recoverable revision decision", () => 
     expect(view.reasons).toContain("Required order adoption before record cannot be removed: record already has completed, live or failed work.");
     const before = db.serialize();
     await expect(runtime.reviseGraph(apply(id, "refused"))).rejects.toThrow("Revision refused");
-    expect(db.serialize()).toEqual(before);
+    expect(db.serialize().equals(before)).toBe(true);
   });
 
   it.each([
@@ -270,7 +271,7 @@ describe("one preserved running graph and recoverable revision decision", () => 
     expect(view.reasons.join(" ")).toContain(reason);
     const before = db.serialize(), sent = sends.length;
     await expect(runtime.reviseGraph(apply(id, "mixed"))).rejects.toThrow("Revision refused");
-    expect(db.serialize()).toEqual(before);
+    expect(db.serialize().equals(before)).toBe(true);
     expect(sends.length).toBe(sent);
   });
 
@@ -282,13 +283,13 @@ describe("one preserved running graph and recoverable revision decision", () => 
     step("record").objective = "Record differently"; save();
     let before = db.serialize();
     await expect(runtime.reviseGraph(stale)).rejects.toThrow("Authored input changed");
-    expect(db.serialize()).toEqual(before);
+    expect(db.serialize().equals(before)).toBe(true);
     const current = apply(id);
     await close(id, "adoption");
     expect(frontier(id)).toEqual(["record"]);
     before = db.serialize();
     await expect(runtime.reviseGraph(current)).rejects.toThrow("progressed since inspection");
-    expect(db.serialize()).toEqual(before);
+    expect(db.serialize().equals(before)).toBe(true);
     expect(queue.list({ tag: "step:record" } as never).length).toBe(1);
   });
 
@@ -304,7 +305,7 @@ describe("one preserved running graph and recoverable revision decision", () => 
     expect(recovered.receipt.projected).toEqual([{ stepId: "record", qitemId: packet(id, "record"), owner: "owner@rig" }]);
     const replay = await app.request("/api/workflow/" + id + "/revision", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
     expect(await replay.json()).toMatchObject({ replayed: true, projected: [] });
-    expect(db.serialize()).toEqual(after);
+    expect(db.serialize().equals(after)).toBe(true);
     expect(sends.length).toBe(sent);
   });
 
@@ -326,7 +327,7 @@ describe("one preserved running graph and recoverable revision decision", () => 
     db.exec("CREATE TRIGGER fail_projection BEFORE INSERT ON events WHEN NEW.type = 'workflow.next_qitem_projected' BEGIN SELECT RAISE(ABORT, 'synthetic write failure'); END");
     const before = db.serialize(), sent = sends.length;
     await expect(guarded.reviseGraph(input)).rejects.toThrow("synthetic write failure");
-    expect(db.serialize()).toEqual(before);
+    expect(db.serialize().equals(before)).toBe(true);
     expect(sends.length).toBe(sent);
     expect(recoverGraphOperation(db, input.operationKey)).toBeNull();
     db.exec("DROP TRIGGER fail_projection");
@@ -343,7 +344,7 @@ describe("one preserved running graph and recoverable revision decision", () => 
     expect(inspectGraph(db, id)).toMatchObject({ status: "compatible", projects: ["record"] });
     const before = db.serialize(), sent = sends.length;
     await expect(runtime.reviseGraph(apply(id))).rejects.toThrow("cannot resolve next owner");
-    expect(db.serialize()).toEqual(before);
+    expect(db.serialize().equals(before)).toBe(true);
     expect(sends.length).toBe(sent);
   });
 
@@ -382,7 +383,7 @@ describe("one preserved running graph and recoverable revision decision", () => 
     expect(reviseGraph(db, bus, input).replayed).toBe(true);
     expect(recoverGraphOperation(db, "entry")?.receipt.compiledInputDigest).toBe(run.compiledInputDigest);
     expect(() => reviseGraph(db, bus, { ...input, reason: "different decision" })).toThrow("different decision");
-    expect(db.serialize()).toEqual(after);
+    expect(db.serialize().equals(after)).toBe(true);
   });
 
   it("refuses stale proposals and rolls back the whole revision if event persistence fails", async () => {
@@ -391,12 +392,12 @@ describe("one preserved running graph and recoverable revision decision", () => 
     steps().find(s => s.id === "finish").objective = "Second edit"; save();
     const before = db.serialize();
     expect(() => reviseGraph(db, bus, input)).toThrow("Authored input changed");
-    expect(db.serialize()).toEqual(before);
+    expect(db.serialize().equals(before)).toBe(true);
     const current = apply(run.instanceId);
     db.exec("CREATE TRIGGER fail_revision BEFORE INSERT ON events WHEN NEW.type = 'workflow.revised' BEGIN SELECT RAISE(ABORT, 'synthetic write failure'); END");
     const beforeFailure = db.serialize();
     expect(() => reviseGraph(db, bus, current)).toThrow("synthetic write failure");
-    expect(db.serialize()).toEqual(beforeFailure);
+    expect(db.serialize().equals(beforeFailure)).toBe(true);
     expect(recoverGraphOperation(db, current.operationKey)).toBeNull();
   });
   it("invalidates proposed-member inspection on removal and recovers a missing source without another manifest edit", async () => {
@@ -424,7 +425,7 @@ describe("one preserved running graph and recoverable revision decision", () => 
     await expect(runtime.instantiateLifecycle({ missionPath: mission, operationKey: "shared-revision", rootObjective: "Conflict control", createdBySession: "owner@rig" })).rejects.toMatchObject({ code: "lifecycle_operation_conflict" });
     expect(() => reviseGraph(db, bus, { ...second, operationKey: "first-entry" })).toThrow("different decision");
     expect(() => reviseGraph(db, bus, { ...second, operationKey: 4 as unknown as string })).toThrow("inspected version/digest");
-    expect(db.serialize()).toEqual(before);
+    expect(db.serialize().equals(before)).toBe(true);
   });
 
   it("adopts only exception policy for future occurrences while preserving live child and completed judgment", async () => {

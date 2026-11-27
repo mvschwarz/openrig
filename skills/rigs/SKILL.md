@@ -426,7 +426,10 @@ commands; if the two ever differ, this step is right.
     A task closed with no result sent wakes nothing. Without the plugin, only the wait above does, where your app has
     one. While its work is open, start each of your turns by listing your address's tasks (above), before anything
     else, including when the person talks to you and when they come back. A Claude Desktop scheduled task can pick the
-    team's results up on a schedule, in a fresh session, not this chat. Offer it if they'd like that.
+    team's results up on a schedule, in a fresh session, not this chat. Offer it if they'd like that, and say what it
+    needs: where Desktop asks before each OpenRig call, each run waits there and shows them only "Needs your input"
+    until they approve it, or choose an approval that lasts across runs ("Always allow", or "Allow for all scheduled
+    runs") for OpenRig's read tools, where the app offers one.
 - **If the operator answers with a model error,** such as "… not supported when using Codex with a ChatGPT account", its
   Codex sign-in works but that account can't run the model. OpenRig put the operator on Codex because the sign-in
   passed. Tell the person which model failed. If Claude Code is signed in, offer to move the operator to it; on their

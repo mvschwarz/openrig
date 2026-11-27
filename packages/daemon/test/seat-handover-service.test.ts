@@ -6,6 +6,8 @@ import { CodexInPlaceRestart } from "../src/domain/seat-restart-in-place.js";
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
+import { SuccessorSessionLauncher } from "../src/domain/successor-session-launcher.js";
 import os from "node:os";
 import path from "node:path";
 import { ensureSeatSkillPlugin, seatSkillLocation, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
@@ -2341,7 +2343,8 @@ describe("SeatHandoverService", () => {
       harnessTmux = {
         hasSession: vi.fn(async () => true),
         getPaneCommand: vi.fn(async () => "synth-seat"),
-        sendShellCommand: vi.fn(async (_session: string, command: string) => {
+        sendShellCommand: vi.fn(async (_session: string, command: string, beforeInput?: () => void) => {
+          beforeInput?.();
           const file = /OPENRIG_LAUNCH_RESULT='([^']+)'/.exec(command)?.[1];
           const attempt = /OPENRIG_LAUNCH_ATTEMPT=(\S+)/.exec(command)?.[1];
           const resume = /OPENRIG_RESUME_REF='([^']+)'/.exec(command)?.[1];
@@ -2369,10 +2372,10 @@ describe("SeatHandoverService", () => {
         launchResultRoot: () => path.join(home, "launch-results"), launchResultWait: { timeoutMs: 500, intervalMs: 5 }, ...deps });
     }
 
-    function harnessService(adapters: Record<string, RuntimeAdapter>): SeatHandoverService {
+    function harnessService(adapters: Record<string, RuntimeAdapter>, overrides: Partial<ConstructorParameters<typeof SeatHandoverService>[0]> = {}): SeatHandoverService {
       return new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux(),
         now: () => new Date("2026-04-24T18:30:00.000Z"), runtimeAdapters: adapters, occupantInvalidator: { invalidateRetiringOccupant },
-        activityOracle: { declareOccupantSwap }, predecessorRecapResolver: resolvePredecessorRecap as never, readinessTimeoutMs: 50, sleep: async () => {} });
+        activityOracle: { declareOccupantSwap }, predecessorRecapResolver: resolvePredecessorRecap as never, readinessTimeoutMs: 50, sleep: async () => {}, ...overrides });
     }
 
     /** A seat a start launched for `runtime`, its session recording that, as a start records it (`selection: false`: one
@@ -2423,6 +2426,130 @@ describe("SeatHandoverService", () => {
         claudeResume: noResume, codexResume: noResume });
       return restore.restore(snapshot.id, { adapters });
     }
+
+    it("first-input handover passes one whole packet before launch and never types a duplicate, including held notices", async () => {
+      install(BASE + "names_conversation: true\nresume: true\nfirst_input: true\n");
+      const { rig, node, sessionId } = seedHarnessSeat();
+      const bindingBefore = sessionRegistry.getBindingForNode(node.id);
+      const captured = "predecessor\n" + " ü 'quoted' $literal\n".repeat(900) + "END-OF-PREDECESSOR";
+      capturePaneScreen.mockResolvedValue(captured);
+      const role = path.join(home, "startup", "role.md"); fs.mkdirSync(path.dirname(role)); fs.writeFileSync(role, "Your role");
+      db.prepare("UPDATE node_startup_context SET resolved_files_json = ? WHERE node_id = ?").run(JSON.stringify([
+        { path: "startup/role.md", absolutePath: role, ownerRoot: home, deliveryHint: "send_text", required: true,
+          appliesOn: ["fresh_start", "restore"], orientation: "role" },
+      ]), node.id);
+      db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql);
+      const outbox = new OutboxHandler(db);
+      outbox.retain({ outboxId: "held-first-input", senderSession: "sender@fixture", destinationSession: SEAT, body: "Kept work" },
+        { nodeId: node.id, session: SEAT, occupant: null, pane: null });
+      const heldBefore = outbox.getById("held-first-input");
+      const adapters = harnessAdapters();
+      const launchSpy = vi.spyOn(SuccessorSessionLauncher.prototype, "createSuccessor");
+      try {
+        harnessTmux.sendShellCommand.mockImplementation(async (_session: string, command: string, beforeInput?: () => void) => {
+          beforeInput?.();
+          expect(sessionRegistry.getBindingForNode(node.id)).toEqual(bindingBefore);
+          const file = /OPENRIG_FIRST_INPUT='([^']+)'/.exec(command)?.[1];
+          expect(file).toBeDefined(); expect(fs.existsSync(file!)).toBe(true);
+          return { ok: true };
+        });
+        const result = await harnessService(adapters, {
+          authoredRecapResolver: () => ({ address: "/saved/RECAP.md", chainLength: 2 }),
+        }).handover({ seatRef: SEAT, reason: "replace occupant", source: "fresh" });
+        expect(result).toMatchObject({ ok: true, result: { mutated: true, restorePacket: {
+          status: "unconfirmed", firstInput: { submission: "unconfirmed" }, consumption: "unconfirmed",
+        }, sideEffects: { startupContextDelivered: false } } });
+        if (!result.ok || !("result" in result)) return;
+        const file = result.result.restorePacket!.firstInput!.path;
+        const packet = fs.readFileSync(file, "utf8");
+        expect(packet === launchSpy.mock.calls[0]![0].firstInputText).toBe(true);
+        expect(packet.startsWith("=== OpenRig seat handover — restore context ===\n")).toBe(true);
+        expect(packet.includes(captured)).toBe(true);
+        for (const text of ["Seat: " + SEAT, "Predecessor session: " + SEAT, role, "/saved/RECAP.md"])
+          expect(packet).toContain(text);
+        expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+        expect(fs.statSync(path.dirname(file)).mode & 0o777).toBe(0o700);
+        expect(fs.readdirSync(path.dirname(file))).toHaveLength(1);
+        expect(harnessTmux.sendShellCommand).toHaveBeenCalledTimes(1);
+        expect(sendText).not.toHaveBeenCalled(); expect(sendKeys).not.toHaveBeenCalled();
+        expect(outbox.getById("held-first-input")).toEqual(heldBefore);
+        const events = db.prepare("SELECT seq, type, payload FROM events WHERE node_id = ? AND type IN ('seat.handover_first_input_passed', 'seat.handover_completed') ORDER BY seq")
+          .all(node.id) as Array<{ seq: number; type: string; payload: string }>;
+        expect(events.map(event => event.type)).toEqual(["seat.handover_first_input_passed", "seat.handover_completed"]);
+        expect(JSON.parse(events[0]!.payload)).toMatchObject({ path: file, submission: "unconfirmed", consumption: "unconfirmed", launchCommand: "accepted", binding: "not_committed" });
+        expect(JSON.parse(events[1]!.payload).restorePacket).toEqual(result.result.restorePacket);
+        expect(result.result.newSessionId).not.toBe(sessionId);
+        harnessTmux.sendShellCommand.mockClear();
+        harnessTmux.sendShellCommand.mockImplementation(async () => ({ ok: true }));
+        const restored = await restoreSeat(rig.id, node.id, adapters);
+        expect(restored.ok, JSON.stringify(restored)).toBe(true);
+        expect(harnessTmux.sendShellCommand.mock.calls[0]![1]).toContain("-u OPENRIG_FIRST_INPUT");
+        expect(fs.readdirSync(path.dirname(file))).toHaveLength(1);
+      } finally { launchSpy.mockRestore(); }
+    });
+
+    it("first-input handover preserves the passed receipt when readiness fails, without rebinding or resending", async () => {
+      install(BASE + "names_conversation: true\nfirst_input: true\n");
+      const { node } = seedHarnessSeat();
+      const bindingBefore = sessionRegistry.getBindingForNode(node.id);
+      harnessTmux.getPaneCommand.mockResolvedValue("sh");
+      const result = await harnessService(harnessAdapters()).handover({ seatRef: SEAT, reason: "replace occupant", source: "fresh" });
+      expect(result).toMatchObject({ ok: false, code: "successor_create_failed" });
+      if (result.ok) return;
+      expect(result.guidance).toContain("The restore packet was passed at launch");
+      expect(sessionRegistry.getBindingForNode(node.id)).toEqual(bindingBefore);
+      expect(sendText).not.toHaveBeenCalled(); expect(sendKeys).not.toHaveBeenCalled();
+      const events = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'seat.handover_first_input_passed'").all(node.id) as Array<{ payload: string }>;
+      expect(events).toHaveLength(1);
+      const receipt = JSON.parse(events[0]!.payload);
+      expect(receipt).toMatchObject({ submission: "unconfirmed", consumption: "unconfirmed", launchCommand: "accepted", binding: "not_committed" });
+      expect(fs.readFileSync(receipt.path, "utf8")).toContain("Seat: " + SEAT);
+      expect(db.prepare("SELECT 1 FROM events WHERE node_id = ? AND type = 'seat.handover_completed'").get(node.id)).toBeUndefined();
+    });
+
+    it("first-input handover preserves the full packet when an argument-based example reports E2BIG", async () => {
+      const example = path.resolve(__dirname, "../../../docs/reference/community-harness-examples/openclaw/openrig-openclaw-launch");
+      install(BASE.replace("command: synth-seat", `command: ${example}`) + "names_conversation: true\nfirst_input: true\n");
+      const { node } = seedHarnessSeat();
+      const bindingBefore = sessionRegistry.getBindingForNode(node.id);
+      const captured = "x".repeat(2 * 1024 * 1024) + "END-OF-LARGE-PACKET";
+      capturePaneScreen.mockResolvedValue(captured);
+      const native = path.join(home, "fake-openclaw"), marker = path.join(home, "native-started");
+      fs.writeFileSync(native, `#!/bin/sh\nprintf started > '${marker}'\n`, { mode: 0o755 });
+      let packetFile: string | undefined;
+      harnessTmux.sendShellCommand.mockImplementation(async (_session: string, command: string, beforeInput?: () => void) => {
+        beforeInput?.(); packetFile = /OPENRIG_FIRST_INPUT='([^']+)'/.exec(command)?.[1];
+        const child = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", env: { ...process.env,
+          LC_ALL: "C", OPENRIG_HOME: home, OPENRIG_NODE_ID: node.id, OPENRIG_OPENCLAW: native } });
+        return child.status === 0 ? { ok: true } : { ok: false, message: child.stderr || child.error?.message || `launcher exit ${child.status}` };
+      });
+      const result = await harnessService(harnessAdapters()).handover({ seatRef: SEAT, reason: "replace occupant", source: "fresh" });
+      expect(result).toMatchObject({ ok: false, code: "successor_create_failed" });
+      if (result.ok) return;
+      expect(result.message).toMatch(/Argument list too long|E2BIG/i);
+      expect.soft(result.guidance).toContain("re-wakeable from its provider session file");
+      expect.soft(result.guidance).toContain("The restore packet was passed at launch");
+      expect.soft(result.guidance).toContain("do not resend the packet or repeat the handover");
+      expect(sessionRegistry.getBindingForNode(node.id)).toEqual(bindingBefore);
+      expect(packetFile).toBeDefined();
+      const packet = fs.readFileSync(packetFile!, "utf8");
+      expect(packet.includes(captured)).toBe(true); expect(Buffer.byteLength(packet)).toBeGreaterThan(Buffer.byteLength(captured));
+      expect(fs.existsSync(marker)).toBe(false);
+      expect(sendText).not.toHaveBeenCalled(); expect(sendKeys).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT 1 FROM events WHERE node_id = ? AND type = 'seat.handover_completed'").get(node.id)).toBeUndefined();
+      const passed = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'seat.handover_first_input_passed'").get(node.id) as { payload: string };
+      expect(JSON.parse(passed.payload)).toMatchObject({ path: packetFile, submission: "unconfirmed", consumption: "unconfirmed" });
+    });
+
+    it("first-input handover leaves a non-opt-in community preset on typed delivery", async () => {
+      install(BASE + "names_conversation: true\n"); seedHarnessSeat();
+      const result = await harnessService(harnessAdapters()).handover({ seatRef: SEAT, reason: "replace occupant", source: "fresh" });
+      expect(result).toMatchObject({ ok: true, result: { restorePacket: { status: "accepted" }, sideEffects: { startupContextDelivered: true } } });
+      expect(harnessTmux.sendShellCommand.mock.calls[0]![1]).not.toContain("OPENRIG_FIRST_INPUT");
+      expect(sendText).toHaveBeenCalledTimes(1); expect(sendText.mock.calls[0]![1]).toContain("Seat: " + SEAT);
+      expect(sendKeys).toHaveBeenCalledWith(SEAT, ["Enter"]);
+      expect(db.prepare("SELECT 1 FROM events WHERE type = 'seat.handover_first_input_passed'").get()).toBeUndefined();
+    });
 
     it.each([
       ["a launcher-reported conversation (plain preset)", "launch_result: true\nresume: true\n", 0, "launcher", "reported by its launcher, not observed"],

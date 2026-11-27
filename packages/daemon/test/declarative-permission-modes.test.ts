@@ -1104,7 +1104,7 @@ description: Custom rig policy
       sessionRegistry: registry,
       discoveryRepo,
       eventBus,
-      successorLauncher: { createSuccessor } as any,
+      successorLauncher: { createSuccessor, usesFirstInput: vi.fn(() => false) } as any,
       tmuxAdapter: { capturePaneScreen: vi.fn(async () => "") } as any,
     });
 

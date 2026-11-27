@@ -71,8 +71,8 @@ Five host-scoped tables back the primitive, one per migration `023`–`027` in
   retired`.
 
 These five are migrations `023`–`027` of the daemon's **96**
-(`git ls-files packages/daemon/src/db/migrations | wc -l`), applied in the
-order of `ALL_MIGRATIONS` (`packages/daemon/src/db/all-migrations.ts:107`).
+(`git ls-files packages/daemon/src/db/migrations | wc -l`), applied in name
+order by `migrate()` (`packages/daemon/src/db/migrate.ts`).
 Later migrations add columns to these tables; `daemon-core.md` covers the
 migration set.
 

@@ -125,6 +125,7 @@ import { readClaudeSelfReportEvidence, verifiedSelfReportPid } from "./adapters/
 import { replaceFile } from "./adapters/replace-file.js";
 import { stageCodexActivityRelay } from "./adapters/codex-activity-relay.js";
 import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
+import { attachDraftHeldReoffer } from "./domain/draft-held-reoffer.js";
 import { deriveSelfHostIdSource, SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./domain/seat-identity-store.js";
 import { DaemonLifecycleStore } from "./domain/daemon-lifecycle-store.js";
@@ -722,7 +723,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       if (activity.state === "unknown") return null;
       if (runtime === "claude-code" && activity.state === "needs_input"
           && !["permission_prompt", "selection_prompt"].includes(activity.reason)) return null;
-      return activity.state === "needs_input" && ["permission_prompt", "selection_prompt"].includes(activity.reason);
+      return activity.state === "needs_input" && ["permission_prompt", "selection_prompt", "hook_trust_gate"].includes(activity.reason);
     },
     permissionPromptChanged: (sessionName, confirmed, runtime) => {
       const latest = agentActivityStore.getLatestForNode({ sessionName });
@@ -766,10 +767,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // An idle seat may have cleared the draft its draft-aware guard held a wake for (#48).
     void queueRepoInstance.retryDraftHeldWakesOnIdle(sessionName, state)
       .catch(error => console.warn(`Draft-held wake retry: ${error instanceof Error ? error.name : typeof error}`));
+    // A plain message held only for that draft goes then too, in order, each through the same guarded delivery.
+    void queueRepoInstance.deliverDraftHeldMessagesOnIdle(sessionName, state)
+      .catch(error => console.warn(`Draft-held message delivery: ${error instanceof Error ? error.name : typeof error}`));
     restoredSeatActivity?.(sessionName, state);
     rexSeatActivity?.(sessionName, { activity, runtime });
   };
   seatStructuralActivityService.attachActivityChanged(retryPromptWakes);
+  // A held message whose last try met the person's recent typing, a drain or a restore is offered again from the same
+  // per-tick sweep, even when the seat's state stays the same (#3991). No capture or delivery path of its own.
+  attachDraftHeldReoffer(seatStructuralActivityService, queueRepoInstance, sessionName => currentSeatActivity(sessionName).activity?.state,
+    { onError: error => console.warn(`Draft-held message re-offer: ${error instanceof Error ? error.name : typeof error}`) });
   eventBus.subscribe(event => { if (event.type === "agent.activity") retryPromptWakes(event.sessionName); });
   // #3315 — whether the daemon reaches its tmux server is state of its own (terminal-server-seats.ts): recorded once
   // per change, delivery to its seats held meanwhile, its return noticed by a read-only probe and owed work offered
@@ -1937,6 +1945,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           return true;
         }
       });
+      // The previous process's deliveries are settled first: the sweep below is the first thing in this process that can
+      // take a claim, and it starts before the server binds, so a later recovery could overwrite a live claim's result.
+      t.guardedDelivery?.recover();
       // Slice 13: messages queued for a hook bridge that has no live arm are typed after the bound; claimed batches whose
       // waiter is gone without an ack become indeterminate.
       setInterval(() => { void t.sweepHookBridge().catch(() => {}); }, 5_000).unref();

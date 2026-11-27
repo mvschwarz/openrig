@@ -638,6 +638,25 @@ export function packagedSeatSkills(entries: ReadonlyArray<Pick<CatalogSkill, "id
 
 const realOrResolved = (path: string): string => { try { return fs.realpathSync(path); } catch { return nodePath.resolve(path); } };
 
+/** The common umasks an install runs under. npm applies the installing shell's umask to every file of a package, so the
+ *  same packaged file is 0600 (0700 for a script) under 077 and 0644 (0755) under 022. */
+const INSTALL_UMASKS = [0o022, 0o002, 0o027, 0o007, 0o077, 0o000];
+
+/**
+ * The modes to try for the recorded files `rig down` removed, whose own modes are gone: today's packaged modes first,
+ * then those modes as each common install umask would have left them (one umask for the whole install). A removed file's
+ * mode only completes the recorded digest; a match proves the present files are as OpenRig wrote them, bytes and modes,
+ * so a seat's own mode change on a present file is still found. Without this, an upgrade installed under another umask
+ * than the one before reads as a mode OpenRig didn't write, and the old copy is kept.
+ */
+function removedModeCandidates(removed: readonly string[], packagedMode: ReadonlyMap<string, number>): Array<Record<string, number>> {
+  const today = Object.fromEntries(removed.map((rel) => [rel, packagedMode.get(rel)!]));
+  if (removed.length === 0) return [today];
+  // The package's own mode, before any umask: the owner's read and execute bits given to group and others (0700 -> 0755).
+  const unmasked = (mode: number) => mode | ((mode & 0o500) >> 3) | ((mode & 0o500) >> 6);
+  return [today, ...INSTALL_UMASKS.map((mask) => Object.fromEntries(removed.map((rel) => [rel, unmasked(packagedMode.get(rel)!) & ~mask & 0o777])))];
+}
+
 /**
  * For a restore, before the saved skills are put back: bring OpenRig's own packaged skills in the seat's loadout up to
  * the packaged source as it is now, so an upgrade's changed copy comes back with today's bytes instead of being named
@@ -688,7 +707,8 @@ function followPackagedSeatSkills(paths: SeatSkillPaths, packaged: ReadonlyArray
     }
     // The copy here must be OpenRig's: every present file recorded, at its recorded bytes, and the saved digest (bytes
     // and modes, the reconciler's rule) rebuilt from the present files' modes and, for what `rig down` removed, today's
-    // packaged modes: rig down removes a file only while its source still has it.
+    // packaged modes, or those modes as another install umask left them (removedModeCandidates): rig down removes a file
+    // only while its source still has its bytes, and an upgrade installed under another umask changes its packaged mode.
     let why: string | undefined;
     if (!insideSeatStorageFolder(paths.root, dir)) why = "it is not inside this seat's storage (a link on the way)";
     else {
@@ -702,13 +722,17 @@ function followPackagedSeatSkills(paths: SeatSkillPaths, packaged: ReadonlyArray
         }
         if (!why && present.length > 0) {
           const packagedMode = new Map(tree.files.map((file) => [file.rel, file.mode]));
-          const modes: Record<string, number> = {};
+          const presentModes: Record<string, number> = {};
+          const removed: string[] = [];
           for (const rel of Object.keys(recorded)) {
-            if (present.includes(rel)) modes[rel] = fs.lstatSync(nodePath.join(dir, rel)).mode & 0o777;
-            else if (packagedMode.has(rel)) modes[rel] = packagedMode.get(rel)!;
+            if (present.includes(rel)) presentModes[rel] = fs.lstatSync(nodePath.join(dir, rel)).mode & 0o777;
+            else if (packagedMode.has(rel)) removed.push(rel);
             else { why = `${nodePath.join(dir, rel)} is gone, so OpenRig can't tell this copy is as it wrote it`; break; }
           }
-          if (!why && skillTreeDigest(recorded, modes) !== skill.digest) why = `${dir} has file modes OpenRig didn't write`;
+          if (!why && !removedModeCandidates(removed, packagedMode)
+            .some((removedModes) => skillTreeDigest(recorded, { ...presentModes, ...removedModes }) === skill.digest)) {
+            why = `${dir} has file modes OpenRig didn't write`;
+          }
         }
       } catch { why = `${dir} can't be read`; }
     }

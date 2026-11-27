@@ -83,6 +83,7 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  activityState?: { display: string; needsInput: { count: number; reason: string | null } } | null;
   external_attachment?: { liveness: "unknown"; lastOwnQueueAction: { at: string; qitemId: string; state: string } | null;
     lastOwnQueueActionRead?: "read" | "unavailable" };
   standby_stopped?: true;
@@ -198,8 +199,8 @@ interface SeatHandoverMutationResult {
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending" | "none"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string };
         model?: { requested: string | null; predecessorCompared: false } };
-  /** The restore or rebuild priming packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
-  restorePacket?: { status: "unconfirmed" | "accepted"; reason: string };
+  /** A packet passed at launch or typed afterward, with its submission still unconfirmed. */
+  restorePacket?: { status: "unconfirmed" | "accepted"; reason: string; firstInput?: { path: string; submission: "unconfirmed" }; consumption?: "unconfirmed" };
   /** #2456: the required startup files the successor started without, where a start would have failed. */
   startedWithoutRequired?: string[];
   /** #2985: this handover adopted the running successor of an earlier failed one (`--recover`). */
@@ -344,6 +345,10 @@ function printHuman(status: SeatStatusResponse): void {
   } else {
     console.log(`Session: ${status.standby_stopped ? "standby (wakes for queued work)" : status.session_status === "running" && status.lifecycle_state === "attention_required"
       ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
+  }
+  if (status.activityState) {
+    const reason = status.activityState.needsInput.count > 0 ? status.activityState.needsInput.reason : null;
+    console.log(`Activity: ${status.activityState.display}${reason ? ` (${reason})` : ""}`);
   }
   const stop = status.permission_stop;
   if (stop && stop.state !== "unavailable") {
@@ -526,8 +531,11 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
     // #3044: a recovered successor on the retiring occupant's conversation resumed it (the result's warning says so).
     if (result.currentStatus?.continuityOutcome !== "resumed") console.log("No conversation continuity was carried: the successor started a fresh conversation.");
   } else if (result.restorePacket?.status === "unconfirmed") {
-    // The packet was pasted and Enter pressed: the successor may already be working on it, so don't send it again.
-    if (result.source.mode === "rebuild") {
+    // A launch input is not a pasted-and-submitted packet; keep its receipt distinct.
+    if (result.restorePacket.firstInput) {
+      console.log(`The restore packet was passed at launch through ${result.restorePacket.firstInput.path}; submission and consumption are unconfirmed.`);
+      console.log("Do not resend the packet or repeat the handover because its uptake is unknown.");
+    } else if (result.source.mode === "rebuild") {
       console.log(`The rebuild priming packet was sent to the successor, but its submission is unconfirmed: ${result.restorePacket.reason}.`);
       if (result.restorePacket.reason === "the prompt still looked staged in the input box") {
         console.log("Check the successor's current screen. Only if that exact packet is still staged, submit the existing packet once. Do not resend blindly or rerun the handover.");

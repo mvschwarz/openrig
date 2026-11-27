@@ -9,10 +9,15 @@ import nativePaste from "./fixtures/claude-paste-footer.json";
 import { wrapPaneEnvelope } from "../src/lib/pane-envelope.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { COALESCED_INTO, DRAFT_HELD_BEHIND_EARLIER, DRAFT_HELD_PER_SENDER, OutboxHandler } from "../src/domain/outbox-handler.js";
+import { attachDraftHeldReoffer } from "../src/domain/draft-held-reoffer.js";
+import { HOOK_BRIDGE_LIVE_BOUND_MS, HookBridge } from "../src/domain/hook-bridge.js";
+import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { RigDeliveryDrainStore } from "../src/domain/rig-delivery-drain.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { DeliveryGuardError, SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport, type SendOpts } from "../src/domain/session-transport.js";
 import { seatRoutes } from "../src/routes/seat.js";
@@ -744,8 +749,12 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(await f.send("draft-cleared", "current request", { beforeWrite: oldPrerequisite })).toMatchObject({ outcome: "retained", sent: false });
     expect(f.submissions).toEqual([]);
     f.bodies.a = "";
-    expect(await f.send("draft-cleared", "current request")).toMatchObject({ ok: true, sent: true });
-    expect(f.submissions).toEqual(["current request"]);
+    // The held request goes once the input is clear, so the sender's resend waits behind it rather than overtaking it, and
+    // both go in order. Neither replays the first attempt's prerequisite.
+    expect(await f.send("draft-cleared", "current request")).toMatchObject({ outcome: "retained", sent: false, reason: DRAFT_HELD_BEHIND_EARLIER });
+    expect(f.submissions).toEqual([]);
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.submissions).toEqual(["current request", "current request"]);
     expect(oldPrerequisite).not.toHaveBeenCalled();
   });
 
@@ -924,8 +933,10 @@ describe("current draft-aware delivery through the real transport", () => {
   it("does not serialize or replay a live prerequisite", async () => {
     const f = fixture(); await f.enable(); f.bodies.a = "draft"; const beforeWrite = vi.fn();
     expect(await f.send("live", "message", { beforeWrite })).toMatchObject({ outcome: "retained", reason: "draft_input_busy" });
-    f.bodies.a = ""; await f.send("live", "message");
-    expect(beforeWrite).not.toHaveBeenCalled(); expect(f.submissions).toEqual(["message"]);
+    // The resend waits behind the held message (same sender), and both go in order; the live prerequisite never runs.
+    f.bodies.a = ""; expect(await f.send("live", "message")).toMatchObject({ outcome: "retained", reason: DRAFT_HELD_BEHIND_EARLIER });
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(beforeWrite).not.toHaveBeenCalled(); expect(f.submissions).toEqual(["message", "message"]);
   });
 });
 
@@ -2020,5 +2031,736 @@ describe("#2429: the guard's own paste after Claude Code collapses it", () => {
     expect(await f.send("hint-gives-way", reminder, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
     expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
     expect(f.submissions).toEqual([]);
+  });
+});
+
+// A plain message held only for a draft in the input goes once the input is clear,
+// through the same guarded delivery, each message with its own outcome and in order. Only messages first held under this
+// behaviour qualify: older held messages, hold-mode messages and system senders' messages stay as they were.
+describe("plain messages held for a draft", () => {
+  const held = (f: ReturnType<typeof fixture>, sender = "pm@test") => f.db.prepare(
+    "SELECT outbox_id, delivery_state, tags FROM outbox_entries WHERE sender_session = ? ORDER BY ts_dispatched, rowid",
+  ).all(sender) as Array<{ outbox_id: string; delivery_state: string; tags: string | null }>;
+  const tagged = (row: { tags: string | null }) => (JSON.parse(row.tags ?? "[]") as string[]).includes("delivery:draft-eligible");
+
+  it("delivers two different held messages from one sender, each once and in order, when the draft clears", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const first = await f.transport.send("worker@test", "first request", { actorSession: "pm@test" });
+    const second = await f.transport.send("worker@test", "second request", { actorSession: "pm@test" });
+    expect(first.outcome).toBe("retained"); expect(second.outcome).toBe("retained");
+    expect(first.warning).toContain("typed once the input is clear");
+    expect(held(f).map(r => [r.delivery_state, tagged(r)])).toEqual([["retained", true], ["retained", true]]);
+    f.bodies.a = "";
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(held(f).map(r => r.delivery_state)).toEqual(["delivered", "delivered"]);
+    const order = f.submissions.map(s => s.includes("first request") ? 1 : s.includes("second request") ? 2 : 0).filter(Boolean);
+    expect(order).toEqual([1, 2]);
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.submissions.filter(s => s.includes("first request") || s.includes("second request"))).toHaveLength(2);
+  });
+
+  it("keeps them held while the draft stays, typing nothing over it", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    await f.transport.send("worker@test", "first request", { actorSession: "pm@test" });
+    for (let i = 0; i < 3; i++) await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(held(f).map(r => [r.delivery_state, tagged(r)])).toEqual([["retained", true]]);
+    expect(f.writes).toEqual([]);
+  });
+
+  it("leaves a message held before this behaviour alone (no tag), even with the input clear", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    await f.transport.send("worker@test", "older request", { actorSession: "pm@test" });
+    f.db.prepare("UPDATE outbox_entries SET tags = NULL WHERE sender_session = 'pm@test'").run();
+    f.bodies.a = "";
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(held(f).map(r => r.delivery_state)).toEqual(["retained"]);
+    expect(f.writes).toEqual([]);
+  });
+
+  it("never delivers a hold-mode message, and doesn't tag it", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.guard.set("a", { mode: "hold" }, "human@test", "manual terminal");
+    await f.transport.send("worker@test", "a request", { actorSession: "pm@test" });
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(held(f).map(r => [r.delivery_state, tagged(r)])).toEqual([["retained", false]]);
+    expect(f.writes).toEqual([]);
+  });
+
+  it("tells the seat once when hold mode is released, and types none of the held messages", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.guard.set("a", { mode: "hold" }, "human@test", "manual terminal");
+    await f.transport.send("worker@test", "a request", { actorSession: "pm@test" });
+    const send = vi.spyOn(f.transport, "send");
+    expect((await f.post("/api/seat/set-typing-guard/worker@test", { mode: "off", reason: "back at the keyboard" })).status).toBe(200);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(String(send.mock.calls[0]![1])).toMatch(/^Automatic input is no longer held\. 1 held message was kept for this seat and not delivered: read it with rig seat held-messages /);
+    expect(held(f).map(r => r.delivery_state)).toEqual(["retained"]);
+    expect((await f.post("/api/seat/set-typing-guard/worker@test", { mode: "draft-aware", reason: "draft mode" })).status).toBe(200);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("doesn't tag a system sender's held message, which keeps its own schedule", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    await f.transport.send("worker@test", "reminder", { actorSession: "watchdog@system" });
+    expect(held(f, "watchdog@system").map(r => [r.delivery_state, tagged(r)])).toEqual([["retained", false]]);
+  });
+});
+
+
+describe("draft-held message accounting under changed conditions", () => {
+  it("records legacy full-quota supersession per message instead of claiming the earlier one delivered", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const target = f.guard.target("worker@test");
+    f.outbox.retain({ outboxId: "quota-earlier", senderSession: "pm@test", destinationSession: "worker@test", body: "earlier distinct request" }, target);
+    for (let i = 1; i < 100; i++) f.outbox.retain({ outboxId: `quota-other-${i}`, senderSession: `other-${i}@test`, destinationSession: "worker@test", body: "held" }, target);
+    const result = await f.transport.send("worker@test", "later distinct request", { actorSession: "pm@test" });
+    const id = result.outboxIds![0]!;
+    expect(result.outcome).toBe("retained");
+    expect(f.outbox.getById("quota-earlier")).toMatchObject({ deliveryState: "retired", body: "earlier distinct request", retirementReason: `coalesced into ${id}` });
+    expect(f.outbox.coalescedInto(id)).toEqual(["quota-earlier"]);
+    expect(f.outbox.getById(id)).toMatchObject({ deliveryState: "retained", body: "later distinct request" });
+    expect(f.outbox.retentionUsage("a").count).toBe(100);
+    expect(f.submissions).toEqual([]);
+  });
+
+  it("does not report custody for the next distinct request when all quota entries are individually eligible", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const target = f.guard.target("worker@test");
+    for (let i=0; i<100; i++) f.outbox.retain({ outboxId: `eligible-${i}`, senderSession: "pm@test", destinationSession: "worker@test", body: `distinct request ${i}`, tags: ["delivery:draft-eligible"] }, target, false, { coalesce: false });
+    const result=await f.transport.send("worker@test", "one request too many", {actorSession: "pm@test"});
+    expect(result).toMatchObject({ok:false,sent:false,outcome:"failed"});
+    expect(result.outboxIds).toBeUndefined();
+    expect(f.db.prepare("SELECT count(*) AS n FROM outbox_entries WHERE delivery_state='retained'").get()).toMatchObject({n:100});
+    expect(f.db.prepare("SELECT count(*) AS n FROM outbox_entries WHERE delivery_state='retired'").get()).toMatchObject({n:0});
+    expect(f.submissions).toEqual([]);
+  });
+
+  it("keeps earlier-occupant custody listed without blocking a later message for the current occupant", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const old = await f.transport.send("worker@test", "request for original occupant", { actorSession: "pm@test" });
+    const oldId = old.outboxIds![0]!;
+    f.db.exec("INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('new-occupant','a',2,'new-generation','fresh')");
+    const current = await f.transport.send("worker@test", "request for current occupant", { actorSession: "pm@test" });
+    const currentId = current.outboxIds![0]!; f.bodies.a = "";
+    const send = vi.spyOn(f.transport, "send");
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect([f.outbox.getById(oldId)!.deliveryState, f.outbox.getById(currentId)!.deliveryState]).toEqual(["retained", "delivered"]);
+    expect(f.outbox.heldForNode("a").items.map(entry => entry.outboxId)).toContain(oldId);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(f.submissions.filter(text => text.includes("request for original occupant"))).toEqual([]);
+    expect(f.submissions.filter(text => text.includes("request for current occupant"))).toHaveLength(1);
+  });
+});
+
+
+describe("hold-release notice accounting", () => {
+  it("emits one notice when two callers concurrently request the same release", async () => {
+    const f=fixture(undefined,{runtime:"claude-code"});
+    await f.guard.set("a",{mode:"hold"},"human@test","manual input");
+    await f.transport.send("worker@test","held request",{actorSession:"pm@test"});
+    const send=vi.spyOn(f.transport,"send");
+    const responses=await Promise.all([
+      f.post("/api/seat/set-typing-guard/worker@test",{mode:"off",reason:"release one"}),
+      f.post("/api/seat/set-typing-guard/worker@test",{mode:"off",reason:"release retry"}),
+    ]);
+    expect(responses.map(r=>r.status)).toEqual([200,200]);
+    expect(send.mock.calls.filter(call=>String(call[1]).startsWith("Automatic input is no longer held."))).toHaveLength(1);
+    expect(f.db.prepare("SELECT delivery_state FROM outbox_entries WHERE sender_session='pm@test'").get()).toMatchObject({delivery_state:"retained"});
+  });
+});
+
+
+describe("pending hold-release notice", () => {
+  it("notifies after the effective release even when the API initially returns pending", async () => {
+    const f=fixture(undefined,{runtime:"claude-code"});
+    await f.guard.set("a",{mode:"hold"},"human@test","manual input");
+    await f.transport.send("worker@test","held request",{actorSession:"pm@test"});
+    let enter!:()=>void, release!:()=>void;
+    const entered=new Promise<void>(resolve=>{enter=resolve;});
+    const gate=new Promise<void>(resolve=>{release=resolve;});
+    const running=f.guard.operation("worker@test",async()=>{},async()=>{enter();await gate;});
+    await entered;
+    const send=vi.spyOn(f.transport,"send");
+    try {
+      const response=await f.post("/api/seat/set-typing-guard/worker@test",{mode:"off",reason:"release while leased"});
+      expect(response.status).toBe(202);
+      expect(send).not.toHaveBeenCalled();
+      release();await running;
+      await vi.waitFor(()=>expect(send.mock.calls.filter(call=>String(call[1]).startsWith("Automatic input is no longer held."))).toHaveLength(1));
+      expect(f.guard.preference("a")).toMatchObject({effectiveMode:"off",pending:false});
+      expect(f.db.prepare("SELECT delivery_state FROM outbox_entries WHERE sender_session='pm@test'").get()).toMatchObject({delivery_state:"retained"});
+    } finally {release();await running;}
+  });
+});
+
+
+describe("draft-held retry guard and uncertainty controls", () => {
+  it("honours a renewed native-input refusal before retrying a held message", async () => {
+    const f=fixture(undefined,{runtime:"claude-code"});await f.enable();f.bodies.a="draft";
+    const held=await f.transport.send("worker@test","retained request",{actorSession:"pm@test"});
+    const id=held.outboxIds![0]!;f.bodies.a="";
+    const before=vi.spyOn(f.guard,"beforeInput").mockRejectedValueOnce(new DeliveryGuardError("target_needs_input","fixture native input needs an answer"));
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test","idle");
+    expect(before).toHaveBeenCalled();expect(f.submissions).toEqual([]);expect(f.writes).toEqual([]);
+    expect(f.outbox.getById(id)!.deliveryState).toBe("retained");before.mockRestore();
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test","idle");
+    expect(f.outbox.getById(id)!.deliveryState).toBe("delivered");
+    expect(f.submissions.filter(s=>s.includes("retained request"))).toHaveLength(1);
+  });
+
+  it("does not request cold start when a plain message retry finds no receiver", async () => {
+    const f=fixture(undefined,{runtime:"claude-code"});await f.enable();f.bodies.a="draft";
+    const held=await f.transport.send("worker@test","retained request",{actorSession:"pm@test"});
+    f.db.exec("UPDATE sessions SET status='exited' WHERE node_id='a'");f.bodies.a="";
+    const notify=vi.fn();f.repo.attachWakeWithoutReceiverNotifier(notify);
+    vi.spyOn(f.transport,"send").mockResolvedValueOnce({ok:false,sessionName:"worker@test",sent:false,inputPhase:"not_reached",reason:"session_missing"});
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test","idle");
+    expect(f.outbox.getById(held.outboxIds![0]!)!.deliveryState).toBe("failed");
+    expect(notify).not.toHaveBeenCalled();expect(f.submissions).toEqual([]);
+  });
+
+  it.each([false,true])("keeps an uncertain retry out of replay (thrown=%s)",async throws=>{
+    const f=fixture(undefined,{runtime:"claude-code"});await f.enable();f.bodies.a="draft";
+    const held=await f.transport.send("worker@test","retained request",{actorSession:"pm@test"});f.bodies.a="";
+    const send=vi.spyOn(f.transport,"send");
+    if(throws)send.mockRejectedValueOnce(new Error("fixture send ended without a receipt"));
+    else send.mockResolvedValueOnce({ok:false,sessionName:"worker@test",sent:true,inputPhase:"written",reason:"delivery_indeterminate"});
+    const retry=f.repo.deliverDraftHeldMessagesOnIdle("worker@test","idle");
+    if(throws)await expect(retry).rejects.toThrow("fixture send ended without a receipt");else await retry;
+    expect(f.outbox.getById(held.outboxIds![0]!)!.deliveryState).toBe("indeterminate");
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test","idle");expect(send).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("draft-held recipient changes during a retry", () => {
+  it.each([false, true])("restores unwritten custody if the recipient changes after selection (already failed=%s)", async alreadyFailed => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "request for original occupant", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!; f.bodies.a = "";
+    const original = f.transport.send.bind(f.transport);
+    const send = vi.spyOn(f.transport, "send").mockImplementationOnce(async (session, text, opts) => {
+      f.db.exec("INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('race-occupant','a',2,'race-generation','fresh')");
+      // Conditional transports can finalize a positive pre-input refusal themselves before returning it.
+      if (alreadyFailed) f.outbox.finalizeDelivery(id, "failed");
+      return original(session, text, opts);
+    });
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.outbox.getById(id)!.deliveryState).toBe("retained");
+    expect(f.outbox.heldForNode("a").items.map(entry => entry.outboxId)).toContain(id);
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(send).toHaveBeenCalledTimes(1); expect(f.writes).toEqual([]); expect(f.submissions).toEqual([]);
+  });
+});
+
+
+describe("draft-held delivery controls becoming active between messages", () => {
+  it.each(["restore", "drain"])("stops before the next message when %s becomes pending during a send", async control => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const first = await f.transport.send("worker@test", "first retained request", { actorSession: "pm@test" });
+    const second = await f.transport.send("worker@test", "second retained request", { actorSession: "pm@test" });
+    let restorePending = false;
+    const repo = new QueueRepository(f.db, new EventBus(f.db), { transport: f.transport,
+      hasPendingPostCompactStage: () => restorePending, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+    repo.attachOutbox(f.outbox);
+    const drain = new RigDeliveryDrainStore(f.db), jobs = new WatchdogJobsRepository(f.db);
+    const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
+    f.bodies.a = "";
+    const original = f.transport.send.bind(f.transport);
+    vi.spyOn(f.transport, "send").mockImplementationOnce(async (session, text, opts) => {
+      const result = await original(session, text, opts);
+      if (control === "restore") restorePending = true;
+      else drain.begin(rigId, { drainId: "fixture-mid-pass", owner: "human@test", reviewAt: new Date(Date.now() + 60_000).toISOString() }, jobs);
+      return result;
+    });
+    await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect([first, second].map(result => f.outbox.getById(result.outboxIds![0]!)!.deliveryState)).toEqual(["delivered", "retained"]);
+    expect(f.submissions.filter(text => text.includes("second retained request"))).toEqual([]);
+    restorePending = false;
+    if (control === "drain") drain.end(rigId, "fixture-mid-pass", jobs);
+    await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.outbox.getById(second.outboxIds![0]!)!.deliveryState).toBe("delivered");
+    expect(f.submissions.filter(text => text.includes("second retained request"))).toHaveLength(1);
+  });
+});
+
+
+// The architecture round on #3991: one sender keeps at most DRAFT_HELD_PER_SENDER draft-held messages at a seat, past
+// which its oldest is coalesced into its newest (#2430's recorded supersession); a full quota says so; OpenRig's own
+// senders, the daemon included, are never draft-held.
+describe("draft-held messages bounded per sender", () => {
+  const rows = (f: ReturnType<typeof fixture>, sender: string) => f.db.prepare(
+    "SELECT outbox_id, body, delivery_state, retirement_reason, tags FROM outbox_entries WHERE sender_session = ? ORDER BY ts_dispatched, rowid",
+  ).all(sender) as Array<{ outbox_id: string; body: string; delivery_state: string; retirement_reason: string | null; tags: string | null }>;
+  const tagged = (row: { tags: string | null }) => (JSON.parse(row.tags ?? "[]") as string[]).includes("delivery:draft-eligible");
+
+  it("keeps one sender's newest messages, coalesces its older ones into the newest, and types only those once the draft clears", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const total = DRAFT_HELD_PER_SENDER + 2;
+    const results = [];
+    for (let i = 1; i <= total; i++) results.push(await f.transport.send("worker@test", `request ${i}`, { actorSession: "pm@test" }));
+    await f.transport.send("worker@test", "another sender's request", { actorSession: "qa@test" });
+    const pm = rows(f, "pm@test");
+    // The send that took each older one past the bound names it to its sender; the earlier sends supersede nothing.
+    expect(results.slice(0, DRAFT_HELD_PER_SENDER).every(r => !r.warning?.includes("supersedes"))).toBe(true);
+    expect(results[DRAFT_HELD_PER_SENDER]!.warning).toContain(`This supersedes your earlier held message ${pm[0]!.outbox_id} here (past ${DRAFT_HELD_PER_SENDER} from one sender); it stays readable by ID and won't be typed.`);
+    expect(results[DRAFT_HELD_PER_SENDER + 1]!.warning).toContain(`your earlier held message ${pm[1]!.outbox_id} here`);
+    // Each older one is coalesced into the message whose arrival took it past the bound, and that message names it.
+    expect(pm.slice(0, 2).map(r => [r.delivery_state, r.retirement_reason]))
+      .toEqual([["retired", `${COALESCED_INTO}${pm[DRAFT_HELD_PER_SENDER]!.outbox_id}`], ["retired", `${COALESCED_INTO}${pm[DRAFT_HELD_PER_SENDER + 1]!.outbox_id}`]]);
+    expect(f.outbox.coalescedInto(pm[DRAFT_HELD_PER_SENDER + 1]!.outbox_id)).toEqual([pm[1]!.outbox_id]);
+    expect(pm.slice(2).every(r => r.delivery_state === "retained" && tagged(r))).toBe(true);
+    expect(rows(f, "qa@test").map(r => [r.delivery_state, tagged(r)])).toEqual([["retained", true]]);
+    f.bodies.a = "";
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    const typed = f.submissions.flatMap(text => [...text.matchAll(/request (\d+)/g)].map(m => Number(m[1])));
+    expect(typed).toEqual(Array.from({ length: DRAFT_HELD_PER_SENDER }, (_, i) => i + 3));
+    expect(f.submissions.filter(text => text.includes("another sender's request"))).toHaveLength(1);
+  });
+
+  it("names the quota when a new message can't be held because the seat's held quota is full", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const target = f.guard.target("worker@test");
+    for (let i = 0; i < 100; i++) f.outbox.retain({ outboxId: `full-${i}`, senderSession: `other-${i}@test`, destinationSession: "worker@test", body: "held" }, target);
+    const result = await f.transport.send("worker@test", "one more request", { actorSession: "pm@test" });
+    expect(result).toMatchObject({ ok: false, sent: false, outcome: "failed" });
+    expect(result.warning).toContain("held-message quota is full (100 messages or 8 MB)");
+    expect(result.warning).toContain("rig seat held-messages worker@test");
+    expect(result.warning).not.toContain("bookkeeping is unavailable");
+    expect(f.submissions).toEqual([]);
+  });
+
+  it("doesn't promise to type a draft-held message later when its receipt couldn't be saved", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const finalize = vi.spyOn(OutboxHandler.prototype, "finalizeDelivery").mockImplementationOnce(() => { throw new Error("ledger failure"); });
+    try {
+      const result = await f.transport.send("worker@test", "request whose receipt fails", { actorSession: "pm@test" });
+      expect(result).toMatchObject({ ok: false, sent: false, outcome: "failed" });
+      expect(result.warning).toContain("bookkeeping is unavailable");
+      expect(result.warning).not.toContain("typed once the input is clear");
+      expect(f.submissions).toEqual([]);
+    } finally { finalize.mockRestore(); }
+  });
+
+  it("at a full quota with a clear input, says the message was typed and doesn't ask for a retry", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "";
+    const target = f.guard.target("worker@test");
+    for (let i = 0; i < 100; i++) f.outbox.retain({ outboxId: `full-${i}`, senderSession: `other-${i}@test`, destinationSession: "worker@test", body: "held" }, target);
+    const result = await f.transport.send("worker@test", "a request typed anyway", { actorSession: "pm@test" });
+    expect(result).toMatchObject({ sent: true });
+    expect(f.submissions.filter(text => text.includes("a request typed anyway"))).toHaveLength(1);
+    expect(result.warning).toContain("held-message quota is full (100 messages or 8 MB), so no receipt was saved for this message, which was typed. Repeating it may duplicate input.");
+    expect(result.warning).not.toContain("then retry");
+  });
+
+  it.each(["daemon@kernel", "system:health", "watchdog@system"])("never draft-holds a message from OpenRig's own sender %s", async (sender) => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const result = await f.transport.send("worker@test", "a notice", { actorSession: sender });
+    expect(result.outcome).toBe("retained");
+    expect(result.warning).not.toContain("typed once the input is clear");
+    expect(rows(f, sender).map(r => tagged(r))).toEqual([false]);
+  });
+});
+
+
+// How a draft-held message's retry joins the paths around it: it's offered again once a temporary condition passes, through
+// the daemon's own wiring (the structural sweep) rather than a direct pass call; a sender's later message never overtakes its
+// earlier held one; and a retry re-reads the mode, a drain and a restore under the delivery lease once it's its turn to type.
+describe("draft-held retry integration", () => {
+  const stateOf = (f: ReturnType<typeof fixture>, id: string) => f.outbox.getById(id)!.deliveryState;
+  const order = (f: ReturnType<typeof fixture>, texts: string[]) =>
+    f.submissions.map(s => texts.findIndex(t => s.includes(t))).filter(i => i >= 0);
+  const nowSec = () => Math.floor(Date.now() / 1000);
+
+  it("the sweep offers it again after the first try met recent typing, at the same idle state, and delivers it once", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "request held for the draft", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    // The daemon's wiring: the structural sweep drives the offer; the seat stays idle throughout.
+    let clock = Date.now();
+    const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20) }, () => new Date(clock));
+    const passes = vi.spyOn(f.repo, "deliverDraftHeldMessagesOnIdle");
+    attachDraftHeldReoffer(structural, f.repo, () => "idle", { now: () => clock });
+    // The person clears the draft; their writable client was active this second.
+    f.bodies.a = "";
+    f.hooks.clients = () => `0|${nowSec()}\n`;
+    await structural.pollAllRunningTmuxSeats(f.db);
+    await vi.waitFor(() => expect(passes).toHaveBeenCalledTimes(1));
+    await passes.mock.results[0]!.value;
+    expect(stateOf(f, id)).toBe("retained");
+    expect(f.submissions).toEqual([]);
+    // The same idle screen, inside the interval: no new offer.
+    await structural.pollAllRunningTmuxSeats(f.db);
+    expect(passes).toHaveBeenCalledTimes(1);
+    // After the quiet interval, with no new activity transition, the next sweep offers it again: one delivery.
+    f.hooks.clients = () => `0|${nowSec() - 10}\n`;
+    clock += 4_500;
+    await structural.pollAllRunningTmuxSeats(f.db);
+    await vi.waitFor(() => expect(stateOf(f, id)).toBe("delivered"));
+    for (let i = 0; i < 3; i++) { clock += 4_500; await structural.pollAllRunningTmuxSeats(f.db); }
+    expect(f.submissions.filter(s => s.includes("request held for the draft"))).toHaveLength(1);
+  });
+
+  it("a draft that stays is read twice, then not again until the pane changes", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "a sitting draft";
+    await f.transport.send("worker@test", "request behind a sitting draft", { actorSession: "pm@test" });
+    let clock = Date.now();
+    // As in the daemon, the sweep reads each window's last write time; this pane isn't written to again.
+    const written = Math.floor(clock / 1000) - 60;
+    const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20),
+      readAllSessionWindows: async () => new Map([["worker@test", { activity: written, size: "80x24" }], ["sibling@test", { activity: written, size: "80x24" }]]) },
+      () => new Date(clock));
+    const passes = vi.spyOn(f.repo, "deliverDraftHeldMessagesOnIdle");
+    attachDraftHeldReoffer(structural, f.repo, () => "idle", { now: () => clock });
+    for (let i = 0; i < 5; i++) {
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await Promise.all(passes.mock.results.map(r => r.value));
+      clock += 4_500;
+    }
+    expect(passes).toHaveBeenCalledTimes(2);
+    expect(f.writes).toEqual([]);
+  });
+
+  it("with A held and the input clear, a live send B from the same sender waits behind A, then A and B go in order", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const a = await f.transport.send("worker@test", "stale request A", { actorSession: "pm@test" });
+    f.bodies.a = "";
+    const b = await f.transport.send("worker@test", "correction B", { actorSession: "pm@test" });
+    expect(b).toMatchObject({ outcome: "retained", sent: false, reason: DRAFT_HELD_BEHIND_EARLIER });
+    expect(b.warning).toContain("typed right after it");
+    expect(f.submissions).toEqual([]);
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect([a, b].map(r => stateOf(f, r.outboxIds![0]!))).toEqual(["delivered", "delivered"]);
+    expect(order(f, ["stale request A", "correction B"])).toEqual([0, 1]);
+  });
+
+  it("interleaved senders: another sender isn't held behind, and a send arriving between A1 and A2 goes after A2", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const a1 = await f.transport.send("worker@test", "request A1", { actorSession: "pm@test" });
+    const a2 = await f.transport.send("worker@test", "request A2", { actorSession: "pm@test" });
+    f.bodies.a = "";
+    const other = await f.transport.send("worker@test", "other sender C", { actorSession: "qa@test" });
+    expect(other).toMatchObject({ ok: true });
+    expect(order(f, ["other sender C"])).toEqual([0]);
+    const original = f.transport.send.bind(f.transport);
+    let late: Promise<unknown> | undefined;
+    vi.spyOn(f.transport, "send").mockImplementationOnce(async (session, text, opts) => {
+      const result = await original(session, text, opts);
+      late = original("worker@test", "request B, sent between A1 and A2", { actorSession: "pm@test" });
+      return result;
+    });
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    await late;
+    expect([a1, a2].map(r => stateOf(f, r.outboxIds![0]!))).toEqual(["delivered", "delivered"]);
+    expect(order(f, ["other sender C", "request A1", "request A2", "request B, sent between A1 and A2"])).toEqual([0, 1, 2, 3]);
+  });
+
+  it("an off activation queued behind a held lease keeps the old body held; it goes once draft-aware is on again", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "old held body", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    f.bodies.a = "";
+    let release!: () => void;
+    const occupied = f.guard.exclusive("a", () => new Promise<void>(resolve => { release = resolve; }));
+    const off = f.guard.set("a", { mode: "off" }, "human@test", "leaving draft-aware", 20);
+    const pass = f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    await off; release(); await occupied;
+    expect(await pass).toBe("paused");
+    expect(stateOf(f, id)).toBe("retained");
+    expect(f.writes).toEqual([]); expect(f.submissions).toEqual([]);
+    await f.enable();
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(stateOf(f, id)).toBe("delivered");
+    expect(f.submissions.filter(s => s.includes("old held body"))).toHaveLength(1);
+  });
+
+  it.each(["drain", "restore"])("a %s that starts while the retry waits for the lease keeps it held, nothing typed", async control => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "held through a control", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    let restorePending = false;
+    const repo = new QueueRepository(f.db, new EventBus(f.db), { transport: f.transport,
+      hasPendingPostCompactStage: () => restorePending, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+    repo.attachOutbox(f.outbox);
+    const drain = new RigDeliveryDrainStore(f.db), jobs = new WatchdogJobsRepository(f.db);
+    const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
+    f.bodies.a = "";
+    let release!: () => void;
+    const occupied = f.guard.exclusive("a", () => new Promise<void>(resolve => { release = resolve; }));
+    const pass = repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    await new Promise(resolve => setTimeout(resolve, 10));
+    if (control === "restore") restorePending = true;
+    else drain.begin(rigId, { drainId: "fixture-while-waiting", owner: "human@test", reviewAt: new Date(Date.now() + 60_000).toISOString() }, jobs);
+    release(); await occupied;
+    expect(await pass).toBe("paused");
+    expect(stateOf(f, id)).toBe("retained");
+    expect(f.writes).toEqual([]); expect(f.submissions).toEqual([]);
+    restorePending = false;
+    if (control === "drain") drain.end(rigId, "fixture-while-waiting", jobs);
+    await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(stateOf(f, id)).toBe("delivered");
+  });
+
+  // #3991 r5: the lease's admission check comes before awaited steps (the guard's re-reads and settle before the paste).
+  // A control that starts during them is read again at the paste, so nothing is pasted.
+  it.each(["drain", "restore"])("a %s that starts during the retry's awaited steps before its paste keeps it held, nothing pasted", async control => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "held through a late control", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    let restorePending = false;
+    const repo = new QueueRepository(f.db, new EventBus(f.db), { transport: f.transport,
+      hasPendingPostCompactStage: () => restorePending, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+    repo.attachOutbox(f.outbox);
+    const drain = new RigDeliveryDrainStore(f.db), jobs = new WatchdogJobsRepository(f.db);
+    const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
+    f.bodies.a = "";
+    let started = false;
+    f.hooks.settle = () => {
+      if (started) return;
+      started = true;
+      if (control === "restore") restorePending = true;
+      else drain.begin(rigId, { drainId: "fixture-before-paste", owner: "human@test", reviewAt: new Date(Date.now() + 60_000).toISOString() }, jobs);
+    };
+    expect(await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle")).toBe("paused");
+    expect(started).toBe(true);
+    expect(stateOf(f, id)).toBe("retained");
+    expect(f.writes).toEqual([]); expect(f.submissions).toEqual([]);
+    f.hooks.settle = undefined;
+    restorePending = false;
+    if (control === "drain") drain.end(rigId, "fixture-before-paste", jobs);
+    await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(stateOf(f, id)).toBe("delivered");
+    expect(f.submissions.filter(s => s.includes("held through a late control"))).toHaveLength(1);
+  });
+
+  // #3991 r6: a retry the hook bridge hands back for typing keeps its own admission. The fallback passes the drain check
+  // at its handback; a drain that starts during the guard's settle before the paste is read there, and nothing is pasted.
+  it("a drain that starts after the bridge hands a held retry back, before its paste, keeps it held; it's delivered once after the drain", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "held, then handed back by the bridge", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    const repo = new QueueRepository(f.db, new EventBus(f.db), { transport: f.transport, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+    repo.attachOutbox(f.outbox);
+    const jobs = new WatchdogJobsRepository(f.db);
+    const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
+    let clock = Date.now();
+    const bridge = new HookBridge(f.db, { now: () => clock, lease: (node, fn) => f.guard.exclusive(node, fn), drained: name => repo.deliveryDrains.holds(name) });
+    (f.transport as unknown as { hookBridge: unknown }).hookBridge = bridge;
+    bridge.setPreference("a", true, "human@test", "wake at turn boundaries");
+    const { armId } = bridge.arm({ nodeId: "a", sessionName: "worker@test", generation: "g1", hookEvent: "SessionStart" });
+    // The draft clears: the pass's retry goes to the live bridge.
+    f.bodies.a = "";
+    expect(await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle")).toBe("done");
+    expect(bridge.queued("a").map(row => row.outboxId)).toEqual([id]);
+    // Its waiter goes; past the bound the sweep types it, under the seat's lease, with no drain at the handback.
+    bridge.expired("a", "worker@test", armId);
+    clock += HOOK_BRIDGE_LIVE_BOUND_MS;
+    let started = false;
+    f.hooks.settle = () => {
+      if (started) return;
+      started = true;
+      repo.deliveryDrains.begin(rigId, { drainId: "fixture-after-handback", owner: "human@test", reviewAt: new Date(Date.now() + 60_000).toISOString() }, jobs);
+    };
+    await f.transport.sweepHookBridge();
+    expect(started).toBe(true);
+    expect(f.writes).toEqual([]); expect(f.submissions).toEqual([]);
+    expect(bridge.queued("a")).toEqual([]);
+    // Still owed: back on the held list, marked for its retry.
+    expect(stateOf(f, id)).toBe("retained");
+    expect(f.outbox.getById(id)!.tags).toContain("delivery:draft-eligible");
+    f.hooks.settle = undefined;
+    repo.deliveryDrains.end(rigId, "fixture-after-handback", jobs);
+    await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(stateOf(f, id)).toBe("delivered");
+    await f.transport.sweepHookBridge();
+    await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.submissions.filter(s => s.includes("held, then handed back by the bridge"))).toHaveLength(1);
+  });
+
+  // #3991 r7: a retry already in the bridge was admitted by its pass. After that only a drain or a restore holds it, as the
+  // bridge's own waiter would; the seat leaving draft-aware mode doesn't leave it in the bridge, untyped and off the held list.
+  it("a held retry already in the bridge, when the seat leaves draft-aware mode and no waiter is live, is typed once by the fallback", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "held, then the seat left draft-aware", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    const repo = new QueueRepository(f.db, new EventBus(f.db), { transport: f.transport, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+    repo.attachOutbox(f.outbox);
+    let clock = Date.now();
+    const bridge = new HookBridge(f.db, { now: () => clock, lease: (node, fn) => f.guard.exclusive(node, fn), drained: name => repo.deliveryDrains.holds(name) });
+    (f.transport as unknown as { hookBridge: unknown }).hookBridge = bridge;
+    bridge.setPreference("a", true, "human@test", "wake at turn boundaries");
+    const { armId } = bridge.arm({ nodeId: "a", sessionName: "worker@test", generation: "g1", hookEvent: "SessionStart" });
+    // The draft clears: the pass admits the retry, and it goes to the live bridge.
+    f.bodies.a = "";
+    expect(await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle")).toBe("done");
+    expect(bridge.queued("a").map(row => row.outboxId)).toEqual([id]);
+    // The person turns draft-aware delivery off. Its waiter goes, and past the bound the sweep types it.
+    await f.guard.set("a", { mode: "off" }, "human@test", "leaving draft-aware");
+    bridge.expired("a", "worker@test", armId);
+    clock += HOOK_BRIDGE_LIVE_BOUND_MS;
+    await f.transport.sweepHookBridge();
+    expect(bridge.queued("a")).toEqual([]);
+    expect(stateOf(f, id)).toBe("delivered");
+    await f.transport.sweepHookBridge();
+    await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.submissions.filter(s => s.includes("held, then the seat left draft-aware"))).toHaveLength(1);
+  });
+
+  // #3991 r5: an activity read that fails is uncertainty, not a draft the guard saw, so it never stops the periodic offer.
+  it("two failed activity reads on an unchanged pane don't stop the offers: once the reader recovers, the next offer delivers once", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "request held while the reader fails", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    f.bodies.a = "";
+    let clock = Date.now();
+    // The pane isn't written to again, as in the sitting-draft case above.
+    const written = Math.floor(clock / 1000) - 60;
+    const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20),
+      readAllSessionWindows: async () => new Map([["worker@test", { activity: written, size: "80x24" }], ["sibling@test", { activity: written, size: "80x24" }]]) },
+      () => new Date(clock));
+    const passes = vi.spyOn(f.repo, "deliverDraftHeldMessagesOnIdle");
+    attachDraftHeldReoffer(structural, f.repo, () => "idle", { now: () => clock });
+    // tmux answers with a client row the guard can't read, so the activity read fails (client_activity_unavailable).
+    let failing = true;
+    f.hooks.clients = () => failing ? "unreadable client row\n" : `0|${nowSec() - 10}\n`;
+    for (let i = 0; i < 3; i++) {
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await Promise.all(passes.mock.results.map(r => r.value));
+      clock += 4_500;
+    }
+    expect(passes).toHaveBeenCalledTimes(3);
+    expect(await passes.mock.results[2]!.value).toBe("unknown");
+    expect(stateOf(f, id)).toBe("retained");
+    expect(f.writes).toEqual([]);
+    // The reader recovers; nothing new is written to the pane and no new message arrives.
+    failing = false;
+    await structural.pollAllRunningTmuxSeats(f.db);
+    await Promise.all(passes.mock.results.map(r => r.value));
+    expect(stateOf(f, id)).toBe("delivered");
+    for (let i = 0; i < 2; i++) { clock += 4_500; await structural.pollAllRunningTmuxSeats(f.db); }
+    expect(f.submissions.filter(s => s.includes("request held while the reader fails"))).toHaveLength(1);
+  });
+});
+
+
+// Same-sender order across the routes and refusals around the draft-held pass: a hook bridge that has come live, a
+// held message its retry has claimed, and a held message whose own paste is then refused.
+describe("draft-held order across routes and refusals", () => {
+  const order = (f: ReturnType<typeof fixture>, texts: string[]) =>
+    f.submissions.map(s => texts.findIndex(t => s.includes(t))).filter(i => i >= 0);
+
+  it("holds a sender's message behind its held one even when the hook bridge has come live, and the bridge gets them in order", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const a = await f.transport.send("worker@test", "request A", { actorSession: "pm@test" });
+    expect(a.outcome).toBe("retained");
+    f.bodies.a = "";
+    const deposited: string[] = [];
+    const bridge = { routes: () => true, live: () => true, queuedForTyping: () => [], unavailable: () => "off",
+      handbackRefusal: () => null, wakeFenced: () => false, wakeApplicable: () => true,
+      deposit: (_target: unknown, session: string, text: string, _opts: unknown, ids: string[]) => {
+        deposited.push(text.includes("request A") ? "A" : text.includes("request B") ? "B" : "?");
+        // HookBridge.deposit's own result: the bridge keeps custody until the seat's turn boundary hands it over.
+        return { ok: true, sessionName: session, outcome: "bridged", sent: false, verified: false, inputPhase: "not_reached", outboxIds: ids };
+      } };
+    (f.transport as unknown as { hookBridge: unknown }).hookBridge = bridge;
+    const b = await f.transport.send("worker@test", "request B", { actorSession: "pm@test" });
+    expect(b).toMatchObject({ outcome: "retained", reason: DRAFT_HELD_BEHIND_EARLIER });
+    expect(deposited).toEqual([]);
+    const idA = a.outboxIds![0]!;
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(deposited).toEqual(["A"]);
+    expect(f.outbox.getById(idA)!.deliveryState).toBe("sending");   // with the bridge, not yet handed over
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(deposited).toEqual(["A"]);   // B still waits behind A
+    f.outbox.finalizeDelivery(idA, "delivered");   // the bridge hands A to the agent
+    expect(f.outbox.getById(idA)!.deliveryState).toBe("delivered");
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(deposited).toEqual(["A", "B"]);
+    expect(f.writes).toEqual([]);
+  });
+
+  it("holds a live send behind a held message its retry has claimed, and types it after", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const a = await f.transport.send("worker@test", "request A", { actorSession: "pm@test" });
+    const idA = a.outboxIds![0]!;
+    f.bodies.a = "";
+    expect(f.outbox.reopenHeld(idA) && f.outbox.claimForDelivery(idA)).toBe(true);   // claimed, waiting for the lease
+    const b = await f.transport.send("worker@test", "request B", { actorSession: "pm@test" });
+    expect(b).toMatchObject({ outcome: "retained", reason: DRAFT_HELD_BEHIND_EARLIER });
+    expect(f.submissions).toEqual([]);
+    f.outbox.retainUnwritten(idA);   // that retry ended without writing
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(order(f, ["request A", "request B"])).toEqual([0, 1]);
+  });
+
+  it("stops owing a held message whose own paste is refused, and lets the sender's next message go", async () => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 }); f.bodies.a = "a person's draft";
+    const a = await f.transport.send("worker@test", "tab\there", { actorSession: "pm@test", verify: false });
+    const idA = a.outboxIds![0]!;
+    const eligible = () => (JSON.parse((f.db.prepare("SELECT tags FROM outbox_entries WHERE outbox_id=?").get(idA) as { tags: string | null }).tags ?? "[]") as string[])
+      .includes("delivery:draft-eligible");
+    expect(a.outcome).toBe("retained"); expect(eligible()).toBe(true);   // held for the draft before its paste was read
+    f.bodies.a = "";
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");   // its retry meets the paste refusal
+    expect(f.outbox.getById(idA)!.deliveryState).toBe("retained"); expect(eligible()).toBe(false);
+    const b = await f.transport.send("worker@test", "plain follow-up", { actorSession: "pm@test", verify: false });
+    expect(b.outcome).not.toBe("retained");
+    expect(f.submissions.some(s => s.includes("plain follow-up"))).toBe(true);
+    expect(f.submissions.some(s => s.includes("tab"))).toBe(false);
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.submissions.some(s => s.includes("tab"))).toBe(false);
+  });
+
+  it("through the sweep's offers on an unchanged pane, a held follower goes once its earlier message's own paste is refused", async () => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 }); f.bodies.a = "a person's draft";
+    const nowSec = () => Math.floor(Date.now() / 1000);
+    const eligible = (id: string) => (JSON.parse((f.db.prepare("SELECT tags FROM outbox_entries WHERE outbox_id=?").get(id) as { tags: string | null }).tags ?? "[]") as string[])
+      .includes("delivery:draft-eligible");
+    const a = await f.transport.send("worker@test", "tab\there", { actorSession: "pm@test", verify: false });
+    const b = await f.transport.send("worker@test", "plain follow-up", { actorSession: "pm@test", verify: false });
+    const [idA, idB] = [a.outboxIds![0]!, b.outboxIds![0]!];
+    expect([a.outcome, b.outcome]).toEqual(["retained", "retained"]);   // both held while the person had a draft
+    let clock = Date.now();
+    const written = Math.floor(clock / 1000) - 60;   // the pane isn't written to again
+    const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20),
+      readAllSessionWindows: async () => new Map([["worker@test", { activity: written, size: "160x45" }]]) }, () => new Date(clock));
+    const passes = vi.spyOn(f.repo, "deliverDraftHeldMessagesOnIdle");
+    attachDraftHeldReoffer(structural, f.repo, () => "idle", { now: () => clock });
+    const sweep = async () => { await structural.pollAllRunningTmuxSeats(f.db); await Promise.all(passes.mock.results.map(r => r.value)); };
+    // The person clears the draft, active this second: the first offer meets the quiet window and holds A again.
+    f.bodies.a = "";
+    f.hooks.clients = () => `0|${nowSec()}\n`;
+    await sweep();
+    expect(passes).toHaveBeenCalledTimes(1);
+    expect([idA, idB].map(id => f.outbox.getById(id)!.deliveryState)).toEqual(["retained", "retained"]);
+    expect(eligible(idA)).toBe(true);
+    // Past the quiet window, the next offer meets A's own paste refusal, which withdraws A; the same pass goes on to B.
+    f.hooks.clients = () => `0|${nowSec() - 10}\n`;
+    for (let i = 0; i < 4; i++) { clock += 4_500; await sweep(); }
+    expect(f.outbox.getById(idB)!.deliveryState).toBe("delivered");
+    expect(f.submissions.filter(s => s.includes("plain follow-up"))).toHaveLength(1);
+    expect(f.outbox.getById(idA)!.deliveryState).toBe("retained"); expect(eligible(idA)).toBe(false);
+    expect(f.submissions.some(s => s.includes("tab"))).toBe(false);
+  });
+
+  it("after a restart, a held message the hook bridge handed back for typing reads uncertain and holds nothing behind it", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const a = await f.transport.send("worker@test", "request A", { actorSession: "pm@test" });
+    const idA = a.outboxIds![0]!;
+    const entry = f.outbox.getById(idA)!;
+    // The real handback state: the bridge queues A, then hands it to a typed send, and the daemon stops before that send
+    // writes its own receipt.
+    const bridge = new HookBridge(f.db);
+    expect(f.outbox.reopenHeld(idA)).toBe(true);
+    expect(bridge.deposit(entry.guardBinding as never, "worker@test", entry.body, { actorSession: "pm@test" }, [idA])).toMatchObject({ outcome: "bridged" });
+    expect(bridge.releaseForTyping(entry.guardBinding!.nodeId, "worker@test", idA, "typed fallback")).toBe(true);
+    expect(f.db.prepare("SELECT delivery_state, guard_delivery FROM outbox_entries WHERE outbox_id=?").get(idA))
+      .toEqual({ delivery_state: "sending", guard_delivery: null });
+    f.guarded.recover();   // the daemon's next start
+    expect(f.outbox.getById(idA)!.deliveryState).toBe("indeterminate");
+    f.bodies.a = "";
+    const b = await f.transport.send("worker@test", "request B", { actorSession: "pm@test" });
+    expect(b.outcome).not.toBe("retained");
+    expect(f.submissions.some(s => s.includes("request B"))).toBe(true);
+    await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.submissions.some(s => s.includes("request A"))).toBe(false);   // never replayed
   });
 });

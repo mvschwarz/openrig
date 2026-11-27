@@ -432,6 +432,13 @@ describe("MCP Server", () => {
       expect(instructions).not.toContain(MEMBER_WORKFLOW);
       expect(instructions).not.toContain("without asking whether you may");
       for (const part of ["the person's to answer", "record only what the person tells you", "Never choose an answer for them", "exactly what the person typed in resolution, with no label"]) expect(FRONT_DOOR_WORKFLOW).toContain(part);
+      // Nothing wakes a plain chat, so its next turn is when it hears the team, whatever the person writes about. A
+      // scheduled run in an app that asks before each call shows only "Needs your input" until the person approves.
+      for (const part of ["start each of your turns by listing your items (rig_queue_list with owned set)", "whatever the person's message is about",
+        "tell them first about any question waiting for them", "an approval that lasts", "shows the person only 'Needs your input', not the team's question",
+        "Don't promise that a wake will reach them by itself", "say a run can, not that it will",
+        "then answer what they wrote", "If their message answers that question, record it"]) expect(FRONT_DOOR_WORKFLOW).toContain(part);
+      for (const gone of ["when they ask or come back", "by itself until then"]) expect(FRONT_DOOR_WORKFLOW).not.toContain(gone);
       // It hands the team the person's work, so which assistant they mean is theirs to say when several fit. Its list shows
       // team seats and connected assistants: only a running team seat picks a request up on its own.
       expect(FRONT_DOOR_WORKFLOW).toContain(`${ASK_LISTED} ${ASK_RUNNING_PICKUP} ${ASK_CONNECTED_PICKUP} ${ASK_SENT_ANYWAY} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);

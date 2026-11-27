@@ -630,7 +630,7 @@ function isRosterNotice(item: QueueItem): boolean {
 }
 
 /** Rows no finding is filed about: the sweep's own findings, which self-exclude by their stamp tag, and OpenRig's
- *  roster-ready notice, which is information about the team, not work. Its wake is still retried like any row's. */
+ *  roster-ready notice, which is information about the team, not work. Any already-owed wake keeps its recovery path. */
 function isSweepExempt(item: QueueItem): boolean {
   return isFindingRow(item) || isRosterNotice(item);
 }
