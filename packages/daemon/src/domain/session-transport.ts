@@ -2440,6 +2440,8 @@ export class SessionTransport {
   private eventBus?: EventBus;
   private hookBridge?: HookBridge;
   private queueWakeApplicable?: (entries: readonly QueueWakeFacts[]) => boolean;
+  /** A draft-held retry's admission (QueueRepository.heldRetryAdmitted), for one the hook bridge hands back to typing. */
+  private heldRetryAdmission?: (sessionName: string) => boolean;
   private hookBridgeSweep: Promise<Array<{ outboxId: string; result: SendResult }>> | null = null;
   private hookBridgeSweepAgain = false;
   private now: () => Date;
@@ -2489,6 +2491,10 @@ export class SessionTransport {
       this.hookBridge.wakeApplicable = applicable;
       this.hookBridge.wakeFenced = fenced;
     }
+  }
+
+  configureHeldRetryAdmission(admitted: (sessionName: string) => boolean): void {
+    this.heldRetryAdmission = admitted;
   }
 
   attachRuntimeAdapters(adapters: Record<string, TransportReadinessChecker>): void {
@@ -3065,11 +3071,20 @@ export class SessionTransport {
         const entry = outbox.getById(outboxId);
         const row = saved.get(outboxId);
         if (!entry || !row) break;
-        // Its body already carries any urgent line; its admission says how the guard admits it.
+        // Its body already carries any urgent line; its admission says how the guard admits it. A held message's retry
+        // keeps its own admission too (#3991): read under the lease and again at the paste, as on the pass's own route.
+        const admitted = row.heldRetry ? this.heldRetryAdmission : undefined;
         const result = await this.send(entry.destinationSession, entry.body, { committedOutboxIds: [outboxId],
           hookBridgeFallback: { nodeId, reason, admission: row.admission }, actorSession: entry.senderSession,
-          ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}) });
+          ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}),
+          ...(admitted ? { retryAdmission: () => admitted(entry.destinationSession) } : {}) });
         if (result.reason === "hook_bridge_claimed") break;
+        // That retry wasn't admitted, and nothing was written. Refused under the lease, it's still queued for the bridge;
+        // refused at the paste, after the handback, it goes back to the held list, where its pass delivers it once.
+        if (result.reason === HELD_RETRY_NOT_ADMITTED && result.sent !== true && result.inputPhase === "not_reached") {
+          if (!bridge.queued(nodeId).some((queued) => queued.outboxId === outboxId)) outbox.retainUnwritten(outboxId);
+          continue;
+        }
         // A drain that began since the selection holds it: untouched, and what's behind it may still go.
         if (result.reason === "delivery_drain_held") continue;
         // Its wake no longer applies: ended not delivered at the handback.

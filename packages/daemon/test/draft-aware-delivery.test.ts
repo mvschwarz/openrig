@@ -11,7 +11,7 @@ import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { COALESCED_INTO, DRAFT_HELD_BEHIND_EARLIER, DRAFT_HELD_PER_SENDER, OutboxHandler } from "../src/domain/outbox-handler.js";
 import { attachDraftHeldReoffer } from "../src/domain/draft-held-reoffer.js";
-import { HookBridge } from "../src/domain/hook-bridge.js";
+import { HOOK_BRIDGE_LIVE_BOUND_MS, HookBridge } from "../src/domain/hook-bridge.js";
 import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { RigDeliveryDrainStore } from "../src/domain/rig-delivery-drain.js";
@@ -2518,6 +2518,50 @@ describe("draft-held retry integration", () => {
     await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
     expect(stateOf(f, id)).toBe("delivered");
     expect(f.submissions.filter(s => s.includes("held through a late control"))).toHaveLength(1);
+  });
+
+  // #3991 r6: a retry the hook bridge hands back for typing keeps its own admission. The fallback passes the drain check
+  // at its handback; a drain that starts during the guard's settle before the paste is read there, and nothing is pasted.
+  it("a drain that starts after the bridge hands a held retry back, before its paste, keeps it held; it's delivered once after the drain", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "held, then handed back by the bridge", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    const repo = new QueueRepository(f.db, new EventBus(f.db), { transport: f.transport, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+    repo.attachOutbox(f.outbox);
+    const jobs = new WatchdogJobsRepository(f.db);
+    const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
+    let clock = Date.now();
+    const bridge = new HookBridge(f.db, { now: () => clock, lease: (node, fn) => f.guard.exclusive(node, fn), drained: name => repo.deliveryDrains.holds(name) });
+    (f.transport as unknown as { hookBridge: unknown }).hookBridge = bridge;
+    bridge.setPreference("a", true, "human@test", "wake at turn boundaries");
+    const { armId } = bridge.arm({ nodeId: "a", sessionName: "worker@test", generation: "g1", hookEvent: "SessionStart" });
+    // The draft clears: the pass's retry goes to the live bridge.
+    f.bodies.a = "";
+    expect(await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle")).toBe("done");
+    expect(bridge.queued("a").map(row => row.outboxId)).toEqual([id]);
+    // Its waiter goes; past the bound the sweep types it, under the seat's lease, with no drain at the handback.
+    bridge.expired("a", "worker@test", armId);
+    clock += HOOK_BRIDGE_LIVE_BOUND_MS;
+    let started = false;
+    f.hooks.settle = () => {
+      if (started) return;
+      started = true;
+      repo.deliveryDrains.begin(rigId, { drainId: "fixture-after-handback", owner: "human@test", reviewAt: new Date(Date.now() + 60_000).toISOString() }, jobs);
+    };
+    await f.transport.sweepHookBridge();
+    expect(started).toBe(true);
+    expect(f.writes).toEqual([]); expect(f.submissions).toEqual([]);
+    expect(bridge.queued("a")).toEqual([]);
+    // Still owed: back on the held list, marked for its retry.
+    expect(stateOf(f, id)).toBe("retained");
+    expect(f.outbox.getById(id)!.tags).toContain("delivery:draft-eligible");
+    f.hooks.settle = undefined;
+    repo.deliveryDrains.end(rigId, "fixture-after-handback", jobs);
+    await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(stateOf(f, id)).toBe("delivered");
+    await f.transport.sweepHookBridge();
+    await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.submissions.filter(s => s.includes("held, then handed back by the bridge"))).toHaveLength(1);
   });
 
   // #3991 r5: an activity read that fails is uncertainty, not a draft the guard saw, so it never stops the periodic offer.

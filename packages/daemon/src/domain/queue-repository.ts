@@ -471,6 +471,8 @@ export interface QueueNudgeTransport {
   retentionTarget?(session: string, input?: import("./seat-delivery-guard.js").AdmissionInput): import("./seat-delivery-guard.js").GuardTarget | null;
   draftAwareTarget?(session: string): import("./seat-delivery-guard.js").GuardTarget | null;
   configureGuardedWakes?(applicable: (entries: readonly QueueWakeFacts[]) => boolean, fenced?: (qitemId: string) => boolean): void;
+  /** A draft-held retry's own admission (heldRetryAdmitted), for one the seat's hook bridge hands back to typing. */
+  configureHeldRetryAdmission?(admitted: (sessionName: string) => boolean): void;
   send(
     sessionName: string,
     // (h): stampISO threads the nudge's compose time so the transport's delivered-latency calc can
@@ -1508,6 +1510,7 @@ export class QueueRepository {
       if (!row || this.transferFence(row.qitemId) || row.destinationSession !== entry.destinationSession) return false;
       return entry.outboxId.startsWith(WAKE_INTENT_PREFIX) ? this.currentWakeIntent(entry) : isBlockerLive(row.state);
     }), qitemId => !!this.transferFence(qitemId));
+    transport.configureHeldRetryAdmission?.(sessionName => this.heldRetryAdmitted(sessionName));
   }
 
   private currentWakeIntent(entry: QueueWakeFacts): boolean {
@@ -2560,6 +2563,19 @@ export class QueueRepository {
   /** Seats with a draft-held delivery pass running, so overlapping idle observations don't race each other. */
   private readonly draftHeldPasses = new Set<string>();
 
+  /** Whether a drain or a pending restore stops draft-held delivery to this seat now, at any of its addresses (#3991). */
+  private draftHeldPaused(sessionName: string, addresses: readonly string[] = this.resolveSessionAddresses(sessionName)): boolean {
+    return addresses.some(address => this.deliveryDrains.holds(address))
+      || [sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address));
+  }
+
+  /** A draft-held retry's admission: draft-aware delivery is still on for the seat, and no drain or pending restore stops
+   *  it. The pass gives it to each retry it sends (`retryAdmission`); the hook bridge's typed fallback reads it for a retry
+   *  the bridge hands back, so it's read again under the delivery lease and at the paste on that route too. */
+  heldRetryAdmitted(sessionName: string): boolean {
+    return !this.draftHeldPaused(sessionName) && !!this.transport?.draftAwareTarget?.(sessionName);
+  }
+
   /** The seats holding draft-held messages, for the periodic offer (createDraftHeldReoffer); none without an outbox. */
   draftHeldSeats(): Array<{ session: string; newest: string }> {
     return this.outbox?.draftHeldSeats() ?? [];
@@ -2581,8 +2597,7 @@ export class QueueRepository {
     if (state !== "idle" || !this.outbox || !this.transport?.draftAwareTarget?.(sessionName)) return "skipped";
     const addresses = this.resolveSessionAddresses(sessionName);
     if (!addresses.length) return "skipped";
-    const paused = () => addresses.some(address => this.deliveryDrains.holds(address))
-      || [sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address));
+    const paused = () => this.draftHeldPaused(sessionName, addresses);
     if (paused()) return "paused";
     const key = addresses[0]!;
     if (this.draftHeldPasses.has(key)) return "skipped";
