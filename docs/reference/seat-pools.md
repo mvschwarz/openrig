@@ -229,17 +229,22 @@ work another seat already took in another system from going to a free agent. It 
 
 - **What runs.** The block's list, run as a command with its arguments, never through a shell, with
   `--qitem <id> --from <session> --to <session>` added after them: the row, where it waits (as stored) and the agent it
-  would go to. It gets no stdin and the daemon's environment.
+  would go to. It gets no stdin and the daemon's environment without its credentials (the bearer, relay, hook and
+  run grant tokens), as every other command a spec runs. Its list is kept in the job's notes, which the job's status
+  shows: never put a secret in it. A list item with a NUL byte can't be started, so every move is a guard error.
 - **When.** Once per planned move, under the model's custody lease, after the move's job and block checks (a block
   changed since the plan is never guarded with its old command) and before the re-checks that come just before the
   move. Those stay as they are, with the job and the block read again after the guard: while the guard runs, a row
   claimed or rerouted, or an agent no longer free, is skipped, and a block changed or a job stopped ends the
-  evaluation's moves, as without a guard.
+  evaluation's moves, as without a guard. The guards of one evaluation run one after the other: each can add up to
+  its timeout to the evaluation, under the model's custody.
 - **Exit 0** lets the move go.
 - **Exit 75** (`EX_TEMPFAIL`) vetoes it: that move alone is skipped, named in the notes' `skipped` with the code
   `guard_refused` and the first line of the guard's stdout as `message`, if any. The row stays pending where it was,
   with its history and its waiting time unchanged: nothing is written to it. The next evaluation plans it again, with no
-  cooldown, requeue or priority change. The other moves of the evaluation go on.
+  cooldown, requeue or priority change. The other moves of the evaluation go on. A vetoed row keeps its place, and
+  with it the free agent it was planned to, so while the veto lasts, rows behind it can wait on that agent: close or
+  claim a vetoed row promptly.
 - **Anything else** is a guard error, and the move goes ahead: the command can't be started, it runs past its timeout
   (2 seconds, after which it is killed with its process group), it is killed by a signal, or it exits with another code.
   A broken guard never freezes a pool. The notes name each one in `guardErrors`, with the row, `from`, `to`, the code

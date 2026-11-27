@@ -1,14 +1,16 @@
 import { spawn } from "node:child_process";
+import { isTmuxCredentialEnvKey } from "../adapters/tmux-credential-env.js";
 
 // #4061 (Ask 1): the seat pool's dispatch guard, an opt-in check the operator sets with the pool block's
 // `dispatch_guard` (an argv: an absolute executable and its own arguments, never a shell string). The executor runs it
 // once per planned move, before its final re-check, under the model's custody lease, so its timeout is short.
 //
 // The command gets `--qitem <id> --from <session> --to <session>` after its own arguments, no stdin and the daemon's
-// environment. Exit 0 lets the move go. Exit 75 (EX_TEMPFAIL: try again later) vetoes it: the row is skipped this
-// cycle and planned again on the next one. Anything else (it can't be started, it times out, it is killed, it exits with
-// another code) is a guard error, and the move goes ahead: a broken guard never freezes a pool. A dedicated veto code
-// keeps an ordinary crash (exit 1, a shell's `set -e`, an argument error) from reading as a veto.
+// environment without its credentials, like everything else a spec runs (through the tmux client). Exit 0 lets the
+// move go. Exit 75 (EX_TEMPFAIL: try again later) vetoes it: the row is skipped this cycle and planned again on the next
+// one. Anything else (it can't be started, it times out, it is killed, it exits with another code) is a guard error, and
+// the move goes ahead: a broken guard never freezes a pool. A dedicated veto code keeps an ordinary crash (exit 1, a
+// shell's `set -e`, an argument error) from reading as a veto.
 
 /** How long the guard may run before it is killed and the move goes ahead. */
 export const SEAT_POOL_DISPATCH_GUARD_TIMEOUT_MS = 2_000;
@@ -43,6 +45,13 @@ function firstLine(text: string): string {
   return line.length > NOTE_CAP ? `${line.slice(0, NOTE_CAP)}…` : line;
 }
 
+/** The daemon's environment without the names that grant authority or access, which a spec's command never gets. */
+function guardEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (isTmuxCredentialEnvKey(key)) delete env[key];
+  return env;
+}
+
 /** The daemon's guard runner: the argv by `spawn`, no shell, killed (its whole process group) at the timeout. */
 export function runSeatPoolDispatchGuard(
   input: SeatPoolDispatchGuardInput,
@@ -66,7 +75,7 @@ export function runSeatPoolDispatchGuard(
     try {
       // detached: its own process group, so the timeout's kill reaches what it started too.
       child = spawn(file, [...own, "--qitem", input.qitemId, "--from", input.from, "--to", input.to], {
-        shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+        shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: guardEnvironment(),
       });
     } catch (error) {
       finish({ verdict: "error", message: `could not start: ${error instanceof Error ? error.message : String(error)}` });

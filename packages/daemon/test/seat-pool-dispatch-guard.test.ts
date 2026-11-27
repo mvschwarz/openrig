@@ -70,6 +70,30 @@ describe("seat-pool dispatch guard runner (#4061)", () => {
     expect(await runSeatPoolDispatchGuard(guard(script))).toEqual({ verdict: "error", message });
   });
 
+  it("A guard gets the daemon's environment without its credentials, as a command run through tmux does.", async () => {
+    const set = {
+      OPENRIG_AUTH_BEARER_TOKEN: "bearer-secret",
+      OPENRIG_TERMINAL_BEARER_TOKEN: "terminal-secret",
+      OPENRIG_RELAY_OUTBOUND_TOKEN: "relay-secret",
+      OPENRIG_RUN_GRANT_X: "grant-secret",
+      OPENRIG_POOL_GUARD_PLAIN: "kept",
+    };
+    const before = Object.fromEntries(Object.keys(set).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, set);
+    try {
+      const credentials = JSON.stringify(Object.keys(set).filter((key) => key !== "OPENRIG_POOL_GUARD_PLAIN"));
+      const script = `const e = process.env; const leaked = ${credentials}.filter((k) => k in e);`
+        + " if (leaked.length) { console.error('leaked ' + leaked.join(',')); process.exit(3); }"
+        + " process.exit(e.OPENRIG_POOL_GUARD_PLAIN === 'kept' ? 0 : 4)";
+      expect(await runSeatPoolDispatchGuard(guard(script))).toEqual({ verdict: "allow" });
+    } finally {
+      for (const [key, value] of Object.entries(before)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it("A guard that can't be started is a guard error.", async () => {
     const verdict = await runSeatPoolDispatchGuard({ argv: ["/nonexistent/openrig-pool-guard"], ...ROW });
     expect(verdict).toMatchObject({ verdict: "error" });
