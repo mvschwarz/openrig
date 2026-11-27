@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { runningShippedSpecsRoot } from "./builtin-startup-files.js";
 
 export interface RestoreReadContext {
   openrigHome: string | null | undefined;
@@ -58,7 +59,7 @@ export function compactionPacketLaunchEnv(args: readonly string[], context: { op
 const PREVIOUS_PACKET_ROOT = "/tmp/claude-compaction-restore";
 
 // These are permission patterns, not shell arguments. Keep literal path components
-// literal; only the attempt/timestamp segment below is a wildcard.
+// literal; the attempt/timestamp segment and the packaged Markdown subtree below are wildcards.
 function literalPath(value: string): string {
   return value.replaceAll(path.sep, "/").replace(/[\\*?\[\]()!{}]/g, "\\$&");
 }
@@ -90,6 +91,10 @@ export function withManagedRestoreReads(args: string[], context: RestoreReadCont
   const seat = context.session.replace(/[^a-zA-Z0-9_.@-]/g, "_");
   const extra = postCompactExtraSetting(context.extraInstructionFile);
   const files = [
+    // A restore map may name its original installed role file, else the restore stops at a native Read prompt. Read the
+    // package's own Markdown specs, the root seats' role paths are re-anchored to (runningShippedSpecsRoot), without moving
+    // that file or changing saved maps; native deny/ask still wins, and no other install files or writes are granted.
+    ...spellings(runningShippedSpecsRoot()).map(root => `${root}/**/*.md`),
     ...spellings(context.openrigHome).flatMap(home => [
       `${home}/compaction/restore-pending/${seat}.json`,
       `${home}/plugins/openrig-core/skills/refocusing/SKILL.md`,

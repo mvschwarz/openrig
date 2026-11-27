@@ -10,14 +10,15 @@ export function terminalAnswerMeaning(unattributed: string): string {
 
 /** How to ask the person back when their answer is unclear or conditional: a new ask to the person the request went to,
  *  which reaches them where they answer. `asked` is null when no registered person resolves: removed since the ask, an
- *  unreadable registry, or an ask to the unattributed actor itself. What to do then is this one sentence. */
-export function askBackRoute(asked: string | null, unattributed: string, request: string): string {
+ *  unreadable registry, or an ask to the unattributed actor itself. What to do then is this one sentence. `when` names
+ *  what sends the agent back to the person; a permission request's receiving agent judges a condition itself. */
+export function askBackRoute(asked: string | null, unattributed: string, request: string, when = "their answer is unclear or conditional"): string {
   const nowhere = `A row to ${unattributed} names no person: it asks no one, waits on Steering and in the Feed, and OpenRig reports it as undeliverable, so don't ask them back there.`;
   if (asked) {
-    return `If their answer is unclear or conditional, ask them back with an ask to ${asked} that names ${request}: `
+    return `If ${when}, ask them back with an ask to ${asked} that names ${request}: `
       + `rig queue create --destination ${asked} --summary "<your question>" --body-file <file>. It reaches them where they answer (the Feed, Steering, and Slack when it's connected). ${nowhere}`;
   }
-  return `If their answer is unclear or conditional, OpenRig can't resolve a registered person to ask back about ${request}: `
+  return `If ${when}, OpenRig can't resolve a registered person to ask back about ${request}: `
     + `nobody registered matches, or the person registry couldn't be read (rig gateway human list shows which). `
     + `Say so once, in this conversation, and keep the request and their answer waiting. The ways through are repairing an unreadable registry, registering a person (rig gateway human add), or the request's own decision command. ${nowhere}`;
 }

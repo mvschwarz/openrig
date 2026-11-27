@@ -378,14 +378,11 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
     // A dependency name resolves as it always has. Only a name that matches no member's identity may resolve by the SPEC id a
     // member declares (read the way the execution view reads it), and only when exactly one active member declares it;
     // anything else stays an unknown dependency.
-    let declared: Map<MissionReadiness["slices"][number], string | null> | null = null;
-    const resolve = (name: string) => {
-      const exact = slices.find(x => x.id === name);
-      if (exact) return exact;
-      declared ??= new Map(slices.map(x => [x, declaredNodeId(dirs.get(x)!)]));
-      const declaring = slices.filter(x => declared!.get(x) === name);
-      return declaring.length === 1 ? declaring[0] : undefined;
-    };
+    const declared = new Map<MissionReadiness["slices"][number], string | null>();
+    const resolve = (name: string) => resolveSliceDependency(name, slices, x => x.id, x => {
+      if (!declared.has(x)) declared.set(x, declaredNodeId(dirs.get(x)!));
+      return declared.get(x)!;
+    });
     const memo = new Map<string, boolean | null>();
     const visit = (s: MissionReadiness["slices"][number], visiting = new Set<string>()): boolean | null => {
       if (visiting.has(s.id)) throw new JudgmentError("dependency_cycle", `Cycle involving ${s.scope}`);
@@ -425,7 +422,19 @@ function frontmatterDependsOn(dir: string, io: ScopeFsDeps): "json" | "other" | 
 }
 
 /** The `id:` a work node's authored file declares, or null when it declares none or can't be read. */
-function declaredNodeId(dir: string): string | null {
+/** How a dependency name finds a sibling slice, for proof readiness and the lifecycle compiler alike: the member whose
+ *  own identity it is, else the one member whose node file declares it as its SPEC id (`declared`, read only when no
+ *  identity matches). A name no member has, or two members declare, resolves to nothing. */
+export function resolveSliceDependency<T>(name: string, members: readonly T[], identity: (member: T) => string,
+  declared: (member: T) => string | null): T | undefined {
+  const exact = members.find(member => identity(member) === name);
+  if (exact) return exact;
+  const declaring = members.filter(member => declared(member) === name);
+  return declaring.length === 1 ? declaring[0] : undefined;
+}
+
+/** The SPEC id a work node declares in its node file's frontmatter, read the way the execution view reads it. */
+export function declaredNodeId(dir: string): string | null {
   try {
     const node = resolveNodeFileVia(dir, p => proofFs.readFile(p));
     const id = node ? parseFrontmatter(node.content)["id"] : undefined;

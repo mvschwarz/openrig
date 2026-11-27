@@ -57,6 +57,13 @@ describe("workflow-keepalive policy (PL-004 Phase D; POC parity, SQLite source-o
 
   afterEach(() => db.close());
 
+  it("routes keepalive to the local frontier owner, not the transferred owner", async () => {
+    const policy = makeWorkflowKeepalivePolicy({ db, isFenced: id => id === "q-1" });
+    const out = await policy.evaluate(makeJob({ context: { workflow_instance_id: "inst-active" } }));
+
+    expect(out).toMatchObject({ action: "send", target: { session: "owner2@rig" } });
+  });
+
   it("active instance with frontier → send to first resolved owner; lists others in notes", async () => {
     const policy = makeWorkflowKeepalivePolicy({ db });
     const out = await policy.evaluate(

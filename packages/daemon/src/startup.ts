@@ -10,7 +10,7 @@ import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
 import { isBoundTerminalSeat } from "./domain/terminal-seat.js";
 import { seatRuntimeHomeBySession, seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
-import { reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
+import { recordedRecoveryInability, reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
 import { TerminalPolicyStore } from "./domain/terminal-policy.js";
@@ -934,7 +934,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     String(new ContextPackSettingsStore().resolveOne("topology.root").value));
   // launch.codex_login_shell, read at each Codex launch (absent or unreadable = off).
   const readCodexLoginShell = () => { try { return new ContextPackSettingsStore().resolveOne("launch.codex_login_shell").value === true; } catch { return false; } };
-  const codexResume = new CodexResumeAdapter(tmuxAdapter, { ensureManagedConfig: async (home?: string) => { await codexAdapter.ensureManagedConfig(home); }, prepareTeamWorkspace, prepareSeatFolder, resolveGitAddDirs: resolveCodexGitAddDirs, seatLaunchEnvironment, codexHome: configuredCodexHome, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, codexLoginShell: readCodexLoginShell });
+  // #3385: a restore's resume completes an openrig-core upgrade waiting in its home. The seat is its newest session of that
+  // name, so its own (stopped) Codex isn't counted.
+  const upgradeCorePluginForRestore = async (session: string, home?: string) => {
+    try {
+      const row = db.prepare("SELECT node_id FROM sessions WHERE session_name = ? ORDER BY created_at DESC, id DESC LIMIT 1").get(session) as { node_id: string } | undefined;
+      await codexAdapter.upgradeCorePluginForResume(row?.node_id, home);
+    } catch (err) { console.error(`[openrig] runtime setup warning: ${(err as Error).message}`); }
+  };
+  const codexResume = new CodexResumeAdapter(tmuxAdapter, { ensureManagedConfig: async (home?: string) => { await codexAdapter.ensureManagedConfig(home); }, upgradeCorePlugin: upgradeCorePluginForRestore, prepareTeamWorkspace, prepareSeatFolder, resolveGitAddDirs: resolveCodexGitAddDirs, seatLaunchEnvironment, codexHome: configuredCodexHome, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, codexLoginShell: readCodexLoginShell });
   // OPR.0.4.6.PI1 — the Pi seat-state root + the compiled runner entry (daemon
   // dist). Shared by the Pi runtime adapter, the resume adapter, and the
   // resume-token capture sidecar reader.
@@ -1188,7 +1196,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     console.warn("Could not stage the Codex activity relay; using the shipped relay:", error);
   }
   const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, restoreReadPolicy, hookBridgeLaunch: (nodeId: string, executable?: string) => hookBridge.launchWanted(nodeId, executable), statuslineThrottleLaunch: (nodeId: string) => rigRepo.getNodeStatuslineThrottle(nodeId), fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, replaceFragment: replaceClaudeFragment, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: claudeCollectorAssetPath, autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), managedBlockRecords: guidanceBlockRecords, readProjectionHash: (targetPath) => projectionManifestStore.lastHash(targetPath), recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
-  const codexAdapter = new CodexRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, prepareTeamWorkspace, prepareSeatFolder, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, seatHome: (nodeId: string, ignoreAccountHome?: boolean) => seatRuntimeHome(db, nodeId, "codex", ignoreAccountHome).home, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, codexLoginShell: readCodexLoginShell, activityRelayPath: codexActivityRelayPath ?? nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveCorePluginDir: () => vendoredCorePluginDir(), resolveCorePluginSelected: (nodeId: string) => Boolean(seatCodexCorePluginDir({ id: nodeId, runtime: "codex" }, db)), resolveHooksEnabled: async () => {
+  const codexAdapter = new CodexRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, prepareTeamWorkspace, prepareSeatFolder, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, seatHome: (nodeId: string, ignoreAccountHome?: boolean) => seatRuntimeHome(db, nodeId, "codex", ignoreAccountHome).home, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, codexLoginShell: readCodexLoginShell, activityRelayPath: codexActivityRelayPath ?? nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveCorePluginDir: () => vendoredCorePluginDir(), resolveCorePluginSelected: (nodeId: string) => Boolean(seatCodexCorePluginDir({ id: nodeId, runtime: "codex" }, db)), listCodexSeats: () => db.prepare("SELECT n.id AS nodeId, b.tmux_session AS tmuxSession FROM nodes n LEFT JOIN bindings b ON b.node_id = n.id WHERE n.runtime = 'codex'").all() as Array<{ nodeId: string; tmuxSession: string | null }>,resolveHooksEnabled: async () => {
     const { SettingsStore } = await import("./domain/user-settings/settings-store.js");
     return new SettingsStore().resolveOne("runtime.codex.hooks_enabled").value as boolean;
   }, resolveManagedConfigSettings: async () => {
@@ -1287,7 +1295,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   }
 
   // After vendoring, so Codex installs the openrig-core version this daemon ships: only when some Codex seat's resolved
-  // selection includes it (a daemon whose Codex seats didn't select it never installs it).
+  // selection includes it (a daemon whose Codex seats didn't select it never installs it). An upgrade waits while a Codex
+  // seat runs in that home, and the warning names the seats (#3385).
   try {
     const codexNodes = db.prepare("SELECT id FROM nodes WHERE runtime = 'codex'").all() as Array<{ id: string }>;
     await codexAdapter.ensureCodexCorePluginAtBoot(codexNodes.some(({ id }) => Boolean(seatCodexCorePluginDir({ id, runtime: "codex" }, db))));
@@ -2687,6 +2696,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         createQueueRow: (row) => queueRepoInstance.create({ ...row, sourceSession: "watchdog@system", nudge: false, wakeTrigger: "openrig" })
           .then(({ qitemId, state }) => ({ qitemId, state })),
         resolveParkedRows: ({ jobId, targetSession }) => queueRepoInstance.parkedRowsOwnedBy(jobId, targetSession),
+        notificationCurrent: jobId => !queueRepoInstance.watchdogReminderSuperseded(jobId),
+        resolveSharedParkReminder: jobId => queueRepoInstance.resolveSharedParkReminder(jobId),
         noteParkedRows: ({ owner, notes }) => queueRepoInstance.noteParkedRows(owner, notes),
         noteQueuedRow: ({ jobId, destinationSession, note }) => queueRepoInstance.noteOpenWatchdogRow(jobId, destinationSession, note),
       }),
@@ -2723,13 +2734,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       additionalPolicies: [
         makeWorkflowKeepalivePolicy({
           db,
+          isFenced: id => !!queueRepoInstance.transferFence(id),
           // OPR.0.4.6.WF5 FR-2 class (b): detection-time exception items,
           // dedup by occurrence; dial resolved via the runtime's cached
           // spec (registered-human selection inside the helper).
           ensureStuckExceptionItem: workflowExceptionEnsurer,
           reconcileStuckExceptions: (id) => workflowRuntime?.reconcileStuckExceptions(id) ?? 0,
         }),
-        makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService, isQueueOnlySeat: isQueueOnlyGuardSeat }),
+        makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService, isQueueOnlySeat: isQueueOnlyGuardSeat, isFenced: id => !!queueRepoInstance.transferFence(id) }),
         // OPR.0.5.6.24 F-14: the parked-owner consumer — the WHOLE shipped
         // parked diagnosis (diagnoseRigParked over the arbitrated oracle +
         // destination-scoped obligations + wake status; the same derivation
@@ -3115,6 +3127,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // the type narrow for downstream consumers).
   const { ContextMonitor } = await import("./domain/context-monitor.js");
   const { ClaudeCompactionEnforcer } = await import("./domain/claude-compaction-enforcer.js");
+  // Who can act on a recovery notice: an agent whose own managed compaction this enforcer records as failing can't.
+  // Called only from later polls and notices, after compactionEnforcer (next line) is initialized; a constructor-time call would hit its TDZ.
+  const recoveryInability = (session: string): string | null => compactionEnforcer ? recordedRecoveryInability(db, compactionEnforcer, session) : null;
   const compactionEnforcer = deps.sessionTransport
     ? new ClaudeCompactionEnforcer(
         new ContextPackSettingsStore(),
@@ -3123,10 +3138,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         // so a stage minted by a retired generation is refused for the successor. null = UNKNOWN → the
         // gate is inert (never compares a stale generation as if live).
         {
-          onPreparationFailure: (failure) => reportPreparationFailure(db, queueRepoInstance, failure),
-          onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure),
-          onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true }),
-          onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown),
+          onPreparationFailure: (failure) => reportPreparationFailure(db, queueRepoInstance, failure, recoveryInability),
+          onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure, { unable: recoveryInability }),
+          onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true, unable: recoveryInability }),
+          onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown, recoveryInability),
           // #3688: a cancel, a new attempt or a replaced occupant settles the notices its debt opened.
           onCompactionDebtEnded: (ended) => settleCompactionNotices(queueRepoInstance, ended),
           terminalPolicies: new TerminalPolicyStore(db),
@@ -3321,7 +3336,11 @@ export async function createHerdrAppProviders(opts: {
     env: opts.hcEnv,
     ...(opts.spawnFn ? { spawnFn: opts.spawnFn } : {}),
     reconcileAll: () => {
-      for (const provider of providers.values()) void provider.reconcile().catch(() => {});
+      // What the running daemon notices (a viewer herdr-core brought back as a shell, one that ended) is reported as at
+      // start: once recorded, a later start has nothing new to report.
+      for (const provider of providers.values()) {
+        void provider.reconcile().then((notes) => { for (const note of notes) console.warn(`[herdr-app] ${note}`); }).catch(() => {});
+      }
     },
   });
   const ownWork = () => {
@@ -3367,7 +3386,8 @@ export async function createHerdrAppProviders(opts: {
         const provider = resolve({ appHome: recorded.appHome });
         if (!provider) continue;
         ownWork();
-        await provider.reconcile().catch(() => {});
+        // What changed while the daemon was down is reported here, a viewer herdr-core brought back as a shell included.
+        for (const note of await provider.reconcile().catch(() => [] as string[])) console.warn(`[herdr-app] ${note}`);
         // A gate still pending when the daemon stopped is followed again, within its recorded window.
         await provider.resumePendingGates().catch(() => {});
       } catch { /* an unreadable journal stays as it is; an open of that app home reports it */ }

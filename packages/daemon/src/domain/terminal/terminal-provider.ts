@@ -102,6 +102,11 @@ export interface ProviderStatus {
   core?: { session: string; socket?: string };
   /** herdr-app: explicit statement of the shared herdr-core assumption between daemon and app window. */
   assumption?: string;
+  /** herdr-app: no window answers on this machine and its herdr-core does, so an open places the view in that core for a
+   *  herdr-app elsewhere (`available` then means a view can be placed, not that a window is here). */
+  placement?: "core";
+  /** herdr-app core placement: this daemon's machine, which a connected herdr-app shows the view from. */
+  host?: string;
   /** herdr-app: count of viewer starts whose hc run outcome was unknown and are still being tracked for cleanup, or "unknown" when the journal could not be read. */
   pendingStarts?: number | "unknown";
   /** The provider server's identity, so a caller can tell whether it talks to the same server (Rex). */
@@ -146,6 +151,9 @@ export interface OpenViewResult {
   notes?: string[];
   /** The provider space the view opened in (a Rex session), for a caller that shows it. */
   space?: { id: string; label: string };
+  /** herdr-app placed the view in this machine's herdr-core for a window elsewhere: `ok` and `opened` mean its viewers
+   *  started, never that a window shows them. */
+  placement?: { mode: "core"; visibility: "unconfirmed"; core: { session: string; socket?: string }; viewId: string; host: string };
   /** An existing workspace that still showed this view live was focused instead of opening tiles (`opened` is empty). */
   reusedWorkspace?: { id: string; tabId: string; view: string };
 }
