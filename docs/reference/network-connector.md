@@ -154,6 +154,9 @@ participant's rig. `request` sends one request to a peer, named as `peers` lists
 - **The request is recorded here first,** as a local queue item from the seat to OpenRig, parked on the hub item
   (`external:network-request/<hub item>`). It's addressed to OpenRig rather than the seat, so the seat owes nothing on it
   and isn't reminded about it while it waits. Find it with `rig queue list --mine`.
+  When the CLI runs inside a seat, that calling seat is recorded as the source with `transport:v1` provenance, even
+  when it uses another seat's binding. The JSON response includes `sourceSession`, `returnRoute` and `returnRouteBasis`;
+  the return-route fields are null when no route was requested.
 - **Then it's created on the hub** under an id derived from the seat's node, the hub, the participant and your request
   id, so one request is always one hub item. A create that goes again reads the request from the local item; the
   connector keeps only a hash of it. So a request whose local item was erased, closed or canceled here isn't sent. The

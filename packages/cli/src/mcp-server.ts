@@ -1887,7 +1887,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           if (listed.status >= 400) return mapResult(listed);
           const bindings = (listed.data as { bindings?: Array<{ id: string; localSession: string }> } | null)?.bindings ?? [];
           const selected = bindings.find((b) => b.id === ref || b.localSession === ref);
-          if (selected && !scope.session(selected.localSession)) return outOfScope(`Binding ${ref}`);
+          // The route also accepts recorded and derived seat names, beyond the binding's saved display name.
+          if (!scope.session(selected?.localSession ?? ref)) return outOfScope(`Binding ${ref}`);
         }
         const conversation = !access && !inManagedSeat() && sender.session === seatOf();
         const key = conversation ? options.conversationKey?.() ?? null : null;

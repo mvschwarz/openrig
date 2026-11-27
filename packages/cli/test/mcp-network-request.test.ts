@@ -16,6 +16,7 @@ import { migrate } from "../../daemon/src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { createTestApp } from "../../daemon/test/helpers/test-app.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
+import { SessionRegistry } from "../../daemon/src/domain/session-registry.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
 import { NetworkBindingStore, type NetworkBinding } from "../../daemon/src/domain/network/network-bindings.js";
@@ -184,6 +185,35 @@ describe("MCP network request through the existing daemon route", () => {
     expect(creates).toBe(0);
     const readOnly = await connect({ access: { ...access, owner: true, readOnly: true } });
     expect((await readOnly.client.listTools()).tools.some((t) => t.name === "rig_network_request")).toBe(false);
+  });
+
+  it.each(["earlier@lab", "ops-agent@lab"])("keeps binding scope consistent for the route's accepted name %s", async (ref) => {
+    const registry = new SessionRegistry(db);
+    registry.registerSession(binding.nodeId, "earlier@lab");
+    registry.registerSession(binding.nodeId, SEAT);
+    registry.updateBinding(binding.nodeId, { tmuxSession: SEAT });
+    db.prepare("UPDATE nodes SET logical_id = 'ops.agent' WHERE id = ?").run(binding.nodeId);
+    expect(bindings.find(ref)?.id).toBe(binding.id);
+    expect(binding.localSession).not.toBe(ref);
+    const access = { principal: "scoped", owner: false, rigs: ["other"], roots: [], workspace: false };
+    const outside = await connect({ seat: "caller@other", access });
+    const denied = await outside.call("rig_network_request", { ...request, binding: ref });
+    expect(denied.error).toBe(true);
+    expect(denied.data.code).toBe("out_of_scope");
+    expect(creates).toBe(0);
+    expect(queue.getById(request.requestId)).toBeNull();
+    const allowed = await connect({ seat: "caller@lab", access: { ...access, rigs: ["lab"] } });
+    expect((await allowed.call("rig_network_request", { ...request, binding: ref })).error).toBe(false);
+    expect(creates).toBe(1);
+  });
+
+  it("keeps an unknown binding in the caller's scope readable as not found", async () => {
+    const access = { principal: "scoped", owner: false, rigs: ["lab"], roots: [], workspace: false };
+    const { call } = await connect({ seat: "caller@lab", access });
+    const missing = await call("rig_network_request", { ...request, binding: "missing@lab" });
+    expect(missing.error).toBe(true);
+    expect(missing.data.code).toBe("binding_not_found");
+    expect(creates).toBe(0);
   });
 
   it("recovers a lost hub reply using the same id, and refuses changed request text without a duplicate", async () => {
