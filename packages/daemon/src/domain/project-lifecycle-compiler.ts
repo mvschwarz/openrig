@@ -1,4 +1,5 @@
-import { JudgmentError, readMissionReadiness, resolveProjectRoot, type MissionReadiness } from "./proof/judgments.js";
+import { JudgmentError, declaredNodeId, readMissionReadiness, resolveProjectRoot, resolveSliceDependency, type MissionReadiness } from "./proof/judgments.js";
+import { resolveNodeFile } from "./scope/node-file.js";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -94,6 +95,8 @@ export function compileProjectLifecycle(input: {
   const sliceDirs: Record<string, string> = Object.create(null);
   const activeSliceDirs: string[] = [];
   const idClaims = new Map<string, string[]>();
+  // Each step compiled from a slice's own execution contract, with that slice's folder.
+  const stepSliceDir = new Map<WorkflowStepSpec, string>();
   const roles: WorkflowSpec["roles"] = {};
   const unknowns: string[] = [];
   const advisories: string[] = [];
@@ -218,10 +221,38 @@ export function compileProjectLifecycle(input: {
       ...(execution.acceptance ? { acceptance: asMapping(execution.acceptance, `${slicePath}: execution.acceptance`) as unknown as WorkflowStepSpec["acceptance"] } : {}),
     };
     steps.push(step);
+    stepSliceDir.set(step, dirname(slicePath));
     // A compiled step keeps its own slice, whatever another slice is named.
     if (isNodeId(sliceDir)) sliceDirs[stepId] = sliceDir;
     else advisories.push(`slice directory "${sliceDir}" cannot be a packet tag; step "${stepId}" is tagged with no slice`);
   });
+
+  // A step's depends_on can name a sibling by the dot-ID its SPEC declares, which is what `rig scope slice create
+  // --execution-depends-on` writes, instead of its step name (metadata.id, else its folder). Proof readiness's resolver
+  // maps that name to the sibling's step, so the two read one edge alike. A dot-ID two slices declare names no step.
+  const compiled = [...stepSliceDir.keys()];
+  const declaredIds = new Map<WorkflowStepSpec, string | null>();
+  const declaredOf = (step: WorkflowStepSpec) => {
+    if (!declaredIds.has(step)) declaredIds.set(step, declaredNodeId(stepSliceDir.get(step)!));
+    return declaredIds.get(step)!;
+  };
+  const aliased = new Set<WorkflowStepSpec>();
+  const ambiguous = new Set<string>();
+  for (const step of compiled) {
+    step.depends_on = (step.depends_on ?? []).map((name) => {
+      const target = resolveSliceDependency(name, compiled, (candidate) => candidate.id, declaredOf);
+      if (target && target.id !== name) aliased.add(target);
+      if (target) return target.id;
+      const declaring = compiled.filter((candidate) => declaredOf(candidate) === name);
+      if (declaring.length > 1 && !ambiguous.has(name)) {
+        ambiguous.add(name);
+        advisories.push(`slice dot-ID "${name}" is declared by ${declaring.length} slices (${declaring.map((s) => basename(stepSliceDir.get(s)!)).join(", ")}); a dependency on it names no step`);
+      }
+      return name;
+    });
+  }
+  // The node file an edge resolved through is an input of this compile.
+  for (const target of aliased) sources.push(digestSource("slice", resolveNodeFile(stepSliceDir.get(target)!)!));
 
   // An authored step is named for a slice's directory or its metadata.id. The directory wins; an id maps only when
   // exactly one active slice claims it and no directory has that name, otherwise the step gets no slice tag.

@@ -589,13 +589,15 @@ export class SeatActivityService {
     this.sessionToSeat.set(evidence.sessionName, evidence.seatNodeId);
     const prior = seat.sources.get(evidence.sourceId);
     if (prior && evidence.seq <= prior.latest.seq) return; // stale/reordered — dropped
-    // A durable source's posts can arrive out of their own order: an older boundary arriving later is dropped. A
-    // declared-hooks preset's posts are ordered the same way, durable or not, so a delayed older Stop can't read a working
-    // seat idle (the store still records it).
-    if (prior && (this.durableBoundaries(seat, evidence.rung)
-        || (evidence.rung === "lifecycle-hooks" && seat.inventory?.activityHooks !== undefined))
-        && hookPrecedes({ eventAt: evidence.observedAt, sourceSequence: evidence.sourceSequence },
-          { eventAt: prior.latest.observedAt, sourceSequence: prior.latest.sourceSequence })) return;
+    // Hook posts can arrive out of their own order (the seq above is arrival order): an older boundary arriving later is
+    // dropped. That's any post from a durable source, and a working or idle post from any hook source (a declared-hooks
+    // preset's included), so a late Stop can't make a seat mid-turn read idle. An attention post (a prompt, a usage limit)
+    // keeps its own ordering below.
+    if (prior && (this.durableBoundaries(seat, evidence.rung) || (evidence.rung === "lifecycle-hooks"
+        && (evidence.activity === "working" || evidence.activity === "idle-at-prompt")))
+        && [prior.latest, prior.latestActivity].some((newer) => newer
+          && hookPrecedes({ eventAt: evidence.observedAt, sourceSequence: evidence.sourceSequence },
+            { eventAt: newer.observedAt, sourceSequence: newer.sourceSequence }))) return;
     const runtime = seat.inventory?.runtime ?? "codex";
     const claude = runtime === "claude-code";
     const wasConfirmed = seat.arbitrated.needsInput.count > 0;

@@ -193,6 +193,23 @@ behaviour rather than being labelled the person or a peer. The existing
 adds no restriction there. Its existing-input check applies independently of the
 typing mode. Plain tmux is not prevented.
 
+### Files read during managed restore
+
+A managed restore no longer stops at a permission prompt to read OpenRig's own
+role file or other shipped spec files. A role file from your own spec root still
+asks.
+
+The launch settings OpenRig builds for a Claude seat allow reading its restore
+files. They also allow reading Markdown files under the installed daemon's own
+`specs` directory, where a restore map can name a seat's role file. OpenRig grants
+the directory both where it's named and where it resolves, when the install uses a
+symlink. It doesn't move the files or rewrite saved restore maps.
+
+These allowances are reads only. The seat's native mode and its existing deny and
+ask rules still apply, and custom spec roots aren't included. A Claude seat that's
+already running gets this at its next fresh launch, resume or fork. A continuation
+that keeps its captured native arguments keeps the earlier allowances.
+
 ### Deliberate interaction and existing input
 
 A managed `rig send <seat> "<answer>" --dangerously-interact --reason "<why>" can

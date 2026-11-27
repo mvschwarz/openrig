@@ -10,7 +10,7 @@ import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { createHash, randomUUID } from "node:crypto";
-import { CLAUDE_NOT_STATUS_LINE_ROW, CLAUDE_REMOTE_CONTROL_ROWS, CLAUDE_STATUS_DECORATIONS, CLAUDE_STATUS_WARNINGS, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+import { CLAUDE_CLEAR_HINT, CLAUDE_NOT_STATUS_LINE_ROW, CLAUDE_REMOTE_CONTROL_ROWS, CLAUDE_STATUS_DECORATIONS, CLAUDE_STATUS_WARNINGS, COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
   composerContainsOwnedText,
   composerNumberedChoicePattern,
@@ -36,7 +36,7 @@ import { declaredCapabilities, readSendOutcome, type WrittenFact } from "./conne
 import { DraftAwareDelivery, type GuardedDeliverySummary, type QueueWakeFacts } from "./draft-aware-delivery.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
-import { communityHarnessOf } from "./built-in-runtimes.js";
+import { communityHarnessOf, isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 import { claudeResumeRotation, sessionCommunityHarnessSelect, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter, TmuxResult } from "../adapters/tmux.js";
 import { tmuxUnsetWindowSizeCommand } from "../adapters/tmux-server.js";
@@ -235,6 +235,18 @@ function trimPaneLines(paneContent: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+/** Where a line-mode community harness is asking now. It prints a numbered dialog, the answer and more output into its
+ *  scrollback, then its next empty prompt below them, so, as #2520 reads Claude's empty input box, a later empty prompt
+ *  line makes everything above it history. Only an empty one: a prompt glyph with text after it can be a selection list's
+ *  own highlighted row (`❯ Yes` under its question), and a draft can't be told from one. With no later empty prompt in
+ *  view the whole window counts, as before. Claude and Codex keep their own current-dialog readers: a live Codex choice
+ *  can sit above its composer. */
+function currentPromptRegion(lines: string[], runtime: string | null | undefined): string[] {
+  if (!isCommunityHarnessRuntime(runtime)) return lines;
+  const prompt = lines.map(line => COMPOSER_EMPTY_PATTERN.test(line)).lastIndexOf(true);
+  return prompt < 0 ? lines : lines.slice(prompt + 1);
+}
+
 function truncateEvidence(text: string): string {
   const compact = text.replace(/\s+/g, " ").trim();
   return compact.length > 240 ? `${compact.slice(0, 237)}...` : compact;
@@ -361,6 +373,12 @@ function skipClaudeStatusRows(lines: string[], from: number): number {
   let bar = from;
   while (bar >= 0) {
     const row = lines[bar]!.trim();
+    const previous = lines[bar - 1]?.trim();
+    // #1641: a narrow pane can split the /clear hint at a word or within one.
+    if (row && previous && (CLAUDE_CLEAR_HINT.test(`${previous} ${row}`) || CLAUDE_CLEAR_HINT.test(`${previous}${row}`))) {
+      bar -= 2;
+      continue;
+    }
     if (row && !CLAUDE_STATUS_WARNINGS.some(pattern => pattern.test(row)) &&
         !CLAUDE_STATUS_DECORATIONS.some(pattern => pattern.test(row)) &&
         !CLAUDE_REMOTE_CONTROL_ROWS.some(pattern => pattern.test(row))) break;
@@ -441,9 +459,12 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
   const footerAt = findClaudeFooterIndex(drawn.slice(0, end));
   const statusLineClose = claudeCloseAboveStatusLine(drawn, footerAt);
   const statusLineRows = statusLineClose < 0 ? 0 : footerAt - statusLineClose - 1;
-  const lines = physical.slice(Math.max(0, end - 20 - statusLineRows), end)
-    .map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
-  const bar = findClaudeFooterIndex(lines);
+  const start = Math.max(0, end - 20 - statusLineRows);
+  if (footerAt < start) return null;
+  const nonblank = (line: string) => line.trim().length > 0;
+  // Find the footer on physical rows so a blank cannot join two fragments of a hint.
+  const bar = drawn.slice(start, footerAt + 1).filter(nonblank).length - 1;
+  const lines = drawn.slice(start, end).filter(nonblank);
   const supportedWarningFooter = lines[bar]?.trim() === "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
   const modeFooter = CLAUDE_MODE_FOOTER.test(lines[bar]?.trim() ?? "");
   // The closing rule is right above the footer, or above a user statusLine drawn between them (#2700).
@@ -834,7 +855,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     !!claudeComposer.liveStatus && CLAUDE_LIVE_STATUS_PATTERN.test(claudeComposer.liveStatus);
   // Wider window for prompt SIGNATURES so a tall footer can't push a real prompt out of view (see
   // PROMPT_SCAN_LINES). The generic activity checks below keep the tighter 8-line window.
-  const promptScanLines = historyAboveInput ? [] : lastNonBlank.slice(-PROMPT_SCAN_LINES);
+  const promptScanLines = historyAboveInput ? [] : currentPromptRegion(lastNonBlank.slice(-PROMPT_SCAN_LINES), options.runtime);
   const trailingNonBlank = lastNonBlank.slice(-3);
   const lastLine = lastNonBlank.at(-1) ?? "";
   const idlePromptLine = trailingNonBlank.find((line) =>

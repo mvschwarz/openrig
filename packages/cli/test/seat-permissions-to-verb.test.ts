@@ -69,7 +69,7 @@ describe("rig seat set-permissions-to", () => {
     expect(calls[0]!.path).toBe("/api/seat/set-permissions-to/dev-runner%40perm-rig");
     expect(calls[0]!.body).toEqual({ to: "mike@external", reason: "Mike approves" });
     expect(exitCode).toBeUndefined();
-    expect(logs.join("\n")).toContain("dev.runner@perm-rig's permission requests: the default person -> mike@external (audited).");
+    expect(logs.join("\n")).toContain("dev.runner@perm-rig's permission requests: no one chosen (a runner's requests go to the default person; a Claude Code seat's own prompts go to its work's return route, else to no one) -> mike@external (audited).");
   });
 
   it("--clear posts clear", async () => {
@@ -79,7 +79,7 @@ describe("rig seat set-permissions-to", () => {
       await program.parseAsync(["node", "rig", "seat", "set-permissions-to", "dev.runner", "--clear", "--reason", "back to the default person"]);
     });
     expect(calls[0]!.body).toEqual({ clear: true, reason: "back to the default person" });
-    expect(logs.join("\n")).toContain("mike@external -> the default person");
+    expect(logs.join("\n")).toContain("mike@external -> no one chosen (a runner's requests go to the default person; a Claude Code seat's own prompts go to its work's return route, else to no one)");
   });
 
   it("--deny posts the explicit opt-in to refuse, and prints it", async () => {
@@ -89,7 +89,7 @@ describe("rig seat set-permissions-to", () => {
       await program.parseAsync(["node", "rig", "seat", "set-permissions-to", "dev.runner", "--deny", "--reason", "high stakes"]);
     });
     expect(calls[0]!.body).toEqual({ deny: true, reason: "high stakes" });
-    expect(logs.join("\n")).toContain("the default person -> refused (--deny)");
+    expect(logs.join("\n")).toContain("no one chosen (a runner's requests go to the default person; a Claude Code seat's own prompts go to its work's return route, else to no one) -> --deny (a runner's requests are refused; a Claude Code seat's own prompts stay in its terminal, asking no one)");
   });
 
   it("requires exactly one of --to, --clear or --deny, before any request", async () => {

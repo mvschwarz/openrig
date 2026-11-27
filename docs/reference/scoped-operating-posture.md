@@ -51,7 +51,12 @@ another preference store or infer delegation from workflow existence or activity
 The existing SQLite mode-binding table remains the only preference store. Matching
 posture bindings resolve in this order: qitem, workstream, mission, project, rig,
 global host. The qualifiers are respectively a qitem ID, `project/mission/slice-id`,
-`project/mission`, project ID, canonical rig ID, and null. Rig names resolve to IDs.
+`project/mission`, project ID, canonical rig ID, and null. Rig names resolve to IDs: an ID
+resolves exactly, and a name to the one live rig with it. Archived rigs of that name count only
+when no live one has it, and a name that still matches several rigs reports `unknown` with their
+IDs in the reason, so one can be named by ID. A qitem addressed to a seat takes that seat's rig;
+one addressed to a person (`<person>@external`) names no rig, and its posture comes from its work
+scope.
 The workstream is an existing authored slice, found by its directory or SPEC ID;
 the returned identity uses its SPEC ID and project/mission qualification.
 
