@@ -63,6 +63,10 @@ export interface ParkedOwnerConsumerDeps {
      *  occupant generation, however many other rows came after it. Without it, the owner's minimum interval finds no
      *  earlier reminder and holds nothing back. */
     latestAcceptedSendTo?: (jobId: string, targetSession: string, occupantGeneration: string) => WatchdogHistoryEntry | null;
+    /** Whether the job recorded an attempt to one seat refused at a prompt after the given history row, to that occupant
+     *  or to one the attempt didn't record. Without it, a refusal is looked for only on the seat's open rows and the
+     *  last reminder's. */
+    refusedAttemptSince?: (jobId: string, targetSession: string, afterHistoryId: string, occupantGeneration: string | null) => boolean;
   };
   /** The durable row-side surfaces (queue repository, adapter-wired). */
   rows: {
@@ -320,7 +324,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
       // refused one, one to an earlier occupant, or one with no recorded occupant starts nothing: an unknown occupant
       // earns no quiet time.
       const lastReminder = (owner: string, generation: string | null):
-        { at: number; obligations: string[]; episodeKey: string | null; primaryRow: string | null } | null => {
+        { at: number; historyId: string; obligations: string[]; episodeKey: string | null; primaryRow: string | null } | null => {
         if (generation === null) return null;
         let e: WatchdogHistoryEntry | null = null;
         try { e = deps.history.latestAcceptedSendTo?.(job.jobId, owner, generation) ?? null; } catch { /* unknown history holds no reminder back */ }
@@ -330,7 +334,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         const named = e.evaluationNotes?.["obligations"];
         const key = typeof e.evaluationNotes?.["episodeKey"] === "string" ? e.evaluationNotes["episodeKey"] as string : null;
         const row = e.evaluationNotes?.["primaryRow"];
-        return { at: sentAt, obligations: Array.isArray(named) ? named.filter((id): id is string => typeof id === "string") : [],
+        return { at: sentAt, historyId: e.historyId, obligations: Array.isArray(named) ? named.filter((id): id is string => typeof id === "string") : [],
           episodeKey: key, primaryRow: typeof row === "string" ? row : null };
       };
 
@@ -353,6 +357,13 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           } catch { /* unreadable history holds nothing back */ }
         }
         return false;
+      };
+
+      // An attempt to this owner refused at a prompt, recorded after its last accepted reminder, to the occupant running
+      // now (or to one the attempt didn't record): the history is where the refusal is recorded first, and the row note
+      // made from it lands only while the row that carried it is open.
+      const refusedAttemptSince = (owner: string, afterHistoryId: string, generation: string | null): boolean => {
+        try { return deps.history.refusedAttemptSince?.(job.jobId, owner, afterHistoryId, generation) === true; } catch { return false; }
       };
 
       // A delivered reminder's rows still pending and unclaimed past the bound go to someone who can act, once per
@@ -545,7 +556,10 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         if (!terminal && last && seat.activity.needsInput.count === 0
           && (deps.now?.() ?? Date.now()) - last.at < minIntervalS * 1000
           // The rows the reminder named are read too: a refusal recorded on one of them still counts after it closes.
-          && !refusedSince([...new Set([...knownRows, ...last.obligations])], last.at, seat.sessionName, generation, generationOf)) {
+          && !refusedSince([...new Set([...knownRows, ...last.obligations])], last.at, seat.sessionName, generation, generationOf)
+          // A refused attempt since then counts from the history, whatever row carried it: that row may have closed, also
+          // before the refusal could be noted on it.
+          && !refusedAttemptSince(seat.sessionName, last.historyId, generation)) {
           const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && last.obligations.includes(r.qitemId)
             && namedIds.includes(r.qitemId)).map(r => r.qitemId);
           const nextReminderAt = new Date(last.at + minIntervalS * 1000).toISOString();

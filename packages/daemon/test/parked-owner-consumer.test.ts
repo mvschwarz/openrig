@@ -137,6 +137,10 @@ function makeDeps(
       latestAcceptedSendTo: (_j, target, generation) =>
         history.find((e) => e.deliveryTargetSession === target && e.outcome === "sent" && e.deliveryStatus === "ok"
           && e.evaluationNotes?.["deliveryFact"] === "accepted" && e.evaluationNotes?.["occupantGeneration"] === generation) ?? null,
+      // As the real log reads it: an attempt to this seat refused at a prompt after the row, to this occupant or an unrecorded one.
+      refusedAttemptSince: (_j, target, afterHistoryId, generation) => history.some((e) => e.deliveryTargetSession === target
+        && e.outcome === "refused" && e.historyId > afterHistoryId
+        && (e.evaluationNotes?.["occupantGeneration"] == null || e.evaluationNotes["occupantGeneration"] === generation)),
     },
     rows: store.deps(),
     occupantGeneration,
@@ -1573,6 +1577,58 @@ describe("context.owner_min_interval_s: a minimum time between one owner's remin
       store.openIds = () => open;
       const seat = parkedSeat({ obligations: { items: open.map((qitemId) => ({ qitemId, state: "in-progress", summary: null })), held: [] } });
       expect((await run(twoRows, HOUR, NOW, store, [seat])).action).toBe("send");
+    }
+  });
+
+  it("a refused attempt on a row the seat no longer holds, which the last reminder didn't name, is still a return to ability", async () => {
+    const [A, B, C] = ROW_IDS as [string, string, string];
+    // The refusal noted on the row that carried it, or that row closed before the note could land on it.
+    for (const noted of [true, false]) {
+      const store = new RowStore();
+      let prompt = 0;
+      let open = [A];
+      store.openIds = () => open;
+      const seatNow = () => parkedSeat({
+        activity: prompt > 0
+          ? { value: "needs-input", needsInput: { count: prompt, reason: "permission" }, since: at(3) }
+          : { value: "idle-at-prompt", needsInput: { count: 0, reason: null }, since: at(24 * 60) },
+        obligations: { items: open.map((qitemId) => ({ qitemId, state: "in-progress", summary: null })), held: [] },
+      });
+      const evaluate = (history: WatchdogHistoryEntry[], now: number) =>
+        makeParkedOwnerConsumerPolicy({ ...makeDeps([seatNow()], store, history), now: () => now } as ParkedOwnerConsumerDeps)
+          .evaluate(makeJob({ context: HOUR }));
+      // The last accepted reminder names A, which then closes.
+      const first = await evaluate([], NOW - 10 * 60_000);
+      expect(first.action).toBe("send");
+      if (first.action !== "send") return;
+      const sent: WatchdogHistoryEntry = { ...wake(10, [A]), evaluationNotes: { ...first.notes, deliveryFact: "accepted" } };
+      // B and C arrive while the seat is at a prompt: the attempt for them is refused there, on the row it carries.
+      open = [B, C];
+      prompt = 1;
+      const attempt = await evaluate([sent], NOW - 5 * 60_000);
+      expect(attempt.action).toBe("send");
+      if (attempt.action !== "send") return;
+      const carried = attempt.notes?.["primaryRow"] as string;
+      const key = attempt.notes?.["episodeKey"] as string;
+      const reason = `Refused: '${SEAT}' is at an interactive prompt`;
+      const refusedAttempt: WatchdogHistoryEntry = { ...wake(5, [B, C], { deliveryStatus: "failed", outcome: "refused" }),
+        evaluationNotes: { ...attempt.notes, deliveryReason: reason } };
+      if (noted) {
+        // The next scan notes the refusal on that row; the prompt clears and the ladder closes it.
+        store.record(carried, "watchdog@system", "in-progress", `${REFUSED_PREFIX} ${key}; ${reason}`, at(5));
+        store.record(carried, "watchdog@system", "in-progress", `${CLOSE_PREFIX} ${key} (interactive prompt cleared)`, at(4));
+      } else {
+        // That row closes before the next scan: a note on a closed row doesn't land.
+        store.terminal.add(carried);
+      }
+      prompt = 0;
+      // The row that carried the refusal closes, and the other stays open.
+      open = [B, C].filter((id) => id !== carried);
+      const after = await evaluate([refusedAttempt, sent], NOW);
+      expect(store.transitions.get(carried)!.some((t) => t.transitionNote?.startsWith(REFUSED_PREFIX))).toBe(noted);
+      expect(after).toMatchObject({ action: "send", target: { session: SEAT } });
+      if (after.action !== "send") return;
+      expect(after.notes?.["obligations"]).toEqual(open);
     }
   });
 

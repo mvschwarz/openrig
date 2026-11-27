@@ -2766,6 +2766,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             countForJob: (jobId) => watchdogHistoryLogInstance.countForJob(jobId),
             latestAcceptedSendTo: (jobId, targetSession, occupantGeneration) =>
               watchdogHistoryLogInstance.latestAcceptedSendTo(jobId, targetSession, occupantGeneration),
+            refusedAttemptSince: (jobId, targetSession, afterHistoryId, occupantGeneration) =>
+              watchdogHistoryLogInstance.refusedAttemptSince(jobId, targetSession, afterHistoryId, occupantGeneration),
           },
           // Best-effort attempt reporting; actual prompt and failure recovery still use the existing ladder.
           rows: {

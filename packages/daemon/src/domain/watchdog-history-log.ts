@@ -154,6 +154,21 @@ export class WatchdogHistoryLog {
     return row ? rowToEntry(row) : null;
   }
 
+  /** Whether the job recorded an attempt to one target session that was refused at an interactive prompt (outcome
+   *  `refused`) after the given history row, sent to that occupant generation or to one the attempt didn't record. */
+  refusedAttemptSince(jobId: string, targetSession: string, afterHistoryId: string, occupantGeneration: string | null): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM watchdog_history
+         WHERE job_id = ? AND delivery_target_session = ? AND outcome = 'refused' AND history_id > ?
+           AND (json_extract(evaluation_notes, '$.occupantGeneration') IS NULL
+             OR json_extract(evaluation_notes, '$.occupantGeneration') = ?)
+         LIMIT 1`,
+      )
+      .get(jobId, targetSession, afterHistoryId, occupantGeneration);
+    return row !== undefined;
+  }
+
   listAll(limit = 100): WatchdogHistoryEntry[] {
     const rows = this.db
       .prepare(

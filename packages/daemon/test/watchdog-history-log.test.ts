@@ -63,6 +63,25 @@ describe("WatchdogHistoryLog (PL-004 Phase C; append-only audit)", () => {
     expect(log.latestAcceptedSendTo(jobId, "b@rig", "g1")).toBeNull();
   });
 
+  it("refusedAttemptSince: an attempt to that seat refused after the given row, to that occupant or an unrecorded one", () => {
+    const attempt = (outcome: "sent" | "refused" | "failed", notes: Record<string, unknown> | null, target = "a@rig") =>
+      log.record({ jobId, evaluatedAt: "2026-05-03T07:00:00.000Z", outcome, deliveryTargetSession: target,
+        deliveryStatus: outcome === "sent" ? "ok" : "failed", evaluationNotes: notes });
+    attempt("refused", { occupantGeneration: "g1" });
+    const since = attempt("sent", { occupantGeneration: "g1" });
+    // Not counted: a refusal before the row, a failed attempt, another seat's refusal, another occupant's.
+    attempt("failed", { occupantGeneration: "g1" });
+    attempt("refused", { occupantGeneration: "g1" }, "b@rig");
+    attempt("refused", { occupantGeneration: "g2" });
+    expect(log.refusedAttemptSince(jobId, "a@rig", since.historyId, "g1")).toBe(false);
+    expect(log.refusedAttemptSince(jobId, "a@rig", since.historyId, "g2")).toBe(true);
+    // This occupant's refusal, and one whose attempt didn't record the occupant.
+    attempt("refused", { occupantGeneration: "g1" });
+    expect(log.refusedAttemptSince(jobId, "a@rig", since.historyId, "g1")).toBe(true);
+    attempt("refused", null, "c@rig");
+    expect(log.refusedAttemptSince(jobId, "c@rig", since.historyId, "g1")).toBe(true);
+  });
+
   it("record(skipped) persists reason + null delivery fields", () => {
     const e = log.record({
       jobId,
