@@ -39,6 +39,8 @@ interface SeatStatusResponse {
   /** Slice 16: an open runtime switch, or one recovery stopped short of finishing. */
   runtimeSwitch?: { id: string; phase: string; from: string; to: string; committed: boolean; startedAt: string; attention: string | null; outcome: string | null };
   compaction?: { stage: string; detail: string };
+  /** #4003: launched by OpenRig, or adopted (claimed); absent from older daemons. */
+  origin?: "launched" | "claimed" | null;
   current_occupant: string | null;
   /** #3253: the seat's process limits, read back from its process (applied; requested, not applied; unsupported; unknown;
    *  or invalid: the stored value can't be read). `readFrom` says which process was read. */
@@ -81,6 +83,9 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  external_attachment?: { liveness: "unknown"; lastOwnQueueAction: { at: string; qitemId: string; state: string } | null;
+    lastOwnQueueActionRead?: "read" | "unavailable" };
+  standby_stopped?: true;
   /** The seat's state as `rig ps --nodes` shows it; absent from an older daemon. */
   lifecycle_state?: string;
   launch_cwd?: string | null;
@@ -279,15 +284,20 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Rig: ${status.rig_name}`);
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
+  if (status.origin !== undefined) console.log(`Origin: ${status.origin === "claimed" ? "adopted (origin=claimed): OpenRig didn't launch this session, so stop, restart and clean refuse it" : status.origin === "launched" ? "launched by OpenRig" : "unknown"}`);
   if (status.nativeInput?.unresolved?.length) {
     console.log(`Native request evidence: ${terminalJson(status.nativeInput.unresolved)}`);
     if (status.nativeInput.recovery) console.log(status.nativeInput.recovery);
   }
   if (status.nativeInput?.target) console.log(`Native turn: ${terminalJson(status.nativeInput.target)}`);
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
-  // Only a runner submits permission requests; a plain seat's own prompts are its harness's.
-  if (status.permissions_to || status.runner) {
-    console.log(`Runner permission requests answered by: ${status.permissions_to === "deny" ? "no one: refused (--deny)" : status.permissions_to ?? "the default person"}`);
+  // A runner submits permission requests. A Claude Code seat that loads openrig-core has its own prompts asked of the
+  // chosen person, else its work's return route, else no one (#3992); other seats' prompts are their harness's.
+  const claudeSeat = status.runtime === "claude-code" && !status.runner;
+  if (status.permissions_to || status.runner || claudeSeat) {
+    console.log(claudeSeat
+      ? `Own permission prompts asked of (with openrig-core loaded): ${status.permissions_to === "deny" ? "no one: they stay in the terminal (--deny)" : status.permissions_to ?? "its work's return route, else no one"}`
+      : `Runner permission requests answered by: ${status.permissions_to === "deny" ? "no one: refused (--deny)" : status.permissions_to ?? "the default person"}`);
   }
   if (status.processLimits) {
     const l = status.processLimits;
@@ -323,8 +333,18 @@ function printHuman(status: SeatStatusResponse): void {
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   // #3185: a bare shell or an unconfirmed pane process keeps the session record running; read the seat as rig ps does.
-  console.log(`Session: ${status.session_status === "running" && status.lifecycle_state === "attention_required"
-    ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
+  const attached = status.external_attachment;
+  if (attached) {
+    // A seat joined with rig attach runs in someone else's program: OpenRig can't see its process, only what it writes.
+    const last = attached.lastOwnQueueAction;
+    console.log("Session: attached from an outside program (rig attach); OpenRig can't see its process, so whether it's running is unknown.");
+    // A history OpenRig couldn't read says so: it's never "none recorded".
+    console.log(`  Its own last queue action: ${attached.lastOwnQueueActionRead === "unavailable" ? "couldn't be read"
+      : last ? `${last.state} on ${last.qitemId} at ${last.at}` : "none recorded"}. Work sent to it waits until that program reads its queue.`);
+  } else {
+    console.log(`Session: ${status.standby_stopped ? "standby (wakes for queued work)" : status.session_status === "running" && status.lifecycle_state === "attention_required"
+      ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
+  }
   const stop = status.permission_stop;
   if (stop && stop.state !== "unavailable") {
     console.log(`Latest permission observation at ${stop.observed_at}: ${stop.command}; harness permission request (${stop.source}, ${stop.actor})`);
@@ -1196,8 +1216,8 @@ Examples:
     .command("set-permissions-to")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--to <person>", "The registered person who answers this seat's runner permission requests instead of the default person, such as mike@external")
-    .option("--clear", "Remove the override: the default person answers again")
-    .option("--deny", "Opt in to refusing every runner permission request on this seat")
+    .option("--clear", "Remove the override: a runner's requests go to the default person again, and a Claude Code seat's own prompts to its work's return route, else to no one")
+    .option("--deny", "Opt in to refusing every runner permission request on this seat; on a Claude Code seat, ask no one and leave its prompt in the terminal")
     .requiredOption("--reason <text>", "Audit reason recorded on the node.permissions_to_changed event")
     .option("--operator <address>", "Operator recorded on the audit event (required outside a managed seat)")
     .option("--json", "JSON output for agents")
@@ -1208,6 +1228,13 @@ request to OpenRig, and one person gets an ordinary ask with every option the ag
 offered; the answer goes back to that one request. That person is the default person
 (rig gateway default), unless this override names someone else. When no one can be
 asked, OpenRig's default is to permit the request.
+
+On a Claude Code seat that loads openrig-core, this also chooses who is asked the
+seat's own permission prompt: the chosen person, else the return route of the work
+it's running. With neither, no one is asked, not even the default person, so the
+seat's usual prompt alert isn't held back. There, a prompt no one is asked isn't
+permitted, and --deny stops the question: the prompt stays in the seat's terminal,
+and nothing is refused.
 
 Only a registered person can be chosen (rig gateway human list). A seat address is
 refused. --clear removes the override. --deny is the opt-in for a seat whose requests
@@ -1228,7 +1255,12 @@ Examples:
       await runLifecycleVerb("set-permissions-to", seat, body, opts, (data) => {
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         const name = `${s?.logicalId}@${s?.rigName}`;
-        const owner = (value: unknown) => value === "deny" ? "refused (--deny)" : typeof value === "string" ? value : "the default person";
+        // The receipt doesn't know the seat's kind, so with no one chosen or --deny it names both: a runner's requests and,
+        // on a Claude Code seat that loads openrig-core, its own prompts (#3992).
+        const owner = (value: unknown) => value === "deny"
+          ? "--deny (a runner's requests are refused; a Claude Code seat's own prompts stay in its terminal, asking no one)"
+          : typeof value === "string" ? value
+          : "no one chosen (a runner's requests go to the default person; a Claude Code seat's own prompts go to its work's return route, else to no one)";
         console.log(data["changed"] === false
           ? `${name}'s permission requests already go to ${owner(data["to"])}. No change recorded.`
           : `${name}'s permission requests: ${owner(data["from"])} -> ${owner(data["to"])} (audited).`);
@@ -1476,7 +1508,7 @@ resume/successor launch reads it at call time. Examples:
     .option("--note <text>", "With --confirm: what you'll do first")
     .option("--recover", "Finish an interrupted switch from its record")
     .option("--json", "JSON output for agents")
-    .description("Move a live Codex, Claude Code or Pi seat to another runtime, successor first")
+    .description("Move a live Codex, Claude Code, Pi or community-harness seat to another runtime, successor first")
     .addHelpText("after", `
 The seat keeps its address, connections, queue rows and claims. Its successor
 starts on the target runtime beside the current occupant, reads a handover, and
@@ -1490,7 +1522,7 @@ later converge reports a deferred change_runtime); the source runtime's model,
 effort, Codex profile and native permission choice are cleared, not mapped; two
 processes run until cutover; messages sent to the seat during the switch are
 held, not typed, and need sending again afterwards.
-Codex, Claude Code and Pi, single-pane seats only. --dry-run lists the details.
+Codex, Claude Code, Pi and installed community-harness seats, single-pane seats only. --dry-run lists the details.
 A seat that has never started has no pane to switch: declare the other runtime for it in its rig spec and bring the team
 up again from that spec. That's a new generation of the seat, without this seat's edges, settings or queued work.
 --clear-account-home returns to configured member/rig/daemon/native selection; it does not restore historical credentials.
@@ -1757,7 +1789,7 @@ Examples:
     .requiredOption("--keep-conversation", "Resume the seat's own conversation in its own pane; never a fresh launch or fork")
     .option("--reason <text>", "Audit reason (required when executing)")
     .option("--plan", "Run every check and show what a restart would keep; nothing is stopped or restarted")
-    .option("--verify", "After a real tool-using turn, check whether the restarted seat can be reported as moved")
+    .option("--verify", "With --keep-conversation, after a real tool-using turn: check whether the restarted seat can be reported as moved")
     .option("--expect-account <text>", "With --verify: the account Codex's /status Account line must name")
     .option("--operator <address>", "Operator recorded on the audit event")
     .option("--host <id>", "Restart a seat on this registered machine, over its SSH entry, as this seat")
@@ -1770,9 +1802,17 @@ exception: an explicit effort choice saved with rig seat set-effort is applied, 
 --plan shows that change. With no saved choice (never set, or cleared with --clear),
 an effort difference refuses as settings_drift, as a pending set-model does; the
 next ordinary managed launch or resume resolves effort instead.
+A developer_instructions command-line difference also doesn't refuse the restart.
+Managed launches use that override for startup guidance, but a manual resume can
+carry a person's own value too. This in-place restart doesn't preserve the override
+or rebuild startup guidance; --plan and the result report when it changes. To
+refresh startup guidance, or adopt new openrig-core in a home other seats share,
+use the normal restore path together: rig down, then rig up --existing.
 This never switches an account (use rig auth switch first), never reads credentials,
 never launches fresh, forks or retries. Peers sharing the Codex home are reported,
-not restarted.
+not restarted. An openrig-core upgrade waiting in the seat's Codex home installs
+between the old Codex's stop and the new one's start, unless another Codex seat still
+runs there; then a warning names those seats.
 Mid-turn activity and child processes are shown in --plan and the result; deciding
 whether to interrupt them is the operator's call.
 An adopted seat (origin=claimed) refuses with claimed_session. The stored conversation
@@ -1875,9 +1915,11 @@ session and leaves its process running), then end that process and the
 underlying tmux session, including any remaining shell. Closing only its
 viewing window leaves the tmux session running. rig down <rig> leaves a
 session OpenRig didn't start running.
-A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 still reads
-adopted and is refused too, until its next launched handover or managed launch;
-the refusal says so. Stopping ends that agent's session and any work in progress:
+A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 was recorded as
+adopted. Where retained handover records identify its successor unambiguously,
+the upgrade records it as launched, so it stops like any other launched seat.
+Missing or ambiguous records keep the adopted origin. rig seat status shows
+each seat's recorded origin. Stopping ends that agent's session and any work in progress:
 check it first (rig capture <seat>) and stop only a seat you own or were asked to
 stop. rig seat launch <seat> --fresh --reason <text> starts
 a fresh occupant there; it does not resume the stopped conversation.

@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { HOOK_BRIDGE_TIMEOUT_SECONDS } from "../domain/hook-bridge.js";
 
-import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../../assets/claude-permission-policies.cjs";
-export { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK };
+import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK, RECEIVING_AGENT_NO_ASK } from "../../assets/claude-permission-policies.cjs";
+export { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK, RECEIVING_AGENT_NO_ASK };
 
 type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault" | "nonInterruptive" | "launchPosture" | "permissionMode" | "claudePermissions" | "claudeAutoMode"> & {
   /** Whether OpenRig's managed compaction acts on this Claude launch; read from the policy when absent. */

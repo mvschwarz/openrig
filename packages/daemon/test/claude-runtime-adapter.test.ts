@@ -135,6 +135,37 @@ it("shares a poll's Claude idle-shell listings without collapsing each two-sampl
   expect(reads).toBe(4);
 });
 
+// A fork handover's successor whose Claude runs as a child of a non-interactive inner shell (a launch the pane's shell
+// sourced in a subshell, or a claude alias or function): the pane reads `bash`, the inner shell holds the foreground, and the
+// screen has Claude's prompt but not its header. Readiness proves it by the fork's own --session-id, as it does a fresh launch,
+// and a Claude naming another conversation there isn't this fork.
+it.each([
+  ["the fork's own session id", true],
+  ["another conversation's session id", false],
+] as const)("readiness of a forked Claude under an inner shell, when it names %s", async (_case, own) => {
+  const forkId = "11111111-2222-4333-8444-555555555555";
+  const named = own ? forkId : "99999999-8888-4777-8666-555555555555";
+  const startedAt = "Sat Jan  1 12:00:00 2000";
+  const rows = [
+    { pid: 100, ppid: 1, pgid: 100, tpgid: 200, executableName: "bash", command: "-bash", startedAt },
+    { pid: 200, ppid: 100, pgid: 200, tpgid: 200, executableName: "bash", command: "/bin/bash", startedAt },
+    { pid: 300, ppid: 200, pgid: 200, tpgid: 200, executableName: "claude",
+      command: `claude --permission-mode acceptEdits --resume parent --fork-session --session-id ${named} --name seat`, startedAt },
+  ];
+  const tmux = mockTmux();
+  tmux.getPaneCommand = vi.fn(async () => "bash");
+  tmux.capturePaneContent = vi.fn(async () => "earlier output\n❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)");
+  tmux.listPanes = vi.fn(async () => [{ id: "%1" }]) as unknown as TmuxAdapter["listPanes"];
+  tmux.getPanePid = vi.fn(async () => 100);
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), listProcesses: async () => rows, sessionIdFactory: () => forkId });
+  const binding = { ...makeBinding(), tmuxPane: "%1" };
+  expect(await adapter.launchHarness(binding, { name: "seat", forkSource: { kind: "native_id", value: "parent" } }))
+    .toMatchObject({ ok: true, resumeToken: forkId });
+  const ready = await adapter.checkReady(binding);
+  if (own) expect(ready).toMatchObject({ ready: true });
+  else expect(ready).toMatchObject({ ready: false, code: "awaiting_runtime" });
+});
+
 it("reduces enumerations for a sequential poll of Claude idle shells", async () => {
   const rows = Array.from({ length: 90 }, (_, i) => ({
     pid: 1000 + i, ppid: 1, pgid: 1000 + i, tpgid: 1000 + i,

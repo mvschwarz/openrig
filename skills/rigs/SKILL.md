@@ -9,6 +9,11 @@ OpenRig runs a team of coding agents (Claude Code, Codex and others) side by sid
 tasks, messages and state, so the team keeps working across restarts. This skill gets OpenRig installed, gets a team
 working on what the person wants, and shows how to work with that team from here.
 
+**This file is long. If your read of it came back shortened, read the rest in parts before you act.** Some tools keep
+only the start and end of a long output: Codex, for one, drops the middle and says it truncated it. Parts of about 150
+lines usually come back whole (`sed -n '1,150p' SKILL.md`, then `'151,300p'`, and on to the end). Step 1's plugin offer
+and all of step 2 are in that middle.
+
 **The goal is a team doing the person's work, not just an install.** Go through the steps in order and stop early only
 if the person asks. Give what they want built to OpenRig's operator (step 2) instead of building it yourself.
 

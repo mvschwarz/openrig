@@ -6,7 +6,7 @@ import { createProofPolicyRead, readMissionReadiness, readProjectReadinessAsync 
 import { lifecycleObligations } from "./lifecycle-obligations.js";
 import { renderWorkflowProjectCommand } from "./workflow-projector.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
-import { readWithCurrentParkBoundary } from "./current-park-arm.js";
+import { localQueueWakeSource, readWithCurrentParkBoundary } from "./current-park-arm.js";
 import { isTypedGateBlocker } from "./queue-repository.js";
 // S27 (OPR.0.5.6.27) — the execution view: one JSON document answering the six
 // execution questions (who-where, sequencing, care-dial, done-ness-by-rung, park
@@ -509,6 +509,31 @@ function parseJsonStringList(value: unknown): string[] {
   } catch {
     return [];
   }
+}
+
+/** #3616's read-back: a mission's planned arrangement as this view reads it (the same reader), for each active slice
+ *  of its composition. `missing` (no mission.yaml) and `malformed` are the view's own states, with its warning. */
+export function readPlannedArrangement(missionsRoot: string, mission: string):
+  | { state: "missing" }
+  | { state: "malformed"; warning: string }
+  | { state: "valid"; slices: Array<{ dir: string; id: string | null; wave: string | null; plannedOwners: Array<{ component: string; owner: string }>; dependsOn: string[] | null }> } {
+  const facts = readMissionSlices(missionsRoot, mission);
+  const arrangement = readArrangement(missionsRoot, mission, facts);
+  if (arrangement.state === "missing") return { state: "missing" };
+  if (arrangement.state === "malformed") return { state: "malformed", warning: arrangement.warning };
+  return {
+    state: "valid",
+    slices: [...arrangement.byDir].map(([dir, entry]) => {
+      const id = facts.find((slice) => slice.dir === dir)?.id;
+      return {
+        dir,
+        id: typeof id === "string" && id !== INDETERMINATE ? id : null,
+        wave: entry.wave ?? null,
+        plannedOwners: entry.plannedOwners.map(({ component, owner }) => ({ component, owner })),
+        dependsOn: entry.dependsOn ?? null,
+      };
+    }),
+  };
 }
 
 /** The manifest arrangement is optional. Missing means compatibility fallback;
@@ -1295,6 +1320,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
   });
 
   // ---- Q5 park honesty ----
+  const localWakes = localQueueWakeSource(deps.db);
   const q5 = rows
     .filter((r) => r.state === "blocked" || (r.claimed_at && ["in-progress", "pending"].includes(r.state)))
     .map((r) => {
@@ -1311,9 +1337,9 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
         now: now(),
       });
       const wake = readWithCurrentParkBoundary(boundary => deps.db
-        .prepare(`SELECT w.wake_ref, w.phase FROM queue_transition_wakes w
+        .prepare(`SELECT w.wake_ref, w.phase FROM ${localWakes} w
           WHERE w.qitem_id = ? AND w.phase = 'armed'
-            AND w.transition_id = (SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+            AND w.transition_id = (SELECT MAX(a.transition_id) FROM ${localWakes} a
               WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed')
             ${boundary}
           ORDER BY w.transition_id DESC LIMIT 1`)

@@ -78,6 +78,8 @@ interface WorldOptions {
   /** What the running Codex's own logs show, and whether the read met no detected incompleteness. */
   evidence?: CodexThreadEvidence;
   facts?: Partial<Record<number, ProcessFacts | null>>;
+  /** auth.json's last modification time (ps lstart form, like LSTART and LATER); absent: no auth.json in the home. */
+  authMtime?: string;
   identityFails?: boolean;
   rollout?: string | null;
   /** Printed in the pane after the restart (the operator's /status). */
@@ -113,6 +115,8 @@ interface WorldOptions {
   defaultShell?: string | null | "omitted";
   /** Initial foreground command returned by getPaneCommand before stop (default "codex"). */
   paneCommandBefore?: string;
+  /** #3385: the launcher's openrig-core upgrade step, recorded in `calls`; its answer is why the upgrade still waits. */
+  upgrade?: (nodeId: string, home: string) => Promise<string | undefined>;
 }
 
 const dbs: Database.Database[] = [];
@@ -344,6 +348,12 @@ function world(options: WorldOptions = {}) {
       maybeThrow("verifyResumeInPane");
       return options.launch ?? { ok: true };
     },
+    ...(options.upgrade ? {
+      async upgradeCorePluginForResume(nodeId: string, home: string): Promise<string | undefined> {
+        calls.push(`upgrade ${nodeId === node.id ? "this seat" : nodeId} ${home}; codex ${rows.some((row) => row.executableName === "codex") ? "running" : "stopped"}; resumes ${launches.length}`);
+        return options.upgrade!(nodeId, home);
+      },
+    } : {}),
   };
 
   const io: Partial<InPlaceRestartIo> = {
@@ -360,7 +370,7 @@ function world(options: WorldOptions = {}) {
       return { ...(thread ? { thread } : { reason: "no_log_row" as const }), fullyReadable: false, incomplete: "discovery" };
     },
     readCredentialStore: () => "file",
-    statAuthFile: () => null,
+    statAuthFile: () => (options.authMtime ? { mtimeMs: Date.parse(options.authMtime) } : null),
     findRollout: () => (options.rollout === undefined ? null : "/rollout.jsonl"),
     readRolloutTail: () => options.rollout ?? null,
   };
@@ -500,6 +510,51 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     const kept = await same.service.restartInPlace({ seatRef: SEAT, plan: true });
     expect(kept).toMatchObject({ ok: true, settings: { effort: { running: "high", relaunch: "high", changes: false, source: "authored" } } });
     expect((kept as { settings: { note: string } }).settings.note).toContain("effort included");
+  });
+
+  it("doesn't refuse a changed developer_instructions override, and reports that it is not preserved", async () => {
+    // The running Codex started with earlier guidance; this in-place relaunch does not rebuild it.
+    const earlier = `-m gpt-5.5 -c developer_instructions="earlier-openrig-guidance" -s workspace-write resume ${TOKEN}`;
+    const w = world({ runningArgs: earlier });
+    const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(plan).toMatchObject({ ok: true });
+    expect((plan as { settings: { note: string } }).settings.note)
+      .toContain("The observed developer_instructions command-line override changes on restart");
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "adopt the new openrig-core" }))
+      .toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    // A setting someone chose still refuses beside it, and the guidance isn't named.
+    expect(await world({ savedModel: "gpt-5.6", runningArgs: earlier }).service.restartInPlace({ seatRef: SEAT, plan: true }))
+      .toMatchObject({ ok: false, code: "settings_drift", detail: { differs: ["model"] } });
+    // So does any other config override.
+    expect(await world({ runningArgs: `-m gpt-5.5 -c tools.web_search=true -s workspace-write resume ${TOKEN}` }).service.restartInPlace({ seatRef: SEAT, plan: true }))
+      .toMatchObject({ ok: false, code: "settings_drift", detail: { differs: ["config tools.web_search"] } });
+    // Unchanged guidance adds nothing to the note.
+    const same = await world().service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect((same as { settings: { note: string } }).settings.note).not.toContain("developer_instructions");
+  });
+
+  it.each(["earlier-openrig-guidance", "person-chosen-guidance"])("reports the observed %s override changing through the real resume builder", async (value) => {
+    const w = world({ realResumeBuilder: "without_env",
+      runningArgv: ["/usr/local/bin/codex", "-m", "gpt-5.5", "-s", "workspace-write", "-c", "check_for_update_on_startup=false",
+        "-c", `developer_instructions=${JSON.stringify(value)}`, "resume", TOKEN] });
+    const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(plan).toMatchObject({ ok: true });
+    const restarted = await w.service.restartInPlace({ seatRef: SEAT, reason: "adopt the updated installation" });
+    expect(restarted).toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    expect((restarted as { settings: { note: string } }).settings.note).toBe((plan as { settings: { note: string } }).settings.note);
+    expect(w.launches).toHaveLength(1);
+    expect(w.launches[0]!.command).not.toContain("developer_instructions");
+    expect(w.launches[0]!.resumeToken).toBe(TOKEN);
+    expect((plan as { settings: { note: string } }).settings.note).toContain("The observed developer_instructions command-line override changes on restart");
+    expect((plan as { settings: { note: string } }).settings.note).not.toContain("resume carries the current guidance");
+  });
+
+  it.each(["developer_instructions_extra", "prefix_developer_instructions", "developer_instructions.nested"])("still compares the distinct config key %s", async (key) => {
+    const w = world({ runningArgv: ["/usr/local/bin/codex", "-m", "gpt-5.5", "-s", "workspace-write",
+      "-c", 'developer_instructions="earlier-openrig-guidance"', "-c", `${key}="keep-me"`, "resume", TOKEN] });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true }))
+      .toMatchObject({ ok: false, code: "settings_drift", detail: { differs: [`config ${key}`] } });
+    expect(w.launches).toEqual([]);
   });
 
   it("refuses drift in home and cwd, naming each", async () => {
@@ -748,6 +803,9 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
       .toMatchObject({ ok: false, code: "claimed_session", guidance: expect.stringContaining("rig unclaim") });
     w.db.prepare("UPDATE nodes SET continuity_outcome = 'rebuilt', handover_result = 'complete', handover_at = ? WHERE id = ?")
       .run("2026-11-01T10:00:00.000Z", w.node.id);
+    // The handover's successor is registered in its own commit (#4003): a session adopted later isn't its successor.
+    w.db.prepare("UPDATE sessions SET created_at = '2026-11-01 10:00:00' WHERE id = ?").run(w.session.id);
+    w.db.prepare("UPDATE occupant_tenures SET kind = 'handover', boot_at = '2026-11-01 10:00:00' WHERE node_id = ?").run(w.node.id);
     const result = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
     expect(result).toMatchObject({ ok: false, code: "claimed_session",
       guidance: "It keeps that origin until its next launched handover or managed launch." });
@@ -813,6 +871,28 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(w.events().map((event) => [event.type, event.outcome])).toEqual([
       ["seat.restart_in_place_started", undefined], ["seat.restart_in_place_finished", "restarted_account_unverified"]]);
   });
+
+  it.each([
+    ["unchanged since the running Codex started", "Mon Oct 12 20:00:00 2026", false],
+    ["changed after the running Codex started, before the restart", "Mon Oct 12 21:02:00 2026", true],
+  ])("the auth-file key means the same in the plan and the result: auth.json %s", async (_label, authMtime, changed) => {
+    const w = world({ authMtime });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, planOnly: true,
+      account: { authFile: { changedBeforeRestart: changed, detail: expect.stringContaining("changed after the running Codex started") } } });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "take the home's account" })).toMatchObject({
+      ok: true, outcome: "restarted_account_unverified", newProcess: { startedAt: LATER },
+      account: { authFile: { changedBeforeRestart: changed,
+        detail: expect.stringContaining("changed after the old Codex started and before its replacement started") } } });
+  });
+
+  it.each([["at", LATER], ["after", "Mon Oct 12 21:06:00 2026"]])(
+    "an auth.json changed %s the replacement's start reads false, and says whether the replacement read it is unknown", async (_when, authMtime) => {
+      const w = world({ authMtime });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "take the home's account" })).toMatchObject({
+        ok: true, outcome: "restarted_account_unverified", newProcess: { startedAt: LATER },
+        account: { authFile: { changedBeforeRestart: false,
+          detail: expect.stringContaining("changed at or after the replacement started, so whether the replacement read that change is unknown") } } });
+    });
 
   it("not_started when Codex survives TERM and KILL: no resume is attempted", async () => {
     const w = world({ codexIgnoresSignals: true });
@@ -2049,6 +2129,51 @@ describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () =
     expect(w.calls).toEqual([]);
     expect(w.launches).toEqual([]);
     expect(w.events()).toEqual([]);
+  });
+});
+
+describe("#3385: the restart completes an openrig-core upgrade waiting in the seat's Codex home", () => {
+  const RESUME = `codex -m 'gpt-5.5' -s workspace-write resume '${TOKEN}'`;
+
+  it("shell-backed: after the old Codex has stopped and before the resume, in the home the running Codex used", async () => {
+    const w = world({ upgrade: async () => undefined });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "pick up openrig-core" });
+    expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified", warnings: [] });
+    expect(w.calls).toEqual(["signalPid 200 TERM", `upgrade this seat ${HOME}; codex stopped; resumes 0`]);
+    expect(w.launches).toHaveLength(1);
+  });
+
+  it("direct-native: after the pane's Codex has ended and before the respawn", async () => {
+    const w = world({ shape: "direct_native", remainOnExit: null, upgrade: async () => undefined });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "pick up openrig-core" });
+    expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    expect(w.calls).toEqual(["remain-on-exit on", "remain-on-exit on", "signalPaneProcess TERM", `upgrade this seat ${HOME}; codex stopped; resumes 0`,
+      `respawn env CODEX_HOME='${HOME}' ${RESUME}`, "verifyResumeInPane", "restore remain-on-exit null"]);
+  });
+
+  it("an upgrade still held by another seat is a warning naming it; the restart goes on", async () => {
+    const waiting = "openrig-core 9.9.9 waits to install in /home/u/.codex: … Codex seats running there: dev-peer@r.";
+    const w = world({ upgrade: async () => waiting });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "pick up openrig-core" });
+    expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified", warnings: [waiting] });
+    expect(w.launches).toHaveLength(1);
+  });
+
+  it("a failed upgrade step is a warning, not a stopped seat left unresumed", async () => {
+    const w = world({ upgrade: async () => { throw new Error("config lock broke"); } });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "pick up openrig-core" });
+    expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified",
+      warnings: ["The openrig-core upgrade check didn't run before the resume: config lock broke"] });
+    expect(w.launches).toHaveLength(1);
+  });
+
+  it("a plan, and a restart that never stopped Codex, run no upgrade", async () => {
+    const planned = world({ upgrade: async () => undefined });
+    expect(await planned.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, planOnly: true });
+    expect(planned.calls).toEqual([]);
+    const survived = world({ codexIgnoresSignals: true, upgrade: async () => undefined });
+    expect(await survived.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ ok: true, outcome: "not_started" });
+    expect(survived.calls).toEqual(["signalPid 200 TERM", "signalPid 200 KILL"]);
   });
 });
 

@@ -141,6 +141,72 @@ execution:
     subject.db.close();
   });
 
+  // #3616: `rig scope slice create|set --execution-depends-on` writes sibling dot-IDs, which a slice declares in its SPEC.md,
+  // while a compiled step is named by metadata.id or its folder. Proof readiness's resolver maps the one to the other.
+  describe("a dependency named by a sibling's dot-ID", () => {
+    const slice = (dir: string, manifest: string, specId?: string) => {
+      mkdirSync(join(missionDir, "slices", dir), { recursive: true });
+      writeFileSync(join(missionDir, "slices", dir, "slice.yaml"), manifest);
+      if (specId) writeFileSync(join(missionDir, "slices", dir, "SPEC.md"), `---\nid: ${specId}\n---\n# ${dir}\n`);
+    };
+    const contract = (role: string, dependsOn: string[], id?: string) => `schema: openrig.slice/v0alpha1
+kind: slice
+${id ? `metadata: { id: ${id} }\n` : ""}composition: { mission: ../../mission.yaml }
+execution:
+  actor_role: ${role}
+  depends_on: ${JSON.stringify(dependsOn)}
+`;
+    const compose = (dirs: string[]) => writeFileSync(join(missionDir, "mission.yaml"), `schema: openrig.mission/v0alpha1
+kind: mission
+metadata: { name: release-1.0.0 }
+composition:
+  slices:
+${dirs.map((dir, index) => `    - { ref: slices/${dir}/slice.yaml, order: ${(index + 1) * 10}, active: true }`).join("\n")}
+`);
+
+    it("resolves to that sibling's step, which proof readiness reads the same way", () => {
+      slice("01-build", contract("builder", [], "build"), "DEM.1.0.0.1");
+      slice("02-review", contract("reviewer", ["DEM.1.0.0.1"]), "DEM.1.0.0.2");
+      compose(["01-build", "02-review"]);
+      const subject = runtime();
+      try {
+        const result = subject.runtime.compileLifecycle(missionDir, "release-op");
+        expect(result.unknowns).toEqual([]);
+        expect(result.eligible).toBe(true);
+        expect(result.dependencies).toEqual([{ stepId: "build", dependsOn: [] }, { stepId: "02-review", dependsOn: ["build"] }]);
+        // The SPEC.md the edge resolved through is an input of the compile.
+        expect(result.sources.map((source) => source.path)).toContain(realpathSync(join(missionDir, "slices", "01-build", "SPEC.md")));
+      } finally { subject.db.close(); }
+    });
+
+    it("names no step when two slices declare the dot-ID, and says so", () => {
+      slice("01-build", contract("builder", [], "build"), "DEM.1.0.0.1");
+      slice("02-review", contract("reviewer", ["DEM.1.0.0.1"]), "DEM.1.0.0.2");
+      slice("03-copy", contract("builder", [], "copy"), "DEM.1.0.0.1");
+      compose(["01-build", "02-review", "03-copy"]);
+      const subject = runtime();
+      try {
+        const result = subject.runtime.compileLifecycle(missionDir, "release-op");
+        expect(result.eligible).toBe(false);
+        expect(result.dependencies).toContainEqual({ stepId: "02-review", dependsOn: ["DEM.1.0.0.1"] });
+        expect(result.unknowns).toEqual(expect.arrayContaining([expect.stringContaining("[dependency_step_not_found]")]));
+        expect(result.advisories).toContain('slice dot-ID "DEM.1.0.0.1" is declared by 2 slices (01-build, 03-copy); a dependency on it names no step');
+      } finally { subject.db.close(); }
+    });
+
+    it("keeps a step's own name first: a name that is a step id is never read as a dot-ID", () => {
+      slice("01-build", contract("builder", [], "build"), "DEM.1.0.0.1");
+      slice("02-review", contract("reviewer", ["build"]), "build");
+      compose(["01-build", "02-review"]);
+      const subject = runtime();
+      try {
+        const result = subject.runtime.compileLifecycle(missionDir, "release-op");
+        expect(result.dependencies).toContainEqual({ stepId: "02-review", dependsOn: ["build"] });
+        expect(result.eligible).toBe(true);
+      } finally { subject.db.close(); }
+    });
+  });
+
   it("keeps an active slice without an execution contract inspectable but ineligible", () => {
     writeFileSync(join(missionDir, "slices", "01-build", "slice.yaml"), `schema: openrig.slice/v0alpha1
 kind: slice

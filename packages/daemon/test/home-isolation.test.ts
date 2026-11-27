@@ -81,6 +81,27 @@ describe("homeIsolationAdvisory", () => {
     expect(msg).toContain(`CODEX_HOME=${path.join(d.real, ".codex")} (derived from HOME)`);
   });
 
+  it("names what the daemon itself still writes for each leak, and points at another machine", () => {
+    const d = dirs(); const isolated = path.join(d.scratch, ".openrig");
+    const homeOnly = homeIsolationAdvisory({ accountHome: d.real, openrigHome: isolated, home: d.real, codexHome: path.join(isolated, "codex") })!;
+    expect(homeOnly).toContain(`OpenRig's own skills (openrig-skills, refocusing, rigs) in ${path.join(d.real, ".claude", "skills")} and ${path.join(d.real, ".agents", "skills")}`);
+    expect(homeOnly).toContain(`keeping the earlier copies in ${path.join(isolated, "backups", "managed-refresh")}`);
+    expect(homeOnly).not.toContain("activity-hook block");
+    const codexOnly = homeIsolationAdvisory({ accountHome: d.real, openrigHome: isolated, home: d.scratch, codexHome: path.join(d.real, ".codex") })!;
+    expect(codexOnly).toContain(`its managed setup can update ${path.join(d.real, ".codex", "config.toml")} and, when present, ${path.join(d.real, ".codex", "hooks.json")}`);
+    expect(codexOnly).toContain("that setup runs at daemon start once there is a Codex seat and at later Codex launches");
+    expect(codexOnly).toContain("follows whichever set it up most recently");
+    expect(codexOnly).not.toContain("started last");
+    expect(codexOnly).not.toContain("skills");
+    const both = homeIsolationAdvisory({ accountHome: d.real, openrigHome: path.join(d.real, ".openrig-dev"), home: d.real })!;
+    expect(both).toContain(path.join(d.real, ".agents", "skills"));
+    expect(both).toContain(path.join(d.real, ".codex", "config.toml"));
+    for (const msg of [homeOnly, codexOnly, both, homeIsolationAdvisory({ accountHome: d.real, openrigHome: d.real, home: d.real })!]) {
+      expect(msg).toContain("for a test that needs its own OpenRig, use another machine, such as a VM or VPS");
+      expect(msg).toContain("Starting anyway.");
+    }
+  });
+
   it("warns when HOME is nested in OPENRIG_HOME but CODEX_HOME is outside both", () => {
     const d = dirs(); const nested = path.join(d.scratch, "home"); const real = path.join(d.real, ".codex");
     const msg = homeIsolationAdvisory({ accountHome: d.real, openrigHome: d.scratch, home: nested, codexHome: real })!;

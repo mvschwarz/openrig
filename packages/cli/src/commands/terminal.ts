@@ -86,6 +86,8 @@ export interface OpenViewResult {
   window?: { app: string; surface: string };
   space?: { id: string; label: string };
   reusedWorkspace?: { id: string; tabId: string; view: string };
+  /** herdr-app placed the view in the daemon machine's herdr-core for a window elsewhere: started, never seen. */
+  placement?: { mode: "core"; visibility: "unconfirmed"; core: { session: string; socket?: string }; viewId: string; host: string };
   /** On window failures, false means no desktop launch was attempted. */
   windowAttempted?: boolean;
 }
@@ -163,6 +165,8 @@ function humanOpen(r: OpenViewResult, viaWindow: boolean): string {
   lines.push(
     r.code === "terminal_window_failed" && r.error
       ? r.error
+      : r.ok && r.placement?.mode === "core"
+        ? `Placed in herdr-core on ${r.placement.host} as view ${r.placement.viewId}. Any herdr-app connected to ${r.placement.host} shows it; OpenRig can't see that window.`
       : r.ok && r.reusedWorkspace
         ? `${viaWindow ? "Terminal window requested. " : ""}Reused ${target} workspace ${r.reusedWorkspace.id} for view ${JSON.stringify(r.reusedWorkspace.view)}.`
         : tiled > 0
@@ -294,7 +298,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .argument("[view]", "a rig name, pod:<rig>/<pod>, seat:<rig>/<logical-id>, mission:<id>, slice:<id>, qitem:<id> (current local obligation owners), or a saved-view id")
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
     .option("--all", "Open one viewer per local rig in sorted rig-name order")
-    .option("--provider <name>", "herdr, herdr-app, cmux, rex or orca: open in the running provider without a desktop window; herdr focuses a workspace that still shows this view with live attachments, otherwise each open adds a new workspace, and herdr-app opens a Rig view in the herdr-app window this runs in, which must be answering. orca is experimental and macOS-only. tmux requires --window. Inside Rex, the default opens in Rex")
+    .option("--provider <name>", "herdr, herdr-app, cmux, rex or orca: open in the running provider without a desktop window; herdr focuses a workspace that still shows this view with live attachments, otherwise each open adds a new workspace, and herdr-app opens a Rig view in the herdr-app window this runs in, which must be answering; with no window on the daemon's machine, it places the view in that machine's herdr-core, where a herdr-app connected to it shows it. orca is experimental and macOS-only. tmux requires --window. Inside Rex, the default opens in Rex")
     .option("--orca-workspace <selector>", "Existing local Orca workspace for --provider orca (defaults to the calling Orca terminal's workspace)")
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted outside herdr-app); inside a herdr-app terminal --window still asks for a desktop window, and plain open reuses herdr-app")
@@ -374,8 +378,9 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
         if (selectedHerdrApp?.ambient) {
           const probe = await client.get<{
             available?: boolean;
+            placement?: "core";
             launch?: { socketPath?: string };
-            providers?: Array<{ status?: { available?: boolean; launch?: { socketPath?: string } } }>;
+            providers?: Array<{ status?: { available?: boolean; placement?: "core"; launch?: { socketPath?: string } } }>;
           }>(
             `/api/terminal/status?provider=herdr-app&appHome=${encodeURIComponent(selectedHerdrApp.appHome)}`,
             { headers: terminalAuthHeaders() },
@@ -386,7 +391,8 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
             ambientFallbackNote = `herdr-app's socket exists at ${socketPath} but the daemon could not confirm whether it is answering (HTTP ${probe.status}); opening a desktop window instead. Use --provider herdr-app to require it.`;
             console.error(ambientFallbackNote);
             selectedHerdrApp = null;
-          } else if (!report.available) {
+          } else if (!report.available || report.placement === "core") {
+            // Core placement means no window answers here: this terminal's own window isn't the one to open in.
             const socketPath = report.launch?.socketPath ?? join(selectedHerdrApp.appHome, "herdr-app.sock");
             ambientFallbackNote = `herdr-app's socket exists at ${socketPath} but it isn't answering; opening a desktop window instead. Use --provider herdr-app to require it.`;
             console.error(ambientFallbackNote);

@@ -90,6 +90,82 @@ function disposition(jobId: string, qitemId: string) {
 }
 
 describe("due parked-row reminders for one seat", () => {
+  it("terminalizes a fenced park timer and delivers only its unfenced peers", async () => {
+    const owner = seat();
+    const stale = await park(owner, "transferred");
+    const live = await park(owner, "still local");
+    db.exec(`INSERT INTO queue_transfer_ledger (record_id, side, kind, transfer_id, archive_digest, origin_host_id,
+      origin_minted_at, destination_host_id, authorization_digest, mapping_digest, actor, recorded_at)
+      VALUES ('park-rel', 'origin', 'relinquished', 'transfer', 'digest', 'origin', 'minted', 'target', 'auth', 'map', 'operator', '1')`);
+    db.prepare(`INSERT INTO queue_transfer_relinquished (qitem_id, record_id, archive_digest, destination_host_id, source_state)
+      VALUES (?, 'park-rel', 'digest', 'target', 'blocked')`).run(stale.qitemId);
+    due(stale.jobId);
+    due(live.jobId);
+
+    await deps.watchdogScheduler!.runTickNow();
+
+    expect(sends).toEqual([{ session: owner, text: expect.stringContaining(live.qitemId) }]);
+    expect(sends[0]?.text).not.toContain(stale.qitemId);
+    expect(disposition(stale.jobId, stale.qitemId)).toMatchObject({ state: "terminal", terminalReason: "park_timer_target_terminal", wakePhase: "armed" });
+  });
+
+  it("a park that only moved to another timer is live work, not a superseded delivery", async () => {
+    const owner = seat();
+    // The row stays open but its wait moves to a new timer: the old job's broad terminal reason still ends the job,
+    // while the delivery-time check (what a send under way consults) must not call this a closed or transferred row.
+    const moved = await park(owner, "moved");
+    deps.queueRepo.update({ qitemId: moved.qitemId, actorSession: owner, state: "in-progress", transitionNote: "resumed" } as never);
+    deps.queueRepo.update({ qitemId: moved.qitemId, actorSession: owner, state: "blocked", blockedOn: "external:other",
+      transitionNote: "parked again", wakeAfterSeconds: 900 } as never);
+    const next = deps.queueRepo.getParkWakeStatus(moved.qitemId)!.ref;
+    expect(next).not.toBe(moved.jobId);
+    expect(deps.queueRepo.resolveWatchdogPreDeliveryTerminalReason(moved.jobId)).toBe("park_timer_target_terminal");
+    expect(deps.queueRepo.watchdogReminderSuperseded(moved.jobId)).toBe(false);
+
+    const gone = await park(owner, "closed");
+    deps.queueRepo.update({ qitemId: gone.qitemId, actorSession: owner, state: "done", closureReason: "no-follow-on" } as never);
+    expect(deps.queueRepo.watchdogReminderSuperseded(gone.jobId)).toBe(true);
+
+    const transferred = await park(owner, "transferred");
+    db.exec(`INSERT INTO queue_transfer_ledger (record_id, side, kind, transfer_id, archive_digest, origin_host_id,
+      origin_minted_at, destination_host_id, authorization_digest, mapping_digest, actor, recorded_at)
+      VALUES ('moved-rel', 'origin', 'relinquished', 'transfer', 'moved-digest', 'origin', 'minted', 'target', 'auth', 'map', 'operator', '1')`);
+    db.prepare(`INSERT INTO queue_transfer_relinquished (qitem_id, record_id, archive_digest, destination_host_id, source_state)
+      VALUES (?, 'moved-rel', 'moved-digest', 'target', 'blocked')`).run(transferred.qitemId);
+    expect(deps.queueRepo.watchdogReminderSuperseded(transferred.jobId)).toBe(true);
+  });
+
+  it.each([false, true])("keeps a fenced generating row's timer only for live attachments (all fenced: %s)", async (allFenced) => {
+    const owner = seat();
+    const origin = await park(owner, "timer origin");
+    const attach = async (body: string) => {
+      const row = await deps.queueRepo.create({ sourceSession: "orch@rig", destinationSession: owner, body, nudge: false });
+      deps.queueRepo.update({ qitemId: row.qitemId, actorSession: owner, state: "blocked", blockedOn: "external:wait",
+        transitionNote: "attached to timer", wakeWatchdogId: origin.jobId });
+      return row.qitemId;
+    };
+    const stale = await attach("transferred attachment");
+    const live = await attach("local attachment");
+    db.exec(`INSERT INTO queue_transfer_ledger (record_id, side, kind, transfer_id, archive_digest, origin_host_id,
+      origin_minted_at, destination_host_id, authorization_digest, mapping_digest, actor, recorded_at)
+      VALUES ('shared-park-rel-${seq}', 'origin', 'relinquished', 'transfer', 'shared-digest-${seq}', 'origin', 'minted', 'target', 'auth', 'map', 'operator', '1')`);
+    const fence = db.prepare(`INSERT INTO queue_transfer_relinquished (qitem_id, record_id, archive_digest, destination_host_id, source_state)
+      VALUES (?, ?, ?, 'target', 'blocked')`);
+    for (const id of [origin.qitemId, stale, ...(allFenced ? [live] : [])]) fence.run(id, `shared-park-rel-${seq}`, `shared-digest-${seq}`);
+    due(origin.jobId);
+
+    expect(deps.queueRepo.resolveWatchdogPreDeliveryTerminalReason(origin.jobId)).toBe(allFenced ? "park_timer_target_terminal" : null);
+    await deps.watchdogScheduler!.runTickNow();
+
+    expect(sends).toEqual(allFenced ? [] : [{ session: owner, text: expect.stringContaining(live) }]);
+    if (!allFenced) {
+      expect(sends[0]?.text).not.toContain(origin.qitemId);
+      expect(sends[0]?.text).not.toContain(stale);
+    }
+    expect(disposition(origin.jobId, stale).wakePhase).toBe("armed");
+    expect(disposition(origin.jobId, live).wakePhase).toBe(allFenced ? "armed" : "fired");
+  });
+
   it("arrive as one message per scheduler pass, naming every row", async () => {
     const owner = seat();
     const rows = [await park(owner, "first wait"), await park(owner, "second wait"), await park(owner, "third wait")];

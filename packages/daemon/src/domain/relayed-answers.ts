@@ -55,6 +55,7 @@ export interface RelayedAnswerReceipt {
   readonly item: import("./queue-repository.js").QueueItem;
   readonly replyQitemId: string | null;
   readonly unanswered: string[];
+  readonly historyOnly?: true;
   readonly corrected?: boolean;
   readonly unplaced?: boolean;
 }

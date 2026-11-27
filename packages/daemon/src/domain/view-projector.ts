@@ -2,6 +2,7 @@ import { projectIds, type ProjectRead } from "./workspace/project-read.js";
 import type Database from "better-sqlite3";
 import { lastMeaningfulTransition } from "./queue-waiting.js";
 import { derivePickup } from "./queue-pickup.js";
+import { ACTIVE_QUEUE_STATES } from "./queue-repository.js";
 import { ulid } from "ulid";
 import type { EventBus } from "./event-bus.js";
 import { buildExecutionView, compactionOwedSinceOf, type ExecutionViewDeps } from "./execution-view.js";
@@ -306,17 +307,19 @@ export class ViewProjector {
         params = [...rigParams, limit];
         break;
       case "held":
-        // state = 'blocked' OR blocked_on is non-null.
+        // state = 'blocked' OR blocked_on is non-null, limited to active rows: closing a row keeps
+        // its blocked_on, so without the filter finished rows stay held forever (#4006).
         sql = `
           SELECT qitem_id, source_session, destination_session, state, blocked_on, ts_updated, body
           FROM queue_items
           WHERE (state = 'blocked' OR blocked_on IS NOT NULL)
+            AND state IN (${ACTIVE_QUEUE_STATES.map(() => "?").join(", ")})
             AND ${fixtureClause}
             ${rigClause}
           ORDER BY ts_updated DESC
           LIMIT ?
         `;
-        params = [...rigParams, limit];
+        params = [...ACTIVE_QUEUE_STATES, ...rigParams, limit];
         break;
       case "activity": {
         // Recent transitions joined with qitem state. Fixture-clause must

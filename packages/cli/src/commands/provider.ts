@@ -674,6 +674,9 @@ it asks to keep the running effort, and uses the seat's saved effort when it can
 A stopped seat isn't relaunched, and no snapshot is taken: the reference is saved only when the seat's next launch would
 resume its conversation, and the report prints that launch (rig launch <rig> <seat> --snapshot-id <id>, or a plain rig launch
 when restore's periodic carry resumes it). Otherwise it refuses and nothing changes.
+A seat that has never launched (materialized, with no session yet) has no conversation to resume: the reference is saved for
+its first launch, in the same write that checks the seat still hasn't launched, with a record naming who asked, and the
+report prints rig launch <rig> <seat>. A first launch that started meanwhile is left as it is; run the switch again.
 Seats sharing the config dir keep their own login: Claude Code reads the token from that one process's environment and doesn't
 save it. That environment is Claude's, so the tools, hooks and MCP servers it starts inherit the token, and one that prints its
 environment writes it into the transcript. A token-authenticated seat can make model requests but can't use claude.ai

@@ -612,10 +612,11 @@ export class InboundRouter {
           identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId,
           direct: { ...picked, eventId: action?.action_ts ? `slack-click:${channel}:${rootTs}:${who.source}:${action.action_ts}` : undefined,
             recovering: !live || Boolean(clickKey && this.deps.actionDeadLetter?.readAll().some(entry => this.clickReplyKey(entry.ev) === clickKey)) } });
-        if (live) await acknowledge(answer.unplaced ? "Your choice was sent to the asking agent without changing any answer."
+        if (live) await acknowledge(answer.historyOnly ? "Answer retained in transfer history; no reply was sent."
+          : answer.unplaced ? "Your choice was sent to the asking agent without changing any answer."
           : answer.corrected ? "Your direct correction was sent to the asking agent."
           : answer.unanswered.length ? "Answer recorded; other questions are still open." : "All answered and sent back.");
-        return { status: "accepted", reason: answer.unplaced ? "reply-delivered" : answer.unanswered.length ? "answer-recorded" : "answers-complete" };
+        return { status: "accepted", reason: answer.historyOnly ? "answer-recorded" : answer.unplaced ? "reply-delivered" : answer.unanswered.length ? "answer-recorded" : "answers-complete" };
       } catch (error) {
         this.deps.log?.(`relay answer continuation failed qitem=${qitemId}: ${String(error)}`);
         if (live) await acknowledge("This answer was not recorded. Check that the question is still open or corrects a relayed answer.");

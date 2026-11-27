@@ -6,6 +6,10 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { eraseQueue } from "../src/domain/queue-erasure.js";
+import { buildQueueTransfer } from "../src/domain/queue-transfer-export.js";
+import { parseQueueTransfer } from "../src/domain/queue-transfer-parse.js";
+import { AUTHORIZATION_KIND, parseAuthorization } from "../src/domain/queue-transfer-records.js";
+import { QueueTransferSource } from "../src/domain/queue-transfer-relinquish.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { queueRoutes } from "../src/routes/queue.js";
@@ -87,6 +91,41 @@ it("keeps other questions open and commits one return across failures and repeat
   expect(f.history()).toHaveLength(2);
   expect(new Set(f.history().map(answer => answer.qitemId)).size).toBe(1);
   expect(f.repo.getById(f.ask.qitemId)?.closureReason).toBe("relayed-answer");
+});
+
+it.each([false, true])("keeps partial and final fenced answers as history without return work (direct=%s)", async direct => {
+  const f = await fixture(true);
+  const { qitemId } = f.ask;
+  f.db.exec("INSERT INTO self_host_identity VALUES (1, 'origin', 'minted', 'reconciled')");
+  const { archive: archiveText } = buildQueueTransfer(f.db, { kind: "qitems", names: [qitemId] });
+  const archive = parseQueueTransfer(archiveText);
+  const authorization = parseAuthorization({ kind: AUTHORIZATION_KIND, operationId: "op", archiveDigest: archive.digest,
+    origin: archive.origin, destination: { hostId: "target", authorizedAt: "3", seatMapping: [] },
+    intervention: { kind: "online-handshake", actor: "operator", recordedAt: "3", limits: "local" } });
+  new QueueTransferSource(f.repo).relinquish({ archiveText, authorization, intervention: "dispatch relinquished", actor: { actorSession: "operator" } });
+  const scheduler = () => f.db.prepare(`SELECT state, claimed_at, blocked_on, closure_required_at, closure_reason
+    FROM queue_items WHERE qitem_id = ?`).get(qitemId);
+  const before = scheduler();
+  const partial = await f.relay({ questionId: "first", optionId: "no" });
+  expect(partial.status, await partial.text()).toBe(200);
+  const history = [expect.objectContaining({ kind: "relayed-answer", questionId: "first", qitemId: null })];
+  expect(f.history()).toEqual(history);
+  expect(scheduler()).toEqual(before);
+
+  const outbox = f.db.prepare("SELECT * FROM outbox_entries");
+  const beforeOutbox = outbox.all();
+  const final = { questionId: "second", optionId: "yes" };
+  vi.setSystemTime(new Date("2026-02-03T04:05:07Z"));
+  const completion = await (direct ? f.correct(final) : f.relay(final));
+  const response = await completion.json();
+  expect(completion.status, JSON.stringify(response)).toBe(200);
+  if (!direct) expect(response).toMatchObject({ historyOnly: true, replyQitemId: null });
+  expect(f.history()).toEqual([...history, expect.objectContaining({ questionId: "second", kind: direct ? "direct-answer" : "relayed-answer" })]);
+  expect(f.repo.transitionLog.listForQitem(qitemId).at(-1)?.transitionNote).toContain(direct ? "Yes" : "Not this week.");
+  expect(outbox.all()).toEqual(beforeOutbox);
+  expect(scheduler()).toEqual(before);
+  expect(f.db.prepare("SELECT qitem_id FROM queue_transfer_relinquished").pluck().all()).toEqual([qitemId]);
+  expect(f.db.prepare("SELECT qitem_id FROM queue_items WHERE reply_to = ?").all(qitemId)).toEqual([]);
 });
 
 it("returns an exact-question direct correction without replacing the relay or reopening the ask", async () => {

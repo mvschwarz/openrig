@@ -68,7 +68,7 @@ const CALL_TAG = "permission-call:";
 const ACTOR_TAG = "permission-actor:";
 /** Until when the harness's hook takes an answer here; after it (and a grace), an open native ask is over. */
 const ANSWER_BY_TAG = "permission-answer-by:";
-/** Which owner source a native ask went to: chosen-person, return-route or default-person. */
+/** Which owner source a native ask went to: chosen-person or return-route (an ask made before 0.7.25 can say default-person). */
 const ASKED_TAG = "permission-asked:";
 /** Each option a native ask offers. An ask to a conversation can't carry questions (only a person's ask does), so its
  *  options travel as these. */
@@ -77,6 +77,7 @@ const OPTION_TAG = "permission-option:";
 const TAKEN_NOTE = "runner-permission-taken-by-hook";
 /** A tool call with this ask's exact input completed in the same conversation (matched by content, not by id). */
 const COMPLETED_NOTE = "runner-permission-tool-completed";
+const RESOLVED_CALL_NOTE = "runner-permission-call-resolved";
 /** An agent's decision on a request (`rig seat decide-permission`), whoever records it. */
 const DECIDED_NOTE = "runner-permission-decided";
 /** A decision an agent records with `--relay`: its report that this is the person's own answer. OpenRig didn't get that
@@ -577,9 +578,10 @@ export class RunnerPermissions {
   }
 
   /** Who answers a native prompt: the person chosen for the seat (`rig seat set-permissions-to`), else the return route of
-   *  the work the seat is running (the person's own conversation; `seatReturnRoute`), else the default person. Nobody, and
-   *  nothing is asked. */
-  private nativeOwner(seat: RunnerPermissionSeat): { ok: true; address: string; source: "chosen-person" | "return-route" | "default-person"; why: string }
+   *  the work the seat is running (the person's own conversation; `seatReturnRoute`). With neither, nothing is asked: the
+   *  default person isn't asked by implication, since an open ask would hold back the seat's usual prompt escalation (its
+   *  prompt alert and routed relay). A runner's request still goes to the default person (`resolve`). */
+  private nativeOwner(seat: RunnerPermissionSeat): { ok: true; address: string; source: "chosen-person" | "return-route"; why: string }
     | { ok: false; why: string } {
     const selected = this.deps.ownerOf(seat.nodeId);
     if (selected === PERMISSIONS_DENY) {
@@ -597,10 +599,9 @@ export class RunnerPermissions {
       why: route.routes > 1 && !route.inProgress
         ? `your conversation handed ${seat.sessionName} its newest open work (${route.row}), and this address is that work's return route; it holds open work from ${route.routes} conversations, and none is in progress`
         : `your conversation handed ${seat.sessionName} the work it's running (${route.row}), and this address is that work's return route${route.routes > 1 ? `; it holds open work from ${route.routes} conversations, and this one's is in progress` : ""}` };
-    const fallback = defaultPermissionOwner(this.deps.humanRegistry);
-    if (fallback.ok) return { ok: true, address: fallback.address, source: "default-person",
-      why: "you are the default person, and no one else is chosen for this seat or reached by its work's return route" };
-    return { ok: false, why: `No one can be asked${chosenProblem ? ` (the person chosen for this seat: ${chosenProblem})` : ""}: the seat's work carries no return route on this host, and ${fallback.message}` };
+    return { ok: false, why: chosenProblem
+      ? `no one can be asked (the person chosen for this seat: ${chosenProblem}), and the seat's work carries no return route on this host; the prompt goes through the seat's usual escalation instead`
+      : "no one is chosen for this seat (rig seat set-permissions-to) and its work carries no return route on this host, so no one is asked by implication; the prompt goes through the seat's usual escalation instead" };
   }
 
   /** The return route of the open work addressed to the seat (pending, in progress or blocked), with the row that carries
@@ -866,25 +867,36 @@ export class RunnerPermissions {
     for (const fingerprint of fingerprints.slice(0, 64)) {
       if (typeof fingerprint !== "string" || !FINGERPRINT.test(fingerprint)) continue;
       const rows = candidates.all(seat.sessionName, since, `%"${CALL_TAG}${fingerprint}"%`) as Array<{ qitem_id: string }>;
-      for (const { qitem_id } of rows) {
-        if (settledHere.has(qitem_id)) continue;
+      const matches = rows.flatMap(({ qitem_id }) => {
+        if (settledHere.has(qitem_id)) return [];
         const asked = this.deps.queueRepo.getById(qitem_id);
         const hook = asked ? nativePermissionHook(asked) : null;
         if (!asked || !hook || !asked.tags?.includes(`${CALL_TAG}${fingerprint}`) || tagValue(asked, NODE_TAG) !== seat.nodeId
-          || tagValue(asked, GENERATION_TAG) !== seat.generation || tagValue(asked, ACTOR_TAG) !== (actor ?? "main")) continue;
+          || tagValue(asked, GENERATION_TAG) !== seat.generation || tagValue(asked, ACTOR_TAG) !== (actor ?? "main")) return [];
         const live = this.liveEnd(asked);
-        if (!live || live.state === "canceled") continue;
+        if (!live || live.state === "canceled") return [];
         const transitions = this.deps.queueRepo.listTransitions(live.qitemId);
-        if (transitions.some((t) => t.transitionNote?.startsWith(COMPLETED_NOTE)) || this.withdrawnAfterClose(live)) continue;
+        if (transitions.some((t) => t.transitionNote?.startsWith(COMPLETED_NOTE) || t.transitionNote?.startsWith(RESOLVED_CALL_NOTE))
+          || this.withdrawnAfterClose(live)) return [];
+        const open = live.state === "pending" || live.state === "in-progress" || live.state === "blocked";
+        const decision = open ? null : this.read(null, qitem_id);
+        return [{ qitem_id, asked, hook, live, open, decision }];
+      });
+      // A completed call can belong to an earlier answered ask while an identical later prompt is still waiting.
+      // Consume an outstanding decision first; content alone is no reason to withdraw that later live prompt.
+      const hasDecision = (match: typeof matches[number]): boolean => match.decision?.ok === true
+        && (match.decision.state === "answered" || (match.decision.state === "refused" && match.decision.reason === "said_no"));
+      for (const { qitem_id, asked, hook, live, open, decision } of [...matches.filter(hasDecision), ...matches.filter(match => !hasDecision(match))]) {
         settledHere.add(qitem_id);
-        if (live.state === "pending" || live.state === "in-progress" || live.state === "blocked") {
+        if (open) {
           this.close(live, WITHDRAWN_NOTE, "answered_in_terminal", `${nativeWithdrawText("answered_in_terminal", hook)} ${harnessName(hook)} reported a tool call with exactly this input resolved in the same conversation, without an answer from here (matched by its content; there's no tool-call id).`);
         } else {
-          const decided = this.read(null, qitem_id);
-          // A denied call resolves too, without running: this newest ask is its call, and there's no completion to record.
-          if (!decided.ok || decided.state !== "answered" || decided.optionId === tagValue(asked, REJECT_TAG)) break;
+          if (!decision?.ok || (decision.state !== "answered" && !(decision.state === "refused" && decision.reason === "said_no"))) break;
+          const denied = decision.state === "refused" || decision.optionId === tagValue(asked, REJECT_TAG);
           this.deps.queueRepo.transitionLog.append({ qitemId: live.qitemId, state: live.state, actorSession: asked.sourceSession,
-            transitionNote: `${COMPLETED_NOTE}: a tool call with exactly this input completed in the same ${harnessName(hook)} conversation after this allow (matched by its content; there's no tool-call id). It ran, unless the terminal's own answer came first.` });
+            transitionNote: denied
+              ? `${RESOLVED_CALL_NOTE}: a tool batch resolved this denied call; no tool completion is claimed.`
+              : `${COMPLETED_NOTE}: a tool call with exactly this input completed in the same ${harnessName(hook)} conversation after this allow (matched by its content; there's no tool-call id). It ran, unless the terminal's own answer came first.` });
         }
         settled++;
         break;
@@ -1141,14 +1153,39 @@ function nativeDecisionMessage(input: { decider: string; relay: boolean; denies:
 export function nativeAskHoldsPrompt(db: Database.Database, sessionName: string, now = Date.now()): boolean {
   try {
     // The seat's native asks only (the partial index), not every row it ever sent: the wake ladder asks this on its ticks.
-    const rows = db.prepare(`SELECT tags FROM queue_items WHERE source_session = ? AND state IN ('pending','in-progress','blocked','handed-off')
-      AND ${NATIVE_ASK_ROWS} ORDER BY ts_created DESC LIMIT 20`).all(sessionName) as Array<{ tags: string | null }>;
-    return rows.some(({ tags }) => {
+    // Stream the indexed asks: decided handoffs must not consume a row limit and hide an older open ask. An ask's answer-by is
+    // at most MAX_HOLD_SECONDS after it was created, so older asks (handed-off ones stay handed-off) are never read.
+    if (!Number.isFinite(now)) return false;
+    const since = new Date(now - MAX_HOLD_SECONDS * 1000 - NATIVE_GRACE_MS).toISOString();
+    const rows = db.prepare(`SELECT qitem_id, state, tags FROM queue_items WHERE source_session = ? AND ts_created >= ?
+      AND (state IN ('pending','in-progress','blocked','handed-off') OR (state = 'done' AND closure_reason = 'handed_off_to'))
+      AND ${NATIVE_ASK_ROWS} ORDER BY ts_created DESC`).iterate(sessionName, since) as Iterable<{ qitem_id: string; state: string; tags: string | null }>;
+    const handedOff: string[] = [];
+    for (const { qitem_id, state, tags } of rows) {
       let parsed: unknown;
-      try { parsed = JSON.parse(tags ?? "[]"); } catch { return false; }
+      try { parsed = JSON.parse(tags ?? "[]"); } catch { continue; }
       const by = Array.isArray(parsed) ? parsed.find((tag): tag is string => typeof tag === "string" && tag.startsWith(ANSWER_BY_TAG)) : undefined;
       const until = Date.parse(by?.slice(ANSWER_BY_TAG.length) ?? "");
-      return Array.isArray(parsed) && parsed.includes(RUNNER_PERMISSION_TAG) && Number.isFinite(until) && now <= until;
-    });
+      if (!Array.isArray(parsed) || !parsed.includes(RUNNER_PERMISSION_TAG) || !Number.isFinite(until) || !(now <= until)) continue;
+      // Handed on (handed-off, or done by handoff-and-complete): its chain decides, below.
+      if (state !== "handed-off" && state !== "done") return true;
+      handedOff.push(qitem_id);
+    }
+    if (handedOff.length === 0) return false;
+    // Follow the same newest, addressed successor as liveEnd. UNION makes cycles converge. An unrepresented
+    // handoff (including one off-host) is not proof of a decision, so it still holds until answer-by.
+    return db.prepare(`WITH RECURSIVE chain(qitem_id, state, handed_off_to, closure_reason) AS (
+      SELECT qitem_id, state, handed_off_to, closure_reason FROM queue_items
+        WHERE qitem_id IN (SELECT value FROM json_each(?))
+      UNION
+      SELECT next.qitem_id, next.state, next.handed_off_to, next.closure_reason FROM chain
+        JOIN queue_items next ON next.rowid = (
+          SELECT rowid FROM queue_items WHERE handed_off_from = chain.qitem_id AND destination_session = chain.handed_off_to
+          ORDER BY ts_created DESC, rowid DESC LIMIT 1)
+        WHERE chain.state = 'handed-off' OR (chain.state = 'done' AND chain.closure_reason = 'handed_off_to')
+    ) SELECT 1 FROM chain WHERE state IN ('pending','in-progress','blocked')
+      OR ((state = 'handed-off' OR (state = 'done' AND closure_reason = 'handed_off_to')) AND NOT EXISTS (
+        SELECT 1 FROM queue_items WHERE handed_off_from = chain.qitem_id AND destination_session = chain.handed_off_to))
+      LIMIT 1`).get(JSON.stringify(handedOff)) !== undefined;
   } catch { return false; }
 }

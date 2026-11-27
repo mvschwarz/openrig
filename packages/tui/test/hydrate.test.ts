@@ -726,6 +726,28 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(output.lines.find((line) => /\bmismatch\s/.test(line))).not.toContain("run ▸");
     expect(output.lines.find((line) => /\bmissing\s/.test(line))).not.toContain("run ▸");
   });
+  // #4042: a seat joined with rig attach runs in an outside program. OpenRig can't start it (its launch refuses a bound seat),
+  // so the TUI never offers run for it, whatever its session reads; a tmux seat that's gone still offers it.
+  it("offers no run action for a seat attached from an outside program, whose liveness is unknown", async () => {
+    const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
+    const quiet = { terminalActive: null, agentActivity: null, activityState: null, needsAttention: false };
+    const nodes = [
+      { ...base, ...quiet, logicalId: "dev.desk", attachmentType: "external_cli", sessionStatus: "attached", lifecycleState: "unknown" },
+      { ...base, ...quiet, logicalId: "dev.ended", attachmentType: "external_cli", sessionStatus: "exited", lifecycleState: "detached" },
+      { ...base, ...quiet, logicalId: "dev.gone", attachmentType: "tmux", sessionStatus: "detached", lifecycleState: "detached" },
+    ];
+    const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
+    const byName = Object.fromEntries(myrig(snap).pods[0]!.agents.map((agent) => [agent.name, agent]));
+    expect(byName["dev.desk"]).toMatchObject({ status: "attached", live: false, canRun: false });
+    expect(byName["dev.ended"]?.canRun).toBe(false);
+    expect(byName["dev.gone"]?.canRun).toBe(true);
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "rig", name: "myrig" });
+    const output = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    expect(output.lines.find((line) => /\bdesk\s/.test(line))).not.toContain("run ▸");
+    expect(output.lines.find((line) => /\bgone\s/.test(line))).toContain("run ▸");
+  });
+
   it("shows a quiet seat the daemon reads as unknown as unknown, never idle, for a community harness and a built-in runtime alike", async () => {
     const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
     const quiet = { startupStatus: "ready", sessionStatus: "running", terminalActive: false, agentActivity: { state: "unknown" },

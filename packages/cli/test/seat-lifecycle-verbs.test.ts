@@ -611,6 +611,14 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
     peers: [{ logicalId: "dev.peer", effect: "Not restarted; account unverified." }], warnings: [],
   });
 
+  it("--verify's own help line says it goes with --keep-conversation", () => {
+    const restart = makeCommand(makeDeps({ status: 200, data: {} }, [])).commands.find((c) => c.name() === "seat")!
+      .commands.find((c) => c.name() === "restart")!;
+    expect(restart.options.find((option) => option.long === "--verify")?.description).toContain("--keep-conversation");
+    // What `rig seat restart --help` prints, with its line wrapping undone.
+    expect(restart.helpInformation().replace(/\s+/g, " ")).toContain("--verify With --keep-conversation, after a real tool-using turn: check whether the restarted seat can be reported as moved");
+  });
+
   it("prints the --no-daemon launch evidence and a named startup gate's kind", async () => {
     const data = { ...report("incomplete"), codexNoDaemonFlag: { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." },
       account: { credentialStore: { detail: "File-backed." }, authFile: { detail: "Stat only." }, startupGate: "Codex is waiting for hook trust approval.", startupGateKind: "hook_trust_gate" },

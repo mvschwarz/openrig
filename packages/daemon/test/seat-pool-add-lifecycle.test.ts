@@ -339,7 +339,7 @@ describe("seat-pool add: while max drops and across a restart (#3395 Piece 1)", 
     expect(w.converge).toHaveBeenCalledTimes(1);
   });
 
-  it("`max` drops to 0 and then the add ends `failed` with a node: the slot is `drained` and held, `room` is freed, and the slot is not retried.", async () => {
+  it("`max` drops to 0 and then the add ends `failed` with a node: the slot is `drained` and held, `room` is freed, and the slot is not retried; while it stays, no new number is taken, cycle after cycle, and the add's notes name that attempt.", async () => {
     const w = lifecycleWorld();
     const m = await w.model({ max: 1, min: 1 });
     const gate = deferred();
@@ -380,17 +380,45 @@ describe("seat-pool add: while max drops and across a restart (#3395 Piece 1)", 
     const agents = readSeatPoolAgents(w.deps(), w.slots.forModel(m.nodeId));
     expect(agents.map((a) => [a.slotNumber, a.phase, a.running])).toEqual([[1, "drained", false]]);
     expect(seatPoolRoom({ max: 1 }, agents)).toBe(1);
-    // reported each cycle, never tried again (past the cooldown its drained slot started)
-    w.clock.now = new Date(w.clock.now.getTime() + 61_000);
-    for (let i = 0; i < 2; i++) {
+    // reported each cycle, never tried again, and no new number is taken while it stays, past each cooldown
+    const reuseHold = { code: "failed", observed: "exited", error: "Harness launch failed: harness exited" };
+    for (let i = 0; i < 3; i++) {
+      w.clock.now = new Date(w.clock.now.getTime() + 61_000);
       const again = await w.notesOf(m.jobId);
       await w.executor().idle();
-      expect(again.slots).toEqual([{ slotNumber: 1, nodeId: agent.id, phase: "drained", attempt: settled[0]!.attempt }]);
-      expect(again.add).toEqual({ held: "held: drained slot awaiting comeback" });
+      expect(again.slots).toEqual([{ slotNumber: 1, nodeId: agent.id, phase: "drained", attempt: settled[0]!.attempt, reuseHold }]);
+      expect(again.add).toEqual({
+        held: `held: failed add ${id} (slot 1) settled not_running (exited)`,
+        failedAdd: { slotNumber: 1, nodeId: agent.id, attempt: settled[0]!.attempt, reuseHold },
+      });
+      // the failed add holds the add's new number only, never the whole pool
+      expect(again).not.toHaveProperty("held");
       expect(JSON.stringify(again)).not.toContain("\"stop\"");
     }
+    expect(w.nodeOf(m.rigId, "dev.impl-s2")).toBeUndefined();
     expect(w.converge).toHaveBeenCalledTimes(1);
     expect(w.correlations()).toHaveLength(1);
+  });
+
+  it("An add whose outcome is `unknown` holds no new number: with demand for one more agent, the next number is issued.", async () => {
+    const w = lifecycleWorld();
+    const m = await w.model({ max: 2, min: 1 });
+    // the first agent's call returns with its startup not ready: its result is unknown
+    w.hooks.afterAdd = () => { w.db.prepare("UPDATE sessions SET startup_status = 'pending' WHERE node_id = ?").run(w.nodeOf(m.rigId, "dev.impl-s1")!.id); };
+    const id1 = issuedOf(await w.notesOf(m.jobId))[0]!.attempt.id;
+    await w.executor().idle();
+    const s1 = w.nodeOf(m.rigId, "dev.impl-s1")!;
+    const unknown = await w.notesOf(m.jobId);
+    expect(unknown.slots).toEqual([{ slotNumber: 1, nodeId: s1.id, phase: "adding", attempt: expect.objectContaining({ id: id1, status: "unknown" }) }]);
+
+    w.hooks.afterAdd = undefined;
+    w.setMax(m, 2, 2);
+    const next = await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(issuedOf(next).map((e) => e.logicalId)).toEqual(["dev.impl-s2"]);
+    expect(next.add).not.toHaveProperty("held");
+    expect(next.add).not.toHaveProperty("failedAdd");
+    expect(w.converge).toHaveBeenCalledTimes(2);
   });
 
   it("An add whose node's executor is confirmed stopped while its session is not `exited` settles `not_running` with `observed: probe_absent`, and nothing is stopped.", async () => {

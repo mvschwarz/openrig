@@ -19,6 +19,7 @@ import {
   resolveStuckSweepIntervalSeconds,
   runStuckSweep,
 } from "./domain/queue-stuck-sweep.js";
+import { seatEvidenceReader } from "./domain/seat-evidence.js";
 import {
   createWakeLadderStatus,
   makePermissionPromptReader,
@@ -180,12 +181,16 @@ export function startStuckSweepScheduler(deps: {
   rigRepo: { db: import("better-sqlite3").Database };
   queueRepo?: import("./domain/queue-repository.js").QueueRepository;
   stuckSweepStatus?: import("./domain/queue-stuck-sweep.js").StuckSweepStatus;
+  /** #331: a finding names the seat's latest context sample from here. */
+  contextUsageStore?: import("./domain/context-usage-store.js").ContextUsageStore;
 }): ReturnType<typeof setInterval> | null {
   const queueRepo = deps.queueRepo;
   if (!queueRepo) return null;
   const status = createStuckSweepStatus();
   deps.stuckSweepStatus = status; // healthz reads this snapshot
   const db = deps.rigRepo.db;
+  // #331: a finding names what's already known about its seat: held messages and the latest context sample.
+  const seatEvidence = seatEvidenceReader(db, deps.contextUsageStore);
   // A pass yields the event loop, so a tick could start a second pass over the first one (a pass longer than the
   // interval): one pass at a time, and a tick that finds one still running is skipped.
   let runningSince: string | null = null;
@@ -203,7 +208,7 @@ export function startStuckSweepScheduler(deps: {
     status.pass({ runningSince, skippedTicks: 0 });
     // runStuckSweep never throws (failure is recorded loudly on the status surface);
     // the catch is the never-crash-the-daemon belt for the promise chain itself.
-    void runStuckSweep({ db, queueRepo, status }).catch((err: unknown) => {
+    void runStuckSweep({ db, queueRepo, status, seatEvidence }).catch((err: unknown) => {
       console.error(`[stuck-sweep] scheduler error: ${err instanceof Error ? err.message : String(err)}`);
     }).finally(() => { runningSince = null; status.pass({ runningSince: null, skippedTicks: skipped }); });
   };
@@ -429,6 +434,7 @@ export async function startServer(port?: number) {
         // tree post-bind so the HTTP surface is ready before the first
         // tick (matches contextMonitor pattern).
         deps.watchdogScheduler?.start();
+        deps.seatReaper?.start();
         // #2940: keep_alive seats are watched from here on; boot-time recovery stays with the kernel boot in createDaemon.
         deps.keepAliveSupervisor?.start();
         deps.networkConnector?.start();
@@ -507,6 +513,7 @@ export async function startServer(port?: number) {
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
+      ["seat-reaper", async () => { deps.seatReaper?.stop(); await deps.seatReaper?.drain(); }],
       ["terminal-reachability", () => deps.terminalReachability?.stop()],
       ["network-connector", () => deps.networkConnector?.stop()],
       ["stream-intake", () => deps.streamIntakeCoordinator?.stop()],

@@ -28,6 +28,17 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import type { RigSpec } from "../src/domain/types.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { makeWatchdogDeliver } from "../src/domain/watchdog-delivery.js";
+import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
+import { SessionTransport } from "../src/domain/session-transport.js";
+import { buildQueueTransfer } from "../src/domain/queue-transfer-export.js";
+import { QueueTransferStaging } from "../src/domain/queue-transfer-staging.js";
+import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { readStandbyStop } from "../src/domain/seat-standby.js";
 
 const RIG = "pi-continuity";
 const SEAT_SESSION = "dev-impl@pi-continuity";
@@ -144,6 +155,153 @@ describe("cold start continuity on the Pi path (#2829 slice 1)", () => {
   function ledger(): string | undefined {
     return (db.prepare("SELECT last_outcome FROM seat_cold_starts WHERE node_id = ?").get(implNodeId) as { last_outcome: string } | undefined)?.last_outcome;
   }
+
+  function recordStandby() {
+    const sessionId = implSessionId();
+    const identity = "$1|42|100|%1";
+    sessionRegistry.updateResumeToken(sessionId, "pi_session_file", SESSION_FILE);
+    sessionRegistry.markIntentionallyStopped(sessionId);
+    sessionRegistry.updateBinding(implNodeId, { attachmentType: "tmux", tmuxSession: SEAT_SESSION, tmuxPane: "%1" });
+    eventBus.emit({ type: "session.stopped", rigId, nodeId: implNodeId, sessionId, sessionName: SEAT_SESSION,
+      operator: "daemon:seat-reaper", reason: "idle_reap", standbyPane: identity });
+    const standby = readStandbyStop(db, implNodeId);
+    if (!standby) throw new Error("fixture did not record standby");
+    return standby;
+  }
+
+  it.each(["rig down", "rig seat stop"])("does not wake a standby seat after %s", async stop => {
+    recordStandby();
+    expect(readStandbyStop(db, implNodeId)).not.toBeNull();
+    const tmux = tmuxWithLivePeer();
+    tmux.deliveryGuard = deliveryGuard;
+    const present = new Set([SEAT_SESSION, PEER_SESSION]);
+    tmux.probeSession = async name => ({ state: present.has(name) ? "present" : "absent" });
+    tmux.killSession = async name => { present.delete(name); return { ok: true }; };
+    const deps = { db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux };
+    if (stop === "rig down") {
+      const teardown = new RigTeardownOrchestrator({ ...deps, snapshotCapture });
+      expect(await teardown.teardown(rigId, { force: true })).toMatchObject({ errors: [], sessionsKilled: 2 });
+    } else {
+      expect(await new SeatLifecycleService(deps).stopSeat({ seatRef: SEAT_SESSION, reason: "stay off" })).toMatchObject({ ok: true });
+      expect(present.has(PEER_SESSION)).toBe(true);
+    }
+    expect(readStandbyStop(db, implNodeId)).toBeNull();
+
+    const launch = vi.fn(async () => ({ ok: false }));
+    const cold = new SeatColdStarter({ db, deliveryGuard, probeSession: tmux.probeSession,
+      getNodeLaunchRecipe: recipeWithColdStart, launchSingleNode: launch });
+    const transport = { deliveryTarget: (name: string) => resolveGuardTarget(db, name),
+      send: async () => ({ ok: false as const, sent: false, error: "no receiver" }) };
+    const queue = new QueueRepo(db, eventBus, { transport });
+    queue.attachOutbox(new OutboxHandler(db));
+    queue.attachStandbyWake(cold.wakeStandby.bind(cold));
+    const row = await queue.create({ sourceSession: "operator@external", destinationSession: SEAT_SESSION, body: "work" });
+    await queue.drainPendingWakeIntents();
+
+    expect(queue.getById(row.qitemId)?.state).toBe("pending");
+    expect(launch).not.toHaveBeenCalled();
+    expect(ledger()).toBeUndefined();
+  });
+
+  it("records the restore attempt when standby resume needs attention", async () => {
+    const standby = recordStandby();
+    const tmux = tmuxWithLivePeer();
+    tmux.getDefaultShell = async () => "/bin/sh";
+    tmux.standbyPaneIdentity = async () => standby.identity;
+    tmux.respawnPane = async () => ({ ok: true });
+    tmux.hasSession = async () => false;
+    const resume = vi.fn<PiResumeAdapter["resume"]>(async () => ({ ok: false, code: "attention_required", message: "Needs operator" }));
+    const restore = orchestratorWith({ canResume: () => true, resume } as PiResumeAdapter, tmux);
+
+    const result = await deliveryGuard.lifecycle([implNodeId], () => restore.launchSingleNode(rigId, "dev.impl", { standby }));
+
+    expect(result.launched).toEqual([expect.objectContaining({ nodeId: implNodeId, status: "attention_required" })]);
+    expect(eventBus.replayAll(0)).toContainEqual(expect.objectContaining({ type: "restore.subset_completed", rigId,
+      result: expect.objectContaining({ nodes: result.launched }) }));
+    // The attempt is found, not missing: reconcile reads this standby resume rather than no attempt at all.
+    expect((await restore.reconcileNodeRuntimeTruth(rigId, implNodeId)).code).not.toBe("no_attempt");
+  });
+
+  it.each(["create", "handoff", "park timer", "standalone reminder", "plain send", "stage-only import"] as const)("dispatches %s against a recorded standby seat", async trigger => {
+    const standby = recordStandby();
+    const tmux = tmuxWithLivePeer();
+    tmux.probeSession = async name => ({ state: name === SEAT_SESSION ? "present" : "absent" });
+    tmux.getDefaultShell = async () => "/bin/sh";
+    tmux.standbyPaneIdentity = async () => standby.identity;
+    tmux.respawnPane = vi.fn(async () => ({ ok: true as const }));
+    const resume = vi.fn<PiResumeAdapter["resume"]>(async () => ({ ok: true }));
+    const restore = orchestratorWith({ canResume: () => true, resume } as PiResumeAdapter, tmux);
+    const cold = new SeatColdStarter({ db, deliveryGuard, probeSession: tmux.probeSession,
+      getNodeLaunchRecipe: recipeWithColdStart, launchSingleNode: (id, logicalId, standby) => restore.launchSingleNode(id, logicalId, { standby }) });
+    const outbox = new OutboxHandler(db);
+    const deliveryTarget = (destination: string) => resolveGuardTarget(db, destination);
+    const send = vi.fn(async (destination: string, _message: string, opts?: { committedOutboxIds?: string[] }) => {
+      const current = deliveryTarget(destination);
+      const matches = (opts?.committedOutboxIds ?? []).every(id =>
+        JSON.stringify(outbox.getById(id)?.guardBinding) === JSON.stringify(current));
+      return ledger() === "resumed" && matches ? { ok: true as const, verified: true }
+        : { ok: false as const, sent: false, error: matches ? "no receiver" : "guard target changed" };
+    });
+    const queue = new QueueRepo(db, eventBus, { transport: { send, deliveryTarget } });
+    queue.attachOutbox(outbox);
+    const wake = cold.wakeStandby.bind(cold);
+    queue.attachStandbyWake(wake);
+    if (trigger === "plain send" || trigger === "stage-only import") {
+      if (trigger === "plain send") {
+        const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+        tmux.getPaneCommand = async () => null;
+        await transport.send(SEAT_SESSION, "plain message");
+      } else {
+        const source = new Database(":memory:");
+        try {
+          migrate(source, ALL_MIGRATIONS);
+          source.exec("INSERT INTO self_host_identity VALUES (1, 'origin', 'minted', 'reconciled')");
+          source.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body)
+            VALUES ('qitem-staged', '1', '1', ?, ?, 'pending', 'staged work')`).run(PEER_SESSION, SEAT_SESSION);
+          const archive = buildQueueTransfer(source, { kind: "host" }).archive;
+          expect(new QueueTransferStaging(db).import(archive).stage?.status).toBe("staged");
+        } finally { source.close(); }
+        expect(queue.getById("qitem-staged")).toBeNull();
+        expect((await queue.drainPendingWakeIntents()).delivered).toBe(0);
+      }
+      expect(ledger()).toBeUndefined();
+      expect(resume).not.toHaveBeenCalled();
+      expect(tmux.respawnPane).not.toHaveBeenCalled();
+      return;
+    } else if (trigger === "create") {
+      const row = await queue.create({ sourceSession: PEER_SESSION, destinationSession: SEAT_SESSION, body: "new work" });
+      await vi.waitFor(() => expect(queue.getById(row.qitemId)?.lastNudgeResult).toBe("verified"));
+    } else if (trigger === "handoff") {
+      const source = await queue.create({ sourceSession: "operator@external", destinationSession: PEER_SESSION, body: "handoff work", nudge: false });
+      const { created } = await queue.handoff({ qitemId: source.qitemId, fromSession: PEER_SESSION, toSession: SEAT_SESSION });
+      await vi.waitFor(() => expect(queue.getById(created.qitemId)?.lastNudgeResult).toBe("verified"));
+      expect(send.mock.calls[0]).toEqual([SEAT_SESSION, expect.stringContaining(created.qitemId), expect.anything()]);
+    } else {
+      const deliver = makeWatchdogDeliver({ sessionTransport: { send }, wakeStandby: wake, outbox,
+        resolveParkedRows: ({ jobId, targetSession }) => queue.parkedRowsOwnedBy(jobId, targetSession) });
+      if (trigger === "standalone reminder") {
+        await deliver({ targetSession: SEAT_SESSION, message: "plain reminder" }, { jobId: "unattached", policy: "periodic-reminder" });
+        expect(resume).not.toHaveBeenCalled();
+        expect(tmux.respawnPane).not.toHaveBeenCalled();
+        return;
+      }
+      const row = await queue.create({ sourceSession: PEER_SESSION, destinationSession: SEAT_SESSION, body: "parked work", nudge: false });
+      queue.update({ qitemId: row.qitemId, actorSession: SEAT_SESSION, state: "blocked", wakeAfterSeconds: 5 });
+      const jobId = queue.getParkWakeStatus(row.qitemId)?.ref;
+      if (!jobId) throw new Error("fixture did not arm a park timer");
+      const jobs = new WatchdogJobsRepository(db);
+      const engine = new WatchdogPolicyEngine({ jobsRepo: jobs, historyLog: new WatchdogHistoryLog(db), eventBus, deliver,
+        onWakeAttempt: ({ jobId, deliveryStatus }) => queue.recordWatchdogWakeAttempt(jobId, deliveryStatus) });
+      expect(await engine.evaluate(jobs.getByIdOrThrow(jobId))).toMatchObject({ delivery: { status: "ok" } });
+      expect(queue.getParkWakeStatus(row.qitemId)).toMatchObject({ phase: "fired" });
+      expect(send.mock.calls[0]?.[1]).toContain(row.qitemId);
+    }
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(resume.mock.calls[0]?.slice(1, 4)).toEqual(["pi_session_file", SESSION_FILE, "./"]);
+    expect(sessionRegistry.getBindingForNode(implNodeId)?.tmuxPane).toBe("%1");
+    expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
 
   it("resumes the seat's existing Pi conversation from its exact session file", async () => {
     sessionRegistry.updateResumeToken(implSessionId(), "pi_session_file", SESSION_FILE);
