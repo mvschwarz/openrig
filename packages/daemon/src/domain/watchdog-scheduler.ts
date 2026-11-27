@@ -2,6 +2,9 @@ import type { WatchdogJob, WatchdogJobsRepository } from "./watchdog-jobs-reposi
 import type { ReminderPass, WatchdogPolicyEngine } from "./watchdog-policy-engine.js";
 import { nextDueAt } from "./watchdog-due.js";
 
+/** One turn of the event loop (setImmediate), not a microtask: queued I/O and timers run before the pass goes on. */
+export const yieldToLoop = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve));
+
 /**
  * Watchdog scheduler (PL-004 Phase C; daemon-native supervision tree
  * member). Joins createDaemon's lifecycle: started by startup.ts after
@@ -135,9 +138,19 @@ export class WatchdogScheduler {
     const active = this.jobsRepo.listActive();
     // Parked-row reminders due in this pass are held and sent at its end, one message per seat.
     const pass: ReminderPass = { held: [] };
+    let evaluated = false;
     for (const job of active) {
       if (this.shuttingDown) return;
       if (!isDue(job, nowMs)) continue;
+      // Let the event loop take a turn between jobs (the #2649 pattern): an evaluate that does its work without real I/O
+      // resolves at once, and awaiting it only runs microtasks, so without this one pass over every due job held the
+      // loop, and no request was answered until it ended. A job stopped meanwhile isn't evaluated; order is unchanged.
+      if (evaluated) {
+        await yieldToLoop();
+        if (this.shuttingDown) return;
+        if (this.jobsRepo.getById(job.jobId)?.state !== "active") continue;
+      }
+      evaluated = true;
       try {
         await this.policyEngine.evaluate(job, passStartedAt.toISOString(), pass);
       } catch (err) {

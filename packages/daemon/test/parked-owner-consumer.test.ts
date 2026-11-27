@@ -1675,3 +1675,19 @@ describe("context.owner_min_interval_s: a minimum time between one owner's remin
     expect(parkedOwnerSpecYaml(RIG, null)).toBe(fresh);
   });
 });
+
+// Health1305: the evaluate diagnoses a whole rig; it lets the event loop take a turn between seats (the #2649 pattern),
+// so a long rig doesn't hold the daemon. Seat order is unchanged.
+describe("parked-owner evaluate yields to the event loop between seats", () => {
+  it("runs queued event-loop work between two seats, not after the whole rig, in seat order", async () => {
+    const order: string[] = [];
+    const seats = [parkedSeat({ sessionName: "b@r", parked: "indeterminate" }), parkedSeat({ sessionName: "a@r", parked: "indeterminate" })];
+    const deps = { ...makeDeps(seats, new RowStore()), terminalServerUnreachable: (name: string) => {
+      order.push(name);
+      if (name === "a@r") setImmediate(() => order.push("event loop"));   // a macrotask queued while seat a is read
+      return false;
+    } };
+    await makeParkedOwnerConsumerPolicy(deps).evaluate(makeJob());
+    expect(order).toEqual(["a@r", "event loop", "b@r"]);
+  });
+});
