@@ -2109,7 +2109,8 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .requiredOption("--to <session>", "Destination seat receiving the new qitem")
     .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
     .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
-    .option("--note <text>", "Transition note")
+    .option("--note <text>", "Transition note on the source row for the audit log")
+    .option("--resolution <text>", "The outcome stored on the closed source row and shown by rig queue show (requires source daemon support)")
     .option("--priority <priority>", "Override priority for the new qitem: routine | urgent | critical", queuePriorityArg)
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
@@ -2128,6 +2129,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       body?: string;
       bodyFile?: string;
       note?: string;
+      resolution?: string;
       priority?: string;
       tier?: string;
       tags?: string;
@@ -2188,6 +2190,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           evidenceRef: opts.evidenceRef,
           ...(opts.alert ? { humanAlert: true } : {}),
           transitionNote: opts.note,
+          resolution: opts.resolution,
           priority: opts.priority,
           tier: opts.tier,
           tags,
