@@ -2,10 +2,26 @@ import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 import type { RestoreSnapshotSelection, RestoreSnapshotSummary, Snapshot, SnapshotData } from "./types.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
+import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
+import { resolveActiveSnapshotSession } from "./active-occupant.js";
 
 export type RestoreSnapshotSelectionOutcome =
   | { ok: true; snapshot: Snapshot; selection: RestoreSnapshotSelection }
   | { ok: false; code: "snapshot_not_found" | "snapshot_wrong_rig" | "snapshot_unusable" | "no_usable_snapshot"; message: string };
+
+/** What the comeback selection read: the snapshot it chose (null: none qualifies, or a recorded conflict stopped it),
+ *  how many snapshots it read, newest first, and for each one that did not qualify the first condition it failed (1: not
+ *  restore-usable; 2: the node is not in its intended topology; 3: no single active occupant recorded for the node). A
+ *  condition 3 whose occupancy the capture can't tell names its candidates and why (`unknown`); a node recorded absent
+ *  has no `unknown`. */
+export interface ComebackSnapshotSelection {
+  chosen: Snapshot | null;
+  /** Set only with `chosen: null`: the newest capture passing conditions 1 and 2 that recorded 2+ live occupants for
+   *  the node, and the candidates it names. */
+  conflict?: { snapshotId: string; candidateIds: string[] };
+  read: number;
+  failed: Array<{ snapshotId: string; condition: 1 | 2 | 3; unknown?: { candidateIds: string[]; detail: string } }>;
+}
 
 interface ListOptions {
   kind?: string;
@@ -92,6 +108,68 @@ export class SnapshotRepository {
       return { id: row.id, rigId: row.rig_id, kind: row.kind, status: row.status, data, createdAt: row.created_at };
     }
     return null;
+  }
+
+  /**
+   * The snapshot a seat pool's comeback launches a retained node from: the newest one, whatever its kind, that
+   * (1) is restore-usable, (2) holds the node in its intended topology with this logical id, and (3) recorded exactly
+   * one active occupant for that node. Read only. Rows are ranked by id alone (`created_at DESC, rowid DESC`) and read
+   * one at a time until one qualifies, so a capture taken after the node stopped never wins over the one taken while it
+   * ran. A row removed between the ranking and its read is skipped and not counted. A capture that passes (1) and (2)
+   * and whose own occupant map recorded two or more live occupants for the node stops the search: nothing is chosen,
+   * and the conflict names that snapshot and its candidates, so an older conversation is never picked over it. A node
+   * recorded absent, and an occupancy the metadata can't tell (the legacy relation, or candidates that were not running
+   * at capture, as after a reboot), fail (3) and the search goes on. Returns the chosen snapshot (null when none
+   * qualifies or a conflict stopped the search), the conflict, how many were read, and the first condition each one
+   * that did not qualify failed.
+   */
+  selectComebackSnapshot(rigId: string, nodeId: string, logicalId: string): ComebackSnapshotSelection {
+    const ids = this.db
+      .prepare("SELECT id FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC, rowid DESC")
+      .all(rigId) as Array<{ id: string }>;
+    const failed: ComebackSnapshotSelection["failed"] = [];
+    let read = 0;
+    for (const { id } of ids) {
+      const row = this.rowById(id);
+      if (!row) continue;
+      read++;
+      let data: SnapshotData;
+      try {
+        data = decodeStoredSnapshotData(row.data);
+      } catch {
+        failed.push({ snapshotId: id, condition: 1 });
+        continue;
+      }
+      if (!isRestoreUsableSnapshotData(data)) { failed.push({ snapshotId: id, condition: 1 }); continue; }
+      if (!resolveSnapshotRestoreTopology(data).intendedNodes.some((node) => node.id === nodeId && node.logicalId === logicalId)) {
+        failed.push({ snapshotId: id, condition: 2 });
+        continue;
+      }
+      const occupant = resolveActiveSnapshotSession(data, nodeId);
+      if (occupant.kind !== "resolved") {
+        // A recorded conflict: the capture's own occupant map names two or more candidates whose captured rows were
+        // running. Only a present map can say this (conditions 1 and 2 already hold its entry and every candidate as a
+        // row of this node); the legacy relation's `ambiguous` and a reboot capture's candidates that were not running
+        // say the metadata can't tell, and fall through.
+        const recorded = data.activeOccupantsByNode?.[nodeId];
+        if (recorded?.kind === "ambiguous"
+          && recorded.candidateIds.filter((cid) => data.sessions.some((s) => s.id === cid && s.nodeId === nodeId && s.status === "running")).length >= 2) {
+          return { chosen: null, conflict: { snapshotId: id, candidateIds: [...recorded.candidateIds] }, read, failed };
+        }
+        failed.push({
+          snapshotId: id,
+          condition: 3,
+          ...(occupant.kind === "ambiguous" ? { unknown: { candidateIds: occupant.candidateIds, detail: occupant.detail } } : {}),
+        });
+        continue;
+      }
+      return {
+        chosen: { id: row.id, rigId: row.rig_id, kind: row.kind, status: row.status, data, createdAt: row.created_at },
+        read,
+        failed,
+      };
+    }
+    return { chosen: null, read, failed };
   }
 
   /** Resolve an exact or policy-ranked restore source and return the evidence

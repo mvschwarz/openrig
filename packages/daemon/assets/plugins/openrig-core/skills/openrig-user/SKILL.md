@@ -1715,7 +1715,10 @@ grant never get them.
 - **Over stdio, and over HTTP with no grants:** the server acts as one seat, the `OPENRIG_SESSION_NAME` in its
   environment. Every request carries that identity, so no tool call names a sender. Without it, messages, new tasks and
   chat go through as an unknown sender (`unknown-mcp-` and eight hex digits, one per `rig mcp serve` process) with a
-  note at the top, and claim, update, hand off, unclaim and decide are refused with `actor_required`.
+  note at the top, and claim, update, hand off, unclaim and decide are refused with `actor_required`. The exception
+  is over stdio, for an item addressed to an address OpenRig issued this conversation: one recorded under its
+  conversation key, or one a create through the same server process was issued (`returnRoute` `auto`). The server
+  claims, updates and decides such an item as that address.
 - **Over HTTP with grants:** each caller acts as its own grant's seat.
 
 ### Over HTTP: an assistant that can't start a local process

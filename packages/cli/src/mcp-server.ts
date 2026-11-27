@@ -888,14 +888,16 @@ function askWhichAssistant(canList: boolean, frontDoor: boolean): string {
 
 /** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
  *  that works its inbox. The team's questions to it are the person's to answer. */
-export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v5";
+export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v6";
 export const FRONT_DOOR_WORKFLOW = [
   `Front door (${FRONT_DOOR_WORKFLOW_VERSION}). This seat is a person's agent in their own app: you hand the team their work and bring back what it produced, and you aren't one of its members.`,
   "The team's questions are the person's, and an answer covers only the question it answered: a later one, even one like it, goes back to them, unless they told you outright to decide that kind of question. Approving a plan, a task or 'go ahead' isn't an answer to the questions that work raises. Never tell the team they approved something, or will answer a question, unless they said so, and don't send them to a seat's terminal to answer the team's questions: those come to this seat as items.",
   askWhichAssistant(true, true),
   "Items addressed to your seat (rig_queue_list with owned set) are usually the team's questions about work you handed it. They're the person's to answer, not yours: show each to the person with the team's draft, and record only what the person tells you.",
   "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and exactly what the person typed in resolution, with no label, quotation marks or words of your own (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them unless they told you outright to decide that kind of question: then answer only what's clearly inside it, and say in resolution that you decided under their instruction, not that they answered, and tell them you did. Don't claim an item you can't close with their words or under such an instruction.",
-  "Where the app runs the openrig plugin's hooks (Claude Code, Codex), a task that reaches an address OpenRig issued to this conversation is brought into it with its recorded sender. Otherwise nothing wakes this conversation when the team finishes, and it has no wake of its own: tell the person you'll check when they ask, then check your work and your items when they ask or come back. Offer a wake only where their app actually has one, such as Claude Desktop's scheduled tasks.",
+  "Where the app runs the openrig plugin's hooks (Claude Code, Codex), a task that reaches an address OpenRig issued to this conversation is brought into it with its recorded sender. Otherwise nothing wakes this conversation when the team finishes, and it has no wake of its own, so the person hears from the team when they next write to you.",
+  "While work you handed over is open, start each of your turns by listing your items (rig_queue_list with owned set) and checking that work, before anything else and whatever the person's message is about, and tell them first about any question waiting for them, then answer what they wrote. If their message answers that question, record it as above rather than asking it again. If their app asks them to approve each OpenRig call, tell them once that choosing an approval that lasts for OpenRig's read tools (list and show), such as 'Always allow', where the app offers one, lets these checks run without asking.",
+  "Offer a wake only where their app actually has one, such as a Claude Desktop scheduled task that checks your items, and say what it needs. Where the app asks before each OpenRig call, each run waits there and shows the person only 'Needs your input', not the team's question, until they approve it or choose an approval that lasts across runs for OpenRig's read tools ('Always allow', or 'Allow for all scheduled runs'), where the app offers one. Don't promise that a wake will reach them by itself: once they've chosen such an approval, say a run can, not that it will.",
 ].join(" ");
 const FRONT_DOOR_INSTRUCTIONS = [...SHARED_INSTRUCTIONS, FRONT_DOOR_WORKFLOW].join("\n");
 // An external caller's first paragraph says what the connection is for, on its own: a client may show the model only the
@@ -1296,21 +1298,30 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       if (res.data.length < limit) return res.data;
     }
   };
-  /** The address OpenRig issued this stdio server's own conversation (under the conversation key it derives itself, as its
-   *  creates record it), when `qitemId` is addressed there: the conversation then acts as that address, as
-   *  `OPENRIG_SESSION_NAME=<address> rig ...` does in a shell, with or without a seat configured for its tools. Never under a
-   *  seat OpenRig launched (inManagedSeat), which acts as itself. That's attribution, not proof of a person (a relay still
-   *  reads relayed and unconfirmed). Null otherwise, or when a read fails: the call goes as before. */
+  /** Addresses OpenRig issued to this stdio server's own creates (an explicit or default `returnRoute: auto`), as each
+   *  create's answer names them. They're the conversation's own when it has no key to record them under: an app that isn't
+   *  Claude Code or Codex, such as Claude Desktop's chat, asks the team through this server and its questions come back
+   *  there. Held for this server's process, as a key is held for its Claude Code process. */
+  const issuedToThisServer = new Set<string>();
+  /** The address OpenRig issued this stdio server's own conversation, when `qitemId` is addressed there: one recorded under
+   *  the conversation key it derives itself (as its creates record it), or one this server's own create was issued
+   *  (issuedToThisServer). The conversation then acts as that address, as `OPENRIG_SESSION_NAME=<address> rig ...` does in
+   *  a shell, with or without a seat configured for its tools. Never under a seat OpenRig launched (inManagedSeat), which
+   *  acts as itself. That's attribution, not proof of a person (a relay still reads relayed and unconfirmed). Null
+   *  otherwise, or when a read fails: the call goes as before. */
   const ownConversationAddress = async (qitemId: string): Promise<string | null> => {
-    const key = !access && !inManagedSeat() ? options.conversationKey?.() ?? null : null;
-    if (!key) return null;
+    if (access || inManagedSeat()) return null;
+    const key = options.conversationKey?.() ?? null;
+    if (!key && issuedToThisServer.size === 0) return null;
     try {
       // Its sender is the seat configured for its tools, or none: any other (a pane's bound seat) isn't this conversation.
       if ((await client.senderIdentity()).session !== seatOf()) return null;
-      const tag = conversationKeyTag(key);
-      const [item, rows] = await Promise.all([client.get(`/api/queue/${encodeURIComponent(qitemId)}`), issuedRows(tag)]);
+      const tag = key ? conversationKeyTag(key) : null;
+      const [item, rows] = await Promise.all([client.get(`/api/queue/${encodeURIComponent(qitemId)}`), tag ? issuedRows(tag) : []]);
       const address = item.status < 400 ? (item.data as { destinationSession?: unknown } | null)?.destinationSession : undefined;
-      return typeof address === "string" && rows.some((row) => row.returnRoute === address && (row.returnRouteBasis === "issued"
+      if (typeof address !== "string") return null;
+      if (issuedToThisServer.has(address)) return address;
+      return tag && rows.some((row) => row.returnRoute === address && (row.returnRouteBasis === "issued"
         || row.returnRouteBasis === "issued-actor") && Array.isArray(row.tags) && row.tags.includes(tag)) ? address : null;
     } catch { return null; }
   };
@@ -2005,6 +2016,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           ...(alert ? { humanAlert: true } : {}),
           ...(lineage ? { chainOfRecord: lineage.chainOfRecord } : {}),
         });
+        // The address OpenRig issued this stdio server's create on its own daemon: the team's questions about this work come
+        // there, and this conversation answers them as that address (ownConversationAddress), with or without a key.
+        const created = (res.status < 400 ? res.data ?? {} : {}) as { returnRoute?: unknown; returnRouteBasis?: unknown };
+        if (options.conversationKey && !access && !target.remote && !inManagedSeat() && typeof created.returnRoute === "string"
+          && (created.returnRouteBasis === "issued" || created.returnRouteBasis === "issued-actor")) issuedToThisServer.add(created.returnRoute);
         // An external caller reusing the id of an item it can't see learns only that the id is taken, never that item's
         // parties.
         const conflict = (res.data ?? {}) as { error?: unknown; existingSource?: unknown; existingDestination?: unknown };
@@ -2321,10 +2337,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           const why = options.unfilledSeat ? unfilledSeatText(options.unfilledSeat) : "OPENRIG_SESSION_NAME isn't set where it was configured";
           const message = `This server has no seat: ${why}, so it acts as no seat and never as another seat. Reads work. `
             + `Messages (rig_send), new tasks (rig_queue_create) and chat go through as the unknown sender ${unknownSender}, each `
-            + "with a note saying so: there's no return address, so follow a task by its qitemId with rig_queue_show. "
-            + "Claiming, updating, handing off or deciding a task, answering a question asked of a seat, and listing your own "
-            + "items (owned or mine) need this app's seat; reply to the team's questions as a message or a new task naming the "
-            + "question's qitemId. To act as this app's address on the team, such as cursor@my-team, the server needs "
+            + "with a note saying so. A task created with returnRoute auto gets an address of this conversation's own: the team's "
+            + "questions about it come there, and this server claims and answers them as that address. Without one there's no "
+            + "return address, so follow a task by its qitemId with rig_queue_show. Claiming, updating, handing off or deciding "
+            + "any other item, answering a question asked of a seat, and listing your own items (owned or mine) need this app's "
+            + "seat; reply to those questions as a message or a new task naming the question's qitemId. To act as this app's address on the team, such as cursor@my-team, the server needs "
             + "OPENRIG_SESSION_NAME: in Claude Code, set the plugin's OpenRig seat; in Codex, pass it with --env on codex mcp add. "
             + "VS Code, Copilot CLI and Cursor can't give a plugin's server a value: add your own rig mcp serve --front-door "
             + "server with OPENRIG_SESSION_NAME in its env and turn the plugin's openrig server off (in VS Code, give yours "

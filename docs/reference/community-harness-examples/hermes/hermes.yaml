@@ -9,7 +9,7 @@ limits:
   - creation settings (model, provider, max turns) come from the seat's Hermes config.yaml, not from flags
   - no guidance, skills or startup files are placed
   - needs-input and approval prompts are read from the screen only
-  - fresh handover restore packets are typed after launch (not via --query-file); check the successor's pane
+  - fresh handover passes its restore packet through --query-file; native submission and consumption are unconfirmed
   - initial input transport is covered with a stand-in; unattended startup needs checking with the installed Hermes
 first_input: true                 # Hermes v0.23.4: --query-file seeds the interactive session on a real TTY
 names_conversation: true

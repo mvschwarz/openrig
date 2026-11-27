@@ -178,6 +178,8 @@ export interface InPlaceRestartReport {
 export interface AccountEvidence {
   verdict: "unverified";
   credentialStore: { value: string | null; state: "read" | "unset" | "unreadable"; detail: string };
+  /** `changedBeforeRestart` means the same in a plan and a result: auth.json changed after the running Codex started
+   *  (and, in a result, before its replacement started). null when the file or a start time can't be read. */
   authFile: { changedBeforeRestart: boolean | null; detail: string };
   startupGate: string | null;
   /** The native resume probe's code for that gate (for example `hook_trust_gate`), when the launch named one. */
@@ -846,7 +848,10 @@ export class CodexInPlaceRestart {
         : Number.isNaN(newStart)
           ? { changedBeforeRestart: Number.isNaN(oldStart) ? null : auth.mtimeMs > oldStart,
               detail: "Whether auth.json changed after the running Codex started (stat only; never read). A change is not proof of which account." }
-          : { changedBeforeRestart: auth.mtimeMs < newStart, detail: "auth.json was last modified before the replacement started (stat only; never read)." },
+          : { changedBeforeRestart: Number.isNaN(oldStart) ? null : auth.mtimeMs > oldStart && auth.mtimeMs < newStart,
+              detail: auth.mtimeMs < newStart
+                ? "Whether auth.json changed after the old Codex started and before its replacement started (stat only; never read). A change is not proof of which account."
+                : "auth.json changed at or after the replacement started, so whether the replacement read that change is unknown (stat only; never read)." },
       startupGate: null,
       startupGateKind: null,
       notVerified: NOT_VERIFIED,

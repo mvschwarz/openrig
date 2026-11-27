@@ -155,12 +155,15 @@ The app starts one `openrig` server, `rig mcp serve --front-door`, from the root
   macOS, reopening the app from the Dock drops it, and an already running VS Code keeps its own environment.
   - **What goes through without one:** messages (`rig_send`), new tasks (`rig_queue_create`) and chat
     (`rig_chatroom_send`) reach the team as an unknown sender, `unknown-mcp-` and eight hex digits, one per server. Each
-    opens with a note saying why there's no seat and what the app's MCP client says it is. There's no return address,
-    so your agent follows a task it created by its id (`rig_queue_show`). `rig_whoami` says why there's no seat and
-    names the unknown sender.
-  - **What needs a seat:** OpenRig answers `actor_required` to claim, update, hand off, unclaim and decide, which covers
-    recording an answer to the team's questions. Listing the questions sent to you (`rig_queue_list` with `owned` or
-    `mine`) needs the seat too. Set one to get the team's questions and replies.
+    opens with a note saying why there's no seat and what the app's MCP client says it is. Without a return address,
+    your agent follows a task it created by its id (`rig_queue_show`). `rig_whoami` says why there's no seat and names
+    the unknown sender.
+  - **Answers to the team's questions:** a task created with `returnRoute` `auto` gets an address of the conversation's
+    own, and the team's questions about it are addressed there. Your agent claims and answers them as that address
+    through the same server, while the app keeps that server running.
+  - **What needs a seat:** OpenRig answers `actor_required` to hand off and unclaim, and to claim, update and decide
+    any other item. Listing the questions sent to you (`rig_queue_list` with `owned` or `mine`) needs the seat too.
+    Set one to get the team's questions and replies.
   - Environment export needs an HTTP work grant, which a plugin's local server never has.
 - **To give the app a seat,** add your own MCP server that runs `rig mcp serve --front-door` with
   `OPENRIG_SESSION_NAME=<address>` in its environment, and turn the plugin's `openrig` server off, so the app runs one

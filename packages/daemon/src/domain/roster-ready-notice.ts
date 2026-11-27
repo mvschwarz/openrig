@@ -13,7 +13,7 @@ export function isRosterReadyNotice(row: { qitem_id: string; source_session: str
 }
 
 /** One durable notice per seat in this newly built rig. A failed notice does not change launch status. It's information
- *  only: the text names nothing to claim, run or write, and the stuck sweep files no finding about it. */
+ *  only: keep it available for the seat's next natural turn, without spending a turn to announce it. */
 export async function noticeRosterReady(queue: Pick<QueueRepository, "create">, rigId: string, sessions: string[]): Promise<string[]> {
   const warnings: string[] = [];
   for (const session of sessions) {
@@ -23,6 +23,7 @@ export async function noticeRosterReady(queue: Pick<QueueRepository, "create">, 
         sourceSession: OPENRIG_SENDER,
         destinationSession: session,
         wakeTrigger: "openrig",
+        nudge: false,
         summary: "Team seats and edges recorded (information only)",
         body: "Information only; there's nothing to do for this row. Your team's seats and edges are now recorded, "
           + "so `rig whoami` shows your current peers and routes whenever you next need them. "

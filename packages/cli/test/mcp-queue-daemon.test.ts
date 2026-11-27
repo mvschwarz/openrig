@@ -577,4 +577,66 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     await mine.callTool({ name: "rig_queue_update", arguments: { qitemId: question.qitemId, state: "done", closureReason: "no-follow-on", resolution: "This one" } });
     expect(repo.listTransitions(question.qitemId).map((t) => t.actorSession)).not.toContain(issued.returnRoute);
   });
+
+  // A seatless entry in an app that isn't Claude Code or Codex (Claude Desktop's chat) has no conversation key, so nothing
+  // records its issued address under one. Its ask still gets that address as the task's sender and return route, and the
+  // seat's question comes back there; the person's answer through the same server closes it, as that address.
+  it("lets a seatless stdio server with no conversation key answer a question sent to the address its own create was issued", async () => {
+    delete process.env.OPENRIG_SESSION_NAME;
+    const mine = await conversationServer(null);
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const created = await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Report alpha or beta", returnRoute: "auto" } });
+    expect(created.isError).toBeFalsy();
+    const work = repo.getById(createdId(created))!;
+    expect(work).toMatchObject({ returnRouteBasis: "issued-actor" });
+    const address = work.returnRoute!;
+    expect(address).toMatch(/^conversation-[0-9a-f]{12}@kernel$/);
+    expect(work.sourceSession).toBe(address);
+    const question = await repo.create({ sourceSession: "dev-build@team", destinationSession: address, body: "Which word: alpha or beta?" });
+    repo.update({ qitemId: work.qitemId, actorSession: "dev-build@team", state: "blocked", blockedOn: question.qitemId });
+
+    const claim = await mine.callTool({ name: "rig_queue_claim", arguments: { qitemId: question.qitemId } });
+    expect(claim.isError, JSON.stringify(claim.content)).toBeFalsy();
+    const answer = await mine.callTool({ name: "rig_queue_update",
+      arguments: { qitemId: question.qitemId, state: "done", closureReason: "no-follow-on", resolution: "beta" } });
+    expect(answer.isError, JSON.stringify(answer.content)).toBeFalsy();
+    expect(repo.getById(question.qitemId)).toMatchObject({ state: "done", resolution: "beta" });
+    // Who answered, and through which route: the conversation's issued address, as the plugin's server records it.
+    expect(repo.listTransitions(question.qitemId).slice(-2).map((t) => t.actorSession)).toEqual([address, address]);
+    expect(repo.getById(work.qitemId)?.state).toBe("pending");
+  });
+
+  it("keeps today's refusal for any other item, for another server's issued address, and for a server that isn't a conversation", async () => {
+    delete process.env.OPENRIG_SESSION_NAME;
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const mine = await conversationServer(null);
+    const other = await conversationServer(null);
+    const created = await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Report alpha or beta", returnRoute: "auto" } });
+    const address = repo.getById(createdId(created))!.returnRoute!;
+    const question = await repo.create({ sourceSession: "dev-build@team", destinationSession: address, body: "Which word?" });
+    const elsewhere = await repo.create({ sourceSession: "dev-build@team", destinationSession: DESK, body: "For the desk" });
+    const close = { state: "done", closureReason: "no-follow-on", resolution: "beta" };
+
+    // An item addressed to a seat, not to this conversation's address: refused as before, and unchanged.
+    const notMine = await mine.callTool({ name: "rig_queue_update", arguments: { qitemId: elsewhere.qitemId, ...close } });
+    expect(notMine.isError).toBe(true);
+    expect(JSON.stringify(notMine.content)).toContain("actor_required");
+    expect(repo.getById(elsewhere.qitemId)?.state).toBe("pending");
+    // Another server process wasn't issued that address.
+    expect((await other.callTool({ name: "rig_queue_update", arguments: { qitemId: question.qitemId, ...close } })).isError).toBe(true);
+    // A server that isn't a conversation's own (an HTTP server passes no conversation key) issues the address on create
+    // but never acts as it.
+    const shared = createMcpServer(new DaemonClient(url));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const http = new Client({ name: "shared", version: "1.0.0" });
+    await shared.connect(serverTransport);
+    await http.connect(clientTransport);
+    closers.push(async () => { await http.close(); await shared.close(); });
+    const sharedCreate = await http.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "From a shared server", returnRoute: "auto" } });
+    const sharedAddress = repo.getById(createdId(sharedCreate))!.returnRoute!;
+    const sharedQuestion = await repo.create({ sourceSession: "dev-build@team", destinationSession: sharedAddress, body: "Which?" });
+    expect((await http.callTool({ name: "rig_queue_update", arguments: { qitemId: sharedQuestion.qitemId, ...close } })).isError).toBe(true);
+    expect(repo.getById(question.qitemId)?.state).toBe("pending");
+    expect(repo.getById(sharedQuestion.qitemId)?.state).toBe("pending");
+  });
 });

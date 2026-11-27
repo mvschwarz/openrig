@@ -145,7 +145,7 @@ export function diagnoseSeatParked(
   const state = deps.getSeatState(seat.seatNodeId);
   // The reader leaves out a wake escalation about this seat's own prompt that nobody holds; one its owner holds stays
   // (queue-repository listOpenObligations).
-  const scope = `destination=${seat.sessionName} state=pending,in-progress,blocked excluding=unheld-own-prompt-alerts limit=${PARKED_OBLIGATION_LIMIT}`;
+  const scope = `destination=${seat.sessionName} state=pending,in-progress,blocked excluding=unheld-own-prompt-alerts,roster-ready-notices limit=${PARKED_OBLIGATION_LIMIT}`;
   const read = deps.listOpenObligations(seat.sessionName, PARKED_OBLIGATION_LIMIT);
   const held: HeldObligation[] = read.rows.filter((r) => r.state === "blocked").map((row) => {
     const wake = parseWake(deps.getParkWake?.(row.qitemId));
