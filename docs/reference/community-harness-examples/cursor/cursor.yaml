@@ -5,7 +5,7 @@ command: openrig-cursor-launch
 maintainer: Your name or team
 limits:
   - resume reads a chat as missing unless its store is in the seat's Cursor config folder, under the seat's working directory
-  - no guidance, skills or startup files are placed
+  - no guidance or skills are placed; startup text files go only in the first input
   - needs-input and approval prompts are read from the screen only
 launch_result: true
 resume: true

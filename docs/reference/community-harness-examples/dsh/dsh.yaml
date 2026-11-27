@@ -15,6 +15,6 @@ limits:
   - a prompt whose whole text is /abort can't be sent; a Ctrl-C byte inside a paste also aborts; without a TTY, input is read line by line; this isn't a binary-safe channel
   - one prompt at a time; a message that arrives mid-turn waits for the next turn
   - the seat's model isn't passed; dsh uses its own configured model
-  - no guidance, skills or startup files are placed; dsh reads its own AGENTS.md and skill folders
+  - no guidance or skills are placed, and startup text files go only in the first input; dsh reads its own AGENTS.md and skill folders
   - when the pane closes, the runner cancels a running turn and stops dsh; anything dsh's tools started may keep running
   - fork unsupported

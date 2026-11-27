@@ -1894,9 +1894,12 @@ describe("StartupOrchestrator", () => {
         launchResultRoot: () => nodePath.join(dir, "state", "launch-results"),
         tmux: { hasSession: async () => true, getPaneCommand: async () => "node", sendShellCommand: shell } });
       const delivery = vi.spyOn(adapter, "deliverStartup");
-      const files: ResolvedStartupFile[] = ["first", "second"].map(name => ({ path: `${name}.md`, absolutePath: `/${name}.md`,
-        ownerRoot: "/", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }));
-      const orchestrator = createOrchestrator({ readFile: path => path === "/first.md" ? "first role\n'quoted' $literal\n" : "second role" });
+      // second.txt has no explicit hint (auto resolves to send_text); empty.md reads empty and stays out of the folded input.
+      const files: ResolvedStartupFile[] = [["first.md", "send_text"], ["second.txt", "auto"], ["empty.md", "send_text"]].map(([name, deliveryHint]) => ({
+        path: name!, absolutePath: `/${name}`, ownerRoot: "/", deliveryHint: deliveryHint as ResolvedStartupFile["deliveryHint"],
+        required: true, appliesOn: ["fresh_start"] }));
+      const contents: Record<string, string> = { "/first.md": "first role\n'quoted' $literal\n", "/second.txt": "second role", "/empty.md": "" };
+      const orchestrator = createOrchestrator({ readFile: path => contents[path] ?? "" });
       const result = await orchestrator.startNode(makeInput(seed, { adapter, includeDurableObligations: true, resolvedStartupFiles: files,
           startupActions: [makeAction({ type: "startup_proof", value: "authenticated" }), makeIdentityAction(), makeAction({ value: "later action" })] }));
       expect(result.ok).toBe(!assisted && !uncertain);
@@ -1905,12 +1908,15 @@ describe("StartupOrchestrator", () => {
       const first = firstInput ? content : typed[0];
       expect(first).toContain("OpenRig-generated identity context");
       expect(first).toContain("first role\n'quoted' $literal\n");
+      // A launch-time first input carries every send_text file in order; other routes fold only the first.
+      if (firstInput) expect(first!.indexOf("first role")).toBeLessThan(first!.indexOf("second role"));
+      expect(first!.includes("second role")).toBe(firstInput);
       expect(first).toContain("read durable obligations with rig queue list");
       expect(first).toContain("startup orientation challenge");
       expect(typed).toHaveLength(uncertain ? 0 : firstInput ? 1 : 2);
       if (!uncertain) {
         expect(typed.at(-1)).toBe("later action");
-        expect(delivery.mock.calls.flatMap(([files]) => files.map(file => file.path))).toEqual(["second.md"]);
+        expect(delivery.mock.calls.flatMap(([files]) => files.map(file => file.path))).toEqual(firstInput ? ["empty.md"] : ["second.txt", "empty.md"]);
       }
       const records = db.prepare("SELECT payload FROM events WHERE node_id=? AND type='node.startup_first_input_passed'").all(seed.nodeId) as { payload: string }[];
       expect(records).toHaveLength(firstInput ? 1 : 0);
