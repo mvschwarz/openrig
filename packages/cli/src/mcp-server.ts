@@ -833,7 +833,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
 
 /** How a member works its inbox, and asks a person while keeping the work: one versioned text, carried in this server's
  *  instructions and quoted in docs/reference/hosted-members.md. Change it here, bump the version, and update the quote. */
-export const MEMBER_WORKFLOW_VERSION = "member-workflow/v3";
+export const MEMBER_WORKFLOW_VERSION = "member-workflow/v4";
 /** What the connection itself authorizes. */
 const MEMBER_AUTHORITY = "If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may.";
 export const MEMBER_WORKFLOW = [

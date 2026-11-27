@@ -946,11 +946,12 @@ describe("MCP Server", () => {
     // v2: the closure reason a finished item takes, and scope described from the grant, not the tool list.
     for (const part of ["closure reason no-follow-on", "a listed tool isn't access", "names the shared roots you may read"]) expect(MEMBER_WORKFLOW).toContain(part);
     // v3: an item titled "Checked on …" is OpenRig's check on other work, to act on, not a task to close.
-    expect(MEMBER_WORKFLOW_VERSION).toBe("member-workflow/v3");
+    // v4: requester questions use the imported work's route, never its copied sender name.
+    expect(MEMBER_WORKFLOW_VERSION).toBe("member-workflow/v4");
     expect(MEMBER_WORKFLOW).toContain("An item titled \"Checked on …\" is OpenRig's check on other work, not a task: act on the item it names, or the items it lists, and the check closes itself.");
     const doc = fs.readFileSync(new URL("../../../docs/reference/hosted-members.md", import.meta.url), "utf8");
     expect(doc).toContain(`> ${MEMBER_WORKFLOW}`);
-    for (const old of ["member-workflow/v1", "member-workflow/v2"]) expect(doc).not.toContain(old);
+    for (const old of ["member-workflow/v1", "member-workflow/v2", "member-workflow/v3"]) expect(doc).not.toContain(old);
     await cleanup();
   });
 

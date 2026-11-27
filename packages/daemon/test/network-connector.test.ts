@@ -763,6 +763,100 @@ describe("network connector", () => {
       return { binding: bindings.get(binding.id)!, work: repo.getById(work.qitemId)! };
     };
 
+    it.each([true, false])("R1 uncertain retry preserves the current dependency (owner selected another=%s)", async (changed) => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const input = { requesterOf: work.qitemId, requestId: "qitem-old-question", body: "Which audience?" };
+      const hubId = networkHubRequestId(binding, input.requestId);
+      hub.loseCreateAnswer.add(hubId);
+      expect((await originateNetworkRequest(deps, binding, input)).state).toBe("unknown");
+      if (changed) {
+        await repo.create({ qitemId: "qitem-new-question", sourceSession: "dev-impl@lab", destinationSession: "dev-impl@lab", body: "A later decision", nudge: false });
+        repo.update({ qitemId: work.qitemId, actorSession: "dev-impl@lab", state: "blocked", blockedOn: "qitem-new-question" });
+      }
+      expect((await originateNetworkRequest(deps, binding, input)).state).toBe("sent");
+      expect.soft(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: changed ? "qitem-new-question" : input.requestId });
+      expect(hub.creates).toBe(1);
+      Object.assign(hub.items.get(hubId)!, { state: "done", closureReason: "no-follow-on", resolution: "Old question's answer" });
+      await runNetworkBindingPass(deps, binding);
+      expect(repo.getById(input.requestId)!.state).toBe("done");
+      expect(repo.getById(work.qitemId)).toMatchObject(changed ? { state: "blocked", blockedOn: "qitem-new-question" } : { state: "pending", blockedOn: null });
+      if (changed) expect(repo.getById("qitem-new-question")!.state).toBe("pending");
+    });
+
+    it("R1 overlapping first attempts establish the wait only on the actual receipt insert", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const input = { requesterOf: work.qitemId, requestId: "qitem-overlap", body: "Which audience?" };
+      let entered!: () => void, release!: () => void;
+      const waiting = new Promise<void>(resolve => { entered = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const create = repo.create.bind(repo); let first = true;
+      const spy = vi.spyOn(repo, "create").mockImplementation(async (change) => {
+        const row = await create(change);
+        if (change.qitemId === input.requestId && first) { first = false; entered(); await gate; }
+        return row;
+      });
+      const delayed = originateNetworkRequest(deps, binding, input);
+      await waiting;
+      try {
+        const hubId = networkHubRequestId(binding, input.requestId);
+        hub.loseCreateAnswer.add(hubId);
+        expect((await originateNetworkRequest(deps, binding, input)).state).toBe("unknown");
+        await repo.create({ qitemId: "qitem-overlap-new", sourceSession: "dev-impl@lab", destinationSession: "dev-impl@lab", body: "Later dependency", nudge: false });
+        repo.update({ qitemId: work.qitemId, actorSession: "dev-impl@lab", state: "blocked", blockedOn: "qitem-overlap-new" });
+      } finally { release(); }
+      expect((await delayed).state).toBe("sent"); spy.mockRestore();
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: "qitem-overlap-new" });
+      expect([...hub.items.values()].filter(x => x.requesterOf === "hub-work")).toHaveLength(1);
+    });
+
+    it("R1 an interrupted initial wait rolls back its receipt and a same-id retry completes it", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const input = { requesterOf: work.qitemId, requestId: "qitem-incomplete", body: "Which audience?" };
+      const update = repo.update.bind(repo);
+      const spy = vi.spyOn(repo, "update").mockImplementation((change) => {
+        if (change.qitemId === work.qitemId && change.blockedOn === input.requestId) {
+          spy.mockRestore(); throw new Error("fixture: initial wait interrupted");
+        }
+        return update(change);
+      });
+      await expect(originateNetworkRequest(deps, binding, input)).rejects.toThrow("initial wait interrupted");
+      expect(db.prepare("SELECT count(*) AS n FROM network_requests WHERE local_qitem_id = ?").get(input.requestId)).toEqual({ n: 0 });
+      expect(repo.getById(input.requestId)!.state).toBe("blocked");
+      expect(repo.getById(work.qitemId)!.state).toBe("in-progress");
+      expect((await originateNetworkRequest(deps, binding, input)).state).toBe("sent");
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: input.requestId });
+      expect(hub.creates).toBe(1);
+    });
+
+    it.each(["missing", "unreadable"] as const)("R1 a %s requester advertisement cannot prevent an existing answer from returning", async (mode) => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const sent = await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "qitem-confirmed-question", body: "Which audience?" });
+      await runNetworkBindingPass(deps, binding);
+      Object.assign(hub.items.get(sent.hubQitemId)!, { state: "done", closureReason: "no-follow-on", resolution: "Person Alex: use the public audience." });
+      if (mode === "missing") hub.requesterQuestions = false;
+      else hub.failToolList = true;
+      await runNetworkBindingPass(deps, binding);
+      expect(repo.getById("qitem-confirmed-question")).toMatchObject({ state: "done", resolution: "Person Alex: use the public audience." });
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "pending", blockedOn: null });
+      expect(hub.creates).toBe(1);
+    });
+
+    it("R1 canceling a deferred unsupported question releases the work without a create", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      let connects = 0;
+      hub.duringConnect = () => { if (++connects === 2) hub.requesterQuestions = false; };
+      expect((await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "qitem-deferred", body: "Which audience?" })).state).toBe("unknown");
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: "qitem-deferred" });
+      repo.update({ qitemId: "qitem-deferred", actorSession: "dev-impl@lab", state: "done", closureReason: "canceled", resolution: "Canceled the question" });
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "pending", blockedOn: null });
+      expect(hub.creates).toBe(0);
+    });
+
     it("an old hub writes no question, receipt or wait and never tries name-based create", async () => {
       const { binding, work } = await incoming();
       const count = db.prepare("SELECT count(*) AS n FROM queue_items").get();

@@ -154,6 +154,9 @@ This mode excludes a peer argument. It is available only when the hub advertises
 receipt or wait; it never falls back to a copied requester name. A supporting hub pins the question to the original
 source connection before writing it. An unreachable original requester is reported as `requester_unreachable`.
 
+If the hub stops advertising support before a deferred create, the question stays open and the work stays blocked;
+cancel the question to release the work. Recovering an existing question never replaces a later dependency selected by the owner.
+
 The same local work waits on the question receipt. The connector reports this explicit relation to the hub after
 confirming the question. Other local dependencies and progress notes stay private. The question's terminal outcome
 returns through its receipt and releases the local work to pending through the queue's ordinary dependency handling;

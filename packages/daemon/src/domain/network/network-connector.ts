@@ -344,7 +344,13 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
         const question = deps.db.prepare("SELECT hub_qitem_id FROM network_requests WHERE local_qitem_id = ? AND requester_local_qitem_id = ? AND requester_hub_qitem_id = ? AND hub_created_at IS NOT NULL AND settled_at IS NULL")
           .get(end.blockedOn, end.qitemId, receipt.hub_qitem_id) as { hub_qitem_id: string } | undefined;
         if (question) {
-          if (!await hub.offers("rig_queue_create", "requesterOf")) throw new HubError("unavailable", "This hub does not advertise requester-question waits; the wait remains local.");
+          let advertised: boolean;
+          try { advertised = await hub.offers("rig_queue_create", "requesterOf"); } catch (error) {
+            if (!(error instanceof HubError) || error.kind === "revoked") throw error;
+            // Capability discovery can fail while show still works: skip this write, not answer reconciliation.
+            throw new HubError("refused", `The requester wait remains local: ${error.message}`, error.code);
+          }
+          if (!advertised) throw new HubError("refused", "This hub does not advertise requester-question waits; the wait remains local.");
           const shown = await hub.show(receipt.hub_qitem_id);
           const hubQuestion = await hub.show(question.hub_qitem_id);
           const current = deps.queueRepo.getById(end.qitemId);

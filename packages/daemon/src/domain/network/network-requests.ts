@@ -359,9 +359,19 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
       throw error;
     }
     if (requesterLocal) {
-      deps.db.prepare(`INSERT INTO network_requests (local_qitem_id, binding_id, node_id, hub_url, hub_seat, peer, hub_qitem_id, body_sha256, created_at, requester_local_qitem_id, requester_hub_qitem_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
-        .run(requestId, binding.id, binding.nodeId, binding.hubUrl, binding.hubSeat, peer, hubId, bodySha, now().toISOString(), requesterLocal, requesterHub);
+      // Establish the receipt and its initial wait together. Recovery (including an overlapping create that lost
+      // this insert) must not replay the mutation over a dependency the owner selected later.
+      deps.db.transaction(() => {
+        const inserted = deps.db.prepare(`INSERT INTO network_requests (local_qitem_id, binding_id, node_id, hub_url, hub_seat, peer, hub_qitem_id, body_sha256, created_at, requester_local_qitem_id, requester_hub_qitem_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
+          .run(requestId, binding.id, binding.nodeId, binding.hubUrl, binding.hubSeat, peer, hubId, bodySha, now().toISOString(), requesterLocal, requesterHub);
+        if (inserted.changes === 0) return;
+        const work = deps.queueRepo.getById(requesterLocal);
+        if (work && !LOCAL_CLOSED.has(work.state) && work.destinationSession === session && work.blockedOn !== requestId) {
+          deps.queueRepo.update({ qitemId: work.qitemId, actorSession: session, state: "blocked", blockedOn: requestId,
+            transitionNote: "Waiting on the requester's explicit answer through the network question receipt." });
+        }
+      })();
     } else {
       deps.db.prepare(`INSERT INTO network_requests (local_qitem_id, binding_id, node_id, hub_url, hub_seat, peer, hub_qitem_id, body_sha256, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
@@ -372,13 +382,6 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
 
   // The payload comes from the local item, so a retry sends what the first attempt recorded, summary included.
   const local = deps.queueRepo.getById(requestId);
-  if (receipt.requester_local_qitem_id && local && !LOCAL_CLOSED.has(local.state)) {
-    const work = deps.queueRepo.getById(receipt.requester_local_qitem_id);
-    if (work && !LOCAL_CLOSED.has(work.state) && work.destinationSession === session && work.blockedOn !== requestId) {
-      deps.queueRepo.update({ qitemId: work.qitemId, actorSession: session, state: "blocked", blockedOn: requestId,
-        transitionNote: "Waiting on the requester's explicit answer through the network question receipt." });
-    }
-  }
   const payload = local && !LOCAL_CLOSED.has(local.state) ? requestPayload(local, receipt) : null;
   if (!payload) {
     const closedHere = !!local && LOCAL_CLOSED.has(local.state);
