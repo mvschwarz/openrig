@@ -1823,9 +1823,12 @@ request was never delivered or was delivered and no complete restore map followe
 restore-delivery failures. If the seat has no recorded
 parent session (including when it is outside the recorded topology), these notices go to the
 configured registered human operator, or the default registered person when no operator is set.
-If no registered person can be selected, OpenRig creates no notice rather than inventing a
-destination: `rig compact <seat> --state` reports a restore-delivery notice failure, while a
-preparation notice is tried again on later polls. A parent is the source of a `delegates_to` edge
+If no registered person can be selected, they go to the receiving agent (`agents.operator_session`,
+else the kernel operator seat when this host has one), and the notice says it is a receiver fallback,
+not the person's selection. With neither, OpenRig creates no notice rather than inventing a
+destination: `rig compact <seat> --state` reports a restore-delivery notice failure, and for a
+preparation notice its `preparationNotice` reads `not_addressed` with the reason; later polls try
+again. A parent is the source of a `delegates_to` edge
 to the seat; declare one when an agent should receive these notices. With multiple parents, the
 parent session with the latest creation time is selected; `escalates_to` is not used for these
 notices. The restore-delivery notice to a person omits local paths and
@@ -1841,7 +1844,10 @@ named, for the next route. A notice already with an agent that becomes unable th
 same row with its history, to the next capable recipient: a pending notice with a wake, a claimed one
 without. Unknown or unread capacity is not inability. When no capable recipient resolves, the notice
 stays with the first agent the route reached and says plainly that no capable recipient was
-established. Otherwise existing notices keep their destination when the topology changes.
+established. The notices an unable agent holds are re-checked on each of its polls, also when nobody
+can receive its own notice, so a capable recipient chosen later takes them at the next poll; once
+the agent can act again, the ones it kept stop saying that no capable recipient was established.
+Otherwise existing notices keep their destination when the topology changes.
 
 A `delegates_to` edge also decides routing. A seat's stuck-row findings and recovery go to its most
 recently started parent. A person's top-level Slack message in the rig's mapped channel goes to the rig's
