@@ -2440,7 +2440,8 @@ export class SessionTransport {
   private eventBus?: EventBus;
   private hookBridge?: HookBridge;
   private queueWakeApplicable?: (entries: readonly QueueWakeFacts[]) => boolean;
-  /** A draft-held retry's admission (QueueRepository.heldRetryAdmitted), for one the hook bridge hands back to typing. */
+  /** Whether a draft-held retry the hook bridge hands back to typing may still go: no drain or pending restore stops it
+   *  (QueueRepository's draftHeldPaused). A mode change doesn't hold it. */
   private heldRetryAdmission?: (sessionName: string) => boolean;
   private hookBridgeSweep: Promise<Array<{ outboxId: string; result: SendResult }>> | null = null;
   private hookBridgeSweepAgain = false;
@@ -3071,8 +3072,9 @@ export class SessionTransport {
         const entry = outbox.getById(outboxId);
         const row = saved.get(outboxId);
         if (!entry || !row) break;
-        // Its body already carries any urgent line; its admission says how the guard admits it. A held message's retry
-        // keeps its own admission too (#3991): read under the lease and again at the paste, as on the pass's own route.
+        // Its body already carries any urgent line; its admission says how the guard admits it. A held message's retry is
+        // held again by a drain or a pending restore (#3991), read under the lease and again at the paste. A mode change
+        // doesn't hold one the bridge already has: its pass admitted it, and it goes once, as the bridge's waiter would.
         const admitted = row.heldRetry ? this.heldRetryAdmission : undefined;
         const result = await this.send(entry.destinationSession, entry.body, { committedOutboxIds: [outboxId],
           hookBridgeFallback: { nodeId, reason, admission: row.admission }, actorSession: entry.senderSession,

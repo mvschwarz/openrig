@@ -2564,6 +2564,35 @@ describe("draft-held retry integration", () => {
     expect(f.submissions.filter(s => s.includes("held, then handed back by the bridge"))).toHaveLength(1);
   });
 
+  // #3991 r7: a retry already in the bridge was admitted by its pass. After that only a drain or a restore holds it, as the
+  // bridge's own waiter would; the seat leaving draft-aware mode doesn't leave it in the bridge, untyped and off the held list.
+  it("a held retry already in the bridge, when the seat leaves draft-aware mode and no waiter is live, is typed once by the fallback", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const held = await f.transport.send("worker@test", "held, then the seat left draft-aware", { actorSession: "pm@test" });
+    const id = held.outboxIds![0]!;
+    const repo = new QueueRepository(f.db, new EventBus(f.db), { transport: f.transport, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+    repo.attachOutbox(f.outbox);
+    let clock = Date.now();
+    const bridge = new HookBridge(f.db, { now: () => clock, lease: (node, fn) => f.guard.exclusive(node, fn), drained: name => repo.deliveryDrains.holds(name) });
+    (f.transport as unknown as { hookBridge: unknown }).hookBridge = bridge;
+    bridge.setPreference("a", true, "human@test", "wake at turn boundaries");
+    const { armId } = bridge.arm({ nodeId: "a", sessionName: "worker@test", generation: "g1", hookEvent: "SessionStart" });
+    // The draft clears: the pass admits the retry, and it goes to the live bridge.
+    f.bodies.a = "";
+    expect(await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle")).toBe("done");
+    expect(bridge.queued("a").map(row => row.outboxId)).toEqual([id]);
+    // The person turns draft-aware delivery off. Its waiter goes, and past the bound the sweep types it.
+    await f.guard.set("a", { mode: "off" }, "human@test", "leaving draft-aware");
+    bridge.expired("a", "worker@test", armId);
+    clock += HOOK_BRIDGE_LIVE_BOUND_MS;
+    await f.transport.sweepHookBridge();
+    expect(bridge.queued("a")).toEqual([]);
+    expect(stateOf(f, id)).toBe("delivered");
+    await f.transport.sweepHookBridge();
+    await repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
+    expect(f.submissions.filter(s => s.includes("held, then the seat left draft-aware"))).toHaveLength(1);
+  });
+
   // #3991 r5: an activity read that fails is uncertainty, not a draft the guard saw, so it never stops the periodic offer.
   it("two failed activity reads on an unchanged pane don't stop the offers: once the reader recovers, the next offer delivers once", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
