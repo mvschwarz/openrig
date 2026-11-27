@@ -15,7 +15,7 @@ import { shellQuote } from "./shell-quote.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix, commandEnvPrefix } from "./claude-resume-launch.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
 import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, claudeResumeSignInEvidence, claudeResumeSignInMessage, noConversationFoundOwner } from "../domain/native-resume-probe.js";
-import { verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { observeClaudePaneRuntime, verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
@@ -393,11 +393,23 @@ export class ClaudeResumeAdapter {
       };
     }
 
-    // A conversation that resumed to Claude's login refusal as its latest reply waits for its person to sign in, as the
-    // managed resume reports it; its report names the refusal, not the screen.
+    // A conversation that resumed to Claude's login refusal as its latest reply reports it as the managed resume does, under
+    // the managed path's gate evidence: the pane isn't provably back at an idle shell (a refusal above a shell is what Claude
+    // left when it exited), and it holds no other conversation's Claude. Otherwise the launch is kept with the qualified
+    // report. Either way the report names the refusal row, never the screen, whose refused turn may be startup text.
     if (finalProbe.code === "login_required") {
       const evidence = claudeResumeSignInEvidence(finalProbe);
-      return { ok: false, code: "attention_required", message: claudeResumeSignInMessage(finalProbe), ...(evidence !== undefined ? { evidence } : {}) };
+      const lineage = { target: tmuxSessionName, tmux: this.tmux, ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}) };
+      const atIdleShell = this.tmux.stagedLaunchUnread?.(tmuxSessionName) !== true && await verifyPaneIdleShell(lineage);
+      const anotherConversation = !atIdleShell && !await verifyClaudePaneProcess({ ...lineage, expectedToken: resumeToken })
+        && await observeClaudePaneRuntime(lineage) !== null;
+      return {
+        ok: false,
+        code: "attention_required",
+        message: atIdleShell || anotherConversation ? `Claude resume could not be verified; launch retained: ${finalProbe.detail}`
+          : claudeResumeSignInMessage(finalProbe),
+        ...(evidence !== undefined ? { evidence } : {}),
+      };
     }
     return {
       ok: false,

@@ -43,11 +43,13 @@ export const CLAUDE_PROCESS_ONLY_RESUME = "Claude was running when the resume's 
   + "yet (no prompt, reply or dialog), so this resume rests on the process alone.";
 
 /** A resume whose conversation came back to Claude's login refusal as its latest reply (`login_required`): Claude is
- *  running and waits for its person to sign in, which won't happen by itself, so the launch is kept for them. It names
- *  the refusal Claude drew and never the screen's other text (the refused turn may be the seat's own startup text). */
+ *  running and waits for its person to sign in, which won't happen by itself, so the launch is kept for them. A seat that
+ *  got a working credential since, with no newer turn, shows the same refusal, and nothing on screen tells them apart (the
+ *  "Not logged in" footer doesn't: a gateway seat always shows it), so the step is worded for either. It names the refusal
+ *  Claude drew and never the screen's other text (the refused turn may be the seat's own startup text). */
 export function claudeResumeSignInMessage(probe: Pick<NativeResumeProbeResult, "loginRefusal">): string {
-  const reply = probe.loginRefusal ? ` at Claude's "${probe.loginRefusal.message}" reply` : " at Claude's login refusal";
-  return `Claude needs you to sign in: the resumed conversation is waiting${reply}. Open this seat's terminal and run `
+  const refusal = probe.loginRefusal ? `Claude's login refusal ("${probe.loginRefusal.message}")` : "Claude's login refusal";
+  return `The resumed Claude conversation's latest reply is ${refusal}. If this seat isn't signed in, open its terminal and run `
     + "/login there. The conversation was kept, and nothing was typed into it.";
 }
 

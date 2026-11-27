@@ -3702,7 +3702,8 @@ describe("RestoreOrchestrator", () => {
         // A seat resumed to its login refusal waits for its person to sign in: never a failed resume.
         if (mode === "login") {
           expect({ status: outcome.status, startup: latest.startupStatus }).toEqual({ status: "attention_required", startup: "attention_required" });
-          expect(outcome.error).toContain("Claude needs you to sign in: the resumed conversation is waiting at Claude's \"Not logged in · Please run /login\" reply.");
+          expect(outcome.error).toContain("The resumed Claude conversation's latest reply is Claude's login refusal (\"Not logged in · Please run /login\"). "
+            + "If this seat isn't signed in, open its terminal and run /login there.");
           expect(outcome.error).not.toMatch(/timed out|resume failed/);
           expect(outcome.attentionEvidence).toBe("● Not logged in · Please run /login");
         }

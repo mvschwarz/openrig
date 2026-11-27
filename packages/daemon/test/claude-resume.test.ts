@@ -446,17 +446,30 @@ describe("ClaudeResumeAdapter", () => {
         .toMatchObject({ ok: false, code: "attention_required", message: expect.stringContaining("observation unavailable") });
     });
 
-    // The older resume path reports a conversation resumed to Claude's login refusal the same way: waiting for sign-in,
-    // naming the refusal and not the screen (its refused turn may be the seat's startup text).
-    it("reads a conversation resumed to Claude's login refusal as waiting for sign-in", async () => {
+    // The older resume path reports a conversation resumed to Claude's login refusal as the managed resume does, under its
+    // gate evidence: no pane provably back at an idle shell, and no other conversation's Claude in it. Otherwise the launch is
+    // kept with the qualified report. Either way it names the refusal row, never the screen (its refused turn may be startup text).
+    describe("a conversation resumed to Claude's login refusal", () => {
+      const startedAt = "Sat Jan  1 12:00:00 2000";
+      const shell = { pid: 4321, ppid: 1, pgid: 4321, tpgid: 4321, command: "-zsh", executableName: "zsh", startedAt };
+      const claudeRunning = (token: string) => [{ ...shell, tpgid: 4400 },
+        { pid: 4400, ppid: 4321, pgid: 4400, tpgid: 4400, command: `claude --permission-mode acceptEdits --resume ${token} --name worker`, executableName: "claude", startedAt }];
       const screen = fs.readFileSync(new URL("./fixtures/claude-login-resume-2.1.330.txt", import.meta.url), "utf8");
-      const adapter = new ClaudeResumeAdapter(mockTmux({ getPaneCommand: async () => "claude", capturePaneContent: async () => screen }),
-        { pollMs: 0, maxWaitMs: 0 });
-      const result = await adapter.resume("worker", "claude_id", "retained-history", "/repo");
-      expect(result).toEqual({ ok: false, code: "attention_required", evidence: "  ⎿  Not logged in · Please run /login",
-        message: "Claude needs you to sign in: the resumed conversation is waiting at Claude's \"Not logged in · Please run /login\" reply. "
-          + "Open this seat's terminal and run /login there. The conversation was kept, and nothing was typed into it." });
-      expect(JSON.stringify(result)).not.toContain("hello");
+      const signIn = "The resumed Claude conversation's latest reply is Claude's login refusal (\"Not logged in · Please run /login\"). "
+        + "If this seat isn't signed in, open its terminal and run /login there. The conversation was kept, and nothing was typed into it.";
+      const qualified = "Claude resume could not be verified; launch retained: Claude is running but cannot continue until the user logs in.";
+      it.each([
+        ["this launch's own Claude holds the pane", "claude", screen, async () => claudeRunning("retained-history"), signIn],
+        ["the process table can't be read, so nothing rules it out", "claude", screen, async () => { throw new Error("ps unavailable"); }, signIn],
+        ["the pane is provably back at an idle shell under the refusal Claude left", "zsh", `${screen}\nuser@host:~/project$ `, async () => [shell], qualified],
+        ["another conversation's Claude holds the pane", "claude", screen, async () => claudeRunning("some-other-conversation"), qualified],
+      ])("keeps the launch and reports the refusal row when %s", async (_case, command, content, listProcesses, message) => {
+        const adapter = new ClaudeResumeAdapter(mockTmux({ getPaneCommand: async () => command, capturePaneContent: async () => content,
+          getPanePid: async () => 4321 }), { pollMs: 0, maxWaitMs: 0, listProcesses });
+        const result = await adapter.resume("worker", "claude_id", "retained-history", "/repo");
+        expect(result).toEqual({ ok: false, code: "attention_required", message, evidence: "  ⎿  Not logged in · Please run /login" });
+        expect(JSON.stringify(result)).not.toContain("hello");
+      });
     });
 
     it.each([

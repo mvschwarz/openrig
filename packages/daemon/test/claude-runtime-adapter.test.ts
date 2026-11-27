@@ -1101,8 +1101,8 @@ describe("Claude Code runtime adapter", () => {
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
     expect(result).toEqual({
       ok: false, recovery: "attention_required",
-      error: "Claude needs you to sign in: the resumed conversation is waiting at Claude's \"Login expired · Please run /login\" reply. "
-        + "Open this seat's terminal and run /login there. The conversation was kept, and nothing was typed into it.",
+      error: "The resumed Claude conversation's latest reply is Claude's login refusal (\"Login expired · Please run /login\"). "
+        + "If this seat isn't signed in, open its terminal and run /login there. The conversation was kept, and nothing was typed into it.",
       evidence: "● Login expired · Please run /login",
       probe: { status: "failed", code: "login_required", loginRefusal: { message: "Login expired · Please run /login", row: "response" },
         capture: { lines: 4, bytes: Buffer.byteLength(content), sha256: createHash("sha256").update(content).digest("hex"), columns: 100, rows: 30 } },
@@ -1684,7 +1684,7 @@ describe("Claude Code runtime adapter", () => {
           .toEqual({ ok: false, probe: probeEvidence, error: "Claude resume failed: timed out waiting for Claude to become active" });
         // A login refusal waits for sign-in like the gates: the launch is kept for its person (see "waits for sign-in" below).
         expect((await run({ readinessTimeoutMs, rows: () => stuck, screen: () => "● Not logged in · Please run /login" })).result)
-          .toMatchObject({ ok: false, recovery: "attention_required", error: expect.stringMatching(/^Claude needs you to sign in: /) });
+          .toMatchObject({ ok: false, recovery: "attention_required", error: expect.stringMatching(/^The resumed Claude conversation's latest reply is Claude's login refusal /) });
       });
     });
 
@@ -1890,8 +1890,8 @@ describe("Claude Code runtime adapter", () => {
         const { result, tmux } = await run({ paneCommand: "claude", screen: () => screen(name) });
         expect(result).toEqual({ ok: false, probe: probeEvidence, recovery: "attention_required", error: signIn,
           evidence: "  ⎿  Not logged in · Please run /login" });
-        expect(signIn).toBe("Claude needs you to sign in: the resumed conversation is waiting at Claude's \"Not logged in · Please run /login\" reply. "
-          + "Open this seat's terminal and run /login there. The conversation was kept, and nothing was typed into it.");
+        expect(signIn).toBe("The resumed Claude conversation's latest reply is Claude's login refusal (\"Not logged in · Please run /login\"). "
+          + "If this seat isn't signed in, open its terminal and run /login there. The conversation was kept, and nothing was typed into it.");
         // Nothing is typed into the login screen: the launch line and its own Enter are all that's sent.
         expect(tmux.sendText).toHaveBeenCalledTimes(1);
         expect(tmux.sendKeys).toHaveBeenCalledExactlyOnceWith("r01-impl", ["Enter"]);

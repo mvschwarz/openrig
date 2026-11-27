@@ -2652,9 +2652,9 @@ describe("StartupOrchestrator", () => {
       capture: { lines: 4, bytes: Buffer.byteLength(content), sha256: createHash("sha256").update(content).digest("hex"), columns: missingGeometry ? null : 100, rows: missingGeometry ? null : 30 },
     };
     expect(result).toMatchObject({ ok: false, startupStatus: "attention_required", evidence: "● Login expired · Please run /login",
-      errors: ["Harness launch requires attention: Claude needs you to sign in: the resumed conversation is waiting at Claude's "
-        + "\"Login expired · Please run /login\" reply. Open this seat's terminal and run /login there. The conversation was kept, "
-        + "and nothing was typed into it."], probe });
+      errors: ["Harness launch requires attention: The resumed Claude conversation's latest reply is Claude's login refusal "
+        + "(\"Login expired · Please run /login\"). If this seat isn't signed in, open its terminal and run /login there. The conversation "
+        + "was kept, and nothing was typed into it."], probe });
     expect(sessionRegistry.getSessionsForRig(seed.rigId).find(s => s.id === seed.sessionId)?.startupStatus).toBe("attention_required");
     const events = db.prepare("SELECT payload FROM events WHERE type = 'node.startup_failed'").all() as { payload: string }[];
     expect(events).toHaveLength(1);
