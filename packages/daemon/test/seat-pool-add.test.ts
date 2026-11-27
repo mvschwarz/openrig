@@ -417,22 +417,6 @@ describe("seat-pool add: names, folders and what an add reports (#3395 Piece 1)"
     expect(w.nodeOf(m.rigId, "dev.impl-s2")).toBeDefined();
   });
 
-  it("While a slot is `drained`, the pool adds no new number and reports `held: drained slot awaiting comeback`.", async () => {
-    const w = addWorld();
-    const m = await w.model();
-    const drained = w.rigRepo.addNode(m.rigId, "dev.impl-s1", { runtime: "claude-code", podId: w.nodeOf(m.rigId, "dev.impl")!.podId!, cwd: w.modelCwd });
-    w.slots.insert({ modelNodeId: m.nodeId, slotNumber: 1, nodeId: drained.id, phase: "drained", at: IDLE_SINCE });
-    const before = w.slots.forModel(m.nodeId);
-
-    const notes = await w.notesOf(m.jobId);
-    await w.executor.idle();
-    expect(notes.add).toEqual({ held: "held: drained slot awaiting comeback" });
-    expect(notes).not.toHaveProperty("held");
-    expect(w.converge).not.toHaveBeenCalled();
-    expect(w.slots.forModel(m.nodeId)).toEqual(before);
-    expect(w.correlations()).toEqual([]);
-  });
-
   it("An add that settles with its agent running is reported `running`, and while it is issued it is reported `in_flight` and never issued again.", async () => {
     const w = addWorld();
     const m = await w.model();

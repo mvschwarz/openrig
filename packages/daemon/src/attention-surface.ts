@@ -17,6 +17,9 @@ export interface AttentionItem {
    *  `answer` takes a choice or their own words, or sends a complete set's recorded answers back, and the answer goes back
    *  to the asker as Slack's answers do. */
   answer?: { verb: "approve" | "answer" | "resolve"; actorSession: string };
+  /** On an open informational update addressed to a person: mission control's `dismiss`, which closes it (not approval,
+   *  proof of delivery or a reply), its body and history kept. Absent once it's closed. */
+  dismiss?: { actorSession: string };
   /** The seat that asked, which the person can open to answer in their own words (the Feed card's Chat). */
   asker?: string;
   /** The row's questions and the answers recorded so far, as the queue row holds them. */

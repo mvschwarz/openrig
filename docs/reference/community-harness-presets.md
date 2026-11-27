@@ -293,6 +293,14 @@ Agent's CLI.
 - **The launcher:** it creates the session OpenRig named (`-c <name> --create-if-missing`), and on a resume reopens it
   without `--create-if-missing`, with its own Hermes home per seat. A name that matches nothing ends with Hermes's own
   "No session found" error.
+- **First startup input:** the preset declares `first_input: true`. With Hermes v0.23.4, the launcher passes
+  `OPENRIG_FIRST_INPUT` as `--query-file <path>`. Hermes v0.23.4's source seeds that text as the first turn of an
+  interactive terminal session. The launcher passes no first input on a resume. A missing, unreadable or empty file stops the
+  launch with an error; the startup text is never truncated to fit a command-line argument. This transport is covered
+  with a stand-in; unattended startup still needs checking with the installed Hermes.
+  A fresh handover's successor still gets its restore packet typed into Hermes after launch, not through
+  `--query-file`, so it can land before Hermes's input is ready, and OpenRig can't tell whether Hermes took it:
+  check the successor's pane, and press Enter if the packet is still in the input.
 - **Settings go in the seat's Hermes `config.yaml`, not in flags:** Hermes's CLI creates a named session with no launch
   flags and then reopens it, refusing any creation flag (model, provider, `--max-turns`) that differs. So the preset's
   command carries none, and each seat's `config.yaml`, in its Hermes home, sets them before the seat's first start:
@@ -514,7 +522,7 @@ A runner preset for [nodecode](https://nodecode.ai), a self-modifying Common Lis
 
 A format-1 preset may set `first_input: true` (a boolean, default false). OpenRig composes the same initial identity turn it would otherwise paste, including the first merged text file, durable-obligation guidance and any selected orientation challenge. Before launch it writes that text to a per-attempt 0600 file under its own `state/first-input/` folder and passes the path as `OPENRIG_FIRST_INPUT`. The typed launch command carries the path, not the text; an argument-based launcher still puts the text in the native harness’s argv.
 
-The contributor-owned launcher reads the file and uses its harness’s supported initial-prompt route: the Cursor example passes one positional prompt; OpenClaw uses `--message`. Core knows neither flag. If no initial identity turn is due (an ordinary resume, for example), the variable is absent and the launcher starts without a first message. Later startup files and actions use their existing delivery paths; they are not folded into the launch file.
+The contributor-owned launcher reads the file and uses its harness’s supported initial-prompt route: the Cursor example passes one positional prompt; OpenClaw uses `--message`; Hermes uses `--query-file <path>` to avoid putting the text on argv. Core does not choose these native options. If no initial identity turn is due (an ordinary resume, for example), the variable is absent and the launcher starts without a first message. Later startup files and actions use their existing delivery paths; they are not folded into the launch file.
 
 OpenRig records `node.startup_first_input_passed` with the path and `submission: unconfirmed`. This says the input was passed at launch, not that the native harness submitted or read it. An uncertain launch is not permission to replay it. Readiness remains process-only. `startup_assisted` is independent: when declared, startup still requires a person’s acknowledgement, including when the first input was passed at launch.
 

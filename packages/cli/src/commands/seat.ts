@@ -1789,7 +1789,7 @@ Examples:
     .requiredOption("--keep-conversation", "Resume the seat's own conversation in its own pane; never a fresh launch or fork")
     .option("--reason <text>", "Audit reason (required when executing)")
     .option("--plan", "Run every check and show what a restart would keep; nothing is stopped or restarted")
-    .option("--verify", "After a real tool-using turn, check whether the restarted seat can be reported as moved")
+    .option("--verify", "With --keep-conversation, after a real tool-using turn: check whether the restarted seat can be reported as moved")
     .option("--expect-account <text>", "With --verify: the account Codex's /status Account line must name")
     .option("--operator <address>", "Operator recorded on the audit event")
     .option("--host <id>", "Restart a seat on this registered machine, over its SSH entry, as this seat")
