@@ -1542,11 +1542,13 @@ daemon start.
 
 A second `OPENRIG_HOME` on the same user account isn't an isolated test environment.
 Unless its `HOME` and `CODEX_HOME` also point inside it, its daemon still refreshes
-OpenRig's own skills in that account's `~/.claude/skills` and `~/.agents/skills`, and
-once it has a Codex seat it rewrites the managed activity-hook block in
-`~/.codex/config.toml`, which every daemon using that Codex home shares. The startup
-"home isolation advisory" names which of these apply. For a test that needs its own
-OpenRig, use another machine, such as a VM or VPS.
+OpenRig's own skills in that account's `~/.claude/skills` and `~/.agents/skills`. With
+Codex hooks enabled, its managed setup can also update `~/.codex/config.toml` and, when
+present, `~/.codex/hooks.json` with OpenRig's activity hooks. That setup runs at daemon
+start and at later Codex launches, so a Codex home that several daemons use follows
+whichever set it up most recently. The startup "home isolation advisory" names which of
+these apply. For a test that needs its own OpenRig, use another machine, such as a VM
+or VPS.
 
 ## Daemon start wait
 

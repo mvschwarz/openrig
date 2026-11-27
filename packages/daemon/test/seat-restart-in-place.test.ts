@@ -885,12 +885,14 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
         detail: expect.stringContaining("changed after the old Codex started and before its replacement started") } } });
   });
 
-  it("an auth.json changed after the replacement started reads false, and says whether the replacement read it is unknown", async () => {
-    const w = world({ authMtime: "Mon Oct 12 21:06:00 2026" });
-    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "take the home's account" })).toMatchObject({
-      ok: true, outcome: "restarted_account_unverified",
-      account: { authFile: { changedBeforeRestart: false, detail: expect.stringContaining("whether the replacement read that change is unknown") } } });
-  });
+  it.each([["at", LATER], ["after", "Mon Oct 12 21:06:00 2026"]])(
+    "an auth.json changed %s the replacement's start reads false, and says whether the replacement read it is unknown", async (_when, authMtime) => {
+      const w = world({ authMtime });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "take the home's account" })).toMatchObject({
+        ok: true, outcome: "restarted_account_unverified", newProcess: { startedAt: LATER },
+        account: { authFile: { changedBeforeRestart: false,
+          detail: expect.stringContaining("changed at or after the replacement started, so whether the replacement read that change is unknown") } } });
+    });
 
   it("not_started when Codex survives TERM and KILL: no resume is attempted", async () => {
     const w = world({ codexIgnoresSignals: true });

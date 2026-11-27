@@ -71,8 +71,9 @@ export function homeIsolationAdvisory(input: { openrigHome: string; home: string
   }
   if (!isInside(codexHome, root)) {
     leaks.push(`CODEX_HOME=${input.codexHome || `${codexDir} (derived from HOME)`}`);
-    writes.push(`once it has a Codex seat, it writes OpenRig's managed activity-hook block into ${nodePath.join(codexDir, "config.toml")}, `
-      + `pointing at this home's hook relay; every daemon that uses that Codex home rewrites the same block, so it names whichever started last`);
+    writes.push(`with Codex hooks enabled, its managed setup can update ${nodePath.join(codexDir, "config.toml")} and, when present, `
+      + `${nodePath.join(codexDir, "hooks.json")}, pointing OpenRig's activity hooks at this home's hook relay; that setup runs at daemon start `
+      + `once there is a Codex seat and at later Codex launches, so a Codex home that several daemons use follows whichever set it up most recently`);
   }
   if (leaks.length === 0) return undefined;
   return `[openrig] home isolation advisory: OPENRIG_HOME=${input.openrigHome} is not the default location, `

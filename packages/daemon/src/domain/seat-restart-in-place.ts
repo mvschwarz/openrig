@@ -851,7 +851,7 @@ export class CodexInPlaceRestart {
           : { changedBeforeRestart: Number.isNaN(oldStart) ? null : auth.mtimeMs > oldStart && auth.mtimeMs < newStart,
               detail: auth.mtimeMs < newStart
                 ? "Whether auth.json changed after the old Codex started and before its replacement started (stat only; never read). A change is not proof of which account."
-                : "auth.json changed after the replacement started, so whether the replacement read that change is unknown (stat only; never read)." },
+                : "auth.json changed at or after the replacement started, so whether the replacement read that change is unknown (stat only; never read)." },
       startupGate: null,
       startupGateKind: null,
       notVerified: NOT_VERIFIED,

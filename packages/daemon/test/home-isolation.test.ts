@@ -88,8 +88,10 @@ describe("homeIsolationAdvisory", () => {
     expect(homeOnly).toContain(`keeping the earlier copies in ${path.join(isolated, "backups", "managed-refresh")}`);
     expect(homeOnly).not.toContain("activity-hook block");
     const codexOnly = homeIsolationAdvisory({ accountHome: d.real, openrigHome: isolated, home: d.scratch, codexHome: path.join(d.real, ".codex") })!;
-    expect(codexOnly).toContain(`OpenRig's managed activity-hook block into ${path.join(d.real, ".codex", "config.toml")}`);
-    expect(codexOnly).toContain("so it names whichever started last");
+    expect(codexOnly).toContain(`its managed setup can update ${path.join(d.real, ".codex", "config.toml")} and, when present, ${path.join(d.real, ".codex", "hooks.json")}`);
+    expect(codexOnly).toContain("that setup runs at daemon start once there is a Codex seat and at later Codex launches");
+    expect(codexOnly).toContain("follows whichever set it up most recently");
+    expect(codexOnly).not.toContain("started last");
     expect(codexOnly).not.toContain("skills");
     const both = homeIsolationAdvisory({ accountHome: d.real, openrigHome: path.join(d.real, ".openrig-dev"), home: d.real })!;
     expect(both).toContain(path.join(d.real, ".agents", "skills"));
