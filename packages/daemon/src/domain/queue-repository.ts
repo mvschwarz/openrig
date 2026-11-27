@@ -473,6 +473,9 @@ export interface QueueNudgeTransport {
   retentionTarget?(session: string, input?: import("./seat-delivery-guard.js").AdmissionInput): import("./seat-delivery-guard.js").GuardTarget | null;
   draftAwareTarget?(session: string): import("./seat-delivery-guard.js").GuardTarget | null;
   configureGuardedWakes?(applicable: (entries: readonly QueueWakeFacts[]) => boolean, fenced?: (qitemId: string) => boolean): void;
+  /** Whether a draft-held retry the seat's hook bridge hands back to typing may still go: no drain or pending restore
+   *  stops it. A mode change doesn't hold one the bridge already has (#3991). */
+  configureHeldRetryAdmission?(admitted: (sessionName: string) => boolean): void;
   send(
     sessionName: string,
     // (h): stampISO threads the nudge's compose time so the transport's delivered-latency calc can
@@ -1510,6 +1513,9 @@ export class QueueRepository {
       if (!row || this.transferFence(row.qitemId) || row.destinationSession !== entry.destinationSession) return false;
       return entry.outboxId.startsWith(WAKE_INTENT_PREFIX) ? this.currentWakeIntent(entry) : isBlockerLive(row.state);
     }), qitemId => !!this.transferFence(qitemId));
+    // A retry the bridge already has was admitted by its pass, so only a drain or a restore holds it now, as the bridge's
+    // own waiter would; the pass's own admission (draft-aware mode too) is in deliverDraftHeldMessagesOnIdle.
+    transport.configureHeldRetryAdmission?.(sessionName => !this.draftHeldPaused(sessionName));
   }
 
   private currentWakeIntent(entry: QueueWakeFacts): boolean {
@@ -2595,6 +2601,12 @@ export class QueueRepository {
   /** Seats with a draft-held delivery pass running, so overlapping idle observations don't race each other. */
   private readonly draftHeldPasses = new Set<string>();
 
+  /** Whether a drain or a pending restore stops draft-held delivery to this seat now, at any of its addresses (#3991). */
+  private draftHeldPaused(sessionName: string, addresses: readonly string[] = this.resolveSessionAddresses(sessionName)): boolean {
+    return addresses.some(address => this.deliveryDrains.holds(address))
+      || [sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address));
+  }
+
   /** The seats holding draft-held messages, for the periodic offer (createDraftHeldReoffer); none without an outbox. */
   draftHeldSeats(): Array<{ session: string; newest: string }> {
     return this.outbox?.draftHeldSeats() ?? [];
@@ -2616,8 +2628,7 @@ export class QueueRepository {
     if (state !== "idle" || !this.outbox || !this.transport?.draftAwareTarget?.(sessionName)) return "skipped";
     const addresses = this.resolveSessionAddresses(sessionName);
     if (!addresses.length) return "skipped";
-    const paused = () => addresses.some(address => this.deliveryDrains.holds(address))
-      || [sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address));
+    const paused = () => this.draftHeldPaused(sessionName, addresses);
     if (paused()) return "paused";
     const key = addresses[0]!;
     if (this.draftHeldPasses.has(key)) return "skipped";
@@ -2644,12 +2655,14 @@ export class QueueRepository {
         if (!entry?.guardBinding || JSON.stringify(entry.guardBinding) !== JSON.stringify(target)) continue;
         if (!this.outbox.reopenHeld(outbox_id)) return "done";
         if (!this.outbox.claimForDelivery(outbox_id)) return "done";
+        let heldFor: string | undefined;
         try {
           const result = await this.transport.send(entry.destinationSession, entry.body, {
             committedOutboxIds: [outbox_id], actorSession: entry.senderSession,
             ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}),
             retryAdmission: () => !paused() && !!this.transport?.draftAwareTarget?.(sessionName),
           });
+          heldFor = result.reason;
           if ((result.reason === "guard_target_changed" || result.reason === HELD_RETRY_NOT_ADMITTED) && result.sent !== true
             && (result.sent === false || result.inputPhase === "not_reached")
             && result.inputPhase !== "attempted" && result.inputPhase !== "written") {
@@ -2677,7 +2690,9 @@ export class QueueRepository {
         // Its own paste was refused before anything was written, which withdrew it from automatic retry (it stays held,
         // with its result). It no longer holds later messages back, so the pass goes on to them rather than ending as a draft.
         if (after === "retained" && !settled?.tags?.includes(DRAFT_HELD_ELIGIBLE_TAG)) continue;
-        if (after !== "delivered") return after === "retained" ? "draft" : "done";
+        // Held again because the guard couldn't read the input or its clients' activity: uncertainty, not a draft seen,
+        // so the periodic offer keeps trying (DraftHeldReoffer) while the guard still decides each delivery.
+        if (after !== "delivered") return after === "retained" ? heldFor === "draft_input_unknown" ? "unknown" : "draft" : "done";
       }
     } finally {
       this.draftHeldPasses.delete(key);

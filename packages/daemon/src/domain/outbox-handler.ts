@@ -35,9 +35,10 @@ export const DRAFT_HELD_BEHIND_EARLIER = "draft_held_behind_earlier";
  *  (SendOpts.retryAdmission): nothing is written, and the message stays held. */
 export const HELD_RETRY_NOT_ADMITTED = "held_retry_not_admitted";
 /** How a draft-held delivery pass ended (QueueRepository.deliverDraftHeldMessagesOnIdle): a message went back to held
- *  (`draft`), a drain, restore or mode change stopped it (`paused`), nothing eligible was left to try (`done`), or it
- *  didn't run (`skipped`: not idle, not draft-aware, or a pass already running). */
-export type DraftHeldPassEnd = "draft" | "paused" | "done" | "skipped";
+ *  for a draft the guard saw (`draft`), or because it couldn't read the input or its clients' activity (`unknown`: not
+ *  a draft known to be there), a drain, restore or mode change stopped it (`paused`), nothing eligible was left to try
+ *  (`done`), or it didn't run (`skipped`: not idle, not draft-aware, or a pass already running). */
+export type DraftHeldPassEnd = "draft" | "unknown" | "paused" | "done" | "skipped";
 /** The draft-aware refusals that mean only "a draft is in the input", and the hold that keeps a sender's order behind one. */
 export const DRAFT_HELD_REASONS: ReadonlySet<string> = new Set(["draft_input_busy", "draft_input_unknown", "draft_input_changed", DRAFT_HELD_BEHIND_EARLIER]);
 /** How many draft-held messages one sender keeps at a seat, each with its own outcome. Past it, the sender's oldest is

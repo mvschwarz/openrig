@@ -2440,6 +2440,9 @@ export class SessionTransport {
   private eventBus?: EventBus;
   private hookBridge?: HookBridge;
   private queueWakeApplicable?: (entries: readonly QueueWakeFacts[]) => boolean;
+  /** Whether a draft-held retry the hook bridge hands back to typing may still go: no drain or pending restore stops it
+   *  (QueueRepository's draftHeldPaused). A mode change doesn't hold it. */
+  private heldRetryAdmission?: (sessionName: string) => boolean;
   private hookBridgeSweep: Promise<Array<{ outboxId: string; result: SendResult }>> | null = null;
   private hookBridgeSweepAgain = false;
   private now: () => Date;
@@ -2489,6 +2492,10 @@ export class SessionTransport {
       this.hookBridge.wakeApplicable = applicable;
       this.hookBridge.wakeFenced = fenced;
     }
+  }
+
+  configureHeldRetryAdmission(admitted: (sessionName: string) => boolean): void {
+    this.heldRetryAdmission = admitted;
   }
 
   attachRuntimeAdapters(adapters: Record<string, TransportReadinessChecker>): void {
@@ -3065,11 +3072,21 @@ export class SessionTransport {
         const entry = outbox.getById(outboxId);
         const row = saved.get(outboxId);
         if (!entry || !row) break;
-        // Its body already carries any urgent line; its admission says how the guard admits it.
+        // Its body already carries any urgent line; its admission says how the guard admits it. A held message's retry is
+        // held again by a drain or a pending restore (#3991), read under the lease and again at the paste. A mode change
+        // doesn't hold one the bridge already has: its pass admitted it, and it goes once, as the bridge's waiter would.
+        const admitted = row.heldRetry ? this.heldRetryAdmission : undefined;
         const result = await this.send(entry.destinationSession, entry.body, { committedOutboxIds: [outboxId],
           hookBridgeFallback: { nodeId, reason, admission: row.admission }, actorSession: entry.senderSession,
-          ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}) });
+          ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}),
+          ...(admitted ? { retryAdmission: () => admitted(entry.destinationSession) } : {}) });
         if (result.reason === "hook_bridge_claimed") break;
+        // That retry wasn't admitted, and nothing was written. Refused under the lease, it's still queued for the bridge;
+        // refused at the paste, after the handback, it goes back to the held list, where its pass delivers it once.
+        if (result.reason === HELD_RETRY_NOT_ADMITTED && result.sent !== true && result.inputPhase === "not_reached") {
+          if (!bridge.queued(nodeId).some((queued) => queued.outboxId === outboxId)) outbox.retainUnwritten(outboxId);
+          continue;
+        }
         // A drain that began since the selection holds it: untouched, and what's behind it may still go.
         if (result.reason === "delivery_drain_held") continue;
         // Its wake no longer applies: ended not delivered at the handback.
@@ -4147,7 +4164,18 @@ export class SessionTransport {
     // setup). A refusal there is proven pre-input and returns caller_cancelled; Enter below never checks it.
     const cancel = callerSignal(opts);
     if (cancel?.aborted) return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
-    const beforePaste = cancel ? () => { opts?.beforeWrite?.(); if (cancel.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the paste"); } : opts?.beforeWrite;
+    // A held message's retry reads its admission again at the adapter's last step before the paste, as it did under the
+    // lease: a drain, restore or mode change that began during the awaited steps since then keeps it held, nothing pasted.
+    const retry = opts?.retryAdmission;
+    const beforePaste = cancel || retry ? () => {
+      opts?.beforeWrite?.();
+      if (retry) {
+        let admitted = false;
+        try { admitted = retry(); } catch { /* a check that can't be read keeps the message held */ }
+        if (!admitted) throw new DeliveryGuardError(HELD_RETRY_NOT_ADMITTED, "The held message's retry is no longer admitted (delivery mode, drain or restore changed while it waited); nothing was pasted.");
+      }
+      if (cancel?.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the paste");
+    } : opts?.beforeWrite;
     const preserveInput = opts?.preserveInput ? async () => {
       const readBox = async () => runtime === "claude-code" || runtime === "codex"
         ? this.captureInputBox(readTarget, runtime, { remainingMs: INPUT_BOX_READ_DEADLINE_MS }) : null;
@@ -4194,7 +4222,8 @@ export class SessionTransport {
     }
     if (!textResult.ok) {
       // A draft refusal is the guard holding the write before any input; it is not an attempted write.
-      const policyRefusal = typeof textResult.code === "string" && (textResult.code.startsWith("expected_identity_") || textResult.code.startsWith("draft_") || textResult.code.startsWith("override_input_") || textResult.code === "managed_compaction_pending");
+      const policyRefusal = typeof textResult.code === "string" && (textResult.code.startsWith("expected_identity_") || textResult.code.startsWith("draft_") || textResult.code.startsWith("override_input_") || textResult.code === "managed_compaction_pending"
+        || textResult.code === HELD_RETRY_NOT_ADMITTED);
       return observe({
         ok: false,
         sessionName,

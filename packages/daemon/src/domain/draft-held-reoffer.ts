@@ -54,8 +54,10 @@ interface Offer { at: number; end: DraftHeldPassEnd; pane: number | undefined; n
  *  runs at the end of each structural sweep (the existing per-tick observation; no capture of its own) and gives each seat
  *  with draft-held messages another pass, at most once per `intervalMs`:
  *  - at once for a message held since the last offer, and for a seat not offered yet (after a restart, too);
- *  - after the interval when the last try was paused (drain, restore, mode) or held by the draft;
- *  - a draft still there after two tries waits for the pane to change, so a sitting draft isn't re-read every interval.
+ *  - after the interval when the last try was paused (drain, restore, mode), held by the draft, or held because the input
+ *    or its clients' activity couldn't be read (`unknown`);
+ *  - a draft the guard saw on two tries waits for the pane to change, so a sitting draft isn't re-read every interval. An
+ *    unreadable try isn't a draft seen: it never counts toward that, so a reader that recovers gets the next offer.
  *  A pass that leaves nothing eligible forgets the seat. Each pass keeps every guard and outcome rule of the pass itself. */
 export function createDraftHeldReoffer(deps: DraftHeldReofferDeps): () => void {
   const interval = deps.intervalMs ?? DRAFT_HELD_REOFFER_MS;

@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { DRAFT_HELD_BEHIND_EARLIER, DRAFT_HELD_ELIGIBLE_TAG, DRAFT_HELD_PER_SENDER, DRAFT_HELD_REASONS, HELD_QUOTA_BYTES, HELD_QUOTA_COUNT, OutboxHandler, OutboxHandlerError, type OutboxEntry } from "./outbox-handler.js";
+import { DRAFT_HELD_BEHIND_EARLIER, DRAFT_HELD_ELIGIBLE_TAG, DRAFT_HELD_PER_SENDER, DRAFT_HELD_REASONS, HELD_QUOTA_BYTES, HELD_QUOTA_COUNT, HELD_RETRY_NOT_ADMITTED, OutboxHandler, OutboxHandlerError, type OutboxEntry } from "./outbox-handler.js";
 import { isOpenRigSender } from "../lib/pane-envelope.js";
 import { HOOK_BRIDGE_CHANNEL } from "./hook-bridge.js";
 
@@ -133,7 +133,7 @@ export class DraftAwareDelivery {
         ...(guardError && error.inputReadFailure ? { inputReadFailure: error.inputReadFailure } : {}) };
     }
     if (inputWritten) result = { ...result, sent: true };
-    const preInputRefusal = ["draft_input_busy", "draft_input_unknown", "draft_input_changed", "draft_wake_superseded", DRAFT_HELD_BEHIND_EARLIER,
+    const preInputRefusal = ["draft_input_busy", "draft_input_unknown", "draft_input_changed", "draft_wake_superseded", DRAFT_HELD_BEHIND_EARLIER, HELD_RETRY_NOT_ADMITTED,
       "target_needs_input", "wait_for_idle_timeout", "target_activity_unknown", "target_runtime_unverified", "target_runtime_not_running", "target_runtime_conflict",
       "invalid_wait_for_idle", "invalid_dangerously_interact", "dangerously_interact_requires_reason", "prompt_override_audit_unavailable",
       "transport_unavailable", "session_missing", "tmux_unavailable"].includes(result.reason ?? "");
@@ -197,9 +197,10 @@ export class DraftAwareDelivery {
           ? `${quota}, so this message wasn't saved or delivered. Read or retire what's held (rig seat held-messages ${session}), then retry.`
           : `${quota}, so no receipt was saved for this message, which ${result.sent === true ? "was" : "may have been"} typed. Repeating it may duplicate input.`
         : "Delivery bookkeeping is unavailable; this result describes the input attempt, not a saved receipt. Repeating the request may duplicate input.";
-      // The input was protected, but failed bookkeeping cannot claim durable custody of its message.
+      // The input was protected, but failed bookkeeping cannot claim durable custody of its message. Nothing then holds
+      // it for the draft, so its promise to type it later isn't repeated.
       if (noWrite) result = { ...result, ok: false, outcome: "failed" };
-      return { ...result, warning: [result.warning, warning].filter(Boolean).join(" ") };
+      return { ...result, warning: [draftHeld ? undefined : result.warning, warning].filter(Boolean).join(" ") };
     }
     // Past the per-sender bound, the sender learns which of its held messages this one superseded.
     if (superseded.length) result = { ...result, warning: [result.warning, `This supersedes your earlier held message${superseded.length === 1 ? "" : "s"} ${superseded.join(", ")} here (past ${DRAFT_HELD_PER_SENDER} from one sender); ${superseded.length === 1 ? "it stays" : "they stay"} readable by ID and won't be typed.`].filter(Boolean).join(" ") };
