@@ -6,9 +6,9 @@ This isn't a schedule or a promise: we release often, and an item ships when a g
 To see what's being worked on, by release and theme, open the [OpenRig roadmap board](https://github.com/users/mvschwarz/projects/1).
 Issues labelled `good first issue` are also listed on the [contribute page](https://github.com/mvschwarz/openrig/contribute).
 
-## Released in 0.7.23
+## Released in 0.7.24
 
-[0.7.23 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.23): OpenRig 0.7.23 is a patch for teams that reach past one computer, and for recovery that says what it did. A seat connected to a hub can send requests to its peers there and get the answers back as local work. Codex seats explain sign-in and restart in place on a Mac. `rig start --last` names any rig it leaves out. See its release notes for what shipped, known limits, upgrade instructions and contributor credits.
+[0.7.24 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.24): OpenRig 0.7.24 is a patch for people who work with their team from their own Claude Code or Codex conversation. The team's questions can now come back to that conversation by themselves, and a team seat's Claude Code permission prompt can be answered from there. The TUI's Topology view opens on a busy daemon, and the notice a new agent gets when its team is recorded reads as information, not work. See its release notes for what shipped, known limits, upgrade instructions and contributor credits.
 
 ## How to help
 
