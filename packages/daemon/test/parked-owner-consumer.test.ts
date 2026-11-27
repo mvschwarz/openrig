@@ -1466,6 +1466,11 @@ describe("context.owner_min_interval_s: a minimum time between one owner's remin
     // Inside the bound: held, nobody told.
     expect(await evaluate(10)).toMatchObject({ action: "skip" });
     expect(escalations).toEqual([]);
+    // Past it, a row the reminder named that closed after the diagnosis is not unclaimed: nobody is told about it.
+    store.openIds = () => ROW_IDS.slice(1);
+    expect(await evaluate(20)).toMatchObject({ action: "skip" });
+    expect(escalations).toEqual([]);
+    store.openIds = () => ROW_IDS;
     // Past it: the pending row the last reminder named goes out once; the row opened after it, and the claimed one, don't.
     expect(await evaluate(20)).toMatchObject({ action: "skip" });
     expect(await evaluate(20)).toMatchObject({ action: "skip" });

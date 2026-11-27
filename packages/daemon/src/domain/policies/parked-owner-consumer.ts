@@ -516,7 +516,8 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         const last = minIntervalS === 0 ? null : lastReminder(seat.sessionName, generation);
         if (!terminal && last && seat.activity.needsInput.count === 0
           && (deps.now?.() ?? Date.now()) - last.at < minIntervalS * 1000) {
-          const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && last.obligations.includes(r.qitemId)).map(r => r.qitemId);
+          const unclaimed = seat.obligations.items.filter(r => r.state === "pending" && last.obligations.includes(r.qitemId)
+            && namedIds.includes(r.qitemId)).map(r => r.qitemId);
           const nextReminderAt = new Date(last.at + minIntervalS * 1000).toISOString();
           const escalationFailure = last.episodeKey && unclaimed.length > 0
             ? await escalateIfDue(seat.sessionName, last.episodeKey, new Date(last.at).toISOString(), unclaimed,
