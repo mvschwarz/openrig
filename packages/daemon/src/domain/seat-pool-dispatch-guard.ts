@@ -74,8 +74,11 @@ export function runSeatPoolDispatchGuard(
     }
     let stdout = "";
     let stderr = "";
-    child.stdout?.on("data", (chunk: Buffer) => { if (stdout.length < OUTPUT_CAP) stdout += chunk.toString("utf8"); });
-    child.stderr?.on("data", (chunk: Buffer) => { if (stderr.length < OUTPUT_CAP) stderr += chunk.toString("utf8"); });
+    // Decoded by the stream, so a character split across two writes is kept whole.
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => { if (stdout.length < OUTPUT_CAP) stdout += chunk; });
+    child.stderr?.on("data", (chunk: string) => { if (stderr.length < OUTPUT_CAP) stderr += chunk; });
     /** The guard's own exit, once it has exited: the verdict, even when the timeout comes before its output is read. */
     let exited: { code: number | null; signal: NodeJS.Signals | null } | undefined;
     /** Kills the guard's process group and lets go of its pipes: nothing it started outlives its verdict that way. */

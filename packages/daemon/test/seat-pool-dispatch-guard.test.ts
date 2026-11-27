@@ -56,6 +56,12 @@ describe("seat-pool dispatch guard runner (#4061)", () => {
     expect(await runSeatPoolDispatchGuard(guard("process.exit(75)"))).toEqual({ verdict: "veto" });
   });
 
+  it("A message with a character split across two writes is read whole.", async () => {
+    // "€" is e2 82 ac in UTF-8: the first two bytes in one write, the last in a later one.
+    const script = "process.stdout.write(Buffer.from([0xe2, 0x82])); setTimeout(() => { process.stdout.write(Buffer.from([0xac, 0x20, 0x35, 0x0a])); process.exit(75); }, 100)";
+    expect(await runSeatPoolDispatchGuard(guard(script))).toEqual({ verdict: "veto", message: "€ 5" });
+  });
+
   it.each([
     ["exits 1 (a crash, not a veto)", "console.error('boom'); process.exit(1)", "exited 1: boom"],
     ["exits 2 with nothing on stderr", "process.exit(2)", "exited 2"],
