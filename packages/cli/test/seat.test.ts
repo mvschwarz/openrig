@@ -660,6 +660,24 @@ describe("rig seat status", () => {
     expect(logs).toContain(expected);
   });
 
+  // A seat joined with rig attach runs in someone else's program: OpenRig can't see its process, only what it writes.
+  it.each([
+    [{ at: "2026-11-27T08:00:00.000Z", qitemId: "qitem-1", state: "in-progress" },
+      "  Its own last queue action: in-progress on qitem-1 at 2026-11-27T08:00:00.000Z. Work sent to it waits until that program reads its queue."],
+    [null, "  Its own last queue action: none recorded. Work sent to it waits until that program reads its queue."],
+    // A history OpenRig couldn't read is never "none recorded".
+    [null, "  Its own last queue action: couldn't be read. Work sent to it waits until that program reads its queue.", "unavailable"],
+  ])("says a seat attached from an outside program is attached with liveness unknown, never running or detached (case %#)", async (last, line, read = "read") => {
+    const deps = makeDeps({ status: 200, data: { ...STATUS, session_status: "attached", lifecycle_state: "unknown",
+      external_attachment: { liveness: "unknown", lastOwnQueueAction: last, lastOwnQueueActionRead: read } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    expect(logs).toContain("Session: attached from an outside program (rig attach); OpenRig can't see its process, so whether it's running is unknown.");
+    expect(logs).toContain(line);
+    expect(logs.join("\n")).not.toMatch(/Session: (running|detached)/);
+  });
+
   it("returns a nonzero status for an unknown seat", async () => {
     const deps = makeDeps({
       status: 404,

@@ -815,7 +815,9 @@ export interface NodeRecoveryGuidance {
 // Per-node lifecycle projection derived from session/restore state plus snapshot resume metadata.
 // L2 cold-start truth model: distinguishes a recoverable detached node from a node that would
 // fresh-launch, and surfaces "attention required" for the post-L3 Claude resume-prompt proxy.
-export type NodeLifecycleState = "running" | "detached" | "recoverable" | "attention_required";
+/** `unknown`: a seat joined with `rig attach` as an external CLI runs in someone else's program, so OpenRig can't see
+ *  whether it's running (see `NodeInventoryEntry.externalAttachment`). */
+export type NodeLifecycleState = "running" | "detached" | "recoverable" | "attention_required" | "unknown";
 
 /**
  * OPR.0.4.3.19 — the liveness identity verdict for a managed seat.
@@ -918,10 +920,20 @@ export interface NodeInventoryEntry {
   configuredAccount?: string | null;
   /** Present only on a community harness's seat: its label, maintainer and declared limits. */
   communityHarness?: import("./community-harness-presets.js").CommunityHarnessLabel;
-  /** Effective current status; confirmed session absence projects as detached. */
+  /** Effective current status; confirmed session absence projects as detached. A seat joined with `rig attach` as an
+   *  external CLI reads `attached`: OpenRig can't see its process, so a stored running or detached isn't its state. */
   sessionStatus: string | null;
   /** Persisted session status, retained for history and registry-based rollups. */
   storedSessionStatus?: string | null;
+  /** Present only on a seat attached from an outside program (`rig attach`, an external CLI): OpenRig can't type into it
+   *  or see its process, so its liveness is unknown. Its own newest queue action (a claim, note or handoff it wrote, live or
+   *  archived) is the only sign OpenRig has that it's working; null when it has written none. `lastOwnQueueActionRead` is
+   *  "unavailable" when that history couldn't be read, and then the null says nothing about it. */
+  externalAttachment?: {
+    liveness: "unknown";
+    lastOwnQueueAction: { at: string; qitemId: string; state: string } | null;
+    lastOwnQueueActionRead: "read" | "unavailable";
+  };
   /** The latest session was explicitly stopped and has no replacement binding.
    * It remains non-running, but is not a missing member in the rig lifecycle. */
   intentionallyStopped?: boolean;

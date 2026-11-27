@@ -49,6 +49,7 @@ import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.j
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper } from "./launch-wrapper.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { readStandbyStop } from "./seat-standby.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 // -- Row types for SQL results --
 
@@ -658,7 +659,8 @@ function mapStatus(status: string): NodeRestoreOutcome {
 }
 
 function deriveHeldReason(db: Database.Database, rigId: string, nodeId: string, sessionStatus: string | null): string | null {
-  if (sessionStatus === "running") return null;
+  // A seat attached from an outside program (rig attach) isn't held back from a launch, as it wasn't while its record read running.
+  if (sessionStatus === "running" || sessionStatus === "attached") return null;
 
   const heldRow = db.prepare(
     "SELECT seq, payload FROM events WHERE node_id = ? AND type = 'node.held' ORDER BY seq DESC LIMIT 1"
@@ -1073,7 +1075,13 @@ function buildInventoryItem(
   // Keep registry history intact; only an applicable, explicit absence changes
   // the current status. Unavailable tmux and process mismatches are not absence.
   const paneExited = row.session_status === "running" && identityVerdict?.reason === "pane_exited";
-  const sessionStatus = paneExited ? "exited"
+  // A seat joined with `rig attach` runs in someone else's program (seat-kinds: no inbound transport, an external process
+  // owner), so OpenRig can't see whether it runs: a stored running, or a detached a tmux probe once wrote, isn't its state.
+  // It reads attached, with liveness unknown and its own newest queue action as the only evidence.
+  const externallyAttached = row.binding_attachment_type != null
+    && seatProcessOwner(resolveSeatKind(row.binding_attachment_type)) === "external"
+    && (row.session_status === "running" || row.session_status === "detached");
+  const sessionStatus = externallyAttached ? "attached" : paneExited ? "exited"
     : row.session_status === "running" && identityVerdictConfirmsSessionMissing(identityVerdict) ? "detached" : row.session_status;
   const startupStatus = paneExited || (sessionStatus === "running" && identityVerdictDownranksRunning(identityVerdict?.verdict))
     ? "attention_required" : row.startup_status as NodeInventoryEntry["startupStatus"];
@@ -1088,7 +1096,8 @@ function buildInventoryItem(
   const stopConfirmed = row.intentionally_stopped === 1 && row.stop_attempt === null
     && (row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null;
   const standbyStopped = row.intentionally_stopped === 1 && row.session_status === "exited" && readStandbyStop(db, row.node_id) !== null;
-  const lifecycleState = keepAliveIncident?.exhausted && sessionStatus !== "running" ? "attention_required" : deriveNodeLifecycleState({
+  const lifecycleState = keepAliveIncident?.exhausted && sessionStatus !== "running" ? "attention_required"
+    : externallyAttached && startupStatus !== "attention_required" && restoreOutcome !== "attention_required" ? "unknown" : deriveNodeLifecycleState({
     sessionStatus,
     startupStatus,
     restoreOutcome,
@@ -1116,6 +1125,7 @@ function buildInventoryItem(
     ...(launchWrapper ? { launchWrapper } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
+    ...(externallyAttached ? { externalAttachment: { liveness: "unknown" as const, ...lastOwnQueueAction(db, row.session_name) } } : {}),
     // An explicit down records a failed start's rolled-back session without changing its superseded status.
     intentionallyStopped: stopConfirmed,
     ...(standbyStopped ? { standbyStopped: true as const } : {}),
@@ -1610,6 +1620,23 @@ export function seatNeedsAttention(
     || (entry.heldReason != null && !isUnlaunchedHeldWithoutWork(entry, assignedWorkCount))
     || entry.latestError != null
     || (entry.startedWithoutRequired?.length ?? 0) > 0;
+}
+
+/** The newest queue transition a seat wrote itself (a claim, note or handoff): for a seat attached from an outside program,
+ *  the one sign OpenRig has that it's working. It reads the live history and the archive retention moves finished work to
+ *  (one indexed row from each), so an archived action still counts. Null when it has written none; "unavailable" when its
+ *  history couldn't be read, so a failed read never reads as none. */
+function lastOwnQueueAction(db: Database.Database, session: string | null):
+  Pick<NonNullable<NodeInventoryEntry["externalAttachment"]>, "lastOwnQueueAction" | "lastOwnQueueActionRead"> {
+  if (!session) return { lastOwnQueueAction: null, lastOwnQueueActionRead: "read" };
+  try {
+    const newest = ["queue_transitions", "queue_transitions_archive"]
+      .map((table) => db.prepare(`SELECT transition_id, ts, qitem_id, state FROM ${table} WHERE actor_session = ? ORDER BY transition_id DESC LIMIT 1`)
+        .get(session) as { transition_id: number; ts: string; qitem_id: string; state: string } | undefined)
+      .filter((row) => row !== undefined)
+      .sort((a, b) => b.transition_id - a.transition_id)[0];
+    return { lastOwnQueueAction: newest ? { at: newest.ts, qitemId: newest.qitem_id, state: newest.state } : null, lastOwnQueueActionRead: "read" };
+  } catch { return { lastOwnQueueAction: null, lastOwnQueueActionRead: "unavailable" }; }
 }
 
 /**

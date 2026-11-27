@@ -928,7 +928,9 @@ export class SessionRegistry {
             WHERE node_id = ?`
           )
           .run(
-            fields.attachmentType ?? existing.attachment_type ?? "tmux",
+            // A write that names a tmux session and no type binds a tmux pane (rig bind, a launch, a pane repair): it's a
+            // tmux binding, even over a node attached from an outside program, so its readers never call it attached.
+            fields.attachmentType ?? (fields.tmuxSession ? "tmux" : existing.attachment_type) ?? "tmux",
             fields.tmuxSession ?? existing.tmux_session,
             fields.tmuxWindow ?? existing.tmux_window,
             fields.tmuxPane ?? existing.tmux_pane,

@@ -265,6 +265,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "195_workflow_start_operations.sql": "workflow receipt table — workflow suites migrate the workflow schema.",
   "053_sessions_node_id_index.sql": "sessions perf index — index/perf suites add it inline; the core edge uses the base sessions table.",
   "054_queue_transitions_archive.sql": "queue-retention EXTENSION table — queue-retention suites migrate it inline.",
+  "201_queue_transitions_archive_actor_index.sql": "indexes the archive table (054 is excluded). Speed only: an attached seat's newest own queue action reads the same row without it; its suites migrate the canonical full list.",
   "112_queue_transitions_ts_qitem.sql": "indexes queue transitions plus the archive table (054 is excluded). Speed only: the recent-activity read returns the same rows without these indexes, and queue-recent-transitions.test.ts tests that read without them (it migrates 054 inline, not 112).",
   "062_usage_samples.sql": "usage-metering subsystem table — usage suites migrate it inline.",
   "094_usage_samples_latest_indexes.sql": "indexes usage_samples (062 is excluded); usage index tests migrate the canonical full schema.",

@@ -667,6 +667,13 @@ describe("Ps CLI", () => {
         sessionStatus: "detached", startupStatus: "ready", restoreOutcome: "n-a", lifecycleState: "detached",
         tmuxAttachCommand: null, resumeCommand: null, latestError: null,
       },
+      // A seat attached from an outside program (rig attach): OpenRig can't see whether it runs.
+      {
+        rigId: "rig-1", rigName: "mixed-rig", logicalId: "dev.desk", podId: "pod-1", podNamespace: "dev",
+        canonicalSessionName: "dev-desk@mixed-rig", nodeKind: "agent", runtime: "claude-code",
+        sessionStatus: "attached", startupStatus: "ready", restoreOutcome: "n-a", lifecycleState: "unknown",
+        tmuxAttachCommand: null, resumeCommand: null, latestError: null,
+      },
     ];
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]);
@@ -676,6 +683,7 @@ describe("Ps CLI", () => {
     expect(output).toContain("run");
     expect(output).toContain("rec");
     expect(output).toContain("det");
+    expect(logs.find((l) => l.includes("dev-desk@mixed-rig"))).toMatch(/\bunk\b/);
   });
 
   it("ps --nodes --json includes lifecycleState per node", async () => {
