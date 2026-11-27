@@ -90,7 +90,7 @@ handoff → inspect/attach → work → repeat`.
 
 The migrations live in `packages/daemon/src/db/migrations/` (96 files,
 `001_core_schema.ts` … `097_thread_part_map.ts`, with no `093`).
-`ALL_MIGRATIONS` (`packages/daemon/src/db/all-migrations.ts:107`) lists all 96, and `createDaemon`
+`ALL_MIGRATIONS` (`packages/daemon/src/db/all-migrations.ts`) is every file there, found when the module loads, and `createDaemon`
 applies them with `migrate(db, ALL_MIGRATIONS)` (`startup.ts:298`). `migrate.ts`
 sorts them by name (`:29`) and records each applied name in `schema_migrations`
 (`:15`).
