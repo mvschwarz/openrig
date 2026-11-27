@@ -1125,8 +1125,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // -s workspace-write floor flag.
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
       // The git dirs and the seat folder follow the parent id: ps flattens argv, so a path with a space placed before the
-      // id would be read as the id when the fork is verified.
-      const cmd = `codex${daemonArg}${postureArg}${networkArg}${loginShellArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}${seatFolderArg}`;
+      // id would be read as the id when the fork is verified. -C names the seat's directory, as on a fresh launch and a
+      // resume: without it, a parent recorded in another directory makes Codex ask which one to use.
+      const cmd = `codex${daemonArg}${postureArg}${networkArg}${loginShellArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)} -C ${shellQuote(binding.cwd)}${gitDirArg}${seatFolderArg}`;
       const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -1368,10 +1369,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private resumeCore(prepared: PreparedCodexLaunch, resumeToken: string, binding: NodeBinding): string {
     const { profile, queueStateDirArg, gitDirArg, seatFolderArg, model, postureArg, networkArg, loginShellArg, daemonOptOut, effort } = prepared;
     // The git dirs and the seat folder follow the conversation id, as on a fork, so the resume proof reads the id even
-    // from a path with a space.
+    // from a path with a space. -C names the seat's directory, as a fresh launch does: without it, a conversation recorded in
+    // another directory makes Codex ask which one to use.
     // A resume whose startup queued the managed guidance carries it as developer instructions, as a fresh launch does.
     return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}${loginShellArg}`, daemonOptOut, effort)
-      + gitDirArg + seatFolderArg + (binding.guidanceLaunchInstructions && binding.tmuxSession ? this.developerInstructionsArg(binding.tmuxSession) : "");
+      + ` -C ${shellQuote(binding.cwd)}` + gitDirArg + seatFolderArg + (binding.guidanceLaunchInstructions && binding.tmuxSession ? this.developerInstructionsArg(binding.tmuxSession) : "");
   }
 
   private async seatCommand(binding: NodeBinding, cmd: string, launchShell?: string): Promise<string> {

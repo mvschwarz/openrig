@@ -1954,7 +1954,7 @@ describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () =
         : w.calls.find((call) => call.startsWith("respawn "))!.slice("respawn ".length);
       expect(launchedCommand).toContain(expectedPrefix);
       expect(launchedCommand).toContain("--no-daemon -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.5' -c 'model_reasoning_effort=\"high\"' resume");
-      expect(launchedCommand).toContain(`'${TOKEN}' --add-dir '/shared/one'`);
+      expect(launchedCommand).toContain(`'${TOKEN}' -C '/work' --add-dir '/shared/one'`);
       // The running Codex kept its login shell, so the relaunch does too.
       expect(launchedCommand).not.toContain("allow_login_shell");
       if (shape === "shell_backed") {
@@ -2007,6 +2007,18 @@ describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () =
     expect("launchShell" in w.builds[0]!).toBe(false);
     expect(w.launches[0]!.command).toContain(`'${path.join(w.wrapperBinDir!, "codex")}' -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.5' resume '${TOKEN}'`);
     expect(w.launches[0]!.command).not.toContain("mtn");
+  });
+
+  // Codex launched with -C works there while its process cwd stays the launcher's, so the relaunch keeps the running -C.
+  it("relaunches in the running Codex's -C directory, and in the observed directory when it had none", async () => {
+    const argv = ["/usr/local/bin/codex", "-m", "gpt-5.5", "-s", "workspace-write", "-c", "check_for_update_on_startup=false", "resume", TOKEN, "-C", "/seat root"];
+    const withRoot = world({ realResumeBuilder: "env", runningArgs: `-m gpt-5.5 -s workspace-write -c check_for_update_on_startup=false resume ${TOKEN} -C /seat root`, runningArgv: argv });
+    expect(await withRoot.service.restartInPlace({ seatRef: SEAT, reason: "keeps -C" })).toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    expect(withRoot.launches[0]!.command).toContain(`resume '${TOKEN}' -C '/seat root'`);
+
+    const without = world({ realResumeBuilder: "env" });
+    expect(await without.service.restartInPlace({ seatRef: SEAT, reason: "observed cwd" })).toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    expect(without.launches[0]!.command).toContain(`resume '${TOKEN}' -C '/work'`);
   });
 
   it("refuses before stopping or typing when launch_wrapper is selected but SeatLaunchEnvironment is unavailable (never falls back to bare)", async () => {

@@ -116,18 +116,18 @@ function gitDirOption(gitCwd: string | null): string {
   return gitCwd === null ? "" : ` --add-dir ${quote(nodePath.join(gitCwd, ".git"))}`;
 }
 
-function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string, effort?: string, gitCwd: string | null = "/project"): string {
+function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string, effort?: string, gitCwd: string | null = "/project", cwd = "/project"): string {
   const queueDirArg = queueRoot === null ? "" : ` --add-dir ${quote(queueRoot)}`;
   const modelArg = model ? ` -m ${quote(model)}` : "";
   const effortArg = effort ? ` -c ${quote(`model_reasoning_effort="${effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -c 'allow_login_shell=false'${modelArg}${effortArg} resume ${quote(token)}${queueDirArg}${gitDirOption(gitCwd)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -c 'allow_login_shell=false'${modelArg}${effortArg} resume ${quote(token)}${queueDirArg} -C ${quote(cwd)}${gitDirOption(gitCwd)}`;
 }
 
-function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null; gitCwd?: string | null } = {}): string {
+function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null; gitCwd?: string | null; cwd?: string } = {}): string {
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
   const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
-  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -c 'allow_login_shell=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}${gitDirOption(options.gitCwd === undefined ? "/project" : options.gitCwd)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -c 'allow_login_shell=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)} -C ${quote(options.cwd ?? "/project")}${gitDirOption(options.gitCwd === undefined ? "/project" : options.gitCwd)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
@@ -138,9 +138,9 @@ function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: str
   return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' -c 'allow_login_shell=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
 }
 
-function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot(), gitCwd: string | null = "/project"): string {
+function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot(), gitCwd: string | null = "/project", cwd = "/project"): string {
   const queueDirArg = queueRoot === null ? "" : ` --add-dir ${quote(queueRoot)}`;
-  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' -c 'allow_login_shell=false' resume ${quote(token)}${queueDirArg}${gitDirOption(gitCwd)}`;
+  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' -c 'allow_login_shell=false' resume ${quote(token)}${queueDirArg} -C ${quote(cwd)}${gitDirOption(gitCwd)}`;
 }
 
 beforeEach(() => {
@@ -1597,7 +1597,25 @@ describe("Codex runtime adapter", () => {
     const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
     // ps joins argv with spaces; it does not retain the shell's quotes around each path.
     expect(codexCommandResumeToken(command.replace(/'/g, ""))).toBe("sess-456");
-    expect(command).toContain(`resume 'sess-456' --add-dir '${testQueueRoot(sharedDocsRoot)}' --add-dir '/project/.git'`);
+    expect(command).toContain(`resume 'sess-456' --add-dir '${testQueueRoot(sharedDocsRoot)}' -C '/project' --add-dir '/project/.git'`);
+  });
+
+  // A seat whose saved directory differs from the one its conversation was recorded in (rig seat set-cwd) would otherwise
+  // meet Codex's own "Working directory" picker; -C names the seat's directory, as the fresh launch does.
+  it("a resume names the seat's directory with -C after the conversation id, as the fresh launch does", async () => {
+    const cwd = "/work/seat dir";
+    const proof = provenCodexResume("sess-456");
+    const tmux = mockTmux({ getPanePid: proof.getPanePid });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: proof.listProcesses as never, readResumeEvidence: proof.readResumeEvidence });
+
+    const result = await adapter.launchHarness(makeBinding(cwd), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result.ok).toBe(true);
+    const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
+    expect(command).toBe(expectedResumeCommand("sess-456", testQueueRoot(), undefined, undefined, cwd, cwd));
+    expect(command).toContain("resume 'sess-456' --add-dir");
+    expect(command).toContain(" -C '/work/seat dir' --add-dir '/work/seat dir/.git'");
+    expect(codexCommandResumeToken(command.replace(/'/g, ""))).toBe("sess-456");
   });
 
   it("launchHarness sends correct resume command", async () => {
