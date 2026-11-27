@@ -3000,6 +3000,44 @@ describe("a seat's explicit filesystem policy (argv and native-read preflight, n
     expect(after.ok && after.core).toContain('"/same/.git"="write"');
   });
 
+  // #4031 review X-F1: an authored rule for the git dir in another accepted spelling is the person's choice, kept as is.
+  it("keeps an authored git-dir rule written with a trailing slash, with no write rule beside it", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, codexHome: "/shared-home",
+      verifyFilesystemPolicy: async () => ({ ok: true, verified: true }), resolveGitAddDirs: async () => ["/same/.git"] });
+    const authored = { approval: "never" as const, filesystem: { "/same": "write" as const, "/same/.git/": "read" as const }, network_access: false };
+    expect(await adapter.launchHarness({ ...makeBinding("/same"), codexPermissions: authored }, { name: "dev-a@test-rig" })).toMatchObject({ ok: true });
+    const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
+    expect(command).toContain('"/same/.git/"="read"');
+    expect(command).not.toContain('"/same/.git"="write"');
+  });
+
+  // #4031 review X-F2: an in-place restart carries the override the running Codex has, whatever the resolver says now, and
+  // preflights that same policy; a changed saved choice isn't carried, so the restart's drift check reports it.
+  it("carries a running Codex's generated git-dir rules through an in-place restart, and preflights them", async () => {
+    const envelope = { approval: "never" as const, filesystem: { "/same": "write" as const }, network_access: false };
+    const ranWith = { ...envelope, filesystem: { ...envelope.filesystem, "/same/.git": "write" as const } };
+    const running = (permissionsConfig: string) => ({ permissionsConfig, networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: [] });
+    for (const resolved of [[], ["/other/.git"]]) {
+      const verifyFilesystemPolicy = vi.fn<CodexFilesystemVerifier>(async () => ({ ok: true, verified: true }));
+      const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: mockFs(), sleep: async () => {}, codexHome: "/shared-home",
+        verifyFilesystemPolicy, resolveGitAddDirs: async () => resolved });
+      const restart = await adapter.buildResumeCommand({ ...makeBinding("/same"), codexPermissions: envelope },
+        { name: "dev-a@test-rig", resumeToken: "thread-A", running: running(codexFilesystemOverrides(ranWith)[1]!) });
+      expect(restart.ok && restart.core).toContain(codexFilesystemOverrides(ranWith)[1]!.replaceAll("'", ""));
+      expect(restart.ok && restart.core).not.toContain("/other/.git");
+      expect(verifyFilesystemPolicy).toHaveBeenCalledWith(expect.objectContaining({ permissions: ranWith }));
+    }
+    // The saved choice changed since launch: the restart emits the new envelope (with its git dir), not the running one.
+    const changed = { ...envelope, filesystem: { ...envelope.filesystem, "/same/private": "deny" as const } };
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: mockFs(), sleep: async () => {}, codexHome: "/shared-home",
+      verifyFilesystemPolicy: async () => ({ ok: true, verified: true }), resolveGitAddDirs: async () => ["/same/.git"] });
+    const fresh = await adapter.buildResumeCommand({ ...makeBinding("/same"), codexPermissions: changed },
+      { name: "dev-a@test-rig", resumeToken: "thread-A", running: running(codexFilesystemOverrides(ranWith)[1]!) });
+    expect(fresh.ok && fresh.core).toContain('"/same/private"="deny"');
+    expect(fresh.ok && fresh.core).toContain('"/same/.git"="write"');
+  });
+
   it("refuses a native-read mismatch before dispatching any command", async () => {
     const tmux = mockTmux();
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), verifyFilesystemPolicy: async () => ({ ok: false, error: "lower profile adds a writable root" }) });

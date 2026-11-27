@@ -1,5 +1,5 @@
 import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
-import { codexFilesystemOverrides, codexMemberLaunch, observeCodexEnvelope, readProfileFingerprint, withSeatGitDirs, type CodexMemberPermissions, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
+import { codexMemberLaunch, observeCodexEnvelope, readProfileFingerprint, runningSeatPermissions, withSeatGitDirs, type CodexMemberPermissions, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
 import { codexPolicyWarning, resolveCodexFilesystemHome, verifyCodexFilesystemPolicy, type CodexFilesystemDecision, type CodexFilesystemVerifier } from "../domain/codex-filesystem-preflight.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
@@ -944,17 +944,19 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /** The seat's codex_permissions as its launch emits them: a filesystem envelope that lets the seat write its working
    *  folder also names its git dirs as writable (withSeatGitDirs), from the resolver plain launches use. A running Codex
-   *  keeps the rules it runs with, as a plain launch's add-dirs carry over: one launched before those rules existed
-   *  restarts in place with the authored envelope. */
+   *  keeps the override it runs with when that is still the authored envelope (plus only those generated rules), as a
+   *  plain launch's add-dirs carry over, so an in-place restart neither resolves them again nor drifts; a changed saved
+   *  choice is emitted fresh, and the restart's drift check reports it. */
   private async seatPermissions(binding: NodeBinding, running?: RunningCodexLaunch): Promise<CodexMemberPermissions | undefined> {
     const authored = binding.codexPermissions;
     if (!authored || !("filesystem" in authored)) return authored;
-    if (running?.permissionsConfig !== undefined && running.permissionsConfig === codexFilesystemOverrides(authored)[1]) return authored;
-    return withSeatGitDirs(authored, await this.resolveGitAddDirs(binding.cwd), binding.cwd);
+    const ran = running?.permissionsConfig !== undefined ? runningSeatPermissions(authored, running.permissionsConfig) : undefined;
+    return ran ?? withSeatGitDirs(authored, await this.resolveGitAddDirs(binding.cwd), binding.cwd);
   }
 
-  private async checkFilesystemPolicy(binding: NodeBinding): Promise<CodexFilesystemDecision | undefined> {
-    const permissions = await this.seatPermissions(binding);
+  /** The native-read preflight of the policy this launch emits (`permissions`, when the caller has it). */
+  private async checkFilesystemPolicy(binding: NodeBinding, emitted?: CodexMemberPermissions): Promise<CodexFilesystemDecision | undefined> {
+    const permissions = emitted ?? await this.seatPermissions(binding);
     if (!permissions || !("filesystem" in permissions)) return undefined;
     try {
       return await this.verifyFilesystemPolicy({ permissions, cwd: binding.cwd,
@@ -1157,8 +1159,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
   private async prepareLaunch(binding: NodeBinding, name: string, running: RunningCodexLaunch | undefined,
     opts: { installCorePlugin: boolean; preview?: boolean }): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
-    const checkedBeforeCutover = this.filesystemPreflight.get(binding);
-    const decision = checkedBeforeCutover ?? await this.checkFilesystemPolicy(binding);
+    // One policy for the preflight and the launch: an in-place restart checks the override it will carry.
+    const codexPermissions = await this.seatPermissions(binding, running);
+    const checkedBeforeCutover = running ? undefined : this.filesystemPreflight.get(binding);
+    const decision = checkedBeforeCutover ?? await this.checkFilesystemPolicy(binding, codexPermissions);
     this.filesystemPreflight.delete(binding);
     if (decision && !decision.ok) return decision;
     // The config write and, for a seat that selected openrig-core, its install run as one step under the config lock, so
@@ -1180,7 +1184,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
     const profile = binding.codexConfigProfile?.trim();
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
-    const codexPermissions = await this.seatPermissions(binding, running);
     const filesystemPermissions = codexPermissions && "filesystem" in codexPermissions ? codexPermissions : undefined;
     // An authored filesystem policy always wins over a stale observed legacy envelope. Legacy rebuilds keep their carry behavior.
     const memberChoice = codexPermissions && (!binding.codexRebuildPermissions || filesystemPermissions) ? codexMemberLaunch(codexPermissions) : undefined;

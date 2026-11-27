@@ -18,8 +18,8 @@ import os from "node:os";
 import nodePath from "node:path";
 import { execFileSync } from "node:child_process";
 import { codexEnvelopeArgs } from "../src/domain/codex-rebuild-permissions.js";
-import { clearCodexMemberPermissions, codexMemberEnvelope, codexRigReach, codexRigReachWarning, readCodexMemberPermissions, readProfileFingerprint,
-  validateCodexMemberPermissions, withSeatGitDirs, type CodexMemberPermissions, type CodexProfileObservation, type CodexRigReachGap } from "../src/domain/codex-member-permissions.js";
+import { clearCodexMemberPermissions, codexFilesystemOverrides, codexMemberEnvelope, codexRigReach, codexRigReachWarning, readCodexMemberPermissions, readProfileFingerprint,
+  validateCodexMemberPermissions, withSeatGitDirs, runningSeatPermissions, type CodexMemberPermissions, type CodexProfileObservation, type CodexRigReachGap } from "../src/domain/codex-member-permissions.js";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import { seatRoutes } from "../src/routes/seat.js";
 import { createTestApp } from "./helpers/test-app.js";
@@ -619,5 +619,40 @@ describe("withSeatGitDirs: a filesystem envelope's git dirs, as a plain launch's
     expect(withSeatGitDirs(legacy as never, dirs, "/repo")).toBe(legacy);
     const partial = withSeatGitDirs(envelope({ "/repo": "write", "/repo/.git": "read" }), dirs, "/repo", "/home/me");
     expect(partial).toEqual(envelope({ "/repo": "write", "/repo/.git": "read", "/common/repo.git": "write" }));
+  });
+
+  // #4031 review X-F1: Codex resolves equally specific entries with write above read, so a write beside the person's own
+  // read rule, written another way, would turn their read into write.
+  it("treats another spelling of the same git dir (~/…, a trailing slash) as already named", () => {
+    for (const [rules, cwd] of [
+      [{ "~/work/repo": "write", "~/work/repo/.git": "read" }, "/home/me/work/repo"],
+      [{ "/repo": "write", "/repo/.git/": "read" }, "/repo"],
+      [{ "/repo/": "write", "/repo/./.git": "deny" }, "/repo"],
+    ] as const) {
+      const authored = envelope({ ...rules });
+      expect(withSeatGitDirs(authored, [`${cwd}/.git`], cwd, "/home/me")).toBe(authored);
+    }
+  });
+});
+
+describe("runningSeatPermissions: the envelope a running Codex was launched with (#4031 review X-F2)", () => {
+  const envelope = (filesystem: Record<string, "read" | "write" | "deny">, network_access = false) => ({ approval: "never" as const, filesystem, network_access });
+  const authored = envelope({ ":workspace_roots": "write", ":minimal": "read" });
+  const config = (permissions: ReturnType<typeof envelope>) => codexFilesystemOverrides(permissions)[1]!;
+
+  it("reads back the authored envelope, alone or with only added write rules, exactly as it ran", () => {
+    expect(runningSeatPermissions(authored, config(authored))).toEqual(authored);
+    const withGit = envelope({ ":workspace_roots": "write", ":minimal": "read", "/repo/.git": "write", "/common/repo.git": "write" });
+    const carried = runningSeatPermissions(authored, config(withGit));
+    expect(carried).toEqual(withGit);
+    expect(config(carried!)).toBe(config(withGit));
+  });
+
+  it("is undefined when the saved choice changed since launch, an added rule isn't write, or the override can't be read", () => {
+    expect(runningSeatPermissions(authored, config(envelope({ ":workspace_roots": "read", ":minimal": "read" })))).toBeUndefined();
+    expect(runningSeatPermissions(authored, config(envelope({ ":workspace_roots": "write", ":minimal": "read", "/secret": "deny" })))).toBeUndefined();
+    expect(runningSeatPermissions(authored, config(envelope({ ":workspace_roots": "write", ":minimal": "read" }, true)))).toBeUndefined();
+    expect(runningSeatPermissions(authored, "permissions={not toml")).toBeUndefined();
+    expect(runningSeatPermissions(authored, 'permissions={"other"={filesystem={}}}')).toBeUndefined();
   });
 });

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { open } from "node:fs/promises";
 import { homedir } from "node:os";
+import { parse as parseToml } from "smol-toml";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import type { CodexPermissionEnvelope } from "./codex-rebuild-permissions.js";
 import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
@@ -116,18 +117,23 @@ export function codexFilesystemOverrides(permissions: CodexFilesystemPermissions
     `permissions={${JSON.stringify(CODEX_SEAT_PERMISSION_PROFILE)}={filesystem={${entries}},network={enabled=${permissions.network_access === true}}}}`];
 }
 
+/** Where an authored filesystem key points, for the keys with a fixed root here: :root, the workspace roots (the seat's
+ *  folder), `~/…` and absolute paths, normalized, so a trailing slash or `..` is the same root. Undefined for native
+ *  selectors with no fixed root (:minimal, :tmpdir, :slash_tmp) and patterns. */
+function authoredRoot(key: string, cwd: string, home: string): string | undefined {
+  const anchor = key === ":root" ? sep : key === ":workspace_roots" || key === ":project_roots" ? cwd
+    : key.startsWith("~/") ? join(home, key.slice(2)) : isAbsolute(key) ? key : undefined;
+  return anchor === undefined || /[?*\[\]{}]/.test(key) ? undefined : resolve(anchor);
+}
+
 /** The access an envelope's flat rules give `target`: its closest authored root's, or undefined when no rule covers it or
- *  the closest ones disagree. Native selectors with no fixed root here (:minimal, :tmpdir, :slash_tmp, patterns) don't
- *  count, so they never make it "write". */
+ *  the closest ones disagree. Selectors with no fixed root never make it "write". */
 function flatAccessAt(filesystem: CodexFilesystemPermissions["filesystem"], target: string, cwd: string, home: string): CodexFilesystemAccess | undefined {
   const within = (path: string, root: string) => path === root || path.startsWith(root === sep ? sep : root + sep);
   const rules: Array<{ root: string; access: CodexFilesystemAccess }> = [];
   for (const [key, access] of Object.entries(filesystem)) {
-    const anchor = key === ":root" ? sep : key === ":workspace_roots" || key === ":project_roots" ? cwd
-      : key.startsWith("~/") ? join(home, key.slice(2)) : isAbsolute(key) ? key : undefined;
-    if (anchor === undefined || /[?*\[\]{}]/.test(key)) continue;
-    const root = resolve(anchor);
-    if (within(resolve(target), root)) rules.push({ root, access });
+    const root = authoredRoot(key, cwd, home);
+    if (root !== undefined && within(resolve(target), root)) rules.push({ root, access });
   }
   rules.sort((a, b) => b.root.length - a.root.length);
   const closest = rules[0];
@@ -138,14 +144,32 @@ function flatAccessAt(filesystem: CodexFilesystemPermissions["filesystem"], targ
  *  so it can commit; under a permissions profile Codex keeps `.git` read-only inside a writable root unless the profile
  *  names an explicit write rule for it. So an envelope that lets the seat write its working folder gets a write rule for
  *  each of those dirs (the same ones, from the same resolver). One that doesn't, a read-only one, or a dir the envelope
- *  already names keeps what was authored. */
+ *  already names, in any spelling of the same root (`~/…`, a trailing slash), keeps what was authored. */
 export function withSeatGitDirs(permissions: CodexMemberPermissions, gitDirs: readonly string[], cwd: string,
   home = homedir()): CodexMemberPermissions {
   if (!("filesystem" in permissions) || gitDirs.length === 0) return permissions;
   if (flatAccessAt(permissions.filesystem, cwd, cwd, home) !== "write") return permissions;
-  const added = gitDirs.filter((dir) => !Object.hasOwn(permissions.filesystem, dir));
+  const named = new Set(Object.keys(permissions.filesystem).map((key) => authoredRoot(key, cwd, home)).filter((root) => root !== undefined));
+  const added = [...new Set(gitDirs)].filter((dir) => !named.has(resolve(dir)));
   if (added.length === 0) return permissions;
   return { ...permissions, filesystem: { ...permissions.filesystem, ...Object.fromEntries(added.map((dir) => [dir, "write" as const])) } };
+}
+
+/** The envelope a running Codex was launched with, read back from its `permissions=` override: the authored envelope plus
+ *  only write rules for paths it doesn't name (the git dirs withSeatGitDirs adds), so an in-place restart emits the
+ *  override exactly as it runs. Undefined when the override can't be read or the authored choice has changed since, so the
+ *  restart's drift check still reports a real change. */
+export function runningSeatPermissions(authored: CodexFilesystemPermissions, permissionsConfig: string): CodexFilesystemPermissions | undefined {
+  let ran: unknown;
+  try {
+    ran = (parseToml(permissionsConfig) as { permissions?: Record<string, { filesystem?: unknown }> }).permissions?.[CODEX_SEAT_PERMISSION_PROFILE]?.filesystem;
+  } catch { return undefined; }
+  if (!ran || typeof ran !== "object" || Array.isArray(ran)) return undefined;
+  const rules = ran as Record<string, unknown>;
+  for (const [key, access] of Object.entries(authored.filesystem)) if (rules[key] !== access) return undefined;
+  for (const [key, access] of Object.entries(rules)) if (!Object.hasOwn(authored.filesystem, key) && access !== "write") return undefined;
+  const carried: CodexFilesystemPermissions = { ...authored, filesystem: rules as CodexFilesystemPermissions["filesystem"] };
+  return codexFilesystemOverrides(carried)[1] === permissionsConfig ? carried : undefined;
 }
 
 /** The same authored choice reaches launch, both resumes and the status plan. This reports argv, not enforcement. */
