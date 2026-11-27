@@ -1,3 +1,4 @@
+import { isRosterReadyNotice } from "./roster-ready-notice.js";
 import { queueDisplayText, QUEUE_DISPLAY_PREFIX_UNITS } from "./queue-display.js";
 import { RigDeliveryDrainStore } from "./rig-delivery-drain.js";
 import { PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap } from "./queue-wake-ladder.js";
@@ -5906,19 +5907,26 @@ export class QueueRepository {
    *  explicitly holds (blocked) stays, so that hold and its wake are diagnosed as before; so does a row whose tags aren't
    *  a JSON array. Each row carries its blocker and last update, so a hold is shown with what it waits on and its age. */
   listOpenObligations(destinationSession: string, limit: number): Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null; blockedOn: string | null; updatedAt: string }> {
+    if (limit === 0) return [];
     const addresses = this.resolveSessionAddresses(destinationSession);
     const slots = addresses.map(() => "?").join(",");
     const ownPrompt = addresses.flatMap((address) => [`prompt-destination:${address}`, `consumed-prompt-destination:${address}`]);
     const rows = this.db.prepare(
-      `SELECT qitem_id, state, blocked_on, ts_updated${this.hasSummaryColumn ? ", summary" : ""} FROM queue_items
+      `SELECT qitem_id, source_session, state, blocked_on, ts_updated${this.hasSummaryColumn ? ", summary" : ""} FROM queue_items
         WHERE destination_session IN (${slots}) AND state IN ('pending', 'in-progress', 'blocked')
           AND NOT CASE WHEN state != 'blocked' AND json_valid(tags) THEN CASE WHEN json_type(tags) = 'array' THEN
             EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)
             AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value IN (${ownPrompt.map(() => "?").join(",")}))
           ELSE 0 END ELSE 0 END
-        ORDER BY ts_created DESC LIMIT ?`,
-    ).all(...addresses, WAKE_ESCALATION_TAG, ...ownPrompt, limit) as Array<{ qitem_id: string; state: "pending" | "in-progress" | "blocked"; summary?: string | null; blocked_on: string | null; ts_updated: string }>;
-    return rows.map((r) => ({ qitemId: r.qitem_id, state: r.state, summary: r.summary ?? null, blockedOn: r.blocked_on, updatedAt: r.ts_updated }));
+        ORDER BY ts_created DESC`,
+    ).iterate(...addresses, WAKE_ESCALATION_TAG, ...ownPrompt) as IterableIterator<{ qitem_id: string; source_session: string; state: "pending" | "in-progress" | "blocked"; summary?: string | null; blocked_on: string | null; ts_updated: string }>;
+    const result: ReturnType<QueueRepository["listOpenObligations"]> = [];
+    for (const row of rows) {
+      if (isRosterReadyNotice(row)) continue;
+      result.push({ qitemId: row.qitem_id, state: row.state, summary: row.summary ?? null, blockedOn: row.blocked_on, updatedAt: row.ts_updated });
+      if (limit > 0 && result.length >= limit) break;
+    }
+    return result;
   }
 
   list(opts: QueueListOptions & { compact: true }): CompactQueueItem[];

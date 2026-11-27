@@ -1,3 +1,5 @@
+import { isRosterReadyNotice } from "./roster-ready-notice.js";
+import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
 import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { configuredAccount } from "./configured-account.js";
 import { restoreOutcomesByIntendedNode } from "./restore-topology.js";
@@ -1871,8 +1873,23 @@ export function readAssignedWorkBySession(db: Database.Database): Map<string, As
     in_progress_count: number;
     blocked_count: number;
   }>;
+  // Keep ordinary work aggregated in SQLite. Only OpenRig-authored candidates need the shared classifier;
+  // a matching sender alone does not make a row informational.
+  const byDestination = new Map(rows.map(row => [row.destination_session, row]));
+  const candidates = db.prepare(`SELECT qitem_id, source_session, destination_session, state FROM queue_items
+    WHERE state IN ('pending', 'in-progress', 'blocked') AND source_session = ?`)
+    .iterate(OPENRIG_SENDER) as IterableIterator<{ qitem_id: string; source_session: string; destination_session: string; state: string }>;
+  for (const row of candidates) {
+    if (!isRosterReadyNotice(row)) continue;
+    const counts = byDestination.get(row.destination_session)!;
+    counts.assigned_count--;
+    if (row.state === "pending") counts.pending_count--;
+    else if (row.state === "in-progress") counts.in_progress_count--;
+    else counts.blocked_count--;
+  }
   const out = new Map<string, AssignedWorkCounts>();
   for (const r of rows) {
+    if (r.assigned_count === 0) continue;
     const address = physicalSessionName(db, r.destination_session);
     const prior = out.get(address);
     out.set(address, {

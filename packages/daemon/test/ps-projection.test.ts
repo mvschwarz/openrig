@@ -1,3 +1,5 @@
+import { rosterReadyNoticeId } from "../src/domain/roster-ready-notice.js";
+import { OPENRIG_SENDER } from "../src/lib/pane-envelope.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 // #3636 — hoisted importOriginal passthrough: every export stays the real
@@ -497,6 +499,19 @@ describe("PsProjectionService", () => {
       expect(entries[0]!.hasWorkCount).toBe(0);
       // process-alive count unchanged
       expect(entries[0]!.runningCount).toBe(1);
+    });
+
+    it.each(["pending", "in-progress", "blocked"])("keeps roster-ready %s information out of rig ps work totals", state => {
+      const rigId = seedRig("information-only");
+      const nodeId = seedNode(rigId, "dev");
+      seedSession(nodeId, "running");
+      const destination = `tmux-${nodeId}`;
+      db.prepare(`INSERT INTO queue_items (qitem_id, source_session, destination_session, body, state, ts_created, ts_updated)
+        VALUES (?, ?, ?, 'Information only', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
+        .run(rosterReadyNoticeId(rigId, destination), OPENRIG_SENDER, destination, state);
+      expect(ps.getEntries()[0]).toMatchObject({ hasWorkCount: 0, runningCount: 1 });
+      seedPendingQitem(destination);
+      expect(ps.getEntries()[0]).toMatchObject({ hasWorkCount: 1, runningCount: 1 });
     });
 
     it("HG-3 direction B — seat SILENT with queued work: terminalActive=false, hasAssignedWork=true ⇒ activeCount=0, hasWorkCount=1", () => {
