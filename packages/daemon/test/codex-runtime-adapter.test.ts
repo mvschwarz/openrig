@@ -3028,6 +3028,16 @@ describe("a seat's explicit filesystem policy (argv and native-read preflight, n
       expect(restart.ok && restart.core).not.toContain("/other/.git");
       expect(verifyFilesystemPolicy).toHaveBeenCalledWith(expect.objectContaining({ permissions: ranWith }));
     }
+    // #4031 round 3: a write grant removed from the saved envelope since launch isn't carried. The restart emits the saved
+    // envelope fresh, so its permissions override differs from the running one, which is what the drift check compares.
+    const launchedWith = { ...envelope, filesystem: { "/same": "write" as const, "/scratch": "write" as const, "/same/.git": "write" as const } };
+    const removed = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: mockFs(), sleep: async () => {}, codexHome: "/shared-home",
+      verifyFilesystemPolicy: async () => ({ ok: true, verified: true }), resolveGitAddDirs: async () => ["/same/.git"] });
+    const afterRemoval = await removed.buildResumeCommand({ ...makeBinding("/same"), codexPermissions: envelope },
+      { name: "dev-a@test-rig", resumeToken: "thread-A", running: running(codexFilesystemOverrides(launchedWith)[1]!) });
+    expect(afterRemoval.ok && afterRemoval.core).not.toContain("/scratch");
+    expect(afterRemoval.ok && afterRemoval.core).toContain(codexFilesystemOverrides(ranWith)[1]!);
+    expect(afterRemoval.ok && afterRemoval.core).not.toContain(codexFilesystemOverrides(launchedWith)[1]!);
     // The saved choice changed since launch: the restart emits the new envelope (with its git dir), not the running one.
     const changed = { ...envelope, filesystem: { ...envelope.filesystem, "/same/private": "deny" as const } };
     const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: mockFs(), sleep: async () => {}, codexHome: "/shared-home",

@@ -943,15 +943,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   /** The seat's codex_permissions as its launch emits them: a filesystem envelope that lets the seat write its working
-   *  folder also names its git dirs as writable (withSeatGitDirs), from the resolver plain launches use. A running Codex
-   *  keeps the override it runs with when that is still the authored envelope (plus only those generated rules), as a
-   *  plain launch's add-dirs carry over, so an in-place restart neither resolves them again nor drifts; a changed saved
-   *  choice is emitted fresh, and the restart's drift check reports it. */
+   *  folder also names its git dirs as writable (withSeatGitDirs), from the resolver plain launches use. On an in-place
+   *  restart a running Codex keeps the override it runs with when that is the saved envelope plus only git-dir write
+   *  rules (runningSeatPermissions), as a plain launch's add-dirs carry over, so a resolver that now fails or differs
+   *  doesn't change the relaunch. Any other difference, a removed write grant included, is emitted fresh from the saved
+   *  envelope, and the restart's drift check reports it. */
   private async seatPermissions(binding: NodeBinding, running?: RunningCodexLaunch): Promise<CodexMemberPermissions | undefined> {
     const authored = binding.codexPermissions;
     if (!authored || !("filesystem" in authored)) return authored;
-    const ran = running?.permissionsConfig !== undefined ? runningSeatPermissions(authored, running.permissionsConfig) : undefined;
-    return ran ?? withSeatGitDirs(authored, await this.resolveGitAddDirs(binding.cwd), binding.cwd);
+    const gitDirs = await this.resolveGitAddDirs(binding.cwd);
+    const ran = running?.permissionsConfig !== undefined ? runningSeatPermissions(authored, running.permissionsConfig, gitDirs) : undefined;
+    return ran ?? withSeatGitDirs(authored, gitDirs, binding.cwd);
   }
 
   /** The native-read preflight of the policy this launch emits (`permissions`, when the caller has it). */

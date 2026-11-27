@@ -155,11 +155,20 @@ export function withSeatGitDirs(permissions: CodexMemberPermissions, gitDirs: re
   return { ...permissions, filesystem: { ...permissions.filesystem, ...Object.fromEntries(added.map((dir) => [dir, "write" as const])) } };
 }
 
+/** Git metadata by its path: a `.git` folder or a `<name>.git` repository, or anything inside a `.git` folder (a linked
+ *  worktree's own git dir). */
+function isGitMetadataPath(path: string): boolean {
+  const resolved = resolve(path);
+  return resolved.endsWith(".git") || resolved.includes(`${sep}.git${sep}`);
+}
+
 /** The envelope a running Codex was launched with, read back from its `permissions=` override: the authored envelope plus
- *  only write rules for paths it doesn't name (the git dirs withSeatGitDirs adds), so an in-place restart emits the
- *  override exactly as it runs. Undefined when the override can't be read or the authored choice has changed since, so the
- *  restart's drift check still reports a real change. */
-export function runningSeatPermissions(authored: CodexFilesystemPermissions, permissionsConfig: string): CodexFilesystemPermissions | undefined {
+ *  only the git-dir write rules withSeatGitDirs adds (a path the git-dir resolver gives now, `gitDirs`, or git metadata by
+ *  its path, so a failed resolver doesn't change the relaunch), so an in-place restart emits the override exactly as it
+ *  runs. Undefined when the override can't be read or the authored choice has changed since, a removed write grant
+ *  included, so the restart's drift check still reports a real change. */
+export function runningSeatPermissions(authored: CodexFilesystemPermissions, permissionsConfig: string,
+  gitDirs: readonly string[] = []): CodexFilesystemPermissions | undefined {
   let ran: unknown;
   try {
     ran = (parseToml(permissionsConfig) as { permissions?: Record<string, { filesystem?: unknown }> }).permissions?.[CODEX_SEAT_PERMISSION_PROFILE]?.filesystem;
@@ -167,7 +176,11 @@ export function runningSeatPermissions(authored: CodexFilesystemPermissions, per
   if (!ran || typeof ran !== "object" || Array.isArray(ran)) return undefined;
   const rules = ran as Record<string, unknown>;
   for (const [key, access] of Object.entries(authored.filesystem)) if (rules[key] !== access) return undefined;
-  for (const [key, access] of Object.entries(rules)) if (!Object.hasOwn(authored.filesystem, key) && access !== "write") return undefined;
+  const resolved = new Set(gitDirs.map((dir) => resolve(dir)));
+  for (const [key, access] of Object.entries(rules)) {
+    if (Object.hasOwn(authored.filesystem, key)) continue;
+    if (access !== "write" || !(resolved.has(resolve(key)) || isGitMetadataPath(key))) return undefined;
+  }
   const carried: CodexFilesystemPermissions = { ...authored, filesystem: rules as CodexFilesystemPermissions["filesystem"] };
   return codexFilesystemOverrides(carried)[1] === permissionsConfig ? carried : undefined;
 }

@@ -648,11 +648,21 @@ describe("runningSeatPermissions: the envelope a running Codex was launched with
     expect(config(carried!)).toBe(config(withGit));
   });
 
+  it("carries git-dir write rules by the resolver's current answer or by their git-metadata path, so a failed resolver keeps them", () => {
+    const linked = envelope({ ":workspace_roots": "write", ":minimal": "read", "/repo/.git/worktrees/side": "write", "/repo/.git": "write" });
+    expect(runningSeatPermissions(authored, config(linked), [])).toEqual(linked);
+    const named = envelope({ ":workspace_roots": "write", ":minimal": "read", "/outside/repo-metadata": "write" });
+    expect(runningSeatPermissions(authored, config(named), ["/outside/repo-metadata"])).toEqual(named);
+    expect(runningSeatPermissions(authored, config(named), [])).toBeUndefined();
+  });
+
   it("is undefined when the saved choice changed since launch, an added rule isn't write, or the override can't be read", () => {
     expect(runningSeatPermissions(authored, config(envelope({ ":workspace_roots": "read", ":minimal": "read" })))).toBeUndefined();
     expect(runningSeatPermissions(authored, config(envelope({ ":workspace_roots": "write", ":minimal": "read", "/secret": "deny" })))).toBeUndefined();
     expect(runningSeatPermissions(authored, config(envelope({ ":workspace_roots": "write", ":minimal": "read" }, true)))).toBeUndefined();
     expect(runningSeatPermissions(authored, "permissions={not toml")).toBeUndefined();
+    // #4031 round 3: a write grant removed from the saved envelope since launch isn't a git-dir rule, so it isn't carried.
+    expect(runningSeatPermissions(authored, config(envelope({ ":workspace_roots": "write", ":minimal": "read", "/scratch": "write" })), ["/repo/.git"])).toBeUndefined();
     expect(runningSeatPermissions(authored, 'permissions={"other"={filesystem={}}}')).toBeUndefined();
   });
 });
