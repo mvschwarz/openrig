@@ -3,12 +3,30 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { resolveCurrentSessionAddress } from "./session-registry.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import { verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
+import type { ArbitratedSeatState } from "./activity-taxonomy.js";
+import type { StructuralObservation } from "./seat-structural-activity-service.js";
 
 export interface HookReviewObservation {
   destination: string;
   episode: string;
   state: "blocked" | "clear" | "unknown";
   observedAt: string;
+}
+
+/** Existing cached evidence only; candidate selection never captures a pane. */
+export function cachedHookReviewCandidates(deps: {
+  db: Database.Database;
+  getSeatState?: (nodeId: string) => Pick<ArbitratedSeatState, "needsInput"> | null | undefined;
+  getStructuralActivity?: (sessionName: string) => Pick<StructuralObservation, "reason"> | null | undefined;
+}): string[] {
+  const rows = deps.db.prepare(`SELECT n.id, b.tmux_session FROM nodes n JOIN rigs r ON r.id = n.rig_id
+    JOIN bindings b ON b.node_id = n.id WHERE n.runtime = 'codex' AND r.archived_at IS NULL
+    AND b.attachment_type = 'tmux' AND b.tmux_session IS NOT NULL`).all() as Array<{ id: string; tmux_session: string }>;
+  return rows.filter(row => {
+    const state = deps.getSeatState?.(row.id);
+    return (state?.needsInput.count ?? 0) > 0 && state?.needsInput.reason === "hook_trust_gate"
+      || deps.getStructuralActivity?.(row.tmux_session)?.reason === "hook_trust_gate";
+  }).map(row => row.tmux_session);
 }
 
 /** Read-only, visible-screen evidence for managed Codex seats. No stored
@@ -18,8 +36,10 @@ export function makeKernelHookReviewReader(deps: {
   tmux: Pick<TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen" | "getPanePid">;
   listProcesses?: NativeProcessLister;
   now?: () => Date;
-}): () => Promise<HookReviewObservation[]> {
-  return async () => {
+}): (destinations?: readonly string[]) => Promise<HookReviewObservation[]> {
+  return async destinations => {
+    if (destinations?.length === 0) return [];
+    const selection = destinations ? ` AND b.tmux_session IN (${destinations.map(() => "?").join(",")})` : "";
     const rows = deps.db.prepare(`SELECT b.id AS bindingId, b.node_id AS nodeId, b.tmux_session AS destination,
         b.tmux_pane AS pane, s.id AS sessionId
       FROM bindings b JOIN nodes n ON n.id = b.node_id JOIN rigs r ON r.id = n.rig_id
@@ -27,7 +47,7 @@ export function makeKernelHookReviewReader(deps: {
       WHERE n.runtime = 'codex' AND r.archived_at IS NULL AND b.attachment_type = 'tmux'
         AND b.tmux_pane IS NOT NULL AND s.id = (SELECT latest.id FROM sessions latest
           WHERE latest.node_id = n.id ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
-        AND s.status NOT IN ('stopped','exited','detached','superseded')`).all() as Array<{
+        AND s.status NOT IN ('stopped','exited','detached','superseded')${selection}`).all(...(destinations ?? [])) as Array<{
           bindingId: string; nodeId: string; destination: string; pane: string; sessionId: string;
         }>;
     const observations: HookReviewObservation[] = [];

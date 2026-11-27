@@ -1,5 +1,5 @@
 import { beginStartupPhase, recordStartupPhase } from "./domain/startup-phase-timing.js";
-import { makeKernelHookReviewReader } from "./domain/kernel-hook-review.js";
+import { cachedHookReviewCandidates, makeKernelHookReviewReader } from "./domain/kernel-hook-review.js";
 import { serve, type ServerType } from "@hono/node-server";
 import fs from "node:fs";
 import path from "node:path";
@@ -230,6 +230,7 @@ export function startWakeLadderScheduler(deps: {
   usageLimitJitterSeconds?: number;
   seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">
     & Partial<Pick<import("./domain/seat-activity-service.js").SeatActivityService, "codexPermissionState">>;
+  seatStructuralActivityService?: Pick<import("./domain/seat-structural-activity-service.js").SeatStructuralActivityService, "getStructuralActivity">;
   agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">
     & Partial<Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "findPermissionPromptStart">>;
   tmuxAdapter?: Pick<import("./adapters/tmux.js").TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen" | "getPanePid">;
@@ -258,7 +259,12 @@ export function startWakeLadderScheduler(deps: {
       queueRepo,
       status,
       ...(deliveryEngine ? { deliveryEngine } : {}),
-      ...(deps.tmuxAdapter ? { readHookReviews: makeKernelHookReviewReader({ db, tmux: deps.tmuxAdapter }) } : {}),
+      ...(deps.tmuxAdapter ? {
+        readHookReviews: makeKernelHookReviewReader({ db, tmux: deps.tmuxAdapter }),
+        readHookReviewCandidates: () => cachedHookReviewCandidates({ db,
+          getSeatState: nodeId => deps.seatActivityService?.getSeatState(nodeId),
+          getStructuralActivity: session => deps.seatStructuralActivityService?.getStructuralActivity(session) }),
+      } : {}),
       readPermissionPrompts: makePermissionPromptReader({ db,
         getLatestHook: (sessionName, runtime) => deps.agentActivityStore?.getLatestForNode({ sessionName,
           order: runtime === "claude-code" ? "source" : "arrival" }),

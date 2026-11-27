@@ -157,7 +157,7 @@ keep their existing readiness handling. Claude's persistent "Not logged in" foot
 configured gateway may authenticate its requests.
 
 A managed Codex seat at its active "Hooks need review" menu reports `needs-input` with reason `hook_trust_gate`.
-`rig seat status <seat>` and `rig ps --nodes` show the question, and the existing prompt escalation includes the command
+`rig seat status <seat>` and `rig ps --nodes` show that reason, and the existing prompt escalation includes the command
 to attach to that seat's terminal. Review the hooks in Codex there; OpenRig does not choose or approve them for you.
 Old hook-review text above a later conversation prompt is not an active review menu.
 
