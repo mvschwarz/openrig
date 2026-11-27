@@ -112,6 +112,28 @@ describe("ViewProjector (PL-004 Phase B; L5 read-only projections)", () => {
     expect(result.rows[0]!.state).toBe("blocked");
   });
 
+  it("show held lists only active rows, even when a closed row kept a stale blocked_on (#4006)", async () => {
+    const seed = async (body: string, state: string) => {
+      const item = await queueRepo.create({
+        sourceSession: "alice@product-lab",
+        destinationSession: "delivery@product-lab",
+        body,
+        nudge: false,
+      });
+      db.prepare("UPDATE queue_items SET state = ?, blocked_on = ? WHERE qitem_id = ?")
+        .run(state, "dep@product-lab", item.qitemId);
+    };
+    await seed("finished work", "done");
+    await seed("handed-off work", "handed-off");
+    await seed("canceled work", "canceled");
+    await seed("denied work", "denied");
+    await seed("failed work", "failed");
+    await seed("waiting work", "in-progress");
+    await seed("queued work", "pending");
+    const result = projector.show("held");
+    expect(result.rows.map((r) => r.state).sort()).toEqual(["blocked", "in-progress", "pending"]);
+  });
+
   it("show escalations returns qitems with closure_reason='escalation'", () => {
     // No escalations in fixture; should return 0.
     const result = projector.show("escalations");

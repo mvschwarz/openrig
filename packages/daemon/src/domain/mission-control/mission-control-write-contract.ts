@@ -638,9 +638,10 @@ export class MissionControlWriteContract {
           { register, afterCommit: wake => { afterCommit.push(wake); } });
           input.appSubmission?.checkpoint(receipt.item);
           return this.recordAnswer(input, before, input.decision ?? input.optionId ?? "", {
-            outcome: receipt.unplaced || receipt.unanswered.length ? "recorded" : "answered",
+            outcome: receipt.historyOnly || receipt.unplaced || receipt.unanswered.length ? "recorded" : "answered",
             unanswered: (ask.humanQuestions ?? []).filter(q => receipt.unanswered.includes(q.id)).map(q => q.question),
-            ...(receipt.unplaced ? { message: `Reply returned to ${ask.sourceSession} as ${receipt.replyQitemId} without changing any answer.` }
+            ...(receipt.historyOnly ? { message: "Answer retained in transfer history; no reply was sent." }
+              : receipt.unplaced ? { message: `Reply returned to ${ask.sourceSession} as ${receipt.replyQitemId} without changing any answer.` }
               : receipt.corrected ? { message: `Direct correction returned to ${ask.sourceSession} as ${receipt.replyQitemId}. The relay remains in history.` } : {}),
           }, receipt.replyQitemId, undefined, register);
         });

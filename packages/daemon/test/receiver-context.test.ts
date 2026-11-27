@@ -8,6 +8,14 @@ describe("what a receiving agent reads to act on a person's answer", () => {
     expect(route).toContain("A row to human@host names no person: it asks no one, waits on Steering and in the Feed, and OpenRig reports it as undeliverable, so don't ask them back there.");
   });
 
+  it("asks back on what the caller names, and on an unclear or conditional answer by default", () => {
+    expect(askBackRoute("sarah@external", "human@host", "pairing code 1")).toMatch(/^If their answer is unclear or conditional, ask them back/);
+    const permission = askBackRoute("sarah@external", "human@host", "request q-1", "you can't tell whether this exact action meets their condition");
+    expect(permission).toMatch(/^If you can't tell whether this exact action meets their condition, ask them back with an ask to sarah@external/);
+    expect(permission).not.toContain("unclear or conditional");
+    expect(askBackRoute(null, "human@host", "request q-1", "you can't tell")).toMatch(/^If you can't tell, OpenRig can't resolve a registered person/);
+  });
+
   it("with no registered person to ask back: says so once, keeps the request and the answer waiting, and names the ways through", () => {
     const route = askBackRoute(null, "human@host", "request q-1");
     expect(route).toContain("OpenRig can't resolve a registered person to ask back about request q-1: nobody registered matches, or the person registry couldn't be read (rig gateway human list shows which).");

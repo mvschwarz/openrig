@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
@@ -48,6 +49,8 @@ function spellings(dir: string): string[] {
   }
   return [...new Set([path.resolve(dir), real])];
 }
+const bundledSpecReads = spellings(path.resolve(fileURLToPath(new URL("../specs/", import.meta.url))))
+  .map(root => `Read(/${root}/**/*.md)`);
 function settings(command: string) {
   // No provider executable: a private shell function records its arguments with NUL separators.
   const args = execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\0' "$@"; }; ${command}`], { encoding: "utf8" }).split("\0");
@@ -58,13 +61,14 @@ function settings(command: string) {
 it.each([
   { kind: "fresh", managed: false }, { kind: "fork", managed: false }, { kind: "resume", managed: false },
   { kind: "fresh", managed: true }, { kind: "fork", managed: true }, { kind: "resume", managed: true },
-])("$kind, explicit mode=$managed: command grants only the canonical seat files and launched conversation packet", async ({ kind, managed }) => {
+])("$kind, explicit mode=$managed: command grants packaged specs, canonical seat files and launched conversation packet", async ({ kind, managed }) => {
   const f = fixture(managed);
   expect((await f.adapter.launchHarness(f.binding, { name: "owner@rig",
     ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: PARENT } } : {}),
     ...(kind === "resume" ? { resumeToken: CHILD } : {}) })).ok).toBe(true);
   const allow = settings(f.commands[0]!).permissions.allow as string[];
   expect(allow.filter(rule => rule.startsWith("Read(") && rule !== "Read(./**)")).toEqual([
+    ...bundledSpecReads,
     ...spellings(f.home).flatMap(home => [
       `Read(/${home}/compaction/restore-pending/owner@rig.json)`,
       `Read(/${home}/plugins/openrig-core/skills/refocusing/SKILL.md)`,
@@ -135,8 +139,8 @@ it("grants each restore file both where it's named and where it resolves, when a
   }
   expect(allow).toContain(`Read(/${root}/packets/not-yet/${CHILD}-*/restore-instructions.md)`);
   expect(allow).toContain(`Read(/${root}/real-packets/not-yet/${CHILD}-*/restore-instructions.md)`);
-  // Every grant stays inside the fixture at either spelling.
-  expect(allow.every(rule => rule.startsWith(`Read(/${root}/`))).toBe(true);
+  // Every other grant stays inside the fixture at either spelling.
+  expect(allow.every(rule => bundledSpecReads.includes(rule) || rule.startsWith(`Read(/${root}/`))).toBe(true);
 });
 
 it("grants the generic post-compact-extra.md and the configured extra file and preparation root the restore reads", async () => {
@@ -192,9 +196,9 @@ it.each([
   expect(named.length).toBeGreaterThanOrEqual(4);
   // Claude Code needs both the path read and the file it resolves to.
   expect(named.flatMap(spellings).filter(p => !allow.some(rule => ruleRegex(rule).test(p)))).toEqual([]);
-  // Exact files only: the link's target and nothing beside it, and nothing outside the fixture but the packet root.
+  // Apart from packaged Markdown, exact files only: the link target, not its siblings, plus the packet root.
   expect(allow.filter(rule => rule.startsWith(`Read(/${root}/shared/`))).toEqual(link ? [`Read(/${root}/shared/context.md)`] : []);
-  expect(allow.filter(rule => !rule.startsWith(`Read(/${root}/`) && !rule.includes("/claude-compaction-restore/"))).toEqual([]);
+  expect(allow.filter(rule => !rule.startsWith(`Read(/${root}/`) && !rule.includes("/claude-compaction-restore/") && !bundledSpecReads.includes(rule))).toEqual([]);
 });
 
 it("with no packet root set, the request and the grant name the OpenRig home's runtime folder, and the grant keeps the previous root for this session only", async () => {
@@ -312,4 +316,18 @@ it("names no packet folder for a launch whose grant has none: a legacy session n
   writeFileSync(file, granted[1]!);
   expect(compactionPacketLaunchEnv(["--settings", file], { openrigHome: f.home, nativeSessionId: CHILD })).toEqual({});
   expect(compactionPacketLaunchEnv([], { openrigHome: f.home, nativeSessionId: CHILD })).toEqual({});
+});
+
+it("grants reads of packaged Markdown specs, including the role a restore map names, without granting writes or other roots", async () => {
+  const { withManagedRestoreReads } = await import("../src/domain/managed-restore-read-access.js");
+  const f = fixture();
+  const specs = path.resolve(fileURLToPath(new URL("../specs/", import.meta.url)));
+  const prior = { permissions: { deny: [`Read(/${specs}/agents/**/guidance/role.md)`], ask: ["Read(//elsewhere/**)"] } };
+  const result = JSON.parse(withManagedRestoreReads(["--settings", JSON.stringify(prior)],
+    { openrigHome: f.home, session: "owner@rig", cwd: f.cwd, nativeSessionId: CHILD })[1]!);
+  for (const root of spellings(specs)) expect(result.permissions.allow).toContain(`Read(/${root}/**/*.md)`);
+  expect(result.permissions.deny).toEqual(prior.permissions.deny);
+  expect(result.permissions.ask).toEqual(prior.permissions.ask);
+  expect(result.permissions.allow).not.toContain("Read");
+  expect(result.permissions.allow.some((rule: string) => /^(Edit|Write)\(/.test(rule))).toBe(false);
 });

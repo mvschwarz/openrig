@@ -44,7 +44,7 @@ describe("rig terminal open: when herdr-app is the target", () => {
   });
 
   it("probing an ambient herdr-app window: answering opens in herdr-app; unanswering or unconfirmed status falls back to desktop with an accurate note; explicit --provider herdr-app does not fall back", async () => {
-    const runOpen = async (args: string[], env: NodeJS.ProcessEnv, probeReply: { status: number; available?: boolean }) => {
+    const runOpen = async (args: string[], env: NodeJS.ProcessEnv, probeReply: { status: number; available?: boolean; placement?: "core"; openReply?: Record<string, unknown> }) => {
       const posts: Array<{ path: string; body: unknown }> = [];
       const gets: string[] = [];
       const logs: string[] = [];
@@ -58,7 +58,7 @@ describe("rig terminal open: when herdr-app is the target", () => {
           if (path.startsWith("/api/terminal/status?provider=herdr-app")) {
             return probeReply.available === undefined
               ? { status: probeReply.status, data: { error: "not_found" } }
-              : { status: probeReply.status, data: { providers: [{ name: "herdr-app", status: { available: probeReply.available, launch: { socketPath: "/apps/h/herdr-app.sock" } } }] } };
+              : { status: probeReply.status, data: { providers: [{ name: "herdr-app", status: { available: probeReply.available, ...(probeReply.placement ? { placement: probeReply.placement } : {}), launch: { socketPath: "/apps/h/herdr-app.sock" } } }] } };
           }
           if (path === "/api/terminal/status" || path.startsWith("/api/terminal/status?provider=herdr")) {
             return {
@@ -94,6 +94,7 @@ describe("rig terminal open: when herdr-app is the target", () => {
           if (path === "/api/terminal/follow") {
             return { status: 200, data: { provider: "herdr", ok: true, workspaceId: "ws-1", opened: ["dev.build@demo"], absent: [], degraded: [], pages: 1 } };
           }
+          if (b.provider === "herdr-app" && probeReply.openReply) return { status: 200, data: probeReply.openReply };
           if (b.provider === "herdr-app" && probeReply.available !== true) {
             return { status: 200, data: { provider: "herdr-app", ok: false, code: "herdr_app_unavailable", error: "herdr-app is not answering", opened: [], absent: [], degraded: [], pages: 0 } };
           }
@@ -176,5 +177,20 @@ describe("rig terminal open: when herdr-app is the target", () => {
     expect(explicitWindow.gets.some((g) => g.startsWith("/api/terminal/status?provider=herdr-app"))).toBe(false);
     expect(explicitWindow.posts.some((p) => (p.body as { provider?: string })?.provider === "herdr-app")).toBe(false);
     expect(JSON.parse(explicitWindow.logs[0]!)).toMatchObject({ ok: true, provider: "herdr" });
+
+    // 8. Ambient + core placement (no window answers here; this machine's core does) -> the desktop fallback, as for any
+    //    window that isn't answering: this terminal's own window isn't one a view could open in
+    const coreAmbient = await runOpen(["rig:demo", "--json"], inApp, { status: 200, available: true, placement: "core" });
+    expect(coreAmbient.posts.some((p) => (p.body as { provider?: string })?.provider === "herdr-app")).toBe(false);
+    expect(coreAmbient.errs[0]).toContain("herdr-app's socket exists at /apps/h/herdr-app.sock but it isn't answering; opening a desktop window instead.");
+
+    // 9. Explicit --provider herdr-app placed in core: the result says placed, never seen, and the open succeeds
+    process.exitCode = undefined;
+    const placed = await runOpen(["rig:demo", "--provider", "herdr-app"], inApp, { status: 200, available: true, openReply: {
+      provider: "herdr-app", ok: true, opened: ["dev.build@demo"], remote: [], absent: [], degraded: [], pages: 1, space: { id: "rv-1", label: "demo" },
+      placement: { mode: "core", visibility: "unconfirmed", core: { session: "default" }, viewId: "rv-1", host: "box" } } });
+    expect(placed.logs.join("\n")).toContain("Placed in herdr-core on box as view rv-1. Any herdr-app connected to box shows it; OpenRig can't see that window.");
+    expect(placed.logs.join("\n")).not.toContain("Prepared");
+    expect(process.exitCode).toBeUndefined();
   });
 });

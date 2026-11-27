@@ -1,3 +1,4 @@
+import { contextConfiguredBudgetSchema } from "./migrations/200_context_configured_budget.js";
 import { networkBindingProvidersSchema } from "./migrations/191_network_binding_providers.js";
 import { nodeKeepAliveSchema } from "./migrations/181_node_keep_alive.js";
 import { sessionStopAttemptSchema } from "./migrations/180_session_stop_attempt.js";
@@ -9,10 +10,12 @@ import { queueRelayedAnswersSchema } from "./migrations/186_queue_relayed_answer
 import { queueTransferStagingSchema } from "./migrations/190_queue_transfer_staging.js";
 import { seatReapStateSchema } from "./migrations/191_seat_reap_state.js";
 import { seatColdStartStandbyStopSchema } from "./migrations/200_seat_cold_start_standby_stop.js";
+import { queueTransferActivationSchema } from "./migrations/191_queue_transfer_activation.js";
 import { workflowRunTitleSchema } from "./migrations/194_workflow_run_title.js";
 import { workflowStartOperationsSchema } from "./migrations/195_workflow_start_operations.js";
 import { queueItemEvidenceRefRootsSchema } from "./migrations/196_queue_item_evidence_ref_roots.js";
 import { queueItemsNativePermissionIndexSchema } from "./migrations/199_queue_items_native_permission_index.js";
+import { sessionsEarlierHandoverOriginSchema } from "./migrations/200_sessions_earlier_handover_origin.js";
 import { queueItemsBlockedOnIndexSchema } from "./migrations/182_queue_items_blocked_on_index.js";
 import { queueItemsScanIndexesSchema } from "./migrations/183_queue_items_scan_indexes.js";
 import { providerAccountRefsSchema } from "./migrations/187_provider_account_refs.js";
@@ -398,10 +401,16 @@ export const ALL_MIGRATIONS: Migration[] = [
   seatReapStateSchema,
   communityHarnessRuntimeSwitchesSchema,
   networkBindingProvidersSchema,
+  queueTransferActivationSchema,
   workflowRunTitleSchema,
   workflowStartOperationsSchema,
   networkRequestsSchema,
   queueItemEvidenceRefRootsSchema,
   queueItemsNativePermissionIndexSchema,
+<<<<<<< HEAD
   seatColdStartStandbyStopSchema,
+=======
+  contextConfiguredBudgetSchema,
+  sessionsEarlierHandoverOriginSchema,
+>>>>>>> a6d72c5159edd344f9ffc2b7f0ddfd681245c8eb
 ];

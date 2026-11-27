@@ -36,7 +36,7 @@ import { declaredCapabilities, readSendOutcome, type WrittenFact } from "./conne
 import { DraftAwareDelivery, type GuardedDeliverySummary, type QueueWakeFacts } from "./draft-aware-delivery.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
-import { communityHarnessOf } from "./built-in-runtimes.js";
+import { communityHarnessOf, isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 import { claudeResumeRotation, sessionCommunityHarnessSelect, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter, TmuxResult } from "../adapters/tmux.js";
 import { tmuxUnsetWindowSizeCommand } from "../adapters/tmux-server.js";
@@ -233,6 +233,18 @@ function trimPaneLines(paneContent: string): string[] {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+}
+
+/** Where a line-mode community harness is asking now. It prints a numbered dialog, the answer and more output into its
+ *  scrollback, then its next empty prompt below them, so, as #2520 reads Claude's empty input box, a later empty prompt
+ *  line makes everything above it history. Only an empty one: a prompt glyph with text after it can be a selection list's
+ *  own highlighted row (`❯ Yes` under its question), and a draft can't be told from one. With no later empty prompt in
+ *  view the whole window counts, as before. Claude and Codex keep their own current-dialog readers: a live Codex choice
+ *  can sit above its composer. */
+function currentPromptRegion(lines: string[], runtime: string | null | undefined): string[] {
+  if (!isCommunityHarnessRuntime(runtime)) return lines;
+  const prompt = lines.map(line => COMPOSER_EMPTY_PATTERN.test(line)).lastIndexOf(true);
+  return prompt < 0 ? lines : lines.slice(prompt + 1);
 }
 
 function truncateEvidence(text: string): string {
@@ -843,7 +855,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     !!claudeComposer.liveStatus && CLAUDE_LIVE_STATUS_PATTERN.test(claudeComposer.liveStatus);
   // Wider window for prompt SIGNATURES so a tall footer can't push a real prompt out of view (see
   // PROMPT_SCAN_LINES). The generic activity checks below keep the tighter 8-line window.
-  const promptScanLines = historyAboveInput ? [] : lastNonBlank.slice(-PROMPT_SCAN_LINES);
+  const promptScanLines = historyAboveInput ? [] : currentPromptRegion(lastNonBlank.slice(-PROMPT_SCAN_LINES), options.runtime);
   const trailingNonBlank = lastNonBlank.slice(-3);
   const lastLine = lastNonBlank.at(-1) ?? "";
   const idlePromptLine = trailingNonBlank.find((line) =>
@@ -2059,10 +2071,9 @@ export interface SendOpts {
   /** Marked urgent, and by whom (the authenticated sender, or the queue item's source). A seat's interruption level lets an
    *  urgent message type; it's shown on delivery. */
   urgent?: { by: string };
-  /** Internal, for a combined queue wake: called under the seat's lease, where delivery is decided (`held` is that
-   *  decision), with how the seat's level would treat each input now. It returns the members that still go with this send:
-   *  their text and outbox ids. Never accepted from HTTP. */
-  recheckMembers?: (holds: (input: AdmissionInput) => boolean, held: boolean) => { text: string; outboxIds: string[] };
+  /** Recheck committed wake members under the seat lease against the current admission decision. False sends nothing. */
+  recheckMembers?: (holds: (input: AdmissionInput) => boolean, held: boolean) => { text: string; outboxIds: string[] } | false;
+  notificationCurrent?: () => boolean;
   /** Internal observation of a completed input effect; never a permission callback. A paste reports the exact text it
    *  wrote, for delivery evidence. */
   onInputEffect?: (phase: "pasted" | "submitted", written?: { text: string }) => void;
@@ -2461,11 +2472,14 @@ export class SessionTransport {
       (session, text, opts) => this.sendUnguarded(session, text, opts));
   }
 
-  configureGuardedWakes(applicable: (entries: readonly QueueWakeFacts[]) => boolean): void {
+  configureGuardedWakes(applicable: (entries: readonly QueueWakeFacts[]) => boolean, fenced?: (qitemId: string) => boolean): void {
     this.guardedDelivery?.configureWakes(applicable);
     // The hook bridge checks the same predicate before it queues an automatic wake and before it hands one over.
     this.queueWakeApplicable = applicable;
-    if (this.hookBridge) this.hookBridge.wakeApplicable = applicable;
+    if (this.hookBridge) {
+      this.hookBridge.wakeApplicable = applicable;
+      this.hookBridge.wakeFenced = fenced;
+    }
   }
 
   attachRuntimeAdapters(adapters: Record<string, TransportReadinessChecker>): void {
@@ -3167,6 +3181,8 @@ export class SessionTransport {
     const saved = opts?.hookBridgeFallback?.admission;
     const admission: AdmissionInput = saved ? { source: saved.source, urgent: saved.urgent, override: false }
       : { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent, override: opts?.dangerouslyInteract === true };
+    const superseded = (): SendResult => ({ ok: false, sessionName, sent: false, inputPhase: "not_reached",
+      reason: "draft_wake_superseded", error: "The queue notification is no longer applicable; no input written." });
     if (!guard) {
       try {
         const nodeId = this.getSessionMeta(sessionName).nodeId;
@@ -3176,7 +3192,10 @@ export class SessionTransport {
       }
       // No guard, so no recorded delivery to read back: a caller already gone ends the send here.
       if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
-      const result = await this.sendUnguarded(sessionName, text, opts);
+      const members = opts?.recheckMembers?.(() => false, false);
+      if (members === false || opts?.notificationCurrent?.() === false) return superseded();
+      const result = await this.sendUnguarded(sessionName, members?.text ?? text,
+        members ? { ...opts, committedOutboxIds: members.outboxIds } : opts);
       if (result.ok && result.sent !== false) {
         await this.reconcileStartupReadiness(sessionName).catch(() => {});
       }
@@ -3240,6 +3259,7 @@ export class SessionTransport {
         const taken = this.takeFromHookBridge(sessionName, ids, opts);
         if (taken) return taken;
         const members = recheck(false);
+        if (members === false || opts?.notificationCurrent?.() === false) return superseded();
         const memberText = members?.text ?? text;
         const memberOpts = members ? { ...sendOpts, committedOutboxIds: members.outboxIds } : sendOpts;
         const currentIds = memberOpts?.committedOutboxIds ?? ids;
@@ -3316,6 +3336,7 @@ export class SessionTransport {
         const taken = this.takeFromHookBridge(sessionName, ids, opts);
         if (taken) return taken;
         const members = recheck(true);
+        if (members === false || opts?.notificationCurrent?.() === false) return superseded();
         if (members) ids = members.outboxIds;
         const route = inputRoute(target.nodeId);
         if (opts?.nativeWake && route !== "native")

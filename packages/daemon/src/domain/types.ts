@@ -1850,6 +1850,13 @@ export type ContextUnknownReason =
   | "stale_generation"
   | "no_data";
 
+/** Display-only configured budget. This is not an observed native compaction trigger. */
+export interface ConfiguredContextBudget {
+  tokens: number;
+  usedPercentage: number | null;
+  source: "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+}
+
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
@@ -1864,6 +1871,7 @@ export interface ContextUsage {
   totalInputTokens: number | null;
   totalOutputTokens: number | null;
   currentUsage: string | null;
+  configuredBudget?: ConfiguredContextBudget | null;
   transcriptPath: string | null;
   sessionId: string | null;
   sessionName: string | null;

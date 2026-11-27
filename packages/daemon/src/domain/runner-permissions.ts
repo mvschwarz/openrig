@@ -68,7 +68,7 @@ const CALL_TAG = "permission-call:";
 const ACTOR_TAG = "permission-actor:";
 /** Until when the harness's hook takes an answer here; after it (and a grace), an open native ask is over. */
 const ANSWER_BY_TAG = "permission-answer-by:";
-/** Which owner source a native ask went to: chosen-person, return-route or default-person. */
+/** Which owner source a native ask went to: chosen-person or return-route (an ask made before 0.7.25 can say default-person). */
 const ASKED_TAG = "permission-asked:";
 /** Each option a native ask offers. An ask to a conversation can't carry questions (only a person's ask does), so its
  *  options travel as these. */
@@ -578,9 +578,10 @@ export class RunnerPermissions {
   }
 
   /** Who answers a native prompt: the person chosen for the seat (`rig seat set-permissions-to`), else the return route of
-   *  the work the seat is running (the person's own conversation; `seatReturnRoute`), else the default person. Nobody, and
-   *  nothing is asked. */
-  private nativeOwner(seat: RunnerPermissionSeat): { ok: true; address: string; source: "chosen-person" | "return-route" | "default-person"; why: string }
+   *  the work the seat is running (the person's own conversation; `seatReturnRoute`). With neither, nothing is asked: the
+   *  default person isn't asked by implication, since an open ask would hold back the seat's usual prompt escalation (its
+   *  prompt alert and routed relay). A runner's request still goes to the default person (`resolve`). */
+  private nativeOwner(seat: RunnerPermissionSeat): { ok: true; address: string; source: "chosen-person" | "return-route"; why: string }
     | { ok: false; why: string } {
     const selected = this.deps.ownerOf(seat.nodeId);
     if (selected === PERMISSIONS_DENY) {
@@ -598,10 +599,9 @@ export class RunnerPermissions {
       why: route.routes > 1 && !route.inProgress
         ? `your conversation handed ${seat.sessionName} its newest open work (${route.row}), and this address is that work's return route; it holds open work from ${route.routes} conversations, and none is in progress`
         : `your conversation handed ${seat.sessionName} the work it's running (${route.row}), and this address is that work's return route${route.routes > 1 ? `; it holds open work from ${route.routes} conversations, and this one's is in progress` : ""}` };
-    const fallback = defaultPermissionOwner(this.deps.humanRegistry);
-    if (fallback.ok) return { ok: true, address: fallback.address, source: "default-person",
-      why: "you are the default person, and no one else is chosen for this seat or reached by its work's return route" };
-    return { ok: false, why: `No one can be asked${chosenProblem ? ` (the person chosen for this seat: ${chosenProblem})` : ""}: the seat's work carries no return route on this host, and ${fallback.message}` };
+    return { ok: false, why: chosenProblem
+      ? `no one can be asked (the person chosen for this seat: ${chosenProblem}), and the seat's work carries no return route on this host; the prompt goes through the seat's usual escalation instead`
+      : "no one is chosen for this seat (rig seat set-permissions-to) and its work carries no return route on this host, so no one is asked by implication; the prompt goes through the seat's usual escalation instead" };
   }
 
   /** The return route of the open work addressed to the seat (pending, in progress or blocked), with the row that carries
@@ -1153,14 +1153,39 @@ function nativeDecisionMessage(input: { decider: string; relay: boolean; denies:
 export function nativeAskHoldsPrompt(db: Database.Database, sessionName: string, now = Date.now()): boolean {
   try {
     // The seat's native asks only (the partial index), not every row it ever sent: the wake ladder asks this on its ticks.
-    const rows = db.prepare(`SELECT tags FROM queue_items WHERE source_session = ? AND state IN ('pending','in-progress','blocked','handed-off')
-      AND ${NATIVE_ASK_ROWS} ORDER BY ts_created DESC LIMIT 20`).all(sessionName) as Array<{ tags: string | null }>;
-    return rows.some(({ tags }) => {
+    // Stream the indexed asks: decided handoffs must not consume a row limit and hide an older open ask. An ask's answer-by is
+    // at most MAX_HOLD_SECONDS after it was created, so older asks (handed-off ones stay handed-off) are never read.
+    if (!Number.isFinite(now)) return false;
+    const since = new Date(now - MAX_HOLD_SECONDS * 1000 - NATIVE_GRACE_MS).toISOString();
+    const rows = db.prepare(`SELECT qitem_id, state, tags FROM queue_items WHERE source_session = ? AND ts_created >= ?
+      AND (state IN ('pending','in-progress','blocked','handed-off') OR (state = 'done' AND closure_reason = 'handed_off_to'))
+      AND ${NATIVE_ASK_ROWS} ORDER BY ts_created DESC`).iterate(sessionName, since) as Iterable<{ qitem_id: string; state: string; tags: string | null }>;
+    const handedOff: string[] = [];
+    for (const { qitem_id, state, tags } of rows) {
       let parsed: unknown;
-      try { parsed = JSON.parse(tags ?? "[]"); } catch { return false; }
+      try { parsed = JSON.parse(tags ?? "[]"); } catch { continue; }
       const by = Array.isArray(parsed) ? parsed.find((tag): tag is string => typeof tag === "string" && tag.startsWith(ANSWER_BY_TAG)) : undefined;
       const until = Date.parse(by?.slice(ANSWER_BY_TAG.length) ?? "");
-      return Array.isArray(parsed) && parsed.includes(RUNNER_PERMISSION_TAG) && Number.isFinite(until) && now <= until;
-    });
+      if (!Array.isArray(parsed) || !parsed.includes(RUNNER_PERMISSION_TAG) || !Number.isFinite(until) || !(now <= until)) continue;
+      // Handed on (handed-off, or done by handoff-and-complete): its chain decides, below.
+      if (state !== "handed-off" && state !== "done") return true;
+      handedOff.push(qitem_id);
+    }
+    if (handedOff.length === 0) return false;
+    // Follow the same newest, addressed successor as liveEnd. UNION makes cycles converge. An unrepresented
+    // handoff (including one off-host) is not proof of a decision, so it still holds until answer-by.
+    return db.prepare(`WITH RECURSIVE chain(qitem_id, state, handed_off_to, closure_reason) AS (
+      SELECT qitem_id, state, handed_off_to, closure_reason FROM queue_items
+        WHERE qitem_id IN (SELECT value FROM json_each(?))
+      UNION
+      SELECT next.qitem_id, next.state, next.handed_off_to, next.closure_reason FROM chain
+        JOIN queue_items next ON next.rowid = (
+          SELECT rowid FROM queue_items WHERE handed_off_from = chain.qitem_id AND destination_session = chain.handed_off_to
+          ORDER BY ts_created DESC, rowid DESC LIMIT 1)
+        WHERE chain.state = 'handed-off' OR (chain.state = 'done' AND chain.closure_reason = 'handed_off_to')
+    ) SELECT 1 FROM chain WHERE state IN ('pending','in-progress','blocked')
+      OR ((state = 'handed-off' OR (state = 'done' AND closure_reason = 'handed_off_to')) AND NOT EXISTS (
+        SELECT 1 FROM queue_items WHERE handed_off_from = chain.qitem_id AND destination_session = chain.handed_off_to))
+      LIMIT 1`).get(JSON.stringify(handedOff)) !== undefined;
   } catch { return false; }
 }

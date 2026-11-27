@@ -45,6 +45,7 @@ import type Database from "better-sqlite3";
 import { parseFrontmatter } from "./slices/slice-indexer.js";
 import { reanchorBuiltinStartupFile } from "./builtin-startup-files.js";
 import { isRosterReadyNotice } from "./roster-ready-notice.js";
+import { queueLabelLine } from "./queue-display.js";
 
 export interface RoleOrientation {
   state: "unknown" | "no-record" | "not-declared" | "missing" | "present";
@@ -153,8 +154,9 @@ export interface CurrentWorkRow {
 export interface MissionsRootResolution {
   root: string | null;
   reason?: string;
-  /** The root stands in for the row's own project root, and another root could hold a mission of the same name: the
-   *  catalogue lists other project roots, or it, or the row's project in it, can't be read. Unset when the configured
+  /** The root stands in for the row's own project root (or the row names none, and the rig's project stands in), and
+   *  another root could hold a mission of the same name: the catalogue lists other project roots, or it, or the row's
+   *  project in it, can't be read. Unset when the configured
    *  root is the only root a row's mission can live in (no catalogue configured), whatever the reason says. */
   ambiguous?: boolean;
 }
@@ -198,7 +200,7 @@ interface Match {
  * Returning the set instead lets the caller refuse a genuinely conflicting row. Exact
  * duplicate strings collapse, because they are one value written twice.
  */
-function tagValues(tags: string[], prefix: string): string[] {
+export function tagValues(tags: string[], prefix: string): string[] {
   const values = tags
     .filter((t) => t.startsWith(prefix))
     .map((t) => t.slice(prefix.length).trim())
@@ -757,8 +759,9 @@ export interface RowScope {
   slicePath: string | null;
   /** Why a mission or slice the row names did not resolve here; null when everything it names did. */
   unresolved: string | null;
-  /** Why the row's tags were resolved under a root that stands in for its project's own while another root could hold
-   *  a mission of the same name (MissionsRootResolution.ambiguous); null otherwise, including when no catalogue is
+  /** Why the row's tags were resolved under a root that stands in for its project's own (or the row names none, and the
+   *  rig's project stands in) while another root could hold a mission of the same name
+   *  (MissionsRootResolution.ambiguous); null otherwise, including when no catalogue is
    *  configured and the configured root is the only one. Kept even when the mission resolved there. */
   missionsRootFallback: string | null;
 }
@@ -876,10 +879,7 @@ const SUMMARY_FROM_BODY_CHARS = 240;
  *  heading, quote or list marker dropped), bounded: the row still gets a label someone can recognise. */
 function summaryOf(row: CandidateRow): string | null {
   if (row.summary?.trim()) return row.summary;
-  const line = (row.body ?? "").split(/\r?\n/).map((text) => text.replace(/^[\s#>*+-]+/, "").trim())
-    .find((text) => /[\p{L}\p{N}]/u.test(text));
-  if (!line) return null;
-  return line.length > SUMMARY_FROM_BODY_CHARS ? `${line.slice(0, SUMMARY_FROM_BODY_CHARS - 1)}…` : line;
+  return queueLabelLine(row.body, SUMMARY_FROM_BODY_CHARS, true) || null;
 }
 
 /** A held or pending row's scope, resolved as an in-progress tag candidate is. Rows sharing a scope resolve it once. */
