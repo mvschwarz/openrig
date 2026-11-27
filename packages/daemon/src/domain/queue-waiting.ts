@@ -35,6 +35,16 @@ export function reusedStatement(db: Database.Database, sql: string): Database.St
   return statement;
 }
 
+/** Keep both reads' meaning identical. Compare with the immediately preceding row, including fired wakes,
+ * before excluding bookkeeping. The existing (qitem_id, transition_id) index serves both newest-first reads
+ * and predecessor lookups; no history-wide window is needed. A long excluded tail still has to be visited. */
+function meaningfulTransitionPredicate(hasWakes: boolean): string {
+  return `(t.actor_session NOT IN ('watchdog@system', 'wake-ladder@system', 'daemon@kernel', 'daemon@system')
+    OR t.state IS NOT (SELECT p.state FROM queue_transitions p
+      WHERE p.qitem_id = t.qitem_id AND p.transition_id < t.transition_id ORDER BY p.transition_id DESC LIMIT 1))
+    ${hasWakes ? "AND NOT EXISTS (SELECT 1 FROM queue_transition_wakes w WHERE w.transition_id = t.transition_id AND w.phase = 'fired')" : ""}`;
+}
+
 /** A read of the existing transition log, not another progress receipt. Machine
  * actors and typed wake receipts are bookkeeping, never task progress. Historical
  * untyped author notes remain author testimony; their text is not classified.
@@ -42,30 +52,27 @@ export function reusedStatement(db: Database.Database, sql: string): Database.St
  * ladder before it can join its dispatch marker to the delivery receipt. */
 export function lastMeaningfulTransition(db: Database.Database, id: string): { id: number; at: string } | null {
   if (!reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transitions'").get()) return null;
-  const hasWakes = reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
-  const row = reusedStatement(db, `SELECT t.transition_id, t.ts FROM (
-      SELECT *, LAG(state) OVER (ORDER BY transition_id) AS previous_state FROM queue_transitions WHERE qitem_id = ?
-    ) t WHERE (t.actor_session NOT IN ('watchdog@system', 'wake-ladder@system', 'daemon@kernel', 'daemon@system') OR t.state IS NOT t.previous_state)
-    ${hasWakes ? "AND NOT EXISTS (SELECT 1 FROM queue_transition_wakes w WHERE w.transition_id = t.transition_id AND w.phase = 'fired')" : ""}
+  const hasWakes = reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get() !== undefined;
+  const row = reusedStatement(db, `SELECT t.transition_id, t.ts FROM queue_transitions t
+    WHERE t.qitem_id = ? AND ${meaningfulTransitionPredicate(hasWakes)}
     ORDER BY t.transition_id DESC LIMIT 1`).get(id) as { transition_id: number; ts: string } | undefined;
   return row ? { id: row.transition_id, at: row.ts } : null;
 }
 
-/** lastMeaningfulTransition for many rows in one read: the same LAG window, partitioned by row, and the same filters.
+/** lastMeaningfulTransition for many rows in one read: one indexed newest-first lookup per requested id.
  * Every requested id is a key of the result; an id without a meaningful transition maps to null. */
 export function lastMeaningfulTransitionMany(db: Database.Database, ids: readonly string[]): Map<string, { id: number; at: string } | null> {
   const unique = [...new Set(ids)];
   const out = new Map<string, { id: number; at: string } | null>(unique.map((id) => [id, null]));
   if (unique.length === 0) return out;
   if (!reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transitions'").get()) return out;
-  const hasWakes = reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
-  const rows = reusedStatement(db, `SELECT qitem_id, transition_id, ts FROM (
-      SELECT t.qitem_id, t.transition_id, t.ts, ROW_NUMBER() OVER (PARTITION BY t.qitem_id ORDER BY t.transition_id DESC) AS newest FROM (
-        SELECT *, LAG(state) OVER (PARTITION BY qitem_id ORDER BY transition_id) AS previous_state FROM queue_transitions
-         WHERE qitem_id IN (SELECT value FROM json_each(?))
-      ) t WHERE (t.actor_session NOT IN ('watchdog@system', 'wake-ladder@system', 'daemon@kernel', 'daemon@system') OR t.state IS NOT t.previous_state)
-      ${hasWakes ? "AND NOT EXISTS (SELECT 1 FROM queue_transition_wakes w WHERE w.transition_id = t.transition_id AND w.phase = 'fired')" : ""}
-    ) WHERE newest = 1`).all(JSON.stringify(unique)) as Array<{ qitem_id: string; transition_id: number; ts: string }>;
+  const hasWakes = reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get() !== undefined;
+  const rows = reusedStatement(db, `SELECT found.qitem_id, found.transition_id, found.ts
+    FROM json_each(?) requested JOIN queue_transitions found ON found.transition_id = (
+      SELECT t.transition_id FROM queue_transitions t
+      WHERE t.qitem_id = requested.value AND ${meaningfulTransitionPredicate(hasWakes)}
+      ORDER BY t.transition_id DESC LIMIT 1
+    )`).all(JSON.stringify(unique)) as Array<{ qitem_id: string; transition_id: number; ts: string }>;
   for (const row of rows) out.set(row.qitem_id, { id: row.transition_id, at: row.ts });
   return out;
 }
