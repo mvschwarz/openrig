@@ -215,6 +215,21 @@ it("says a dismiss changed nothing only when the daemon refused it, not when it 
   const failed = await failure((async () => Response.json({ error: "internal" }, { status: 500 })) as typeof fetch);
   expect(failed).not.toContain("nothing changed");
   expect(failed).toMatch(/^Dismiss not confirmed, the daemon failed while answering: .*500 — internal\. It may have been dismissed/);
+  // A 200 whose body can't be read doesn't confirm the close either.
+  const unreadable = await failure((async () => new Response("{\"verb\":\"dism", { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch);
+  expect(unreadable).not.toContain("nothing changed");
+  expect(unreadable).toContain("Dismiss not confirmed, the daemon's answer couldn't be read");
+});
+
+it("bounds a dismiss write, headers and body, with a deadline", async () => {
+  const signals: (AbortSignal | null | undefined)[] = [];
+  const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async (_url, init) => {
+    signals.push(init?.signal);
+    return Response.json({ verb: "dismiss", qitemId: "fyi", closedQitem: {} });
+  }) as typeof fetch });
+  await client.missionControlAction({ verb: "dismiss", qitemId: "fyi", actorSession: "parkingmeter@external", authority: "primary-user" });
+  expect(signals[0]).toBeInstanceOf(AbortSignal);
+  expect(signals[0]?.aborted).toBe(false);
 });
 
 it("sends an answer act's choice or words in the one mission-control write", async () => {

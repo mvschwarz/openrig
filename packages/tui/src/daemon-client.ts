@@ -36,13 +36,17 @@ export class DaemonWriteRefused extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
 
+/** The daemon accepted a write (2xx) but its answer couldn't be read, so whether the write landed isn't known. */
+export class DaemonAnswerUnreadable extends Error {}
+
 /** What a person reads when a dismiss fails: "nothing changed" only when the daemon refused it (a 4xx). */
 export function dismissFailureNotice(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   if (err instanceof DaemonWriteRefused && err.status < 500) {
     return `Not dismissed, nothing changed: ${message}. The update's detail shows its current state.`;
   }
-  const why = err instanceof DaemonWriteRefused ? "the daemon failed while answering" : "the daemon didn't answer";
+  const why = err instanceof DaemonWriteRefused ? "the daemon failed while answering"
+    : err instanceof DaemonAnswerUnreadable ? "the daemon's answer couldn't be read" : "the daemon didn't answer";
   return `Dismiss not confirmed, ${why}: ${message}. It may have been dismissed; the update's detail shows its current state.`;
 }
 
@@ -165,11 +169,13 @@ export class DaemonClient {
     return res.json();
   }
 
-  private async post(route: string, body: unknown, options: { headers?: Record<string, string>; unauthorized?: string } = {}): Promise<unknown> {
+  private async post(route: string, body: unknown, options: { headers?: Record<string, string>; unauthorized?: string; waitMs?: number } = {}): Promise<unknown> {
     const res = await this.fetchImpl(`${this.baseUrl}${route}`, {
       method: "POST",
       headers: { ...(options.headers ?? this.headers), "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      // Bounds the headers and the body read below; without waitMs a write waits as long as the daemon takes.
+      ...(options.waitMs === undefined ? {} : { signal: AbortSignal.timeout(options.waitMs) }),
     });
     const parsed = await res.json().catch(() => null);
     if (res.status === 401 && options.unauthorized) throw new DaemonWriteRefused(401, options.unauthorized);
@@ -511,9 +517,15 @@ export class DaemonClient {
     return { status: res.status, body: await res.json().catch(() => null) as Record<string, unknown> | null };
   }
   /** The mission-control write Steering uses to answer a request, or to dismiss an update (POST /api/mission-control/action). */
-  missionControlAction(input: { verb: "approve" | "answer" | "resolve" | "dismiss"; qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string; authority?: "primary-user" }) {
-    return this.post("/api/mission-control/action", input, { headers: this.actionHeaders, unauthorized: ACTION_UNAUTHORIZED }) as Promise<{ verb: string; qitemId: string; closedQitem: unknown;
-      answer?: { outcome: "recorded" | "answered"; unanswered: string[]; message?: string } }>;
+  async missionControlAction(input: { verb: "approve" | "answer" | "resolve" | "dismiss"; qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string; authority?: "primary-user" }) {
+    const dismiss = input.verb === "dismiss";
+    // A dismiss waits at most 10 seconds, as a pair decision does; then its outcome is unknown, not "nothing changed".
+    const result = await this.post("/api/mission-control/action", input, { headers: this.actionHeaders, unauthorized: ACTION_UNAUTHORIZED, ...(dismiss ? { waitMs: 10_000 } : {}) });
+    if (dismiss && (result === null || typeof result !== "object")) {
+      throw new DaemonAnswerUnreadable("POST /api/mission-control/action answered OK without a readable result");
+    }
+    return result as { verb: string; qitemId: string; closedQitem: unknown;
+      answer?: { outcome: "recorded" | "answered"; unanswered: string[]; message?: string } };
   }
   attentionAggregate() {
     return this.get(`/api/queue/attention-aggregate`);
