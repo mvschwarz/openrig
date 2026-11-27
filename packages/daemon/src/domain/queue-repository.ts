@@ -5905,7 +5905,8 @@ export class QueueRepository {
    *  about this seat's own prompt that nobody holds is left out: with no operator seat to carry it, the alert falls back
    *  to the seat itself, and the escalation is the wake, not the content, so it is never that seat's work. One its owner
    *  explicitly holds (blocked) stays, so that hold and its wake are diagnosed as before; so does a row whose tags aren't
-   *  a JSON array. Each row carries its blocker and last update, so a hold is shown with what it waits on and its age. */
+   *  a JSON array. OpenRig's roster-ready notice (isRosterReadyNotice) is also left out: information, not an obligation.
+   *  Each row carries its blocker and last update, so a hold is shown with what it waits on and its age. */
   listOpenObligations(destinationSession: string, limit: number): Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null; blockedOn: string | null; updatedAt: string }> {
     if (limit === 0) return [];
     const addresses = this.resolveSessionAddresses(destinationSession);

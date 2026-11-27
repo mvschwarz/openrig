@@ -38,11 +38,14 @@ During a fresh team build, a seat can see `rosterState: "building"` in
 roster-ready notice for each agent that started. The notice is information only:
 `rig whoami` now shows the current peers and routes, and the row needs no claim,
 file or follow-up. The agent can close it or leave it, and the stuck sweep files
-no finding about it, pending or claimed. It does not wake the agent: the row is
-available at its next natural turn. It does not count as assigned work in
-`rig ps` or as an obligation for the parked-owner check.
-If the notice cannot be recorded, an unconfirmed notice appears as a launch warning. If an edge could not be recorded,
-the launch warning names it and no roster-ready notice is sent. Terminal-only seats are excluded.
+no finding about it, pending or claimed. It does not wake the agent or send text
+to its terminal. It waits in the seat's queue (`rig queue list`; refocus lists it
+as an OpenRig notice), and `rig whoami` is current whenever the agent next reads
+it. The notice does not count as assigned work in `rig ps` or as an obligation
+for the parked-owner check.
+If the notice cannot be recorded, an unconfirmed notice appears as a launch
+warning. If an edge could not be recorded, the launch warning names it and no
+roster-ready notice is sent. Terminal-only seats are excluded.
 
 The attention codes that stop startup this way are `trust_gate`,
 `hook_trust_gate`, `update_gate`, `login_required`, `mcp_gate`,

@@ -1881,7 +1881,8 @@ export function readAssignedWorkBySession(db: Database.Database): Map<string, As
     .iterate(OPENRIG_SENDER) as IterableIterator<{ qitem_id: string; source_session: string; destination_session: string; state: string }>;
   for (const row of candidates) {
     if (!isRosterReadyNotice(row)) continue;
-    const counts = byDestination.get(row.destination_session)!;
+    const counts = byDestination.get(row.destination_session);
+    if (!counts) continue; // A concurrent writer may have added this destination after the aggregate read.
     counts.assigned_count--;
     if (row.state === "pending") counts.pending_count--;
     else if (row.state === "in-progress") counts.in_progress_count--;
