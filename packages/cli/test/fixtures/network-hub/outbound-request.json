@@ -1,0 +1,1308 @@
+{
+  "schema": "network-hub-contract/v1",
+  "scenario": "outbound-request",
+  "description": "A request the local seat sends through the hub: created under the connector's derived id, read while pending, then its answer closes the local item.",
+  "recordedFrom": "The network connector of @openrig/cli 0.7.23 against a hub that answers application/json (never SSE). Seats, ids, times and texts are synthetic.",
+  "participant": {
+    "hubSeat": "alex@team",
+    "token": "<TOKEN>"
+  },
+  "normalize": {
+    "match": [
+      "method",
+      "path",
+      "authorization",
+      "rpcMethod",
+      "tool",
+      "arguments"
+    ],
+    "argumentsFor": [
+      "tools/call"
+    ],
+    "replace": [
+      {
+        "name": "time",
+        "pattern": "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z",
+        "with": "<TIME>"
+      },
+      {
+        "name": "outbound-item",
+        "pattern": "qitem-netout-[0-9a-f]{20}",
+        "with": "<REQUEST_ITEM>",
+        "bind": true
+      }
+    ],
+    "response": {
+      "jsonrpcId": "echo-request",
+      "substitute": [
+        "<HUB_ORIGIN>",
+        "<REQUEST_ITEM>"
+      ]
+    },
+    "placeholders": {
+      "<TOKEN>": "The participant's bearer: the token the test gives the binding.",
+      "<HUB_ORIGIN>": "The fixture hub's own origin.",
+      "<REQUEST_ITEM>": "The hub item id the connector derives for an outbound request (bound from the first request that names one).",
+      "<TIME>": "Any ISO time in a request (a local claim time in a pickup note, say)."
+    }
+  },
+  "passes": [
+    {
+      "pass": 1,
+      "does": "Create: rig_queue_create under the derived id."
+    },
+    {
+      "pass": 2,
+      "does": "A pass reads the request on the hub: still pending."
+    },
+    {
+      "pass": 3,
+      "does": "A pass reads it done with its resolution."
+    },
+    {
+      "pass": 4,
+      "does": "Settled: an idle pass reads it no more."
+    }
+  ],
+  "exchanges": [
+    {
+      "pass": 1,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "initialize",
+          "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {
+              "name": "openrig-network-connector",
+              "version": "1"
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 0
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 0,
+          "result": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {
+                "listChanged": true
+              },
+              "resources": {
+                "listChanged": true
+              }
+            },
+            "serverInfo": {
+              "name": "openrig",
+              "version": "fixture"
+            },
+            "instructions": "Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\nThis server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.\nTo hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. Queue items are durable: they outlive this conversation and this server.\nTools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.\nA question reserved for a person is theirs to answer: don't answer it on their behalf.\nAcceptance is not completed work. Choose a qitemId and pass it to rig_queue_create, so an uncertain create (a timeout, or an error after sending) can be checked: read that same qitemId with rig_queue_show first, and create again only with that same id, never a new one.\nItems addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.\nBefore sending a request to another assistant, list the team's members. If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude chat agent\"), never reading the address out. Don't pick from your own history or memory. If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway. If the list says the chosen one's person is no longer on the team, don't send; tell your person and ask whether to send it to someone else. When you send to another connected assistant, tell your person how it picks requests up as the list says (when its person asks it, or on its check-in schedule); if the list doesn't say, say that's unknown, and don't promise a time. If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again. If your person still asks to send to one whose person is no longer on the team, tell them it can't be delivered: requests to an assistant whose person is no longer on the team are closed unanswered."
+          }
+        }
+      }
+    },
+    {
+      "pass": 1,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "notifications/initialized",
+          "jsonrpc": "2.0"
+        }
+      },
+      "response": {
+        "status": 202,
+        "headers": {},
+        "body": ""
+      }
+    },
+    {
+      "pass": 1,
+      "required": false,
+      "note": "The SDK opens its optional GET stream after initialize, concurrently and not always before the client closes; the hub has none (405).",
+      "request": {
+        "method": "GET",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": ""
+      },
+      "response": {
+        "status": 405,
+        "headers": {
+          "content-type": "application/json",
+          "allow": "POST"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "error": {
+            "code": -32000,
+            "message": "Method not allowed."
+          },
+          "id": null
+        }
+      }
+    },
+    {
+      "pass": 1,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/call",
+          "params": {
+            "name": "rig_queue_create",
+            "arguments": {
+              "qitemId": "<REQUEST_ITEM>",
+              "destination": "lead@team",
+              "body": "Review the release notes and answer pong.",
+              "summary": "Release notes review"
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 1
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"pickup\":{\"state\":\"unclaimed\"},\"waiting\":{\"owner\":\"lead@team\",\"state\":\"pending\"},\"qitemId\":\"<REQUEST_ITEM>\",\"tsCreated\":\"2026-01-01T00:00:05.000Z\",\"tsUpdated\":\"2026-01-01T00:00:05.000Z\",\"sourceSession\":\"alex@team\",\"destinationSession\":\"lead@team\",\"state\":\"pending\",\"priority\":\"routine\",\"tier\":null,\"tags\":null,\"blockedOn\":null,\"handedOffTo\":null,\"handedOffFrom\":null,\"expiresAt\":null,\"chainOfRecord\":null,\"body\":\"Review the release notes and answer pong.\",\"summary\":\"Release notes review\",\"evidenceRef\":null,\"humanIntent\":null,\"humanDetail\":null,\"replyTo\":null,\"humanQuestions\":null,\"humanAnswers\":null,\"delegatedDecision\":null,\"closureReason\":null,\"closureTarget\":null,\"closureRequiredAt\":null,\"claimedAt\":null,\"lastNudgeAttempt\":null,\"lastNudgeResult\":null,\"lastNudgeWireResult\":null,\"lastHeartbeat\":null,\"resolution\":null,\"targetRepo\":null,\"deliveryOutcome\":null}"
+              }
+            ],
+            "structuredContent": {
+              "pickup": {
+                "state": "unclaimed"
+              },
+              "waiting": {
+                "owner": "lead@team",
+                "state": "pending"
+              },
+              "qitemId": "<REQUEST_ITEM>",
+              "tsCreated": "2026-01-01T00:00:05.000Z",
+              "tsUpdated": "2026-01-01T00:00:05.000Z",
+              "sourceSession": "alex@team",
+              "destinationSession": "lead@team",
+              "state": "pending",
+              "priority": "routine",
+              "tier": null,
+              "tags": null,
+              "blockedOn": null,
+              "handedOffTo": null,
+              "handedOffFrom": null,
+              "expiresAt": null,
+              "chainOfRecord": null,
+              "body": "Review the release notes and answer pong.",
+              "summary": "Release notes review",
+              "evidenceRef": null,
+              "humanIntent": null,
+              "humanDetail": null,
+              "replyTo": null,
+              "humanQuestions": null,
+              "humanAnswers": null,
+              "delegatedDecision": null,
+              "closureReason": null,
+              "closureTarget": null,
+              "closureRequiredAt": null,
+              "claimedAt": null,
+              "lastNudgeAttempt": null,
+              "lastNudgeResult": null,
+              "lastNudgeWireResult": null,
+              "lastHeartbeat": null,
+              "resolution": null,
+              "targetRepo": null,
+              "deliveryOutcome": null
+            }
+          }
+        }
+      }
+    },
+    {
+      "pass": 2,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "initialize",
+          "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {
+              "name": "openrig-network-connector",
+              "version": "1"
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 0
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 0,
+          "result": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {
+                "listChanged": true
+              },
+              "resources": {
+                "listChanged": true
+              }
+            },
+            "serverInfo": {
+              "name": "openrig",
+              "version": "fixture"
+            },
+            "instructions": "Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\nThis server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.\nTo hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. Queue items are durable: they outlive this conversation and this server.\nTools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.\nA question reserved for a person is theirs to answer: don't answer it on their behalf.\nAcceptance is not completed work. Choose a qitemId and pass it to rig_queue_create, so an uncertain create (a timeout, or an error after sending) can be checked: read that same qitemId with rig_queue_show first, and create again only with that same id, never a new one.\nItems addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.\nBefore sending a request to another assistant, list the team's members. If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude chat agent\"), never reading the address out. Don't pick from your own history or memory. If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway. If the list says the chosen one's person is no longer on the team, don't send; tell your person and ask whether to send it to someone else. When you send to another connected assistant, tell your person how it picks requests up as the list says (when its person asks it, or on its check-in schedule); if the list doesn't say, say that's unknown, and don't promise a time. If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again. If your person still asks to send to one whose person is no longer on the team, tell them it can't be delivered: requests to an assistant whose person is no longer on the team are closed unanswered."
+          }
+        }
+      }
+    },
+    {
+      "pass": 2,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "notifications/initialized",
+          "jsonrpc": "2.0"
+        }
+      },
+      "response": {
+        "status": 202,
+        "headers": {},
+        "body": ""
+      }
+    },
+    {
+      "pass": 2,
+      "required": false,
+      "note": "The SDK opens its optional GET stream after initialize, concurrently and not always before the client closes; the hub has none (405).",
+      "request": {
+        "method": "GET",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": ""
+      },
+      "response": {
+        "status": 405,
+        "headers": {
+          "content-type": "application/json",
+          "allow": "POST"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "error": {
+            "code": -32000,
+            "message": "Method not allowed."
+          },
+          "id": null
+        }
+      }
+    },
+    {
+      "pass": 2,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/list",
+          "jsonrpc": "2.0",
+          "id": 1
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "result": {
+            "tools": [
+              {
+                "name": "rig_queue_create",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_queue_show",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_queue_list",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_queue_claim",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_queue_update",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_team",
+                "inputSchema": {
+                  "type": "object"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "pass": 2,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/call",
+          "params": {
+            "name": "rig_queue_list",
+            "arguments": {
+              "owned": true,
+              "state": "in-progress",
+              "limit": 200
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 2
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "[]"
+              }
+            ],
+            "structuredContent": {
+              "items": []
+            }
+          }
+        }
+      }
+    },
+    {
+      "pass": 2,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/call",
+          "params": {
+            "name": "rig_queue_list",
+            "arguments": {
+              "owned": true,
+              "state": "pending",
+              "limit": 25
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 3
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 3,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "[]"
+              }
+            ],
+            "structuredContent": {
+              "items": []
+            }
+          }
+        }
+      }
+    },
+    {
+      "pass": 2,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/call",
+          "params": {
+            "name": "rig_queue_show",
+            "arguments": {
+              "qitemId": "<REQUEST_ITEM>"
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 4
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 4,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"viewer\":{\"seat\":\"alex@team\",\"principal\":null,\"grant\":\"grant-1\",\"you\":true},\"item\":{\"pickup\":{\"state\":\"unclaimed\"},\"waiting\":{\"owner\":\"lead@team\",\"state\":\"pending\"},\"qitemId\":\"<REQUEST_ITEM>\",\"tsCreated\":\"2026-01-01T00:00:05.000Z\",\"tsUpdated\":\"2026-01-01T00:00:05.000Z\",\"sourceSession\":\"alex@team\",\"destinationSession\":\"lead@team\",\"state\":\"pending\",\"priority\":\"routine\",\"tier\":null,\"tags\":null,\"blockedOn\":null,\"handedOffTo\":null,\"handedOffFrom\":null,\"expiresAt\":null,\"chainOfRecord\":null,\"body\":\"Review the release notes and answer pong.\",\"summary\":\"Release notes review\",\"evidenceRef\":null,\"humanIntent\":null,\"humanDetail\":null,\"replyTo\":null,\"humanQuestions\":null,\"humanAnswers\":null,\"delegatedDecision\":null,\"closureReason\":null,\"closureTarget\":null,\"closureRequiredAt\":null,\"claimedAt\":null,\"lastNudgeAttempt\":null,\"lastNudgeResult\":null,\"lastNudgeWireResult\":null,\"lastHeartbeat\":null,\"resolution\":null,\"targetRepo\":null,\"deliveryOutcome\":null,\"decisionRevision\":\"dr1-fixture-1\",\"destinationClass\":\"unroutable\",\"ownerNotificationLevel\":null,\"createdBy\":{\"seat\":\"alex@team\",\"principal\":null,\"grant\":null,\"you\":null}},\"transitions\":[{\"transitionId\":14,\"qitemId\":\"<REQUEST_ITEM>\",\"ts\":\"2026-01-01T00:00:05.000Z\",\"state\":\"pending\",\"transitionNote\":\"created\",\"actorSession\":\"alex@team\",\"closureReason\":null,\"closureTarget\":null,\"identityProvenance\":\"transport:v1\",\"identityPrincipal\":null,\"ownerNotificationKind\":null,\"ownerNotificationLevel\":\"RECORD\",\"actor\":{\"seat\":\"alex@team\",\"principal\":null,\"grant\":null,\"you\":null}}]}"
+              }
+            ],
+            "structuredContent": {
+              "viewer": {
+                "seat": "alex@team",
+                "principal": null,
+                "grant": "grant-1",
+                "you": true
+              },
+              "item": {
+                "pickup": {
+                  "state": "unclaimed"
+                },
+                "waiting": {
+                  "owner": "lead@team",
+                  "state": "pending"
+                },
+                "qitemId": "<REQUEST_ITEM>",
+                "tsCreated": "2026-01-01T00:00:05.000Z",
+                "tsUpdated": "2026-01-01T00:00:05.000Z",
+                "sourceSession": "alex@team",
+                "destinationSession": "lead@team",
+                "state": "pending",
+                "priority": "routine",
+                "tier": null,
+                "tags": null,
+                "blockedOn": null,
+                "handedOffTo": null,
+                "handedOffFrom": null,
+                "expiresAt": null,
+                "chainOfRecord": null,
+                "body": "Review the release notes and answer pong.",
+                "summary": "Release notes review",
+                "evidenceRef": null,
+                "humanIntent": null,
+                "humanDetail": null,
+                "replyTo": null,
+                "humanQuestions": null,
+                "humanAnswers": null,
+                "delegatedDecision": null,
+                "closureReason": null,
+                "closureTarget": null,
+                "closureRequiredAt": null,
+                "claimedAt": null,
+                "lastNudgeAttempt": null,
+                "lastNudgeResult": null,
+                "lastNudgeWireResult": null,
+                "lastHeartbeat": null,
+                "resolution": null,
+                "targetRepo": null,
+                "deliveryOutcome": null,
+                "decisionRevision": "dr1-fixture-1",
+                "destinationClass": "unroutable",
+                "ownerNotificationLevel": null,
+                "createdBy": {
+                  "seat": "alex@team",
+                  "principal": null,
+                  "grant": null,
+                  "you": null
+                }
+              },
+              "transitions": [
+                {
+                  "transitionId": 14,
+                  "qitemId": "<REQUEST_ITEM>",
+                  "ts": "2026-01-01T00:00:05.000Z",
+                  "state": "pending",
+                  "transitionNote": "created",
+                  "actorSession": "alex@team",
+                  "closureReason": null,
+                  "closureTarget": null,
+                  "identityProvenance": "transport:v1",
+                  "identityPrincipal": null,
+                  "ownerNotificationKind": null,
+                  "ownerNotificationLevel": "RECORD",
+                  "actor": {
+                    "seat": "alex@team",
+                    "principal": null,
+                    "grant": null,
+                    "you": null
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "pass": 3,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "initialize",
+          "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {
+              "name": "openrig-network-connector",
+              "version": "1"
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 0
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 0,
+          "result": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {
+                "listChanged": true
+              },
+              "resources": {
+                "listChanged": true
+              }
+            },
+            "serverInfo": {
+              "name": "openrig",
+              "version": "fixture"
+            },
+            "instructions": "Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\nThis server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.\nTo hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. Queue items are durable: they outlive this conversation and this server.\nTools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.\nA question reserved for a person is theirs to answer: don't answer it on their behalf.\nAcceptance is not completed work. Choose a qitemId and pass it to rig_queue_create, so an uncertain create (a timeout, or an error after sending) can be checked: read that same qitemId with rig_queue_show first, and create again only with that same id, never a new one.\nItems addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.\nBefore sending a request to another assistant, list the team's members. If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude chat agent\"), never reading the address out. Don't pick from your own history or memory. If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway. If the list says the chosen one's person is no longer on the team, don't send; tell your person and ask whether to send it to someone else. When you send to another connected assistant, tell your person how it picks requests up as the list says (when its person asks it, or on its check-in schedule); if the list doesn't say, say that's unknown, and don't promise a time. If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again. If your person still asks to send to one whose person is no longer on the team, tell them it can't be delivered: requests to an assistant whose person is no longer on the team are closed unanswered."
+          }
+        }
+      }
+    },
+    {
+      "pass": 3,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "notifications/initialized",
+          "jsonrpc": "2.0"
+        }
+      },
+      "response": {
+        "status": 202,
+        "headers": {},
+        "body": ""
+      }
+    },
+    {
+      "pass": 3,
+      "required": false,
+      "note": "The SDK opens its optional GET stream after initialize, concurrently and not always before the client closes; the hub has none (405).",
+      "request": {
+        "method": "GET",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": ""
+      },
+      "response": {
+        "status": 405,
+        "headers": {
+          "content-type": "application/json",
+          "allow": "POST"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "error": {
+            "code": -32000,
+            "message": "Method not allowed."
+          },
+          "id": null
+        }
+      }
+    },
+    {
+      "pass": 3,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/list",
+          "jsonrpc": "2.0",
+          "id": 1
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "result": {
+            "tools": [
+              {
+                "name": "rig_queue_create",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_queue_show",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_queue_list",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_queue_claim",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_queue_update",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_team",
+                "inputSchema": {
+                  "type": "object"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "pass": 3,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/call",
+          "params": {
+            "name": "rig_queue_list",
+            "arguments": {
+              "owned": true,
+              "state": "in-progress",
+              "limit": 200
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 2
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "[]"
+              }
+            ],
+            "structuredContent": {
+              "items": []
+            }
+          }
+        }
+      }
+    },
+    {
+      "pass": 3,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/call",
+          "params": {
+            "name": "rig_queue_list",
+            "arguments": {
+              "owned": true,
+              "state": "pending",
+              "limit": 25
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 3
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 3,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "[]"
+              }
+            ],
+            "structuredContent": {
+              "items": []
+            }
+          }
+        }
+      }
+    },
+    {
+      "pass": 3,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/call",
+          "params": {
+            "name": "rig_queue_show",
+            "arguments": {
+              "qitemId": "<REQUEST_ITEM>"
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 4
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 4,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"viewer\":{\"seat\":\"alex@team\",\"principal\":null,\"grant\":\"grant-1\",\"you\":true},\"item\":{\"pickup\":{\"state\":\"terminal\"},\"waiting\":{\"owner\":\"lead@team\",\"state\":\"done\"},\"qitemId\":\"<REQUEST_ITEM>\",\"tsCreated\":\"2026-01-01T00:00:05.000Z\",\"tsUpdated\":\"2026-01-01T00:00:14.000Z\",\"sourceSession\":\"alex@team\",\"destinationSession\":\"lead@team\",\"state\":\"done\",\"priority\":\"routine\",\"tier\":null,\"tags\":null,\"blockedOn\":null,\"handedOffTo\":null,\"handedOffFrom\":null,\"expiresAt\":null,\"chainOfRecord\":null,\"body\":\"Review the release notes and answer pong.\",\"summary\":\"Release notes review\",\"evidenceRef\":null,\"humanIntent\":null,\"humanDetail\":null,\"replyTo\":null,\"humanQuestions\":null,\"humanAnswers\":null,\"delegatedDecision\":null,\"closureReason\":\"no-follow-on\",\"closureTarget\":null,\"closureRequiredAt\":null,\"claimedAt\":\"2026-01-01T00:00:13.000Z\",\"lastNudgeAttempt\":null,\"lastNudgeResult\":null,\"lastNudgeWireResult\":null,\"lastHeartbeat\":null,\"resolution\":\"pong\",\"targetRepo\":null,\"deliveryOutcome\":null,\"decisionRevision\":\"dr1-fixture-2\",\"closingTransition\":{\"transitionId\":16,\"ts\":\"2026-01-01T00:00:14.000Z\",\"state\":\"done\",\"closureReason\":\"no-follow-on\",\"closureTarget\":null,\"actorSession\":\"lead@team\",\"transitionNote\":null},\"destinationClass\":\"unroutable\",\"ownerNotificationLevel\":null,\"createdBy\":{\"seat\":\"alex@team\",\"principal\":null,\"grant\":null,\"you\":null}},\"transitions\":[{\"transitionId\":14,\"qitemId\":\"<REQUEST_ITEM>\",\"ts\":\"2026-01-01T00:00:05.000Z\",\"state\":\"pending\",\"transitionNote\":\"created\",\"actorSession\":\"alex@team\",\"closureReason\":null,\"closureTarget\":null,\"identityProvenance\":\"transport:v1\",\"identityPrincipal\":null,\"ownerNotificationKind\":null,\"ownerNotificationLevel\":\"RECORD\",\"actor\":{\"seat\":\"alex@team\",\"principal\":null,\"grant\":null,\"you\":null}},{\"transitionId\":15,\"qitemId\":\"<REQUEST_ITEM>\",\"ts\":\"2026-01-01T00:00:13.000Z\",\"state\":\"in-progress\",\"transitionNote\":\"claimed\",\"actorSession\":\"lead@team\",\"closureReason\":null,\"closureTarget\":null,\"identityProvenance\":\"transport:v1\",\"identityPrincipal\":null,\"ownerNotificationKind\":null,\"ownerNotificationLevel\":\"RECORD\",\"actor\":{\"seat\":\"lead@team\",\"principal\":null,\"grant\":null,\"you\":false}},{\"transitionId\":16,\"qitemId\":\"<REQUEST_ITEM>\",\"ts\":\"2026-01-01T00:00:14.000Z\",\"state\":\"done\",\"transitionNote\":null,\"actorSession\":\"lead@team\",\"closureReason\":\"no-follow-on\",\"closureTarget\":null,\"identityProvenance\":\"transport:v1\",\"identityPrincipal\":null,\"ownerNotificationKind\":null,\"ownerNotificationLevel\":\"RECORD\",\"actor\":{\"seat\":\"lead@team\",\"principal\":null,\"grant\":null,\"you\":false}}]}"
+              }
+            ],
+            "structuredContent": {
+              "viewer": {
+                "seat": "alex@team",
+                "principal": null,
+                "grant": "grant-1",
+                "you": true
+              },
+              "item": {
+                "pickup": {
+                  "state": "terminal"
+                },
+                "waiting": {
+                  "owner": "lead@team",
+                  "state": "done"
+                },
+                "qitemId": "<REQUEST_ITEM>",
+                "tsCreated": "2026-01-01T00:00:05.000Z",
+                "tsUpdated": "2026-01-01T00:00:14.000Z",
+                "sourceSession": "alex@team",
+                "destinationSession": "lead@team",
+                "state": "done",
+                "priority": "routine",
+                "tier": null,
+                "tags": null,
+                "blockedOn": null,
+                "handedOffTo": null,
+                "handedOffFrom": null,
+                "expiresAt": null,
+                "chainOfRecord": null,
+                "body": "Review the release notes and answer pong.",
+                "summary": "Release notes review",
+                "evidenceRef": null,
+                "humanIntent": null,
+                "humanDetail": null,
+                "replyTo": null,
+                "humanQuestions": null,
+                "humanAnswers": null,
+                "delegatedDecision": null,
+                "closureReason": "no-follow-on",
+                "closureTarget": null,
+                "closureRequiredAt": null,
+                "claimedAt": "2026-01-01T00:00:13.000Z",
+                "lastNudgeAttempt": null,
+                "lastNudgeResult": null,
+                "lastNudgeWireResult": null,
+                "lastHeartbeat": null,
+                "resolution": "pong",
+                "targetRepo": null,
+                "deliveryOutcome": null,
+                "decisionRevision": "dr1-fixture-2",
+                "closingTransition": {
+                  "transitionId": 16,
+                  "ts": "2026-01-01T00:00:14.000Z",
+                  "state": "done",
+                  "closureReason": "no-follow-on",
+                  "closureTarget": null,
+                  "actorSession": "lead@team",
+                  "transitionNote": null
+                },
+                "destinationClass": "unroutable",
+                "ownerNotificationLevel": null,
+                "createdBy": {
+                  "seat": "alex@team",
+                  "principal": null,
+                  "grant": null,
+                  "you": null
+                }
+              },
+              "transitions": [
+                {
+                  "transitionId": 14,
+                  "qitemId": "<REQUEST_ITEM>",
+                  "ts": "2026-01-01T00:00:05.000Z",
+                  "state": "pending",
+                  "transitionNote": "created",
+                  "actorSession": "alex@team",
+                  "closureReason": null,
+                  "closureTarget": null,
+                  "identityProvenance": "transport:v1",
+                  "identityPrincipal": null,
+                  "ownerNotificationKind": null,
+                  "ownerNotificationLevel": "RECORD",
+                  "actor": {
+                    "seat": "alex@team",
+                    "principal": null,
+                    "grant": null,
+                    "you": null
+                  }
+                },
+                {
+                  "transitionId": 15,
+                  "qitemId": "<REQUEST_ITEM>",
+                  "ts": "2026-01-01T00:00:13.000Z",
+                  "state": "in-progress",
+                  "transitionNote": "claimed",
+                  "actorSession": "lead@team",
+                  "closureReason": null,
+                  "closureTarget": null,
+                  "identityProvenance": "transport:v1",
+                  "identityPrincipal": null,
+                  "ownerNotificationKind": null,
+                  "ownerNotificationLevel": "RECORD",
+                  "actor": {
+                    "seat": "lead@team",
+                    "principal": null,
+                    "grant": null,
+                    "you": false
+                  }
+                },
+                {
+                  "transitionId": 16,
+                  "qitemId": "<REQUEST_ITEM>",
+                  "ts": "2026-01-01T00:00:14.000Z",
+                  "state": "done",
+                  "transitionNote": null,
+                  "actorSession": "lead@team",
+                  "closureReason": "no-follow-on",
+                  "closureTarget": null,
+                  "identityProvenance": "transport:v1",
+                  "identityPrincipal": null,
+                  "ownerNotificationKind": null,
+                  "ownerNotificationLevel": "RECORD",
+                  "actor": {
+                    "seat": "lead@team",
+                    "principal": null,
+                    "grant": null,
+                    "you": false
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "pass": 4,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "initialize",
+          "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {
+              "name": "openrig-network-connector",
+              "version": "1"
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 0
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 0,
+          "result": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+              "tools": {
+                "listChanged": true
+              },
+              "resources": {
+                "listChanged": true
+              }
+            },
+            "serverInfo": {
+              "name": "openrig",
+              "version": "fixture"
+            },
+            "instructions": "Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\nThis server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.\nTo hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. Queue items are durable: they outlive this conversation and this server.\nTools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.\nA question reserved for a person is theirs to answer: don't answer it on their behalf.\nAcceptance is not completed work. Choose a qitemId and pass it to rig_queue_create, so an uncertain create (a timeout, or an error after sending) can be checked: read that same qitemId with rig_queue_show first, and create again only with that same id, never a new one.\nItems addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.\nBefore sending a request to another assistant, list the team's members. If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude chat agent\"), never reading the address out. Don't pick from your own history or memory. If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway. If the list says the chosen one's person is no longer on the team, don't send; tell your person and ask whether to send it to someone else. When you send to another connected assistant, tell your person how it picks requests up as the list says (when its person asks it, or on its check-in schedule); if the list doesn't say, say that's unknown, and don't promise a time. If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again. If your person still asks to send to one whose person is no longer on the team, tell them it can't be delivered: requests to an assistant whose person is no longer on the team are closed unanswered."
+          }
+        }
+      }
+    },
+    {
+      "pass": 4,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "notifications/initialized",
+          "jsonrpc": "2.0"
+        }
+      },
+      "response": {
+        "status": 202,
+        "headers": {},
+        "body": ""
+      }
+    },
+    {
+      "pass": 4,
+      "required": false,
+      "note": "The SDK opens its optional GET stream after initialize, concurrently and not always before the client closes; the hub has none (405).",
+      "request": {
+        "method": "GET",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": ""
+      },
+      "response": {
+        "status": 405,
+        "headers": {
+          "content-type": "application/json",
+          "allow": "POST"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "error": {
+            "code": -32000,
+            "message": "Method not allowed."
+          },
+          "id": null
+        }
+      }
+    },
+    {
+      "pass": 4,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/list",
+          "jsonrpc": "2.0",
+          "id": 1
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "result": {
+            "tools": [
+              {
+                "name": "rig_queue_create",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_queue_show",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_queue_list",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_queue_claim",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_queue_update",
+                "inputSchema": {
+                  "type": "object"
+                }
+              },
+              {
+                "name": "rig_team",
+                "inputSchema": {
+                  "type": "object"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "pass": 4,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/call",
+          "params": {
+            "name": "rig_queue_list",
+            "arguments": {
+              "owned": true,
+              "state": "in-progress",
+              "limit": 200
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 2
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "[]"
+              }
+            ],
+            "structuredContent": {
+              "items": []
+            }
+          }
+        }
+      }
+    },
+    {
+      "pass": 4,
+      "required": true,
+      "request": {
+        "method": "POST",
+        "path": "/mcp",
+        "headers": {
+          "authorization": "Bearer <TOKEN>"
+        },
+        "body": {
+          "method": "tools/call",
+          "params": {
+            "name": "rig_queue_list",
+            "arguments": {
+              "owned": true,
+              "state": "pending",
+              "limit": 25
+            }
+          },
+          "jsonrpc": "2.0",
+          "id": 3
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 3,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "[]"
+              }
+            ],
+            "structuredContent": {
+              "items": []
+            }
+          }
+        }
+      }
+    }
+  ]
+}

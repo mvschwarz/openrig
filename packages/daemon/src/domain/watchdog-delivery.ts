@@ -52,6 +52,9 @@ export function makeWatchdogDeliver(deps: {
   /** The live parked rows of the target whose current park this job wakes: at a queue-only seat the reminder is noted
    *  on them, not made into another row. */
   resolveParkedRows?: (input: { jobId: string; targetSession: string }) => string[];
+  wakeStandby?: (destination: string, owed: () => boolean) => Promise<boolean> | undefined;
+  notificationCurrent?: (jobId: string) => boolean;
+  resolveSharedParkReminder?: (jobId: string) => string | null;
   /** Writes each note on its parked row, in one transaction, while the row is still `owner`'s and its current park is
    *  still the job's; returns the rows noted. */
   noteParkedRows?: (input: { owner: string; notes: Array<{ qitemId: string; jobId: string; note: string }> }) => string[];
@@ -101,9 +104,17 @@ export function makeWatchdogDeliver(deps: {
     }
   };
 
-  const deliver: DeliveryFn = async ({ targetSession, message, continuityAction }, source) => {
+  const deliver: DeliveryFn = async ({ targetSession, message: originalMessage, continuityAction }, source) => {
     let continuityActionCompleted = false;
     try {
+      const sharedReminder = source.members ? null : deps.resolveSharedParkReminder?.(source.jobId) ?? null;
+      const message = sharedReminder ?? originalMessage;
+      // The seat lease can delay input. Refuse a frozen payload only when the rows it can name left their park
+      // for good (closed, or transferred away): a park that merely moved to another timer is live work, not a
+      // refusal, and the delivery still settles with its own transport outcome.
+      const notificationCurrent = () => (source.members ?? [source]).every(({ jobId }) =>
+        deps.notificationCurrent?.(jobId) !== false && (deps.resolveSharedParkReminder?.(jobId) ?? null) === sharedReminder);
+      if (!notificationCurrent()) return { status: "failed", sent: false, inputPhase: "not_reached", error: "no longer current: park or transfer state changed" };
       const checkTerminal = () => {
         if (source.policy === PARKED_OWNER_POLICY_NAME && deps.isTerminalSeat?.(targetSession))
           throw new DeliveryGuardError("terminal_seat", "A terminal seat cannot consume an automated parked-owner reminder; route its obligation to an agent seat. No input was written.");
@@ -116,6 +127,16 @@ export function makeWatchdogDeliver(deps: {
       if (deps.isQueueOnlySeat?.(targetSession) && deps.createQueueRow) {
         return { ...await queueOnly(targetSession, message, continuityAction !== undefined, source), continuityActionCompleted };
       }
+      if (source.policy === "periodic-reminder") {
+        const owed = () => source.parkedRows
+          ? source.parkedRows.length > 0 && source.parkedRows.every(({ jobId, qitemId }) => deps.resolveParkedRows?.({ jobId, targetSession }).includes(qitemId))
+          : (deps.resolveParkedRows?.({ jobId: source.jobId, targetSession }).length ?? 0) > 0;
+        const starting = deps.wakeStandby?.(targetSession, owed);
+        if (starting) {
+          if (!await starting) return { status: "failed", sent: false, inputPhase: "not_reached", error: "Standby resume was not confirmed." };
+          if (!owed()) return { status: "failed", sent: false, inputPhase: "not_reached", error: "The park wake is no longer owed." };
+        }
+      }
       const warning = deps.outbox && source.policy === "periodic-reminder" ? "" : "Delivery may repeat after an unconfirmed attempt.\n";
       const payload = formatWatchdogDeliveryMessage(source, warning + message);
       // SessionTransport still owns recipient, approval and draft protection. Only an occurrence admitted by the
@@ -127,11 +148,11 @@ export function makeWatchdogDeliver(deps: {
       const result = await deps.sessionTransport.send(targetSession, payload,
         // Typed, never queued for a seat's hook bridge: the watchdog's receipts and accounting read only a typed outcome,
         // so a queued reminder would read delivered before anything took it (#3270).
-        { actorSession: "watchdog@system", openrigNotice: true, auditPointer: source.jobId, noHookBridge: true, ...(beforeWrite ? { beforeWrite } : {}) });
+        { actorSession: "watchdog@system", openrigNotice: true, auditPointer: source.jobId, noHookBridge: true, notificationCurrent, ...(beforeWrite ? { beforeWrite } : {}) });
       const fact = readSendOutcome(result, writtenFact(result));
       if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted, fact };
       return result.ok
-        ? { status: "ok", continuityActionCompleted, fact }
+        ? { status: "ok", continuityActionCompleted, fact, ...(sharedReminder === null ? {} : { sentMessage: message }) }
         : { status: "failed", fact, error: result.error, sent: result.sent, ...(result.reason ? { transportReason: result.reason } : {}),
           ...(result.inputPhase ? { inputPhase: result.inputPhase } : {}),
           ...(result.sent === false && result.inputPhase === "not_reached" && result.noInputCode ? { code: result.noInputCode } : {}), continuityActionCompleted };

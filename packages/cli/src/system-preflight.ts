@@ -4,7 +4,7 @@ import { accessSync, mkdirSync, constants } from "node:fs";
 import { dirname } from "node:path";
 import type { ConfigStore, RiggedConfig } from "./config-store.js";
 import type { DaemonStatus } from "./daemon-lifecycle.js";
-import { buildTmuxControlFailure, probeTmuxControlAsync } from "./tmux-health.js";
+import { buildTmuxControlFailure, buildTmuxVersionCheckFailure, probeTmuxControlAsync } from "./tmux-health.js";
 import { classifyNodeVersion } from "./node-support.js";
 import { isBlockedConnectionCode } from "./daemon-reachability.js";
 
@@ -155,6 +155,9 @@ export class SystemPreflight {
         reason: "OpenRig uses tmux to create and control agent sessions.",
         fix: "Install tmux (brew install tmux on macOS, apt install tmux on Debian/Ubuntu).",
       });
+    } else if (tmuxProbe.code === "not_runnable" || tmuxProbe.code === "check_failed") {
+      const failure = buildTmuxVersionCheckFailure(tmuxProbe.code, tmuxProbe.detail ?? "no detail");
+      checks.push({ name: "tmux", ok: false, error: failure.message, reason: failure.reason, fix: failure.fix });
     } else if (tmuxProbe.available) {
       checks.push({ name: "tmux", ok: true });
     } else {

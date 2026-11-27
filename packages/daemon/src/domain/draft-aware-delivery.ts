@@ -20,6 +20,10 @@ export interface GuardedDeliverySummary {
   id: string;
   state: "sending" | "held" | "complete" | "failed" | "indeterminate";
   reason: string;
+  /** A message held before any paste although its composer read as empty (such as a Codex message that wouldn't stay
+   *  visible in its viewport, #2242): the input read's own status and reason, and the guard's explanation, so the
+   *  summary doesn't read as an unknown composer or a draft. */
+  inputRead?: { status: "empty"; reason: string; message: string };
 }
 
 /** Historical attempts contain outcomes, never executable options or callbacks. */
@@ -53,7 +57,11 @@ export class DraftAwareDelivery {
       : entry.deliveryState === "delivered" ? "complete" : entry.deliveryState === "sending" ? "sending" : entry.deliveryState === "failed" ? "failed" : "indeterminate";
     const reason = entry.deliveryState === "retired" ? "message_retired" : receipt.result?.reason ?? receipt.watchdog?.nextAction
       ?? (state === "sending" ? "delivery_in_progress" : state === "complete" ? "delivered" : "interrupted_write");
-    return { id: receipt.ids[0]!, state, reason };
+    // The receipt already holds the distinction; carry it for a retained message whose composer read as empty.
+    const read = receipt.result?.inputReadFailure;
+    const inputRead = entry.deliveryState === "retained" && read?.status === "empty" && typeof receipt.result?.error === "string"
+      ? { status: "empty" as const, reason: read.reason, message: receipt.result.error } : undefined;
+    return { id: receipt.ids[0]!, state, reason, ...(inputRead ? { inputRead } : {}) };
   }
 
   /** The existing per-seat lease serializes requests. Each current request gets an attempt, not an old result. */

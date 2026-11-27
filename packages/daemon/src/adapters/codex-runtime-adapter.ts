@@ -10,8 +10,9 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
+import { readNativeProcessLaunches } from "../domain/native-process-arguments.js";
 import { parse as parseToml } from "smol-toml";
-import type { TmuxAdapter } from "./tmux.js";
+import { isMissingTmuxServer, type TmuxAdapter } from "./tmux.js";
 import { tmuxAttachCommand } from "./tmux-server.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { codexPostureArg } from "./yolo-mode.js";
@@ -52,6 +53,9 @@ import {
   codexCoreMarketplaceManifest, codexCorePluginEnablement, codexReadableConfigLayers, recordedMarketplaceSource, userLayerEnablesCorePlugin,
   type CodexConfigLayerRead,
 } from "../domain/codex-core-plugin-install.js";
+
+/** One Codex seat as OpenRig records it: its node and the tmux session its binding names (null when unbound). */
+export interface CodexSeatRecord { nodeId: string; tmuxSession: string | null }
 
 /** Runs Codex's own CLI with the daemon's CODEX_HOME; tests inject a recorder. */
 export type CodexCliRunner = (args: string[], env: NodeJS.ProcessEnv) => Promise<{ status: number | null; stdout: string; stderr: string }>;
@@ -121,6 +125,8 @@ interface PreparedCodexLaunch {
   networkArg: string;
   /** Keeps OpenRig's command folder on the PATH of the seat's tool commands; see codexNonLoginShellArg. */
   loginShellArg: string;
+  /** What the launch's plugin setup reports to the launch's result: an openrig-core install that waits (#3385). */
+  warnings: string[];
 }
 
 export interface CodexAdapterFsOps {
@@ -210,6 +216,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private resolveCorePluginDir?: () => string | undefined;
   // Whether a node's resolved plugin selection includes openrig-core (the test that also gives it OPENRIG_SEAT_PROJECT_DIR).
   private resolveCorePluginSelected?: (nodeId: string) => boolean;
+  // #3385: the Codex seats OpenRig records, for the check that holds an openrig-core upgrade while one runs in that home.
+  private listCodexSeats?: () => CodexSeatRecord[] | Promise<CodexSeatRecord[]>;
+  private readCodexHomes: (pids: number[]) => ReadonlyMap<number, string> | Promise<ReadonlyMap<number, string>>;
   private runCodexCli: CodexCliRunner;
   // One Codex config.toml per adapter: launches, the boot step and resume all write it (and Codex's install writes it too),
   // so each of those runs its whole setup under this one lock, one after another.
@@ -263,6 +272,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     resolveCorePluginDir?: () => string | undefined;
     /** Whether the node's resolved plugin selection includes openrig-core. Absent: no launch ever installs it. */
     resolveCorePluginSelected?: (nodeId: string) => boolean;
+    /** #3385: every Codex seat OpenRig records, with its bound tmux session. Absent: no seat holds an upgrade. */
+    listCodexSeats?: () => CodexSeatRecord[] | Promise<CodexSeatRecord[]>;
+    /** The running processes' homes, not their next-launch selections. Missing values remain unknown. */
+    readCodexHomes?: (pids: number[]) => ReadonlyMap<number, string> | Promise<ReadonlyMap<number, string>>;
     runCodexCli?: CodexCliRunner;
     /** Where Codex's system and legacy managed config files live (default /etc/codex). */
     codexSystemConfigDir?: string;
@@ -273,6 +286,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.managedBlockRecords = deps.managedBlockRecords;
     this.resolveCorePluginDir = deps.resolveCorePluginDir;
     this.resolveCorePluginSelected = deps.resolveCorePluginSelected;
+    this.listCodexSeats = deps.listCodexSeats;
+    this.readCodexHomes = deps.readCodexHomes ?? readRunningCodexHomes;
     this.runCodexCli = deps.runCodexCli ?? defaultCodexCli;
     this.codexSystemConfigDir = deps.codexSystemConfigDir ?? "/etc/codex";
     this.tmux = deps.tmux;
@@ -395,7 +410,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /**
    * Boot step, run after the plugin is vendored: install openrig-core into Codex only when hooks are enabled and some
-   * Codex seat's resolved selection includes it. A daemon whose Codex seats didn't select it never installs it.
+   * Codex seat's resolved selection includes it. A daemon whose Codex seats didn't select it never installs it. An
+   * upgrade waits while a Codex seat runs in the daemon's Codex home (#3385).
    */
   async ensureCodexCorePluginAtBoot(anySeatSelected: boolean): Promise<void> {
     if (!anySeatSelected || !this.resolveHooksEnabled) return;
@@ -410,13 +426,37 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   /**
+   * #3385: a Codex start that resumes a conversation (an in-place restart, once its old Codex has stopped, or a restore)
+   * completes an openrig-core upgrade waiting in its home, before its Codex starts, once no other Codex seat runs there.
+   * It never makes a first install. Returns why the upgrade still waits, for the start's own result; undefined otherwise.
+   */
+  async upgradeCorePluginForResume(nodeId: string | undefined, home?: string): Promise<string | undefined> {
+    if (!this.resolveCorePluginSelected || !this.resolveHooksEnabled) return undefined;
+    const resolveHooksEnabled = this.resolveHooksEnabled;
+    return this.withConfigLock(async () => {
+      try {
+        if (!(await resolveHooksEnabled())) return undefined;
+        const result = await this.ensureCodexCorePlugin(home, { exceptNodeId: nodeId, upgradeOnly: true });
+        return result.outcome === "deferred" ? result.reason : undefined;
+      } catch (err) {
+        console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
+        return undefined;
+      }
+    });
+  }
+
+  /**
    * Install the vendored openrig-core plugin into Codex through Codex's own commands, so a seat that selected it gets its
    * refocus and skills, trusting exact shipped hooks on first install and renewing proven owned content approvals. It runs only when the person's config
    * doesn't disable the plugin (codexCorePluginEnablement), and only when the installed version differs from the vendored
    * one. Codex owns its plugin cache; its immutable legacy trust baseline is never rewritten.
+   *
+   * #3385: replacing an installed version waits ("deferred") while a Codex seat other than `exceptNodeId` runs in that
+   * home, or might: a running Codex points its hooks at the new folder but keeps the approvals it started with, so Codex
+   * turns them off until it restarts. `upgradeOnly` does nothing unless such an upgrade is waiting.
    */
-  async ensureCodexCorePlugin(home?: string): Promise<{ outcome: "installed" | "current" | "skipped"; reason: string }> {
-    const report = (outcome: "installed" | "current" | "skipped", reason: string) => {
+  async ensureCodexCorePlugin(home?: string, opts: { exceptNodeId?: string; upgradeOnly?: boolean } = {}): Promise<{ outcome: "installed" | "current" | "skipped" | "deferred"; reason: string }> {
+    const report = (outcome: "installed" | "current" | "skipped" | "deferred", reason: string) => {
       if (outcome !== "current") console.error(`[openrig] codex core plugin ${outcome}: ${reason}`);
       return { outcome, reason };
     };
@@ -426,6 +466,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     try { version = (JSON.parse(this.fs.readFile(nodePath.join(pluginDir, ".codex-plugin", "plugin.json"))) as { version?: unknown }).version; }
     catch { return report("skipped", "the vendored plugin has no readable Codex manifest"); }
     if (typeof version !== "string" || !/^[0-9A-Za-z._-]+$/.test(version)) return report("skipped", "the vendored plugin's Codex manifest has no usable version");
+    const codexHome = nodePath.dirname(this.resolveCodexConfigPath(home));
+    const cacheRoot = nodePath.join(codexHome, "plugins", "cache", CODEX_CORE_MARKETPLACE, CODEX_CORE_PLUGIN);
+    const cachedDir = nodePath.join(cacheRoot, version);
+    const cached = this.fs.exists(cachedDir);
+    // The versions Codex's install would replace: the ones it keeps beside the vendored one's folder (null: unreadable).
+    const replaced = cached ? [] : otherCoreVersions(cacheRoot, version);
+    if (opts.upgradeOnly && replaced?.length === 0) return { outcome: "skipped", reason: "no openrig-core upgrade waits in this Codex home" };
 
     const shipped = nodePath.resolve(import.meta.dirname, "../../assets/plugins/openrig-core");
     const ownFiles: string[] = [];
@@ -449,7 +496,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       catch { return false; }
     };
 
-    const codexHome = nodePath.dirname(this.resolveCodexConfigPath(home));
     const readLayers = (): CodexConfigLayerRead[] => codexReadableConfigLayers(codexHome, this.codexSystemConfigDir).map((layer) => {
       if (!this.fs.exists(layer.path)) return { ...layer, state: "absent" as const };
       try { return { ...layer, state: "read" as const, content: this.fs.readFile(layer.path) }; }
@@ -472,9 +518,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Current only when Codex would load it: the vendored version is in its store AND the user config still registers it
     // (our marketplace, and an explicit enabled = true, which Codex's install writes). Codex loads only configured
     // plugins, so a cache left behind after the entry or the marketplace was removed is installed again.
-    const cacheRoot = nodePath.join(codexHome, "plugins", "cache", CODEX_CORE_MARKETPLACE, CODEX_CORE_PLUGIN);
-    const cachedDir = nodePath.join(cacheRoot, version);
-    const cached = this.fs.exists(cachedDir);
     // Codex's "continue without trusting" choice writes no state, so an existing install with no hooks.state entry for any
     // of OpenRig's hooks may be an unrecorded skip, or an older install that never granted them. OpenRig trusts its own
     // exact shipped hooks there as on a first install (#17). Any recorded choice for one of them, or a layer it can't read,
@@ -553,6 +596,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       renewContentApproval(noOwnHookChoice(layers) && grantOwnHooks() === 6);
       return report("current", `${CODEX_CORE_PLUGIN_KEY} ${version} is installed and registered`);
     }
+    if (replaced === null || replaced.length > 0) {
+      const holding = await this.codexSeatsRunningIn(codexHome, opts.exceptNodeId);
+      if (holding.running.length > 0 || holding.unknown.length > 0 || holding.unlisted) {
+        return report("deferred", corePluginWait({ home: codexHome, version, installed: replaced, ...holding }));
+      }
+    }
     const manifestPath = nodePath.join(pluginsDir, CODEX_MARKETPLACE_MANIFEST_PATH);
     const manifest = codexCoreMarketplaceManifest();
     if (!this.fs.exists(manifestPath) || this.fs.readFile(manifestPath) !== manifest) {
@@ -568,6 +617,60 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (installed.status !== 0) return report("skipped", `codex plugin add failed: ${(installed.stderr || installed.stdout).trim() || `exit ${installed.status}`}`);
     renewContentApproval((firstInstall || noOwnHookChoice(layers)) && grantOwnHooks() === 6);
     return report("installed", `${CODEX_CORE_PLUGIN_KEY} ${version} through Codex's own install (${enablement.reason})`);
+  }
+
+  /**
+   * #3385: the Codex seats that run in `codexHome`, other than `exceptNodeId`. A seat counts when its home (its own
+   * CODEX_HOME, else HOME/.codex, from the process itself) is this one and the pane of its bound tmux session runs a Codex process. Codex loads the
+   * installed plugin into every session in a home, so seats that didn't select openrig-core count too. A seat whose session,
+   * pane or processes can't be read is `unknown`, never not running; an unbound seat, or a session tmux says is gone, isn't
+   * running.
+   */
+  private async codexSeatsRunningIn(codexHome: string, exceptNodeId: string | undefined): Promise<{ running: string[]; unknown: string[]; unlisted?: true }> {
+    const running: string[] = [];
+    const unknown: string[] = [];
+    if (!this.listCodexSeats) return { running, unknown };
+    let seats: CodexSeatRecord[];
+    try { seats = await this.listCodexSeats(); }
+    catch { return { running, unknown, unlisted: true }; }
+    const target = realPathOf(codexHome);
+    let rows: Promise<CodexProcess[]> | undefined;
+    const table = () => (rows ??= Promise.resolve().then(() => this.listProcessesShared()));
+    const live: Array<{ session: string; pids: number[] }> = [];
+    for (const seat of seats) {
+      if (seat.nodeId === exceptNodeId || !seat.tmuxSession) continue;
+      const pids = await this.sessionCodexPids(seat.tmuxSession, table);
+      if (pids === "unknown") unknown.push(seat.tmuxSession);
+      else if (pids.length > 0) live.push({ session: seat.tmuxSession, pids });
+    }
+    // Batch the OS capture: a macOS daemon must not start one osascript process per seat.
+    let homes: ReadonlyMap<number, string>;
+    try { homes = await this.readCodexHomes([...new Set(live.flatMap(seat => seat.pids))]); }
+    catch { homes = new Map(); }
+    for (const seat of live) {
+      const values = seat.pids.map(pid => homes.get(pid));
+      if (values.some(home => home && nodePath.isAbsolute(home) && realPathOf(home) === target)) running.push(seat.session);
+      else if (values.some(home => !home || !nodePath.isAbsolute(home))) unknown.push(`${seat.session} (Codex home unreadable)`);
+    }
+    return { running, unknown };
+  }
+
+  /** Whether a tmux session's pane runs a Codex process: the pane's own process or one below it. */
+  private async sessionCodexPids(session: string, table: () => Promise<CodexProcess[]>): Promise<number[] | "unknown"> {
+    try {
+      const probe = await this.tmux.probeSession(session);
+      if (probe.state === "absent" || isMissingTmuxServer(probe)) return [];
+      if (probe.state !== "present") return "unknown";
+      const panePid = await this.tmux.getPanePid(session);
+      if (!panePid) return "unknown";
+      const rows = await table();
+      // A pane tmux keeps after its process exited (remain-on-exit, as the pane cutover leaves it) still reports that pid.
+      // tmux says when the pane is dead: then its seat runs no Codex. A live pid the table missed stays unknown.
+      if (!rows.some((row) => row.pid === panePid)) return (await this.tmux.isPaneDead(session)) ? [] : "unknown";
+      return paneCodexProcesses(rows, panePid).map(row => row.pid);
+    } catch {
+      return "unknown";
+    }
   }
 
   /**
@@ -978,11 +1081,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     const updatePrompt: UpdatePromptAttempt = { handled: false };
-    // Only a launch that starts a conversation may install the core plugin; a resume never does.
-    const prepared = await this.prepareLaunch(binding, opts.name, undefined, { installCorePlugin: !opts.resumeToken });
+    // Only a launch that starts a conversation may install the core plugin; a resume only completes a waiting upgrade.
+    const prepared = await this.prepareLaunch(binding, opts.name, undefined, { corePlugin: opts.resumeToken ? "upgrade" : "install" });
     if (!prepared.ok) return prepared;
     const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonArg, networkArg, loginShellArg } = prepared;
-    const policyNotice = appliedLaunch.reason?.startsWith("policy not verified:") ? { warnings: [appliedLaunch.reason] } : {};
+    const notices = [...(appliedLaunch.reason?.startsWith("policy not verified:") ? [appliedLaunch.reason] : []), ...prepared.warnings];
+    const policyNotice = notices.length > 0 ? { warnings: notices } : {};
 
     // Fork branch: `codex fork <parent_thread_id>`. Captures the NEW thread id
     // post-fork. Parent thread id is NOT persisted onto the new seat record
@@ -1081,8 +1185,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ok: false, error: "launch_wrapper support unavailable; no agent started." };
     }
     if (!binding.tmuxSession) return { ok: false, error: "No tmux session bound — cannot build a Codex resume command" };
-    // Building a resume command (the in-place restart's) never installs the core plugin. A preview leaves the Codex config alone.
-    const prepared = await this.prepareLaunch(binding, opts.name, opts.running, { installCorePlugin: false, preview: opts.preview === true });
+    // Building a resume command (the in-place restart's) never installs the core plugin: the restart completes a waiting
+    // upgrade once its old Codex has stopped (upgradeCorePluginForResume). A preview leaves the Codex config alone.
+    const prepared = await this.prepareLaunch(binding, opts.name, opts.running, { corePlugin: "none", preview: opts.preview === true });
     if (!prepared.ok) return prepared;
     const core = this.resumeCore(prepared, opts.resumeToken, binding);
     let command: string;
@@ -1142,22 +1247,28 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
   private async prepareLaunch(binding: NodeBinding, name: string, running: RunningCodexLaunch | undefined,
-    opts: { installCorePlugin: boolean; preview?: boolean }): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
+    opts: { corePlugin: "install" | "upgrade" | "none"; preview?: boolean }): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
     const checkedBeforeCutover = this.filesystemPreflight.get(binding);
     const decision = checkedBeforeCutover ?? await this.checkFilesystemPolicy(binding);
     this.filesystemPreflight.delete(binding);
     if (decision && !decision.ok) return decision;
-    // The config write and, for a seat that selected openrig-core, its install run as one step under the config lock, so
-    // concurrent launches never interleave them. An unselected seat's launch never installs.
+    // The config write and the plugin step run as one step under the config lock, so concurrent launches never interleave
+    // them. Only a fresh start of a seat that selected openrig-core may install it; any other Codex start (a resume, an
+    // unselected seat) only completes an upgrade waiting in that home, which a running seat there held (#3385).
     // A seat with its own CODEX_HOME gets OpenRig's managed config (hooks, feature flag) and plugin in that home.
     // A preview (a restart plan, a switch's precheck) leaves the Codex config alone; the launch it previews converges it.
     const home = this.homeFor(binding);
     const own = this.ownHome(binding);
+    const warnings: string[] = [];
     if (!opts.preview) await this.withConfigLock(async () => {
       const managed = await this.applyManagedConfig(home);
-      if (opts.installCorePlugin && managed?.hooksEnabled && this.resolveCorePluginSelected?.(binding.nodeId)) {
-        try { await this.ensureCodexCorePlugin(home); }
-        catch (err) { console.error(`[openrig] runtime setup warning: ${(err as Error).message}`); }
+      const selected = this.resolveCorePluginSelected;
+      if (opts.corePlugin !== "none" && managed?.hooksEnabled && selected) {
+        try {
+          const upgradeOnly = opts.corePlugin === "upgrade" || !selected(binding.nodeId);
+          const result = await this.ensureCodexCorePlugin(home, { exceptNodeId: binding.nodeId, upgradeOnly });
+          if (result.outcome === "deferred") warnings.push(result.reason);
+        } catch (err) { console.error(`[openrig] runtime setup warning: ${(err as Error).message}`); }
       }
     });
     const model = binding.model?.trim();
@@ -1188,7 +1299,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         seatFolderArg: "",
         daemonOptOut: running.daemonOptOut, daemonArg: running.daemonOptOut ? " --no-daemon" : "",
         networkArg: !filesystemPermissions && running.networkOverride ? ` -c ${shellQuote(CODEX_NETWORK_DEFAULT_OVERRIDE)}` : "",
-        loginShellArg: running.nonLoginShell ? codexNonLoginShellArg : "" };
+        loginShellArg: running.nonLoginShell ? codexNonLoginShellArg : "", warnings };
     }
 
     // OPR.0.3.4.7 — profile-LOAD probe before launch/resume. A legacy
@@ -1231,7 +1342,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.
     const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut } : appliedLaunch;
     return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonOptOut, daemonArg, networkArg,
-      loginShellArg: this.codexLoginShell?.() ? "" : codexNonLoginShellArg };
+      loginShellArg: this.codexLoginShell?.() ? "" : codexNonLoginShellArg, warnings };
   }
 
   private resumeCore(prepared: PreparedCodexLaunch, resumeToken: string, binding: NodeBinding): string {
@@ -3154,6 +3265,69 @@ function findCodexDescendantPids(
 
   visit(parentPid);
   return matches;
+}
+
+/** #3385: the version folders Codex keeps for openrig-core in `cacheRoot` other than `version`: none when there's no cache
+ *  yet, null when the folder can't be read. */
+function otherCoreVersions(cacheRoot: string, version: string): string[] | null {
+  try {
+    return fs.readdirSync(cacheRoot, { withFileTypes: true })
+      .filter((entry) => (entry.isDirectory() || entry.isSymbolicLink()) && entry.name !== version && !entry.name.startsWith("."))
+      .map((entry) => entry.name).sort();
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? [] : null;
+  }
+}
+
+function realPathOf(path: string): string {
+  try { return fs.realpathSync.native(nodePath.resolve(path)); } catch { return nodePath.resolve(path); }
+}
+
+/** #3385: whether a pane's own process, or any process below it, is a Codex (by its OS name, or a `codex` argv token). A
+ *  zombie isn't. */
+function paneCodexProcesses(rows: CodexProcess[], panePid: number): CodexProcess[] {
+  const children = new Map<number, CodexProcess[]>();
+  for (const row of rows) {
+    const siblings = children.get(row.ppid);
+    if (siblings) siblings.push(row); else children.set(row.ppid, [row]);
+  }
+  const seen = new Set<number>();
+  const found: CodexProcess[] = [];
+  const queue = rows.filter((row) => row.pid === panePid);
+  while (queue.length > 0) {
+    const row = queue.shift()!;
+    if (seen.has(row.pid)) continue;
+    seen.add(row.pid);
+    if (row.state !== "Z" && (row.executableName === "codex" || commandLooksLikeCodex(row.command))) found.push(row);
+    queue.push(...(children.get(row.pid) ?? []));
+  }
+  return found;
+}
+
+/** Only the two home variables leave the transient OS capture; credentials and other environment values do not. */
+async function readRunningCodexHomes(pids: number[]): Promise<ReadonlyMap<number, string>> {
+  const homes = new Map<number, string>();
+  for (const [pid, launch] of await readNativeProcessLaunches(pids)) {
+    const home = launch.env.CODEX_HOME ?? (launch.env.HOME ? nodePath.join(launch.env.HOME, ".codex") : undefined);
+    if (home && nodePath.isAbsolute(home)) homes.set(pid, home);
+  }
+  return homes;
+}
+
+/** #3385: why an openrig-core install waits in a Codex home, for the runtime setup report and the start's own result. */
+function corePluginWait(input: { home: string; version: string; installed: string[] | null; running: string[]; unknown: string[]; unlisted?: true }): string {
+  const installed = input.installed?.length ? `${CODEX_CORE_PLUGIN} ${input.installed.join(", ")}` : `the ${CODEX_CORE_PLUGIN} version installed there`;
+  const parts = [`${CODEX_CORE_PLUGIN} ${input.version} waits to install in ${input.home}: replacing ${installed} under a running Codex turns off its hooks (refocus and compaction context) until that Codex restarts.`];
+  if (input.running.length > 0) parts.push(`Codex seats running there: ${input.running.join(", ")}.`);
+  if (input.unknown.length > 0) {
+    const one = input.unknown.length === 1;
+    parts.push(`Couldn't tell whether ${input.unknown.join(", ")} ${one ? "is" : "are"} running there, so ${one ? "it counts" : "they count"} as running.`);
+  }
+  if (input.unlisted) parts.push("OpenRig's records of its Codex seats couldn't be read, so a seat may be running there.");
+  parts.push(`Until it installs, Codex seats there, new ones included, start with ${installed}.`
+    + " It installs once none of them is running: rig seat restart <seat> --keep-conversation --reason \"<why>\" on the last one"
+    + " installs it before that seat's Codex starts again, and rig down <rig> then rig up <rig> --existing restarts several together.");
+  return parts.join(" ");
 }
 
 function commandLooksLikeCodex(command: string): boolean {

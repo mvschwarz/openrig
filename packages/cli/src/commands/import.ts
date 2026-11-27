@@ -37,8 +37,29 @@ function materializationCurrentlyAvailable(operation: z.infer<typeof materialize
     operation.current.nodes.every(node => node.exists);
 }
 
+/**
+ * What a run with no mode flag prints for a valid spec. That run only validates, so it says plainly that nothing
+ * changed and which flags would apply the spec, to the named rig when --target-rig was given.
+ */
+export function validateOnlyNotice(targetRig?: string): string {
+  if (!targetRig) {
+    return [
+      "Valid. Nothing was imported: without a mode flag, rig import only validates the spec.",
+      "To import it, add --instantiate (create the rig and launch it) or --materialize-only (create it without launching).",
+    ].join("\n");
+  }
+  return [
+    `Valid. Nothing was applied to rig ${targetRig}: without a mode flag, rig import only validates the spec.`,
+    `To apply it to rig ${targetRig}, add one of:`,
+    "  --workspace-only    apply the spec's workspace declaration",
+    "  --materialize-only  add the spec's pods (a pod the rig already has is a conflict)",
+    "Neither changes the pods or members the rig already has.",
+  ].join("\n");
+}
+
 export function importCommand(depsOverride?: ImportDeps): Command {
-  const cmd = new Command("import").description("Import a rig spec from YAML");
+  const cmd = new Command("import")
+    .description("Validate a rig spec from YAML; add --instantiate, --materialize-only or --workspace-only to apply it");
   const getDeps = (): ImportDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
@@ -53,7 +74,7 @@ export function importCommand(depsOverride?: ImportDeps): Command {
     .option("--json", "With --materialize-only: print the native JSON receipt")
     .option("--workspace-only", "Apply only the workspace declaration to an existing rig")
     .option("--preflight", "Run preflight checks")
-    .option("--target-rig <rigId>", "Target existing rig for materialization or workspace apply")
+    .option("--target-rig <rigId>", "Existing rig to apply to, with --materialize-only or --workspace-only (alone, import only validates)")
     .option("--rig-root <root>", "Root directory for pod-aware resolution")
     .option("--cwd <path>", "Override launch/materialization working directory for all members")
     .action(async (filePath: string, opts: { instantiate?: boolean; materializeOnly?: boolean; operationId?: string; json?: boolean; workspaceOnly?: boolean; preflight?: boolean; targetRig?: string; rigRoot?: string; cwd?: string }) => {
@@ -279,7 +300,7 @@ export function importCommand(depsOverride?: ImportDeps): Command {
         return;
       }
 
-      // Default: validate only
+      // Default: validate only. Nothing is applied, so the notice says so (#2769).
       const res = await client.postText<{ valid?: boolean; errors?: string[] }>("/api/rigs/import/validate", yaml);
       if (res.status >= 400) {
         console.error(`Validation failed: invalid spec (HTTP ${res.status}). Check your YAML syntax and retry.`);
@@ -288,7 +309,7 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       }
       const data = res.data;
       if (data.valid) {
-        console.log("Valid");
+        console.log(validateOnlyNotice(opts.targetRig));
       } else {
         console.error(`Rig spec invalid:\n${(data.errors ?? []).map((e) => `  ${e}`).join("\n")}\nFix: update your spec and re-validate with: rig spec validate <path>`);
         process.exitCode = 1;

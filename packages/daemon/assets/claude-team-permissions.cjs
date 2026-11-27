@@ -4,6 +4,7 @@
 // policy; this file never reads or writes a person's permission settings.
 // This is command convenience, not containment (test runners can execute code).
 const { basename, isAbsolute } = require("node:path");
+const { spawnSync } = require("node:child_process");
 
 function scanQuotes(text, keepDouble = false, initial = "", arithmetic = 0) {
   let out = "", state = initial, start = 0, arithmeticStart = 0, wordStarted = Boolean(initial);
@@ -240,7 +241,32 @@ function decide(command, policy, depth = 0) {
   return prefixes(policy.allow).some(prefix => prefixEnd(tokens, prefix) !== undefined) ? "allow" : undefined;
 }
 
-module.exports = { decide };
+// Whether this seat is the host's receiving agent (agents.operator_session), read through the seat's own rig so the
+// setting resolves as that seat's commands see it. A seat with no session name, or a setting that can't be read,
+// isn't the receiving agent, so the ask stays.
+function isReceivingAgent(env = process.env, run = spawnSync) {
+  const self = (env.OPENRIG_SESSION_NAME || env.RIGGED_SESSION_NAME || "").trim();
+  if (!self) return false;
+  try {
+    const result = run("rig", ["config", "get", "agents.operator_session", "--json"], { env, encoding: "utf8", timeout: 3000 });
+    if (result.status !== 0) return false;
+    const value = JSON.parse(result.stdout).value;
+    return typeof value === "string" && value.trim() === self;
+  } catch {
+    return false;
+  }
+}
+
+// The team policy for one command. On the receiving agent, seat decide-permission keeps its no-prompt path, since
+// that seat settles the permission requests a person answered; every other team seat asks. The setting is read only
+// when the command names decide-permission.
+function teamPolicy(command, env = process.env, receivingAgent = isReceivingAgent) {
+  const { TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK, RECEIVING_AGENT_NO_ASK } = require("./claude-permission-policies.cjs");
+  const exempt = command.includes("decide-permission") && receivingAgent(env);
+  return { allow: TEAM_CLAUDE_ALLOW, ask: exempt ? TEAM_CLAUDE_ASK.filter(rule => !RECEIVING_AGENT_NO_ASK.includes(rule)) : TEAM_CLAUDE_ASK };
+}
+
+module.exports = { decide, teamPolicy, isReceivingAgent };
 if (require.main === module) {
   let raw = "";
   process.stdin.setEncoding("utf8");
@@ -251,11 +277,12 @@ if (require.main === module) {
       if (input.tool_name !== "Bash" || typeof input.tool_input?.command !== "string") return;
       const kind = process.argv[2];
       let policy;
-      if (kind === "kernel" || kind === "team") {
+      if (kind === "kernel") {
         // Each invocation reads the installed lists; native inline allowances remain as launched.
-        const { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } = require("./claude-permission-policies.cjs");
-        policy = kind === "kernel" ? { allow: KERNEL_CLAUDE_ALLOW, ask: [] }
-          : { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK };
+        const { KERNEL_CLAUDE_ALLOW } = require("./claude-permission-policies.cjs");
+        policy = { allow: KERNEL_CLAUDE_ALLOW, ask: [] };
+      } else if (kind === "team") {
+        policy = teamPolicy(input.tool_input.command);
       } else {
         // Existing running sessions still carry their encoded launch policy.
         policy = JSON.parse(Buffer.from(kind, "base64").toString("utf8"));

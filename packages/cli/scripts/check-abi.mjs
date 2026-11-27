@@ -24,7 +24,7 @@ const FIX_INSTALL = "Fix:  nvm install 22 && npm install -g @openrig/cli";
  * @param {{
  *   nodeVersion: string,
  *   loadNativeAddon: () => void,
- *   openNativeDatabase?: () => { ok: true } | { ok: false, detail: string },
+ *   openNativeDatabase?: () => { ok: true } | { ok: false, detail: string, notRun?: boolean },
  * }} deps
  * @returns {{ ok: true, warning?: string } | { ok: false, message: string }}
  */
@@ -123,6 +123,17 @@ export function checkAbi({ nodeVersion, loadNativeAddon, openNativeDatabase }) {
   // binding works (Node 20 + better-sqlite3 13 loads, then segfaults here).
   if (openNativeDatabase) {
     const opened = openNativeDatabase();
+    // The check's own child process couldn't start (a sandbox can refuse it). That says nothing about the binding,
+    // which loaded, so it isn't a rebuild: say the open wasn't checked.
+    if (!opened.ok && opened.notRun) {
+      const lines = [
+        "better-sqlite3 loaded, but the database check couldn't run:",
+        "it couldn't start a Node process here, which a sandbox can",
+        "block. Opening a database was not checked.",
+      ];
+      if (warning) lines.push("", `Node ${major} is also untested with @openrig/cli.`);
+      return { ok: true, warning: box(lines) + `  Detail: ${opened.detail}\n` };
+    }
     if (!opened.ok) {
       return {
         ok: false,
@@ -157,7 +168,12 @@ export function openInChildProcess(addonPath, spawnSync) {
     encoding: "utf8",
     timeout: 30_000,
   });
-  if (result.error) return { ok: false, detail: result.error.message };
+  // The child was refused permission to start (EPERM or EACCES, as in a sandbox): nothing was opened, so nothing
+  // failed to open. Any other error, such as a timeout, still counts as a failed open.
+  if (result.error) {
+    const code = /** @type {NodeJS.ErrnoException} */ (result.error).code;
+    return { ok: false, ...(code === "EPERM" || code === "EACCES" ? { notRun: true } : {}), detail: result.error.message };
+  }
   if (result.signal) return { ok: false, detail: `database open was killed by ${result.signal}` };
   if (result.status !== 0) {
     const stderr = (result.stderr || "").trim().split("\n").slice(-3).join(" ");

@@ -213,9 +213,16 @@ describe("Tier B — missionAuthoredStatuses sidecar (t1 presence FIRST)", () =>
     writeMission("v6-frozen", V6_FROZEN_README, { s2: "---\nstatus: active\n---\n" });
     writeMission("empty-value", "---\nstatus:\ntitle: x\n---\n# M\n", { s3: "---\nstatus: active\n---\n" });
     writeMission("no-readme2", null, { s4: "---\nstatus: active\n---\n" });
+    writeMission("commented-status", "---\nstatus: active # keep this comment\n---\n", { s5: "---\nstatus: active\n---\n" });
+    writeMission("quoted-status", '---\n"status": active\nmetadata:\n  status: nested\n---\n', { s6: "---\nstatus: active\n---\n" });
+    writeMission("invalid-yaml", "---\nstatus: complete\nintent: Ship X: on a network\n---\n", { s7: "---\nstatus: active\n---\n" });
     const sidecar = makeIndexer().missionAuthoredStatuses();
-    for (const mission of ["with-status", "v6-frozen", "empty-value", "no-readme2"]) {
+    const expected: Record<string, string | null> = { "with-status": "complete", "v6-frozen": null,
+      "empty-value": null, "no-readme2": null, "commented-status": "active", "quoted-status": "active", "invalid-yaml": null };
+    for (const mission of Object.keys(expected)) {
       const routeValue = readMissionStatus(path.join(missionsRoot(), mission));
+      expect(routeValue, mission).toBe(expected[mission]);
+      expect(sidecar[mission]?.authoredStatus ?? null, mission).toBe(expected[mission]);
       expect(sidecar[mission]?.authoredStatus ?? null).toBe(routeValue);
     }
   });

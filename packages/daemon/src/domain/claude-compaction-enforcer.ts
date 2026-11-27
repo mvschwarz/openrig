@@ -635,6 +635,10 @@ export const RESTORE_UPTAKE_WAIT_MS_DEFAULT = 30 * 60_000;
 /** This daemon process. A record this process wrote is its own state, never something to recover. */
 const DAEMON_PROCESS_ID = randomUUID();
 
+/** Ended automatic attempts, for one occupant, before its preparation is reported (#2799). The same run is the positive
+ *  evidence that the seat can't run its own managed recovery (`recoveryInability`). */
+export const PREPARATION_FAILURE_REPORT_AFTER = 3;
+
 export interface PreparationFailure {
   sessionName: string;
   occupantGeneration: string;
@@ -644,6 +648,10 @@ export interface PreparationFailure {
   endedAttempts: number;
   reason: string;
   inputBox?: PreparationState["inputBox"];
+  /** The context sample the poll that counted the attempt read: the used percentage and when it was taken. */
+  context?: { usedPercentage: number | null; sampledAt: string | null };
+  /** The latest attempt's preparation request was delivered and its map never completed; unset when it sent nothing. */
+  delivered?: true;
 }
 interface PreparationFailureRun {
   occupantGeneration: string;
@@ -918,6 +926,12 @@ export class ClaudeCompactionEnforcer {
     const session = input.sessionName;
     if (input.runtime !== "claude-code" || input.usedPercentage == null) return null;
     this.recoverSeat(input);
+    // The gate holds a fresh request, not the record of the one that ended: count it now, so a seat that doesn't read idle
+    // again still opens its preparation notice (sends nothing; the guarded poll's own count is then a no-op).
+    try {
+      const policy = this.settingsStore.resolveClaudeCompactionPolicy();
+      if (isValidThresholdPercent(policy.thresholdPercent)) await this.noteEndedPreparation(input, policy);
+    } catch { /* the guarded poll counts it */ }
     const ended = this.lastEnded.get(session);
     if (!ended) return null;
     const live = this.liveGeneration(session);
@@ -2400,15 +2414,38 @@ export class ClaudeCompactionEnforcer {
     }
   }
 
+  /** Positive evidence that this seat can't run its own managed recovery now, for a recovery notice choosing who can act:
+   *  its current occupant's automatic preparation has ended without /compact at least PREPARATION_FAILURE_REPORT_AFTER
+   *  times while its usage stayed above the threshold (sent nothing, or its map never completed), the run that opens its
+   *  preparation notice. The run clears when usage falls below the threshold, on a manual attempt or a cancel, a held map,
+   *  and with the occupant. Null when OpenRig holds no such record, including when it can't tell (no record read yet, or
+   *  the live occupant unknown): unknown is not inability. */
+  recoveryInability(session: string): string | null {
+    const r = this.records.get(session)?.record;
+    const run = r?.preparationFailures;
+    if (!r || !run || run.endedAttempts < PREPARATION_FAILURE_REPORT_AFTER) return null;
+    const generation = this.liveGeneration(session);
+    if (generation === null || run.occupantGeneration !== generation) return null;
+    return `its own managed compaction ended ${run.endedAttempts} automatic attempts without /compact while its context stayed above the compaction threshold (latest attempt ${run.lastAttemptId})`;
+  }
+
   /** Count ended attempts, never individual send calls. The current attempt record carries the run across restarts. */
   private async noteEndedPreparation(input: EnforcerInput, policy: ClaudeCompactionPolicy): Promise<void> {
     const current = this.records.get(input.sessionName);
     if (!current) return;
     const r = current.record, generation = this.liveGeneration(input.sessionName);
+    // #2799 counted only attempts that sent nothing. A delivered request whose map never completed (preparation_incomplete)
+    // is the context wall itself, so it counts too: a sent command is not recovery. A delivered attempt's other endings, an
+    // uncertain send, a held map and the stops below interrupt the run; a request still in flight or waiting for its map
+    // decides nothing yet. An attempt that ended while its send was still pending (stopped during the send, its result
+    // never recorded, as across a daemon stop) has an unknown delivery, so it interrupts like an uncertain send.
+    const ended = r.phase === "ended";
+    const delivery = r.delivery === "not_sent" || (r.delivery === "pending" && !ended) ? "open"
+      : r.delivery === "delivered" && (!ended || r.reason === "preparation_incomplete") ? "open" : "interrupted";
     const interrupted = this.pendingPreCompactPrep.get(input.sessionName)?.cancelled || !policy.enabled || input.usedPercentage == null || input.usedPercentage < policy.thresholdPercent
       || r.mode !== "automatic" || generation === null || generation !== r.occupantGeneration
       || (r.sessionId && input.sessionId && r.sessionId !== input.sessionId)
-      || r.delivery !== "not_sent" || r.belowSince !== undefined || r.compactSending || r.uncertainCompact
+      || delivery === "interrupted" || r.prepared || r.belowSince !== undefined || r.compactSending || r.uncertainCompact
       || ["preparation_cancelled", "preparation_replaced", "stale_generation", "disabled", "daemon_restarted",
         "below_threshold_while_prepared", "prepared_map_stale", "occupant_generation_unavailable"].includes(r.reason ?? "");
     if (interrupted) {
@@ -2426,11 +2463,13 @@ export class ClaudeCompactionEnforcer {
       run.lastAttemptId = r.attemptId; run.endedAttempts++;
       this.persist(input.sessionName, r.attemptId, { preparationFailures: run });
     }
-    if (run.endedAttempts < 3 || run.reportedAttempts === run.endedAttempts || !this.onPreparationFailure) return;
+    if (run.endedAttempts < PREPARATION_FAILURE_REPORT_AFTER || run.reportedAttempts === run.endedAttempts || !this.onPreparationFailure) return;
     try {
       await this.onPreparationFailure({ sessionName: input.sessionName, occupantGeneration: generation,
         attemptId: r.attemptId, mapPath: r.mapPath, statePath: current.file, endedAttempts: run.endedAttempts,
-        reason: r.reason ?? "send_failed", ...(r.inputBox ? { inputBox: r.inputBox } : {}) });
+        reason: r.reason ?? "send_failed", ...(r.inputBox ? { inputBox: r.inputBox } : {}),
+        ...(r.delivery === "delivered" ? { delivered: true as const } : {}),
+        context: { usedPercentage: input.usedPercentage ?? null, sampledAt: input.sampledAt ?? null } });
       if (this.records.get(input.sessionName) === current && current.record.preparationFailures === run) {
         run.reportedAttempts = run.endedAttempts;
         this.persist(input.sessionName, r.attemptId, { preparationFailures: run });

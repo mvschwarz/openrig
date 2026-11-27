@@ -56,6 +56,9 @@ export interface InPlaceCodexLauncher {
   verifyResumeInPane(tmuxSession: string, resumeToken: string, nodeId?: string, home?: string): Promise<HarnessLaunchResult>;
   /** Types a built command into the pane's shell and verifies the resume, preparing nothing again. */
   sendResumeCommand(tmuxSession: string, command: string, resumeToken: string, nodeId?: string, home?: string): Promise<HarnessLaunchResult>;
+  /** #3385: with the seat's old Codex stopped, complete an openrig-core upgrade waiting in `home` before its Codex starts
+   *  again. Returns why it still waits, if it does. */
+  upgradeCorePluginForResume?(nodeId: string, home: string): Promise<string | undefined>;
 }
 
 /** What one process shows about itself, read without touching any credential: cwd, executable, and only
@@ -320,6 +323,7 @@ export class CodexInPlaceRestart {
         return { ...report, outcome: "native_unknown", recoveryCommand, couldNotSee: ["whether the original Codex exited and the pane's shell is back in the foreground"],
           message: "Signals were sent, but the pane could not be observed afterwards; no resume was attempted." };
       }
+      await this.upgradeCorePlugin(target, report, progress);
       // The shell is back: type the exact resume command the checks ran on, built from the running Codex's
       // choices, and prove the resume. Preparing the launch again here would decide those choices afresh.
       progress.stage = "resume";
@@ -359,6 +363,7 @@ export class CodexInPlaceRestart {
     progress.stage = "stop";
     const terminated = await terminatePaneInPlace(this.deps.tmux, pane, this.timing, "Codex");
     if (!terminated.ok) return this.afterFailedStop(target, report, observed, held, recoveryCommand, terminated.message, progress);
+    await this.upgradeCorePlugin(target, report, progress);
     // Respawn the dead pane WITHOUT -k (scrollback stays) with the resume command as its own command.
     progress.stage = "respawn";
     const respawned = await this.deps.tmux.respawnPane(pane, relaunch.command,
@@ -387,6 +392,18 @@ export class CodexInPlaceRestart {
     }
     progress.paneHeld = undefined;
     return verified;
+  }
+
+  /** #3385: between the old Codex's stop and the new one's start, the one moment this seat runs no Codex, complete an
+   *  openrig-core upgrade waiting in its home. A wait (other seats still run there) or a failed check is a warning; the
+   *  restart goes on either way. */
+  private async upgradeCorePlugin(target: InPlaceRestartTarget, report: InPlaceRestartReport, progress: RestartProgress): Promise<void> {
+    if (!this.deps.codex.upgradeCorePluginForResume) return;
+    progress.stage = "plugin upgrade";
+    let waiting: string | undefined;
+    try { waiting = await this.deps.codex.upgradeCorePluginForResume(target.seat.nodeId, report.codexHome); }
+    catch (error) { waiting = `The openrig-core upgrade check didn't run before the resume: ${error instanceof Error ? error.message : String(error)}`; }
+    if (waiting) report.warnings.push(waiting);
   }
 
   /**
