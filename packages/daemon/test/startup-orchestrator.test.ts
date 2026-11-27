@@ -2624,7 +2624,9 @@ describe("StartupOrchestrator", () => {
     }
   });
 
-  it.each(["available", "error", "timeout"] as const)("persists the real Claude launch probe on startup_failed with geometry=%s (#1480)", async geometry => {
+  // A resume whose conversation came back to Claude's login refusal waits for its person to sign in: attention_required with
+  // the sign-in step, never "Harness launch failed", and the real probe still persisted.
+  it.each(["available", "error", "timeout"] as const)("persists the real Claude launch probe on startup_failed with geometry=%s (#1480), the resume waiting for sign-in", async geometry => {
     const missingGeometry = geometry !== "available";
     const seed = seedSession();
     const content = "❯ fixture-private-startup-prompt\n● Login expired · Please run /login\n\n❯";
@@ -2649,9 +2651,11 @@ describe("StartupOrchestrator", () => {
       status: "failed", code: "login_required", loginRefusal: { message: "Login expired · Please run /login", row: "response" },
       capture: { lines: 4, bytes: Buffer.byteLength(content), sha256: createHash("sha256").update(content).digest("hex"), columns: missingGeometry ? null : 100, rows: missingGeometry ? null : 30 },
     };
-    expect(result).toMatchObject({ ok: false, startupStatus: "failed",
-      errors: ["Harness launch failed: Claude resume failed: timed out waiting for Claude to become active"], probe });
-    expect(sessionRegistry.getSessionsForRig(seed.rigId).find(s => s.id === seed.sessionId)?.startupStatus).toBe("failed");
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required", evidence: "● Login expired · Please run /login",
+      errors: ["Harness launch requires attention: Claude needs you to sign in: the resumed conversation is waiting at Claude's "
+        + "\"Login expired · Please run /login\" reply. Open this seat's terminal and run /login there. The conversation was kept, "
+        + "and nothing was typed into it."], probe });
+    expect(sessionRegistry.getSessionsForRig(seed.rigId).find(s => s.id === seed.sessionId)?.startupStatus).toBe("attention_required");
     const events = db.prepare("SELECT payload FROM events WHERE type = 'node.startup_failed'").all() as { payload: string }[];
     expect(events).toHaveLength(1);
     expect(JSON.parse(events[0]!.payload)).toMatchObject({ rigId: seed.rigId, nodeId: seed.nodeId, sessionId: seed.sessionId,

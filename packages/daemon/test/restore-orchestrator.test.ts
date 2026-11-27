@@ -3695,9 +3695,17 @@ describe("RestoreOrchestrator", () => {
         expect(outcome.status).not.toBe("resumed");
         if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
         // Attempted lineage, not readiness: a gate Claude draws after starting (the resume chooser, workspace trust, project
-        // MCP approval) keeps the launch for a person, with its resume token.
-        else if (mode === "chooser" || mode === "trust" || mode === "mcp") expect(latest.resumeToken).toBe(token);
+        // MCP approval, or its login refusal as the resumed conversation's latest reply) keeps the launch for a person, with
+        // its resume token.
+        else if (mode === "chooser" || mode === "trust" || mode === "mcp" || mode === "login") expect(latest.resumeToken).toBe(token);
         else expect(latest.resumeToken).toBeNull();
+        // A seat resumed to its login refusal waits for its person to sign in: never a failed resume.
+        if (mode === "login") {
+          expect({ status: outcome.status, startup: latest.startupStatus }).toEqual({ status: "attention_required", startup: "attention_required" });
+          expect(outcome.error).toContain("Claude needs you to sign in: the resumed conversation is waiting at Claude's \"Not logged in · Please run /login\" reply.");
+          expect(outcome.error).not.toMatch(/timed out|resume failed/);
+          expect(outcome.attentionEvidence).toBe("● Not logged in · Please run /login");
+        }
       }
       if (mode === "error") {
         expect(tmux.killSession).toHaveBeenCalledTimes(1);

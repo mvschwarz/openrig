@@ -446,6 +446,19 @@ describe("ClaudeResumeAdapter", () => {
         .toMatchObject({ ok: false, code: "attention_required", message: expect.stringContaining("observation unavailable") });
     });
 
+    // The older resume path reports a conversation resumed to Claude's login refusal the same way: waiting for sign-in,
+    // naming the refusal and not the screen (its refused turn may be the seat's startup text).
+    it("reads a conversation resumed to Claude's login refusal as waiting for sign-in", async () => {
+      const screen = fs.readFileSync(new URL("./fixtures/claude-login-resume-2.1.330.txt", import.meta.url), "utf8");
+      const adapter = new ClaudeResumeAdapter(mockTmux({ getPaneCommand: async () => "claude", capturePaneContent: async () => screen }),
+        { pollMs: 0, maxWaitMs: 0 });
+      const result = await adapter.resume("worker", "claude_id", "retained-history", "/repo");
+      expect(result).toEqual({ ok: false, code: "attention_required", evidence: "  ⎿  Not logged in · Please run /login",
+        message: "Claude needs you to sign in: the resumed conversation is waiting at Claude's \"Not logged in · Please run /login\" reply. "
+          + "Open this seat's terminal and run /login there. The conversation was kept, and nothing was typed into it." });
+      expect(JSON.stringify(result)).not.toContain("hello");
+    });
+
     it.each([
       ["No conversation found", "retry_fresh"],
       ["How would you like to resume?\n❯ Resume from summary\n  Resume full session as-is", "attention_required"],

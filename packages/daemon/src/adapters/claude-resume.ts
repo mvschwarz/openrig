@@ -14,7 +14,7 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import { shellQuote } from "./shell-quote.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix, commandEnvPrefix } from "./claude-resume-launch.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
-import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, noConversationFoundOwner } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME, claudeResumeSignInEvidence, claudeResumeSignInMessage, noConversationFoundOwner } from "../domain/native-resume-probe.js";
 import { verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
@@ -393,6 +393,12 @@ export class ClaudeResumeAdapter {
       };
     }
 
+    // A conversation that resumed to Claude's login refusal as its latest reply waits for its person to sign in, as the
+    // managed resume reports it; its report names the refusal, not the screen.
+    if (finalProbe.code === "login_required") {
+      const evidence = claudeResumeSignInEvidence(finalProbe);
+      return { ok: false, code: "attention_required", message: claudeResumeSignInMessage(finalProbe), ...(evidence !== undefined ? { evidence } : {}) };
+    }
     return {
       ok: false,
       code: "attention_required",

@@ -42,6 +42,20 @@ export interface NativeResumeProbeResult {
 export const CLAUDE_PROCESS_ONLY_RESUME = "Claude was running when the resume's wait ended, but nothing on its screen was recognized "
   + "yet (no prompt, reply or dialog), so this resume rests on the process alone.";
 
+/** A resume whose conversation came back to Claude's login refusal as its latest reply (`login_required`): Claude is
+ *  running and waits for its person to sign in, which won't happen by itself, so the launch is kept for them. It names
+ *  the refusal Claude drew and never the screen's other text (the refused turn may be the seat's own startup text). */
+export function claudeResumeSignInMessage(probe: Pick<NativeResumeProbeResult, "loginRefusal">): string {
+  const reply = probe.loginRefusal ? ` at Claude's "${probe.loginRefusal.message}" reply` : " at Claude's login refusal";
+  return `Claude needs you to sign in: the resumed conversation is waiting${reply}. Open this seat's terminal and run `
+    + "/login there. The conversation was kept, and nothing was typed into it.";
+}
+
+/** The evidence a sign-in wait reports: the refusal row Claude drew, never the rest of the screen. */
+export function claudeResumeSignInEvidence(probe: Pick<NativeResumeProbeResult, "loginRefusal">): string | undefined {
+  return probe.loginRefusal ? `${probe.loginRefusal.row === "result" ? "  ⎿  " : "● "}${probe.loginRefusal.message}` : undefined;
+}
+
 // Claude's auto-mode footer row, which Claude draws under its composer.
 const CLAUDE_AUTO_MODE_FOOTER = /^[ \t]*⏵⏵ auto mode on \(shift\+tab to cycle\)(?:[ \t]+·[^\r\n]*)?[ \t]*$/m;
 
