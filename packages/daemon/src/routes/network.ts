@@ -117,7 +117,8 @@ export function networkRoutes(opts?: { bearerToken?: string | null; home?: strin
     if (!body) return c.json({ error: "invalid_body", message: "The body must be JSON." }, 400);
     try {
       const target = bound(c);
-      return c.json(await originateNetworkRequest(requestDeps(c), target, { peer: body.peer, requestId: body.requestId, body: body.body, summary: body.summary }), 201);
+      return c.json(await originateNetworkRequest(requestDeps(c), target, { peer: body.peer, requesterOf: body.requesterOf,
+        requestId: body.requestId, body: body.body, summary: body.summary }), 201);
     } catch (error) { return refused(c, error); }
   });
 

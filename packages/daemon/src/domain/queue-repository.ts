@@ -84,7 +84,7 @@ import { physicalSessionName, SessionRegistry } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { withRecoveryIndex } from "./queue-recovery.js";
-import { lastMeaningfulTransition, lastMeaningfulTransitionMany, meaningfulFor, readWaitingView, WaitingStatements, type WaitingView, type WaitingActivityReader, type WaitingReads } from "./queue-waiting.js";
+import { lastMeaningfulTransition, lastMeaningfulTransitionMany, meaningfulFor, readWaitingView, WaitingStatements, type WaitingView, type NetworkWait, type WaitingActivityReader, type WaitingReads } from "./queue-waiting.js";
 import { isTypedGateBlocker, typedGateBlockerPrefix } from "./queue-blocker.js";
 export { TYPED_GATE_BLOCKER_PREFIXES, isTypedGateBlocker, typedGateBlockerPrefix } from "./queue-blocker.js";
 import { isOpenRigSender, OPENRIG_SENDER, wrapPaneEnvelope } from "../lib/pane-envelope.js";
@@ -351,6 +351,7 @@ export interface QueueItem {
    *  + heartbeat; a closed row is terminal, never stalled. */
   pickup?: PickupReceipt;
   waiting?: WaitingView;
+  networkWait?: NetworkWait;
   handedOffTo: string | null;
   handedOffFrom: string | null;
   expiresAt: string | null;
@@ -1319,6 +1320,7 @@ export class QueueRepository {
   private readonly hasSummaryColumn: boolean;
   private readonly hasHumanIntentColumn: boolean;
   private readonly hasReplyToColumn: boolean;
+  private readonly hasNetworkWaitColumn: boolean;
   private readonly hasReturnRouteColumn: boolean;
   private readonly hasHumanQuestionsColumn: boolean;
   private readonly hasDelegatedDecisionColumn: boolean;
@@ -1432,6 +1434,7 @@ export class QueueRepository {
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasHumanIntentColumn = detectQueueColumn(db, "human_intent");
     this.hasReplyToColumn = detectQueueColumn(db, "reply_to");
+    this.hasNetworkWaitColumn = !!db.prepare("SELECT 1 FROM pragma_table_info('network_requests') WHERE name = 'remote_wait'").get();
     this.hasReturnRouteColumn = detectQueueColumn(db, "return_route");
     this.hasHumanQuestionsColumn = detectQueueColumn(db, "human_questions");
     this.hasDelegatedDecisionColumn = detectQueueColumn(db, "delegated_decision");
@@ -7392,11 +7395,27 @@ export class QueueRepository {
   }
 
   /** listed: the row's owner notifications and ledger, when a listing read them for all its rows. */
+  private networkWaitFor(qitemId: string): NetworkWait | null {
+    if (!this.hasNetworkWaitColumn) return null;
+    const row = this.db.prepare("SELECT remote_wait FROM network_requests WHERE local_qitem_id = ? AND settled_at IS NULL").get(qitemId) as { remote_wait: string | null } | undefined;
+    if (!row?.remote_wait) return null;
+    try {
+      const wait: unknown = JSON.parse(row.remote_wait);
+      if (!wait || typeof wait !== "object") return null;
+      const value = wait as NetworkWait;
+      return ["requester-question", "another-request"].includes(value.kind) && typeof value.observedAt === "string" ? value : null;
+    } catch { return null; }
+  }
+
   waitingView(qitemId: string, listed?: ListedLedger): WaitingView | null {
     // The row in hand, when the listing passed it: its later re-reads below are served by it too.
     const inHand = listed?.row && listed.row.qitem_id === qitemId ? listed.row : undefined;
     const reads = listed?.reads && inHand ? { ...listed.reads, row: inHand } : listed?.reads;
     const view = readWaitingView(this.db, qitemId, listed?.reads?.activity ?? this.activityReader, target => this.acceptsDestination(target), reads);
+    if (view?.blocker?.owner === OPENRIG_SENDER) {
+      const networkWait = this.networkWaitFor(view.blocker.ref);
+      if (networkWait) view.blocker.networkWait = networkWait;
+    }
     if (view && ["pending", "in-progress"].includes(view.state)) {
       // #514 — the unclaimed sweep skips a pending ask already posted to its human in the current
       // episode (same predicate as runStuckSweep), so the view must not promise that sweep.
@@ -7490,6 +7509,7 @@ export class QueueRepository {
     const meaningful = meaningfulFor(this.db, row.qitem_id, listed?.reads);
     // A listing's rows are its own SELECT *: the waiting view reads the row in hand instead of reading it again.
     const waiting = includeWaiting ? this.waitingView(row.qitem_id, listed?.reads ? { ...listed, row } : listed) : null;
+    const networkWait = row.destination_session === OPENRIG_SENDER ? this.networkWaitFor(row.qitem_id) : null;
     const listedActivity = listed?.reads?.activity;
     const activity = listedActivity ? listedActivity(row.destination_session) : this.ownerActivity(row.destination_session);
     const pickup = derivePickup({
@@ -7509,6 +7529,7 @@ export class QueueRepository {
       ...(handoffAdvisory ? { handoffAdvisory } : {}),
       pickup,
       ...(waiting ? { waiting } : {}),
+      ...(networkWait ? { networkWait } : {}),
       qitemId: row.qitem_id,
       tsCreated: row.ts_created,
       tsUpdated: row.ts_updated,

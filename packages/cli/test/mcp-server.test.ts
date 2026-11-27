@@ -1027,6 +1027,12 @@ describe("MCP Server", () => {
     if (offered.has("rig_queue_create")) expect(instructions).toContain(`${ASK_LISTED} ${ASK_CONNECTED_PICKUP} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);
     // A grant that can send and read back what it sent carries the retry rule; one that only works its inbox doesn't.
     expect(instructions.includes(RETRY_RULE)).toBe(offered.has("rig_queue_create"));
+    expect(instructions.includes("inputSchema.properties.requesterOf")).toBe(offered.has("rig_queue_create"));
+    if (offered.has("rig_queue_create")) {
+      expect(instructions).toContain("write no question or name-based fallback");
+      expect(instructions).toContain("A person address is not a blocker this scoped connection may name");
+      expect(instructions).toContain("canceled, denied or failed is not approval");
+    }
     await external.close();
     await server.close();
   });

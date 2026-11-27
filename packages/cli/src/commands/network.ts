@@ -225,12 +225,13 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
     .description("Send a request to a peer through a connected seat's hub; its answer comes back to a local queue item")
     // Commander fills arguments in order, so an optional one can't come before a required one: both are optional here,
     // and one argument given is the peer.
-    .usage("[options] [binding-or-seat] <peer>")
+    .usage("[options] [binding-or-seat] [peer]")
     .argument("[binding-or-seat]", "The binding id, or the connected seat's address. Left out, your own seat")
     .argument("[peer]", "The peer's address in the hub, as rig network peers lists it")
     .requiredOption("--id <request-id>", "Your own id for this request, unique to it: the local item's id. Retry only with the same id")
     .requiredOption("--body-file <path>", "A file holding the request: what to do and what to return")
     .option("--summary <text>", "One-line summary")
+    .option("--requester-of <qitemId>", "Ask the original requester of this seat's imported network work; excludes a peer argument and blocks that work on the question receipt")
     .option("--json", "Print JSON")
     .addHelpText("after", `
 Waiting for the answer: the local item <request-id> belongs to OpenRig, so nothing
@@ -247,10 +248,18 @@ add --wake-after 4h (your choice) to the block to be woken anyway.
 A request id starting fold:, auth: or external: is read by block as a gate, not as
 this item, so nothing wakes the row for it: give a request you'll wait on another id.
 rig whoami names your binding.`)
-    .action(async (first: string | undefined, second: string | undefined, opts: { id: string; bodyFile: string; summary?: string; json?: boolean }, command: Command) => {
-      if (first === undefined) return missingArgument(command, "peer");
-      const peer = second ?? first;
-      const ref = second === undefined ? ownSeat(command) : first;
+    .addHelpText("after", `
+For a question about imported work:
+  rig network request --requester-of <work-id> --id <question-id> --body-file <question-file>
+The hub must advertise requesterOf. Otherwise no question or wait is written and
+no name-based fallback is sent. On support, the same work waits on the question
+receipt and resumes on its actual result. A person decision is never inferred.
+With --requester-of, the optional positional argument names the binding only.`)
+    .action(async (first: string | undefined, second: string | undefined, opts: { id: string; bodyFile: string; summary?: string; requesterOf?: string; json?: boolean }, command: Command) => {
+      if (opts.requesterOf && second !== undefined) return command.error("error: --requester-of excludes a peer argument", { code: "commander.excessArguments", exitCode: 1 });
+      if (!opts.requesterOf && first === undefined) return missingArgument(command, "peer");
+      const peer = opts.requesterOf ? undefined : second ?? first;
+      const ref = opts.requesterOf ? first ?? ownSeat(command) : second === undefined ? ownSeat(command) : first!;
       let body: string;
       try { body = readFileSync(opts.bodyFile, "utf8"); } catch (error) {
         console.error(`Can't read the body file: ${(error as Error).message}`);
@@ -260,7 +269,8 @@ rig whoami names your binding.`)
       const daemon = await client();
       if (!daemon) return;
       const res = await daemon.post<Record<string, unknown>>(`/api/network/bindings/${encodeURIComponent(ref)}/requests`,
-        { peer, requestId: opts.id, body, summary: opts.summary }, { headers: operatorAuthHeaders(), timeoutMs: ACCOUNT_WRITE_TIMEOUT_MS });
+        { ...(opts.requesterOf ? { requesterOf: opts.requesterOf } : { peer }), requestId: opts.id, body, summary: opts.summary },
+        { headers: operatorAuthHeaders(), timeoutMs: ACCOUNT_WRITE_TIMEOUT_MS });
       finish(res.status, res.data, opts.json, (d) => String(d.message ?? ""));
       // Refused by the hub: the request is recorded and closed failed, which isn't success.
       if (res.status < 400 && (res.data as { state?: unknown } | null)?.state === "refused") process.exitCode = 1;

@@ -3,6 +3,7 @@
 // bearer. Nothing here decides what to do with an item; it only says what the hub answered, and sorts a failure into
 // what the caller must do about it.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 export interface HubItem {
@@ -14,6 +15,9 @@ export interface HubItem {
   summary?: string | null;
   resolution?: string | null;
   closureReason?: string | null;
+  /** Only exposed by the hub when this participant can read the referenced item. */
+  blockedOn?: string | null;
+  requesterOf?: string | null;
   /** For an item handed on there: the next item, when the hub names one this participant can read on the hub itself. */
   successor?: string | null;
 }
@@ -38,7 +42,7 @@ export class HubError extends Error {
 const GRANT_UNAVAILABLE_BODY = /"error"\s*:\s*"grant_authority_unavailable"/;
 
 export interface HubSession {
-  listOwned(state: "pending" | "in-progress", limit: number): Promise<HubItem[]>;
+  listOwned(state: "pending" | "in-progress" | "blocked", limit: number): Promise<HubItem[]>;
   claim(qitemId: string): Promise<void>;
   show(qitemId: string): Promise<HubItem>;
   note(qitemId: string, note: string): Promise<void>;
@@ -48,10 +52,13 @@ export interface HubSession {
   team(rigId?: string): Promise<HubTeam>;
   /** Create an item for a peer under an id the caller chose. The hub answers a retry of one that landed with the stored
    *  item, and `createWarning` when the retry's body wasn't saved. */
-  create(input: { qitemId: string; destination: string; body: string; summary?: string | null }): Promise<HubItem & { createWarning?: string }>;
+  create(input: { qitemId: string; body: string; summary?: string | null } &
+    ({ destination: string; requesterOf?: never } | { requesterOf: string; destination?: never })): Promise<HubItem & { createWarning?: string }>;
+  /** Reflect one explicit requester-question dependency; the hub owns its eventual release. */
+  block(qitemId: string, blockedOn: string): Promise<void>;
   /** Whether the hub offers this participant the tool, as its tool list says. A grant offers only the tools its
    *  object/action pairs name; one it doesn't name isn't served at all. */
-  offers(tool: string): Promise<boolean>;
+  offers(tool: string, inputProperty?: string): Promise<boolean>;
   end(): Promise<void>;
 }
 
@@ -105,6 +112,8 @@ const item = (value: unknown): HubItem => {
     summary: typeof row.summary === "string" ? row.summary : null,
     resolution: typeof row.resolution === "string" ? row.resolution : null,
     closureReason: typeof row.closureReason === "string" ? row.closureReason : null,
+    blockedOn: typeof row.blockedOn === "string" ? row.blockedOn : null,
+    requesterOf: typeof row.requesterOf === "string" ? row.requesterOf : null,
   };
 };
 
@@ -123,7 +132,11 @@ export const connectMcpHub: HubConnect = async (hubUrl, token, signal) => {
     requestInit: { headers: { Authorization: `Bearer ${token}` } },
     redirectPolicy: "same-origin",
   });
-  const client = new Client({ name: "openrig-network-connector", version: "1" });
+  // Reuse one advertised catalog in this session; MCP's list-changed notification invalidates it.
+  let catalog: Promise<Tool[]> | null = null;
+  const client = new Client({ name: "openrig-network-connector", version: "1" }, {
+    listChanged: { tools: { autoRefresh: false, debounceMs: 0, onChanged: () => { catalog = null; } } },
+  });
   const close = () => { void client.close().catch(() => {}); };
   if (signal?.aborted) throw new HubError("unavailable", "The pass ended before it reached the hub.");
   signal?.addEventListener("abort", close, { once: true });
@@ -153,6 +166,7 @@ export const connectMcpHub: HubConnect = async (hubUrl, token, signal) => {
       return { ...item(shown?.item ?? shown), successor: successorId(shown?.successor) };
     },
     note: async (qitemId, note) => { await call("rig_queue_update", { qitemId, note }); },
+    block: async (qitemId, blockedOn) => { await call("rig_queue_update", { qitemId, state: "blocked", blockedOn }); },
     close: async (qitemId, input) => {
       await call("rig_queue_update", { qitemId, state: input.state, ...(input.closureReason ? { closureReason: input.closureReason } : {}), resolution: input.resolution });
     },
@@ -162,20 +176,26 @@ export const connectMcpHub: HubConnect = async (hubUrl, token, signal) => {
       return team as HubTeam;
     },
     create: async (input) => {
-      const created = await call("rig_queue_create", { qitemId: input.qitemId, destination: input.destination, body: input.body,
+      const created = await call("rig_queue_create", { qitemId: input.qitemId,
+        ...(input.requesterOf !== undefined ? { requesterOf: input.requesterOf } : { destination: input.destination }), body: input.body,
         ...(input.summary ? { summary: input.summary } : {}) }) as Record<string, unknown>;
       const warning = (created?.createWarning ?? null) as { code?: unknown } | null;
       return { ...item(created), ...(typeof warning?.code === "string" ? { createWarning: warning.code } : {}) };
     },
-    offers: async (tool) => {
+    offers: async (tool, inputProperty) => {
       try {
-        let cursor: string | undefined;
-        do {
-          const page = await client.listTools(cursor === undefined ? undefined : { cursor });
-          if (page.tools.some((listed) => listed.name === tool)) return true;
-          cursor = page.nextCursor;
-        } while (cursor);
-        return false;
+        catalog ??= (async () => {
+          const tools: Tool[] = [];
+          let cursor: string | undefined;
+          do {
+            const page = await client.listTools(cursor === undefined ? undefined : { cursor });
+            tools.push(...page.tools);
+            cursor = page.nextCursor;
+          } while (cursor);
+          return tools;
+        })().catch((error) => { catalog = null; throw error; });
+        const listed = (await catalog).find((entry) => entry.name === tool);
+        return !!listed && (inputProperty === undefined || Object.hasOwn(listed.inputSchema.properties ?? {}, inputProperty));
       } catch (error) {
         throw hubFailure(error);
       }

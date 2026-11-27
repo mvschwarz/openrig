@@ -26,6 +26,7 @@ import { providerAccountAssignmentsSchema } from "./migrations/188_provider_acco
 import { rigSeatSliceSchema } from "./migrations/189_rig_seat_slice.js";
 import { communityHarnessRuntimeSwitchesSchema } from "./migrations/179_community_harness_runtime_switches.js";
 import { networkRequestsSchema } from "./migrations/184_network_requests.js";
+import { networkRequesterQuestionsSchema } from "./migrations/202_network_requester_questions.js";
 
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
@@ -407,7 +408,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueTransferActivationSchema,
   workflowRunTitleSchema,
   workflowStartOperationsSchema,
-  networkRequestsSchema,
+  networkRequestsSchema, networkRequesterQuestionsSchema,
   queueItemEvidenceRefRootsSchema,
   sessionAgentActivityHooksSchema,
   queueItemsNativePermissionIndexSchema,
