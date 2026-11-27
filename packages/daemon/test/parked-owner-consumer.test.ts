@@ -1681,11 +1681,13 @@ describe("context.owner_min_interval_s: a minimum time between one owner's remin
 describe("parked-owner evaluate yields to the event loop between seats", () => {
   it("runs queued event-loop work between two seats, not after the whole rig, in seat order", async () => {
     const order: string[] = [];
-    const seats = [parkedSeat({ sessionName: "b@r", parked: "indeterminate" }), parkedSeat({ sessionName: "a@r", parked: "indeterminate" })];
+    const seats = [parkedSeat({ sessionName: "b@r" }), parkedSeat({ sessionName: "a@r" })];
+    // Both seats' terminal servers don't answer, the check every seat meets first, so each is read and skipped and no
+    // reminder ends the evaluate early.
     const deps = { ...makeDeps(seats, new RowStore()), terminalServerUnreachable: (name: string) => {
       order.push(name);
       if (name === "a@r") setImmediate(() => order.push("event loop"));   // a macrotask queued while seat a is read
-      return false;
+      return true;
     } };
     await makeParkedOwnerConsumerPolicy(deps).evaluate(makeJob());
     expect(order).toEqual(["a@r", "event loop", "b@r"]);
