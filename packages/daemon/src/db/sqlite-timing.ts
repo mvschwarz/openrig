@@ -37,23 +37,27 @@ export function withSqliteTiming(db: Database.Database): Database.Database {
     }
   };
 
-  const prepare = db.prepare.bind(db);
+  // Each wrapper looks the driver's method up on the prototype when it is called, never binding it in advance, so a
+  // spy or patch on the Statement or Database prototype still sees every call, including those of a statement that
+  // was prepared and cached before the spy (as the #3645 statement-count test does).
+  type Methods = Record<string, (...args: unknown[]) => unknown>;
+  const driver = (target: object, name: string) => (Object.getPrototypeOf(target) as Methods)[name]!;
+
   db.prepare = ((source: string) => {
-    const statement = prepare(source);
+    const statement = driver(db, "prepare").call(db, source) as object;
     const verb = firstKeyword(source);
-    const methods = statement as unknown as Record<string, (...args: unknown[]) => unknown>;
+    const methods = statement as Methods;
     for (const method of ["run", "get", "all"] as const) {
-      const original = methods[method]!.bind(statement);
-      methods[method] = (...args: unknown[]) => timed(`sqlite.${method}.${verb}`, () => original(...args));
+      methods[method] = (...args: unknown[]) => timed(`sqlite.${method}.${verb}`, () => driver(statement, method).apply(statement, args));
     }
-    // iterate() is lazy: the work is in each step, so each next() is timed (return() still finalizes on an early break).
-    const iterate = methods.iterate!.bind(statement);
+    // iterate() is lazy: making the iterator, each next() and return() (which ends the statement on an early break)
+    // are each timed.
     methods.iterate = (...args: unknown[]) => {
-      const rows = iterate(...args) as IterableIterator<unknown>;
       const site = `sqlite.iterate.${verb}`;
+      const rows = timed(site, () => driver(statement, "iterate").apply(statement, args)) as IterableIterator<unknown>;
       const timedRows: IterableIterator<unknown> = {
         next: (...step: [] | [unknown]) => timed(site, () => rows.next(...step)),
-        return: (value?: unknown) => rows.return ? rows.return(value) : { done: true, value },
+        return: (value?: unknown) => timed(site, () => rows.return ? rows.return(value) : { done: true, value }),
         [Symbol.iterator]() { return timedRows; },
       };
       return timedRows;
@@ -61,19 +65,16 @@ export function withSqliteTiming(db: Database.Database): Database.Database {
     return statement;
   }) as typeof db.prepare;
 
-  const exec = db.exec.bind(db);
-  db.exec = ((source: string) => timed(`sqlite.exec.${firstKeyword(source)}`, () => exec(source))) as typeof db.exec;
+  db.exec = ((source: string) => timed(`sqlite.exec.${firstKeyword(source)}`, () => driver(db, "exec").call(db, source))) as typeof db.exec;
 
-  const pragma = db.pragma.bind(db);
   db.pragma = ((source: string, options?: Database.PragmaOptions) =>
-    timed(`sqlite.pragma.${pragmaName(source)}`, () => pragma(source, options))) as typeof db.pragma;
+    timed(`sqlite.pragma.${pragmaName(source)}`, () => driver(db, "pragma").call(db, source, options))) as typeof db.pragma;
 
-  const transaction = db.transaction.bind(db);
   // The driver returns four functions (default, deferred, immediate, exclusive) that each carry all four plus
   // `database`. Each is wrapped by an ordinary function, so the caller's `this` reaches the callback, and the wrappers
   // get the same properties, so the shape is the driver's.
   db.transaction = ((fn: (...args: unknown[]) => unknown) => {
-    const native = transaction(fn) as unknown as Record<"default" | "deferred" | "immediate" | "exclusive", (...args: unknown[]) => unknown>;
+    const native = driver(db, "transaction").call(db, fn) as unknown as Record<"default" | "deferred" | "immediate" | "exclusive", (...args: unknown[]) => unknown>;
     const wrap = (variant: (...args: unknown[]) => unknown) =>
       function (this: unknown, ...args: unknown[]) { return timed("sqlite.transaction", () => variant.apply(this, args)); };
     const wrapped = { default: wrap(native.default), deferred: wrap(native.deferred), immediate: wrap(native.immediate), exclusive: wrap(native.exclusive) };
@@ -107,7 +108,7 @@ const PRAGMA_NAMES = new Set(["analysis_limit", "application_id", "auto_vacuum",
  *  one way and the scan stays linear. */
 const LEAD = String.raw`^(?:\s|--[^\n]*\n|\/\*(?:[^*]|\*+[^*\/])*\*+\/)*`;
 const FIRST_WORD = new RegExp(LEAD + String.raw`([A-Za-z_]{1,24})`);
-const PRAGMA_WORD = new RegExp(LEAD + String.raw`(?:[A-Za-z_][A-Za-z0-9_]{0,63}\s*\.\s*)?([A-Za-z_]{1,24})`);
+const PRAGMA_WORD = new RegExp(LEAD + String.raw`(?:[A-Za-z_][A-Za-z0-9_]{0,63}\s*\.\s*)?([A-Za-z_]{1,32})`);
 
 /** The statement's first keyword, lower case, when it is a known SQL verb; otherwise `other`. */
 export function firstKeyword(source: string): string {

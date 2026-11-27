@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -158,6 +158,50 @@ describe("SQLite timing spans", () => {
     d.close();
   });
 
+  it("lets a spy on the driver's prototypes count every call, including a statement cached before the spy (#3645)", () => {
+    const d = db();
+    const cached = d.prepare("SELECT count(*) AS n FROM t");
+    const statement = Object.getPrototypeOf(cached) as Record<"all" | "get" | "run" | "iterate", (...args: unknown[]) => unknown>;
+    const connection = Object.getPrototypeOf(d) as Record<"exec" | "pragma" | "transaction" | "prepare", (...args: unknown[]) => unknown>;
+    const spies = [
+      ...(["all", "get", "run", "iterate"] as const).map((m) => vi.spyOn(statement, m)),
+      ...(["exec", "pragma", "transaction", "prepare"] as const).map((m) => vi.spyOn(connection, m)),
+    ];
+    try {
+      cached.get();
+      cached.all();
+      expect([...cached.iterate()]).toEqual([{ n: 0 }]);
+      d.prepare("INSERT INTO t (v) VALUES ('a')").run();
+      expect(spies.map((spy) => spy.mock.calls.length)).toEqual([1, 1, 1, 1, 0, 0, 0, 1]);
+      // The driver's own pragma() and transaction() run statements inside, so only the connection's counts are checked.
+      d.exec("SELECT 1");
+      d.pragma("user_version");
+      d.transaction(() => 1)();
+      expect(spies.slice(4).map((spy) => spy.mock.calls.length)).toEqual([1, 1, 1, 1]);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+    d.close();
+  });
+
+  it("times making the iterator and its return() too, so a slow reset on an early break is a span", () => {
+    const d = db();
+    const statement = Object.getPrototypeOf(d.prepare("SELECT 1")) as { iterate: (...args: unknown[]) => unknown };
+    const hold = (ms: number) => { const until = performance.now() + ms; while (performance.now() < until) { /* hold */ } };
+    const iterate = vi.spyOn(statement, "iterate").mockImplementation(() => {
+      hold(260);
+      return { next: () => ({ done: false, value: 1 }), return: () => { hold(260); return { done: true, value: undefined }; } };
+    });
+    try {
+      record();
+      for (const _ of d.prepare("SELECT v FROM t").iterate()) break;
+      expect(spans.map((s) => s.site)).toEqual(["sqlite.iterate.select", "sqlite.iterate.select"]);
+    } finally {
+      iterate.mockRestore();
+    }
+    d.close();
+  });
+
   it("does nothing without a recorder", () => {
     const d = db();
     expect(d.prepare("SELECT hold_ms(260) AS h").get()).toEqual({ h: 260 });
@@ -181,6 +225,7 @@ describe("SQLite timing spans", () => {
     expect(pragmaName("wal_checkpoint(TRUNCATE)")).toBe("wal_checkpoint");
     expect(pragmaName("seat_private_schema.wal_checkpoint(FULL)")).toBe("wal_checkpoint");
     expect(pragmaName(" /* c */ main . user_version")).toBe("user_version");
+    expect(pragmaName("reverse_unordered_selects = 1")).toBe("reverse_unordered_selects");   // 25 characters, the longest
     expect(pragmaName("seat_private_schema")).toBe("other");
     expect(pragmaName("seat_private_schema.seat_private_value")).toBe("other");
     expect(pragmaName("")).toBe("other");
