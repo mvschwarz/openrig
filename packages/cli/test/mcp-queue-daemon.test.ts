@@ -88,9 +88,26 @@ describe("MCP queue tools on the daemon's queue routes", () => {
       // The env is read per request at DaemonClient's one stamping point, as in a server process of its own.
       process.env.OPENRIG_SESSION_NAME = seat;
       const result = await client.callTool({ name, arguments: args });
-      return { isError: result.isError === true, data: JSON.parse((result.content as Array<{ text: string }>)[0]!.text), structured: result.structuredContent };
+      return { isError: result.isError === true, data: JSON.parse((result.content as Array<{ text: string }>)[0]!.text), structured: result.structuredContent, contentCount: (result.content as unknown[]).length };
     };
   }
+
+  it("lets a compact MCP list display a body-only request without a show call", async () => {
+    const desk = await connectAs(DESK);
+    const impl = await connectAs(IMPL);
+    const created = await desk("rig_queue_create", { destination: IMPL, body: " \nReadable request line\nLong details" });
+    expect(created.isError).toBe(false);
+    const listed = await impl("rig_queue_list", { owned: true, limit: 1 });
+    expect(listed.isError).toBe(false);
+    expect(listed.data).toEqual([expect.objectContaining({
+      qitemId: created.data.qitemId, summary: null, displayText: "Readable request line",
+      fieldsElided: expect.arrayContaining(["body"]),
+    })]);
+    expect(listed.data[0]).not.toHaveProperty("body");
+    expect(listed.contentCount).toBe(1);
+    expect(listed.structured).toMatchObject({ limit: 1, truncated: false });
+    expect(listed.structured).toMatchObject({ items: listed.data });
+  });
 
   it("delegates a task and reads the assignee's answer back by its id, under each seat's configured identity", async () => {
     const desk = await connectAs(DESK);

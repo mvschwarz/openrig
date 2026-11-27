@@ -2842,7 +2842,11 @@ describe("queue routes", () => {
   });
 
   describe("R1 handoff-and-complete route", () => {
-    it("POST /api/queue/:id/handoff-and-complete closes source as done + creates new", async () => {
+    it.each([
+      { variant: "explicit body", body: "carol's piece", resolution: "Accepted" },
+      { variant: "inherited body", body: undefined, resolution: "Accepted" },
+      { variant: "inherited body without resolution", body: undefined, resolution: undefined },
+    ])("closes the source and creates a successor with $variant", async ({ body, resolution }) => {
       const created = await app.request("/api/queue/create", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
@@ -2855,7 +2859,9 @@ describe("queue routes", () => {
         body: JSON.stringify({
           fromSession: "bob@r",
           toSession: "carol@r",
-          body: "carol's piece",
+          body,
+          resolution,
+          transitionNote: "Audit only",
         }),
       });
       expect(res.status).toBe(201);
@@ -2868,7 +2874,10 @@ describe("queue routes", () => {
       expect(result.closed.handedOffTo).toBe("carol@r");
       expect(result.created.state).toBe("pending");
       expect(result.created.handedOffFrom).toBe(item.qitemId);
-      expect(result.created.body).toBe("carol's piece");
+      expect(result.created).toMatchObject({ body: body ?? "x", resolution: null });
+      expect(result.closed).toMatchObject({ resolution: resolution ?? null });
+      expect(queueRepo.getById(item.qitemId)?.resolution).toBe(resolution ?? null);
+      expect(queueRepo.listTransitions(item.qitemId).at(-1)?.transitionNote).toBe("Audit only");
     });
 
     it("POST /api/queue/:id/handoff-and-complete returns 400 on missing toSession (fromSession is header-derived; missing-sender is the 401 path)", async () => {

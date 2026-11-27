@@ -640,6 +640,7 @@ export function queueRoutes(): Hono {
       toSession: string;
       body?: string;
       transitionNote?: string;
+      resolution?: string;
       priority?: QueuePriority;
       tier?: string;
       tags?: string[];
@@ -730,6 +731,7 @@ export function queueRoutes(): Hono {
         closureTarget: closeTarget,
         terminalState,
         transitionNote: body.transitionNote,
+        resolution: body.resolution,
         identityProvenance: body.identityProvenance ?? null,
         claimedAtBeforeForward: source.claimedAt ?? null,
         successorQitemId: successorId,
@@ -1359,6 +1361,7 @@ export function queueRoutes(): Hono {
       toSession?: string;
       body?: string;
       transitionNote?: string;
+      resolution?: string;
       priority?: QueuePriority;
       tier?: string;
       tags?: string[];
@@ -1385,7 +1388,9 @@ export function queueRoutes(): Hono {
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
     }
 
+    const resolution = typeof body.resolution === "string" ? body.resolution : undefined;
     const crossHostBody = {
+      resolution,
       fromSession,
       toSession: body.toSession,
       body: body.body,
@@ -1417,6 +1422,7 @@ export function queueRoutes(): Hono {
         toSession: body.toSession,
         body: body.body,
         transitionNote: body.transitionNote,
+        resolution,
         priority: body.priority,
         tier: body.tier,
         tags: body.tags,

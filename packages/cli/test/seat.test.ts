@@ -127,6 +127,17 @@ describe("seat typing guard commands", () => {
     expect(cmd.options.find(o => o.long === "--reason")?.mandatory).toBe(true);
   });
 
+  it.each([
+    { origin: "launched", line: "Origin: launched by OpenRig" },
+    { origin: "claimed", line: "Origin: adopted (origin=claimed): OpenRig didn't launch this session, so stop, restart and clean refuse it" },
+    { origin: null, line: "Origin: unknown" },
+    { origin: undefined, line: null },
+    { origin: "unreadable", line: "Origin: unknown" },
+  ])("#4003: seat status names the seat's origin ($origin)", async ({ origin, line }) => {
+    const human = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: { ...STATUS, origin } }, []))
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(human.logs.filter((l) => l.startsWith("Origin:"))).toEqual(line ? [line] : []);
+  });
   it("shows body-free current and historical native recovery evidence in human and JSON seat status", async () => {
     const nativeInput = { input: true, wake: true, cancel: false, target: null,
       unresolved: [{ requestId: "uncertain", runId: "old", inCurrentRun: false, kind: "cancel", stage: "completed", outcome: "requested", destination: "dev@rig" }],

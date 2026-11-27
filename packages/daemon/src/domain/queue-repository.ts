@@ -1,3 +1,4 @@
+import { queueDisplayText, QUEUE_DISPLAY_PREFIX_UNITS } from "./queue-display.js";
 import { RigDeliveryDrainStore } from "./rig-delivery-drain.js";
 import { PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap } from "./queue-wake-ladder.js";
 import { LADDER_ATTEMPT_PREFIX } from "./queue-stuck-sweep.js";
@@ -149,6 +150,11 @@ export type QueueState = (typeof QUEUE_STATES)[number];
  *  `handoff -> state=handed-off`, the highest-volume terminal class. The `satisfies`
  *  clause is the compile guard: removing a state from QUEUE_STATES fails here. */
 export const TERMINAL_QUEUE_STATES = ["done", "handed-off"] as const satisfies readonly QueueState[];
+function appendClosingResolution(previous: string | null, outcome: string | undefined): string | null {
+  if (typeof outcome !== "string" || !outcome.trim()) return previous;
+  return previous ? `${previous}\n${outcome}` : outcome;
+}
+
 export function isTerminalState(state: string): boolean {
   return (TERMINAL_QUEUE_STATES as readonly string[]).includes(state);
 }
@@ -692,7 +698,9 @@ export interface QueueHandoffInput {
  * follow-on. Closure_reason is recorded as `handed_off_to` and the new qitem
  * is created in the same atomic transaction.
  */
-export interface QueueHandoffAndCompleteInput extends QueueHandoffInput {}
+export interface QueueHandoffAndCompleteInput extends QueueHandoffInput {
+  resolution?: string;
+}
 
 export interface QueueClaimInput {
   qitemId: string;
@@ -1072,8 +1080,8 @@ export function detectTable(db: Database.Database, tableName: string): boolean {
  * Phase A wires no-op; Phase B can plug in the rig registry to reject
  * phantom-rig destinations. POC compatibility: `qitem_id` shape preserved.
  */
-// Reduced column set for compact rows. `list`, `findOverdue` and `findUndelivered` all select it
-// (plus summary, through QueueRepository.compactColumns) and pass each row through compactRow, so
+// Reduced column set for compact rows. `list`, `findOverdue` and `findUndelivered` select it plus
+// the authored summary and a bounded body prefix (compactColumns), then pass each row through compactRow, so
 // the compact projection is one thing: present text is shown, and what isn't selected is left out
 // and named in fieldsElided, never backfilled as empty.
 const COMPACT_ELIDED_FIELDS = [
@@ -1083,6 +1091,8 @@ const COMPACT_ELIDED_FIELDS = [
 /** A compact listing row: the elided fields are absent, not empty, and `fieldsElided` names them. */
 export type CompactQueueItem = Omit<QueueItem, (typeof COMPACT_ELIDED_FIELDS)[number] | "fieldsElided"> & {
   fieldsElided: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
+  /** Derived one-line preview; summary and elided content retain their own meaning. */
+  displayText: string;
 };
 
 /** `qitemId` narrows either finder to one row, so a caller can ask again whether that row still qualifies. */
@@ -1091,7 +1101,7 @@ type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?
 type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean; qitemId?: string; waiting?: boolean };
 
 function compactRow(item: QueueItem): CompactQueueItem {
-  const row: Record<string, unknown> = { ...item, fieldsElided: [...COMPACT_ELIDED_FIELDS] };
+  const row: Record<string, unknown> = { ...item, displayText: queueDisplayText(item.summary, item.body, item.qitemId), fieldsElided: [...COMPACT_ELIDED_FIELDS] };
   for (const field of COMPACT_ELIDED_FIELDS) delete row[field];
   return row as unknown as CompactQueueItem;
 }
@@ -3693,10 +3703,11 @@ export class QueueRepository {
                  ts_updated = ?,
                  handed_off_to = ?,
                  closure_reason = 'handed_off_to',
-                 closure_target = ?
+                 closure_target = ?,
+                 resolution = ?
            WHERE qitem_id = ?`
         )
-        .run(ts, input.toSession, input.toSession, source.qitemId);
+        .run(ts, input.toSession, input.toSession, this.handoffClosingResolution(source, input.resolution), source.qitemId);
 
       this.transitionLog.append({
         qitemId: source.qitemId,
@@ -3846,6 +3857,7 @@ export class QueueRepository {
     /** `handed-off` for /handoff; `done` for /handoff-and-complete. */
     terminalState: "handed-off" | "done";
     transitionNote?: string;
+    resolution?: string;
     /** The sender's recorded provenance, as the local handoff records it. Null only for an in-process caller. */
     identityProvenance?: string | null;
     /** The source's claim as the caller read it before forwarding. A claim made since then is overridden by this close,
@@ -3890,10 +3902,11 @@ export class QueueRepository {
                  ts_updated = ?,
                  handed_off_to = ?,
                  closure_reason = 'handed_off_to',
-                 closure_target = ?
+                 closure_target = ?,
+                 resolution = ?
            WHERE qitem_id = ?`
         )
-        .run(input.terminalState, ts, input.toSession, input.closureTarget, input.qitemId);
+        .run(input.terminalState, ts, input.toSession, input.closureTarget, this.handoffClosingResolution(source, input.resolution), input.qitemId);
 
       const note = input.transitionNote ?? `cross-host handoff to ${input.toSession}`;
       const closeTransition = this.transitionLog.append({
@@ -4731,12 +4744,9 @@ export class QueueRepository {
     // The outcome is used only as non-blank text on the update that closes an open row; on any other
     // update the field is ignored and the row answers as it would without it. It goes after what the row
     // already carries (a pod-fallback line, or an earlier close's outcome) on its own line, text as sent.
-    const closingResolution = typeof input.resolution === "string" && input.resolution.trim().length > 0
-      && isBlockerLive(qitem.state) && !isBlockerLive(input.state)
-      ? input.resolution : null;
-    const nextResolution = closingResolution === null
-      ? qitem.resolution
-      : qitem.resolution ? `${qitem.resolution}\n${closingResolution}` : closingResolution;
+    const nextResolution = isBlockerLive(qitem.state) && !isBlockerLive(input.state)
+      ? appendClosingResolution(qitem.resolution, input.resolution)
+      : qitem.resolution;
     const notification = this.classifyOwnerNotification({
       action: "update",
       destinationSession: qitem.destinationSession,
@@ -6246,10 +6256,12 @@ export class QueueRepository {
     return rows.map((r) => this.rowToItem(r, opts?.includeWaiting ?? true));
   }
 
-  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for, and a
+  /** The compact listings' columns: the shared set plus the summary, as authored, a bounded prefix for display, and a
    *  routed row's return route, which isn't elided, so a routed row never lists as unrouted. */
   private compactColumns(): string {
-    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "")
+    // Byte slicing preserves embedded NULs (TEXT substr stops there). Four UTF-8 bytes per UTF-16 unit
+    // supply the helper's entire prefix; any partial code point at the SQL edge is beyond its bound.
+    return COMPACT_QUEUE_COLUMNS + `, CAST(substr(CAST(body AS BLOB), 1, ${QUEUE_DISPLAY_PREFIX_UNITS * 4}) AS TEXT) AS body` + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "")
       + (this.hasReturnRouteColumn ? ", return_route, return_route_basis" : "");
   }
 
@@ -6258,8 +6270,8 @@ export class QueueRepository {
    * does NOT itself emit events — callers decide whether to nudge or escalate.
    *
    * Slice 15 (finding 2): optionally rig-scoped, limited, and compact — mirroring
-   * `list` — so `rig queue overdue` is bounded and body-free by default instead of
-   * dumping every rig's full qitem bodies to a single caller. No args = the prior
+   * `list` — so `rig queue overdue` is bounded and the body field stays absent; displayText may show its first useful line.
+   * It doesn't dump every rig's full qitem bodies to a single caller. No args = the prior
    * behavior (all overdue, full rows) for the watchdog.
    */
   findOverdue(opts: FindOverdueOptions & { compact: true }): CompactQueueItem[];
@@ -6890,6 +6902,20 @@ export class QueueRepository {
       const row = this.getById(qitemId);
       if (row?.state === "pending") this.promptRecoveryState.set(row.destinationSession, true);
     }
+  }
+
+  private handoffClosingResolution(source: QueueItem, outcome: string | undefined): string | null {
+    const previous = source.resolution;
+    if (previous && typeof outcome === "string" && outcome.trim() && !isBlockerLive(source.state)) {
+      // A non-live handoff does not leave the live-to-closed transition that signals an appended outcome.
+      // Keep any identifiable fallback line last, where a later reroute can replace it without touching the outcome.
+      const fallbackStart = this.fallbackLineStart(source.qitemId, previous);
+      if (fallbackStart !== null) {
+        const earlierOutcomes = previous.slice(0, Math.max(0, fallbackStart - 1));
+        return `${appendClosingResolution(earlierOutcomes, outcome)}\n${previous.slice(fallbackStart)}`;
+      }
+    }
+    return appendClosingResolution(previous, outcome);
   }
 
   /**

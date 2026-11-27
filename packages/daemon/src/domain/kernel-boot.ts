@@ -123,7 +123,12 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
     tracker.setSkipped(managed.kind === "stale"
       ? "kernel rig already managed; it was already down before this daemon start, so it was not restored. Bring it back with: rig up kernel --existing"
       : "kernel rig already managed", recordedVariant);
-    if (managed.kind === "live") tracker.observeManagedKernel();
+    // A kernel whose seats are known (running, stopped with `rig down`, or already down before this start)
+    // is reported from those seats once they are up, including after `rig up kernel --existing`. One this
+    // start can't classify (`unknown`, such as a restore already launching) keeps the skip as before.
+    if (managed.kind === "live" || managed.kind === "stopped" || managed.kind === "stale") {
+      tracker.observeManagedKernel("kernel rig already managed");
+    }
     return tracker;
   }
 

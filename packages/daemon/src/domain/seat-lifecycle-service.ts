@@ -1,3 +1,4 @@
+import { earlierHandoverSuccessorQuery } from "../db/migrations/200_sessions_earlier_handover_origin.js";
 import { validateStatuslineThrottle } from "./claude-statusline-throttle.js";
 import { communityHarnessOf, isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
@@ -2803,13 +2804,12 @@ export class SeatLifecycleService {
     return row ?? null;
   }
 
-  /** From 0.7.9 a fresh, fork or rebuild handover records its successor as launched (#2440); a successor from before
-   *  keeps origin=claimed. Name that case rather than suggest `rig unclaim`, which would end OpenRig's management. */
+  /** Migration 200 repairs established earlier successors. A released one still reads claimed; explain that case only
+   *  from the same positive evidence, never merely because this node had some earlier handover. */
   private earlierHandoverRefusal(nodeId: string, session: { id: string; session_name: string }, refuses: string): SeatRefusal | null {
-    if (this.latestSession(nodeId)?.id !== session.id) return null;
     const handover = this.db.prepare(
-      "SELECT continuity_outcome, handover_at FROM nodes WHERE id = ? AND handover_result = 'complete' AND continuity_outcome IN ('fresh', 'forked', 'rebuilt')",
-    ).get(nodeId) as { continuity_outcome: string; handover_at: string | null } | undefined;
+      `SELECT continuity_outcome, handover_at FROM (${earlierHandoverSuccessorQuery}) WHERE session_id = ? AND node_id = ?`,
+    ).get(session.id, nodeId) as { continuity_outcome: string; handover_at: string | null } | undefined;
     if (!handover) return null;
     return {
       ok: false,
