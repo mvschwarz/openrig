@@ -78,6 +78,8 @@ interface WorldOptions {
   /** What the running Codex's own logs show, and whether the read met no detected incompleteness. */
   evidence?: CodexThreadEvidence;
   facts?: Partial<Record<number, ProcessFacts | null>>;
+  /** auth.json's last modification time (ps lstart form, like LSTART and LATER); absent: no auth.json in the home. */
+  authMtime?: string;
   identityFails?: boolean;
   rollout?: string | null;
   /** Printed in the pane after the restart (the operator's /status). */
@@ -368,7 +370,7 @@ function world(options: WorldOptions = {}) {
       return { ...(thread ? { thread } : { reason: "no_log_row" as const }), fullyReadable: false, incomplete: "discovery" };
     },
     readCredentialStore: () => "file",
-    statAuthFile: () => null,
+    statAuthFile: () => (options.authMtime ? { mtimeMs: Date.parse(options.authMtime) } : null),
     findRollout: () => (options.rollout === undefined ? null : "/rollout.jsonl"),
     readRolloutTail: () => options.rollout ?? null,
   };
@@ -868,6 +870,26 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(w.launches[0]).toEqual({ resumeToken: TOKEN, command: `env CODEX_HOME='${HOME}' codex -m 'gpt-5.5' -s workspace-write resume '${TOKEN}'` });
     expect(w.events().map((event) => [event.type, event.outcome])).toEqual([
       ["seat.restart_in_place_started", undefined], ["seat.restart_in_place_finished", "restarted_account_unverified"]]);
+  });
+
+  it.each([
+    ["unchanged since the running Codex started", "Mon Oct 12 20:00:00 2026", false],
+    ["changed after the running Codex started, before the restart", "Mon Oct 12 21:02:00 2026", true],
+  ])("the auth-file key means the same in the plan and the result: auth.json %s", async (_label, authMtime, changed) => {
+    const w = world({ authMtime });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, planOnly: true,
+      account: { authFile: { changedBeforeRestart: changed, detail: expect.stringContaining("changed after the running Codex started") } } });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "take the home's account" })).toMatchObject({
+      ok: true, outcome: "restarted_account_unverified", newProcess: { startedAt: LATER },
+      account: { authFile: { changedBeforeRestart: changed,
+        detail: expect.stringContaining("changed after the old Codex started and before its replacement started") } } });
+  });
+
+  it("an auth.json changed after the replacement started reads false, and says whether the replacement read it is unknown", async () => {
+    const w = world({ authMtime: "Mon Oct 12 21:06:00 2026" });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "take the home's account" })).toMatchObject({
+      ok: true, outcome: "restarted_account_unverified",
+      account: { authFile: { changedBeforeRestart: false, detail: expect.stringContaining("whether the replacement read that change is unknown") } } });
   });
 
   it("not_started when Codex survives TERM and KILL: no resume is attempted", async () => {
