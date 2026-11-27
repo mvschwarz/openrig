@@ -771,7 +771,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // A held message whose last try met the person's recent typing, a drain or a restore is offered again from the same
   // per-tick sweep, even when the seat's state stays the same (#3991). No capture or delivery path of its own.
   attachDraftHeldReoffer(seatStructuralActivityService, queueRepoInstance, sessionName => currentSeatActivity(sessionName).activity?.state,
-    { onError: error => console.warn(`Draft-held message re-offer: ${error instanceof Error ? error.name : typeof error}`) });
+    { onError: error => console.warn(`Draft-held message re-offer: ${error instanceof Error ? error.name : typeof error}`),
+      quietUntil: sessionName => deliveryGuard.inputQuietUntil(sessionName) });
   eventBus.subscribe(event => { if (event.type === "agent.activity") retryPromptWakes(event.sessionName); });
   // #3315 — whether the daemon reaches its tmux server is state of its own (terminal-server-seats.ts): recorded once
   // per change, delivery to its seats held meanwhile, its return noticed by a read-only probe and owed work offered

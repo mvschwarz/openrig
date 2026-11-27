@@ -10,7 +10,7 @@ import { wrapPaneEnvelope } from "../src/lib/pane-envelope.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { COALESCED_INTO, DRAFT_HELD_BEHIND_EARLIER, DRAFT_HELD_PER_SENDER, OutboxHandler } from "../src/domain/outbox-handler.js";
-import { attachDraftHeldReoffer } from "../src/domain/draft-held-reoffer.js";
+import { attachDraftHeldReoffer, createDraftHeldReoffer } from "../src/domain/draft-held-reoffer.js";
 import { HookBridge } from "../src/domain/hook-bridge.js";
 import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -1323,15 +1323,31 @@ describe("supported seat and queue integration", () => {
     expect(typedInto(f, "a")).toEqual([]);
   });
 
-  it("leaves a handed-off row's draft-held wake to the wake ladder's own retries", async () => {
+  // #4041: handing work over is how it ordinarily reaches a seat, so a handoff successor held for a draft has the same one
+  // retry owner as a created row: the seat's idle report and the sweep's offer, not also the ladder's timer.
+  it("gives a handoff successor's draft-held wake the idle retry and the sweep's offer, and the ladder doesn't retry it too", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
     const src = await f.repo.create({ sourceSession: "sender@test", destinationSession: "sibling@test", body: "queued work", nudge: false });
     const { created } = await f.repo.handoff({ qitemId: src.qitemId, fromSession: "sibling@test", toSession: "worker@test" });
-    await vi.waitFor(() => expect(f.repo.getById(created.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
-    f.bodies.a = "";
-    await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
-    expect(notes(f, created.qitemId, "wake-attempt:")).toEqual([]);
-    expect(typedInto(f, "a")).toEqual([]);
+    const id = created.qitemId;
+    await vi.waitFor(() => expect(f.repo.getById(id)!.lastNudgeResult).toBe("retained:draft_aware"));
+    expect(f.repo.getById(id)!.handedOffFrom).toBe(src.qitemId);
+    const tick = await heldLadder(f, 30);
+    await tick();   // inside the cap and the window, with a zero retry interval: the ladder's timer leaves it alone
+    expect(notes(f, id, "wake-attempt:")).toEqual([]);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() - 60_000);
+    try {
+      const t0 = Date.now();
+      f.bodies.a = ""; f.hooks.clients = () => `0|${Math.floor(t0 / 1000)}\n`;   // the person's Enter, this second
+      await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");   // the activity path's try, held by the quiet window
+      expect(notes(f, id, "wake-attempt:")).toEqual(["wake-attempt: 1/3 outcome=retained:draft_aware trigger=seat-idle"]);
+      const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20) });
+      attachDraftHeldReoffer(structural, f.repo, () => "idle", { quietUntil: name => f.guard.inputQuietUntil(name) });
+      vi.setSystemTime(t0 + 4_600);   // no new report: only the sweep's offer
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await vi.waitFor(() => expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("delivered"));
+    } finally { vi.useRealTimers(); }
+    expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
   });
 
   it("sends no typed notice to a sender who is a person; the owner's escalation still goes out", async () => {
@@ -2676,5 +2692,102 @@ describe("draft-held order across routes and refusals", () => {
     expect(f.submissions.some(s => s.includes("request B"))).toBe(true);
     await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
     expect(f.submissions.some(s => s.includes("request A"))).toBe(false);   // never replayed
+  });
+});
+
+// #4041 round 1: a person at the seat's own terminal moves the guard's quiet window with each key, an offer that couldn't
+// try isn't spent, and a failed read after a pass is reported, not left as an unhandled rejection.
+describe("draft-held queue wake offers: the terminal's quiet window, a paused offer and a failed re-read", () => {
+  const sec = (ms: number) => Math.floor(ms / 1000);
+  const settle = () => new Promise(resolve => setTimeout(resolve, 30));
+  const tries = (f: ReturnType<typeof fixture>, qitemId: string) =>
+    f.repo.listTransitions(qitemId).map(t => t.transitionNote ?? "").filter(n => n.startsWith("wake-attempt:"));
+  const heldWake = async (f: ReturnType<typeof fixture>) => {
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
+    return item.qitemId;
+  };
+  const sweep = (f: ReturnType<typeof fixture>) => {
+    const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20) });
+    attachDraftHeldReoffer(structural, f.repo, () => "idle", { quietUntil: name => f.guard.inputQuietUntil(name) });
+    return structural;
+  };
+
+  it("waits for the quiet window at the person's own terminal instead of trying inside it, then offers once and it goes", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const id = await heldWake(f);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() - 60_000);
+    try {
+      const t0 = Date.now();
+      f.bodies.a = ""; f.hooks.clients = () => `0|${sec(t0)}\n`;   // the person's Enter at their terminal
+      await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");   // the activity path's try, held by the window
+      expect(tries(f, id)).toHaveLength(1);
+      const structural = sweep(f);
+      const passes = vi.spyOn(f.repo, "retryDraftHeldWakesOnIdle");
+      // A key just before the offer's interval ends moves the window past it: the offer waits, with no try.
+      const key = t0 + 4_600;
+      vi.setSystemTime(key); f.hooks.clients = () => `0|${sec(key)}\n`;
+      await structural.pollAllRunningTmuxSeats(f.db); await settle();
+      vi.setSystemTime(key + 1_000);
+      await structural.pollAllRunningTmuxSeats(f.db); await settle();
+      expect(passes).not.toHaveBeenCalled();
+      expect(tries(f, id)).toHaveLength(1);
+      // The window ends: one offer, one try, and the wake goes.
+      vi.setSystemTime(sec(key) * 1000 + 999 + 3_000 + 100);
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await vi.waitFor(() => expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("delivered"));
+      expect(passes).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
+    expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
+  });
+
+  it("keeps the offer when a drain covers it, and the wake goes once the drain ends, with no new report", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const id = await heldWake(f);
+    const drain = new RigDeliveryDrainStore(f.db), jobs = new WatchdogJobsRepository(f.db);
+    const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() - 60_000);
+    try {
+      const t0 = Date.now();
+      f.bodies.a = ""; f.hooks.clients = () => `0|${sec(t0)}\n`;
+      await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
+      const structural = sweep(f);
+      const passes = vi.spyOn(f.repo, "retryDraftHeldWakesOnIdle");
+      drain.begin(rigId, { drainId: "fixture-offer", owner: "human@test", reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+      vi.setSystemTime(t0 + 4_600);
+      await structural.pollAllRunningTmuxSeats(f.db); await settle();
+      expect(passes).toHaveBeenCalledTimes(1);
+      await expect(passes.mock.results[0]!.value).resolves.toBe("paused");
+      expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("retained");
+      drain.end(rigId, "fixture-offer", jobs);
+      vi.setSystemTime(t0 + 9_200);
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await vi.waitFor(() => expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("delivered"));
+      expect(passes).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+    expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
+  });
+
+  it("reports a failed read after a wake pass through onError, leaves no unhandled rejection, and keeps the seat eligible", async () => {
+    const errors: unknown[] = [], unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let at = Date.parse("2026-11-27T10:00:00.000Z");
+      const lastTry = new Date(at - 10_000).toISOString();
+      let reads = 0;
+      const deliverWakes = vi.fn(async () => "draft" as const);
+      const offer = createDraftHeldReoffer({ heldSeats: () => [], deliver: async () => "done", paneActivity: () => undefined,
+        heldWakeSeats: () => { reads += 1; if (reads === 2) throw new Error("database is locked"); return [{ session: "worker@test", lastTry }]; },
+        deliverWakes, now: () => at, onError: error => { errors.push(error); } });
+      offer(); await settle();
+      expect(deliverWakes).toHaveBeenCalledTimes(1);
+      expect(errors.map(e => (e as Error).message)).toEqual(["database is locked"]);
+      at += 4_600; offer(); await settle();
+      expect(deliverWakes).toHaveBeenCalledTimes(2);   // the error didn't mark the try offered
+      at += 4_600; offer(); await settle();
+      expect(deliverWakes).toHaveBeenCalledTimes(2);   // once read, the offer's try isn't offered again
+      expect(unhandled).toEqual([]);
+    } finally { process.off("unhandledRejection", onUnhandled); }
   });
 });

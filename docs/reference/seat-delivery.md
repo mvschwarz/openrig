@@ -492,8 +492,13 @@ Migration `100_typing_guard_modes` extends the existing guard/audit rows and
 adds receipt metadata to the original outbox rows; it creates no tables, retry
 indexes or executable requests. Combined wakes retain each original ID and body.
 A held queue wake stays on the existing queue recovery path. A row created straight to
-a `draft-aware` seat is tried again when the seat next reports idle while it's still in
-`draft-aware` mode, through the same guarded delivery and within `queue.wake_retry_cap`.
+a `draft-aware` seat, or handed to it with `rig queue handoff`, is tried again when the
+seat next reports idle while it's still in `draft-aware` mode, through the same guarded
+delivery and within `queue.wake_retry_cap`. A try the guard held gets one more offer while
+the seat stays idle with nothing new to report: after about 4.5 s, and not before the
+guard's quiet window for activity at the seat's own terminal has ended. An offer that
+couldn't try (a drain, an owed restore, the seat not idle) is offered again later. The
+wake ladder doesn't also retry these rows on its own timer.
 Switching modes alone replays nothing; a retry already admitted while the seat was
 `draft-aware` goes once. Still held past that cap or
 `queue.wake_unconfirmed_window_minutes`, or held in `hold` mode past the window, the row

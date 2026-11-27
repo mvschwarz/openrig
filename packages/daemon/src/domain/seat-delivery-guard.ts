@@ -240,6 +240,18 @@ export class SeatDeliveryGuard {
 
   maybeTarget(name: string): GuardTarget | null { return this.resolve(name); }
 
+  /** When the seat's recent-client-activity hold ends (epoch ms): the same quiet window the paste checks
+   *  (quietBeforePaste), for a caller timing its next try past it. Null when no writable client is attached, the seat
+   *  isn't known, or no activity reader is attached; undefined when tmux can't report it, which a caller treats as no
+   *  wait (the guard still decides at the paste). */
+  async inputQuietUntil(name: string): Promise<number | null | undefined> {
+    const target = this.resolve(name);
+    if (!target || !this.inputActivity) return null;
+    const at = await this.inputActivity(target).catch(() => undefined);
+    if (at === undefined) return undefined;
+    return at === null ? null : at + CLIENT_ACTIVITY_PRECISION_MS + INPUT_QUIET_MS;
+  }
+
   target(name: string): GuardTarget {
     const target = this.resolve(name);
     if (!target) throw new DeliveryGuardError("guard_target_unknown", `Cannot establish managed input target ${name}; no input written.`);

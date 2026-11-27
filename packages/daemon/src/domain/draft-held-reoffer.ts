@@ -10,7 +10,7 @@ export function attachDraftHeldReoffer(
     draftHeldWakeSeats(): Array<{ session: string; lastTry: string }>;
     retryDraftHeldWakesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<DraftHeldPassEnd> },
   stateOf: (sessionName: string) => AgentActivity["state"] | undefined,
-  opts: Pick<DraftHeldReofferDeps, "now" | "intervalMs" | "onError"> = {},
+  opts: Pick<DraftHeldReofferDeps, "now" | "intervalMs" | "onError" | "quietUntil"> = {},
 ): void {
   structural.attachSweepCompleted(createDraftHeldReoffer({ ...opts,
     heldSeats: () => repo.draftHeldSeats(),
@@ -37,6 +37,9 @@ export interface DraftHeldReofferDeps {
   heldWakeSeats?: () => Array<{ session: string; lastTry: string }>;
   /** One draft-held wake pass for the seat (QueueRepository.retryDraftHeldWakesOnIdle). */
   deliverWakes?: (session: string) => Promise<DraftHeldPassEnd>;
+  /** When the guard's recent-client-activity window for the seat ends, epoch ms (SeatDeliveryGuard.inputQuietUntil); null
+   *  with no writable client, undefined when unknown. */
+  quietUntil?: (session: string) => Promise<number | null | undefined>;
   now?: () => number;
   intervalMs?: number;
   onError?: (error: unknown) => void;
@@ -58,25 +61,45 @@ export function createDraftHeldReoffer(deps: DraftHeldReofferDeps): () => void {
   const now = deps.now ?? Date.now;
   const offers = new Map<string, Offer>();
   const running = new Set<string>();
-  // Queue wakes: each try the activity path made gets ONE more offer after the quiet interval, keyed by that try's time.
+  // Queue wakes: each try the activity path made gets ONE more offer after the quiet interval and once the seat's terminal
+  // is quiet (the guard's window), keyed by that try's time. An offer that made no try isn't spent.
   // #48 counts tries for the owner's escalation, so a person who keeps typing still reaches it after the same number of
   // distinct tries; this only adds the observation a quiet-window hold was missing.
   const wakeOffered = new Map<string, string>();
+  // Not before this time: the end of the guard's quiet window while a person is at the seat's terminal, or the interval
+  // after an offer that made no try.
+  const wakeNotBefore = new Map<string, number>();
   const wakesRunning = new Set<string>();
   const offerWakes = () => {
-    if (!deps.heldWakeSeats || !deps.deliverWakes) return;
+    const heldWakeSeats = deps.heldWakeSeats, deliverWakes = deps.deliverWakes;
+    if (!heldWakeSeats || !deliverWakes) return;
     let seats: Array<{ session: string; lastTry: string }>;
-    try { seats = deps.heldWakeSeats(); } catch (error) { deps.onError?.(error); return; }
+    try { seats = heldWakeSeats(); } catch (error) { deps.onError?.(error); return; }
     const held = new Set(seats.map(seat => seat.session));
     for (const session of Array.from(wakeOffered.keys())) if (!held.has(session)) wakeOffered.delete(session);
+    for (const session of Array.from(wakeNotBefore.keys())) if (!held.has(session)) wakeNotBefore.delete(session);
     for (const { session, lastTry } of seats) {
-      if (wakesRunning.has(session) || wakeOffered.get(session) === lastTry || now() - Date.parse(lastTry) < interval) continue;
+      if (wakesRunning.has(session) || wakeOffered.get(session) === lastTry || now() - Date.parse(lastTry) < interval
+        || (wakeNotBefore.get(session) ?? 0) > now()) continue;
       wakesRunning.add(session);
-      void deps.deliverWakes(session).then(() => {
+      const offer = async () => {
+        // A person typing at the seat's own terminal moves the guard's quiet window with each key, and a try inside it is
+        // held. Wait for the window's end instead: no try, so no spent cap, while they type. A time tmux can't report
+        // doesn't wait; the guard still decides at the paste.
+        const until = deps.quietUntil ? await deps.quietUntil(session).catch(() => undefined) : undefined;
+        if (typeof until === "number" && until > now()) { wakeNotBefore.set(session, until); return; }
+        const end = await deliverWakes(session);
+        // A pass that made no try (the seat not idle, a drain, an owed restore) keeps the offer, after the interval.
+        if (end === "skipped" || end === "paused") { wakeNotBefore.set(session, now() + interval); return; }
         // The offer's own try (when it recorded one) is this seat's new newest; it isn't offered again.
-        const after = deps.heldWakeSeats?.().find(seat => seat.session === session)?.lastTry;
+        const after = heldWakeSeats().find(seat => seat.session === session)?.lastTry;
         wakeOffered.set(session, after ?? lastTry);
-      }, error => { wakeOffered.set(session, lastTry); deps.onError?.(error); }).finally(() => wakesRunning.delete(session));
+        wakeNotBefore.delete(session);
+      };
+      // The whole continuation, the re-read included, reports through onError, and the seat stays eligible after the
+      // interval: an error never marks a try as offered.
+      void offer().catch(error => { wakeNotBefore.set(session, now() + interval); deps.onError?.(error); })
+        .finally(() => wakesRunning.delete(session));
     }
   };
   return () => {

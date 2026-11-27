@@ -1,6 +1,6 @@
 import { queueDisplayText, QUEUE_DISPLAY_PREFIX_UNITS } from "./queue-display.js";
 import { RigDeliveryDrainStore } from "./rig-delivery-drain.js";
-import { PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap } from "./queue-wake-ladder.js";
+import { DRAFT_HELD_WAKE_RESULT, PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap } from "./queue-wake-ladder.js";
 import { LADDER_ATTEMPT_PREFIX } from "./queue-stuck-sweep.js";
 import { withUrgentLine } from "./urgent-line.js";
 import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js";
@@ -81,7 +81,6 @@ import { DRAFT_HELD_ELIGIBLE_TAG, HELD_RETRY_NOT_ADMITTED, HELD_SENDER_NOTICE_PR
 import { readStandbyStop } from "./seat-standby.js";
 import { DRAFT_HELD_REOFFER_MS } from "./draft-held-reoffer.js";
 /** A queue wake the draft-aware guard held for a draft in the input (#48). */
-const DRAFT_HELD_WAKE_RESULT = "retained:draft_aware";
 import { physicalSessionName, SessionRegistry } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
@@ -2532,10 +2531,11 @@ export class QueueRepository {
 
   /** #48: a queue wake the draft-aware guard held is tried again when its seat reports idle, through the same guarded
    *  delivery, which re-checks the input and holds it again if it still can't go. Only while the seat is still in
-   *  draft-aware mode: switching modes alone replays nothing, and a retry already admitted goes once. Only rows created
-   *  straight to the seat: a handed-off row's retries are the wake ladder's. A hold-mode wake is never retried. Each try
-   *  is one of the ladder's attempts, so the existing wake retry cap bounds them; the ladder's one held notice comes past
-   *  that cap or the unconfirmed window. */
+   *  draft-aware mode: switching modes alone replays nothing, and a retry already admitted goes once. A row created to
+   *  the seat and a `rig queue handoff` successor alike (#4041): the wake ladder doesn't retry these on its timer
+   *  (idleRetriedDraftHold), so each has one retry owner. A hold-mode wake is never retried. Each try is one of the
+   *  ladder's attempts, so the existing wake retry cap bounds them; the ladder's one held notice comes past that cap or
+   *  the unconfirmed window. */
   async retryDraftHeldWakesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<DraftHeldPassEnd> {
     if (state !== "idle" || !this.outbox || !this.transport?.draftAwareTarget?.(sessionName)) return "skipped";
     const addresses = this.resolveSessionAddresses(sessionName);
@@ -2544,7 +2544,7 @@ export class QueueRepository {
     // As for a prompt clear (#2575): while a compaction's restore is owed, the wake would reach the agent before it.
     if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return "paused";
     const rows = this.db.prepare(`SELECT qitem_id FROM queue_items WHERE state = 'pending' AND claimed_at IS NULL
-      AND handed_off_from IS NULL AND destination_session IN (${addresses.map(() => "?").join(",")})
+      AND destination_session IN (${addresses.map(() => "?").join(",")})
       AND last_nudge_result = ? ORDER BY ts_created, qitem_id`).all(...addresses, DRAFT_HELD_WAKE_RESULT) as Array<{ qitem_id: string }>;
     const cap = resolveWakeRetryCap();
     let held = false;
@@ -2580,7 +2580,7 @@ export class QueueRepository {
   draftHeldWakeSeats(): Array<{ session: string; lastTry: string }> {
     return this.db.prepare(`SELECT q.destination_session AS session, MAX(t.ts) AS lastTry FROM queue_items q
       JOIN queue_transitions t ON t.qitem_id = q.qitem_id AND t.transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%'
-      WHERE q.state = 'pending' AND q.claimed_at IS NULL AND q.handed_off_from IS NULL AND q.last_nudge_result = ?
+      WHERE q.state = 'pending' AND q.claimed_at IS NULL AND q.last_nudge_result = ?
       GROUP BY q.destination_session`).all(DRAFT_HELD_WAKE_RESULT) as Array<{ session: string; lastTry: string }>;
   }
 
