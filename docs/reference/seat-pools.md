@@ -58,6 +58,10 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
   read again before each move: when a re-apply has changed it since the evaluation planned (any value, cleared or
   unreadable), that move and the rest are skipped with `pool_block_changed`, and the next evaluation plans against the
   block as it is then.
+- **How long a row has waited.** A row waits from its creation, its latest reroute, or its latest return to pending
+  when a handover (`rig handover`, `rig seat handover`) or a fresh launch (`rig seat launch --fresh`) releases the
+  retiring occupant's claims, whichever is latest. A released row therefore waits `dispatch_after_s` again and goes
+  behind rows that have waited longer; its creation time and history do not change.
 - **Rows left with a drained agent.** A pending row addressed to a `drained` pool agent, under any of its names, is
   moved to a free pool agent the same way, whatever its tags.
 - **Adding agents.** The job keeps the pool at a target: the larger of `min` and the demand, capped at `max` (0 under
