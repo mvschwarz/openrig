@@ -2381,9 +2381,15 @@ export class RestoreOrchestrator {
     }
     const session = resumeSource ?? (sessionResolution.kind === "resolved" ? sessionResolution.session : null);
     const checkpoint = data.checkpoints[node.id] ?? null;
+    // A seat the snapshot recorded with no occupant (it was detached at capture, as after a reboot) starts fresh, but
+    // still for the app its newest saved session was launched for (#4047): its harness selection is on that row.
+    const harnessSelection = (session
+      ?? (!selected && sessionResolution.kind === "none"
+        ? data.sessions.filter(row => row.nodeId === node.id).reduce<Session | null>((newest, row) => !newest || row.id > newest.id ? row : newest, null)
+        : null))?.communityHarness;
     // Relaunching a seat that was launched for a community harness keeps that selection on the session registered
     // for it, whether or not the app can start now: never a fallback to a built-in reading.
-    const carriedCommunityHarness = communityHarnessOf(session?.communityHarness, node.runtime);
+    const carriedCommunityHarness = communityHarnessOf(harnessSelection, node.runtime);
     if (carriedCommunityHarness && launchResult?.session?.id) this.sessionRegistry.recordCommunityHarnessSelection(launchResult.session.id, carriedCommunityHarness);
 
     // Check restore policy. OPR.0.3.4.2: a --fresh-listed seat (operation B)
@@ -2493,7 +2499,7 @@ export class RestoreOrchestrator {
     let launchCarriesGuidance = false;
     this.launchGuidanceBlocks.delete(node.id);
     if (resumeRequested && resumeToken && launchResult && isPodAware && startupCtx && !startupCtx.guidanceFile) {
-      launchCarriesGuidance = await this.resumeLaunchCarriesGuidance(seatAdapter(opts?.adapters, startupCtx.runtime, session?.communityHarness),
+      launchCarriesGuidance = await this.resumeLaunchCarriesGuidance(seatAdapter(opts?.adapters, startupCtx.runtime, harnessSelection),
         { ...launchResult.binding, guidanceFile: null, cwd: launchCwd, codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined });
     }
     let launchGuidance: import("./runtime-adapter.js").ResolvedStartupFile[] | null = null;
@@ -2649,7 +2655,7 @@ export class RestoreOrchestrator {
       // (e.g. a node-subset launch that did not thread adapters), we CANNOT resume
       // and MUST NOT silently fresh-prime — fail closed to awaiting-decision.
       // Explicit --fresh and non-resume policies stay the only fresh-prime paths.
-      const resumeAdapter = seatAdapter(opts?.adapters, node.runtime, session?.communityHarness);
+      const resumeAdapter = seatAdapter(opts?.adapters, node.runtime, harnessSelection);
       if (!resumeAdapter) {
         { const kept = await rollbackOwnBlank(); if (kept) return kept; }
         return {
@@ -2691,7 +2697,7 @@ export class RestoreOrchestrator {
     // saved guidance passes, as optional startup files (launchGuidance): no action, skill or other resource.
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
-    const startupAdapter = seatAdapter(opts?.adapters, startupRuntime, session?.communityHarness);
+    const startupAdapter = seatAdapter(opts?.adapters, startupRuntime, harnessSelection);
     // A seat that only ever resumed or was attached (attach, adopt, reconcile-session, a set resume token) has a resume
     // token but no saved startup context. A resume replays none anyway (replayContained), so restore tries the resume
     // with an empty plan and names the gap, rather than stopping on data the resume doesn't use. Guidance, activity hooks
@@ -2837,7 +2843,7 @@ export class RestoreOrchestrator {
     // Attempt restore-safe startup replay if context available
     if ((data.nodeStartupContext || replayCtx) && opts?.adapters && launchResult) {
       if (replayCtx) {
-        const adapter = seatAdapter(opts.adapters, replayCtx.runtime, session?.communityHarness);
+        const adapter = seatAdapter(opts.adapters, replayCtx.runtime, harnessSelection);
         if (adapter) {
           // Prefilter: check which files/entries still exist
           const existsFn = opts.fsOps?.exists ?? (() => true);
