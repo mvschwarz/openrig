@@ -215,6 +215,23 @@ describe("restore-check consumes the shared snapshot validation", () => {
     expect(getRestoreInputs).toHaveBeenCalledTimes(1);
   });
 
+  // #4042: a seat attached from an outside program (rig attach) is left attached by restore, so a routine poll of a rig whose
+  // other seats are ready adds no reads for it, as it didn't while its record read running.
+  it("adds no reads to a recovery poll for a seat attached from an outside program", () => {
+    const attached: NodeInventoryEntry = { ...node("rig-1", true), nodeId: "node-2", logicalId: "desk", canonicalSessionName: "desk@rig-1",
+      sessionStatus: "attached", attachmentType: "external_cli" };
+    const getRestoreInputs = vi.fn(deps().getRestoreInputs);
+    const service = new RestoreCheckService(deps({ getRestoreInputs, getNodeInventory: () => [node("rig-1", true), attached] }));
+    expect(service.check({ recoveryOnly: true }).recovery.status).toBe("not_needed");
+    expect(getRestoreInputs).not.toHaveBeenCalled();
+    // An explicit check names it, and a missing startup context doesn't block its rig: restore leaves it attached.
+    const missing = new RestoreCheckService(deps({ getNodeInventory: () => [node("rig-1", true), attached],
+      getStartupContext: (nodeId) => nodeId === "node-2" ? { status: "missing", evidence: "No startup context recorded" } : deps().getStartupContext(nodeId) }));
+    const checks = missing.check({}).checks.filter((c) => c.check.startsWith("seat.desk@rig-1."));
+    expect(checks.find((c) => c.check === "seat.desk@rig-1.startup-context")?.status).toBe("yellow");
+    expect(checks.filter((c) => c.status === "red")).toEqual([]);
+  });
+
   it("validates mixed and empty rigs even in recovery-only mode", () => {
     for (const nodes of [[], [node("rig-1", true), node("rig-1", false)]]) {
       const getRestoreInputs = vi.fn(deps().getRestoreInputs);

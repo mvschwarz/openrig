@@ -5,6 +5,7 @@ import { isMissingTmuxServer, probeShowsNoServer, type SessionProbe, type TmuxAd
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { readProcessTable, type ProcessTableCensus, type ProcessTableRow } from "./process-table.js";
 import { lstartToMinTs } from "./codex-thread-id.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 export interface ReconcileResult {
   checked: number;
@@ -68,8 +69,9 @@ export class Reconciler {
   /** The rig's seats whose binding is an external CLI (`rig attach`). An unreadable record reads as none, as before. */
   private externalCliNodes(rigId: string): Set<string> {
     try {
-      return new Set((this.db.prepare(`SELECT b.node_id FROM bindings b JOIN nodes n ON n.id = b.node_id
-        WHERE n.rig_id = ? AND b.attachment_type = 'external_cli'`).all(rigId) as Array<{ node_id: string }>).map((r) => r.node_id));
+      return new Set((this.db.prepare(`SELECT b.node_id, b.attachment_type FROM bindings b JOIN nodes n ON n.id = b.node_id
+        WHERE n.rig_id = ?`).all(rigId) as Array<{ node_id: string; attachment_type: string | null }>)
+        .filter((r) => seatProcessOwner(resolveSeatKind(r.attachment_type)) === "external").map((r) => r.node_id));
     } catch { return new Set(); }
   }
 

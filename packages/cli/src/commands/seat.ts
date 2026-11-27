@@ -83,7 +83,8 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
-  external_attachment?: { liveness: "unknown"; lastOwnQueueAction: { at: string; qitemId: string; state: string } | null };
+  external_attachment?: { liveness: "unknown"; lastOwnQueueAction: { at: string; qitemId: string; state: string } | null;
+    lastOwnQueueActionRead?: "read" | "unavailable" };
   standby_stopped?: true;
   /** The seat's state as `rig ps --nodes` shows it; absent from an older daemon. */
   lifecycle_state?: string;
@@ -337,7 +338,9 @@ function printHuman(status: SeatStatusResponse): void {
     // A seat joined with rig attach runs in someone else's program: OpenRig can't see its process, only what it writes.
     const last = attached.lastOwnQueueAction;
     console.log("Session: attached from an outside program (rig attach); OpenRig can't see its process, so whether it's running is unknown.");
-    console.log(`  Its own last queue action: ${last ? `${last.state} on ${last.qitemId} at ${last.at}` : "none recorded"}. Work sent to it waits until that program reads its queue.`);
+    // A history OpenRig couldn't read says so: it's never "none recorded".
+    console.log(`  Its own last queue action: ${attached.lastOwnQueueActionRead === "unavailable" ? "couldn't be read"
+      : last ? `${last.state} on ${last.qitemId} at ${last.at}` : "none recorded"}. Work sent to it waits until that program reads its queue.`);
   } else {
     console.log(`Session: ${status.standby_stopped ? "standby (wakes for queued work)" : status.session_status === "running" && status.lifecycle_state === "attention_required"
       ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);

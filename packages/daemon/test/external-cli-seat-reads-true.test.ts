@@ -5,6 +5,9 @@
 // for weeks while it worked. Now it reads what OpenRig knows: attached, liveness unknown, its own last queue action.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
@@ -21,6 +24,14 @@ import { holdsRecordedConversation } from "../src/domain/shared-conversation.js"
 import { SeatStatusService } from "../src/domain/seat-status-service.js";
 import { createStuckSweepStatus, runStuckSweep, STUCK_SWEEP_FINDING_TAG, unclaimedBacklogTag } from "../src/domain/queue-stuck-sweep.js";
 import { rigsRoutes } from "../src/routes/rigs.js";
+import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
+import { ClaimService } from "../src/domain/claim-service.js";
+import { TranscriptStore } from "../src/domain/transcript-store.js";
+import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
+import { composeRigStatus } from "../src/domain/rig-status-compose.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
+import { selectRoleSeat } from "../src/domain/workflow-role-resolver.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 const DESK = "story-desk@studio";
@@ -140,7 +151,8 @@ describe("a seat joined with rig attach (an external CLI) reads true", () => {
     repo.claim({ qitemId: task.qitemId, destinationSession: DESK });
     const claimed = repo.listTransitions(task.qitemId).at(-1)!;
     const entry = deskEntry();
-    expect(entry.externalAttachment).toEqual({ liveness: "unknown", lastOwnQueueAction: { at: claimed.ts, qitemId: task.qitemId, state: "in-progress" } });
+    expect(entry.externalAttachment).toEqual({ liveness: "unknown", lastOwnQueueAction: { at: claimed.ts, qitemId: task.qitemId, state: "in-progress" },
+      lastOwnQueueActionRead: "read" });
     const seat = new SeatStatusService({ rigRepo: rigs }).getStatus(DESK);
     expect(seat).toMatchObject({ ok: true, status: { session_status: "attached", lifecycle_state: "unknown",
       external_attachment: { liveness: "unknown", lastOwnQueueAction: { qitemId: task.qitemId } } } });
@@ -177,6 +189,64 @@ describe("a seat joined with rig attach (an external CLI) reads true", () => {
     expect(directorEntry().heldReason).toBe("not selected by a subset launch");
   });
 
+  it("its own last queue action still reads after retention archives it; a history that can't be read never reads as none", async () => {
+    const task = await ask();
+    repo.claim({ qitemId: task.qitemId, destinationSession: DESK });
+    repo.update({ qitemId: task.qitemId, actorSession: DESK, state: "done", closureReason: "no-follow-on" });
+    const old = "2026-01-01T00:00:00.000Z";
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(old, task.qitemId);
+    const done = { at: old, qitemId: task.qitemId, state: "done" };
+    expect(deskEntry().externalAttachment).toEqual({ liveness: "unknown", lastOwnQueueAction: done, lastOwnQueueActionRead: "read" });
+    expect(archiveAgedTerminalTransitions(db, { nowIso: "2026-11-27T09:00:00.000Z", transitionsRetentionDays: 1 }).archivedRows).toBeGreaterThan(0);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM queue_transitions WHERE qitem_id = ?").get(task.qitemId)).toEqual({ n: 0 });
+    expect(deskEntry().externalAttachment).toEqual({ liveness: "unknown", lastOwnQueueAction: done, lastOwnQueueActionRead: "read" });
+    // A newer live action wins over the archived one.
+    const next = await ask();
+    repo.claim({ qitemId: next.qitemId, destinationSession: DESK });
+    expect(deskEntry().externalAttachment?.lastOwnQueueAction).toMatchObject({ qitemId: next.qitemId, state: "in-progress" });
+    // Its archive read uses an index, as the live one does.
+    for (const table of ["queue_transitions", "queue_transitions_archive"]) {
+      expect(JSON.stringify(db.prepare(`EXPLAIN QUERY PLAN SELECT transition_id, ts, qitem_id, state FROM ${table} WHERE actor_session = ? ORDER BY transition_id DESC LIMIT 1`).all(DESK)))
+        .toMatch(/USING (COVERING )?INDEX idx_queue_transitions_(archive_)?actor/);
+    }
+    db.exec("DROP TABLE queue_transitions_archive");
+    expect(deskEntry().externalAttachment).toEqual({ liveness: "unknown", lastOwnQueueAction: null, lastOwnQueueActionRead: "unavailable" });
+  });
+
+  it("rig bind of a tmux session onto it makes it a tmux seat: typed tmux, read and reconciled as one", async () => {
+    const tmux = { setSessionOption: async () => ({ ok: true }), setSessionEnv: async () => undefined, getSessionOption: async () => null,
+      sendText: async () => ({ ok: true }), sendKeys: async () => ({ ok: true }), startPipePane: async () => ({ ok: true }),
+      probeSession: async () => ({ state: "present" }), hasSession: async () => true, capturePaneContent: async () => "" } as unknown as TmuxAdapter;
+    const discoveryRepo = new DiscoveryRepository(db);
+    const discovered = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "desk-pane", tmuxPane: "%7", runtimeHint: "claude-code" as never,
+      confidence: "high", cwd: "/work/desk" });
+    const claim = new ClaimService({ db, rigRepo: rigs, sessionRegistry: sessions, discoveryRepo, eventBus: bus, tmuxAdapter: tmux,
+      transcriptStore: new TranscriptStore({ transcriptsRoot: join(tmpdir(), "extcli-bind-transcripts"), enabled: false }),
+      claudeContextProvisioner: { ensureContextCollector: () => {} } } as never);
+    expect(await claim.bind({ discoveredId: discovered.id, rigId, logicalId: "story.desk" })).toMatchObject({ ok: true });
+    expect(sessions.getBindingForNode(deskNode)).toMatchObject({ attachmentType: "tmux", tmuxSession: "desk-pane", tmuxPane: "%7" });
+    expect(deskEntry()).not.toHaveProperty("externalAttachment");
+    expect(deskEntry().sessionStatus).not.toBe("attached");
+    expect(repo.isExternalCliSeat(DESK)).toBe(false);
+    // The reconciler probes it again, so a tmux session that's gone reads detached.
+    const probes: string[] = [];
+    const reconciler = new Reconciler({ db, sessionRegistry: sessions, eventBus: bus, readProcesses: async () => [],
+      tmuxAdapter: { hasSession: async () => false, probeSession: async (name: string) => { probes.push(name); return { state: "absent" }; } } as unknown as TmuxAdapter });
+    await reconciler.reconcile(rigId);
+    expect(probes).toContain("desk-pane");
+  });
+
+  it("rig status says how many seats are attached beside the running count, and only when there are some", () => {
+    const status = (lifecycles: Array<"running" | "unknown" | "detached">) => composeRigStatus({ rigId, rigName: "studio",
+      nodes: lifecycles.map((lifecycleState, i) => ({ logicalId: `s.${i}`, runtime: "claude-code", lifecycleState })),
+      plan: { status: "plan", mode: "restore", rigId, rigName: "studio", snapshot: null, wouldCaptureCurrentState: true, mutated: false,
+        nodes: lifecycles.map((_, i) => ({ logicalId: `s.${i}`, intendedAction: "resume-original", tokenState: "present", freshRequired: false })) } as never });
+    expect(status(["running", "running", "unknown"])).toMatchObject({ seatsRunning: 2, seatsTotal: 3, seatsAttached: 1 });
+    expect(status(["running", "running", "unknown"]).src).toContain("ps: 2/3 running · 1 attached · lifecycle=running");
+    expect(status(["running", "detached"])).not.toHaveProperty("seatsAttached");
+    expect(status(["running", "detached"]).src).toContain("ps: 1/2 running · lifecycle=degraded");
+  });
+
   it("a released seat (rig release clears its binding), or a session that ended, reads as before", () => {
     db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id = ?").run(deskNode);
     expect(deskEntry()).toMatchObject({ sessionStatus: "exited" });
@@ -185,6 +255,56 @@ describe("a seat joined with rig attach (an external CLI) reads true", () => {
     sessions.clearBinding(deskNode);
     expect(deskEntry()).toMatchObject({ sessionStatus: "detached" });
     expect(deskEntry().lifecycleState).not.toBe("unknown");
+  });
+});
+
+// A workflow's role-only step reaches an attached seat that holds the role, as it did while its record read running: it reads
+// its own queue. Its lifecycle still reads unknown.
+describe("role-only workflow routing to a seat joined with rig attach", () => {
+  let db: ReturnType<typeof createDb>, bus: EventBus, repo: QueueRepository, rigId: string, scratch: string;
+  beforeEach(async () => {
+    db = createDb(); migrate(db, ALL_MIGRATIONS);
+    const rigs = new RigRepository(db), sessions = new SessionRegistry(db), podRepo = new PodRepository(db);
+    bus = new EventBus(db);
+    rigId = rigs.createRig("studio").id;
+    const pod = podRepo.createPod(rigId, "story", "Story");
+    rigs.addNode(rigId, "story.desk", { runtime: "claude-code", role: "writer", podId: pod.id, cwd: "/tmp" });
+    const attach = new SelfAttachService({ db, rigRepo: rigs, podRepo, sessionRegistry: sessions, eventBus: bus,
+      tmuxAdapter: { hasSession: async () => false, probeSession: async () => ({ state: "absent" }), listSessions: async () => [] } as never });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("selfAttachService" as never, attach); await next(); });
+    app.route("/api/rigs", rigsRoutes);
+    const attached = await app.request(`/api/rigs/${rigId}/attach-self`, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ logicalId: "story.desk" }) });
+    expect(await attached.json()).toMatchObject({ ok: true, sessionName: DESK, attachmentType: "external_cli" });
+    repo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }) });
+    repo.attachOutbox(new OutboxHandler(db));
+    scratch = mkdtempSync(join(tmpdir(), "extcli-workflow-"));
+  });
+  afterEach(() => { db.close(); rmSync(scratch, { recursive: true, force: true }); });
+
+  it("a role-only entry selects the attached writer, whose lifecycle still reads unknown", async () => {
+    const specPath = join(scratch, "writer.yaml");
+    writeFileSync(specPath, [
+      "workflow:", "  id: extcli-writer", "  version: 1", "  objective: write through an attached conversation", "  target:", "    rig: studio",
+      "  entry:", "    role: writer", "  roles:", "    writer: {}", "  steps:", "    - id: write", "      actor_role: writer",
+      "      allowed_exits:", "        - done", "        - failed", "",
+    ].join("\n"));
+    const runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo: repo, exceptionDial: { hostDefault: () => null, humanFallbackSeat: "human@host" } });
+    const implicit = await runtime.instantiate({ specPath, rootObjective: "role selected", createdBySession: "author@studio" });
+    expect(implicit.entryOwnerSession).toBe(DESK);
+    expect(repo.getById(implicit.entryQitemId)?.destinationSession).toBe(DESK);
+    expect(getNodeInventory(db, rigId)[0]).toMatchObject({ lifecycleState: "unknown", sessionStatus: "attached" });
+  });
+
+  it("the resolver's live gate admits an attached seat only while its lifecycle reads unknown", () => {
+    const facts = (over: Partial<Parameters<typeof selectRoleSeat>[0]["candidates"][number]>) => ({ logicalId: "story.desk", role: "writer",
+      nodeKind: "agent" as const, lifecycleState: "unknown", runtime: "claude-code", pendingWorkCount: 0, coordinate: DESK, rawSessionName: DESK, ...over });
+    expect(selectRoleSeat({ role: "writer", candidates: [facts({ externallyAttached: true })] }).seat).toBe(DESK);
+    for (const over of [{}, { externallyAttached: false }, { externallyAttached: true, lifecycleState: "attention_required" }, { externallyAttached: true, lifecycleState: "detached" }]) {
+      expect(selectRoleSeat({ role: "writer", candidates: [facts(over)] })).toMatchObject({ seat: null,
+        disqualified: [{ disqualifier: `not_live(lifecycleState=${over.lifecycleState ?? "unknown"})` }] });
+    }
   });
 });
 

@@ -926,9 +926,14 @@ export interface NodeInventoryEntry {
   /** Persisted session status, retained for history and registry-based rollups. */
   storedSessionStatus?: string | null;
   /** Present only on a seat attached from an outside program (`rig attach`, an external CLI): OpenRig can't type into it
-   *  or see its process, so its liveness is unknown. Its own newest queue action (a claim, note or handoff it wrote) is
-   *  the only sign OpenRig has that it's working; null when it has written none. */
-  externalAttachment?: { liveness: "unknown"; lastOwnQueueAction: { at: string; qitemId: string; state: string } | null };
+   *  or see its process, so its liveness is unknown. Its own newest queue action (a claim, note or handoff it wrote, live or
+   *  archived) is the only sign OpenRig has that it's working; null when it has written none. `lastOwnQueueActionRead` is
+   *  "unavailable" when that history couldn't be read, and then the null says nothing about it. */
+  externalAttachment?: {
+    liveness: "unknown";
+    lastOwnQueueAction: { at: string; qitemId: string; state: string } | null;
+    lastOwnQueueActionRead: "read" | "unavailable";
+  };
   /** The latest session was explicitly stopped and has no replacement binding.
    * It remains non-running, but is not a missing member in the rig lifecycle. */
   intentionallyStopped?: boolean;

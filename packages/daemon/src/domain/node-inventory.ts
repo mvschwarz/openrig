@@ -49,6 +49,7 @@ import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.j
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper } from "./launch-wrapper.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { readStandbyStop } from "./seat-standby.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 // -- Row types for SQL results --
 
@@ -1077,7 +1078,8 @@ function buildInventoryItem(
   // A seat joined with `rig attach` runs in someone else's program (seat-kinds: no inbound transport, an external process
   // owner), so OpenRig can't see whether it runs: a stored running, or a detached a tmux probe once wrote, isn't its state.
   // It reads attached, with liveness unknown and its own newest queue action as the only evidence.
-  const externallyAttached = row.binding_attachment_type === "external_cli"
+  const externallyAttached = row.binding_attachment_type != null
+    && seatProcessOwner(resolveSeatKind(row.binding_attachment_type)) === "external"
     && (row.session_status === "running" || row.session_status === "detached");
   const sessionStatus = externallyAttached ? "attached" : paneExited ? "exited"
     : row.session_status === "running" && identityVerdictConfirmsSessionMissing(identityVerdict) ? "detached" : row.session_status;
@@ -1123,7 +1125,7 @@ function buildInventoryItem(
     ...(launchWrapper ? { launchWrapper } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
-    ...(externallyAttached ? { externalAttachment: { liveness: "unknown" as const, lastOwnQueueAction: lastOwnQueueAction(db, row.session_name) } } : {}),
+    ...(externallyAttached ? { externalAttachment: { liveness: "unknown" as const, ...lastOwnQueueAction(db, row.session_name) } } : {}),
     // An explicit down records a failed start's rolled-back session without changing its superseded status.
     intentionallyStopped: stopConfirmed,
     ...(standbyStopped ? { standbyStopped: true as const } : {}),
@@ -1621,14 +1623,20 @@ export function seatNeedsAttention(
 }
 
 /** The newest queue transition a seat wrote itself (a claim, note or handoff): for a seat attached from an outside program,
- *  the one sign OpenRig has that it's working. Null when it has written none, or the record can't be read. */
-function lastOwnQueueAction(db: Database.Database, session: string | null): { at: string; qitemId: string; state: string } | null {
-  if (!session) return null;
+ *  the one sign OpenRig has that it's working. It reads the live history and the archive retention moves finished work to
+ *  (one indexed row from each), so an archived action still counts. Null when it has written none; "unavailable" when its
+ *  history couldn't be read, so a failed read never reads as none. */
+function lastOwnQueueAction(db: Database.Database, session: string | null):
+  Pick<NonNullable<NodeInventoryEntry["externalAttachment"]>, "lastOwnQueueAction" | "lastOwnQueueActionRead"> {
+  if (!session) return { lastOwnQueueAction: null, lastOwnQueueActionRead: "read" };
   try {
-    const row = db.prepare("SELECT ts, qitem_id, state FROM queue_transitions WHERE actor_session = ? ORDER BY transition_id DESC LIMIT 1")
-      .get(session) as { ts: string; qitem_id: string; state: string } | undefined;
-    return row ? { at: row.ts, qitemId: row.qitem_id, state: row.state } : null;
-  } catch { return null; }
+    const newest = ["queue_transitions", "queue_transitions_archive"]
+      .map((table) => db.prepare(`SELECT transition_id, ts, qitem_id, state FROM ${table} WHERE actor_session = ? ORDER BY transition_id DESC LIMIT 1`)
+        .get(session) as { transition_id: number; ts: string; qitem_id: string; state: string } | undefined)
+      .filter((row) => row !== undefined)
+      .sort((a, b) => b.transition_id - a.transition_id)[0];
+    return { lastOwnQueueAction: newest ? { at: newest.ts, qitemId: newest.qitem_id, state: newest.state } : null, lastOwnQueueActionRead: "read" };
+  } catch { return { lastOwnQueueAction: null, lastOwnQueueActionRead: "unavailable" }; }
 }
 
 /**

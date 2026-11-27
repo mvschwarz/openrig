@@ -665,9 +665,11 @@ describe("rig seat status", () => {
     [{ at: "2026-11-27T08:00:00.000Z", qitemId: "qitem-1", state: "in-progress" },
       "  Its own last queue action: in-progress on qitem-1 at 2026-11-27T08:00:00.000Z. Work sent to it waits until that program reads its queue."],
     [null, "  Its own last queue action: none recorded. Work sent to it waits until that program reads its queue."],
-  ])("says a seat attached from an outside program is attached with liveness unknown, never running or detached (case %#)", async (last, line) => {
+    // A history OpenRig couldn't read is never "none recorded".
+    [null, "  Its own last queue action: couldn't be read. Work sent to it waits until that program reads its queue.", "unavailable"],
+  ])("says a seat attached from an outside program is attached with liveness unknown, never running or detached (case %#)", async (last, line, read = "read") => {
     const deps = makeDeps({ status: 200, data: { ...STATUS, session_status: "attached", lifecycle_state: "unknown",
-      external_attachment: { liveness: "unknown", lastOwnQueueAction: last } } }, []);
+      external_attachment: { liveness: "unknown", lastOwnQueueAction: last, lastOwnQueueActionRead: read } } }, []);
     const { logs } = await captureLogs(async () => {
       await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
     });
