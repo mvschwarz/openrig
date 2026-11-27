@@ -2,12 +2,12 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type Database from "better-sqlite3";
-import { COMPACTION_RECORD_FILE, type ClaudeCompactionEnforcer, type CompactionDebtEnded, type PreparationFailure, type RestoreDeliveryFailure, type RestoreUptakeUnknown } from "./claude-compaction-enforcer.js";
+import { COMPACTION_RECORD_FILE, type ClaudeCompactionEnforcer, type CompactionDebtEnded, type PreparationFailure, type PreparationNoticeUnaddressed, type RestoreDeliveryFailure, type RestoreUptakeUnknown } from "./claude-compaction-enforcer.js";
 import type { EventBus } from "./event-bus.js";
 import type { QueueItem, QueueRepository } from "./queue-repository.js";
 import { defaultResolveOrchestrator } from "./queue-owner.js";
 import { describeDefaultReceiver, resolveDefaultReceiver } from "./default-receiver.js";
-import { workflowHumanDestination } from "./workflow-human-destination.js";
+import { WorkflowHumanDestinationError, workflowHumanDestination } from "./workflow-human-destination.js";
 import { physicalSessionName } from "./session-registry.js";
 import { resolveRegisteredHumanAddress } from "./gateway/human-registry.js";
 import { shellQuote } from "../adapters/shell-quote.js";
@@ -187,8 +187,10 @@ export async function reportRestoreUptakeUnknown(db: Database.Database, queue: Q
 
 /** One diagnostic per seat/occupant: an owner's disposition stands across automatic attempt IDs and restarts. It carries
  *  what a recipient needs to choose a recovery: the attempt, the observed context, the newest complete restore map and
- *  the existing choices. Once it opens, the seat can't act on other seats' notices, so those move on (D3). */
-export async function reportPreparationFailure(db: Database.Database, queue: QueueRepository, failure: PreparationFailure, unable?: RecoveryInability): Promise<void> {
+ *  the existing choices. Once it opens, the seat can't act on other seats' notices, so those move on (D3), as they do when
+ *  nobody at all can receive its own notice: then none is created or invented, and the result says why, for the seat's
+ *  compaction record (`rig compact --state`); later polls try again. */
+export async function reportPreparationFailure(db: Database.Database, queue: QueueRepository, failure: PreparationFailure, unable?: RecoveryInability): Promise<void | PreparationNoticeUnaddressed> {
   const qitemId = preparationNoticeId(failure.sessionName, failure.occupantGeneration);
   const summary = failure.delivered
     ? `Managed preparation for ${failure.sessionName}: ${failure.endedAttempts} ended attempts without /compact (the latest delivered, ${failure.reason})`
@@ -205,7 +207,13 @@ export async function reportPreparationFailure(db: Database.Database, queue: Que
     if (unable) moveNoticesFromUnableRecipient(db, queue, failure.sessionName, unable);
     return;
   }
-  const recipient = recoveryRecipient(db, queue, failure.sessionName, unable);
+  let recipient: RecoveryRecipient;
+  try { recipient = recoveryRecipient(db, queue, failure.sessionName, unable); }
+  catch (error) {
+    if (!(error instanceof WorkflowHumanDestinationError)) throw error;
+    if (unable) moveNoticesFromUnableRecipient(db, queue, failure.sessionName, unable);
+    return { unaddressed: `No recovery recipient could be resolved, so no notice was created: no eligible independent delegating parent, no capable receiving agent (rig config set agents.operator_session <seat> chooses one), and the registered person couldn't be resolved: ${error.message} OpenRig invents no recipient and tries again on later polls.` };
+  }
   const seat = shellQuote(failure.sessionName);
   const used = failure.context?.usedPercentage;
   const context = typeof used === "number"
@@ -259,8 +267,10 @@ export function moveNoticesFromUnableRecipient(db: Database.Database, queue: Que
       }
       continue;
     }
+    // The recipient's note names the evidence once when the route passed over this seat, as it normally did.
+    const named = [session, item.destinationSession].some((name) => recipient.note.includes(`${name} can't act on it now: `));
     try {
-      queue.routeToFallback(item.qitemId, recipient.session, `${session} can't act on this recovery notice now: ${evidence}. ${recipient.note}`,
+      queue.routeToFallback(item.qitemId, recipient.session, named ? recipient.note : `${session} can't act on this recovery notice now: ${evidence}. ${recipient.note}`,
         { expectState: item.state, expectDestination: item.destinationSession, wake: item.state === "pending" });
       if (item.summary?.endsWith(NO_CAPABLE_RECIPIENT)) {
         queue.update({ qitemId: item.qitemId, actorSession: "system:compaction", summary: item.summary.slice(0, -NO_CAPABLE_RECIPIENT.length),
@@ -270,6 +280,24 @@ export function moveNoticesFromUnableRecipient(db: Database.Database, queue: Que
       // Claimed, moved or closed since it was read: its current owner's state stands.
       const code = (error as { code?: unknown }).code;
       if (code !== "fallback_state_mismatch" && code !== "fallback_destination_mismatch" && code !== "qitem_state_changed") throw error;
+    }
+  }
+}
+
+/** The enforcer's poll re-checks the notices a seat holds: while OpenRig records that it can't act they move on as above,
+ *  to a capable recipient chosen since; once it can act again, the ones it kept lose their "no capable recovery recipient"
+ *  mark, since a capable agent now holds them. */
+export function recheckHeldNotices(db: Database.Database, queue: QueueRepository, session: string, unable: RecoveryInability): void {
+  if (unable(session)) { moveNoticesFromUnableRecipient(db, queue, session, unable); return; }
+  const seat = physicalSessionName(db, session);
+  for (const item of openNotices(queue)) {
+    if (!item.summary?.endsWith(NO_CAPABLE_RECIPIENT) || physicalSessionName(db, item.destinationSession) !== seat) continue;
+    try {
+      queue.update({ qitemId: item.qitemId, actorSession: "system:compaction", expectState: item.state,
+        summary: item.summary.slice(0, -NO_CAPABLE_RECIPIENT.length),
+        transitionNote: `${noticeKind(item)!.label} for ${item.sourceSession}: ${item.destinationSession} can act on it again: OpenRig no longer records its own managed compaction as failing.` });
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== "qitem_state_changed") throw error;
     }
   }
 }
