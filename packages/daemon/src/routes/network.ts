@@ -8,6 +8,8 @@ import type { HubConnect } from "../domain/network/hub-client.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
 import { getSelfHostId } from "../domain/hosts/fanout-contract.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
+import { conversationIssuedAddress, issuedReturnAddress, isConversationKeyTag } from "../domain/return-route.js";
+import { fromLocalClient, requireSenderIdentity, resolveRecordedIdentity } from "./require-sender-identity.js";
 import { OPENRIG_HOME } from "../openrig-compat.js";
 
 /** A local seat's connections to a remote hub (`rig network`). Reads list every binding with its state and last contact,
@@ -117,7 +119,23 @@ export function networkRoutes(opts?: { bearerToken?: string | null; home?: strin
     if (!body) return c.json({ error: "invalid_body", message: "The body must be JSON." }, 400);
     try {
       const target = bound(c);
-      return c.json(await originateNetworkRequest(requestDeps(c), target, { peer: body.peer, requestId: body.requestId, body: body.body, summary: body.summary }), 201);
+      const deps = requestDeps(c);
+      // The same issued-address and attribution rules as queue create. Nothing changes the request's owner:
+      // OpenRig keeps it until the hub answers; the caller reads that same id, not a second answer item.
+      const tags = fromLocalClient(c) && Array.isArray(body.tags) ? body.tags.filter(isConversationKeyTag) : [];
+      const issued = body.returnRoute === "auto" && typeof body.requestId === "string"
+        ? conversationIssuedAddress(deps.db, tags) ?? issuedReturnAddress(body.requestId.trim()) : null;
+      const derived = requireSenderIdentity(c, { verb: "network request" });
+      const identity = derived.ok ? derived : { ok: true as const, session: issued ?? target.localSession, provenance: "claimed:v1" as const };
+      const result = await originateNetworkRequest(deps, target, {
+        peer: body.peer, requestId: body.requestId, body: body.body, summary: body.summary,
+        caller: { sourceSession: identity.session, ...resolveRecordedIdentity(c, identity), tags,
+          ...(issued ? { returnRoute: issued, returnRouteBasis: derived.ok ? "issued" : "issued-actor" } : {}) },
+      });
+      // Read the stored attribution on retries too: a retry never replaces the first caller or its route.
+      const local = deps.queueRepo.getById(result.localQitemId);
+      return c.json({ ...result, sourceSession: local?.sourceSession ?? null,
+        returnRoute: local?.returnRoute ?? null, returnRouteBasis: local?.returnRouteBasis ?? null }, 201);
     } catch (error) { return refused(c, error); }
   });
 

@@ -482,6 +482,11 @@ do not establish connectivity to a live peer.
 | `rig mcp token list` | — | `--json` |
 | `rig mcp token revoke <name>` | — | — |
 
+The MCP `rig_network_request` tool reaches the same network request route without a shell. Pass `peer`,
+`requestId`, `body`, optional `summary`, and optional `binding` (otherwise the caller's seat). Read the answer
+on the same local id with `rig_queue_show`; see [network requests through MCP](../reference/network-connector.md#requesting-through-mcp)
+for retry and waiting behavior, including the external client's need to check again.
+
 ### acp
 
 | Invocation | Aliases | Declared options |

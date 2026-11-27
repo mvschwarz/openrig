@@ -258,7 +258,9 @@ function stopBeforeCreate(deps: NetworkRequestDeps, receipt: RequestRow, stop: C
  *  its id. The same `requestId` with the same request returns where it stands; with another request it's refused. A local
  *  item closed or erased here since it was recorded starts no peer work. */
 export async function originateNetworkRequest(deps: NetworkRequestDeps, binding: NetworkBinding,
-  input: { peer: unknown; requestId: unknown; body: unknown; summary?: unknown }): Promise<NetworkRequestResult> {
+  input: { peer: unknown; requestId: unknown; body: unknown; summary?: unknown;
+    /** The route records the actual caller; direct/internal callers keep the binding seat as before. */
+    caller?: Pick<Parameters<QueueRepository["create"]>[0], "sourceSession" | "identityProvenance" | "identityPrincipal" | "returnRoute" | "returnRouteBasis" | "tags"> }): Promise<NetworkRequestResult> {
   const now = deps.now ?? (() => new Date());
   const peer = text(input.peer);
   const requestId = text(input.requestId);
@@ -295,11 +297,15 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
     try {
       const local = await deps.queueRepo.create({
         qitemId: requestId,
-        sourceSession: session,
+        sourceSession: input.caller?.sourceSession ?? session,
+        identityProvenance: input.caller?.identityProvenance,
+        identityPrincipal: input.caller?.identityPrincipal,
+        returnRoute: input.caller?.returnRoute,
+        returnRouteBasis: input.caller?.returnRouteBasis,
         destinationSession: OPENRIG_SENDER,
         summary: summary ? `${summaryLead(peer)}: ${summary}` : summaryLead(peer),
         body: `${requestHead({ peer, hub_url: binding.hubUrl, hub_seat: binding.hubSeat, hub_qitem_id: hubId })}${body}${requestFoot(requestId)}`,
-        tags: [`network-binding:${binding.id}`, `network-peer:${peer}`, `network-hub-item:${hubId}`, "network-direction:outbound"],
+        tags: [`network-binding:${binding.id}`, `network-peer:${peer}`, `network-hub-item:${hubId}`, "network-direction:outbound", ...(input.caller?.tags ?? [])],
         nudge: false,
       });
       if (local.createWarning) throw reused();
