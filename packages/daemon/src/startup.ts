@@ -12,7 +12,7 @@ import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
 import { isBoundTerminalSeat } from "./domain/terminal-seat.js";
 import { seatRuntimeHomeBySession, seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
-import { reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
+import { recordedRecoveryInability, reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
 import { TerminalPolicyStore } from "./domain/terminal-policy.js";
@@ -3170,6 +3170,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // the type narrow for downstream consumers).
   const { ContextMonitor } = await import("./domain/context-monitor.js");
   const { ClaudeCompactionEnforcer } = await import("./domain/claude-compaction-enforcer.js");
+  // Who can act on a recovery notice: an agent whose own managed compaction this enforcer records as failing can't.
+  // Called only from later polls and notices, after compactionEnforcer (next line) is initialized; a constructor-time call would hit its TDZ.
+  const recoveryInability = (session: string): string | null => compactionEnforcer ? recordedRecoveryInability(db, compactionEnforcer, session) : null;
   const compactionEnforcer = deps.sessionTransport
     ? new ClaudeCompactionEnforcer(
         new ContextPackSettingsStore(),
@@ -3178,10 +3181,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         // so a stage minted by a retired generation is refused for the successor. null = UNKNOWN → the
         // gate is inert (never compares a stale generation as if live).
         {
-          onPreparationFailure: (failure) => reportPreparationFailure(db, queueRepoInstance, failure),
-          onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure),
-          onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true }),
-          onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown),
+          onPreparationFailure: (failure) => reportPreparationFailure(db, queueRepoInstance, failure, recoveryInability),
+          onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure, { unable: recoveryInability }),
+          onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true, unable: recoveryInability }),
+          onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown, recoveryInability),
           // #3688: a cancel, a new attempt or a replaced occupant settles the notices its debt opened.
           onCompactionDebtEnded: (ended) => settleCompactionNotices(queueRepoInstance, ended),
           terminalPolicies: new TerminalPolicyStore(db),
@@ -3377,7 +3380,11 @@ export async function createHerdrAppProviders(opts: {
     env: opts.hcEnv,
     ...(opts.spawnFn ? { spawnFn: opts.spawnFn } : {}),
     reconcileAll: () => {
-      for (const provider of providers.values()) void provider.reconcile().catch(() => {});
+      // What the running daemon notices (a viewer herdr-core brought back as a shell, one that ended) is reported as at
+      // start: once recorded, a later start has nothing new to report.
+      for (const provider of providers.values()) {
+        void provider.reconcile().then((notes) => { for (const note of notes) console.warn(`[herdr-app] ${note}`); }).catch(() => {});
+      }
     },
   });
   const ownWork = () => {
@@ -3423,7 +3430,8 @@ export async function createHerdrAppProviders(opts: {
         const provider = resolve({ appHome: recorded.appHome });
         if (!provider) continue;
         ownWork();
-        await provider.reconcile().catch(() => {});
+        // What changed while the daemon was down is reported here, a viewer herdr-core brought back as a shell included.
+        for (const note of await provider.reconcile().catch(() => [] as string[])) console.warn(`[herdr-app] ${note}`);
         // A gate still pending when the daemon stopped is followed again, within its recorded window.
         await provider.resumePendingGates().catch(() => {});
       } catch { /* an unreadable journal stays as it is; an open of that app home reports it */ }

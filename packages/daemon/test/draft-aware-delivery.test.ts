@@ -187,6 +187,23 @@ describe("Codex pre-paste observability through the real delivery path", () => {
     expect(f.bodies.a).toBe("");
   });
 
+  it("the held message's summary names the empty composer and the viewport hold, not an unknown composer", async () => {
+    const f = await codexDelivery();
+    const result = await f.send("D1", d1Envelope, f.options);
+    expect(result).toMatchObject({ outcome: "retained", reason: "draft_input_unknown", inputReadFailure: { status: "empty", reason: "paste_viewport" } });
+    const id = result.outboxIds![0]!;
+    // The message is the receipt's own recorded explanation: the transport's prefix, then the guard's words.
+    const summary = { id, state: "held", reason: "draft_input_unknown", inputRead: { status: "empty", reason: "paste_viewport",
+      message: "Failed to send text to 'worker@test': OpenRig couldn't confirm the complete message would stay visible in this Codex viewport. Open a larger terminal or shorten the message, then retry this request; nothing was pasted." } };
+    expect(f.guarded.lookup(id)).toEqual(summary);
+    // The held-messages surface a person or agent reads serves the same summary.
+    const listed = await (await f.app.request("/api/seat/held-messages/worker@test")).json() as { items: Array<{ delivery?: unknown }> };
+    expect(listed.items.map(item => item.delivery)).toEqual([summary]);
+    // A retired record reads as retired, with nothing claimed as still owed.
+    f.outbox.retire(id, "human@test", "read the viewport hold");
+    expect(f.guarded.lookup(id)).toEqual({ id, state: "held", reason: "message_retired" });
+  });
+
   it.each(["draft-aware", "openrig-urgent"])("submits a fitting full envelope once (%s)", async mode => {
     const f = await codexDelivery(mode, { width: 160, height: 45 });
     expect(await f.send("fits", d1Envelope, f.options)).toMatchObject({ ok: true, sent: true });
@@ -811,9 +828,10 @@ describe("current draft-aware delivery through the real transport", () => {
     f.bodies.a = condition === "unknown" ? null : "unfinished human request";
     const reason = condition === "unknown" ? "draft_input_unknown" : "draft_input_busy";
     const sleep = vi.fn((ms: number) => f.advance(ms)); f.hooks.sleep = sleep; // a wait, if any, reaches its deadline
-    expect(await f.send("held-claude", "incoming message", { waitForIdleMs: 60000, verify: false })).toMatchObject({
-      outcome: "retained", sent: false, reason, outboxIds: [expect.any(String)],
-    });
+    const held = await f.send("held-claude", "incoming message", { waitForIdleMs: 60000, verify: false });
+    expect(held).toMatchObject({ outcome: "retained", sent: false, reason, outboxIds: [expect.any(String)] });
+    // An unknown composer and a real draft summarize exactly as before: no input-read detail is added.
+    expect(f.guarded.lookup(held.outboxIds![0]!)).toEqual({ id: held.outboxIds![0], state: "held", reason });
     expect(sleep).not.toHaveBeenCalled();
     expect(f.writes).toEqual([]);
     expect(f.outbox.heldForNode("a").items[0]).toMatchObject({ body: "incoming message", deliveryState: "retained" });

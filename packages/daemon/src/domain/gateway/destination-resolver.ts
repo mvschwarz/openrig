@@ -34,7 +34,9 @@
 //   4. A hosted member whose roster entry declares a trigger is hosted. One with no
 //      trigger stays unroutable, so its person is told; its teaching says it picks up its
 //      work when its person asks it to or on a schedule they set, not to fix the address.
-//   5. Anything else is unroutable, with teaching that names BOTH checks.
+//   5. An address OpenRig issued to a person's own conversation (#3964's issued return route) stays unroutable: nothing
+//      pushes work to it. Its teaching says the work waits for the conversation's own read, as a hosted member's does.
+//   6. Anything else is unroutable, with teaching that names BOTH checks.
 import { parseSessionName } from "../session-name.js";
 import { describeCheckIn, type MemberCheckIn } from "../connection-contract.js";
 import type { RosterWake } from "../rosters.js";
@@ -58,11 +60,13 @@ export interface ClassifyDeps {
   isHostedMember?: (destination: string) => boolean;
   /** The existing roster/inbox check-in reading used by the team view. */
   hostedCheckIn?: (destination: string) => MemberCheckIn;
+  /** Whether OpenRig issued this address to a person's own conversation (return-route.ts). */
+  isIssuedConversation?: (destination: string) => boolean;
 }
 
 /** Whether a recorded wake result says no transport could take the wake: an address nothing holds (`unroutable:`), or a
- *  hosted member with no wake trigger, whose work waits until it reads its queue (`awaiting-pickup:`). Every reader of a
- *  recorded no-route result reads both the same way. */
+ *  hosted member with no wake trigger or a conversation address OpenRig issued, whose work waits until it reads its queue
+ *  (`awaiting-pickup:`). Every reader of a recorded no-route result reads both the same way. */
 export function recordsNoWakeRoute(recorded: string | null | undefined): boolean {
   return !!recorded && (recorded.startsWith("unroutable:") || recorded.startsWith("awaiting-pickup:"));
 }
@@ -98,6 +102,13 @@ export function classifyDestination(destination: string, deps: ClassifyDeps): De
       teaching: `awaiting-pickup: '${destination}' is a hosted member with no wake trigger, so no wake is sent. The work waits ` +
         `in its queue until the member reads it: when its person asks it to, on a schedule they set, or through a local seat connected to it.`,
     };
+  }
+  if (deps.isIssuedConversation?.(destination)) {
+    // The seat that sent the work reads this, and repeats it to the person: the address is right, and OpenRig can't see the
+    // conversation's reads, so it says the work waits there, never that it was delivered or that it can't be.
+    return { class: "unroutable", teaching: `awaiting-pickup: '${destination}' is an address OpenRig issued to a person's own conversation ` +
+      "(Claude Code or Codex, not a seat), so no wake is sent. The work waits there until that conversation reads it, through the " +
+      "openrig plugin's hooks or its own check; its claim is the only sign it was picked up." };
   }
   return {
     class: "unroutable",

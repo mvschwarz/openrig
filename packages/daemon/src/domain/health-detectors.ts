@@ -18,7 +18,7 @@ import {
 import type { ContextUsageStore } from "./context-usage-store.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
-import { queryUsageSeries } from "./usage-series.js";
+import { ContextSampleMemo } from "./health-context-samples.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 
 const CONTEXT_PRESSURE_PERCENT = 95;
@@ -241,10 +241,16 @@ export class LiveContextHealthSource implements HealthObservationSource {
     now?: () => Date;
   }) {}
 
+  /** Each live seat's 24 h of context samples, kept between reads. It's exact only while usage_samples rows are appended
+   *  or deleted, never rewritten in place (health-context-samples.ts, usage-samples-store.ts). */
+  private contextSamples: ContextSampleMemo | null = null;
+
   read(): HealthDetectorObservation[] {
     const evaluatedAt = (this.deps.now ?? (() => new Date()))().toISOString();
     const startedAt = new Date(Date.parse(evaluatedAt) - LIVE_CONTEXT_RETENTION_SECONDS * 1000).toISOString();
     const observations: HealthDetectorObservation[] = [];
+    const samples = (this.contextSamples ??= new ContextSampleMemo(this.deps.db));
+    samples.startPass();
     const contextPressurePolicy = this.deps.resolveContextPressurePolicy?.() ?? {
       warningPercent: CONTEXT_PRESSURE_PERCENT,
       criticalPercent: CONTEXT_CRITICAL_PERCENT,
@@ -272,12 +278,7 @@ export class LiveContextHealthSource implements HealthObservationSource {
           && usage.usedPercentage !== null
           && usage.sampledAt !== null
           ? selectContextEpisodeEvidence([
-              ...queryUsageSeries(this.deps.db, {
-                seatSession: liveSession.sessionName,
-                lane: "context",
-                sinceIso: startedAt,
-                limit: 10_000,
-              })
+              ...samples.read(liveSession.sessionName, startedAt)
                 .filter((sample) => sample.nodeId === node.id
                   && sample.sampledAt !== null
                   && Date.parse(sample.sampledAt) >= parseSqliteUtcMs(tenureStartedAt)
@@ -321,6 +322,7 @@ export class LiveContextHealthSource implements HealthObservationSource {
         });
       }
     }
+    samples.endPass();
     return observations;
   }
 }

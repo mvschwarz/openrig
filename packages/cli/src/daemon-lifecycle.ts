@@ -310,6 +310,9 @@ export interface LifecycleDeps {
   /** #3637: records on the reservation that stop is stopping or retained it (`markReservationRetained`): its new text,
    *  that it changed, or that the mark couldn't be written (and the claim it still holds, if it took one). */
   retainStartReservation?: (file: string, raw: string, reason: string) => ReservationMark;
+  /** #3953 — whether a process's stdout or stderr is this file (production: lsof), or why that couldn't be read.
+   *  Absent = stop never identifies a daemon without its record. */
+  writesOutputTo?: (pid: number, file: string) => boolean | { failure: string };
   // OPR.0.4.2.1 — optional injectable delay for the status-probe bounded settle/retry.
   // Defaults to a real setTimeout in production; tests pass a no-op to stay fast. Optional so
   // existing deps / mocks / callers are untouched.
@@ -1102,7 +1105,7 @@ function readStartReservation(deps: LifecycleDeps, file: string): StartReservati
  *  or "stopped"; failures after the signal throw. */
 async function stopReservedChild(deps: LifecycleDeps, ctx: {
   target: string; check: string; listener: () => Promise<"responding" | "refused" | "unavailable">;
-}): Promise<"stopped" | { refusal: string } | undefined> {
+}): Promise<"stopped" | { refusal: string; olderLock?: true } | undefined> {
   const home = deps.homeDir ?? OPENRIG_DIR;
   const file = path.join(home, "daemon-start.lock");
   const r = readStartReservation(deps, file);
@@ -1112,8 +1115,16 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
   if (deps.exists(resolveLifecycleFile(deps, "daemon.json"))) {
     return refuse("a daemon.json is present but unreadable, and nothing ties it to the reserved child");
   }
+  const liveness = (pid: number): ProcessLiveness => deps.processLiveness
+    ? deps.processLiveness(pid)
+    : deps.isProcessAlive(pid) ? "alive" : "dead";
   if (!r.startToken || !r.endpoint) {
-    return refuse("it records no child identity (an older CLI's reservation, or one whose start could not identify the child)");
+    // #3953: with its launcher gone, no start is in progress, so stop may still identify the daemon another way.
+    const launcherLiveness = liveness(r.launcherPid);
+    const starting = launcherLiveness === "dead" ? ""
+      : `; launcher PID ${r.launcherPid} is ${launcherLiveness === "alive" ? "alive" : "of unknown liveness"}, so a start may be in progress`;
+    return { ...refuse(`it records no child identity (an older CLI's reservation, or one whose start could not identify the child)${starting}`),
+      ...(launcherLiveness === "dead" ? { olderLock: true as const } : {}) };
   }
   if (new URL(ctx.target).origin !== r.endpoint) {
     return refuse(`its child was launched to listen at ${r.endpoint}, not at the checked ${ctx.check} (set OPENRIG_URL=${r.endpoint} to check it)`);
@@ -1125,9 +1136,6 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
   const ownNamespace = deps.pidNamespace?.();
   if (!ownNamespace) return refuse("this shell's pid namespace is unknown");
   if (ownNamespace !== r.pidNamespace) return refuse("its PIDs are numbered in another pid namespace than this shell's");
-  const liveness = (pid: number): ProcessLiveness => deps.processLiveness
-    ? deps.processLiveness(pid)
-    : deps.isProcessAlive(pid) ? "alive" : "dead";
   const launcher = liveness(r.launcherPid);
   if (launcher !== "dead") {
     return refuse(`launcher PID ${r.launcherPid} is ${launcher === "alive" ? "alive; startup may still be in progress" : "of unknown liveness"}`);
@@ -1249,8 +1257,45 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
   }
 }
 
+/** #3953 — with no daemon record and no start reservation stop can act on, the daemon this home started, identified as
+ *  the daemon identifies a database's holder (daemon-db-path.ts): the listener at the checked endpoint names its PID, and
+ *  that PID's stdout and stderr are this home's daemon.log, as every start launches its daemon. A process that only owns
+ *  the port, or only appears in a lock, is never chosen. */
+async function identifyLoggingDaemon(deps: LifecycleDeps, check: string): Promise<{ pid: number; log: string } | { why: string }> {
+  const log = resolveLifecycleFile(deps, "daemon.log");
+  if (!deps.writesOutputTo) return { why: "this CLI can't read which file a process writes" };
+  let pid: unknown;
+  // The whole identity read is bounded, the body included, as stopReservedChild's is: a listener that sends its headers
+  // and then stalls is no identity. At the deadline the request is aborted, so nothing it opened outlives the decision.
+  const probe = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    pid = await Promise.race([
+      (async () => {
+        const res = await deps.fetch(check, { signal: probe.signal });
+        return ((await res.json?.()) as { pid?: unknown } | undefined)?.pid;
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          probe.abort(new HealthProbeTimeoutError(check));
+          reject(new HealthProbeTimeoutError(check));
+        }, HEALTHZ_PROBE_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (error) {
+    return { why: `the listener at ${check} gave no readable answer (${error instanceof Error ? error.message : String(error)})` };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  if (!Number.isSafeInteger(pid) || (pid as number) <= 0) return { why: `the listener at ${check} names no PID` };
+  const writes = deps.writesOutputTo(pid as number, log);
+  if (typeof writes === "object") return { why: `whether PID ${pid} writes ${log} couldn't be read (${writes.failure})` };
+  if (!writes) return { why: `the listener at ${check} is PID ${pid}, which doesn't write ${log}, so it isn't shown to be this home's daemon` };
+  return { pid: pid as number, log };
+}
+
 export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-target"> {
-  const state = readState(deps);
+  let state = readState(deps);
   const configured = resolveConfiguredDaemonTarget();
   const explicitUrl = readOpenRigUrl();
   const stateUrl = state ? `http://${formatDaemonHostForUrl(state.host ?? DEFAULT_HOST)}:${state.port}` : undefined;
@@ -1267,16 +1312,29 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
       return isRefusedError(error) ? "refused" : "unavailable";
     }
   };
+  // Set when the daemon was identified without its record (#3953): there is no state to preserve or remove.
+  let identified: { pid: number; log: string } | undefined;
   if (!state) {
     const effect = await listener();
     const sibling = findSiblingHome(deps);
     if (effect !== "refused" || sibling) {
       const reserved = sibling ? undefined : await stopReservedChild(deps, { target, check, listener });
       if (reserved === "stopped") return reserved;
-      throw new Error(`Daemon state is missing — cannot stop safely. Checked ${check}; listener ${effect}.` +
-        (sibling ? ` Resolved home ${sibling.resolvedHome}; live sibling ${sibling.siblingHome}.` : "") +
-        (reserved ? ` ${reserved.refusal}` : ""));
+      // #3953: no record (not an unreadable one), and no reservation stop can act on or a start in progress.
+      const found = !sibling && effect === "responding" && !deps.exists(resolveLifecycleFile(deps, "daemon.json"))
+        && (!reserved || reserved.olderLock) ? await identifyLoggingDaemon(deps, check) : undefined;
+      if (!found || "why" in found) {
+        throw new Error(`Daemon state is missing — cannot stop safely. Checked ${check}; listener ${effect}.` +
+          (sibling ? ` Resolved home ${sibling.resolvedHome}; live sibling ${sibling.siblingHome}.` : "") +
+          (reserved ? ` ${reserved.refusal}` : "") + (found ? ` Not identified as this home's daemon: ${found.why}; no signal sent.` : ""));
+      }
+      identified = found;
+      const { hostname, port } = new URL(target);
+      // Not a record: what this stop identified, now; the checks below run on it as on a recorded daemon.
+      state = { pid: found.pid, port: Number(port) || 80, host: hostname.replace(/^\[|\]$/g, ""), db: "", startedAt: new Date().toISOString() };
     }
+  }
+  if (!state) {
     const stateFile = resolveLifecycleFile(deps, "daemon.json");
     if (deps.exists(stateFile)) {
       throw new Error(`Daemon target state is unreadable; drain completion unverified. Checked ${check}; listener refused; no signal sent. Inspect ${stateFile}.`);
@@ -1289,27 +1347,47 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
     return "no-target";
   }
   const stateFile = resolveLifecycleFile(deps, "daemon.json");
+  const preserved = identified ? "no daemon.json was recorded" : "state preserved";
 
   const liveness = deps.processLiveness
     ? deps.processLiveness(state.pid)
     : deps.isProcessAlive(state.pid) ? "alive" : "dead";
   if (liveness === "unknown") {
-    throw new Error(`Cannot stop safely: PID ${state.pid} liveness is unknown; no signal sent, state preserved.`);
+    throw new Error(`Cannot stop safely: PID ${state.pid} liveness is unknown; no signal sent, ${preserved}.`);
   }
   const pidState = await checkPid(state, deps, liveness);
   if (typeof pidState === "object") {
-    throw new Error(`Cannot stop safely: the identity probe was blocked (${pidState.blocked}); no signal sent, state preserved.`);
+    throw new Error(`Cannot stop safely: the identity probe was blocked (${pidState.blocked}); no signal sent, ${preserved}.`);
   }
   if (pidState === "not_openrig") {
-    throw new Error(`Cannot stop safely: PID ${state.pid} is present but identity is not confirmed at ${check}; no signal sent, state preserved.`);
+    throw new Error(`Cannot stop safely: PID ${state.pid} is present but identity is not confirmed at ${check}; no signal sent, ${preserved}.`);
   }
 
   let notBefore = Date.parse(state.startedAt);
   // Only a signalling stop names a request time: this process's clock just before kill, not delivery.
   let requested = "";
-  if (pidState !== "dead") {
+  let signal = pidState !== "dead";
+  // Set when the check below couldn't read: the stop goes ahead as identified, and its report says so.
+  let unread = "";
+  if (signal && identified) {
+    // A daemon identified without its record is checked again just before the signal: its PID came from an answer a
+    // moment ago, and a process given that PID since wouldn't write this home's log. That narrows the gap without
+    // closing it, since nothing binds a PID to one process atomically. Only a live PID shown to write elsewhere is
+    // refused: one that's gone has stopped (the judgment below reads it), and an unreadable check is no evidence of
+    // another process.
+    const writes = deps.writesOutputTo?.(state.pid, identified.log);
+    if (writes !== true) {
+      if (!deps.isProcessAlive(state.pid)) signal = false;
+      else if (writes === false) {
+        throw new Error(`Cannot stop safely: PID ${state.pid} no longer shows as writing ${identified.log}; no signal sent, ${preserved}.`);
+      } else {
+        unread = `; whether it still writes ${identified.log} couldn't be read again just before the signal (${writes?.failure ?? "no probe"}), so it was signalled as identified`;
+      }
+    }
+  }
+  if (signal) {
     notBefore = Date.now();
-    requested = `; SIGTERM requested at ${new Date(notBefore).toISOString()}`;
+    requested = `; SIGTERM requested at ${new Date(notBefore).toISOString()}${unread}`;
     deps.kill(state.pid, "SIGTERM");
     // One signal. An already-exited target goes straight to the same judgment.
     const deadline = Date.now() + DAEMON_STOP_WAIT_MS;
@@ -1322,18 +1400,21 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   const observation = `targeted ${target}; checked ${check}; PID ${state.pid} ${present ? "present" : "absent"}; listener ${effect}${requested}`;
   if (present) {
     throw new Error(`Daemon did not exit after SIGTERM within ${DAEMON_STOP_WAIT_MS}ms; ${observation}` +
-      (effect === "responding" ? " (still listening)" : "") + "; state file preserved.");
+      (effect === "responding" ? " (still listening)" : "") + `; ${identified ? preserved : "state file preserved"}.`);
   }
-  if (effect !== "refused") throw new Error(`Daemon stop verification is unverified: ${observation}; state preserved.`);
+  if (effect !== "refused") throw new Error(`Daemon stop verification is unverified: ${observation}; ${preserved}.`);
 
   const { receipt, receiptPath } = readShutdownReceipt(deps, stateFile);
   if (!receiptMatchesState(receipt, state, notBefore)) {
-    throw new Error(`Daemon process stopped; ${observation}; drain completion unverified (no matching shutdown receipt); state preserved. Inspect ${path.join(path.dirname(stateFile), "daemon.log")}.`);
+    throw new Error(`Daemon process stopped; ${observation}; drain completion unverified (no matching shutdown receipt); ${preserved}. Inspect ${path.join(path.dirname(stateFile), "daemon.log")}.`);
   }
   if (!isCleanShutdown(receipt)) {
-    throw new Error(`Daemon stopped with incomplete shutdown: ${receipt!.outcome}; phase=${receipt!.phase}; ${observation}. Pending effects are unverified; state preserved; inspect ${receiptPath}.`);
+    throw new Error(`Daemon stopped with incomplete shutdown: ${receipt!.outcome}; phase=${receipt!.phase}; ${observation}. Pending effects are unverified; ${preserved}; inspect ${receiptPath}.`);
   }
   removeMatchingState(deps, stateFile, state);
+  if (identified) {
+    console.warn(`daemon.json was missing, so this stop identified the daemon: PID ${identified.pid} answered ${check} with its PID and writes ${identified.log}${unread}. It stopped cleanly; 'rig daemon start' records a new daemon.json.`);
+  }
   return "stopped";
 }
 

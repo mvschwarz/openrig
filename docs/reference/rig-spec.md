@@ -1858,7 +1858,9 @@ Rig names resolve only among unarchived rigs, and an ambiguous name requires an
 explicit ID. These commands target the local daemon, as `rig add` does.
 
 Managed Claude compaction also uses the delegation parent for two diagnostic notices: repeated
-unsent preparation attempts and repeated restore-delivery failures. If the seat has no recorded
+automatic preparation attempts that end without `/compact` (three for one occupant, whether the
+request was never delivered or was delivered and no complete restore map followed) and repeated
+restore-delivery failures. If the seat has no recorded
 parent session (including when it is outside the recorded topology), these notices go to the
 configured registered human operator, or the default registered person when no operator is set.
 If no registered person can be selected, OpenRig creates no notice rather than inventing a
@@ -1868,8 +1870,18 @@ to the seat; declare one when an agent should receive these notices. With multip
 parent session with the latest creation time is selected; `escalates_to` is not used for these
 notices. The restore-delivery notice to a person omits local paths and
 points to `rig compact <seat> --state` on the host; the preparation notice includes its state-file
-evidence reference and attempt details. Treat these notices and any chat relay accordingly. Existing
-notices retain their destination when the topology changes.
+evidence reference and attempt details, the latest context sample, the seat's newest complete restore
+map and the existing recovery choices (to a person, without local paths). Treat these notices and any
+chat relay accordingly.
+
+A recipient must be able to act. A parent or receiving agent whose own managed compaction OpenRig has
+recorded as failing (its own preparation notice's run: three automatic attempts ended without
+`/compact` for its current occupant, its usage still above the threshold) is passed over, with that
+named, for the next route. A notice already with an agent that becomes unable this way moves, as the
+same row with its history, to the next capable recipient: a pending notice with a wake, a claimed one
+without. Unknown or unread capacity is not inability. When no capable recipient resolves, the notice
+stays with the first agent the route reached and says plainly that no capable recipient was
+established. Otherwise existing notices keep their destination when the topology changes.
 
 A `delegates_to` edge also decides routing. A seat's stuck-row findings and recovery go to its most
 recently started parent. A person's top-level Slack message in the rig's mapped channel goes to the rig's

@@ -2778,6 +2778,342 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
   });
 });
 
+// ===================================================================
+// #3953 — stop with no daemon.json and no start reservation stop can act on (none, or an older CLI's whose launcher is
+// gone): the daemon is identified as the daemon identifies a database's holder: its listener names its PID, and that
+// PID writes this home's daemon.log on stdout and stderr. Every pid is fictional; kill is a vi.fn and liveness is
+// simulated, so no real process is signalled.
+// ===================================================================
+describe("#3953 — stop: a live daemon whose record is missing", () => {
+  const DAEMON = 6262;
+  const LAUNCHER = 4242;
+  const ENDPOINT = "http://127.0.0.1:7433";
+  const receiptPath = path.join(path.dirname(STATE_FILE), "daemon-shutdown.json");
+  let home: string;
+  let savedUrl: string | undefined;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "stop-unrecorded-"));
+    savedUrl = process.env["OPENRIG_URL"];
+    process.env["OPENRIG_URL"] = ENDPOINT;
+    vi.useFakeTimers({ now: new Date("2026-11-25T21:00:00.000Z") });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    fs.rmSync(home, { recursive: true, force: true });
+    if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
+    else delete process.env["OPENRIG_URL"];
+  });
+
+  const lockFile = () => path.join(home, "daemon-start.lock");
+  /** An older CLI's reservation: a launcher record, then a child record with no identity. */
+  const olderLock = () => JSON.stringify({ launcherPid: LAUNCHER, startedAt: "2026-11-20T10:37:00.000Z" }) + "\n" + JSON.stringify({ childPid: DAEMON }) + "\n";
+
+  function unrecordedDeps(opts: {
+    /** The listener's body before the signal (default: this daemon's PID); after the signal it refuses. */
+    answers?: unknown;
+    /** The listener before the signal: answers (default), refuses, or never answers. */
+    listener?: "answers" | "refused" | "hangs";
+    /** Whether the answering PID writes this home's log; null = this CLI has no such probe. */
+    writes?: boolean | { failure: string } | null;
+    lock?: string;
+    alive?: number[];
+    exits?: boolean;
+    receipt?: boolean;
+    unreadableState?: boolean;
+  } = {}): LifecycleDeps {
+    if (opts.lock) fs.writeFileSync(lockFile(), opts.lock);
+    const alive = new Set(opts.alive ?? [DAEMON]);
+    let signalled = false;
+    let receipt: string | null = null;
+    const underHome = (p: string) => p.startsWith(home + path.sep) && fs.existsSync(p);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    return mockDeps({
+      homeDir: home,
+      exists: vi.fn((p: string) => (opts.unreadableState && p === STATE_FILE) || underHome(p)),
+      readFile: vi.fn((p: string) => {
+        if (p === receiptPath) return receipt;
+        if (opts.unreadableState && p === STATE_FILE) return "{not json";
+        return underHome(p) ? fs.readFileSync(p, "utf8") : null;
+      }),
+      isProcessAlive: vi.fn((pid: number) => alive.has(pid)),
+      processLiveness: vi.fn((pid: number) => (alive.has(pid) ? "alive" : "dead")),
+      ...(opts.writes === null ? {} : {
+        writesOutputTo: vi.fn((pid: number, file: string) => typeof opts.writes === "object" ? opts.writes
+          : pid === DAEMON && file === LOG_FILE && (opts.writes ?? true)),
+      }),
+      kill: vi.fn((pid: number) => {
+        signalled = true;
+        if (opts.exits !== false) { alive.delete(pid); if (opts.receipt !== false) receipt = cleanReceipt(pid); }
+        return true;
+      }),
+      fetch: vi.fn(async () => {
+        if (signalled || opts.listener === "refused") throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+        if (opts.listener === "hangs") return neverFetch();
+        return { ok: true, json: async () => (opts.answers === undefined ? { pid: DAEMON } : opts.answers) };
+      }),
+    });
+  }
+
+  async function stop(deps: LifecycleDeps): Promise<"stopped" | "no-target" | Error> {
+    const outcome = stopDaemon(deps).catch((e: Error) => e);
+    await vi.runAllTimersAsync();
+    return outcome;
+  }
+
+  async function expectRefused(deps: LifecycleDeps, reason: RegExp): Promise<string> {
+    const outcome = await stop(deps);
+    expect(outcome).toBeInstanceOf(Error);
+    const message = (outcome as Error).message;
+    expect(message).toMatch(/^Daemon state is missing — cannot stop safely\. Checked \S+; listener (unavailable|responding)\./);
+    expect(message).toMatch(reason);
+    expect(deps.kill).not.toHaveBeenCalled();
+    return message;
+  }
+
+  it("stops the live daemon its listener and this home's log both name: one SIGTERM, a clean receipt, and a note saying how it was identified", async () => {
+    const deps = unrecordedDeps();
+    expect(await stop(deps)).toBe("stopped");
+    expect(deps.kill).toHaveBeenCalledTimes(1);
+    expect(deps.kill).toHaveBeenCalledWith(DAEMON, "SIGTERM");
+    expect(deps.writesOutputTo).toHaveBeenCalledWith(DAEMON, LOG_FILE);
+    expect(console.warn).toHaveBeenCalledWith(`daemon.json was missing, so this stop identified the daemon: PID ${DAEMON} answered ${ENDPOINT}/healthz with its PID and writes ${LOG_FILE}. It stopped cleanly; 'rig daemon start' records a new daemon.json.`);
+    expect(deps.removeFile).not.toHaveBeenCalled();
+  });
+
+  it("checks the identified PID again just before the signal, and sends none when it no longer writes this home's log", async () => {
+    const deps = unrecordedDeps();
+    // Identified a moment ago; by the signal, that PID belongs to a process that writes elsewhere.
+    vi.mocked(deps.writesOutputTo!).mockReturnValueOnce(true).mockReturnValueOnce(false);
+    const outcome = await stop(deps);
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toBe(`Cannot stop safely: PID ${DAEMON} no longer shows as writing ${LOG_FILE}; no signal sent, no daemon.json was recorded.`);
+    expect(deps.writesOutputTo).toHaveBeenCalledTimes(2);
+    expect(deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("a listener that sends its headers and stalls before the body isn't identified: the read is bounded, aborted, and nothing is signalled", async () => {
+    const deps = unrecordedDeps();
+    const signals: AbortSignal[] = [];
+    vi.mocked(deps.fetch).mockImplementation(async (_url: string, init?: { signal?: AbortSignal }) => {
+      if (init?.signal) signals.push(init.signal);
+      return { ok: true, json: () => new Promise<unknown>(() => {}) };
+    });
+    const outcome = await stop(deps);
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/Not identified as this home's daemon: the listener at \S+ gave no readable answer \(healthz probe timed out for \S+\); no signal sent\.$/);
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("a check just before the signal that can't read stops the daemon as identified, and the report says the check couldn't read", async () => {
+    const deps = unrecordedDeps();
+    vi.mocked(deps.writesOutputTo!).mockReturnValueOnce(true).mockReturnValueOnce({ failure: "lsof timed out" });
+    expect(await stop(deps)).toBe("stopped");
+    expect(deps.kill).toHaveBeenCalledTimes(1);
+    expect(deps.kill).toHaveBeenCalledWith(DAEMON, "SIGTERM");
+    expect(console.warn).toHaveBeenCalledWith(`daemon.json was missing, so this stop identified the daemon: PID ${DAEMON} answered ${ENDPOINT}/healthz with its PID and writes ${LOG_FILE}; whether it still writes ${LOG_FILE} couldn't be read again just before the signal (lsof timed out), so it was signalled as identified. It stopped cleanly; 'rig daemon start' records a new daemon.json.`);
+  });
+
+  it("a daemon that exits on its own before the signal isn't signalled, and its stop is judged as one that already exited", async () => {
+    const deps = unrecordedDeps();
+    vi.mocked(deps.writesOutputTo!).mockReturnValueOnce(true).mockImplementationOnce(() => {
+      // It exits cleanly between identification and the check: no process, a clean receipt, a refusing listener.
+      vi.mocked(deps.isProcessAlive).mockReturnValue(false);
+      vi.mocked(deps.readFile).mockImplementation((p: string) => (p === receiptPath ? cleanReceipt(DAEMON) : null));
+      vi.mocked(deps.fetch!).mockRejectedValue(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }));
+      return false;
+    });
+    expect(await stop(deps)).toBe("stopped");
+    expect(deps.writesOutputTo).toHaveBeenCalledTimes(2);
+    expect(deps.kill).not.toHaveBeenCalled();
+    expect(console.warn).toHaveBeenCalledWith(`daemon.json was missing, so this stop identified the daemon: PID ${DAEMON} answered ${ENDPOINT}/healthz with its PID and writes ${LOG_FILE}. It stopped cleanly; 'rig daemon start' records a new daemon.json.`);
+  });
+
+  it("never chooses a process that only owns the port: a listener whose PID doesn't write this home's log is refused", async () => {
+    const message = await expectRefused(unrecordedDeps({ answers: { pid: 999 } }),
+      /Not identified as this home's daemon: the listener at \S+ is PID 999, which doesn't write \S+daemon\.log, so it isn't shown to be this home's daemon; no signal sent\.$/);
+    expect(message).not.toMatch(/stopped/);
+    await expectRefused(unrecordedDeps({ writes: false }), /is PID 6262, which doesn't write/);
+  });
+
+  it("a listener that names no PID, or a process whose files can't be read, refuses and says why", async () => {
+    await expectRefused(unrecordedDeps({ answers: {} }), /the listener at \S+ names no PID; no signal sent\.$/);
+    await expectRefused(unrecordedDeps({ writes: { failure: "lsof isn't installed" } }), /whether PID 6262 writes \S+ couldn't be read \(lsof isn't installed\)/);
+    await expectRefused(unrecordedDeps({ writes: null }), /this CLI can't read which file a process writes/);
+  });
+
+  it("an older CLI's reservation whose launcher is gone doesn't block the identification; one whose launcher is alive (a start in progress) does", async () => {
+    const stale = unrecordedDeps({ lock: olderLock() });
+    expect(await stop(stale)).toBe("stopped");
+    expect(stale.kill).toHaveBeenCalledWith(DAEMON, "SIGTERM");
+    // Both PIDs it names are gone now: the next start archives it, as it archives any abandoned reservation.
+    expect(fs.existsSync(lockFile())).toBe(true);
+    fs.rmSync(lockFile());
+    const starting = await expectRefused(unrecordedDeps({ lock: olderLock(), alive: [DAEMON, LAUNCHER] }),
+      /records no child identity .*; launcher PID 4242 is alive, so a start may be in progress; no signal sent\./);
+    expect(starting).not.toMatch(/Not identified/);
+  });
+
+  it("a reservation stop can't act on for any other reason is never bypassed", async () => {
+    const lock = JSON.stringify({ launcherPid: LAUNCHER, startedAt: "2026-11-20T10:37:00.000Z", bootId: "boot-A" }) + "\n"
+      + JSON.stringify({ childPid: DAEMON, startToken: "lstart:x", pidNamespace: "host", host: "127.0.0.1", port: 7433 }) + "\n";
+    const message = await expectRefused(unrecordedDeps({ lock }), /boot ID/);
+    expect(message).not.toMatch(/Not identified/);
+  });
+
+  it("an unreadable daemon.json is never bypassed", async () => {
+    const deps = unrecordedDeps({ unreadableState: true });
+    const message = await expectRefused(deps, /listener responding\.$/);
+    expect(deps.writesOutputTo).not.toHaveBeenCalled();
+    expect(message).not.toMatch(/Not identified/);
+  });
+
+  it("a listener that doesn't answer in time (a wedge) isn't identified; no listener is still no-target", async () => {
+    const wedged = unrecordedDeps({ listener: "hangs" });
+    await expectRefused(wedged, /listener unavailable\.$/);
+    expect(wedged.writesOutputTo).not.toHaveBeenCalled();
+    const none = unrecordedDeps({ listener: "refused" });
+    expect(await stop(none)).toBe("no-target");
+    expect(none.kill).not.toHaveBeenCalled();
+    expect(none.writesOutputTo).not.toHaveBeenCalled();
+  });
+
+  it("an identified daemon that doesn't exit, or exits with no matching receipt, is reported without claiming a state file", async () => {
+    const stuck = await stop(unrecordedDeps({ exits: false })) as Error;
+    expect(stuck.message).toMatch(/^Daemon did not exit after SIGTERM within \d+ms; targeted \S+; checked \S+; PID 6262 present; listener \w+; SIGTERM requested at \S+; no daemon\.json was recorded\.$/);
+    const silent = await stop(unrecordedDeps({ receipt: false })) as Error;
+    expect(silent.message).toMatch(/drain completion unverified \(no matching shutdown receipt\); no daemon\.json was recorded\./);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("#3953 — realDeps reads a process's stdout and stderr with lsof", () => {
+  it("names the file a process writes on stdout and stderr, and no other", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "writes-output-"));
+    const log = path.join(dir, "daemon.log");
+    const other = path.join(dir, "other.log");
+    fs.writeFileSync(other, "");
+    const fd = fs.openSync(log, "a");
+    const { spawn } = await import("node:child_process");
+    const child = spawn("sleep", ["30"], { stdio: ["ignore", fd, fd] });
+    fs.closeSync(fd);
+    try {
+      const probe = realDeps().writesOutputTo!;
+      const first = probe(child.pid!, log);
+      if (typeof first === "object" && first.failure === "lsof isn't installed") return; // nothing to read with here
+      expect(first).toBe(true);
+      expect(probe(child.pid!, other)).toBe(false);
+      expect(probe(process.pid, log)).toBe(false);
+    } finally {
+      child.kill("SIGKILL");
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The whole stop, with real processes, HTTP and signals: a stand-in for a daemon (not OpenRig) that writes this test
+  // home's daemon.log, answers /healthz with its PID on its own port, and on SIGTERM closes its listener and connections,
+  // drains briefly and writes a clean shutdown receipt, as the daemon does.
+  const STAND_IN = `const http=require("node:http"),fs=require("node:fs"),path=require("node:path");const dir=process.argv[1],instant=process.argv[2]==="instant";
+const server=http.createServer((q,r)=>{r.setHeader("content-type","application/json");r.end(JSON.stringify({status:"ok",pid:process.pid}))});
+server.listen(0,"127.0.0.1",()=>console.log("listening "+server.address().port));
+process.on("SIGTERM",()=>{const t=new Date().toISOString();const done=()=>{fs.writeFileSync(path.join(dir,"daemon-shutdown.json"),JSON.stringify({schema:"openrig.daemon-shutdown/v1",pid:process.pid,startedAt:t,completedAt:new Date().toISOString(),outcome:"clean",phase:"complete",failures:[]}));process.exit(0)};
+if(instant)return done();server.close();server.closeAllConnections();setTimeout(done,200)});`;
+
+  /** `instant`: exits the moment it's signalled, closing nothing first (the case that left a pooled socket to reset). */
+  async function standIn(output: string, exit: "drain" | "instant" = "drain"): Promise<{ child: import("node:child_process").ChildProcess; port: number }> {
+    const fd = fs.openSync(output, "a");
+    const { spawn } = await import("node:child_process");
+    const child = spawn(process.execPath, ["-e", STAND_IN, path.dirname(STATE_FILE), exit], { stdio: ["ignore", fd, fd] });
+    fs.closeSync(fd);
+    for (let i = 0; i < 100; i++) {
+      const port = /listening (\d+)/.exec(fs.readFileSync(output, "utf8"))?.[1];
+      if (port) return { child, port: Number(port) };
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    child.kill("SIGKILL");
+    throw new Error("the stand-in never listened");
+  }
+
+  it("stops a live process with no daemon.json once its listener and this home's daemon.log both name it, and leaves one that writes elsewhere running", async () => {
+    const savedUrl = process.env["OPENRIG_URL"];
+    const receipt = path.join(path.dirname(STATE_FILE), "daemon-shutdown.json");
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "other-home-"));
+    expect(fs.existsSync(STATE_FILE)).toBe(false);
+    const ours = await standIn(LOG_FILE);
+    const theirs = await standIn(path.join(elsewhere, "daemon.log"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Another home's process on the checked port: refused, nothing signalled.
+      process.env["OPENRIG_URL"] = `http://127.0.0.1:${theirs.port}`;
+      await expect(stopDaemon(realDeps())).rejects.toThrow(new RegExp(`is PID ${theirs.child.pid}, which doesn't write .*daemon\\.log, so it isn't shown to be this home's daemon; no signal sent\\.$`));
+      expect(theirs.child.exitCode).toBeNull();
+      expect(theirs.child.signalCode).toBeNull();
+
+      // This home's: stopped the normal way.
+      process.env["OPENRIG_URL"] = `http://127.0.0.1:${ours.port}`;
+      expect(await stopDaemon(realDeps())).toBe("stopped");
+      expect(ours.child.exitCode ?? ours.child.signalCode).not.toBeNull();
+      expect(console.warn).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`^daemon\\.json was missing, so this stop identified the daemon: PID ${ours.child.pid} answered`)));
+    } finally {
+      if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
+      else delete process.env["OPENRIG_URL"];
+      ours.child.kill("SIGKILL");
+      theirs.child.kill("SIGKILL");
+      fs.rmSync(LOG_FILE, { force: true });
+      fs.rmSync(receipt, { force: true });
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  // #3957: a stop's probes must not reuse a pooled connection the daemon has since closed: reused, it resets, and a stop
+  // that worked read "listener unavailable … unverified". Each probe asks for a connection of its own.
+  it("sends every health probe on a connection of its own", async () => {
+    const { createServer } = await import("node:http");
+    const seen: Array<string | undefined> = [];
+    let connections = 0;
+    const server = createServer((req, res) => { seen.push(req.headers.connection); res.end(JSON.stringify({ pid: 1 })); });
+    server.on("connection", () => { connections++; });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/healthz`;
+      const probe = realDeps().fetch;
+      for (let i = 0; i < 3; i++) expect(await (await probe(url)).json?.()).toEqual({ pid: 1 });
+      expect(seen).toEqual(["close", "close", "close"]);
+      expect(connections).toBe(3);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("a daemon that exits the moment it's signalled, closing nothing first, still reads as stopped", async () => {
+    const savedUrl = process.env["OPENRIG_URL"];
+    const receipt = path.join(path.dirname(STATE_FILE), "daemon-shutdown.json");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (let round = 0; round < 3; round++) {
+        fs.rmSync(LOG_FILE, { force: true });
+        fs.rmSync(receipt, { force: true });
+        const ours = await standIn(LOG_FILE, "instant");
+        try {
+          process.env["OPENRIG_URL"] = `http://127.0.0.1:${ours.port}`;
+          expect(await stopDaemon(realDeps())).toBe("stopped");
+        } finally {
+          ours.child.kill("SIGKILL");
+        }
+      }
+    } finally {
+      if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
+      else delete process.env["OPENRIG_URL"];
+      fs.rmSync(LOG_FILE, { force: true });
+      fs.rmSync(receipt, { force: true });
+    }
+  }, 60_000);
+});
+
 describe("#3315 — archiveSpentReservation", () => {
   let home: string;
   beforeEach(() => { home = fs.mkdtempSync(path.join(os.tmpdir(), "spent-reservation-")); });

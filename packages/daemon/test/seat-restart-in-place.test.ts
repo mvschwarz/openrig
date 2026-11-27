@@ -748,6 +748,9 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
       .toMatchObject({ ok: false, code: "claimed_session", guidance: expect.stringContaining("rig unclaim") });
     w.db.prepare("UPDATE nodes SET continuity_outcome = 'rebuilt', handover_result = 'complete', handover_at = ? WHERE id = ?")
       .run("2026-11-01T10:00:00.000Z", w.node.id);
+    // The handover's successor is registered in its own commit (#4003): a session adopted later isn't its successor.
+    w.db.prepare("UPDATE sessions SET created_at = '2026-11-01 10:00:00' WHERE id = ?").run(w.session.id);
+    w.db.prepare("UPDATE occupant_tenures SET kind = 'handover', boot_at = '2026-11-01 10:00:00' WHERE node_id = ?").run(w.node.id);
     const result = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
     expect(result).toMatchObject({ ok: false, code: "claimed_session",
       guidance: "It keeps that origin until its next launched handover or managed launch." });

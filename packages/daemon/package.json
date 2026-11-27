@@ -21,6 +21,7 @@
     "./attention": { "types": "./dist/attention-surface.d.ts", "import": "./dist/attention-surface.js" },
     "./project-catalog": { "types": "./dist/project-catalog-surface.d.ts", "import": "./dist/project-catalog-surface.js" },
     "./mission-parent": { "types": "./dist/mission-parent-surface.d.ts", "import": "./dist/mission-parent-surface.js" },
+    "./scope-manifest": { "types": "./dist/scope-manifest-surface.d.ts", "import": "./dist/scope-manifest-surface.js" },
     "./transcript-redaction": { "types": "./dist/transcript-redaction-surface.d.ts", "import": "./dist/transcript-redaction-surface.js" },
     "./daemon-shutdown": {
       "types": "./dist/daemon-shutdown.d.ts",

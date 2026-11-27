@@ -412,6 +412,38 @@ What reads these declarations:
   or render flag establishes no positive delivery or verification claim. These are outcome words, not a capability
   gate: the reminder's status, receipts and retries don't change with them.
 
+## Display a compact queue row
+
+`displayText` is a derived one-line label for a queue row; use it as the row's one-line label.
+It does not replace the authored summary or full body, or say the body is short or empty.
+It appears on compact reads only; the body field stays absent, while `displayText` may show its first useful line.
+
+`GET /api/queue/list?compact=1` and compact overdue/undelivered reads supply it.
+`rig queue list` carries it in its JSON output; MCP `rig_queue_list` carries it in its rows.
+The stored `summary` (including null), `fieldsElided` and full reads keep their shapes.
+Full reads do not add `displayText`. MCP retains one JSON text part and its
+`structuredContent` page metadata (`items`, `limit`, `truncated`).
+
+The exact rule lives in `packages/daemon/src/domain/queue-display.ts`:
+
+1. Inspect at most 1,024 UTF-16 code units per candidate, dropping a trailing unmatched high
+   surrogate. Split on CRLF, CR, LF, U+2028 or U+2029. On each line, collapse whitespace runs
+   to a space, drop remaining C0 controls and DEL, then trim.
+2. Prefer the authored summary's first nonempty line. Otherwise consider the body prefix:
+   drop leading whitespace and `#`, `>`, `*`, `+`, `-` Markdown markers, and choose the first
+   line containing a Unicode letter or number. SQL transfers at most the first 4,096 bytes of
+   the stored body; byte slicing preserves embedded NULs for the display helper to remove.
+3. Keep at most 160 UTF-16 units. If longer, take the first 159, drop a trailing unmatched
+   high surrogate, and append `…`. If neither prefix supplies a line, apply the summary-line
+   rule to the qitem id, then fall back to `Queue item`. An unhelpful prefix does not mean
+   the whole body is empty; later text is unknown, and full reads keep the original content.
+
+The same `queueLabelLine` body rule labels held and pending work in refocus, with its own
+240-unit limit. Refocus preserves an explicitly authored summary whole, as before.
+These bounds cover text transferred into JavaScript and display processing, not SQLite disk
+reads: `substr` may still read the stored body. A short label is not a speedup claim.
+Detail reads remain separate; clients need not fetch every body just to label compact rows.
+
 ## Route details
 
 - **Early Claude compaction acknowledgement:** Send `{"session":"<session>","earlyAck":true}` to

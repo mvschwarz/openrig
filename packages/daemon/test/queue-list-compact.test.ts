@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
+import { deriveWorkCandidates } from "../src/domain/current-work.js";
 import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
@@ -207,6 +208,59 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     expect(item.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "delegatedDecision"]);
   });
 
+  it("supplies a bounded display line without rewriting authored content or sending a body in the listing", () => {
+    const fixtures = [
+      { id: "q-authored", summary: " \n  Authored\t subject  \r\nsecond line", body: "Other body", display: "Authored subject" },
+      { id: "q-blank-summary", summary: " \r\n\t ", body: "Fallback body", display: "Fallback body" },
+      { id: "q-body", summary: null, body: " \r\n\t Body subject\t here  \nDetails stay in show", display: "Body subject here" },
+      { id: "q-long", summary: null, body: "AB" + "😀".repeat(1000), display: "AB" + "😀".repeat(78) + "…" },
+      { id: "q-emoji", summary: null, body: "😀".repeat(20), display: "q-emoji" },
+      { id: "q-markdown", summary: null, body: "---\n```\n> ### Fix the parser\nLater detail", display: "Fix the parser" },
+      { id: "q-controls", summary: null, body: Array.from({ length: 32 }, (_, i) => String.fromCharCode(i)).join("") + "\u007f\n# Fix the parser", display: "Fix the parser" },
+      { id: "q-explicit", summary: "!!!", body: "Different body", display: "!!!" },
+      { id: "q-hidden", summary: null, body: " ".repeat(1024) + "Text beyond the inspected prefix", display: "q-hidden" },
+      { id: "q-empty", summary: null, body: "", display: "q-empty" },
+      { id: "q-nul", summary: null, body: "\0Body after NUL", display: "Body after NUL" },
+      { id: "q-split-pair", summary: null, body: " ".repeat(1023) + "😀 useful later", display: "q-split-pair" },
+    ];
+    for (const f of fixtures) seedItem(db, f.id, { source: "a@rig", destination: "b@rig", ...f });
+    const compact = repo.list({ compact: true, limit: 20 });
+    const work = deriveWorkCandidates(repo.list({ limit: 20 }), null, { getRow: () => null, continuationOf: () => null });
+    for (const f of fixtures) {
+      const row = compact.find(r => r.qitemId === f.id)!;
+      expect(row).toMatchObject({ summary: f.summary, displayText: f.display });
+      expect(row).not.toHaveProperty("body");
+      expect(row).not.toHaveProperty("bodyPrefix");
+      expect(row.fieldsElided).toContain("body");
+      const full = repo.getById(f.id)!;
+      expect(full).toMatchObject({ body: f.body, summary: f.summary });
+      expect(full).not.toHaveProperty("displayText");
+      if (["q-body", "q-markdown", "q-controls", "q-nul"].includes(f.id)) {
+        expect(work.next.find(row => row.qitemId === f.id)?.summary).toBe(f.display);
+      }
+    }
+  });
+
+  it("supplies the same body fallback on overdue and failed-delivery compact rows", () => {
+    const fullDb = new Database(":memory:");
+    try {
+      migrate(fullDb, ALL_MIGRATIONS);
+      const fullRepo = new QueueRepository(fullDb);
+      seedItem(fullDb, "q-late", { source: "a@rig", destination: "b@rig", state: "in-progress", body: "Overdue subject" });
+      seedItem(fullDb, "q-failed", { source: "a@rig", destination: "b@rig", body: "Delivery subject" });
+      fullDb.prepare("UPDATE queue_items SET closure_required_at = ? WHERE qitem_id = ?").run("2020-01-01T00:00:00.000Z", "q-late");
+      fullDb.prepare("UPDATE queue_items SET last_nudge_result = ? WHERE qitem_id = ?").run("failed:fixture", "q-failed");
+      const overdue = fullRepo.findOverdue({ now: "2026-11-26T00:00:00.000Z", compact: true })[0]!;
+      const undelivered = fullRepo.findUndelivered({ compact: true })[0]!;
+      expect(overdue).toMatchObject({ qitemId: "q-late", summary: null, displayText: "Overdue subject" });
+      expect(undelivered).toMatchObject({ qitemId: "q-failed", summary: null, displayText: "Delivery subject" });
+      for (const row of [overdue, undelivered]) {
+        expect(row).not.toHaveProperty("body");
+        expect(row.fieldsElided).toContain("body");
+      }
+    } finally { fullDb.close(); }
+  });
+
   it("distinguishes a genuinely empty full item from an elided compact item", () => {
     seedItem(db, "q-empty", {
       source: "a@rig",
@@ -326,6 +380,7 @@ describe("Slice 15 — findOverdue rig-scoped + bounded + compact (finding 2)", 
     seedOverdue("q1", "rig-a", { body: "SECRET-LONG-BODY-CONTENT" });
     const compact = repo.findOverdue({ now: NOW, compact: true })[0]!;
     expect(compact.summary).toBe("sum");
+    expect(compact).toHaveProperty("displayText", "sum");
     expect(compact).not.toHaveProperty("body");
     expect(compact).not.toHaveProperty("evidenceRef");
     expect(compact.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers", "delegatedDecision"]);

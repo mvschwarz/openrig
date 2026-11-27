@@ -6,6 +6,7 @@ import {
   CURRENT_WORK_CHOICE_INSTRUCTION,
   deriveCurrentWork,
   deriveCurrentWorkChoice,
+  deriveWorkCandidates,
   type CurrentWorkDerivation,
   type WorkCandidateLookups,
 } from "../src/domain/current-work.js";
@@ -116,5 +117,29 @@ describe("deriveCurrentWorkChoice — plain whoami names the candidates instead 
     expect(choice?.candidates).toEqual([expect.objectContaining({ qitemId: "q-2", workNodePath: null,
       unresolved: "mission missing resolves to 0 directories on this host" })]);
     expect(choice?.unknown).toEqual([{ qitemId: "q-3", summary: null, reason: "no mission tag and no handoff ancestry" }]);
+  });
+});
+
+
+describe("held and pending queue labels", () => {
+  it("keeps an authored summary whole and derives the same readable body line for held and pending work", () => {
+    const summary = " \n# Authored\t summary\nSecond line";
+    const rows = [
+      { qitemId: "authored", state: "pending", summary, body: "Other body" },
+      { qitemId: "body", state: "blocked", summary: null, body: "---\n```\n> ### Fix the parser\nDetails" },
+    ];
+    const work = deriveWorkCandidates(rows, null, nothingElse);
+    expect(work.next[0]?.summary).toBe(summary);
+    expect(work.held[0]?.summary).toBe("Fix the parser");
+  });
+
+  it("retains the 240-unit body-label limit with surrogate care and leaves an unhelpful prefix unknown", () => {
+    const rows = [
+      { qitemId: "long", state: "pending", summary: null, body: "AB" + "😀".repeat(180) },
+      { qitemId: "unknown", state: "blocked", summary: null, body: " ".repeat(1024) + "Later text" },
+    ];
+    const work = deriveWorkCandidates(rows, null, nothingElse);
+    expect(work.next[0]?.summary).toBe("AB" + "😀".repeat(118) + "…");
+    expect(work.held[0]).toMatchObject({ qitemId: "unknown", summary: null });
   });
 });
