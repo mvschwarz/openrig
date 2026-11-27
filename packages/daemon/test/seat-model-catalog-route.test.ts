@@ -92,6 +92,51 @@ describe("seat model catalog", () => {
     }
   });
 
+  it.each([
+    ["model_catalog: null", "model_catalog"],
+    ["model_catalog: {}", "model_catalog.models"],
+    ["model_catalog: {models: [], runtime_version: 7}", "model_catalog.runtime_version"],
+    ["model_catalog: {models: [7]}", "model_catalog.models[0]"],
+    ["model_catalog: {models: [{id: 7}]}", "model_catalog.models[0].id"],
+    ["model_catalog: {models: [{id: one, effort_levels: [low, 7]}]}", "model_catalog.models[0].effort_levels"],
+  ])("identifies malformed metadata in %s without rejecting the preset", async (metadata, field) => {
+    const { url } = seed();
+    preset(metadata);
+    const response = await setup.app.request(url);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      saved: { model: "custom/unlisted", effort: { choice: "future-level" } },
+      catalog: { status: "unavailable", field, reason: expect.any(String) },
+    });
+    expect(loadCommunityHarnessPreset("fixture-harness").ok).toBe(true);
+  });
+
+  it.each([
+    ["format", (marker: string) => `format: {apiKey: ${marker}}`],
+    ["format", (marker: string) => `format: &loop {apiKey: ${marker}, self: *loop}`],
+    ["name", (marker: string) => `format: 1\nname: ${marker}`],
+    [undefined, (marker: string) => `format: 1\n${marker}: private-value`],
+    [undefined, (marker: string) => `format: [${marker}`],
+    ["command", (marker: string) => `format: 1\nname: fixture-harness\nmaintainer: Fixture\ncommand: "${marker} | cat"`],
+  ])("returns a safe loader diagnostic for unusable preset field %s", async (field, contents) => {
+    const { url } = seed();
+    const path = join(home, "community-harnesses", "fixture-harness.yaml");
+    const marker = "test-not-a-key";
+    writeFileSync(path, contents(marker));
+    const response = await setup.app.request(url);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      saved: { model: "custom/unlisted", effort: { choice: "future-level" } },
+      catalog: { status: "unavailable", reason: expect.any(String) },
+    });
+    expect(body.catalog.field).toBe(field);
+    expect(body.catalog.reason).not.toContain("No supported local catalog");
+    expect(JSON.stringify(body)).not.toContain(home);
+    expect(JSON.stringify(body)).not.toContain(marker);
+    expect(JSON.stringify(body)).not.toContain("private-value");
+  });
+
   it("omits an unknown version and keeps the authored effort when there is no override", async () => {
     const { node, url } = seed();
     setup.rigRepo.setNodeEffortChoice(node.id, null);

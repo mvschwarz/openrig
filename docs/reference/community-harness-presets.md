@@ -533,7 +533,7 @@ model_catalog:
     - id: example/model-b
 ```
 
-Omit `runtime_version` when it is unknown and omit `effort_levels` when the preset has no per-model effort information. An explicit `models: []` declares an empty list. Missing or invalid catalog metadata makes the [seat catalog](seat-node-targeting.md#model-and-effort-catalog) unavailable and leaves preset launch behavior unchanged. Older OpenRig versions may reject `model_catalog` as an unknown field.
+Omit `runtime_version` when it is unknown and omit `effort_levels` when the preset has no per-model effort information. The API's `runtimeVersion` is this declaration. OpenRig does not read the installed harness version for this response. An explicit `models: []` declares an empty list. Missing or invalid catalog metadata makes the [seat catalog](seat-node-targeting.md#model-and-effort-catalog) unavailable and leaves preset launch behavior unchanged. Older OpenRig versions may reject `model_catalog` as an unknown field.
 
 ## Pass the seat's declared model at launch
 
