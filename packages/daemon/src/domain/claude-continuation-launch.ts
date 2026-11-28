@@ -94,14 +94,28 @@ const PERMISSION_HOOK_SCRIPT = "claude-team-permissions.cjs";
 const isObject = (value: unknown): value is Settings => !!value && typeof value === "object" && !Array.isArray(value);
 const ruleLists = (permissions: Settings) =>
   Object.fromEntries(RULE_LISTS.filter(key => permissions[key] !== undefined).map(key => [key, permissions[key]]));
+/** The launch policy OpenRig wrote as the hook's third word before it named a kind (#2640): base64 of a JSON object with
+ *  exactly allow and ask string lists. claude-team-permissions.cjs still reads it for sessions launched then. */
+function isEncodedLaunchPolicy(word: string): boolean {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(word)) return false;
+  const bytes = Buffer.from(word, "base64");
+  if (bytes.toString("base64") !== word) return false;
+  try {
+    const policy = JSON.parse(bytes.toString("utf8")) as unknown;
+    const list = (value: unknown) => Array.isArray(value) && value.every(entry => typeof entry === "string");
+    return isObject(policy) && Object.keys(policy).length === 2 && list(policy["allow"]) && list(policy["ask"]);
+  } catch { return false; }
+}
+
 /** OpenRig's own permission hook invocation, as claudeCommandSettings writes it: `<node> <…/claude-team-permissions.cjs>
- *  <team|kernel>`, each word shell-quoted. It's matched by its words, so any install path and conventional quoting
- *  count, never by a substring: a command that only names the file, or runs a longer file name, isn't OpenRig's. */
+ *  <team|kernel>`, or an encoded launch policy from before #2640, each word shell-quoted. It's matched by its words, so
+ *  any install path and conventional quoting count, never by a substring: a command that only names the file, or runs a
+ *  longer file name, isn't OpenRig's. */
 const isPermissionHookCommand = (hook: unknown): boolean => {
   if (!isObject(hook) || hook["type"] !== "command" || typeof hook["command"] !== "string") return false;
   const words = shellWords(hook["command"]);
   return words.length === 3 && /^node(?:js)?(?:\.exe)?$/.test(basename(words[0]!)) && basename(words[1]!) === PERMISSION_HOOK_SCRIPT
-    && (words[2] === "team" || words[2] === "kernel");
+    && (words[2] === "team" || words[2] === "kernel" || isEncodedLaunchPolicy(words[2]!));
 };
 const preToolUse = (settings: Settings): unknown[] => {
   const entries = isObject(settings["hooks"]) ? settings["hooks"]["PreToolUse"] : undefined;

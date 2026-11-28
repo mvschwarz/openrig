@@ -19,7 +19,9 @@ import { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
 import { RigSpecCodec, LegacyRigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { RigSpecSchema, LegacyRigSpecSchema } from "../src/domain/rigspec-schema.js";
 import { readClaudePermissionRules, validateClaudePermissionRules } from "../src/domain/claude-permission-rules.js";
-import { operationalLaunchArgs, TEAM_CLAUDE_ALLOW } from "../src/adapters/kernel-authority.js";
+import { operationalLaunchArgs, KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../src/adapters/kernel-authority.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
+import { composedSeatPermissionPolicy, sendsSeatPermissionPolicy } from "../src/domain/claude-continuation-launch.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import type { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
@@ -276,12 +278,20 @@ describe("restore's resume composes the stored asks", () => {
 
 describe("a continuation sends the team default's permission hook with the team's allows (review C1)", () => {
   const TEAM_HOOK = "claude-team-permissions.cjs";
-  // OpenRig's own hook by its words (node, the script, the kind), not by a substring of its command.
+  // A launch policy encoded the way OpenRig wrote it before #2640: base64 of JSON with allow and ask.
+  const encodedPolicy = (word: string) => {
+    try { const policy = JSON.parse(Buffer.from(word, "base64").toString("utf8")); return Object.keys(policy ?? {}).length === 2 && Array.isArray(policy?.allow) && Array.isArray(policy?.ask); }
+    catch { return false; }
+  };
+  // OpenRig's own hook by its words (node, the script, the kind or encoded policy), not by a substring of its command.
   const ownsHook = (hook: any) => {
     const words = shellWords(String(hook?.command ?? ""));
     return hook?.type === "command" && words.length === 3 && /^node(?:js)?(?:\.exe)?$/.test(path.basename(words[0]!))
-      && path.basename(words[1]!) === TEAM_HOOK && ["team", "kernel"].includes(words[2]!);
+      && path.basename(words[1]!) === TEAM_HOOK && (["team", "kernel"].includes(words[2]!) || encodedPolicy(words[2]!));
   };
+  /** A hook as OpenRig launched it before #2640, with the launch policy encoded in its third word. */
+  const legacyHook = (allow: string[], ask: string[]) => ({ type: "command", timeout: 5,
+    command: ["/usr/local/bin/node", "/old install/claude-team-permissions.cjs", Buffer.from(JSON.stringify({ allow, ask })).toString("base64")].map(shellQuote).join(" ") });
   const teamHookEntries = (settings: Record<string, any>) => (settings.hooks?.PreToolUse ?? []).flatMap((entry: any) => (entry.hooks ?? []).filter(ownsHook));
   const allPreToolUseHooks = (settings: Record<string, any>) => (settings.hooks?.PreToolUse ?? []).flatMap((entry: any) => entry.hooks ?? []);
   const otherHook = { matcher: "Write", hooks: [{ type: "command", command: "/usr/local/bin/my-check", timeout: 5 }] };
@@ -360,6 +370,40 @@ describe("a continuation sends the team default's permission hook with the team'
       hooks: { PreToolUse: [{ matcher: "Bash", hooks: [oldOwn, sibling] }] } }, false);
     expect(teamHookEntries(settings)).toHaveLength(0);
     expect(settings.hooks.PreToolUse).toEqual([{ matcher: "Bash", hooks: [sibling] }]);
+  });
+
+  it("replaces a hook launched before #2640 with its policy encoded, keeping a sibling (review R3-F1)", async () => {
+    const legacy = legacyHook([...TEAM_CLAUDE_ALLOW], [...TEAM_CLAUDE_ASK]);
+    const settings = await continueTeam({ permissions: { allow: ["Bash(stale *)"] }, hooks: { PreToolUse: [{ matcher: "Bash", hooks: [legacy, sibling] }] } });
+    expect(allPreToolUseHooks(settings).filter((hook: any) => hook.command === legacy.command)).toHaveLength(0);
+    expect(teamHookEntries(settings)).toHaveLength(1);
+    expect(settings.hooks.PreToolUse).toEqual(expect.arrayContaining([{ matcher: "Bash", hooks: [sibling] }]));
+  });
+
+  it("removes a pre-#2640 kernel hook when the seat no longer uses that default (review R3-F1)", async () => {
+    const legacy = legacyHook([...KERNEL_CLAUDE_ALLOW], []);
+    const settings = await continueTeam({ permissions: { allow: ["Bash(stale *)"] }, hooks: { PreToolUse: [{ matcher: "Bash", hooks: [legacy, sibling] }] } }, false);
+    expect(teamHookEntries(settings)).toHaveLength(0);
+    expect(settings.hooks.PreToolUse).toEqual([{ matcher: "Bash", hooks: [sibling] }]);
+  });
+
+  it.each([
+    ["base64 that isn't a launch policy", Buffer.from(JSON.stringify({ foo: [] })).toString("base64")],
+    ["a policy with another key", Buffer.from(JSON.stringify({ allow: [], ask: [], deny: [] })).toString("base64")],
+    ["a word that isn't a kind", "team2"],
+  ])("keeps a hook whose third word is %s", async (_label, word) => {
+    const unrelated = { type: "command", timeout: 5, command: ["node", "/x/claude-team-permissions.cjs", word].map(shellQuote).join(" ") };
+    const settings = await continueTeam({ permissions: { allow: ["Bash(stale *)"] }, hooks: { PreToolUse: [{ matcher: "Bash", hooks: [unrelated] }] } });
+    expect(allPreToolUseHooks(settings)).toEqual(expect.arrayContaining([unrelated]));
+  });
+
+  it("the sent-policy check fails when an old OpenRig hook would still be sent", () => {
+    const composed = operationalLaunchArgs("claude-code", { teamPermissionDefault: true, managedCompaction: false, claudePermissions: selected });
+    const policy = composedSeatPermissionPolicy(composed)!;
+    const settings = settingsOf(composed);
+    expect(sendsSeatPermissionPolicy(composed, policy)).toBe(true);
+    const withOld = ["--settings", JSON.stringify({ ...settings, hooks: { PreToolUse: [...settings.hooks.PreToolUse, { matcher: "Bash", hooks: [legacyHook([...TEAM_CLAUDE_ALLOW], [...TEAM_CLAUDE_ASK])] }] } })];
+    expect(sendsSeatPermissionPolicy(withOld, policy)).toBe(false);
   });
 
   it("the pod-aware continuation adds the team hook too", async () => {
