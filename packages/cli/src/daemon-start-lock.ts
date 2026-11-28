@@ -18,6 +18,9 @@ export function observeStartReservation(deps: {
   home: string;
   readFile: (file: string) => string | null;
   processLiveness: (pid: number) => StartReservationObservation["liveness"];
+  /** This boot's ID. A reservation recording another boot's ID is from before a reboot: `rig daemon start` archives
+   *  it whatever its PIDs say, since they may now name unrelated processes, so it is no pending start. */
+  bootId?: string;
 }): StartReservationObservation | undefined {
   let raw: string | null;
   try { raw = deps.readFile(path.join(deps.home, "daemon-start.lock")); }
@@ -28,6 +31,7 @@ export function observeStartReservation(deps: {
   let launcherPid: number | undefined;
   let childPid: number | undefined;
   let incomplete = false;
+  let recordedBoot: string | undefined;
   const result: StartReservationObservation = { liveness: "unknown" };
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
@@ -37,10 +41,15 @@ export function observeStartReservation(deps: {
       if (validPid(rec.launcherPid)) launcherPid = rec.launcherPid;
       if (validPid(rec.childPid)) childPid = rec.childPid;
       if (typeof rec.startedAt === "string") result.since = rec.startedAt;
+      if (typeof rec.bootId === "string" && rec.bootId) recordedBoot = rec.bootId;
       if (typeof rec.host === "string") result.host = rec.host;
       if (typeof rec.port === "number" && Number.isInteger(rec.port) && rec.port > 0 && rec.port <= 65535) result.port = rec.port;
     } catch { incomplete = true; /* retain earlier evidence, but a missing child may still be live */ }
   }
+  // The start's recorded-boot-ID branch: every line readable, a start time and a recorded PID.
+  const earlierBoot = deps.bootId !== undefined && recordedBoot !== undefined && recordedBoot !== deps.bootId
+    && !incomplete && Number.isFinite(Date.parse(result.since ?? "")) && (launcherPid !== undefined || childPid !== undefined);
+  if (earlierBoot) return { ...result, liveness: "dead" };
   const pids = [launcherPid, childPid].filter((pid): pid is number => pid !== undefined);
   for (const pid of pids) {
     let liveness: StartReservationObservation["liveness"];

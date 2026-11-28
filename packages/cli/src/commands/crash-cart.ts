@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { ConfigStore } from "../config-store.js";
 import { formatDaemonHostForUrl } from "../client.js";
 import { resolveConfiguredDaemonTarget } from "../daemon-lifecycle.js";
-import { observeStartReservation } from "../daemon-start-lock.js";
+import { currentBootId, observeStartReservation } from "../daemon-start-lock.js";
 import { createProcessLiveness, signalProbe, readProcessState } from "../process-liveness.js";
 import type { DaemonUnverifiedEvidence } from "@openrig/daemon/crash-cart";
 
@@ -99,10 +99,12 @@ async function realEmit(): Promise<CrashCartEmit> {
   const home = getOpenRigHome();
   const explicitUrl = readOpenRigUrl();
   const processLiveness = createProcessLiveness({ signal: signalProbe, readProcessState });
+  const bootId = currentBootId();
   const readReservation = () => observeStartReservation({
     home,
     readFile: (file) => existsOrThrow(file) ? readFileSync(file, "utf8") : null,
     processLiveness,
+    bootId,
   });
   const configured = resolveConfiguredDaemonTarget();
   const recorded = cc.readDaemonJson(home);

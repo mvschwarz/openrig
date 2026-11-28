@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crashCartCommand, type CrashCartEmit } from "../src/commands/crash-cart.js";
+import { currentBootId } from "../src/daemon-start-lock.js";
 import { crashCartRenderOpts } from "../../tui/src/crash-cart/from-emit.js";
 import { resolveCrashCartKey } from "../../tui/src/crash-cart/keys.js";
 import { renderUnverifiedView } from "../../tui/src/crash-cart/render-crash-cart.js";
@@ -116,6 +117,24 @@ describe("real crash-cart wiring: selected endpoint, reservation and discovery r
     expect(emit.discovery).toBeDefined();
     expect(probe.mock.calls.map(([url]) => url)).toEqual(Array(2).fill("http://127.0.0.1:17433/healthz"));
     expect(readFileSync(join(home, "daemon-start.lock"), "utf8")).toBe(before);
+  });
+  it.skipIf(!currentBootId())("a reservation from an earlier boot leaves genuine refusal down, as a start archives it", async () => {
+    // After a reboot the recorded PIDs can name unrelated live processes (here, this test's own).
+    const before = JSON.stringify({ launcherPid: process.pid, startedAt: "2026-01-01T00:00:00Z", bootId: "an-earlier-boot" }) + "\n"
+      + JSON.stringify({ childPid: process.pid, host: "127.0.0.1", port: 17433 }) + "\n";
+    writeFileSync(join(home, "daemon-start.lock"), before);
+    probes("refused");
+    const emit = await run();
+    expect(emit.state).toBe("down");
+    expect(emit.discovery).toBeDefined();
+    expect(resolveCrashCartKey("s", crashCartRenderOpts(emit as Parameters<typeof crashCartRenderOpts>[0]))).toBe("start-daemon");
+    expect(readFileSync(join(home, "daemon-start.lock"), "utf8")).toBe(before);
+  });
+  it.skipIf(!currentBootId())("an earlier boot's reservation with an unreadable line stays unverified, as a start keeps it", async () => {
+    writeFileSync(join(home, "daemon-start.lock"),
+      JSON.stringify({ launcherPid: process.pid, startedAt: "2026-01-01T00:00:00Z", bootId: "an-earlier-boot" }) + "\n" + '{"childPid": 12');
+    probes("refused");
+    unverified(await run());
   });
   it("uses the active reservation's nondefault endpoint for verdict and evidence", async () => {
     reservation(process.pid, 18433);
