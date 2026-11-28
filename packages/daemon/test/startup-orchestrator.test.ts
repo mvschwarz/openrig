@@ -1064,6 +1064,14 @@ describe("StartupOrchestrator", () => {
     expect(orch.canContinueStartup(seed.nodeId, seed.sessionId)).toBe(false);
   });
 
+  it("keeps the launch notes of a launch kept for attention, such as rules not applied", async () => {
+    const seed = seedSession(); const orch = createOrchestrator();
+    const adapter = mockAdapter({ launchHarness: vi.fn(async () => ({ ok: false, recovery: "attention_required", error: "Hook review", warnings: ["the seat's recorded Claude rules were not applied to this relaunch"] })) });
+    const result = await orch.startNode(makeInput(seed, { adapter }));
+    expect(result.startupStatus).toBe("attention_required");
+    expect(result.warnings).toEqual([expect.stringMatching(/: the seat's recorded Claude rules were not applied to this relaunch$/)]);
+  });
+
   it("records a role binding before launch succeeds and preserves it on exact resume", async () => {
     const seed = seedSession();
     const orch = createOrchestrator();

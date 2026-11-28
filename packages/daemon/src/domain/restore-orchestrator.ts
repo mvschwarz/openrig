@@ -3334,6 +3334,8 @@ export class RestoreOrchestrator {
       if (result.code === "retry_fresh") return { kind: "retry_fresh" };
       // L3: surface attention_required from the Claude probe (resume-selection prompt).
       if (result.code === "attention_required") {
+        // The launch is retained, so its notes still describe the process that runs.
+        for (const note of (result as { warnings?: string[] }).warnings ?? []) warnings?.push(`${sessionName}: ${note}`);
         return {
           kind: "attention_required",
           message: result.message,

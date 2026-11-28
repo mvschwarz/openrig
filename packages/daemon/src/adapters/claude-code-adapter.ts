@@ -657,7 +657,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       const verification = await this.verifyResumeLaunch(binding, launchLine);
       // The process readiness pinned first, if it observed one: the caller records it, not a later read.
       const launchedProcess = launch.process ? { launchedProcess: { ...launch.process } } : {};
-      if (!verification.ok) return { ...verification, ...launchedProcess };
+      // A launch kept for attention still runs: its notes (such as rules not applied) go with that result too.
+      if (!verification.ok) return { ...verification, ...launchedProcess, ...(verification.recovery === "attention_required" ? launchNotes() : {}) };
       if (verification.warnings) tokenWarnings.push(...verification.warnings);
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch: launchApplied, ...launchedProcess, ...launchedExecutable, ...launchNotes() };
     }

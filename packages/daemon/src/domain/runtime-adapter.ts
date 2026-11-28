@@ -175,6 +175,8 @@ export type HarnessLaunchResult = {
   // conversation doesn't exist; other `retry_fresh` failures (such as a pane back at its shell)
   // leave it unset.
   | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string; missingConversation?: true;
+    /** With `recovery: "attention_required"`: the launch notes of the launch kept for attention, which still runs. */
+    warnings?: string[];
     probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence;
     /** The native resume probe's code for the startup gate that stopped the launch (for example `hook_trust_gate`),
      *  when one did. Reporting only: it changes no recovery decision. */

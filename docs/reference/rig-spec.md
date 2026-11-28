@@ -262,8 +262,10 @@ or absent `ask` is left out of the record, which keeps a seat without asks exact
 Other runtimes, mode settings, arbitrary settings and parenthesized MCP rules are rejected. Shape
 validation does not establish support by every Claude version.
 
-An OpenRig without `ask` support refuses to launch, fork or export a seat whose rules include
-`ask`, and refuses a spec that declares it, naming the key. Before downgrading, or before running
+An OpenRig that reads seat rules but lacks `ask` support (such as 0.7.24) refuses to launch, fork
+or export a seat whose rules include `ask`, and refuses a spec that declares it, naming the key. An
+OpenRig from before seat rules doesn't refuse: it leaves the recorded rules out of its launches
+(see Downgrade below). Before downgrading, or before running
 such a seat from an older daemon on another machine, record its rules without `ask`:
 `rig seat set-permissions <seat> --rules <file without ask> --reason "<why>"`. The audit event
 keeps the earlier rules, asks included, so they can be recorded again after an upgrade.

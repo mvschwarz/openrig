@@ -196,6 +196,8 @@ function shellWords(command: string): string[] {
   return words;
 }
 // The --settings value as the shell passes it, whether the flag is quoted (a continuation) or not (a classic command).
+/** Claude's resume chooser, which a resume verification reads as needing attention while the launch is kept. */
+const RESUME_CHOOSER = "How would you like to resume?\n❯ Resume from summary\n  Resume full session as-is";
 const inlineSettings = (command: string) => {
   const words = shellWords(command);
   return JSON.parse(words[words.indexOf("--settings") + 1]!) as Record<string, any>;
@@ -217,8 +219,9 @@ describe("restore's resume composes the stored asks", () => {
     // and an old ask, beside permissions fields the record doesn't own.
     const running = { permissions: { allow: ["Bash(stale *)"], ask: ["Bash(stale-ask *)"], additionalDirectories: ["/selected/docs"], defaultMode: "auto" },
       custom: "kept", idleCompaction: false };
-    const continueWith = async (rules: unknown, args = ["--settings", JSON.stringify(running), "--model", "opus"], managed = true) => {
+    const continueWith = async (rules: unknown, args = ["--settings", JSON.stringify(running), "--model", "opus"], managed = true, pane?: string) => {
       const tmux = resumeTmux();
+      if (pane) vi.mocked(tmux.capturePaneContent).mockImplementation(async () => pane);
       const nativeCommand = vi.fn((_args: string[]) => "retained-launch");
       const prepare = vi.fn(async () => ({ command: nativeCommand, warnings: [], assertCurrent: () => {} }));
       const resumeArgs: Parameters<ClaudeResumeAdapter["resume"]> = ["seat@rig", "claude_id", "same-conversation", "/repo", "auto", undefined, managed ? "auto" : undefined, "node"];
@@ -272,6 +275,12 @@ describe("restore's resume composes the stored asks", () => {
       const { result, sent } = await continueWith(selected, ["--settings", "/custom/settings.json", "--model", "opus"]);
       expect(sent).toContain("/custom/settings.json");
       expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([expect.stringMatching(/recorded Claude rules.*not applied/)]) });
+    });
+
+    it("keeps saying so when the relaunch then needs attention: the launch it retained still runs", async () => {
+      const { result } = await continueWith(selected, ["--settings", "/custom/settings.json", "--model", "opus"], true, RESUME_CHOOSER);
+      expect(result).toMatchObject({ ok: false, code: "attention_required",
+        warnings: expect.arrayContaining([expect.stringMatching(/recorded Claude rules.*not applied/)]) });
     });
   });
 });
@@ -424,9 +433,10 @@ describe("the pod-aware launch composes the stored asks on fresh, resume, fork a
     mkdirp: () => {}, copyFile: () => {}, listFiles: () => [] } as unknown as ClaudeAdapterFsOps);
   const binding = (extra: Partial<NodeBinding> = {}): NodeBinding => ({ id: "b1", nodeId: "n1", tmuxSession: "seat", tmuxWindow: null, tmuxPane: null,
     cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/project", claudePermissions: selected, ...extra });
-  const launch = async (extra: Partial<NodeBinding>, opts: Record<string, unknown>) => {
+  const launch = async (extra: Partial<NodeBinding>, opts: Record<string, unknown>, pane?: string) => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-ask-")); dirs.push(stateDir);
     const tmux = resumeTmux();
+    if (pane) vi.mocked(tmux.capturePaneContent).mockImplementation(async () => pane);
     const result = await new ClaudeCodeAdapter({ tmux, fsOps: fsOps(), stateDir, sleep: async () => {} }).launchHarness(binding(extra), { name: "seat", ...opts } as never);
     return { result, command: vi.mocked(tmux.sendText).mock.calls[0]![1] };
   };
@@ -448,5 +458,12 @@ describe("the pod-aware launch composes the stored asks on fresh, resume, fork a
     expect(settings.permissions.additionalDirectories).toEqual(["/selected/docs"]);
     expect(settings.custom).toBe("kept");
     expect(command).toContain("'--resume' 'same'");
+  });
+
+  it("a continuation that can't apply the rules and then needs attention still says the rules weren't applied", async () => {
+    const { result } = await launch({ claudeExecutable: "/native/claude", claudeLaunch: { args: ["--settings", "/custom/settings.json"], warnings: [] } },
+      { resumeToken: "same" }, RESUME_CHOOSER);
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required",
+      warnings: expect.arrayContaining([expect.stringMatching(/recorded Claude rules.*not applied/)]) });
   });
 });

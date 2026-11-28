@@ -28,7 +28,9 @@ export type ResumeResult =
     warnings?: string[] }
   // Non-terminal: a chooser or an inconclusive observation must preserve the
   // launch. Attention is not proof of native identity or successful continuity.
-  | { ok: false; code: "attention_required"; message: string; evidence?: string }
+  | { ok: false; code: "attention_required"; message: string; evidence?: string;
+    /** The launch notes of the launch it retained, as a resumed result carries them (such as rules not applied). */
+    warnings?: string[] }
   | { ok: false; code: string; message: string };
 
 const CLAUDE_TYPES = new Set(["claude_name", "claude_id"]);
@@ -238,7 +240,10 @@ export class ClaudeResumeAdapter {
       message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
     }));
     const warnings = result.ok ? [...tokenWarnings, ...(result.warnings ?? [])] : [];
-    return result.ok ? { ...result, appliedLaunch, ...(warnings.length ? { warnings } : {}) } : result;
+    if (result.ok) return { ...result, appliedLaunch, ...(warnings.length ? { warnings } : {}) };
+    // The launch is retained while it needs attention, so its notes still describe the process that runs.
+    if (result.code !== "attention_required" || !tokenWarnings.length) return result;
+    return { ...(result as Extract<ResumeResult, { code: "attention_required" }>), warnings: [...tokenWarnings] };
   }
 
   private async verifyResume(tmuxSessionName: string, resumeToken: string, launchLine?: string): Promise<ResumeResult> {
