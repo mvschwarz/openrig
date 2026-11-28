@@ -116,9 +116,11 @@ describe.skipIf(process.platform === "win32")("tmux binary resolution", { timeou
 
     expect(await seen()).toEqual(each(kept));
 
-    // The registry is read on every client start: a same-size edit naming another bearer_env excludes it, and the one it
-    // no longer names arrives.
+    // A registry edit applies to the next client start, even one of the same size once its modified time changes (set
+    // here, so no clock is needed): the edit naming another bearer_env excludes it, and the one it no longer names arrives.
     fs.writeFileSync(registry, "hosts:\n  - id: remote-b\n    transport: http\n    url: http://127.0.0.1:9\n    bearer_env: SYNTH_REMOTE_B_BEARER\n");
+    const later = new Date(Date.now() + 60_000);
+    fs.utimesSync(registry, later, later);
     const afterChange = [...kept.filter(key => key !== "SYNTH_REMOTE_B_BEARER"), "SYNTH_REMOTE_A_BEARER"];
     expect(await seen()).toEqual(each(afterChange));
 

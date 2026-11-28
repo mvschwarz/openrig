@@ -53,7 +53,10 @@ The registry requires a hosts array, unique non-empty ids and a supported
 transport. SSH needs a non-empty target; user and notes are optional. HTTP needs
 a URL and accepts at most one of bearer_env or bearer_file. Omitting both is
 valid for a tokenless target. A configured but unavailable bearer is a permission
-failure, not anonymous fallback. Host ids also have reserved-name validation;
+failure, not anonymous fallback. An agent's tmux session does not inherit the daemon's
+`bearer_env` variables, so an agent running these commands against a
+`bearer_env` host needs that variable in its own `env:`, or the entry should
+use `bearer_file`. Host ids also have reserved-name validation;
 use the actual validator's error rather than inventing an alias that collides.
 
 ## Address the intended operation
