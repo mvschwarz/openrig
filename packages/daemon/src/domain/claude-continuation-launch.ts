@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import { readNativeProcessLaunch } from "./native-process-arguments.js";
 import type { ClaudeAutoMode } from "./claude-auto-mode.js";
 import { ownClaudeSettings, type ClaudeSettingsSeat } from "../adapters/claude-settings-transport.js";
+import { shellWords } from "../adapters/shell-quote.js";
 
 /** Transient argv/config selector only; no general environment values or positional startup input. */
 export interface ClaudeContinuationLaunch { args?: string[]; configDir?: string | null; warnings: string[] }
@@ -93,12 +94,37 @@ const PERMISSION_HOOK_SCRIPT = "claude-team-permissions.cjs";
 const isObject = (value: unknown): value is Settings => !!value && typeof value === "object" && !Array.isArray(value);
 const ruleLists = (permissions: Settings) =>
   Object.fromEntries(RULE_LISTS.filter(key => permissions[key] !== undefined).map(key => [key, permissions[key]]));
-const isPermissionHook = (entry: unknown) => isObject(entry) && Array.isArray(entry["hooks"])
-  && entry["hooks"].some(hook => isObject(hook) && typeof hook["command"] === "string" && hook["command"].includes(PERMISSION_HOOK_SCRIPT));
+/** OpenRig's own permission hook invocation, as claudeCommandSettings writes it: `<node> <…/claude-team-permissions.cjs>
+ *  <team|kernel>`, each word shell-quoted. It's matched by its words, so any install path and conventional quoting
+ *  count, never by a substring: a command that only names the file, or runs a longer file name, isn't OpenRig's. */
+const isPermissionHookCommand = (hook: unknown): boolean => {
+  if (!isObject(hook) || hook["type"] !== "command" || typeof hook["command"] !== "string") return false;
+  const words = shellWords(hook["command"]);
+  return words.length === 3 && /^node(?:js)?(?:\.exe)?$/.test(basename(words[0]!)) && basename(words[1]!) === PERMISSION_HOOK_SCRIPT
+    && (words[2] === "team" || words[2] === "kernel");
+};
 const preToolUse = (settings: Settings): unknown[] => {
   const entries = isObject(settings["hooks"]) ? settings["hooks"]["PreToolUse"] : undefined;
   return Array.isArray(entries) ? entries : [];
 };
+/** PreToolUse entries without OpenRig's permission hook. Only that nested hook goes: an entry keeps its other hooks
+ *  and fields, and an entry left with no hooks is dropped. */
+function withoutPermissionHook(entries: unknown[]): unknown[] {
+  return entries.flatMap(entry => {
+    if (!isObject(entry) || !Array.isArray(entry["hooks"])) return [entry];
+    const hooks = entry["hooks"].filter(hook => !isPermissionHookCommand(hook));
+    if (hooks.length === entry["hooks"].length) return [entry];
+    return hooks.length ? [{ ...entry, hooks }] : [];
+  });
+}
+/** The entries that carry OpenRig's permission hook, each with that hook alone. */
+function permissionHookEntries(entries: unknown[]): unknown[] {
+  return entries.flatMap(entry => {
+    if (!isObject(entry) || !Array.isArray(entry["hooks"])) return [];
+    const hooks = entry["hooks"].filter(isPermissionHookCommand);
+    return hooks.length ? [{ ...entry, hooks }] : [];
+  });
+}
 
 /** Settings without the rule lists and permission hook a seat's policy owns; empty containers are left out. */
 function withoutPolicy(settings: Settings): Settings {
@@ -110,7 +136,7 @@ function withoutPolicy(settings: Settings): Settings {
   } else if (permissions !== undefined) result["permissions"] = permissions;
   if (isObject(hooks)) {
     const { PreToolUse: _pre, ...otherHooks } = hooks;
-    const kept = preToolUse(settings).filter(entry => !isPermissionHook(entry));
+    const kept = withoutPermissionHook(preToolUse(settings));
     const next = kept.length ? { ...otherHooks, PreToolUse: kept } : otherHooks;
     if (Object.keys(next).length) result["hooks"] = next;
   } else if (hooks !== undefined) result["hooks"] = hooks;
@@ -150,7 +176,7 @@ export function composedSeatPermissionPolicy(args: string[]): SeatPermissionPoli
   try {
     const settings = JSON.parse(args[at + 1]!) as unknown;
     if (!isObject(settings) || !isObject(settings["permissions"])) return undefined;
-    return { lists: ruleLists(settings["permissions"]), hooks: preToolUse(settings).filter(isPermissionHook) };
+    return { lists: ruleLists(settings["permissions"]), hooks: permissionHookEntries(preToolUse(settings)) };
   } catch { return undefined; }
 }
 
@@ -159,7 +185,7 @@ export function sendsSeatPermissionPolicy(args: string[], policy: SeatPermission
   const found = settingsValues(args, seat);
   if (found.some(entry => !entry.value)) return false;
   const lists = found.map(entry => entry.value!["permissions"]).filter(isObject).filter(value => Object.keys(ruleLists(value)).length);
-  const hooks = found.flatMap(entry => preToolUse(entry.value!).filter(isPermissionHook));
+  const hooks = found.flatMap(entry => permissionHookEntries(preToolUse(entry.value!)));
   return lists.length === 1 && JSON.stringify(ruleLists(lists[0]!)) === JSON.stringify(policy.lists)
     && JSON.stringify(hooks) === JSON.stringify(policy.hooks);
 }

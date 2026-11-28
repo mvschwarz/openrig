@@ -24,6 +24,7 @@ import { emittedEffortFromArgv } from "./seat-effort.js";
 import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
 import { CODEX_NON_LOGIN_SHELL_OVERRIDE } from "./native-resume-probe.js";
 import { readNativeProcessLaunch } from "./native-process-arguments.js";
+import { shellWords } from "../adapters/shell-quote.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -1141,42 +1142,8 @@ function settingsDrift(running: EffectiveSettings, relaunch: EffectiveSettings):
   return differs;
 }
 
-/** Split a POSIX command line built with shellQuote (single quotes, double quotes, backslashes). */
-export function shellWords(command: string): string[] {
-  const words: string[] = [];
-  let current = "";
-  let has = false;
-  for (let i = 0; i < command.length; i += 1) {
-    const char = command[i]!;
-    if (char === "'") {
-      const end = command.indexOf("'", i + 1);
-      current += command.slice(i + 1, end < 0 ? command.length : end);
-      i = end < 0 ? command.length : end;
-      has = true;
-    } else if (char === '"') {
-      i += 1;
-      while (i < command.length && command[i] !== '"') {
-        if (command[i] === "\\" && i + 1 < command.length) i += 1;
-        current += command[i];
-        i += 1;
-      }
-      has = true;
-    } else if (char === "\\" && i + 1 < command.length) {
-      current += command[i + 1];
-      i += 1;
-      has = true;
-    } else if (/\s/.test(char)) {
-      if (has) words.push(current);
-      current = "";
-      has = false;
-    } else {
-      current += char;
-      has = true;
-    }
-  }
-  if (has) words.push(current);
-  return words;
-}
+// The command-line splitter lives beside shellQuote; re-exported here for this module's existing callers.
+export { shellWords };
 
 /** A NAME=value assignment in a launch wrapper (`env NAME=…` or `/usr/bin/env 'NAME=…'`), before the command. */
 function envAssignment(command: string, name: string): string | null {

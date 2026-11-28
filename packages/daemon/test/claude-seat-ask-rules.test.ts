@@ -276,9 +276,17 @@ describe("restore's resume composes the stored asks", () => {
 
 describe("a continuation sends the team default's permission hook with the team's allows (review C1)", () => {
   const TEAM_HOOK = "claude-team-permissions.cjs";
-  const teamHookEntries = (settings: Record<string, any>) => (settings.hooks?.PreToolUse ?? [])
-    .filter((entry: any) => (entry.hooks ?? []).some((hook: any) => String(hook.command).includes(TEAM_HOOK)));
+  // OpenRig's own hook by its words (node, the script, the kind), not by a substring of its command.
+  const ownsHook = (hook: any) => {
+    const words = shellWords(String(hook?.command ?? ""));
+    return hook?.type === "command" && words.length === 3 && /^node(?:js)?(?:\.exe)?$/.test(path.basename(words[0]!))
+      && path.basename(words[1]!) === TEAM_HOOK && ["team", "kernel"].includes(words[2]!);
+  };
+  const teamHookEntries = (settings: Record<string, any>) => (settings.hooks?.PreToolUse ?? []).flatMap((entry: any) => (entry.hooks ?? []).filter(ownsHook));
+  const allPreToolUseHooks = (settings: Record<string, any>) => (settings.hooks?.PreToolUse ?? []).flatMap((entry: any) => entry.hooks ?? []);
   const otherHook = { matcher: "Write", hooks: [{ type: "command", command: "/usr/local/bin/my-check", timeout: 5 }] };
+  const oldOwn = { type: "command", command: 'node "/old install/claude-team-permissions.cjs" team', timeout: 5 };
+  const sibling = { type: "command", command: "/usr/local/bin/my-project-check", timeout: 8 };
   // A classic continuation (no managed mode), so the team default applies: teamPermissionDefault, no explicit mode.
   const continueTeam = async (running: Record<string, unknown>, teamDefault = true) => {
     const tmux = resumeTmux();
@@ -319,6 +327,39 @@ describe("a continuation sends the team default's permission hook with the team'
     expect(teamHookEntries(settings)).toHaveLength(0);
     expect(settings.permissions.allow).not.toEqual(expect.arrayContaining(TEAM_CLAUDE_ALLOW));
     expect(settings.hooks.PreToolUse).toEqual([otherHook]);
+  });
+
+  it("replaces only OpenRig's hook inside a shared entry, keeping its sibling hook and the entry's other fields (review R2-F1)", async () => {
+    const settings = await continueTeam({ permissions: { allow: ["Bash(stale *)"] },
+      hooks: { PreToolUse: [{ matcher: "Bash", note: "mine", hooks: [oldOwn, sibling] }] } });
+    expect(settings.hooks.PreToolUse).toEqual(expect.arrayContaining([{ matcher: "Bash", note: "mine", hooks: [sibling] }]));
+    expect(teamHookEntries(settings)).toHaveLength(1);
+    expect(teamHookEntries(settings)[0].command).not.toBe(oldOwn.command);
+  });
+
+  it("replaces an older install's hook written with other quoting, once", async () => {
+    const settings = await continueTeam({ permissions: { allow: ["Bash(stale *)"] }, hooks: { PreToolUse: [{ matcher: "Bash", hooks: [oldOwn] }, otherHook] } });
+    expect(allPreToolUseHooks(settings).filter((hook: any) => hook.command === oldOwn.command)).toHaveLength(0);
+    expect(teamHookEntries(settings)).toHaveLength(1);
+    expect(settings.hooks.PreToolUse).toEqual(expect.arrayContaining([otherHook]));
+  });
+
+  it.each([
+    ["a longer file name", "node '/custom/claude-team-permissions.cjs.audit'"],
+    ["a command that only names the file", "/usr/local/bin/my-project-check --label claude-team-permissions.cjs"],
+    ["another program run on the file", "/usr/bin/cat '/x/claude-team-permissions.cjs' team"],
+  ])("keeps an unrelated hook with %s (review R2-F1)", async (_label, command) => {
+    const unrelated = { type: "command", command, timeout: 8 };
+    const settings = await continueTeam({ permissions: { allow: ["Bash(stale *)"] }, hooks: { PreToolUse: [{ matcher: "Bash", hooks: [unrelated] }] } });
+    expect(allPreToolUseHooks(settings)).toEqual(expect.arrayContaining([unrelated]));
+    expect(teamHookEntries(settings)).toHaveLength(1);
+  });
+
+  it("leaving the team default removes only OpenRig's hook from a shared entry", async () => {
+    const settings = await continueTeam({ permissions: { allow: ["Bash(stale *)"] },
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [oldOwn, sibling] }] } }, false);
+    expect(teamHookEntries(settings)).toHaveLength(0);
+    expect(settings.hooks.PreToolUse).toEqual([{ matcher: "Bash", hooks: [sibling] }]);
   });
 
   it("the pod-aware continuation adds the team hook too", async () => {
