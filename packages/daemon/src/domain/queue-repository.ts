@@ -2561,8 +2561,7 @@ export class QueueRepository {
       if (this.transferFence(qitem_id)) continue;
       // A drain or a restore that started while an earlier row's delivery awaited stops the pass before this row is
       // reopened: no try, and the offer is kept.
-      if (addresses.some(address => this.deliveryDrains.holds(address))
-        || [sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) { paused = true; break; }
+      if (this.draftHeldPaused(sessionName, addresses)) { paused = true; break; }
       const after = lastMeaningfulTransition(this.db, qitem_id)?.id ?? 0;
       const tries = (this.db.prepare(`SELECT COUNT(*) AS n FROM queue_transitions WHERE qitem_id = ? AND transition_id > ?
         AND transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%'`).get(qitem_id, after) as { n: number }).n;
