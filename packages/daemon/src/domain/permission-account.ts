@@ -129,6 +129,10 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   if (planned.claudePermissions !== undefined) {
     openRigAdds.claudeAllow.push(...planned.claudePermissions.allow);
     openRigAdds.claudeDeny = [...planned.claudePermissions.deny];
+    if (planned.claudePermissions.ask) {
+      openRigAdds.claudeAsk.push(...planned.claudePermissions.ask);
+      openRigAdds.notes.push("This seat's ask rules go in Claude's native permissions.ask, which Claude checks after deny and before allow. Whether Claude prompts for them in this seat's mode is Claude's behaviour and isn't verified here. An older OpenRig refuses to launch a seat whose rules include ask.");
+    }
     openRigAdds.notes.push("This seat's allow/deny rules are composed into the same launch settings; no shared project settings are changed.",
       "Inherited grants remain. Managed policy, native modes and installed mods can change the effect; this read does not verify enforcement.",
       "Rules are not OS or credential isolation. Older readers may ignore the record; check rollback compatibility and preserve restrictions before downgrading.");

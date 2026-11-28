@@ -82,6 +82,43 @@ function withAutoMode(args: string[], block: ClaudeAutoMode | null, seat?: Claud
   return result;
 }
 
+/** Sets a seat's composed permissions in captured arguments in place of the running process's, keeping every other
+ *  settings key, so a relaunch sends the seat's recorded rules rather than the policy it was started with.
+ *  Undefined for a foreign or changed settings file, whose permissions OpenRig can't see or change. */
+function withPermissions(args: string[], permissions: Record<string, unknown>, seat?: ClaudeSettingsSeat): string[] | undefined {
+  const found = settingsValues(args, seat);
+  if (found.some(entry => !entry.value)) return undefined;
+  if (!found.length) return [...args, "--settings", JSON.stringify({ permissions })];
+  const result = [...args];
+  found.forEach((entry, index) => {
+    const { permissions: _dropped, ...rest } = entry.value!;
+    const json = JSON.stringify(index === found.length - 1 ? { ...rest, permissions } : rest);
+    if (entry.inline) result[entry.at] = `--settings=${json}`; else result[entry.at + 1] = json;
+  });
+  return result;
+}
+
+/** The permissions block a composed launch's one --settings value carries, for a continuation to send instead. */
+export function composedClaudePermissions(args: string[]): Record<string, unknown> | undefined {
+  const at = args.indexOf("--settings");
+  if (at < 0) return undefined;
+  try {
+    const permissions = (JSON.parse(args[at + 1]!) as Record<string, unknown>)["permissions"];
+    return permissions && typeof permissions === "object" && !Array.isArray(permissions) ? permissions as Record<string, unknown> : undefined;
+  } catch { return undefined; }
+}
+
+/** Whether these final arguments send exactly this permissions block; false when a settings file hides them. */
+export function sendsClaudePermissions(args: string[], permissions: Record<string, unknown>, seat?: ClaudeSettingsSeat): boolean {
+  const found = settingsValues(args, seat);
+  if (found.some(entry => !entry.value)) return false;
+  const sent = found.filter(entry => entry.value!["permissions"] !== undefined);
+  return sent.length === 1 && JSON.stringify(sent[0]!.value!["permissions"]) === JSON.stringify(permissions);
+}
+
+/** The text a relaunch reports when captured settings keep it from sending the seat's recorded rules. */
+export const CONTINUATION_RULES_NOT_APPLIED = "The running Claude's --settings is a file OpenRig can't read, so this seat's recorded Claude rules were not applied to this relaunch: it keeps the running process's permissions. The rules apply at the seat's next ordinary launch.";
+
 /** The autoMode block these final arguments send: null for none, undefined when a settings file makes it unknown. */
 export function sentClaudeAutoMode(args: string[], seat?: ClaudeSettingsSeat): ClaudeAutoMode | null | undefined {
   const found = settingsValues(args, seat);
@@ -91,11 +128,14 @@ export function sentClaudeAutoMode(args: string[], seat?: ClaudeSettingsSeat): C
   return (blocks[0]?.value!["autoMode"] as ClaudeAutoMode | undefined) ?? null;
 }
 
-/** `autoMode` is the block this launch sends (null: none); undefined leaves captured settings as they are. */
+/** `autoMode` is the block this launch sends (null: none); undefined leaves captured settings as they are.
+ *  `permissions` is the composed block of a seat that records Claude rules, sent in place of the running one;
+ *  undefined (a seat without rules) leaves captured permissions as they are. */
 export function resumedClaudeArguments(launch: ClaudeContinuationLaunch | undefined, fallback: string[], conversation: string, effort?: string | null, posture?: string,
-  autoMode?: ClaudeAutoMode | null, seat?: ClaudeSettingsSeat): string[] {
+  autoMode?: ClaudeAutoMode | null, seat?: ClaudeSettingsSeat, permissions?: Record<string, unknown>): string[] {
   if (!launch?.args) return fallback;
-  const args = autoMode === undefined ? [...launch.args] : withAutoMode(launch.args, autoMode, seat) ?? [...launch.args];
+  const ruled = permissions === undefined ? [...launch.args] : withPermissions(launch.args, permissions, seat) ?? [...launch.args];
+  const args = autoMode === undefined ? ruled : withAutoMode(ruled, autoMode, seat) ?? ruled;
   // Keep restore's existing explicit seat-effort precedence.
   if (effort) {
     const at = args.findIndex(a => a === "--effort" || a.startsWith("--effort="));

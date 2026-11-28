@@ -91,9 +91,11 @@ export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): st
     if (choice.claudePermissions !== undefined) {
       const rules = validateClaudePermissionRules(choice.claudePermissions);
       args = withSettings(args, settings => {
-        const permissions = (settings.permissions ?? {}) as { allow?: string[]; deny?: string[] };
+        const permissions = (settings.permissions ?? {}) as { allow?: string[]; ask?: string[]; deny?: string[] };
+        // A seat's asks go in Claude's native permissions.ask field, beside any the defaults already list.
         return { ...settings, permissions: { ...permissions,
-          allow: [...(permissions.allow ?? []), ...rules.allow], deny: [...(permissions.deny ?? []), ...rules.deny] } };
+          allow: [...(permissions.allow ?? []), ...rules.allow], deny: [...(permissions.deny ?? []), ...rules.deny],
+          ...(rules.ask ? { ask: [...(permissions.ask ?? []), ...rules.ask] } : {}) } };
       });
     }
     if (choice.statusLine !== undefined) {

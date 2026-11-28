@@ -249,21 +249,33 @@ Claude members can record tool rules independently, even when they share a proje
 ```yaml
 claude_permissions:
   allow: ["Bash(node lane-reader.mjs *)"]
+  ask: ["Bash(git push *)"]
   deny: ["Read(./private/**)"]
 ```
 
-This field accepts only `allow` and `deny` lists of native Claude rule strings. It is
-also supported on legacy flat Claude nodes. Other runtimes, `ask`, mode settings,
-arbitrary settings and parenthesized MCP rules are rejected. Shape validation does
-not establish support by every Claude version.
+This field accepts only `allow`, `ask` and `deny` lists of native Claude rule strings. It is
+also supported on legacy flat Claude nodes. `ask` goes into Claude's native `permissions.ask`:
+Claude checks deny rules, then ask rules, then allow rules, so a matching ask rule prompts even
+when an allow rule also matches. Which modes prompt for an ask rule, and which deny it, is
+Claude's behaviour; OpenRig records and sends the rules and doesn't verify the effect. An empty
+or absent `ask` is left out of the record, which keeps a seat without asks exactly as before.
+Other runtimes, mode settings, arbitrary settings and parenthesized MCP rules are rejected. Shape
+validation does not establish support by every Claude version.
+
+An OpenRig without `ask` support refuses to launch, fork or export a seat whose rules include
+`ask`, and refuses a spec that declares it, naming the key. Before downgrading, or before running
+such a seat from an older daemon on another machine, record its rules without `ask`:
+`rig seat set-permissions <seat> --rules <file without ask> --reason "<why>"`. The audit event
+keeps the earlier rules, asks included, so they can be recorded again after an upgrade.
 
 After composition, launches and resumes keep settings of at most 64 KiB inline, byte-identical.
 Larger JSON values go through Claude's native `--settings` file form: a content-addressed 0600
 file under OpenRig's seat-specific `state/claude-settings/` storage. OpenRig publishes the complete
 file atomically and prunes older files only when their bytes still match their digest. It keeps
 the current files and files named by captured live arguments. Continuations
-can rewrite OpenRig's own unchanged files to apply the selected auto-mode block; foreign files stay
-opaque. A failed write falls back inline with a warning naming the size and failure, never a size
+can rewrite OpenRig's own unchanged files to apply the selected auto-mode block and, for a seat
+with recorded rules, its composed permissions in place of the running ones; foreign files stay
+opaque, and a continuation that can't apply the rules says so. A failed write falls back inline with a warning naming the size and failure, never a size
 refusal. Rules are never truncated or dropped, and shared Claude settings are not changed.
 
 The initial spec records the rules on the stable seat. For an existing seat, put the
@@ -274,10 +286,12 @@ rig seat set-permissions dev-reader@team --rules member-rules.json --reason "Sel
 rig seat status dev-reader@team --json
 ```
 
-Choose either `--rules` or `--mode`, never both. Empty allow and deny lists clear the
+Choose either `--rules` or `--mode`, never both. Empty allow, ask and deny lists clear the
 seat's rules. Updating rules leaves the permission mode, running process and history
 unchanged; they apply at the next separately authorized managed launch or resume.
-Restore and same-seat handover read that same record. A fork copies the source's
+Restore and same-seat handover read that same record, and so does a same-conversation
+relaunch that keeps the running Claude's options, such as a provider switch: it sends the
+recorded rules instead of the permissions the running process started with. A fork copies the source's
 currently recorded rules independently, including retained-seat updates. Export
 contains the current record. An invalid or unreadable record refuses that seat's
 launch, fork or export with a repair message rather than silently omitting its denies.
