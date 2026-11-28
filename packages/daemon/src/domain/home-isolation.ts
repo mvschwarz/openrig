@@ -24,6 +24,9 @@ function isInside(child: string, parent: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !nodePath.isAbsolute(rel));
 }
 
+/** The supported route: a second OpenRig home on one user account isn't isolation. */
+const SEPARATE_MACHINE = "One user account isn't an isolated test environment: for a test that needs its own OpenRig, use another machine, such as a VM or VPS.";
+
 /**
  * An advisory when OPENRIG_HOME is isolated but HOME or CODEX_HOME still resolve to somewhere else.
  *
@@ -53,15 +56,28 @@ export function homeIsolationAdvisory(input: { openrigHome: string; home: string
   if (isInside(canonical(accountHome), root)) {
     return `[openrig] home isolation advisory: OPENRIG_HOME=${input.openrigHome} is not the default location, `
       + `but the isolated root ${root} contains the real home ${accountHome}, so nothing inside it is isolated. `
-      + `Point OPENRIG_HOME, HOME and CODEX_HOME at a directory that does not contain the real home, or unset OPENRIG_HOME. Starting anyway.`;
+      + `${SEPARATE_MACHINE} Point OPENRIG_HOME, HOME and CODEX_HOME at a directory that does not contain the real home, or unset OPENRIG_HOME. Starting anyway.`;
   }
-  const codexHome = canonical(input.codexHome || nodePath.join(input.home, ".codex"));
+  const codexDir = input.codexHome || nodePath.join(input.home, ".codex");
+  const codexHome = canonical(codexDir);
   const leaks: string[] = [];
-  if (!homeInside) leaks.push(`HOME=${input.home}`);
-  if (!isInside(codexHome, root)) leaks.push(`CODEX_HOME=${input.codexHome || `${nodePath.join(input.home, ".codex")} (derived from HOME)`}`);
+  // What this daemon itself still writes outside its home (startup.ts's global skill refresh and the Codex
+  // adapter's managed config), named so a person can find and undo it.
+  const writes: string[] = [];
+  if (!homeInside) {
+    leaks.push(`HOME=${input.home}`);
+    writes.push(`at start it refreshes OpenRig's own skills (openrig-skills, refocusing, rigs) in ${nodePath.join(input.home, ".claude", "skills")} `
+      + `and ${nodePath.join(input.home, ".agents", "skills")} when its bundled copies are newer, keeping the earlier copies in ${nodePath.join(input.openrigHome, "backups", "managed-refresh")}`);
+  }
+  if (!isInside(codexHome, root)) {
+    leaks.push(`CODEX_HOME=${input.codexHome || `${codexDir} (derived from HOME)`}`);
+    writes.push(`with Codex hooks enabled, its managed setup can update ${nodePath.join(codexDir, "config.toml")} and, when present, `
+      + `${nodePath.join(codexDir, "hooks.json")}, pointing OpenRig's activity hooks at this home's hook relay; that setup runs at daemon start `
+      + `once there is a Codex seat and at later Codex launches, so a Codex home that several daemons use follows whichever set it up most recently`);
+  }
   if (leaks.length === 0) return undefined;
   return `[openrig] home isolation advisory: OPENRIG_HOME=${input.openrigHome} is not the default location, `
-    + `but ${leaks.join(" and ")} resolve${leaks.length === 1 ? "s" : ""} outside it. `
-    + `A seat or startup step run by this daemon can read or write outside the isolated home. `
-    + `Point HOME and CODEX_HOME inside the isolated home, or unset OPENRIG_HOME. Starting anyway.`;
+    + `but ${leaks.join(" and ")} resolve${leaks.length === 1 ? "s" : ""} outside it, so this daemon still writes there: ${writes.join("; and ")}. `
+    + `Its seats and startup steps can also read and write outside the isolated home. `
+    + `${SEPARATE_MACHINE} Pointing HOME and CODEX_HOME inside the isolated home keeps these writes inside it. Starting anyway.`;
 }

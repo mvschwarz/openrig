@@ -38,6 +38,7 @@ interface RigStatusRead {
   status?: string;
   seatsTotal?: number;
   seatsRunning?: number;
+  seatsAttached?: number;
 }
 interface InstanceHealthRead extends ControlPlaneRead {
   selfHostId?: string | null;
@@ -68,6 +69,8 @@ interface NodeInventoryRead {
   effortSource?: "seat_choice" | "authored" | "runtime_default" | null;
   lifecycleState: string;
   sessionStatus?: string | null;
+  /** The seat's binding: `external_cli` is a seat joined with `rig attach`, run by an outside program. */
+  attachmentType?: string | null;
   startupStatus?: string | null;
   terminalActive?: boolean | null;
   /** arch 3a947fb1: raw window_activity ISO (owner idle-age is derived at the
@@ -298,7 +301,10 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
                 : node.communityHarness || node.activityState ? "unknown" : "idle"))
           : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
-    canRun: node.lifecycleState !== "running"
+    // A seat bound to an outside program (rig attach, an external CLI) isn't OpenRig's to start: its launch refuses a
+    // bound seat, and whether that program runs is unknown, never stopped.
+    canRun: node.attachmentType !== "external_cli"
+      && node.lifecycleState !== "running"
       && node.sessionStatus !== "running"
       && node.sessionStatus !== "ready"
       && node.terminalActive !== true,
@@ -694,7 +700,8 @@ export async function hydrateSnapshot(
       // rig-down leg (§4.A): summary lifecycleState verbatim, enriched by the
       // rig-status projection where it answers — composed BESIDE the items.
       const st = await safe<RigStatusRead>(`rig-status(${rig.name})`, () => client.rigStatus(rig.id));
-      const seatDetail = st && st.seatsTotal != null ? `${st.seatsRunning ?? 0}/${st.seatsTotal} seats running` : undefined;
+      const seatDetail = st && st.seatsTotal != null
+        ? `${st.seatsRunning ?? 0}/${st.seatsTotal} seats running${st.seatsAttached ? ` · ${st.seatsAttached} attached` : ""}` : undefined;
       rigsDown.push({
         hostId: `rig:${rig.name}`,
         status: st?.status ? `${rig.lifecycleState} (${st.status})` : rig.lifecycleState,

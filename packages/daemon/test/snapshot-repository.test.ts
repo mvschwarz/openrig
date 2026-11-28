@@ -8,7 +8,7 @@ import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { snapshotsSchema } from "../src/db/migrations/004_snapshots.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
-import type { SnapshotData } from "../src/domain/types.js";
+import type { SnapshotData, SnapshotOccupantState } from "../src/domain/types.js";
 
 function setupDb(): Database.Database {
   const db = createDb();
@@ -477,6 +477,180 @@ describe("SnapshotRepository", () => {
   });
 });
 
+
+describe("SnapshotRepository.selectComebackSnapshot: the snapshot a seat pool's comeback launches a retained node from", () => {
+  const NODE = { id: "node-w1", logicalId: "dev.impl-s1" };
+  let db: Database.Database;
+  let repo: SnapshotRepository;
+
+  beforeEach(() => {
+    db = setupDb();
+    repo = new SnapshotRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  /** A capture of the rig: with or without the retained node, and with its session running or stopped at capture. */
+  function capture(opts: { withNode: boolean; running?: boolean }): SnapshotData {
+    const data = sampleData();
+    if (!opts.withNode) return data;
+    data.nodes = [{ id: NODE.id, rigId: "rig-1", logicalId: NODE.logicalId } as SnapshotData["nodes"][number]];
+    data.sessions = [{
+      id: "sess-w1", nodeId: NODE.id, sessionName: "dev-impl-s1@r01", status: opts.running ? "running" : "stopped",
+      resumeType: "claude_id", resumeToken: "token-w1", restorePolicy: "resume_if_possible", lastSeenAt: null,
+      createdAt: "2026-11-18T10:00:00Z", origin: "launched", startupStatus: "ready", startupCompletedAt: null,
+    } as SnapshotData["sessions"][number]];
+    data.activeOccupantsByNode = { [NODE.id]: opts.running ? { kind: "resolved", sessionId: "sess-w1" } : { kind: "absent" } };
+    return data;
+  }
+
+  function insertAt(id: string, kind: string, data: SnapshotData | string, createdAt: string): void {
+    db.prepare("INSERT INTO snapshots (id, rig_id, kind, status, data, created_at) VALUES (?, ?, ?, 'complete', ?, ?)")
+      .run(id, "rig-1", kind, typeof data === "string" ? data : JSON.stringify(data), createdAt);
+  }
+
+  it("With an older `auto-periodic` snapshot A without the node, a pool capture B holding it running and a later `auto-periodic` C where it is absent, the selection picks B, reads C before it, and never reads A.", () => {
+    insertAt("A", "auto-periodic", capture({ withNode: false }), "2026-11-18 09:00:00");
+    insertAt("B", "auto-rehydrate", capture({ withNode: true, running: true }), "2026-11-18 10:00:00");
+    insertAt("C", "auto-periodic", capture({ withNode: true, running: false }), "2026-11-18 11:00:00");
+    // the automatic ranking prefers the periodic kind; the comeback does not
+    expect(repo.findLatestRestoreUsable("rig-1")?.id).toBe("C");
+
+    const selected = repo.selectComebackSnapshot("rig-1", NODE.id, NODE.logicalId);
+    expect(selected.chosen?.id).toBe("B");
+    expect(selected.chosen?.kind).toBe("auto-rehydrate");
+    expect(selected.read).toBe(2);
+    expect(selected.failed).toEqual([{ snapshotId: "C", condition: 3 }]);
+  });
+
+  it("With no snapshot holding the node running, nothing is chosen and each snapshot read is named with the condition it failed: 1 for data that can't be read or is not restore-usable, 2 for a snapshot without the node, 3 for one where it was not running.", () => {
+    insertAt("A", "auto-periodic", capture({ withNode: false }), "2026-11-18 09:00:00");
+    insertAt("B", "auto-rehydrate", "{broken", "2026-11-18 10:00:00");
+    insertAt("E", "auto-rehydrate", "{}", "2026-11-18 10:30:00");
+    insertAt("C", "auto-periodic", capture({ withNode: true, running: false }), "2026-11-18 11:00:00");
+
+    expect(repo.selectComebackSnapshot("rig-1", NODE.id, NODE.logicalId)).toEqual({
+      chosen: null,
+      read: 4,
+      failed: [
+        { snapshotId: "C", condition: 3 },
+        { snapshotId: "E", condition: 1 },
+        { snapshotId: "B", condition: 1 },
+        { snapshotId: "A", condition: 2 },
+      ],
+    });
+  });
+
+  it("A snapshot whose node has the same id under another logical id, or one that keeps the node out of its intended roster, fails condition 2.", () => {
+    const renamed = capture({ withNode: true, running: true });
+    renamed.nodes[0]!.logicalId = "dev.other";
+    insertAt("R", "auto-rehydrate", renamed, "2026-11-18 10:00:00");
+    const outOfRoster = capture({ withNode: true, running: true });
+    outOfRoster.topologyRoster = { version: 1, source: "materialized_topology", intendedNodeIds: [] };
+    outOfRoster.activeOccupantsByNode = {};
+    insertAt("O", "auto-rehydrate", outOfRoster, "2026-11-18 10:30:00");
+
+    expect(repo.selectComebackSnapshot("rig-1", NODE.id, NODE.logicalId)).toEqual({
+      chosen: null, read: 2, failed: [{ snapshotId: "O", condition: 2 }, { snapshotId: "R", condition: 2 }],
+    });
+  });
+
+  /** A capture holding the node with a second session row `sess-w1b` (status `second`), the first one running, and the
+   *  node's occupant entry as given (`undefined` drops the entry). */
+  function twoOccupants(second: string, occupant: SnapshotOccupantState | undefined, firstStatus = "running"): SnapshotData {
+    const data = capture({ withNode: true, running: true });
+    data.sessions[0]!.status = firstStatus;
+    data.sessions.push({ ...data.sessions[0]!, id: "sess-w1b", sessionName: "dev-impl-s1@r01-b", status: second });
+    data.activeOccupantsByNode = occupant === undefined ? {} : { [NODE.id]: occupant };
+    return data;
+  }
+  const BOTH: SnapshotOccupantState = { kind: "ambiguous", candidateIds: ["sess-w1", "sess-w1b"] };
+
+  it("A newer capture that recorded two live occupants for the node stops the selection: nothing is chosen, the conflict names that snapshot and both candidates, and the older single-occupant capture is never read.", () => {
+    insertAt("B", "auto-rehydrate", capture({ withNode: true, running: true }), "2026-11-18 10:00:00");
+    insertAt("D", "manual", twoOccupants("running", BOTH), "2026-11-18 11:00:00");
+
+    expect(repo.selectComebackSnapshot("rig-1", NODE.id, NODE.logicalId)).toEqual({
+      chosen: null, conflict: { snapshotId: "D", candidateIds: ["sess-w1", "sess-w1b"] }, read: 1, failed: [],
+    });
+  });
+
+  it("A capture taken after the drain, with the node not running, falls through to the next capture; when that one is a recorded conflict newer than the qualifying capture, the conflict still stops the selection.", () => {
+    insertAt("B", "auto-rehydrate", capture({ withNode: true, running: true }), "2026-11-18 10:00:00");
+    insertAt("D", "manual", twoOccupants("running", BOTH), "2026-11-18 11:00:00");
+    insertAt("C", "auto-periodic", capture({ withNode: true, running: false }), "2026-11-18 12:00:00");
+
+    expect(repo.selectComebackSnapshot("rig-1", NODE.id, NODE.logicalId)).toEqual({
+      chosen: null, conflict: { snapshotId: "D", candidateIds: ["sess-w1", "sess-w1b"] }, read: 2, failed: [{ snapshotId: "C", condition: 3 }],
+    });
+  });
+
+  it.each([
+    ["no entry for the node", () => twoOccupants("running", undefined)],
+    ["a resolved occupant naming no session", () => twoOccupants("running", { kind: "resolved", sessionId: "sess-gone" })],
+    ["a candidate that is a row of another node", () => {
+      const data = twoOccupants("running", BOTH);
+      data.nodes.push({ id: "node-x", rigId: "rig-1", logicalId: "dev.other" } as SnapshotData["nodes"][number]);
+      data.sessions[1]!.nodeId = "node-x";
+      data.activeOccupantsByNode!["node-x"] = { kind: "resolved", sessionId: "sess-w1b" };
+      return data;
+    }],
+  ])("A newer capture whose occupant metadata for the node is incomplete (%s) fails condition 1, and the selection reaches the older single-occupant capture.", (_label, newer) => {
+    insertAt("B", "auto-rehydrate", capture({ withNode: true, running: true }), "2026-11-18 10:00:00");
+    insertAt("D", "manual", newer(), "2026-11-18 11:00:00");
+
+    const selected = repo.selectComebackSnapshot("rig-1", NODE.id, NODE.logicalId);
+    expect(selected.chosen?.id).toBe("B");
+    expect(selected.conflict).toBeUndefined();
+    expect(selected.read).toBe(2);
+    expect(selected.failed).toEqual([{ snapshotId: "D", condition: 1 }]);
+  });
+
+  it.each([
+    ["a legacy relation recording no single occupant", () => {
+      const data = twoOccupants("running", undefined);
+      delete data.activeOccupantsByNode;
+      data.activeSessionIdByNode = { [NODE.id]: null };
+      return data;
+    }, "the snapshot recorded no single live occupant at capture (explicit null)"],
+    ["candidates that were not running at capture, as after a reboot", () => twoOccupants("detached", BOTH, "detached"),
+      "the snapshot recorded multiple live occupant candidates at capture"],
+    ["only one candidate running at capture", () => twoOccupants("detached", BOTH),
+      "the snapshot recorded multiple live occupant candidates at capture"],
+  ])("A newer capture that can't tell which occupant was live (%s) is named with condition 3, its candidates and why, and the selection still reaches the older capture.", (_label, newer, detail) => {
+    insertAt("B", "auto-rehydrate", capture({ withNode: true, running: true }), "2026-11-18 10:00:00");
+    insertAt("D", "auto-rehydrate", newer(), "2026-11-18 11:00:00");
+
+    const selected = repo.selectComebackSnapshot("rig-1", NODE.id, NODE.logicalId);
+    expect(selected.chosen?.id).toBe("B");
+    expect(selected.conflict).toBeUndefined();
+    expect(selected.read).toBe(2);
+    expect(selected.failed).toEqual([{ snapshotId: "D", condition: 3, unknown: { candidateIds: ["sess-w1", "sess-w1b"], detail } }]);
+  });
+
+  it("The selection ranks a rig's snapshots without their data, reads only its own rig, and changes nothing.", () => {
+    insertAt("B", "auto-rehydrate", capture({ withNode: true, running: true }), "2026-11-18 10:00:00");
+    db.prepare("INSERT INTO snapshots (id, rig_id, kind, status, data, created_at) VALUES ('X', 'rig-2', 'auto-rehydrate', 'complete', ?, '2026-11-18 12:00:00')")
+      .run(JSON.stringify(capture({ withNode: true, running: true })));
+    const before = db.prepare("SELECT id, data FROM snapshots ORDER BY id").all();
+    const original = db.prepare;
+    const statements: string[] = [];
+    db.prepare = function(sql: string) { statements.push(sql); return original.call(this, sql); } as typeof db.prepare;
+    let selected: ReturnType<SnapshotRepository["selectComebackSnapshot"]>;
+    try {
+      selected = repo.selectComebackSnapshot("rig-1", NODE.id, NODE.logicalId);
+    } finally { db.prepare = original; }
+    expect(selected.chosen?.id).toBe("B");
+    expect(selected.read).toBe(1);
+    const rigWide = statements.filter((sql) => /WHERE rig_id = \?/.test(sql));
+    expect(rigWide.length).toBeGreaterThan(0);
+    for (const sql of rigWide) expect(sql).not.toMatch(/SELECT \*|\bdata\b/);
+    expect(statements.some((sql) => /^\s*(INSERT|UPDATE|DELETE)/i.test(sql))).toBe(false);
+    expect(db.prepare("SELECT id, data FROM snapshots ORDER BY id").all()).toEqual(before);
+  });
+});
 
 describe("snapshot pruning above SQLite's parameter limit", () => {
   it.each(["all", "kind"] as const)("prunes %s history without one bind parameter per discarded snapshot", mode => {

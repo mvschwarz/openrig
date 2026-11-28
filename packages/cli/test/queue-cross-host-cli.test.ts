@@ -161,10 +161,14 @@ describe("rig queue cross-host CLI wiring (C3)", () => {
     await program.parseAsync([
       "node", "rig", "queue", "handoff-and-complete", "qitem-src-1",
       "--from", "worker@rig-a", "--to", "dev@rig-b", "--host", "vps-b", "--json",
+      "--resolution", "Accepted", "--note", "Audit only", "--summary", "Next step",
     ]);
     const body = calls.find((c) => c.path === "/api/queue/qitem-src-1/handoff-and-complete")!.body as Record<string, unknown>;
     expect(body.toSession).toBe("dev@rig-b");
     expect(body.hostId).toBe("vps-b");
+    expect(body.resolution).toBe("Accepted");
+    expect(body.transitionNote).toBe("Audit only");
+    expect(body.body).toBeUndefined();
   });
 
   it("conflicting --host + qualifier: local structured error, NOTHING posted, exit 1", async () => {

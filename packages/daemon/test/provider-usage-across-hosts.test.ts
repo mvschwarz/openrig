@@ -273,6 +273,8 @@ describe("GET /api/provider/usage/hosts", () => {
       ["off", "ok", "off", "usage windows are off on this host (provider.usage_windows = false)"],
       ["shell", "unsupported-transport", "unavailable", "not read"],
     ]);
+    // #3625: an ssh entry points at the command that reads that host's seats and assignments over SSH.
+    expect(body.hosts.find((h) => h.hostId === "shell")!.error).toContain("rig provider status --host shell");
     expect(body.items.flatMap((g) => g.observations.map((o) => o.hostId)).sort()).toEqual(["a", "a", "local", "local"]);
   });
 
@@ -622,8 +624,22 @@ describe("round 3: every rendered field checked, failures kept to their host, a 
     ["seat account label", withSeat((x) => ({ ...x, configured: { ...(x["configured"] as Body), profileRef: TRAP } })), "seats"],
     ["seat registryNotes not a list", withSeat((x) => ({ ...x, registryNotes: 5 })), "seats"],
     ["seat differsFrom not a list", withSeat((x) => ({ ...x, observed: { ...(x["observed"] as Body), differsFrom: "dev-b@r" } })), "seats"],
+    ["seat assignment state", withSeat((x) => ({ ...x, assignment: { provider: "codex", state: TRAP, intended: null, applied: null } })), "seats"],
   ];
   const REASON = { rows: "this host served usage rows in a shape this daemon doesn't recognize", seats: "this host served seat accounts in a shape this daemon doesn't recognize" };
+
+  it("#3625: a host's seats carry its assignment verbatim; a host from before assignments still reads", async () => {
+    const assignment = { provider: "codex", state: "follows", intended: { label: "team", reference: "the login team saved in /h", requestedBy: "lead@r", at: "t" },
+      applied: { kind: "switched", label: "team", detail: "restarted in place", at: "t" } };
+    const newer = await host("newer", { rewrite: withSeat((x) => ({ ...x, assignment })) });
+    const older = await host("older-seats", { rewrite: withSeat((x) => x) });
+    const hub = await host("hub", { registry: [newer.entry(), older.entry()] });
+    const { body } = await view(hub);
+    expect(body.hosts.filter((h) => h.hostId !== "local").map((h) => [h.hostId, h.usage])).toEqual([["newer", "served"], ["older-seats", "served"]]);
+    const seatsOf = (id: string) => body.seatAccounts.find((s) => s.hostId === id)!.seats;
+    expect(seatsOf("newer")[0]!.assignment).toEqual(assignment);
+    expect(seatsOf("older-seats")[0]!.assignment).toBeUndefined();
+  });
 
   it("each rendered field class: a malformed host is unavailable with the reason; this host and a healthy one are served", async () => {
     const good = await host("good");

@@ -1,3 +1,5 @@
+import { rosterReadyNoticeId } from "../src/domain/roster-ready-notice.js";
+import { OPENRIG_SENDER } from "../src/lib/pane-envelope.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 // #3636 — hoisted importOriginal passthrough: every export stays the real
@@ -279,6 +281,23 @@ describe("PsProjectionService", () => {
 
   // L2 rig-level lifecycleState
   describe("lifecycleState (L2)", () => {
+    it.each([true, false])("does not fold a retained standby pane as degraded (running peer: %s)", livePeer => {
+      const rigId = seedRig("standby");
+      const nodeId = seedNode(rigId, "qa");
+      const sessionId = seedSession(nodeId, "running");
+      const sessionName = `tmux-${nodeId}`;
+      const registry = new SessionRegistry(db);
+      registry.updateBinding(nodeId, { attachmentType: "tmux", tmuxSession: sessionName, tmuxPane: "%1" });
+      registry.markIntentionallyStopped(sessionId);
+      new EventBus(db).emit({ type: "session.stopped", rigId, nodeId, sessionId, sessionName,
+        operator: "daemon:seat-reaper", reason: "idle_reap", standbyPane: "$1|42|100|%1" });
+      if (livePeer) seedSession(seedNode(rigId, "dev"), "running");
+
+      expect(getNodeInventory(db, rigId).find(entry => entry.nodeId === nodeId)).toMatchObject({ standbyStopped: true });
+      expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: livePeer ? "running" : "stopped",
+        status: livePeer ? "partial" : "stopped", runningCount: Number(livePeer) });
+    });
+
     function seedSnapshotForRig(rigId: string, sessions: Array<{ nodeId: string; resumeToken: string | null }>): void {
       const data = {
         rig: { id: rigId, name: "rig-name", createdAt: "2026-04-28T00:00:00Z", updatedAt: "2026-04-28T00:00:00Z" },
@@ -497,6 +516,19 @@ describe("PsProjectionService", () => {
       expect(entries[0]!.hasWorkCount).toBe(0);
       // process-alive count unchanged
       expect(entries[0]!.runningCount).toBe(1);
+    });
+
+    it.each(["pending", "in-progress", "blocked"])("keeps roster-ready %s information out of rig ps work totals", state => {
+      const rigId = seedRig("information-only");
+      const nodeId = seedNode(rigId, "dev");
+      seedSession(nodeId, "running");
+      const destination = `tmux-${nodeId}`;
+      db.prepare(`INSERT INTO queue_items (qitem_id, source_session, destination_session, body, state, ts_created, ts_updated)
+        VALUES (?, ?, ?, 'Information only', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
+        .run(rosterReadyNoticeId(rigId, destination), OPENRIG_SENDER, destination, state);
+      expect(ps.getEntries()[0]).toMatchObject({ hasWorkCount: 0, runningCount: 1 });
+      seedPendingQitem(destination);
+      expect(ps.getEntries()[0]).toMatchObject({ hasWorkCount: 1, runningCount: 1 });
     });
 
     it("HG-3 direction B — seat SILENT with queued work: terminalActive=false, hasAssignedWork=true ⇒ activeCount=0, hasWorkCount=1", () => {

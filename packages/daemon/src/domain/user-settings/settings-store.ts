@@ -128,8 +128,7 @@ export const SETTINGS_VALID_KEYS = [
   "ui.preview.max_pins",
   "ui.preview.default_lines",
   "ui.timezone",
-  // The web UI and its terminal WebSocket are off unless this is true (read at daemon start).
-  // The web UI and its terminal WebSocket are off unless this is true (read at daemon start).
+  // The web UI pages and assets are off unless this is true (read at daemon start).
   "ui.enabled",
   // TUI topology: whether a remote rig's seats may be read through this daemon (off by default).
   "ui.topology_remote_seats",
@@ -191,6 +190,12 @@ export const SETTINGS_VALID_KEYS = [
   // and keep being maintained regardless of either key.
   "policies.idle_gate_qitem.auto_register",
   "policies.idle_gate_qitem.opt_in_sessions",
+  "policies.seat_scale.enabled",
+  "policies.seat_scale.observe",
+  "policies.seat_scale.idle_threshold_minutes",
+  "policies.seat_scale.max_reaps_per_24h",
+  "policies.seat_scale.protected_rigs",
+  "policies.seat_scale.opt_in_rigs",
   "snapshots.periodic.enabled",
   "snapshots.periodic.interval_seconds",
   "snapshots.periodic.retention_keep",
@@ -348,6 +353,12 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "policies.idle_gate_qitem.active_wake_interval_seconds": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_ACTIVE_WAKE_INTERVAL_SECONDS" },
   "policies.idle_gate_qitem.auto_register": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_AUTO_REGISTER" },
   "policies.idle_gate_qitem.opt_in_sessions": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_OPT_IN_SESSIONS" },
+  "policies.seat_scale.enabled": { primary: "OPENRIG_POLICIES_SEAT_SCALE_ENABLED" },
+  "policies.seat_scale.observe": { primary: "OPENRIG_POLICIES_SEAT_SCALE_OBSERVE" },
+  "policies.seat_scale.idle_threshold_minutes": { primary: "OPENRIG_POLICIES_SEAT_SCALE_IDLE_THRESHOLD_MINUTES" },
+  "policies.seat_scale.max_reaps_per_24h": { primary: "OPENRIG_POLICIES_SEAT_SCALE_MAX_REAPS_PER_24H" },
+  "policies.seat_scale.protected_rigs": { primary: "OPENRIG_POLICIES_SEAT_SCALE_PROTECTED_RIGS" },
+  "policies.seat_scale.opt_in_rigs": { primary: "OPENRIG_POLICIES_SEAT_SCALE_OPT_IN_RIGS" },
   "snapshots.periodic.enabled": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_ENABLED" },
   "snapshots.periodic.interval_seconds": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_INTERVAL_SECONDS" },
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
@@ -462,6 +473,12 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "policies.idle_gate_qitem.active_wake_interval_seconds": ["policies", "idleGateQitem", "activeWakeIntervalSeconds"],
   "policies.idle_gate_qitem.auto_register": ["policies", "idleGateQitem", "autoRegister"],
   "policies.idle_gate_qitem.opt_in_sessions": ["policies", "idleGateQitem", "optInSessions"],
+  "policies.seat_scale.enabled": ["policies", "seatScale", "enabled"],
+  "policies.seat_scale.observe": ["policies", "seatScale", "observe"],
+  "policies.seat_scale.idle_threshold_minutes": ["policies", "seatScale", "idleThresholdMinutes"],
+  "policies.seat_scale.max_reaps_per_24h": ["policies", "seatScale", "maxReapsPer24h"],
+  "policies.seat_scale.protected_rigs": ["policies", "seatScale", "protectedRigs"],
+  "policies.seat_scale.opt_in_rigs": ["policies", "seatScale", "optInRigs"],
   "snapshots.periodic.enabled": ["snapshots", "periodic", "enabled"],
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
@@ -798,6 +815,12 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // B6 — NOT default-on by founder ruling; "all" is the explicit fleet opt-in.
     case "policies.idle_gate_qitem.auto_register": return "off";
     case "policies.idle_gate_qitem.opt_in_sessions": return "";
+    case "policies.seat_scale.enabled": return false;
+    case "policies.seat_scale.observe": return true;
+    case "policies.seat_scale.idle_threshold_minutes": return 240;
+    case "policies.seat_scale.max_reaps_per_24h": return 12;
+    case "policies.seat_scale.protected_rigs": return '["coordination"]';
+    case "policies.seat_scale.opt_in_rigs": return "[]";
     case "snapshots.periodic.enabled": return true;
     case "snapshots.periodic.interval_seconds": return 300;
     case "snapshots.periodic.retention_keep": return 10;
@@ -909,7 +932,26 @@ function percentageConstraint(key: string) {
   };
 }
 
+function seatScaleRigListConstraint(raw: string): void {
+  const value: unknown = JSON.parse(raw);
+  if (!Array.isArray(value) || !value.every((item: unknown) => typeof item === "string" && item.trim().length > 0)) {
+    throw new TypeError("Expected a JSON array of nonempty rig names");
+  }
+}
+
 const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, KeyConstraint>> = {
+  "policies.seat_scale.idle_threshold_minutes": (raw, value) => {
+    positiveIntegerConstraint("policies.seat_scale.idle_threshold_minutes")(raw, value);
+    if (typeof value !== "number" || value < 60 || value > 525600) throw new RangeError("Seat idle threshold must be 60..525600 whole minutes");
+  },
+  "policies.seat_scale.max_reaps_per_24h": (raw, value) => {
+    // #3836 review: both writers must reject what the zod reader rejects (>10000), else a
+    // bad write turns every read into a failed pass and the reaper terminates itself.
+    positiveIntegerConstraint("policies.seat_scale.max_reaps_per_24h")(raw, value);
+    if (typeof value !== "number" || value > 10000) throw new RangeError("Seat reap cap must be 1..10000 reaps per 24h");
+  },
+  "policies.seat_scale.protected_rigs": seatScaleRigListConstraint,
+  "policies.seat_scale.opt_in_rigs": seatScaleRigListConstraint,
   "terminal.tmux_server": choiceConstraint(["inherit", "isolated"],
     (raw) => `Invalid value for terminal.tmux_server: must be "inherit" or "isolated", got "${raw}"`),
   "daemon.db_conflict": choiceConstraint(["warn", "stop"], () => "daemon.db_conflict must be warn or stop"),

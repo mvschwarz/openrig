@@ -2,7 +2,7 @@
   "version": 1,
   "edges": {
     "bundle": {
-      "working-with-an-openrig-team/SKILL.md": "c9a42fdd9632d10de4d8e38abdb6e2b9b049d06b628b96907cf3447f77a4dd63"
+      "working-with-an-openrig-team/SKILL.md": "aae71c16ce039cb22db24429cf1bd869f8dc39e103765253658eeb6c5c853039"
     },
     "canonical": {
       "core/agent-starters/SKILL.md": "8e8961f44fccb812f39e01174a331dab24f153ceaba91925f1e42371836cdec0",
@@ -27,7 +27,7 @@
       "core/specification-system/SKILL.md": "5226d6e8b1362df89ba3d5afd82e4b4add355870132ca4b140d7f9f4324ffdc1",
       "core/topology-mutation-and-seat-management/SKILL.md": "527ca074432ce6513fb25cd27e8c709dabe0c91361b8999e09b272f3813abe62",
       "core/watchdog/SKILL.md": "88e097e7fe7321e166541b9eac42016fa7a3d362a86fde8946e666f22409f145",
-      "core/working-with-an-openrig-team/SKILL.md": "c9a42fdd9632d10de4d8e38abdb6e2b9b049d06b628b96907cf3447f77a4dd63",
+      "core/working-with-an-openrig-team/SKILL.md": "aae71c16ce039cb22db24429cf1bd869f8dc39e103765253658eeb6c5c853039",
       "pm/backlog-capture/SKILL.md": "345c2b47fc85e48c15c0d42bbb48fb27dd3b0ceec36bf59dc6ed20daaea47a84",
       "pm/context-builder/SKILL.md": "0134c9b0a9f196565109f7f51b6ec78d5c3e4b5982a0d7105a93b29952625b3c",
       "pm/exec-summary/SKILL.md": "ada0f42337920e7acdd94e24cad4f5c269b057e750f4a7fc627ea9efbc02fcb6",
@@ -93,7 +93,7 @@
       "openrig-operating-model/templates/SOP.md": "1eaf0daf4f9bbf0715e6a5aaf0f29f030af5fe8b8a10232488ee97c507afa6dc",
       "openrig-operating-model/templates/SPEC.md": "f126536daa59cea3f1cfb0898d83c7cdf99f6392f6f155ea64fe55187dd0f5f1",
       "openrig-skills/SKILL.md": "6d7bf933ac40531f11757a31a93d26dcbda617f1b85f48a21865b3a5c5e2ddaa",
-      "openrig-user/SKILL.md": "9576ac21a0a55fc0511388874a117b3b87c8f1714a123ab6d67c1d56e75ac90c",
+      "openrig-user/SKILL.md": "16a8c1bc2bef823adebdf4d89519f73c441c1bb3436dec00fa2d363e5dff677c",
       "orienting-to-an-inherited-seat/CHANGELOG.md": "a91f117e88034d8bae9b723916235e858fbc151983cc7c32784f5d4ba186274a",
       "orienting-to-an-inherited-seat/SKILL.md": "278c554b3bb4c481f2928499f02442d947ffd4751d60f830610b652e24cb0468",
       "queue-handoff/SKILL.md": "ca16094ab4d7cc267a8005435b21b1bd8f50f35d097d6856f938e32594488e6b",
@@ -132,7 +132,7 @@
       "core/specification-system/SKILL.md": "5226d6e8b1362df89ba3d5afd82e4b4add355870132ca4b140d7f9f4324ffdc1",
       "core/topology-mutation-and-seat-management/SKILL.md": "527ca074432ce6513fb25cd27e8c709dabe0c91361b8999e09b272f3813abe62",
       "core/watchdog/SKILL.md": "88e097e7fe7321e166541b9eac42016fa7a3d362a86fde8946e666f22409f145",
-      "core/working-with-an-openrig-team/SKILL.md": "c9a42fdd9632d10de4d8e38abdb6e2b9b049d06b628b96907cf3447f77a4dd63",
+      "core/working-with-an-openrig-team/SKILL.md": "aae71c16ce039cb22db24429cf1bd869f8dc39e103765253658eeb6c5c853039",
       "pm/backlog-capture/SKILL.md": "345c2b47fc85e48c15c0d42bbb48fb27dd3b0ceec36bf59dc6ed20daaea47a84",
       "pm/context-builder/SKILL.md": "0134c9b0a9f196565109f7f51b6ec78d5c3e4b5982a0d7105a93b29952625b3c",
       "pm/exec-summary/SKILL.md": "ada0f42337920e7acdd94e24cad4f5c269b057e750f4a7fc627ea9efbc02fcb6",

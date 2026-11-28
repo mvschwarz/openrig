@@ -107,12 +107,16 @@ export type ReconcileNodeResult =
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 /** A subset launch's refusal (selection_changed) for a saved seat no current seat matches by both id and logical id. */
 const SNAPSHOT_SEAT_CHANGED = "A snapshot seat was removed or recreated. Select history for the current seat.";
+/** A Claude resume that failed with its conversation saved: a newer Claude Code can resume some conversations an older one
+ *  reports as not found, so updating comes before a fresh start, which leaves the saved conversation unused. */
+const CLAUDE_UPDATE_AND_RETRY = "If this Claude Code may be older than the one that saved the conversation, update it and retry the restore.";
 
 // OPR.0.5.7.1 consumer alignment: the four-way active-occupant ladder lives
 // in the pure leaf module active-occupant.ts, shared with preview, snapshot
 // usability, and lifecycle projection. Imported and re-exported here so the
 // existing export surface and the execution call sites below are unchanged.
 import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError, freshSeatLaunchCommand, seatStopCommand } from "./active-occupant.js";
+import { readStandbyStop, type StandbyStop } from "./seat-standby.js";
 import { shellWord } from "../adapters/shell-quote.js";
 import { resumeTypeForRuntime } from "./resume-token-validation.js";
 import { effectiveRestorePolicy, isOrdinaryTerminalSeat, type RestoreSeatFacts, communityLaunchOnlyRestoreReason } from "./restore-policy.js";
@@ -841,9 +845,37 @@ export class RestoreOrchestrator {
     selectedHistory?: SelectedRestoreHistory;
     /** Cold start only: park if the snapshot occupant is not the seat's current session (R2). */
     requireCurrentOccupant?: boolean;
+    standby?: StandbyStop;
     keepAlive?: boolean | { shouldContinue?: () => boolean };
   }): Promise<NarrowLaunchResult> {
+    if (opts?.standby) return this.resumeStandby(rigId, logicalId, opts.standby, opts);
     return this.launchNodeTargets(rigId, [logicalId], { ...opts, namedAgent: true, nonTargetMode: "unchanged" });
+  }
+
+  private async resumeStandby(rigId: string, logicalId: string, standby: StandbyStop,
+    opts: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean } }): Promise<NarrowLaunchResult> {
+    const guard = this.tmuxAdapter.deliveryGuard;
+    const refused = { ok: false, code: "standby_changed", message: "The recorded standby seat or its preserved pane is no longer available." };
+    if (!guard?.ownsLifecycle(standby.nodeId)) return refused;
+    const data = this.snapshotCapture.readSnapshotData(rigId, "standby", { intendedNodeIds: [standby.nodeId] });
+    const node = data.nodes.find(node => node.id === standby.nodeId && node.logicalId === logicalId);
+    const current = readStandbyStop(this.db, standby.nodeId);
+    const source = data.sessions.find(row => row.id === standby.sessionId && row.nodeId === node?.id);
+    if (!node || current?.stopSeq !== standby.stopSeq || current.sessionId !== standby.sessionId || current.identity !== standby.identity
+      || !source?.resumeToken?.trim() || !source.resumeType || source.resumeType === "none" || source.restorePolicy !== "resume_if_possible") return refused;
+    data.activeOccupantsByNode = { [node.id]: { kind: "resolved", sessionId: source.id } };
+    const snapshotId = `standby:${source.id}`;
+    const subsetWarnings: string[] = [];
+    const launched = [await this.restoreNodeWithCompensation({ node }, rigId, snapshotId, data,
+      { ...opts, keepPane: true, standby, requireCurrentOccupant: true }, subsetWarnings)];
+    // A standby resume answers through the same attempt record as any launch. Without it, an attention_required
+    // standing pane leaves no restore.subset_completed, so reconcileNodeRuntimeTruth reads no attempt (or an older one).
+    const harnessNotStarted = await this.completeSubset(rigId, {
+      snapshotId, preRestoreSnapshotId: null, rigResult: rollupRestoreRigResult(launched), nodes: launched, warnings: subsetWarnings,
+    }, "standby attempt");
+    return { ok: true, launched, alreadyRunning: [], failedTargets: [], unmatchedIds: [],
+      ...(subsetWarnings.length > 0 ? { warnings: subsetWarnings } : {}), ...(harnessNotStarted ? { harnessNotStarted } : {}),
+      nonTargetEffects: { mode: "unchanged", reason: null, affected: [] } };
   }
 
   private async launchNodeTargets(rigId: string, logicalIds: string[], opts: {
@@ -1050,17 +1082,10 @@ export class RestoreOrchestrator {
     // Emit restore.subset_completed for launched targets only
     let harnessNotStarted: HarnessNotStartedReport | undefined;
     if (launched.length > 0) {
-      const subsetResult: RestoreResult = {
-        snapshotId: snapshot.id,
-        preRestoreSnapshotId: null as unknown as string,
-        rigResult: rollupRestoreRigResult(launched),
-        nodes: launched,
-        // A copy: the notice below adds its warnings to the launch's result, not to the event already emitted.
-        warnings: [...subsetWarnings],
-        snapshotSelection,
-      };
-      const completed = this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: snapshot.id, result: subsetResult });
-      harnessNotStarted = await this.noticeBareShells(rigId, `launch attempt ${completed.seq}`, launched, subsetWarnings);
+      harnessNotStarted = await this.completeSubset(rigId, {
+        snapshotId: snapshot.id, preRestoreSnapshotId: null, rigResult: rollupRestoreRigResult(launched),
+        nodes: launched, warnings: subsetWarnings, snapshotSelection,
+      }, "launch attempt");
     }
 
     // Emit node.held for non-running held non-targets (tri-state: running/unknown/held)
@@ -1116,6 +1141,15 @@ export class RestoreOrchestrator {
         affected: held,
       },
     };
+  }
+
+  /** Emit a subset's completion and run the bare-shell notice: the one attempt record every launch path leaves, since
+   *  reconcileNodeRuntimeTruth finds an attempt only through restore.started or restore.subset_completed. */
+  private async completeSubset(rigId: string, result: RestoreResult, label: string): Promise<HarnessNotStartedReport | undefined> {
+    const completed = this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: result.snapshotId,
+      // A copy: the notice adds its warnings to the launch's result, not to the event already emitted.
+      result: { ...result, warnings: [...result.warnings] } });
+    return this.noticeBareShells(rigId, `${label} ${completed.seq}`, result.nodes, result.warnings);
   }
 
   /** Why a keep_alive relaunch of this seat must not happen now (#2940), read under its lifecycle lease: the latest session
@@ -1438,7 +1472,7 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean; requireCurrentOccupant?: boolean; beforeDispatch?: () => boolean },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean; requireCurrentOccupant?: boolean; standby?: StandbyStop; beforeDispatch?: () => boolean },
     warnings?: string[],
     preserveStoppedCurrent = false,
   ): Promise<RestoreNodeResult> {
@@ -1848,6 +1882,7 @@ export class RestoreOrchestrator {
     warnings?.push(...storedPoolAdvisories(node.logicalId, this.rigRepo.getNodePool(liveNode?.id ?? nodeId)));
     const launchResult = await this.nodeLauncher.launchNode(rigId, node.logicalId, {
       ...launchOpts,
+      ...(opts?.standby ? { standby: opts.standby } : {}),
       // #3253: a restore or resume is a recovery: nothing of the seat runs, so a limit that can't be applied doesn't stop
       // it. It goes ahead with a structured warning, and the request stays stored for a fresh launch to apply.
       processLimitsMode: "recovery",
@@ -2590,7 +2625,8 @@ export class RestoreOrchestrator {
           // a confirmed blank agent (precision guard trigger (i)). Roll back to
           // zero sessions; the stop-and-ask is realized as awaiting-decision.
           { const kept = await rollbackOwnBlank(); if (kept) return kept; }
-          return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", stage: "resume_rolled_back", error: `Original session unresumable: resume attempted but failed. The blank session was rolled back; no session is running. Check the harness state manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.` };
+          const check = node.runtime === "claude-code" ? `${CLAUDE_UPDATE_AND_RETRY} Otherwise check` : "Check";
+          return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", stage: "resume_rolled_back", error: `Original session unresumable: resume attempted but failed. The blank session was rolled back; no session is running. ${check} the harness state manually, or deliberately start only this seat fresh, which starts a new conversation and leaves the saved one unused: ${this.freshSeatCommand(rigId, data, node.logicalId)}.` };
         }
       }
     } else if (resumeRequested && isPodAware) {
@@ -2994,14 +3030,16 @@ export class RestoreOrchestrator {
                 // pane leaves the seat's own tmux session at a shell, which the fresh launch won't replace until it's stopped.
                 const fresh = this.freshSeatCommand(rigId, data, node.logicalId);
                 const steps = opts?.keepPane ? `in two steps: ${this.stopSeatCommand(rigId, data, node.logicalId)}, then ${fresh}` : `in one step: ${fresh}`;
+                // Claude's own "No conversation found" can come from an older Claude Code than the one that saved it.
+                const update = node.runtime === "claude-code" ? ` ${CLAUDE_UPDATE_AND_RETRY}` : "";
                 return {
                   nodeId: node.id,
                   logicalId: node.logicalId,
                   status: "awaiting-decision",
                   stage: "resume_rolled_back",
                   error: resumeWithoutContext
-                    ? `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. ${noContextFresh} Restore the original session manually.`
-                    : `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. OpenRig's records can't tell whether this conversation was ever used. If you know this seat was never used, nothing is lost by starting only this seat fresh, ${steps}. Otherwise restore the original session manually.`,
+                    ? `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running.${update} ${noContextFresh} Restore the original session manually.`
+                    : `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running.${update} OpenRig's records can't tell whether this conversation was ever used. If you know this seat was never used, nothing is lost by starting only this seat fresh, ${steps}. Otherwise restore the original session manually.`,
                 };
               }
               return {

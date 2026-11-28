@@ -27,7 +27,7 @@ export function unclaimedReminderRecipient(db: Database.Database, queue: QueueRe
 /** One informational row per recipient for a delivered reminder whose rows stayed unclaimed. Its id comes from the
  *  episode and the recipient, so a retry finds the same row. It holds and refuses nothing. */
 export async function escalateUnclaimedReminder(db: Database.Database, queue: QueueRepository,
-  input: { seat: string; qitemIds: string[]; deliveredAt: string; episodeKey: string }): Promise<string[]> {
+  input: { seat: string; qitemIds: string[]; deliveredAt: string; episodeKey: string; nextReminderAt?: string }): Promise<string[]> {
   const byRecipient = new Map<string, string[]>();
   for (const qitemId of input.qitemIds) {
     const row = queue.getById(qitemId);
@@ -46,7 +46,9 @@ export async function escalateUnclaimedReminder(db: Database.Database, queue: Qu
       qitemId, sourceSession: input.seat, destinationSession: recipient, wakeTrigger: "openrig",
       tags: [PARKED_UNCLAIMED_TAG],
       summary: `${input.seat} was reminded of ${rows} at ${input.deliveredAt}; ${one ? "it is" : "they are"} still unclaimed`,
-      body: `${rows} ${one ? "was" : "were"} named in a parked-owner reminder delivered to ${input.seat} at ${input.deliveredAt}, and ${one ? "is" : "are"} still pending and unclaimed. The seat reads idle with nothing changed since, so the reminder won't repeat. Check the seat (rig capture ${seat}) and the ${one ? "row" : "rows"} (rig queue show <id>), then pick the work up, reassign it, or close it. This notice holds and refuses nothing, and it isn't sent again for this reminder.`,
+      body: `${rows} ${one ? "was" : "were"} named in a parked-owner reminder delivered to ${input.seat} at ${input.deliveredAt}, and ${one ? "is" : "are"} still pending and unclaimed. ${input.nextReminderAt
+        ? `The seat reads idle, and its minimum reminder interval holds its next reminder until ${input.nextReminderAt}.`
+        : "The seat reads idle with nothing changed since, so the reminder won't repeat."} Check the seat (rig capture ${seat}) and the ${one ? "row" : "rows"} (rig queue show <id>), then pick the work up, reassign it, or close it. This notice holds and refuses nothing, and it isn't sent again for this reminder.`,
     });
   }
   return [...byRecipient.keys()];

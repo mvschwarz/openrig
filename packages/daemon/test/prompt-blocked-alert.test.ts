@@ -555,6 +555,8 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   function alerts() { return repo.list({ state: ["pending", "in-progress", "blocked"], limit: 1000 }).filter(r => r.tags?.includes("wake-prompt-refusal")); }
   function tick(port: ReturnType<typeof engine>, opts: Partial<Parameters<typeof runWakeLadderTick>[0]> = {}) {
     return runWakeLadderTick({ db, queueRepo: repo, resolveOrchestrator: () => null, readPromptState: () => state,
+      readHookReviewCandidates: () => db.prepare("SELECT tmux_session FROM bindings WHERE tmux_session IS NOT NULL")
+        .all().map(row => (row as { tmux_session: string }).tmux_session),
       retryIntervalSeconds: 60, now: new Date(Date.now() + 120_000), deliveryEngine: port,
       attemptWake: async () => { throw new Error("unexpected seat input"); }, log: () => {}, ...opts });
   }
@@ -566,7 +568,8 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     beforeEach(() => { hookState = "blocked"; sampledAt = observedAt.toISOString(); });
     function hookTick(port: ReturnType<typeof engine>, opts: Partial<Parameters<typeof runWakeLadderTick>[0]> = {}) {
       const observation = { destination: seat, episode: "session-1:%1:123", state: hookState, observedAt: sampledAt };
-      return tick(port, { now: observedAt, ...{ readHookReviews: async () => [observation] }, ...opts });
+      return tick(port, { now: observedAt, readHookReviewCandidates: () => [seat],
+        ...{ readHookReviews: async () => [observation] }, ...opts });
     }
 
     it("posts one named hook-review alert with no row or send and retires on a fresh clear", async () => {
@@ -709,10 +712,10 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(posts).toHaveLength(1);
   });
 
-  function shellHookReaderFixture() {
+  function shellHookReaderFixture(rigName = "kernel") {
     const rigs = new RigRepository(db); const sessions = new SessionRegistry(db);
-    const rig = rigs.createRig("kernel"); const node = rigs.addNode(rig.id, "operator", { runtime: "codex" });
-    const destination = "operator@kernel";
+    const rig = rigs.createRig(rigName); const node = rigs.addNode(rig.id, "operator", { runtime: "codex" });
+    const destination = `operator@${rigName}`;
     const session = sessions.registerSession(node.id, destination); sessions.updateStatus(session.id, "running");
     sessions.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: destination, tmuxPane: "%17" });
     const hookScreen = "OpenAI Codex (v0.164.0)\nHooks need review\nTrust all and continue";
@@ -737,6 +740,48 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       screen: (value: string) => { screen = value; }, changeNative: () => { nativePid++; },
       changePanePid: () => { panePid += 1000; }, changeBinding: () => sessions.updateBinding(node.id, { tmuxPane: "%18" }) };
   }
+
+  it("escalates a verified non-kernel Codex hook review with the attach route and no menu input", async () => {
+    const f = shellHookReaderFixture("product-team");
+    expect((await f.read())[0]?.state).toBe("blocked");
+    const posts: unknown[] = [];
+    await tick(engine(posts), { now: f.now, readHookReviews: f.read });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(alerts()[0]!.body).toContain("hook_trust_gate");
+    expect(alerts()[0]!.body).toContain(tmuxAttachCommand(f.destination));
+    expect(alerts()[0]!.body).toContain("No input was sent");
+  });
+
+  it("does not live-read an ordinary Codex seat on a tick", async () => {
+    const f = shellHookReaderFixture("ordinary-team");
+    const read = vi.fn(f.read);
+    await tick(engine([]), { now: f.now, readHookReviewCandidates: () => [], readHookReviews: read });
+    expect(read).not.toHaveBeenCalled();
+    expect(f.tmux.listPanes).not.toHaveBeenCalled();
+    expect(f.tmux.readAllPaneProcesses).not.toHaveBeenCalled();
+    expect(f.tmux.capturePaneScreen).not.toHaveBeenCalled();
+  });
+
+  it("filters an explicit live read before any tmux or lineage work", async () => {
+    const f = shellHookReaderFixture("ordinary-team");
+    expect(await f.read(["other@team"])).toEqual([]);
+    expect(f.tmux.listPanes).not.toHaveBeenCalled();
+    expect(f.tmux.readAllPaneProcesses).not.toHaveBeenCalled();
+    expect(f.listProcesses).not.toHaveBeenCalled();
+  });
+
+  it("confirms only its hook-review destination and retains it to clear after the cached candidate disappears", async () => {
+    const f = shellHookReaderFixture("product-team");
+    const read = vi.fn(f.read); const port = engine([]);
+    await tick(port, { now: f.now, readHookReviewCandidates: () => [f.destination], readHookReviews: read });
+    expect(read.mock.calls).toEqual([[[f.destination]], [[f.destination]]]);
+    expect(alerts()).toHaveLength(1);
+    read.mockClear();
+    f.screen("OpenAI Codex (v0.164.0)\nmodel: gpt-5\n› ");
+    await tick(port, { now: f.now, readHookReviewCandidates: () => [], readHookReviews: read });
+    expect(read.mock.calls).toEqual([[[f.destination]]]);
+    expect(alerts()).toHaveLength(0);
+  });
 
   it("escalates a verified shell-backed kernel Codex and leaves its alert unresolved while lineage is unknown", async () => {
     const f = shellHookReaderFixture();

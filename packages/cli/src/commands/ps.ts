@@ -1,5 +1,6 @@
 import { modelObservation, formatModelObservation, type ModelObservation } from "../lib/model-observation.js";
 import { formatCheckIn } from "../lib/check-in.js";
+import { fitCell } from "../lib/terminal-cell.js";
 import { Command } from "commander";
 import stringWidth from "string-width";
 import { resolveEffectiveHost } from "../host-selection.js";
@@ -70,6 +71,7 @@ export interface NodeEntry {
   remoteControl?: { sessionId: string | null; observedAt: string } | null;
   sessionStatus: string | null;
   intentionallyStopped?: boolean;
+  standbyStopped?: true;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: string;
   /** The conversation outcome restore or handover recorded for the current occupant: `resumed` when a restore's resume
@@ -79,7 +81,7 @@ export interface NodeEntry {
   latestErrorStage?: string | null;
   // OPR.0.4.3.06 — challenge-verified orientation, distinct from startupStatus.
   oriented?: string;
-  lifecycleState?: "running" | "detached" | "recoverable" | "attention_required";
+  lifecycleState?: "running" | "detached" | "recoverable" | "attention_required" | "unknown";
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
   resumeCommandLabel?: string | null;
@@ -96,10 +98,14 @@ export interface NodeEntry {
     decidedBy: string | null;
   } | null;
   identityVerdict?: { verdict?: string; reason?: string | null; observedAt?: string | null; evidence?: { observedCommand?: string | null } | null } | null;
+  /** The daemon's reading beside the lifecycle: the current identity check saw a shell in the foreground and didn't verify
+   *  the seat's agent. Absent otherwise. */
+  agentLiveness?: { state: "not_verified"; reason: "shell_foreground"; command: string; observedAt: string };
   /** The registry's recorded session status, kept when the served sessionStatus is corrected. */
   storedSessionStatus?: string | null;
   /** A community harness's seat: its label, maintainer and declared limits. */
-  communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
+  communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string;
+    activityHooks?: string[] };
   /** Configured literal argv prefix wrapping local built-in Pi/Codex launches; omitted when absent. */
   launchWrapper?: string[];
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
@@ -133,6 +139,7 @@ export interface NodeEntry {
     source?: string | null;
     availability: "known" | "unknown";
     usedPercentage: number | null;
+    configuredBudget?: { tokens: number; usedPercentage: number | null; source: string } | null;
     fresh: boolean;
     state?: "critical" | "warning" | "low" | "unknown";
     sampledAt: string | null;
@@ -240,6 +247,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "remoteControl",
   "sessionStatus",
   "intentionallyStopped",
+  "standbyStopped",
   "startupStatus",
   "restoreOutcome",
   "oriented",
@@ -676,6 +684,20 @@ function livenessLine(seat: string, node: NodeEntry): string {
   return `Liveness (${seat}): recorded running, not confirmed: tmux was unavailable at the last observation (${node.identityVerdict?.observedAt ?? "time unknown"}).`;
 }
 
+/** A recorded-running seat whose current identity check saw a shell in the pane's foreground and didn't verify its agent
+ *  (the daemon's agentLiveness), a stored shell observation; delivery checks the target again and applies its runtime's own
+ *  policy. Not known stopped: the agent can run behind a wrapper. */
+function agentNotVerified(node: NodeEntry): boolean {
+  return node.agentLiveness?.state === "not_verified";
+}
+
+function agentLivenessLine(seat: string, node: NodeEntry): string {
+  const { command, observedAt } = node.agentLiveness!;
+  return `Liveness (${seat}): recorded running, agent not verified: the pane's foreground is ${command}, not a verified `
+    + `${node.runtime ?? "agent"} agent (identity check at ${observedAt}). It may have exited to its shell, or run behind a `
+    + `wrapper; rig capture ${seat} shows the pane.`;
+}
+
 // OPR.0.4.0.34 — the compact orch field set (PRD FR-4). Carries the
 // source-available identity + state + resume-summary fields an orchestrator
 // needs at a glance, WITHOUT leaking the resume token value or resumeCommand
@@ -801,6 +823,9 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       oriented: n.oriented ?? "n-a",
       lifecycleState: n.lifecycleState,
       // Keep the current usage limit visible without classifying it as human attention.
+      // The decided activity word, as the table shows it (the oracle's, with the screen fallback where it applies);
+      // agentActivity below is the older hook-and-screen reading.
+      activity: formatActivity(n),
       agentActivity: keepDiagnostics || hasCurrentUsageLimit(n)
         ? { state: n.agentActivity?.state ?? "unknown", reason: n.agentActivity?.reason }
         : { state: n.agentActivity?.state ?? "unknown" },
@@ -819,6 +844,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       lastActivity: n.agentActivity?.sampledAt ?? n.startupCompletedAt ?? null,
     };
     if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
+    if (n.standbyStopped) compact.standbyStopped = true;
     // #3513: only a served observation; its time says when it was last seen.
     if (n.remoteControl) compact.remoteControl = { sessionId: n.remoteControl.sessionId, observedAt: n.remoteControl.observedAt };
     // The served identity evidence (verdict, reason, observation time) and the registry's recorded
@@ -829,6 +855,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // Only what was served: an absent time stays absent, never filled in.
       compact.identityVerdict = { ...(verdict ? { verdict } : {}), ...(reason ? { reason } : {}), ...(observedAt ? { observedAt } : {}) };
     }
+    if (n.agentLiveness) compact.agentLiveness = n.agentLiveness;
     // held/attention reason (short) when present.
     if (n.heldReason) compact.heldReason = n.heldReason;
     if (n.startedWithoutRequired?.length) compact.startedWithoutRequired = n.startedWithoutRequired;
@@ -953,6 +980,8 @@ function abbrevNodeLifecycle(state: NodeEntry["lifecycleState"] | undefined): st
   if (state === "recoverable") return "rec";
   if (state === "detached") return "det";
   if (state === "attention_required") return "att";
+  // A seat attached from an outside program (rig attach): OpenRig can't see whether it runs.
+  if (state === "unknown") return "unk";
   return "—";
 }
 
@@ -1048,7 +1077,7 @@ activeCount, hasWorkCount, attentionCount, status, lifecycleState, uptime,
 latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
 podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, configuredAccount, communityHarness, launchWrapper, model, sessionStatus,
-intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
+intentionallyStopped, standbyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, resumeCommandLabel, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
 agentActivity, activityState, needsAttention, arbitratedNeedsInput, needsInputEvidence,
@@ -1567,7 +1596,7 @@ async function handleNodes(
         ? (n.needsAttention === true && servesQuestion(n) ? questionReason(n) ?? "reason unavailable"
           : n.latestError ? truncate(n.latestError, 40) : n.startedWithoutRequired?.length ? truncate(startedWithoutLine(n.startedWithoutRequired), 40)
           : n.agentActivity?.reason ?? "—")
-        : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—");
+        : livenessUnconfirmed(n) ? "liveness unconfirmed" : agentNotVerified(n) ? "agent not verified" : "—");
       console.log(padCompactNodeRow(
         n.rigName,
         n.canonicalSessionName ?? "—",
@@ -1604,7 +1633,7 @@ async function handleNodes(
         n.restoreOutcome,
         missingSessionGuidance(n) ?? (n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}`
           : n.startedWithoutRequired?.length ? truncate(startedWithoutLine(n.startedWithoutRequired), 30)
-          : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—"),
+          : livenessUnconfirmed(n) ? "liveness unconfirmed" : agentNotVerified(n) ? "agent not verified" : "—"),
         n.runtime === "claude-code" ? n.configuredAccount ?? "unknown" : "—",
       ));
     }
@@ -1614,6 +1643,12 @@ async function handleNodes(
   }
   for (const line of modelLines(humanList as NodeEntry[])) console.log(line);
   for (const n of humanList as NodeEntry[]) {
+    if (n.contextUsage?.source === "claude_statusline_json" && n.contextUsage.configuredBudget) {
+      const budget = n.contextUsage.configuredBudget;
+      const detail = `configured ${budget.tokens} tokens from ${budget.source}`;
+      const percent = budget.usedPercentage == null ? "?" : `${budget.usedPercentage}%`;
+      console.log(`Context (${n.canonicalSessionName ?? n.logicalId}): ${formatContextUsage(n.contextUsage)} / ${percent} budget; ${detail}; sample ${n.contextUsage.sampledAt ?? "unknown"}`);
+    }
     if (n.contextUsage?.source === "runner_reported") {
       console.log(`Context (${n.canonicalSessionName ?? n.logicalId}): ${formatContextUsage(n.contextUsage)} (runner-reported); sample ${n.contextUsage.sampledAt ?? "unknown"}`);
     }
@@ -1630,6 +1665,7 @@ async function handleNodes(
   await printConnectedAssistants(client, opts.rig, requestHeaders);
   for (const n of humanList as NodeEntry[]) {
     if (livenessUnconfirmed(n)) console.log(livenessLine(n.canonicalSessionName ?? n.logicalId, n));
+    if (agentNotVerified(n)) console.log(agentLivenessLine(n.canonicalSessionName ?? n.logicalId, n));
     if (!n.intentionallyStopped && n.identityVerdict?.verdict === "pane_missing"
       && ["session_missing", "pane_pid_gone", "pane_exited"].includes(n.identityVerdict.reason ?? "")) {
       const missing = n.identityVerdict.reason === "session_missing" ? "session" : "pane";
@@ -1656,23 +1692,6 @@ function truncate(s: string, max: number): string {
 }
 
 const RIG_COLUMN_SEPARATOR = "  ";
-const cellSegmenter = new Intl.Segmenter();
-
-function fitCell(value: string, width: number): string {
-  if (stringWidth(value) > width) {
-    const limit = width - 1;
-    let prefix = "";
-    let used = 0;
-    for (const { segment } of cellSegmenter.segment(value)) {
-      const segmentWidth = stringWidth(segment);
-      if (used + segmentWidth > limit) break;
-      prefix += segment;
-      used += segmentWidth;
-    }
-    value = prefix + "…";
-  }
-  return value + " ".repeat(width - stringWidth(value));
-}
 
 function padRigRow(cells: string[], widths: number[]): string {
   return cells.map((cell, i) => i < widths.length ? fitCell(cell, widths[i]!) : cell).join(RIG_COLUMN_SEPARATOR);

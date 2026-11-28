@@ -1,7 +1,8 @@
 // The MCP queue tools against the daemon's real queue routes, over HTTP, through the real DaemonClient: a seat
 // configured once (OPENRIG_SESSION_NAME in the MCP server's env) hands a task to another seat and reads the
 // answer back by the task's id. Nothing in the tool calls names the sender.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +18,9 @@ import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
 import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
+import { RigRepository } from "../../daemon/src/domain/rig-repository.js";
+import { SessionRegistry } from "../../daemon/src/domain/session-registry.js";
+import { RunnerPermissions } from "../../daemon/src/domain/runner-permissions.js";
 import { DaemonClient } from "../src/client.js";
 import { createMcpServer } from "../src/mcp-server.js";
 
@@ -30,9 +34,12 @@ describe("MCP queue tools on the daemon's queue routes", () => {
   let server: ServerType;
   let url: string;
   const closers: Array<() => Promise<void>> = [];
-  const saved = { home: process.env.OPENRIG_HOME, session: process.env.OPENRIG_SESSION_NAME };
+  const saved = { home: process.env.OPENRIG_HOME, session: process.env.OPENRIG_SESSION_NAME, node: process.env.OPENRIG_NODE_ID, legacyNode: process.env.RIGGED_NODE_ID };
 
   beforeEach(async () => {
+    // Outside any seat OpenRig launched, whatever runs these tests: a case that wants one sets OPENRIG_NODE_ID itself.
+    delete process.env.OPENRIG_NODE_ID;
+    delete process.env.RIGGED_NODE_ID;
     // Every migration, as an installed daemon has: the queue routes read columns the reduced test schema lacks.
     db = createDb(":memory:");
     migrate(db, ALL_MIGRATIONS);
@@ -65,6 +72,8 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     fs.rmSync(shared, { recursive: true, force: true });
     if (saved.home === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = saved.home;
     if (saved.session === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = saved.session;
+    if (saved.node === undefined) delete process.env.OPENRIG_NODE_ID; else process.env.OPENRIG_NODE_ID = saved.node;
+    if (saved.legacyNode === undefined) delete process.env.RIGGED_NODE_ID; else process.env.RIGGED_NODE_ID = saved.legacyNode;
   });
 
   /** An MCP connection whose server runs as `seat`, the way a desktop app's MCP entry sets it once. */
@@ -79,9 +88,26 @@ describe("MCP queue tools on the daemon's queue routes", () => {
       // The env is read per request at DaemonClient's one stamping point, as in a server process of its own.
       process.env.OPENRIG_SESSION_NAME = seat;
       const result = await client.callTool({ name, arguments: args });
-      return { isError: result.isError === true, data: JSON.parse((result.content as Array<{ text: string }>)[0]!.text), structured: result.structuredContent };
+      return { isError: result.isError === true, data: JSON.parse((result.content as Array<{ text: string }>)[0]!.text), structured: result.structuredContent, contentCount: (result.content as unknown[]).length };
     };
   }
+
+  it("lets a compact MCP list display a body-only request without a show call", async () => {
+    const desk = await connectAs(DESK);
+    const impl = await connectAs(IMPL);
+    const created = await desk("rig_queue_create", { destination: IMPL, body: " \nReadable request line\nLong details" });
+    expect(created.isError).toBe(false);
+    const listed = await impl("rig_queue_list", { owned: true, limit: 1 });
+    expect(listed.isError).toBe(false);
+    expect(listed.data).toEqual([expect.objectContaining({
+      qitemId: created.data.qitemId, summary: null, displayText: "Readable request line",
+      fieldsElided: expect.arrayContaining(["body"]),
+    })]);
+    expect(listed.data[0]).not.toHaveProperty("body");
+    expect(listed.contentCount).toBe(1);
+    expect(listed.structured).toMatchObject({ limit: 1, truncated: false });
+    expect(listed.structured).toMatchObject({ items: listed.data });
+  });
 
   it("delegates a task and reads the assignee's answer back by its id, under each seat's configured identity", async () => {
     const desk = await connectAs(DESK);
@@ -280,5 +306,337 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     expect(refused.isError).toBe(true);
     expect(refused.structured).toMatchObject({ ok: false, code: "not-a-decision", status: 409 });
     expect((await desk("rig_queue_show", { qitemId })).data.item).toMatchObject({ state: "pending", delegatedDecision: null });
+  });
+
+  // Slice 15 (claude9 and claude10's F1): the person's own conversation, with no seat, answers a seat's Claude Code
+  // permission ask through the plugin's MCP tools, as `rig seat decide-permission` does in a shell.
+  it("answers a seat's own permission ask with rig_seat_decide_permission, as relayed by the conversation and unconfirmed, the first answer counts, and an orphaned ask says it hasn't reached the prompt", async () => {
+    const rigs = new RigRepository(db);
+    const node = rigs.addNode(rigs.createRig("team").id, "dev.build", { runtime: "claude-code" });
+    const sessions = new SessionRegistry(db);
+    sessions.updateStatus(sessions.registerSession(node.id, "dev-build@team").id, "running");
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const route = "conversation-0123456789ab@kernel";
+    const work = await repo.create({ sourceSession: "someone outside a seat", destinationSession: "dev-build@team", body: "Add the feature",
+      returnRoute: route, returnRouteBasis: "issued", nudge: false });
+    repo.update({ qitemId: work.qitemId, actorSession: "dev-build@team", state: "in-progress" });
+    // The seat's PermissionRequest hook submits its prompt (the route's own service, as permission-answer.cjs reaches it).
+    const permissions = new RunnerPermissions({ db, queueRepo: repo, eventBus: new EventBus(db), humanRegistry: () => ({ ok: true, entities: [] }) as never,
+      ownerOf: () => null, currentGeneration: (id) => sessions.currentOccupantTenure(id)?.generationUuid ?? null });
+    const submitted = await permissions.submit({ nodeId: node.id, sessionName: "dev-build@team", generation: sessions.currentOccupantTenure(node.id)!.generationUuid }, {
+      nativeRef: "claude-session-1", turnId: "invocation-1", requestId: "invocation-1", nativeHook: "claude-code", holdSeconds: 86400,
+      action: { tool: "Bash", input: { command: "git commit -m 'Add the feature'" }, agent: null }, toolCall: { title: "Bash", kind: "Bash" },
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] });
+    expect(submitted).toMatchObject({ ok: true, askedOf: route });
+    const askId = (submitted as { askId: string }).askId;
+
+    // The plugin's server in a raw Claude Code conversation: no seat.
+    delete process.env.OPENRIG_SESSION_NAME;
+    const mcp = createMcpServer(new DaemonClient(url));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "conversation", version: "1.0.0" });
+    await mcp.connect(serverTransport);
+    await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await mcp.close(); });
+    const decided = await client.callTool({ name: "rig_seat_decide_permission", arguments: { askId, option: "allow", relay: true, personSaid: "Yes, commit it" } });
+    expect(decided.isError).toBeFalsy();
+    expect(decided.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow",
+      native: { hook: "claude-code", answeredAs: "relayed", by: "someone outside a seat", reported: "Yes, commit it" } });
+    const again = await client.callTool({ name: "rig_seat_decide_permission", arguments: { askId, option: "deny", relay: true, personSaid: "no" } });
+    expect(again.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow", native: { unchanged: true } });
+    const unknown = await client.callTool({ name: "rig_seat_decide_permission", arguments: { askId: "qitem-runner-permission-000000000000000000000000", option: "allow" } });
+    expect(unknown.isError).toBe(true);
+    expect(unknown.structuredContent).toMatchObject({ ok: false, code: "not_found", status: 404 });
+    // Its hook was reading (it had just submitted), so the reply said nothing of the kind below.
+    expect((decided.structuredContent as { native: Record<string, unknown> }).native).not.toHaveProperty("notReached");
+
+    // The seat's next prompt, whose hook was then killed outright: two minutes on, an answer is recorded and the tool's reply
+    // says plainly that it hasn't reached the seat's prompt.
+    const next = await permissions.submit({ nodeId: node.id, sessionName: "dev-build@team", generation: sessions.currentOccupantTenure(node.id)!.generationUuid }, {
+      nativeRef: "claude-session-1", turnId: "invocation-2", requestId: "invocation-2", nativeHook: "claude-code", holdSeconds: 86400,
+      action: { tool: "Bash", input: { command: "git push origin feature" }, agent: null }, toolCall: { title: "Bash", kind: "Bash" },
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 2 * 60_000);
+      const orphaned = await client.callTool({ name: "rig_seat_decide_permission",
+        arguments: { askId: (next as { askId: string }).askId, option: "allow", relay: true, personSaid: "yes" } });
+      expect(orphaned.isError).toBeFalsy();
+      expect(orphaned.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow",
+        native: { answeredAs: "relayed", notReached: expect.stringContaining("It hasn't reached dev-build@team's prompt") } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // claude12's F12b: the conversation that handed the work over, with no seat, answers its seat's ask through the plugin's
+  // MCP tool. The decision names the address OpenRig issued it (under the key its own stdio server derives), as
+  // OPENRIG_SESSION_NAME=<address> does in a shell, not "someone outside a seat". That's attribution only: a relay still
+  // reads relayed and unconfirmed. Another conversation's server, whose key wasn't issued that address, isn't it.
+  it.each([undefined, "cursor@team"])("records a conversation with configured seat %s on its own ask as its issued address, never as the person's own answer", async (configuredSeat) => {
+    const rigs = new RigRepository(db);
+    const node = rigs.addNode(rigs.createRig("team").id, "dev.build", { runtime: "claude-code" });
+    const sessions = new SessionRegistry(db);
+    sessions.updateStatus(sessions.registerSession(node.id, "dev-build@team").id, "running");
+    if (configuredSeat) process.env.OPENRIG_SESSION_NAME = configuredSeat; else delete process.env.OPENRIG_SESSION_NAME;
+    const conversation = async (key: string) => {
+      const mcp = createMcpServer(new DaemonClient(url), { conversationKey: () => key });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "conversation", version: "1.0.0" });
+      await mcp.connect(serverTransport);
+      await client.connect(clientTransport);
+      closers.push(async () => { await client.close(); await mcp.close(); });
+      return client;
+    };
+    const mine = await conversation("claude:conversation-1:4242");
+    const other = await conversation("claude:conversation-2:4343");
+    // The handoff, through the same server: with no seat, OpenRig issues this conversation an address under its key.
+    expect((await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Add the feature" } })).isError).toBeFalsy();
+    const permissions = new RunnerPermissions({ db, queueRepo: new QueueRepository(db, new EventBus(db), { validateRig: () => true }), eventBus: new EventBus(db),
+      humanRegistry: () => ({ ok: true, entities: [] }) as never, ownerOf: () => null, currentGeneration: (id) => sessions.currentOccupantTenure(id)?.generationUuid ?? null });
+    const ask = async (turn: string) => {
+      const submitted = await permissions.submit({ nodeId: node.id, sessionName: "dev-build@team", generation: sessions.currentOccupantTenure(node.id)!.generationUuid }, {
+        nativeRef: "claude-session-1", turnId: turn, requestId: turn, nativeHook: "claude-code", holdSeconds: 86400,
+        action: { tool: "Bash", input: { command: `git commit -m '${turn}'` }, agent: null }, toolCall: { title: "Bash", kind: "Bash" },
+        options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] });
+      return submitted as { askId: string; askedOf: string };
+    };
+    const first = await ask("invocation-1");
+    expect(first.askedOf).toMatch(/^conversation-[0-9a-f]{12}@kernel$/);
+    const decided = await mine.callTool({ name: "rig_seat_decide_permission", arguments: { askId: first.askId, option: "allow", relay: true, personSaid: "yes" } });
+    expect(decided.structuredContent).toMatchObject({ ok: true, state: "answered", optionId: "allow",
+      native: { answeredAs: "relayed", by: first.askedOf, reported: "yes",
+        message: `Allowed once: ${first.askedOf} relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). ${first.askedOf} reports they said: "yes"` } });
+    // Another conversation's server can't take this conversation's address: it decides as before, outside a seat.
+    const second = await ask("invocation-2");
+    expect((await other.callTool({ name: "rig_seat_decide_permission", arguments: { askId: second.askId, option: "deny", reason: "not this one" } })).structuredContent)
+      .toMatchObject({ ok: true, state: "answered", optionId: "deny", native: { answeredAs: "agent", by: configuredSeat ?? "someone outside a seat" } });
+  });
+
+  // R3: with no seat, the conversation closes a team question sent to its issued address with the same MCP tools a seat
+  // uses (claim, then update with the person's words as the resolution), as that address, so the question keeps its
+  // answer and the seat's work parked on it comes back. Another conversation's server isn't that address: as before, its
+  // update names no sender and nothing changes.
+  it("lets a seatless conversation claim and close a question sent to its issued address, as that address", async () => {
+    delete process.env.OPENRIG_SESSION_NAME;
+    const conversation = async (key: string) => {
+      const mcp = createMcpServer(new DaemonClient(url), { conversationKey: () => key });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "conversation", version: "1.0.0" });
+      await mcp.connect(serverTransport);
+      await client.connect(clientTransport);
+      closers.push(async () => { await client.close(); await mcp.close(); });
+      return client;
+    };
+    const mine = await conversation("claude:conversation-1:4242");
+    const other = await conversation("claude:conversation-2:4343");
+    expect((await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Add the feature" } })).isError).toBeFalsy();
+    const listed = await new DaemonClient(url).get(`/api/queue/list?${new URLSearchParams({ destinationSession: "dev-build@team" })}`);
+    const work = (listed.data as Array<{ qitemId: string; returnRoute: string }>)[0]!;
+    const address = work.returnRoute;
+    expect(address).toMatch(/^conversation-[0-9a-f]{12}@kernel$/);
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const question = await repo.create({ sourceSession: "dev-build@team", destinationSession: address, body: "Exclude all four files?" });
+    repo.update({ qitemId: work.qitemId, actorSession: "dev-build@team", state: "blocked", blockedOn: question.qitemId });
+    expect(repo.getById(work.qitemId)?.state).toBe("blocked");
+
+    const elsewhere = await other.callTool({ name: "rig_queue_update",
+      arguments: { qitemId: question.qitemId, state: "done", closureReason: "no-follow-on", resolution: "Yes" } });
+    expect(elsewhere.isError).toBe(true);
+    expect(repo.getById(question.qitemId)?.state).toBe("pending");
+
+    expect((await mine.callTool({ name: "rig_queue_claim", arguments: { qitemId: question.qitemId } })).isError).toBeFalsy();
+    expect(repo.getById(question.qitemId)?.state).toBe("in-progress");
+    expect((await mine.callTool({ name: "rig_queue_update",
+      arguments: { qitemId: question.qitemId, state: "done", closureReason: "no-follow-on", resolution: "Yes, exclude all four" } })).isError).toBeFalsy();
+    expect(repo.getById(question.qitemId)).toMatchObject({ state: "done", resolution: "Yes, exclude all four" });
+    expect(repo.listTransitions(question.qitemId).slice(-2).map((t) => t.actorSession)).toEqual([address, address]);
+    expect(repo.getById(work.qitemId)?.state).toBe("pending");
+  });
+
+  /** The plugin's stdio server in a conversation whose key is `key`, as `rig mcp serve` derives it. */
+  async function conversationServer(key: string | null) {
+    const mcp = createMcpServer(new DaemonClient(url), { conversationKey: () => key });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "conversation", version: "1.0.0" });
+    await mcp.connect(serverTransport);
+    await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await mcp.close(); });
+    return client;
+  }
+  const createdId = (result: unknown): string =>
+    JSON.parse((result as { content: Array<{ text: string }> }).content[0]!.text).qitemId as string;
+
+  // Slice 15 for 0.7.25: a person's own conversation hears its team's questions even when its MCP entry names a seat for
+  // its tools. Its create gets the issued route by default, with the configured seat still the sender; it acts as that
+  // address on a question sent there; and an explicit returnRoute still decides.
+  it("gives an outside conversation with a configured seat its issued return route by default, and lets it act as that address", async () => {
+    const seat = "cursor@team";
+    const mine = await conversationServer("claude:conversation-1:4242");
+    process.env.OPENRIG_SESSION_NAME = seat;
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const created = await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Add the feature" } });
+    expect(created.isError).toBeFalsy();
+    const work = repo.getById(createdId(created))!;
+    expect(work).toMatchObject({ sourceSession: seat, returnRouteBasis: "issued" });
+    expect(work.returnRoute).toMatch(/^conversation-[0-9a-f]{12}@kernel$/);
+    expect(work.tags?.some((tag) => tag.endsWith(":claude:conversation-1:4242"))).toBe(true);
+
+    const question = await repo.create({ sourceSession: "dev-build@team", destinationSession: work.returnRoute!, body: "Exclude all four files?" });
+    const unrelated = await repo.create({ sourceSession: "dev-build@team", destinationSession: seat, body: "Unrelated configured-seat work" });
+    const foreign = await repo.create({ sourceSession: "dev-build@team", destinationSession: "conversation-foreign@kernel", body: "Another chat's question" });
+    // The hook receives the parent conversation's env, not its MCP entry's configured tool identity. Exercise the actual
+    // waiter against rows created through MCP; only the CLI read adapter is supplied from this same isolated repository.
+    const bridge = createRequire(import.meta.url)("../../daemon/assets/claude-hook-bridge.cjs");
+    const commands: string[][] = [];
+    const rig = (args: string[]) => {
+      commands.push(args);
+      if (args[1] === "transitions") return repo.listTransitions(args[2]!);
+      const rows = repo.list({ limit: 1000 });
+      if (args[2] === "--tag") return rows.filter((row) => row.tags?.includes(args[3]!));
+      if (args[2] === "--destination") return rows.filter((row) => row.destinationSession === args[3] && row.state === "pending");
+      throw new Error(`Unexpected hook read: ${args.join(" ")}`);
+    };
+    let output = "";
+    let now = 1000;
+    const hookResult = await bridge.conversationWaiter({ input: { session_id: "outside-configured-test", hook_event_name: "Stop" },
+      out: { write(text: string, done?: () => void) { output += text; done?.(); return true; } },
+      deps: { env: { CLAUDE_PLUGIN_DATA: home }, key: "claude:conversation-1:4242", rig, alive: () => true,
+        now: () => now, sleep: async () => { now += 15000; } } });
+    expect(hookResult).toBe(2);
+    expect(output).toContain(question.qitemId);
+    expect(output).not.toContain(unrelated.qitemId);
+    expect(output).not.toContain(foreign.qitemId);
+    expect(commands.filter((args) => args[2] === "--destination").map((args) => args[3])).toEqual([work.returnRoute]);
+
+    expect((await mine.callTool({ name: "rig_queue_claim", arguments: { qitemId: question.qitemId } })).isError).toBeFalsy();
+    expect((await mine.callTool({ name: "rig_queue_update",
+      arguments: { qitemId: question.qitemId, state: "done", closureReason: "no-follow-on", resolution: "Yes, exclude all four" } })).isError).toBeFalsy();
+    expect(repo.getById(question.qitemId)).toMatchObject({ state: "done", resolution: "Yes, exclude all four" });
+    expect(repo.listTransitions(question.qitemId).slice(-2).map((t) => t.actorSession)).toEqual([work.returnRoute, work.returnRoute]);
+
+    const own = await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Another", returnRoute: "self" } });
+    expect(repo.getById(createdId(own))).toMatchObject({ returnRoute: seat, returnRouteBasis: "caller" });
+  });
+
+  it("keeps the current sender binding on a default create when the node environment is absent", async () => {
+    delete process.env.OPENRIG_SESSION_NAME;
+    const bound = new DaemonClient(url);
+    // The client can already resolve a current pane binding without a node env marker. Keep that same attributed sender
+    // for the real request; a configured tool identity is absent here, so it must not become an outside conversation.
+    bound.bindSender("managed@team");
+    const mcp = createMcpServer(bound, { conversationKey: () => "claude:conversation-1:4242" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "managed", version: "1.0.0" });
+    await mcp.connect(serverTransport);
+    await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await mcp.close(); });
+    const result = await client.callTool({ name: "rig_queue_create", arguments: { destination: IMPL, body: "Keep the managed route" } });
+    expect(result.isError).toBeFalsy();
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const row = repo.getById(createdId(result))!;
+    expect(row.sourceSession).toBe("managed@team");
+    expect(row.returnRoute ?? null).toBeNull();
+    expect(row.tags?.some((tag) => tag.startsWith("conversation-key:")) ?? false).toBe(false);
+  });
+
+  it("keeps a configured caller's ordinary route when its conversation key is missing", async () => {
+    process.env.OPENRIG_SESSION_NAME = "cursor@team";
+    const mine = await conversationServer(null);
+    const result = await mine.callTool({ name: "rig_queue_create", arguments: { destination: IMPL, body: "No correlation available" } });
+    expect(result.isError).toBeFalsy();
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const row = repo.getById(createdId(result))!;
+    expect(row.sourceSession).toBe("cursor@team");
+    expect(row.returnRoute ?? null).toBeNull();
+    expect(row.tags?.some((tag) => tag.startsWith("conversation-key:")) ?? false).toBe(false);
+  });
+
+  // Under a seat OpenRig launched (OPENRIG_NODE_ID in the server's env, as Claude Code passes it on), a configured seat is
+  // that seat's own tool identity: no default route, with or without a configured seat, since the hooks never read an issued
+  // address there, and the server acts as itself, never as an issued address. An explicit auto still issues one.
+  it("gives no default return route under a seat OpenRig launched, configured or not, and an explicit auto still issues one", async () => {
+    const mine = await conversationServer("claude:conversation-1:4242");
+    process.env.OPENRIG_NODE_ID = "01KXTESTNODE";
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    for (const seat of ["dev-build@team", undefined]) {
+      if (seat) process.env.OPENRIG_SESSION_NAME = seat; else delete process.env.OPENRIG_SESSION_NAME;
+      const created = await mine.callTool({ name: "rig_queue_create", arguments: { destination: IMPL, body: `From ${seat ?? "no seat"}` } });
+      expect(created.isError).toBeFalsy();
+      const row = repo.getById(createdId(created))!;
+      expect(row.returnRoute ?? null).toBeNull();
+      expect(row.tags?.some((tag) => tag.endsWith(":claude:conversation-1:4242")) ?? false).toBe(false);
+    }
+
+    process.env.OPENRIG_SESSION_NAME = "dev-build@team";
+    const explicit = await mine.callTool({ name: "rig_queue_create", arguments: { destination: IMPL, body: "Explicit", returnRoute: "auto" } });
+    const issued = repo.getById(createdId(explicit))!;
+    expect(issued).toMatchObject({ sourceSession: "dev-build@team", returnRouteBasis: "issued" });
+    expect(issued.returnRoute).toMatch(/^conversation-[0-9a-f]{12}@kernel$/);
+    const question = await repo.create({ sourceSession: IMPL, destinationSession: issued.returnRoute!, body: "Which one?" });
+    await mine.callTool({ name: "rig_queue_update", arguments: { qitemId: question.qitemId, state: "done", closureReason: "no-follow-on", resolution: "This one" } });
+    expect(repo.listTransitions(question.qitemId).map((t) => t.actorSession)).not.toContain(issued.returnRoute);
+  });
+
+  // A seatless entry in an app that isn't Claude Code or Codex (Claude Desktop's chat) has no conversation key, so nothing
+  // records its issued address under one. Its ask still gets that address as the task's sender and return route, and the
+  // seat's question comes back there; the person's answer through the same server closes it, as that address.
+  it("lets a seatless stdio server with no conversation key answer a question sent to the address its own create was issued", async () => {
+    delete process.env.OPENRIG_SESSION_NAME;
+    const mine = await conversationServer(null);
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const created = await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Report alpha or beta", returnRoute: "auto" } });
+    expect(created.isError).toBeFalsy();
+    const work = repo.getById(createdId(created))!;
+    expect(work).toMatchObject({ returnRouteBasis: "issued-actor" });
+    const address = work.returnRoute!;
+    expect(address).toMatch(/^conversation-[0-9a-f]{12}@kernel$/);
+    expect(work.sourceSession).toBe(address);
+    const question = await repo.create({ sourceSession: "dev-build@team", destinationSession: address, body: "Which word: alpha or beta?" });
+    repo.update({ qitemId: work.qitemId, actorSession: "dev-build@team", state: "blocked", blockedOn: question.qitemId });
+
+    const claim = await mine.callTool({ name: "rig_queue_claim", arguments: { qitemId: question.qitemId } });
+    expect(claim.isError, JSON.stringify(claim.content)).toBeFalsy();
+    const answer = await mine.callTool({ name: "rig_queue_update",
+      arguments: { qitemId: question.qitemId, state: "done", closureReason: "no-follow-on", resolution: "beta" } });
+    expect(answer.isError, JSON.stringify(answer.content)).toBeFalsy();
+    expect(repo.getById(question.qitemId)).toMatchObject({ state: "done", resolution: "beta" });
+    // Who answered, and through which route: the conversation's issued address, as the plugin's server records it.
+    expect(repo.listTransitions(question.qitemId).slice(-2).map((t) => t.actorSession)).toEqual([address, address]);
+    expect(repo.getById(work.qitemId)?.state).toBe("pending");
+  });
+
+  it("keeps today's refusal for any other item, for another server's issued address, and for a server that isn't a conversation", async () => {
+    delete process.env.OPENRIG_SESSION_NAME;
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const mine = await conversationServer(null);
+    const other = await conversationServer(null);
+    const created = await mine.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "Report alpha or beta", returnRoute: "auto" } });
+    const address = repo.getById(createdId(created))!.returnRoute!;
+    const question = await repo.create({ sourceSession: "dev-build@team", destinationSession: address, body: "Which word?" });
+    const elsewhere = await repo.create({ sourceSession: "dev-build@team", destinationSession: DESK, body: "For the desk" });
+    const close = { state: "done", closureReason: "no-follow-on", resolution: "beta" };
+
+    // An item addressed to a seat, not to this conversation's address: refused as before, and unchanged.
+    const notMine = await mine.callTool({ name: "rig_queue_update", arguments: { qitemId: elsewhere.qitemId, ...close } });
+    expect(notMine.isError).toBe(true);
+    expect(JSON.stringify(notMine.content)).toContain("actor_required");
+    expect(repo.getById(elsewhere.qitemId)?.state).toBe("pending");
+    // Another server process wasn't issued that address.
+    expect((await other.callTool({ name: "rig_queue_update", arguments: { qitemId: question.qitemId, ...close } })).isError).toBe(true);
+    // A server that isn't a conversation's own (an HTTP server passes no conversation key) issues the address on create
+    // but never acts as it.
+    const shared = createMcpServer(new DaemonClient(url));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const http = new Client({ name: "shared", version: "1.0.0" });
+    await shared.connect(serverTransport);
+    await http.connect(clientTransport);
+    closers.push(async () => { await http.close(); await shared.close(); });
+    const sharedCreate = await http.callTool({ name: "rig_queue_create", arguments: { destination: "dev-build@team", body: "From a shared server", returnRoute: "auto" } });
+    const sharedAddress = repo.getById(createdId(sharedCreate))!.returnRoute!;
+    const sharedQuestion = await repo.create({ sourceSession: "dev-build@team", destinationSession: sharedAddress, body: "Which?" });
+    expect((await http.callTool({ name: "rig_queue_update", arguments: { qitemId: sharedQuestion.qitemId, ...close } })).isError).toBe(true);
+    expect(repo.getById(question.qitemId)?.state).toBe("pending");
+    expect(repo.getById(sharedQuestion.qitemId)?.state).toBe("pending");
   });
 });

@@ -572,7 +572,7 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(next).toContain("Only a.txt, please.");
     expect(next).toContain("Edit a.txt");
     expect(prompts()).toHaveLength(2);
-    expect(seat.out()).toContain("Only a.txt, please.");
+    await waitFor(() => seat.out().includes("Only a.txt, please."), "the person\'s words on the runner\'s stdout");
   });
 
   // Two asks open at once: the first answer reaches the agent at once, but the seat still waits on a person for the second,

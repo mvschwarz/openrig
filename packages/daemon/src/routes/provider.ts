@@ -15,9 +15,12 @@ import { periodicCarryIsCurrent, snapshotLaunchOutcome } from "../domain/restore
 import type { SessionRegistry } from "../domain/session-registry.js";
 import { resolveActiveSnapshotSession } from "../domain/active-occupant.js";
 import { readClaudeSeatTokenRef } from "../domain/claude-seat-token.js";
+import type { EventBus } from "../domain/event-bus.js";
 import { processArgv, verifyClaudePaneRuntime, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { emittedEffortFromArgv, readSeatEffort, type LaunchEffortSelection } from "../domain/seat-effort.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
+import { accountRefUses, ProviderAccountRefsRepository, readAccountRefInput, type AccountRefProvider } from "../domain/provider/provider-account-refs.js";
+import type { PlanCheck } from "../domain/provider/assignment-plan.js";
 import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
 import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
 import { requireSenderIdentity, resolveRecordedProvenance, transportSenderSession } from "./require-sender-identity.js";
@@ -48,10 +51,22 @@ export interface ProviderRoutesOptions {
 
 /** The seat's in-place restart for this request, built only when used: precheck and switch act on the Codex home the
  *  running seat uses, and the restart keeps its conversation and launch settings. */
+/** The same dry run `rig provider switch --account-home --dry-run` uses: every gate, nothing started or stored. */
+function successorDryRun(c: Context): (seat: string, home: string) => Promise<PlanCheck> {
+  return async (seat, home) => {
+    try {
+      const result = await runtimeSwitchService(c).setRuntime({ seatRef: seat, runtime: "codex", accountHome: home, reason: "assignment plan", dryRun: true });
+      return result.ok ? { safe: true } : { safe: false, reasons: [result.code], message: result.message };
+    } catch (err) {
+      return { safe: false, reasons: ["successor_not_checked"], message: `The account-home dry run couldn't run (${err instanceof Error ? err.message : String(err)}), so the move wasn't checked.` };
+    }
+  };
+}
+
 function seatRestartOf(c: Context): SeatRestart {
   return {
-    plan: (seat) => seatLifecycleService(c).restartInPlace({ seatRef: seat, plan: true }),
-    run: (seat, reason) => seatLifecycleService(c).restartInPlace({ seatRef: seat, reason }),
+    plan: (seat, nodeId) => seatLifecycleService(c).restartInPlace({ seatRef: seat, plan: true, ...(nodeId !== undefined ? { nodeId } : {}) }),
+    run: (seat, reason, nodeId) => seatLifecycleService(c).restartInPlace({ seatRef: seat, reason, ...(nodeId !== undefined ? { nodeId } : {}) }),
   };
 }
 
@@ -66,11 +81,38 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
         JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id LEFT JOIN bindings b ON b.node_id = n.id
         WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`)
         .get(seat) as { id: string; rig_id: string; logical_id: string; runtime: string | null; name: string; status: string; tmux_pane: string | null } | undefined;
-      return row?.runtime === "claude-code"
+      if (row) return row.runtime === "claude-code"
         ? { nodeId: row.id, rigId: row.rig_id, rigName: row.name, logicalId: row.logical_id, running: row.status === "running", pane: row.tmux_pane ?? null } : null;
+      // A seat that has never launched has no session row: the seat-ref resolver finds its node by its canonical name
+      // (active rigs only; a name more than one seat has resolves to none).
+      const resolved = new SeatStatusService({ rigRepo }).getStatus(seat);
+      if (!resolved.ok || resolved.status.runtime !== "claude-code") return null;
+      const node = rigRepo.db.prepare("SELECT n.id, n.rig_id, n.logical_id, r.name FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.rig_id = ? AND n.logical_id = ?")
+        .get(resolved.status.rig_id, resolved.status.logical_id) as { id: string; rig_id: string; logical_id: string; name: string } | undefined;
+      if (!node || rigRepo.db.prepare("SELECT 1 FROM sessions WHERE node_id = ? LIMIT 1").get(node.id)) return null;
+      return { nodeId: node.id, rigId: node.rig_id, rigName: node.name, logicalId: node.logical_id, running: false, pane: null, pristine: true };
     },
     tokenRef: (nodeId) => readClaudeSeatTokenRef(rigRepo.db, nodeId),
     setTokenRef: (nodeId, ref) => { rigRepo.setNodeClaudeTokenRef(nodeId, ref); },
+    saveFirstLaunchTokenRef: (nodeId, ref, audit) => {
+      const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+      let persisted: ReturnType<EventBus["persistWithinTransaction"]> | null = null;
+      const saved = rigRepo.db.transaction((): { ok: true } | { ok: false; code: "seat_launched" | "seat_changed"; message: string } => {
+        const node = rigRepo.db.prepare("SELECT rig_id, logical_id, runtime FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string; logical_id: string; runtime: string | null } | undefined;
+        if (node?.runtime !== "claude-code") return { ok: false, code: "seat_changed", message: "The seat is no longer this Claude seat." };
+        if (rigRepo.db.prepare("SELECT 1 FROM sessions WHERE node_id = ? LIMIT 1").get(nodeId)) {
+          return { ok: false, code: "seat_launched", message: "The seat launched after this switch checked it, so its first launch already chose its login. Run the switch again for the launched seat." };
+        }
+        const from = readClaudeSeatTokenRef(rigRepo.db, nodeId);
+        if (!rigRepo.setNodeClaudeTokenRef(nodeId, ref)) return { ok: false, code: "seat_changed", message: "The seat's reference couldn't be saved on this daemon's database." };
+        if (eventBus) persisted = eventBus.persistWithinTransaction({ type: "node.claude_token_ref_changed", rigId: node.rig_id, nodeId,
+          logicalId: node.logical_id, from: from?.label ?? null, to: ref?.label ?? null, tokenFile: ref?.tokenFile ?? null,
+          credential: ref ? ref.kind === "api-key" ? "api_key" : "subscription_token" : "stored_login", operator: audit.requestedBy, effect: "first_launch" });
+        return { ok: true };
+      })();
+      if (persisted && eventBus) eventBus.notifySubscribers(persisted);
+      return saved;
+    },
     snapshot: (rigId, nodeId) => {
       const capture = c.get("snapshotCapture" as never) as SnapshotCapture | undefined;
       if (!capture) return { snapshotId: "(none)", resumes: false, why: "can't be taken: this daemon has no snapshot capture" };
@@ -317,6 +359,98 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     return c.json({ accounts }, 200);
   });
 
+  // #3625: the accounts this daemon knows by label, each a reference local to this host (a Claude token or API-key file,
+  // or a Codex home and saved login). Separate from /accounts, which is what the read model observed: a label here is
+  // the operator's name for a reference, not proof of any login.
+  const accountRefsOf = (c: Context): ProviderAccountRefsRepository | null => {
+    const rigRepo = c.get("rigRepo" as never) as RigRepository | undefined;
+    return rigRepo ? new ProviderAccountRefsRepository(rigRepo.db, { uses: accountRefUses(rigRepo.db) }) : null;
+  };
+
+  router.get("/account-refs", (c) => {
+    const refs = accountRefsOf(c);
+    if (!refs) return c.json({ error: "account_refs_unavailable" }, unavailable);
+    const provider = c.req.query("provider");
+    if (!okProvider(provider)) return c.json({ error: `invalid provider: ${provider}` }, 400);
+    return c.json({ accounts: refs.list(provider as AccountRefProvider | undefined) }, 200);
+  });
+
+  router.post("/account-refs", async (c) => {
+    const refs = accountRefsOf(c);
+    if (!refs) return c.json({ error: "account_refs_unavailable" }, unavailable);
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return c.json({ error: "body must be a JSON object" }, 400);
+    const input = readAccountRefInput(raw as Record<string, unknown>);
+    if ("problem" in input) return c.json({ ok: false, code: "invalid_reference", message: `${input.problem}. Nothing was stored.` }, 400);
+    const result = refs.add(input);
+    return c.json(result, result.ok ? 201 : result.code === "duplicate_label" ? 409 : 400);
+  });
+
+  router.delete("/account-refs/:provider/:label", (c) => {
+    const refs = accountRefsOf(c);
+    if (!refs) return c.json({ error: "account_refs_unavailable" }, unavailable);
+    const provider = c.req.param("provider");
+    if (!VALID_PROVIDERS.has(provider)) return c.json({ error: `invalid provider: ${provider}` }, 400);
+    const result = refs.remove(provider as AccountRefProvider, c.req.param("label"));
+    return c.json(result, result.ok ? 200 : 404);
+  });
+
+  // #3625: the plan for moving a rig's seats of one provider to an account by label. Read only; applying arrives later.
+  router.get("/assignment-plan", async (c) => {
+    const svc = svcOf(c);
+    if (!svc?.assignmentPlan) return c.json({ error: "provider_service_unavailable" }, unavailable);
+    const rig = c.req.query("rig"), provider = c.req.query("provider"), label = c.req.query("account"), accountHome = c.req.query("accountHome");
+    if (!rig?.trim() || !label?.trim()) return c.json({ error: "rig and account are required" }, 400);
+    if (provider === undefined || !VALID_PROVIDERS.has(provider)) return c.json({ error: "provider must be claude or codex" }, 400);
+    if (accountHome !== undefined && (provider !== "codex" || !path.isAbsolute(accountHome) || /[\0\n\r]/.test(accountHome))) {
+      return c.json({ error: "accountHome is a prepared Codex home: an absolute path, with provider codex" }, 400);
+    }
+    const result = await svc.assignmentPlan({ rig, provider: provider as AccountRefProvider, label, includeOverrides: c.req.query("includeOverrides") === "1",
+      ...(accountHome !== undefined ? { accountHome } : {}), daemon: getSelfHostId() ?? LOCAL_HOST_ID }, seatRestartOf(c), claudeSeatOf(c),
+    successorDryRun(c));
+    return c.json(result, result.ok ? 200 : result.code === "reference_unusable" || result.code === "rig_ambiguous" ? 409 : 404);
+  });
+
+  // #3625 slice 3: apply the plan the person saw (named by its digest), one seat at a time. 200 with each seat's result
+  // once it's done; 409 with nothing changed when the plan changed or another apply is running on the rig.
+  router.post("/assignment-apply", async (c) => {
+    const svc = svcOf(c);
+    if (!svc?.applyAssignment) return c.json({ error: "provider_service_unavailable" }, unavailable);
+    const body = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+    if (body === null || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "body must be a JSON object" }, 400);
+    const { rig, provider, account, plan, accountHome, includeOverrides } = body;
+    if (typeof rig !== "string" || !rig.trim() || typeof account !== "string" || !account.trim()) return c.json({ error: "rig and account are required" }, 400);
+    if (typeof provider !== "string" || !VALID_PROVIDERS.has(provider)) return c.json({ error: "provider must be claude or codex" }, 400);
+    if (typeof plan !== "string" || !/^[0-9a-f]{12}$/.test(plan)) return c.json({ error: "plan is the digest the plan showed (12 hex characters)" }, 400);
+    if (includeOverrides !== undefined && typeof includeOverrides !== "boolean") return c.json({ error: "includeOverrides must be true or false" }, 400);
+    if (accountHome !== undefined && (typeof accountHome !== "string" || provider !== "codex" || !path.isAbsolute(accountHome) || /[\0\n\r]/.test(accountHome))) {
+      return c.json({ error: "accountHome is a prepared Codex home: an absolute path, with provider codex" }, 400);
+    }
+    const rigRepo = c.get("rigRepo" as never) as RigRepository | undefined;
+    if (accountHome !== undefined && rigRepo) {
+      // A move to a prepared home is a runtime switch: the same custody rule as rig provider switch --account-home.
+      const custody = runtimeSwitchCustodyRefusal(rigRepo.db, transportSenderSession(c), c.req.header(OCCUPANT_GENERATION_HEADER));
+      if (custody) return c.json(custody.body, custody.status);
+    }
+    const reason = `rig provider assign ${rig} --provider ${provider} --account ${account}`;
+    const result = await svc.applyAssignment({ rig, provider: provider as AccountRefProvider, label: account, includeOverrides: includeOverrides === true,
+      ...(accountHome !== undefined ? { accountHome } : {}), daemon: getSelfHostId() ?? LOCAL_HOST_ID, digest: plan,
+      requestedBy: transportSenderSession(c) ?? null }, {
+      seatRestart: seatRestartOf(c), claudeSeat: claudeSeatOf(c), successorCheck: successorDryRun(c),
+      successor: async (seat, home) => {
+        const r = await runtimeSwitchService(c).setRuntime({ seatRef: seat, runtime: "codex", accountHome: home, reason, requestedBy: transportSenderSession(c) ?? null });
+        return r.ok ? { ok: true, changed: r.changed, ...("recoveryPending" in r ? { recoveryPending: r.recoveryPending } : {}), ...("confirmation" in r ? { confirmation: r.confirmation } : {}) }
+          : { ok: false, code: r.code, message: r.message, ...(r.guidance ? { guidance: r.guidance } : {}), ...(r.recoveryPending ? { recoveryPending: true } : {}) };
+      },
+    });
+    return c.json(result, result.ok ? 200 : result.code === "unknown_account" || result.code === "unknown_rig" ? 404 : 409);
+  });
+
   router.get("/bindings", async (c) => {
     const svc = svcOf(c);
     if (!svc) return c.json({ error: "provider_service_unavailable" }, unavailable);
@@ -429,8 +563,8 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({ error: "apiKeyFile must be a path and cannot be combined with tokenFile" }, 400);
     }
     // Business outcome (incl. failed_safely / rebind_in_progress) is an explicit 200 payload.
-    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(typeof apiKeyFile === "string" ? { apiKeyFile } : {}) },
-      seatRestartOf(c), claudeSeatOf(c)), 200);
+    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(typeof apiKeyFile === "string" ? { apiKeyFile } : {}),
+      requestedBy: transportSenderSession(c) ?? null }, seatRestartOf(c), claudeSeatOf(c)), 200);
   });
 
   // Slice 18 — subscription move reports: queue items tagged subscription-move, filed by the agent that moved a Codex

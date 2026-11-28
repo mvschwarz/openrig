@@ -20,7 +20,8 @@ const unavailable: SendResult = { ok: false, sessionName: seat, sent: false, inp
   reason: "tmux_unavailable", error: "The terminal service is not listening yet." };
 const delivered: SendResult = { ok: true, sessionName: seat, sent: true };
 const stores: Database.Database[] = [];
-beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z")); });
+// Only the clock is faked: a pass takes a real event-loop turn between due jobs, which a faked setImmediate never runs.
+beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-01-01T00:00:00Z")); });
 afterEach(() => { for (const db of stores.splice(0)) if (db.open) db.close(); vi.useRealTimers(); });
 const later = (seconds: number) => vi.setSystemTime(Date.now() + seconds * 1000);
 function database(saved?: Buffer) {

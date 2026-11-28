@@ -7,7 +7,8 @@ import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
 import type { RuntimeAdapter, NodeBinding, ReadinessResult, ForkSource } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode } from "./runtime-adapter.js";
-import { communityHarnessAdapter, launchedCommunityHarness } from "../adapters/community-harness-runtime-adapter.js";
+import { CommunityHarnessRuntimeAdapter, communityHarnessAdapter, launchedCommunityHarness, type LaunchedCommunityHarness } from "../adapters/community-harness-runtime-adapter.js";
+import type { FirstInputPassed } from "./community-harness-first-input.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { isShellForeground } from "./shell-classifier.js";
@@ -97,6 +98,7 @@ export interface StagedLaunch {
 export type SuccessorLaunchResult =
   | {
       ok: true;
+      firstInput?: FirstInputPassed;
       discoveredId: string;
       activityGrantId?: string;
       tmuxSession: string;
@@ -106,8 +108,8 @@ export type SuccessorLaunchResult =
       /** A community harness's conversation reported by its launcher, or named by OpenRig and passed to it. Absent for a
        *  token read from the runtime itself (a built-in's, or Pi RPC's session file). */
       resumeProvenance?: "launcher" | "passed";
-      /** The community harness this successor was launched for, with its preset's runner declaration at launch. */
-      communityHarness?: { app: string; runner: boolean | "pi-rpc" };
+      /** The community harness this successor was launched for, with its preset's runner and hook declarations at launch. */
+      communityHarness?: LaunchedCommunityHarness;
       appliedLaunch?: AppliedLaunchObservation;
       /** The launch's frozen executable and whether it is a #! script (Claude managed launches, #2341). */
       launchedExecutable?: { path: string; isScript: boolean };
@@ -129,6 +131,7 @@ export type SuccessorLaunchResult =
   | {
       ok: false;
       code: string;
+      firstInput?: FirstInputPassed;
       step: "create_successor" | "resolve_pane" | "start_agent";
       message: string;
       /** True once the predecessor process has been replaced in its pane. */
@@ -222,6 +225,7 @@ export class SuccessorSessionLauncher {
   async createSuccessor(input: {
     node: SuccessorNode;
     departingSessionName: string;
+    firstInputText?: string;
     occupantGeneration?: string | null;
     /** Synchronous physical-cutover observer; runs after the retiree is proven gone and before respawn. */
     onReplacementStarted?: () => void;
@@ -380,9 +384,10 @@ export class SuccessorSessionLauncher {
     //    can tell the operator that a retry would end it.
     // A community harness's successor records the harness and its preset's runner declaration as launched (at commit).
     const communityHarness = launchedCommunityHarness(adapter);
-    const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource, input.occupantGeneration, undefined, binding, adapter);
+    const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource, input.occupantGeneration, undefined, binding, adapter, input.firstInputText);
     if (!started.ok) {
       return { ok: false, code: started.code, step: "start_agent", message: started.message, replacementStarted: true,
+        ...(started.firstInput ? { firstInput: started.firstInput } : {}),
         tmuxPane: pane.id, ...limitsNotice, ...(started.launched ? { successorLaunched: true, retireeExit: terminated.path, retireeExitDetail: terminated.detail,
           ...(started.resumeToken ? { resumeToken: started.resumeToken, resumeType: started.resumeType } : {}),
           ...(started.launchedExecutable ? { launchedExecutable: started.launchedExecutable } : {}),
@@ -409,6 +414,7 @@ export class SuccessorSessionLauncher {
       resumeType: started.resumeType,
       ...(started.resumeProvenance ? { resumeProvenance: started.resumeProvenance } : {}),
       ...(communityHarness ? { communityHarness } : {}),
+      ...(started.firstInput ? { firstInput: started.firstInput } : {}),
       appliedLaunch: started.appliedLaunch,
       ...(started.launchedExecutable ? { launchedExecutable: started.launchedExecutable } : {}),
       ...(started.activityGrantId ? { activityGrantId: started.activityGrantId } : {}),
@@ -496,8 +502,9 @@ export class SuccessorSessionLauncher {
     preparedBinding?: NodeBinding,
     /** The adapter a handover already resolved and preflighted; a staged switch resolves its target here. */
     resolvedAdapter?: RuntimeAdapter,
-  ): Promise<{ ok: true; activityGrantId?: string; resumeToken?: string; resumeType?: string; resumeProvenance?: "launcher" | "passed"; appliedLaunch?: AppliedLaunchObservation; notes?: string[]; launchedExecutable?: { path: string; isScript: boolean } }
-    | { ok: false; code: string; message: string; launched?: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; launchedExecutable?: { path: string; isScript: boolean } }> {
+    firstInputText?: string,
+  ): Promise<{ ok: true; firstInput?: FirstInputPassed; activityGrantId?: string; resumeToken?: string; resumeType?: string; resumeProvenance?: "launcher" | "passed"; appliedLaunch?: AppliedLaunchObservation; notes?: string[]; launchedExecutable?: { path: string; isScript: boolean } }
+    | { ok: false; firstInput?: FirstInputPassed; code: string; message: string; launched?: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; launchedExecutable?: { path: string; isScript: boolean } }> {
     const adapter = resolvedAdapter ?? this.adapterFor(node.runtime);
     if (!adapter) return { ok: false, code: "successor_runtime_unsupported", message: noAdapter(node.runtime) };
 
@@ -523,12 +530,14 @@ export class SuccessorSessionLauncher {
     try {
       launch = await adapter.launchHarness(binding, staged
         ? { name: staged.canonicalSession }
-        : { name: tmuxSession, ...(forkSource ? { forkSource } : { freshInPlace: true }) });
+        : { name: tmuxSession, ...(forkSource ? { forkSource } : { freshInPlace: true,
+          ...(adapter instanceof CommunityHarnessRuntimeAdapter && adapter.firstInput() && firstInputText !== undefined ? { firstInputText } : {}) }) });
     } catch (err) {
       return { ok: false, code: "successor_launch_failed", message: `Successor harness launch threw: ${err instanceof Error ? err.message : String(err)}` };
     }
+    const passedInput = launch.firstInput ? { firstInput: launch.firstInput } : {};
     if (!launch.ok) {
-      return { ok: false, code: "successor_launch_failed", message: `Successor harness launch failed: ${launch.error}` };
+      return { ok: false, ...passedInput, code: "successor_launch_failed", message: `Successor harness launch failed: ${launch.error}` };
     }
 
     // Capture the launch-scraped resume token (never logged). Persisted by the
@@ -563,6 +572,7 @@ export class SuccessorSessionLauncher {
       return {
         ok: false,
         code: "successor_readiness_failed",
+        ...passedInput,
         message: `Successor readiness probe threw: ${err instanceof Error ? err.message : String(err)}`,
         launched: true,
         ...(resumeToken ? { resumeToken, resumeType } : {}),
@@ -574,6 +584,7 @@ export class SuccessorSessionLauncher {
       revokeRun();
       return {
         ok: false,
+        ...passedInput,
         code: isAttentionRequiredReadinessCode(readiness.code) ? "successor_attention_required" : "successor_not_ready",
         message: `Successor did not become a ready agent: ${readiness.reason ?? "readiness timeout"}`,
         launched: true,
@@ -583,7 +594,13 @@ export class SuccessorSessionLauncher {
       };
     }
 
-    return { ok: true, resumeToken, resumeType, ...(resumeProvenance ? { resumeProvenance } : {}), ...(launch.activityGrantId ? { activityGrantId: launch.activityGrantId } : {}), appliedLaunch: launch.appliedLaunch, ...launchedExecutable, ...(notes?.length ? { notes } : {}) };
+    return { ok: true, ...passedInput, resumeToken, resumeType, ...(resumeProvenance ? { resumeProvenance } : {}), ...(launch.activityGrantId ? { activityGrantId: launch.activityGrantId } : {}), appliedLaunch: launch.appliedLaunch, ...launchedExecutable, ...(notes?.length ? { notes } : {}) };
+  }
+
+  /** Use the installed community declaration; built-ins keep typed handover delivery. */
+  usesFirstInput(runtime: string | null): boolean {
+    const adapter = this.adapterFor(runtime);
+    return adapter instanceof CommunityHarnessRuntimeAdapter && adapter.firstInput();
   }
 
   /** A built-in runtime's adapter from the map; a community harness's from its installed preset. A handover of a seat with

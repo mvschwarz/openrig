@@ -245,7 +245,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   }
 
   // -- AC-1: token-safe default (the regression) --
-  it.each(["observed", "unknown"])("r2: AC-1 compact stays below full /2.8 with real %s observations on every row", async status => {
+  it.each(["observed", "unknown"])("r2: AC-1 compact stays below full /2.7 with real %s observations on every row", async status => {
     const originals = ALL_NODES.map(n => n.modelObservation);
     if (status === "unknown") for (const n of ALL_NODES) n.modelObservation = {
       status: "unknown", model: null, source: null, observedAt: null,
@@ -266,9 +266,11 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     // slice 13 fix 2: hostSelfId is one ruled scalar added to BOTH projections
     // (host attribution must ride the token-safe default — a merged roster
     // without it reads as authoritative), which moves the ratio without any
-    // heavy field returning. The real regression guard — heavy fields stay
+    // heavy field returning. Re-based /2.8 → /2.7 when compact gained the one
+    // decided `activity` word per row (the word rig ps and MCP show), again no
+    // heavy field. The real regression guard — heavy fields stay
     // omitted from compact — is asserted directly in AC-7.
-    expect(defaultOutput.length).toBeLessThan(fullOutput.length / 2.8);
+    expect(defaultOutput.length).toBeLessThan(fullOutput.length / 2.7);
     // Sanity: full output exists and is nontrivial
     expect(fullOutput.length).toBeGreaterThan(1000);
     } finally { ALL_NODES.forEach((n, i) => n.modelObservation = originals[i]!); }
@@ -523,8 +525,8 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(Array.isArray(full)).toBe(true);
     expect(compact.length).toBe(full.length);
 
-    // Compact is much smaller (re-based /3 → /2.8 with AC-1 — see its comment)
-    expect(compactLogs.join("").length).toBeLessThan(fullLogs.join("").length / 2.8);
+    // Compact is much smaller (re-based /3 → /2.8 → /2.7 with AC-1 — see its comment)
+    expect(compactLogs.join("").length).toBeLessThan(fullLogs.join("").length / 2.7);
 
     // Full preserves all fields; compact omits heavy ones
     expect(full[0].contextUsage).toBeDefined();
@@ -804,6 +806,43 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
       }
     } finally {
       RIG_A_NODES.splice(RIG_A_NODES.length - extra.length);
+    }
+  });
+
+  // Slice 60: Hermes was killed and its pane's shell lived on; the seat read "run" before and after. The daemon's
+  // agentLiveness shows it beside the unchanged lifecycle, and an ordinary seat's row stays as it was.
+  it("shows a running seat's agent as not verified beside its lifecycle, and leaves an ordinary seat alone", async () => {
+    const at = "2026-11-27T12:15:30.000Z";
+    const hermes = { ...makeFatNode("rig-a", "openrig-build", "ops.hermes"), runtime: "hermes", storedSessionStatus: "running",
+      identityVerdict: { verdict: "unconfirmed", reason: "process_identity_unconfirmed", observedAt: at, evidence: { observedCommand: "zsh" } },
+      agentLiveness: { state: "not_verified", reason: "shell_foreground", command: "zsh", observedAt: at } };
+    const ordinary = { ...makeFatNode("rig-a", "openrig-build", "ops.idle"), storedSessionStatus: "running",
+      identityVerdict: { verdict: "verified", reason: null, observedAt: at } };
+    RIG_A_NODES.push(...([hermes, ordinary] as unknown as typeof RIG_A_NODES));
+    try {
+      const run = async (...args: string[]) => (await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-build", ...args]);
+      })).logs.join("\n");
+      const row = (rows: Array<Record<string, any>>, id: string) => rows.find((r) => r.logicalId === id)!;
+      const compact = JSON.parse(await run("--json"));
+      expect(row(compact, "ops.hermes")).toMatchObject({ lifecycleState: "running",
+        agentLiveness: { state: "not_verified", reason: "shell_foreground", command: "zsh", observedAt: at } });
+      expect(row(compact, "ops.idle")).not.toHaveProperty("agentLiveness");
+      for (const view of [[], ["--full"]]) {
+        const out = await run(...view);
+        const lines = out.split("\n");
+        const hermesRow = lines.find((line) => line.includes("ops-hermes@openrig-build") && !line.startsWith("Liveness ("))!;
+        expect(hermesRow).toContain("run");
+        expect(hermesRow).toContain("agent not verified");
+        expect(out).toContain(`Liveness (ops-hermes@openrig-build): recorded running, agent not verified: the pane's foreground is zsh, `
+          + `not a verified hermes agent (identity check at ${at}). It may have exited to its shell, or run behind a wrapper; `
+          + "rig capture ops-hermes@openrig-build shows the pane.");
+        const idleRow = lines.find((line) => line.includes("ops-idle@openrig-build"))!;
+        expect(idleRow).not.toContain("agent not verified");
+        expect(out).not.toContain("Liveness (ops-idle@");
+      }
+    } finally {
+      RIG_A_NODES.splice(RIG_A_NODES.length - 2);
     }
   });
 

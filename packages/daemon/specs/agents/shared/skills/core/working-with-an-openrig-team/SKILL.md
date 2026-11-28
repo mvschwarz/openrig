@@ -15,12 +15,13 @@ behave; this skill is the loop around them.
 
 ## Check the connection first
 
-- Call `rig_whoami`. It names the seat this connection acts as. Every item you create is recorded as coming from that seat,
-  and the team's questions about your work come back to it.
-- If it has no seat, you can still hand the team work. In Claude Code, OpenRig gives that work a return address of its
-  own (`returnRoute` in the result), and the team's questions about it come there as tasks (below). Elsewhere it goes as
-  the unknown sender `rig_whoami` names, with no return address. Either way, tell the person the `qitemId` and follow it
-  with `rig_queue_show`. Recording the person's answers and listing your own work need a seat: offer to set one (the last
+- Call `rig_whoami`. It names the seat this connection acts as, if any. Every item you create is recorded as coming from
+  that seat.
+- In Claude Code, OpenRig gives the work you hand over a return address of this chat's own (`returnRoute` in the result),
+  with or without a seat, and the team's questions about it come there as tasks (below). Elsewhere they come back to the
+  seat.
+- If it has no seat, you can still hand the team work. Outside Claude Code it goes as the unknown sender `rig_whoami`
+  names, with no return address. Tell the person the `qitemId` and follow it with `rig_queue_show`. Recording the person's answers and listing your own work need a seat: offer to set one (the last
   section). In a shell, the `rig` command can act as that return address instead: put
   `OPENRIG_SESSION_NAME=<address>` in front of each `rig` command you run for this work (`rig queue ...`,
   `rig seat decide-permission ...`), so OpenRig records it as this chat's, not as someone outside a seat.
@@ -33,7 +34,8 @@ behave; this skill is the loop around them.
 
 - Use `rig_queue_create` with `destination` (the lead, or the seat the person chose) and `body`. Write the body for a
   capable colleague: the goal, why it matters, what done looks like, and where to look. Add a one-line `summary`.
-- With a seat, end the body with the reply route, because your seat has no terminal and `rig send` can't reach it:
+- With a seat and no address of this chat's own (no `returnRoute` in the result), end the body with the reply route,
+  because your seat has no terminal and `rig send` can't reach it:
 
   > To ask me anything, create a queue item to `<your seat>` (`rig queue create --destination <your seat> ...`), then
   > block this item on that new item's id (`rig queue block <this id> --on <question id>`), so my answer wakes you. I
@@ -50,7 +52,8 @@ behave; this skill is the loop around them.
   > unknown. If you hand this item on or give this work to another seat, copy this paragraph into the new item. When
   > you finish, put the outcome in this item's resolution, with what the latest review found, and any file in its
   > evidence ref.
-- With no seat but an address of its own (`returnRoute` in the result), end the body with the result route:
+- With an address of this chat's own (`returnRoute` in the result), with or without a seat, end the body with the result
+  route instead:
 
   > When you finish, send the result as a task to this item's return route (`rig queue show <this id>` names it):
   > `rig queue create --destination <that address> --summary "<the result in a line>" --body-file <file>`. Then
@@ -82,10 +85,9 @@ task, without anyone asking you to check.
 
 - When this chat hands work over with an address of its own, OpenRig records that address with a key for this chat.
   The hooks cover:
-  - `rig_queue_create` in Claude Code with no seat, where `returnRoute` `auto` is the default;
-  - `rig_queue_create` with `returnRoute` `auto` when this connection has a seat. Without it, the team's questions go
-    to the seat's own address, which the hooks don't watch: you find them only when you check (`rig_queue_list` with
-    `owned`);
+  - `rig_queue_create` in Claude Code, where `returnRoute` `auto` is the default, with or without a seat for this
+    connection. With `returnRoute` `self`, the team's questions go to the seat's own address, which the hooks don't
+    watch: you find them only when you check (`rig_queue_list` with `owned`);
   - `rig queue create --return-route auto` in the shell, in Claude Code or Codex.
 - Codex through this MCP server isn't covered yet: Codex may not give its MCP servers the session id the key comes
   from, so a `rig_queue_create` there goes without one, and nothing comes here by itself. In Codex, hand work over with
@@ -96,8 +98,9 @@ task, without anyone asking you to check.
   tasks. Claude Code wakes you with them when a turn ends. Codex gets them as a message queued for this chat.
 - Each one says it came from OpenRig's hook bridge and names its sender as OpenRig recorded it. It's a task like any
   other: show it to the person and record their words, as below.
-- A wake comes when your turn ends. Between wakes, list this chat's tasks yourself: `rig_queue_list` with `destination`
-  set to this chat's address. `owned` and `mine` need a seat, and `destination` doesn't.
+- A wake comes only when your turn ends, so while the team works, end your turn rather than watching its seats
+  (`rig_capture`) or waiting inside the turn. Between wakes, list this chat's tasks yourself: `rig_queue_list` with
+  `destination` set to this chat's address. `owned` and `mine` need a seat, and `destination` doesn't.
 - In Claude Code the key belongs to the app's process, not the chat: after `/clear`, the new chat still gets the
   earlier one's tasks, and a chat resumed in a new process (`claude --resume`) doesn't get its earlier tasks by itself,
   so check its address each turn.
@@ -106,15 +109,34 @@ task, without anyone asking you to check.
 
 ## The team's questions
 
-- Questions about your work come to your seat: `rig_queue_list` with `owned` lists them.
+- Questions about your work come to this chat's own address when the work has one (`rig_queue_list` with `destination`
+  set to it), else to your seat (`rig_queue_list` with `owned`).
 - Show the person the question and the team's draft, in their own words where the item gives them. Then ask for an answer.
-- Record only what the person actually tells you. Claim the item (`rig_queue_claim`), then close it with
-  `rig_queue_update`: `state` `done`, `closureReason` `no-follow-on`, and exactly what the person typed in `resolution`,
-  nothing else: no label such as "The person's answer:", no quotation marks, and no notes, paths or summaries of your own.
+- Record only what the person actually tells you, on the question's own task, never with `rig_send`: a message carries
+  no return address, so the work it starts loses this chat's route, and its seats' prompts then reach no one. Claim
+  the item (`rig_queue_claim`), then close it with `rig_queue_update`: `state` `done`, `closureReason` `no-follow-on`,
+  and exactly what the person typed in `resolution`, nothing else: no label such as "The person's answer:", no
+  quotation marks, and no notes, paths or summaries of your own. With no seat, these tools act as the address OpenRig
+  issued this conversation, for a question sent there. In a shell, close it the same way, as its address:
+  `OPENRIG_SESSION_NAME=<address> rig queue update <id> --state done --closure-reason no-follow-on --resolution '<their words>'`.
   If the person isn't there to answer, leave the item open and tell them it's waiting. Never choose an answer for them.
 - A question can be a seat's permission prompt that the operator or a team seat sent you: show it with the seat, the
   exact action and the choices it offers, and record the person's words the same way. The agent that sent it passes
   their answer to the seat.
+- A seat's own Claude Code prompt in work this chat handed over comes straight from that seat as its own ask
+  (`qitem-runner-permission-…`), within seconds, even when you saw the prompt first (in a capture, or an item that says
+  its owner needs input). Answer that ask, not the seat: show the person its exact action, then record their answer
+  with `rig_seat_decide_permission` (in a shell, `rig seat decide-permission`). A plain yes or no is the person's own
+  answer: pass it on exactly, with `relay` and their words in `personSaid`. It's recorded as relayed by this chat, and
+  unconfirmed, since OpenRig doesn't get it from them. For their words or a condition, judge
+  whether that exact action meets them, and give your `reason`. Before you decide one under a standing instruction
+  of theirs ("don't ask me about test runs"), read what the command touches, such as the files a test writes, and
+  check it against what they asked to be asked about: if it's on that list, ask them. It takes their answer for as
+  long as the prompt stays open; once it's answered in the seat's terminal, an answer here is too late. Don't type into the seat for it
+  (`rig send --dangerously-interact`): that answers it in the terminal, ends the ask, and needs the person's exception
+  for a terminal command. If the reply says it hasn't reached the seat's prompt, the seat's hook stopped reading the ask:
+  tell the person, and that prompt waits in the seat's terminal like one with no ask. Only a prompt with no ask (a choice menu, a Codex seat's prompt, a seat on
+  another machine) is answered in the seat, by whoever sent you the question about it.
 - Some questions go to a registered person directly, outside your seat. Those wait for them where they already answer
   the team, such as the OpenRig TUI or Slack. You can mention that they're waiting; answering them isn't yours.
 

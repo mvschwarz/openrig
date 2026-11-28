@@ -31,34 +31,22 @@ Pi 1.4.0 includes an opt-in selector at
 where that extension and native TUI are available. **Do not send `/tools` to an
 agent OpenRig drives over RPC**: that interface cannot operate the selector.
 
-For RPC seats, an optional [community-maintained helper][helper] provides
-read-only status and an explicit command that adds only named intended tools.
-It is maintained outside OpenRig, is not bundled, and this link is not a support
-claim. Loading it also registers the agent-callable `openrig_runtime_status` and
-`openrig_slots` tools; the latter reads a snapshot of the bound rig's agents and
-active queue items. It can add a prompt section when a guidance file is set.
-Review its [shared implementation][runtime] and
-[setup/capability limits][setup] before opting in through Pi's per-seat extension
-configuration. Keep the two helper files together; do not install the separate
-RepoStew application just to use the neutral bridge. Verify what the target
-session actually loaded after the supported activation path.
+For RPC seats, a community-maintained helper used to provide read-only status
+and a command that added only named intended tools. That helper is no longer
+available, and OpenRig doesn't bundle or replace it. If you load a different
+extension for this, review it yourself, opt in through Pi's per-seat extension
+configuration, and verify what the target session actually loaded after the
+supported activation path.
 
-With that helper already loaded, these are **Pi extension commands**, not new
-`rig` commands:
-
-```text
-/openrig-status
-/openrig-restore-tools read
-```
-
-For an agent OpenRig drives over RPC, send each extension command with
+For an agent OpenRig drives over RPC, send an extension's command with
 `rig send <agent> --raw "<command>"` so it arrives without a messaging envelope;
 the usual interactive-prompt guard still applies.
 
-The second command means that `read` is intended now. It does not restore every
-configured default. If `bash` was deliberately disabled, leave it disabled
-unless the operator explicitly intends to add it too. With no names, this helper
-refuses to change the selection.
+Whatever makes the change, add only the names that are intended now. Recovery
+doesn't mean restoring every configured default: if `bash` was deliberately
+disabled, leave it disabled unless the operator explicitly intends to add it
+too. If the seat has no way to change and verify the selection in place, report
+that capability gap, as the end of this page describes.
 
 ## Verify the recovery
 
@@ -78,7 +66,3 @@ after branch navigation or reload. If the runtime cannot support or verify this
 in place, report that capability gap and follow its supported replacement path
 with retained work. Do not manufacture a fresh conversation or claim that another
 harness has Pi's capabilities.
-
-[helper]: https://github.com/dajiaohuang/repostew/blob/adf9f36c23e27cf40cf8dd2dae887972a0dc776b/skill/integrations/pi-openrig.js
-[runtime]: https://github.com/dajiaohuang/repostew/blob/adf9f36c23e27cf40cf8dd2dae887972a0dc776b/skill/integrations/pi-runtime.js
-[setup]: https://github.com/dajiaohuang/repostew/blob/adf9f36c23e27cf40cf8dd2dae887972a0dc776b/skill/references/harnesses/pi.md

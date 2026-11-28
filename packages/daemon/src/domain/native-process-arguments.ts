@@ -183,32 +183,58 @@ export async function readNativeProcessArguments(requested: number[]): Promise<M
   return result;
 }
 
-/** Transient launch capture for an owned continuation. Never stored in a snapshot or diagnostic. */
-export async function readNativeProcessLaunch(pid: number): Promise<{ argv: string[]; env: Record<string, string> } | null> {
-  if (!Number.isInteger(pid) || pid <= 0 || pid > 2147483647) return null;
+export interface NativeProcessLaunch { argv: string[]; env: Record<string, string> }
+
+/** Bounded transient launch captures. One macOS process handles the batch; environments are never persisted. */
+export async function readNativeProcessLaunches(requested: number[]): Promise<Map<number, NativeProcessLaunch>> {
+  const pids = [...new Set(requested.filter(pid => Number.isInteger(pid) && pid > 0 && pid <= 2147483647))].slice(0, MAX_PIDS);
+  const result = new Map<number, NativeProcessLaunch>();
+  if (pids.length === 0) return result;
+  let entries: unknown;
   try {
     if (process.platform === "linux") {
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 2000);
       try {
-        const argv = await boundedLinuxCmdline(pid, controller.signal);
-        const chunks: Buffer[] = []; let length = 0;
-        for await (const chunk of createReadStream(`/proc/${pid}/environ`, { highWaterMark: 64 * 1024, signal: controller.signal })) {
-          length += chunk.length; if (length > MAX_BYTES) return null; chunks.push(chunk);
+        const found: Array<[number, NativeProcessLaunch | null]> = [];
+        for (let start = 0; start < pids.length; start += 16) {
+          found.push(...await Promise.all(pids.slice(start, start + 16).map(async (pid): Promise<[number, NativeProcessLaunch | null]> => {
+            try {
+              const argv = await boundedLinuxCmdline(pid, controller.signal);
+              const chunks: Buffer[] = []; let length = 0;
+              for await (const chunk of createReadStream(`/proc/${pid}/environ`, { highWaterMark: 64 * 1024, signal: controller.signal })) {
+                length += chunk.length; if (length > MAX_BYTES) return [pid, null]; chunks.push(chunk);
+              }
+              const env = parseLinuxProcessArguments(Buffer.concat(chunks, length));
+              return [pid, argv && env ? { argv, env: Object.fromEntries(env.filter(e => e.indexOf("=") > 0).map(e => [e.slice(0, e.indexOf("=")), e.slice(e.indexOf("=") + 1)])) } : null];
+            } catch { return [pid, null]; }
+          })));
+          if (controller.signal.aborted) break;
         }
-        const entries = parseLinuxProcessArguments(Buffer.concat(chunks, length));
-        return argv && entries ? { argv, env: Object.fromEntries(entries.filter(e => e.indexOf("=") > 0).map(e => [e.slice(0, e.indexOf("=")), e.slice(e.indexOf("=") + 1)])) } : null;
+        entries = found;
       } finally { clearTimeout(timer); }
-    }
-    if (process.platform === "darwin") {
+    } else if (process.platform === "darwin") {
       const size = Buffer.alloc(8); size.writeBigUInt64LE(BigInt(MAX_BYTES));
-      const mib = Buffer.alloc(12); [1, 49, pid].forEach((value, index) => mib.writeInt32LE(value, index * 4));
-      const { stdout } = await execFileAsync("/usr/bin/osascript", ["-l", "JavaScript", "-e", MAC_ARGUMENTS,
-        JSON.stringify({ pid, mib: mib.toString("base64"), size: size.toString("base64"), environment: true })],
+      const requests = pids.map(pid => {
+        const mib = Buffer.alloc(12); [1, 49, pid].forEach((value, index) => mib.writeInt32LE(value, index * 4));
+        return JSON.stringify({ pid, mib: mib.toString("base64"), size: size.toString("base64"), environment: true });
+      });
+      const { stdout } = await execFileAsync("/usr/bin/osascript", ["-l", "JavaScript", "-e", MAC_ARGUMENTS, ...requests],
         { encoding: "utf8", timeout: 2000, maxBuffer: MAX_OUTPUT });
-      const value = JSON.parse(stdout)?.[0]?.[1];
-      return value && Array.isArray(value.argv) && value.argv.every((a: unknown) => typeof a === "string")
-        && value.env && typeof value.env === "object" && Object.values(value.env).every(v => typeof v === "string") ? value : null;
+      entries = JSON.parse(stdout);
+    } else return result;
+    if (!Array.isArray(entries)) return result;
+    const selected = new Set(pids);
+    for (const entry of entries) {
+      if (!Array.isArray(entry) || !selected.has(entry[0])) continue;
+      const value = entry[1];
+      if (value && Array.isArray(value.argv) && value.argv.every((a: unknown) => typeof a === "string")
+        && value.env && typeof value.env === "object" && Object.values(value.env).every(v => typeof v === "string")) result.set(entry[0], value);
     }
   } catch { /* Unknown capture: the caller reports it and uses ordinary launch resolution. */ }
-  return null;
+  return result;
+}
+
+/** Transient launch capture for an owned continuation. Never stored in a snapshot or diagnostic. */
+export async function readNativeProcessLaunch(pid: number): Promise<NativeProcessLaunch | null> {
+  return (await readNativeProcessLaunches([pid])).get(pid) ?? null;
 }

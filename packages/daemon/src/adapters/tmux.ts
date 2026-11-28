@@ -15,6 +15,24 @@ import type { TmuxControlExec } from "./tmux-control.js";
 import { tmuxOnDaemonServer } from "./tmux-server.js";
 import { TMUX_SERVER_LIMIT_PREFIX, TMUX_SERVER_NO_SESSION_BUS, TMUX_SERVER_SESSION_BUS } from "../tmux-server-start.js";
 import { SEAT_SCOPE_SLICE, rigSeatSlice } from "./seat-slice.js";
+import { readProcessChildrenNow, readProcessTableCensusNow } from "../domain/process-table.js";
+
+export interface StandbyProcesses {
+  readonly pid: number;
+  readonly startedAt: string;
+  readonly group: number;
+  readonly rootGroup: number;
+  readonly members: ReadonlyMap<number, string>;
+}
+
+export interface StandbySignalWitness {
+  readonly target: { session: string; pane: string; nodeId: string };
+  readonly identity: string;
+  readonly processes: StandbyProcesses;
+  /** Every pre-signal observation this stop accepted, earliest first; the exit check reads all of them so a runner
+   *  first seen in a later look is still required to be gone. */
+  readonly observations?: StandbyProcesses[];
+}
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
@@ -2690,6 +2708,23 @@ export class TmuxAdapter {
       + `\`${tmuxOnDaemonServer()} kill-session -t ${shellQuote(`=${name}`)}\` and run the command again.` };
   }
 
+  /** A standby witness names the same pane on the same server, not merely a reusable pane id. */
+  async standbyPaneIdentity(target: { session: string; pane: string; nodeId: string }, dead: boolean): Promise<string | null> {
+    const { session, pane, nodeId } = target;
+    try {
+      const out = (await this.run(["tmux", "display-message", "-p", "-t", exactTarget(pane, "pane"),
+        "#{session_id}|#{pid}|#{start_time}|#{pane_id}|#{pane_dead}|#{session_name}|#{session_windows}|#{window_panes}"])).trim();
+      const [id, pid, start, foundPane, ended, name, windows, panes] = out.split("|");
+      if (!id || !/^\$\d+$/.test(id) || !pid || !/^\d+$/.test(pid) || !start || !/^\d+$/.test(start)
+        || foundPane !== pane || ended !== (dead ? "1" : "0") || name !== session || windows !== "1" || panes !== "1"
+        || await this.unprovenSeatSession(session, id, nodeId)) return null;
+      return `${id}|${pid}|${start}|${pane}`;
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      return null;
+    }
+  }
+
   /** Keep effect checks outside command catches so a selection refusal retains its code and phase. */
   private async killSessionUnchecked(name: string, beforeEffect?: () => void | Promise<void>, phase?: (value: StopPhase) => void,
     server?: { pid: string; start: string }): Promise<TmuxResult> {
@@ -2948,8 +2983,9 @@ export class TmuxAdapter {
    *  answers false, and the signal goes with this method's own checks.
    *  Stays on the shell-string path deliberately: this is a Unix `kill`,
    *  not a multiplexer command (Windows needs taskkill — named follow-up). */
-  async signalPaneProcess(paneId: string, signal: "TERM" | "HUP" | "KILL", paneChanged?: (pane: string) => Promise<boolean>): Promise<TmuxResult> {
-    return this.guardedInput(paneId, (pane, beforeWrite) => this.signalPaneProcessUnchecked(pane, signal, beforeWrite, paneChanged));
+  async signalPaneProcess(paneId: string, signal: "TERM" | "HUP" | "KILL",
+    check?: ((pane: string) => Promise<boolean>) | StandbySignalWitness): Promise<TmuxResult> {
+    return this.guardedInput(paneId, (pane, beforeWrite) => this.signalPaneProcessUnchecked(pane, signal, beforeWrite, check));
   }
 
   /** #3901: signal one process in a seat's pane (its agent, which in a shell-backed pane runs under the shell), through
@@ -2968,20 +3004,86 @@ export class TmuxAdapter {
   }
 
   private async signalPaneProcessUnchecked(paneId: string, signal: "TERM" | "HUP" | "KILL", beforeWrite: () => void,
-    paneChanged?: (pane: string) => Promise<boolean>): Promise<TmuxResult> {
+    check?: ((pane: string) => Promise<boolean>) | StandbySignalWitness): Promise<TmuxResult> {
     const pid = await this.getPanePid(paneId);
     if (pid == null) {
       return { ok: false, code: "pane_pid_unavailable", message: `Could not resolve the pane pid for "${paneId}".` };
     }
-    if (paneChanged && await paneChanged(paneId)) {
+    const standby = typeof check === "object" ? check : undefined;
+    const current = standby ? await this.observeStandbyProcesses(paneId) : null;
+    if (standby && (!current || current.pid !== pid || pid !== standby.processes.pid || current.startedAt !== standby.processes.startedAt
+      || current.rootGroup !== standby.processes.rootGroup
+      || (current.group !== standby.processes.group && current.group !== current.rootGroup))) {
+      return { ok: false, code: "standby_process_unconfirmed", message: "The selected standby runner could not be re-verified." };
+    }
+    const paneChanged = standby ? paneId !== standby.target.pane || await this.standbyPaneIdentity(standby.target, false) !== standby.identity
+      : typeof check === "function" && await check(paneId);
+    if (paneChanged) {
       return { ok: false, code: "guard_target_changed", message: `Pane "${paneId}" is no longer in the tmux session and server it was first read in; nothing was signalled.` };
     }
+    // This observation was accepted by the checks above and is what the signal uses: keep it for the exit check too.
+    if (current && standby?.observations && !standby.observations.includes(current)) standby.observations.push(current);
     try {
       beforeWrite();
-      await this.exec(`kill -${signal} ${pid}`);
+      if (current && signal !== "HUP") await this.signalForegroundGroup(current.group, signal);
+      if (!current || current.group !== current.rootGroup || signal === "HUP") await this.exec(`kill -${signal} ${pid}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
+    }
+  }
+
+  async standbyProcessCensus(panePid?: number): ReturnType<typeof readProcessTableCensusNow> {
+    const census = await readProcessTableCensusNow();
+    if (panePid !== undefined) {
+      const children = await readProcessChildrenNow(panePid);
+      if (children?.some(pid => !census.rows.some(row => row.pid === pid && row.ppid === panePid))) {
+        throw new Error("The pane's child processes could not all be observed.");
+      }
+    }
+    return census;
+  }
+
+  async observeStandbyProcesses(paneId: string): Promise<StandbyProcesses | null> {
+    const pid = await this.getPanePid(paneId);
+    if (pid === null || pid <= 1) return null;
+    const census = await this.standbyProcessCensus(pid).catch(() => null);
+    const root = census?.rows.find(row => row.pid === pid);
+    if (!census || census.permissionHiddenPids.length > 0 || !root || root.state === "Z"
+      || !Number.isSafeInteger(root.tpgid) || root.tpgid <= 1) return null;
+    const foreground = census.rows.filter(row => row.pgid === root.tpgid && row.state !== "Z");
+    if (!foreground.some(row => row.tpgid === root.tpgid)) return null;
+    const children = new Map<number, typeof census.rows>();
+    for (const row of census.rows) {
+      const siblings = children.get(row.ppid);
+      if (siblings) siblings.push(row);
+      else children.set(row.ppid, [row]);
+    }
+    // Follow PPIDs before signalling; after the shell exits only PID + start time still identifies an orphaned runner.
+    const members = new Map<number, string>();
+    const pending = [root, ...foreground];
+    for (const row of pending) {
+      if (members.has(row.pid)) continue;
+      members.set(row.pid, row.startedAt);
+      for (const child of children.get(row.pid) ?? []) pending.push(child);
+    }
+    return { pid, startedAt: root.startedAt, group: root.tpgid, rootGroup: root.pgid, members };
+  }
+
+  async standbyProcessesGone(processes: StandbyProcesses): Promise<boolean> {
+    const census = await this.standbyProcessCensus().catch(() => null);
+    return census !== null && census.permissionHiddenPids.length === 0 && !census.rows.some(row => row.state !== "Z"
+      && (row.pgid === processes.group || processes.members.get(row.pid) === row.startedAt
+        || (row.pid === processes.pid && row.startedAt === processes.startedAt)));
+  }
+
+  private async signalForegroundGroup(group: number, signal: "TERM" | "KILL"): Promise<void> {
+    try {
+      await this.exec(`kill -${signal} -${group}`);
+    } catch (err) {
+      // A group already gone (the graceful TERM took the runner with it) is not a failure; any other refusal is,
+      // since a runner may still be in it.
+      if (!/no such process/i.test(err instanceof Error ? err.message : String(err))) throw err;
     }
   }
 

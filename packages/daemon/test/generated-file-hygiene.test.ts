@@ -32,7 +32,7 @@ describe("generated file Git hygiene", () => {
     git(repo, "init", "-q");
     git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "initial");
   });
-  afterEach(() => { vi.restoreAllMocks(); fs.rmSync(root, { recursive: true, force: true }); });
+  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); fs.rmSync(root, { recursive: true, force: true }); });
   function write(relative: string, content = "User file\n", base = repo): string {
     const file = path.join(base, relative); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, content); return file;
   }
@@ -49,6 +49,104 @@ describe("generated file Git hygiene", () => {
     expect(result.failed).toEqual([]);
     return result;
   }
+
+  function legacyGit(status = 129) {
+    const realGit = execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const bin = path.join(root, "legacy-bin"); fs.mkdirSync(bin);
+    const calls = path.join(bin, "calls");
+    fs.writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const cp = require('node:child_process'), fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n');
+const listing = args[2] === 'worktree' && args[3] === 'list';
+if (listing && args.includes('-z')) {
+  process.stderr.write("error: unknown switch " + String.fromCharCode(96) + "z'\\n");
+  process.exit(${status});
+}
+try {
+  const output = cp.execFileSync(${JSON.stringify(realGit)}, listing ? [...args, '-z'] : args, { input: fs.readFileSync(0) });
+  // Git 2.34.1 prints worktree paths verbatim, including embedded newlines.
+  process.stdout.write(listing ? output.toString('utf8').replace(/\\0/g, '\\n') : output);
+} catch (e) { process.stderr.write(e.stderr || ''); process.exit(e.status || 1); }
+`, { mode: 0o755 });
+    vi.stubEnv("PATH", bin + path.delimiter + process.env.PATH);
+    return () => fs.readFileSync(calls, "utf8").trimEnd().split("\n").map(line => JSON.parse(line) as string[]);
+  }
+
+  it.each(["openrig-core", "shared:openrig-core"])("excludes %s without a skip warning when Git refuses worktree list -z", effectiveId => {
+    const name = `.codex/plugins/${effectiveId}/payload.txt`;
+    const file = write(name);
+    const calls = legacyGit();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(excludeNewGeneratedFiles(repo, [file])).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+    expect(fs.readFileSync(excludePath(repo), "utf8")).toContain(`/${name}\n`);
+    expect(git(repo, "status", "--porcelain", "-uall")).toBe("");
+    expect(calls().filter(args => args[2] === "worktree").map(args => args.slice(2)))
+      .toEqual([["worktree", "list", "--porcelain", "-z"], ["worktree", "list", "--porcelain"]]);
+  });
+
+  it("preserves sibling conflicts through legacy porcelain with spaces, quotes, backslashes and Unicode", () => {
+    const linked = path.join(root, 'linked ü "quote" \\ tab\t');
+    git(repo, "worktree", "add", "-q", "-b", "linked", linked);
+    const name = ".codex/plugins/openrig-core/payload.txt";
+    write(name, "User", linked);
+    const file = write(name);
+    const before = fs.readFileSync(excludePath(repo));
+    legacyGit();
+    expect(excludeNewGeneratedFiles(repo, [file])).toEqual([expect.stringContaining("already exists in worktree")]);
+    expect(fs.readFileSync(excludePath(repo))).toEqual(before);
+    expect(git(linked, "status", "--porcelain", "-uall")).toContain(name);
+  });
+
+  it.each(["newline", "record", "bare"])("leaves exclusions unchanged for an ambiguous legacy %s path", shape => {
+    const linked = shape === "newline" ? path.join(root, "linked\ncontinuation")
+      : shape === "bare" ? path.join(repo, ".git\nbare")
+      : `${repo}\nHEAD ${git(repo, "rev-parse", "HEAD").trim()}\ndetached`;
+    git(repo, "worktree", "add", "-q", "-b", "linked", linked);
+    const name = ".codex/plugins/openrig-core/payload.txt";
+    write(name, "User", linked);
+    const file = write(name);
+    const before = fs.readFileSync(excludePath(repo));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    legacyGit();
+    expect(excludeNewGeneratedFiles(repo, [file]).join(" ")).toContain("generated_file_exclude_skipped");
+    expect(warn).toHaveBeenCalled();
+    expect(fs.readFileSync(excludePath(repo))).toEqual(before);
+    expect(fs.readFileSync(file, "utf8")).toBe("User file\n");
+    expect(git(linked, "status", "--porcelain", "-uall")).toContain(name);
+  });
+
+  it("supports a bare repository with linked worktrees on legacy Git", () => {
+    const bare = path.join(root, "bare.git"); git(root, "clone", "--bare", "-q", repo, bare);
+    const linked = path.join(root, "linked"); git(bare, "worktree", "add", "-q", "-b", "linked", linked);
+    const file = write(".codex/plugins/openrig-core/payload.txt", "Managed", linked);
+    legacyGit();
+    expect(excludeNewGeneratedFiles(linked, [file])).toEqual([]);
+    expect(fs.readFileSync(excludePath(linked), "utf8")).toContain("/.codex/plugins/openrig-core/payload.txt\n");
+    expect(git(linked, "status", "--porcelain", "-uall")).toBe("");
+  });
+
+  it("does not fall back for other Git failures", () => {
+    const file = write(".codex/plugins/openrig-core/payload.txt");
+    const before = fs.readFileSync(excludePath(repo));
+    const calls = legacyGit(1);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(excludeNewGeneratedFiles(repo, [file]).join(" ")).toContain("generated_file_exclude_skipped");
+    expect(fs.readFileSync(excludePath(repo))).toEqual(before);
+    expect(calls().filter(args => args[2] === "worktree")).toHaveLength(1);
+  });
+
+  it("retains NUL-delimited sibling paths on modern Git", () => {
+    const linked = path.join(root, "linked\ncontinuation");
+    git(repo, "worktree", "add", "-q", "-b", "linked", linked);
+    const name = ".codex/plugins/openrig-core/payload.txt";
+    write(name, "User", linked);
+    const file = write(name);
+    const before = fs.readFileSync(excludePath(repo));
+    expect(excludeNewGeneratedFiles(repo, [file])).toEqual([expect.stringContaining("already exists in worktree")]);
+    expect(fs.readFileSync(excludePath(repo))).toEqual(before);
+  });
 
   it("warns about newly generated guidance without hiding it", async () => {
     const source = write("guidance.md", "Managed guidance", root);

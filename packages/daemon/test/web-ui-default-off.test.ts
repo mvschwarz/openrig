@@ -1,6 +1,5 @@
-// The web UI and its terminal WebSocket are off unless `ui.enabled` is true. Off covers the UI's pages, assets and
-// SPA routes and the production WebSocket registration; every /api route, /healthz and the HTTP terminal routes the
-// CLI and TUI use answer exactly as they do with the UI on.
+// ui.enabled controls pages, assets and SPA routes. Terminal API WebSockets remain available with the same
+// authentication and browser boundary when the UI is off.
 import { describe, it, expect, afterEach } from "vitest";
 import http from "node:http";
 import fs from "node:fs";
@@ -124,15 +123,16 @@ describe("web UI default off (ui.enabled)", () => {
     }
   });
 
-  it("registers the production terminal WebSocket only when enabled; HTTP terminal auth is unchanged", async () => {
+  it("registers the production terminal WebSocket with the UI off or on; HTTP terminal auth is unchanged", async () => {
     const offPort = await listen(fixture({ terminalBearerToken: TOKEN }));
     const onPort = await listen(fixture({ terminalBearerToken: TOKEN, webUiEnabled: true }));
 
     const offUpgrade = await request(offPort, `/api/terminal/seat-1?token=${TOKEN}`, UPGRADE);
-    expect(offUpgrade.upgraded).toBe(false);
-    expect(offUpgrade.status).toBe(404);
+    expect(offUpgrade.upgraded).toBe(true);
+    expect(offUpgrade.status).toBe(101);
     const onUpgrade = await request(onPort, `/api/terminal/seat-1?token=${TOKEN}`, UPGRADE);
-    expect(onUpgrade.status, onUpgrade.body).not.toBe(404);
+    expect(onUpgrade.upgraded).toBe(true);
+    expect(onUpgrade.status).toBe(101);
     // A browser upgrade (own-UI Origin) is refused by the /api browser boundary while the UI is off.
     const offBrowser = await request(offPort, `/api/terminal/seat-1?token=${TOKEN}`, { ...UPGRADE, Origin: `http://127.0.0.1:${offPort}` });
     expect(offBrowser.upgraded).toBe(false);
@@ -149,5 +149,38 @@ describe("web UI default off (ui.enabled)", () => {
       expect(a.status, `${path} ${JSON.stringify(headers)}`).toBe(b.status);
     }
     expect((await request(offPort, "/api/terminal/views")).status).toBe(401);
+  });
+
+  it.each([false, true])("keeps terminal bearer and browser checks with ui.enabled=%s", async (webUiEnabled) => {
+    const previous = process.env.OPENRIG_ALLOWED_ORIGINS;
+    try {
+      process.env.OPENRIG_ALLOWED_ORIGINS = "https://terminal.example.test";
+      const port = await listen(fixture({ terminalBearerToken: TOKEN, webUiEnabled }));
+      const path = "/api/terminal/lead%40fixture";
+      for (const [label, suffix, headers, expected] of [
+        ["header", "", { Authorization: `Bearer ${TOKEN}` }, 101],
+        ["query", `?token=${TOKEN}`, {}, 101],
+        ["missing", "", {}, 401],
+        ["wrong", "", { Authorization: "Bearer incorrect-fixture-value" }, 401],
+        ["unlisted origin", "", { Authorization: `Bearer ${TOKEN}`, Origin: "https://unlisted.example.test" }, 403],
+        ["allowed origin", "", { Authorization: `Bearer ${TOKEN}`, Origin: "https://terminal.example.test" }, 101],
+        ["own origin", "", { Authorization: `Bearer ${TOKEN}`, Origin: `http://127.0.0.1:${port}` }, webUiEnabled ? 101 : 403],
+        ["header host waiver", "", { Authorization: `Bearer ${TOKEN}`, Host: "unlisted.example.test" }, 101],
+        ["query host", `?token=${TOKEN}`, { Host: "unlisted.example.test" }, 403],
+      ] as const) {
+        const result = await request(port, path + suffix, { ...UPGRADE, ...headers });
+        expect(result.status, label).toBe(expected);
+        expect(result.upgraded, label).toBe(expected === 101);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.OPENRIG_ALLOWED_ORIGINS;
+      else process.env.OPENRIG_ALLOWED_ORIGINS = previous;
+    }
+  });
+
+  it("keeps the trusted no-token terminal posture when the web UI is off", async () => {
+    const port = await listen(fixture({ terminalBearerToken: null }));
+    expect((await request(port, "/api/terminal/lead%40fixture", UPGRADE)).status).toBe(101);
+    expect((await request(port, "/api/terminal/lead%40fixture", { ...UPGRADE, Host: "unlisted.example.test" })).status).toBe(403);
   });
 });

@@ -635,6 +635,10 @@ export const RESTORE_UPTAKE_WAIT_MS_DEFAULT = 30 * 60_000;
 /** This daemon process. A record this process wrote is its own state, never something to recover. */
 const DAEMON_PROCESS_ID = randomUUID();
 
+/** Ended automatic attempts, for one occupant, before its preparation is reported (#2799). The same run is the positive
+ *  evidence that the seat can't run its own managed recovery (`recoveryInability`). */
+export const PREPARATION_FAILURE_REPORT_AFTER = 3;
+
 export interface PreparationFailure {
   sessionName: string;
   occupantGeneration: string;
@@ -644,13 +648,21 @@ export interface PreparationFailure {
   endedAttempts: number;
   reason: string;
   inputBox?: PreparationState["inputBox"];
+  /** The context sample the poll that counted the attempt read: the used percentage and when it was taken. */
+  context?: { usedPercentage: number | null; sampledAt: string | null };
+  /** The latest attempt's preparation request was delivered and its map never completed; unset when it sent nothing. */
+  delivered?: true;
 }
+/** A preparation notice nobody could receive: no recovery recipient resolved, and OpenRig invents none. */
+export interface PreparationNoticeUnaddressed { unaddressed: string }
 interface PreparationFailureRun {
   occupantGeneration: string;
   sessionId: string | null;
   endedAttempts: number;
   lastAttemptId: string;
   reportedAttempts?: number;
+  /** Why its notice isn't addressed yet, while no recovery recipient resolves; later polls try again. */
+  unaddressed?: string;
 }
 
 interface CompactionRecord {
@@ -821,7 +833,10 @@ export class ClaudeCompactionEnforcer {
     saturationBoundPercentage: number;
   }) => Promise<void> | void;
 
-  private readonly onPreparationFailure?: (failure: PreparationFailure) => Promise<void>;
+  private readonly onPreparationFailure?: (failure: PreparationFailure) => Promise<void | PreparationNoticeUnaddressed>;
+  private readonly onHeldNoticesRecheck?: (sessionName: string) => Promise<void> | void;
+  /** Whether each seat read unable at its last held-notice re-check; a seat not polled since this daemon started is absent. */
+  private readonly heldNoticesUnable = new Map<string, boolean>();
   private readonly onRestoreDeliveryFailure?: (failure: RestoreDeliveryFailure) => Promise<void>;
   private readonly onRestoreDeliveryComplete?: (receipt: RestoreDeliveryFailure) => Promise<void>;
   private readonly onCompactionDebtEnded?: (ended: CompactionDebtEnded) => Promise<void> | void;
@@ -831,7 +846,10 @@ export class ClaudeCompactionEnforcer {
     settingsStore: SettingsStore,
     sessionTransport: SessionTransport,
     opts?: {
-      onPreparationFailure?: (failure: PreparationFailure) => Promise<void>;
+      /** Resolves with `unaddressed` when no recovery recipient resolves: the run records why, and later polls try again. */
+      onPreparationFailure?: (failure: PreparationFailure) => Promise<void | PreparationNoticeUnaddressed>;
+      /** Re-check the compaction notices a seat holds against its current recovery capacity (`recoveryInability`). */
+      onHeldNoticesRecheck?: (sessionName: string) => Promise<void> | void;
       onRestoreDeliveryFailure?: (failure: RestoreDeliveryFailure) => Promise<void>;
       /** All owed stages landed; independent of the optional post-restore usage sample. */
       onRestoreDeliveryComplete?: (receipt: RestoreDeliveryFailure) => Promise<void>;
@@ -873,6 +891,7 @@ export class ClaudeCompactionEnforcer {
     this.onCompactionDebtEnded = opts?.onCompactionDebtEnded;
     this.restoreUptakeWaitMs = opts?.restoreUptakeWaitMs ?? RESTORE_UPTAKE_WAIT_MS_DEFAULT;
     this.onPreparationFailure = opts?.onPreparationFailure;
+    this.onHeldNoticesRecheck = opts?.onHeldNoticesRecheck;
     this.terminalPolicies = opts?.terminalPolicies;
     this.settingsStore = settingsStore;
     this.sessionTransport = sessionTransport;
@@ -904,6 +923,9 @@ export class ClaudeCompactionEnforcer {
     this.reconcilePreparations();
     this.checkRestoreUptake(input.sessionName);
     const gated = await this.endedAttemptGate(input);
+    // Every sampled poll of a Claude seat, the gate's too: a seat at its context wall may wait at the gate on every poll.
+    // An unsampled poll re-checks in drainPendingPreparedCompact.
+    if (input.runtime === "claude-code" && input.usedPercentage != null) await this.recheckHeldNotices(input.sessionName);
     if (gated) return gated;
     return this.withDeliveryGuard(input, () => this.maybeAutoCompactUnchecked(input));
   }
@@ -918,6 +940,12 @@ export class ClaudeCompactionEnforcer {
     const session = input.sessionName;
     if (input.runtime !== "claude-code" || input.usedPercentage == null) return null;
     this.recoverSeat(input);
+    // The gate holds a fresh request, not the record of the one that ended: count it now, so a seat that doesn't read idle
+    // again still opens its preparation notice (sends nothing; the guarded poll's own count is then a no-op).
+    try {
+      const policy = this.settingsStore.resolveClaudeCompactionPolicy();
+      if (isValidThresholdPercent(policy.thresholdPercent)) await this.noteEndedPreparation(input, policy);
+    } catch { /* the guarded poll counts it */ }
     const ended = this.lastEnded.get(session);
     if (!ended) return null;
     const live = this.liveGeneration(session);
@@ -1077,8 +1105,13 @@ export class ClaudeCompactionEnforcer {
     this.recoverSeat(input);
     this.reconcilePreparations();
     this.checkRestoreUptake(input.sessionName);
-    // #3389: this runs every poll for a seat with no fresh sample, the one that owes a late report's sequence.
-    if (input.runtime === "claude-code") this.reseedIfOwed(input.sessionName);
+    if (input.runtime === "claude-code") {
+      // #3389: this runs every poll for a seat with no fresh sample, the one that owes a late report's sequence.
+      this.reseedIfOwed(input.sessionName);
+      // The held-notice re-check of a sampled poll, on the retained record: a seat at its context wall may take no turn,
+      // so its sample goes stale while it still can't act.
+      await this.recheckHeldNotices(input.sessionName);
+    }
     const attempt = this.pendingPreCompactPrep.get(input.sessionName);
     if (input.runtime !== "claude-code" || attempt?.mode !== "automatic" || attempt.status !== "waiting"
       || attempt.delivery === "pending") return { triggered: false, reason: "no_pending_stage" };
@@ -2400,15 +2433,65 @@ export class ClaudeCompactionEnforcer {
     }
   }
 
+  /** Positive evidence that this seat can't run its own managed recovery now, for a recovery notice choosing who can act:
+   *  its current occupant's automatic preparation has ended without /compact at least PREPARATION_FAILURE_REPORT_AFTER
+   *  times while its usage stayed above the threshold (sent nothing, or its map never completed), the run that opens its
+   *  preparation notice. The run clears when usage falls below the threshold, on a manual attempt or a cancel, a held map,
+   *  and with the occupant. Null when OpenRig holds no such record, including when it can't tell (no record read yet, or
+   *  the live occupant unknown): unknown is not inability. */
+  recoveryInability(session: string): string | null {
+    const r = this.records.get(session)?.record;
+    const run = r?.preparationFailures;
+    if (!r || !run || run.endedAttempts < PREPARATION_FAILURE_REPORT_AFTER) return null;
+    const generation = this.liveGeneration(session);
+    if (generation === null || run.occupantGeneration !== generation) return null;
+    return `its own managed compaction ended ${run.endedAttempts} automatic attempts without /compact while its context stayed above the compaction threshold (latest attempt ${run.lastAttemptId})`;
+  }
+
+  /** The seat's own preparation notice while its run stands (`recoveryInability`), for `rig compact --state`: opened, not
+   *  opened yet, or not addressed because no recovery recipient resolves (none is invented; later polls try again). */
+  getPreparationNotice(session: string): { status: "opened" | "not_opened_yet" | "not_addressed"; failure: string; detail?: string } | null {
+    const failure = this.recoveryInability(session);
+    const run = this.records.get(session)?.record.preparationFailures;
+    if (!failure || !run) return null;
+    if (run.unaddressed) return { status: "not_addressed", failure, detail: run.unaddressed };
+    return { status: run.reportedAttempts === run.endedAttempts ? "opened" : "not_opened_yet", failure };
+  }
+
+  /** D3 follow-through: the compaction notices a seat holds are re-checked on its first poll after a daemon start, on every
+   *  poll while OpenRig records that it can't act (so a capable recipient chosen since then takes them), and once when it
+   *  can act again (so the ones it kept stop saying nobody capable holds them). It rides the seat's existing poll, with a
+   *  fresh usage sample (`maybeAutoCompact`) or without one (`drainPendingPreparedCompact`). */
+  private async recheckHeldNotices(session: string): Promise<void> {
+    if (!this.onHeldNoticesRecheck) return;
+    const unable = this.recoveryInability(session) !== null;
+    if (!unable && this.heldNoticesUnable.get(session) === false) return;
+    try {
+      await this.onHeldNoticesRecheck(session);
+      this.heldNoticesUnable.set(session, unable);
+    } catch (error) {
+      console.warn("[compaction] held-notice re-check failed; the next poll tries again", { sessionName: session,
+        errorClass: error instanceof Error ? error.name : typeof error });
+    }
+  }
+
   /** Count ended attempts, never individual send calls. The current attempt record carries the run across restarts. */
   private async noteEndedPreparation(input: EnforcerInput, policy: ClaudeCompactionPolicy): Promise<void> {
     const current = this.records.get(input.sessionName);
     if (!current) return;
     const r = current.record, generation = this.liveGeneration(input.sessionName);
+    // #2799 counted only attempts that sent nothing. A delivered request whose map never completed (preparation_incomplete)
+    // is the context wall itself, so it counts too: a sent command is not recovery. A delivered attempt's other endings, an
+    // uncertain send, a held map and the stops below interrupt the run; a request still in flight or waiting for its map
+    // decides nothing yet. An attempt that ended while its send was still pending (stopped during the send, its result
+    // never recorded, as across a daemon stop) has an unknown delivery, so it interrupts like an uncertain send.
+    const ended = r.phase === "ended";
+    const delivery = r.delivery === "not_sent" || (r.delivery === "pending" && !ended) ? "open"
+      : r.delivery === "delivered" && (!ended || r.reason === "preparation_incomplete") ? "open" : "interrupted";
     const interrupted = this.pendingPreCompactPrep.get(input.sessionName)?.cancelled || !policy.enabled || input.usedPercentage == null || input.usedPercentage < policy.thresholdPercent
       || r.mode !== "automatic" || generation === null || generation !== r.occupantGeneration
       || (r.sessionId && input.sessionId && r.sessionId !== input.sessionId)
-      || r.delivery !== "not_sent" || r.belowSince !== undefined || r.compactSending || r.uncertainCompact
+      || delivery === "interrupted" || r.prepared || r.belowSince !== undefined || r.compactSending || r.uncertainCompact
       || ["preparation_cancelled", "preparation_replaced", "stale_generation", "disabled", "daemon_restarted",
         "below_threshold_while_prepared", "prepared_map_stale", "occupant_generation_unavailable"].includes(r.reason ?? "");
     if (interrupted) {
@@ -2426,14 +2509,23 @@ export class ClaudeCompactionEnforcer {
       run.lastAttemptId = r.attemptId; run.endedAttempts++;
       this.persist(input.sessionName, r.attemptId, { preparationFailures: run });
     }
-    if (run.endedAttempts < 3 || run.reportedAttempts === run.endedAttempts || !this.onPreparationFailure) return;
+    if (run.endedAttempts < PREPARATION_FAILURE_REPORT_AFTER || run.reportedAttempts === run.endedAttempts || !this.onPreparationFailure) return;
     try {
-      await this.onPreparationFailure({ sessionName: input.sessionName, occupantGeneration: generation,
+      const outcome = await this.onPreparationFailure({ sessionName: input.sessionName, occupantGeneration: generation,
         attemptId: r.attemptId, mapPath: r.mapPath, statePath: current.file, endedAttempts: run.endedAttempts,
-        reason: r.reason ?? "send_failed", ...(r.inputBox ? { inputBox: r.inputBox } : {}) });
+        reason: r.reason ?? "send_failed", ...(r.inputBox ? { inputBox: r.inputBox } : {}),
+        ...(r.delivery === "delivered" ? { delivered: true as const } : {}),
+        context: { usedPercentage: input.usedPercentage ?? null, sampledAt: input.sampledAt ?? null } });
+      const unaddressed = (outcome as PreparationNoticeUnaddressed | undefined)?.unaddressed;
       if (this.records.get(input.sessionName) === current && current.record.preparationFailures === run) {
-        run.reportedAttempts = run.endedAttempts;
-        this.persist(input.sessionName, r.attemptId, { preparationFailures: run });
+        // A notice nobody can receive stays owed: the record says why (rig compact --state), and later polls try again.
+        if (unaddressed) {
+          if (run.unaddressed !== unaddressed) { run.unaddressed = unaddressed; this.persist(input.sessionName, r.attemptId, { preparationFailures: run }); }
+        } else {
+          delete run.unaddressed;
+          run.reportedAttempts = run.endedAttempts;
+          this.persist(input.sessionName, r.attemptId, { preparationFailures: run });
+        }
       }
     } catch { /* The same diagnostic stays eligible on existing polls; no input effect or new scheduler. */ }
   }

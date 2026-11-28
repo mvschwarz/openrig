@@ -32,18 +32,25 @@ on an OpenRig team load `openrig-core` instead.
 ## How the team's questions reach your chat
 
 When your agent hands the team work with an address of its own (`returnRoute` `auto` on `rig_queue_create`, the default
-in Claude Code when the plugin has no seat, or `rig queue create --return-route auto`), OpenRig gives that work an address
+in Claude Code, or `rig queue create --return-route auto`), OpenRig gives that work an address
 for your chat and records it with a key for the chat. In Claude Code the key is the chat's own `claude` process, so a
 new chat in the same process (after `/clear`) still gets the earlier chat's tasks, and one resumed in a new process
 (`claude --resume`) doesn't get them by itself. In Codex it's the session id Codex gives its commands and hooks.
 
 - **Which setups they cover:**
-  - **Claude Code with the plugin's OpenRig seat left blank:** `rig_queue_create` gives the work an address of its own
-    by default.
+  - **Claude Code:** `rig_queue_create` gives the work an address of its own by default, whether the plugin's OpenRig
+    seat is set or blank. With a seat set, the seat stays the work's sender. Work handed over with `returnRoute: "self"`
+    sends the team's questions to the seat's own address instead, which the hooks don't watch, so your agent finds them
+    only when it checks (`rig_queue_list` with `owned`). In one of OpenRig's own seats there's no such default: that seat
+    has its own delivery, and the server knows it's there from `OPENRIG_NODE_ID`, which OpenRig sets in its seats. If
+    the MCP server's environment leaves that variable out (with `CLAUDE_CODE_MCP_ALLOWLIST_ENV` set, say), the server
+    can't tell the seat from your own chat, and the seat's work can get an address its hooks don't watch. Keep
+    `OPENRIG_NODE_ID` in that server's environment.
   - **`rig queue create --return-route auto` in the shell,** in Claude Code or Codex.
-  - **With a seat set:** only work handed over with `returnRoute: "auto"` on `rig_queue_create`. Without it, the team's
-    questions go to the seat's own address, which the hooks don't watch, so your agent finds them only when it checks
-    (`rig_queue_list` with `owned`).
+  - **Not covered: a Claude Code or Codex started from a shell where `OPENRIG_SESSION_NAME` is exported.** The hooks
+    take a chat with that variable in its environment for one of OpenRig's own seats and don't run there, so nothing
+    comes into the chat by itself, even when the MCP server gives the work an address of its own. Set the address in the
+    plugin's OpenRig seat (in Codex, with `--env` on `codex mcp add`) instead of exporting it.
   - **Not yet: Codex through the MCP server.** Codex may not give the server the session id the key comes from, so its
     handovers get no key and nothing wakes for them. In Codex, hand work over with `rig queue create --return-route auto`
     in the shell.
@@ -57,7 +64,10 @@ new chat in the same process (after `/clear`) still gets the earlier chat's task
   `rig`. A chat that never handed work over this way has nothing to read, and they do nothing in OpenRig's own seats.
 - **Which `rig`:** the hooks, and in Claude Code the MCP server, run the file `OPENRIG_RIG_BIN` names, else `rig` on your
   PATH, else the project's own `node_modules/.bin/rig` (in Claude Code, the session's project; in Codex, the session's
-  folder). So an OpenRig installed inside one project is found only in sessions started there. With no `rig`, the hooks
+  folder), else the first `rig` on a login shell's PATH, run with that PATH. So an OpenRig installed inside one project is
+  found only in sessions started there, and one installed after the app started is found once your login profile
+  (`~/.zprofile` for zsh, `~/.bash_profile` or `~/.profile` for bash, not only `~/.zshrc` or `~/.bashrc`) puts its
+  folder on PATH. With no `rig`, the hooks
   say once in a chat that the team's questions won't come in by themselves: once for the plugin's install, not in every
   session, and again only after a `rig` was found and then lost. Claude Code logs the MCP server's one line saying why it
   didn't start. The hooks themselves start with the `node` on the app's PATH, or the file `OPENRIG_NODE` names: set it
@@ -90,8 +100,8 @@ claude plugin install openrig@openrig-app
 ```
 
 Set the plugin's **OpenRig seat** to your address (`/plugin`, then configure): type the address into the row, then save.
-Pressing Enter on the empty row closes it with no change. Then start a new session. With a seat set, the hooks bring in
-the team's questions only for work handed over with `returnRoute: "auto"` (see "Which setups they cover" above).
+Pressing Enter on the empty row closes it with no change. Then start a new session. With a seat set, the hooks still
+bring in the team's questions about work your agent hands over (see "Which setups they cover" above).
 
 **Codex**
 
@@ -148,12 +158,15 @@ The app starts one `openrig` server, `rig mcp serve --front-door`, from the root
   macOS, reopening the app from the Dock drops it, and an already running VS Code keeps its own environment.
   - **What goes through without one:** messages (`rig_send`), new tasks (`rig_queue_create`) and chat
     (`rig_chatroom_send`) reach the team as an unknown sender, `unknown-mcp-` and eight hex digits, one per server. Each
-    opens with a note saying why there's no seat and what the app's MCP client says it is. There's no return address,
-    so your agent follows a task it created by its id (`rig_queue_show`). `rig_whoami` says why there's no seat and
-    names the unknown sender.
-  - **What needs a seat:** OpenRig answers `actor_required` to claim, update, hand off, unclaim and decide, which covers
-    recording an answer to the team's questions. Listing the questions sent to you (`rig_queue_list` with `owned` or
-    `mine`) needs the seat too. Set one to get the team's questions and replies.
+    opens with a note saying why there's no seat and what the app's MCP client says it is. Without a return address,
+    your agent follows a task it created by its id (`rig_queue_show`). `rig_whoami` says why there's no seat and names
+    the unknown sender.
+  - **Answers to the team's questions:** a task created with `returnRoute` `auto` gets an address of the conversation's
+    own, and the team's questions about it are addressed there. Your agent claims and answers them as that address
+    through the same server, while the app keeps that server running.
+  - **What needs a seat:** OpenRig answers `actor_required` to hand off and unclaim, and to claim, update and decide
+    any other item. Listing the questions sent to you (`rig_queue_list` with `owned` or `mine`) needs the seat too.
+    Set one to get the team's questions and replies.
   - Environment export needs an HTTP work grant, which a plugin's local server never has.
 - **To give the app a seat,** add your own MCP server that runs `rig mcp serve --front-door` with
   `OPENRIG_SESSION_NAME=<address>` in its environment, and turn the plugin's `openrig` server off, so the app runs one
@@ -175,8 +188,10 @@ The app starts one `openrig` server, `rig mcp serve --front-door`, from the root
 ## What it doesn't do
 
 - It adds no panel to the app. Where its hooks don't run (apps other than Claude Code and Codex), nothing wakes your
-  chat when the team asks or finishes: ask your agent to check.
+  chat when the team asks or finishes. While work it handed over is open, your agent checks on that work at the start
+  of each of its turns, and an app's scheduled task can check between your messages (your agent says what that needs).
 - Everyone using the app on this machine acts as the seat it names.
 - It reaches a team on this machine.
-- **Outside Claude Code and Codex,** until you give the app a seat, it hands the team work only as an unknown sender
-  with no return address, and it can't record answers to the team's questions: see "No seat" above for how.
+- **Outside Claude Code and Codex,** until you give the app a seat, it hands the team work as an unknown sender. A task
+  it creates with `returnRoute` `auto` gets an address of the conversation's own, and it can answer the team's questions
+  about that task; anything else needs a seat (see "No seat" above).

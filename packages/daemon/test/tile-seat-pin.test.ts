@@ -36,7 +36,8 @@ function seatOn(name: string, session = "seat@rig") {
   const option = (name: string) => tmux(socket, ["show-options", "-wqv", "-t", `=${session}:`, name]).trim();
   const hooks = () => tmux(socket, ["show-hooks", "-t", session]).split("\n").filter(line => line.includes("resize-window")).map(line => line.split(" ")[0]);
   const clients = () => tmux(socket, ["list-clients", "-F", "#{session_name}"]).trim();
-  return { socket, session, create, size: () => read("#{window_width}x#{window_height}"), sessionId: () => read("#{session_id}"), option, hooks, clients };
+  const clientPid = () => Number(tmux(socket, ["list-clients", "-F", "#{client_pid}"]).trim());
+  return { socket, session, create, size: () => read("#{window_width}x#{window_height}"), sessionId: () => read("#{session_id}"), option, hooks, clients, clientPid };
 }
 
 /** The tile: the real pinned argv in a 100x30 pane on its own server. Focus in is ESC [ I, focus out ESC [ O. */
@@ -45,7 +46,8 @@ function tileOn(seat: ReturnType<typeof seatOn>) {
   const argv = pinnedTileAttachArgv("tmux", ["-L", seat.socket], seat.session);
   tmux(socket, ["new-session", "-d", "-s", "tile", "-x", "100", "-y", "30", `env -u TMUX ${argv.map(shellQuote).join(" ")}`]);
   const focus = (key: "49" | "4f") => tmux(socket, ["send-keys", "-t", "tile", "-H", "1b", "5b", key]);
-  return { socket, focusIn: () => focus("49"), focusOut: () => focus("4f"), close: () => tmux(socket, ["kill-server"]) };
+  const panePid = () => Number(tmux(socket, ["display-message", "-p", "-t", "tile", "#{pane_pid}"]).trim());
+  return { socket, focusIn: () => focus("49"), focusOut: () => focus("4f"), close: () => tmux(socket, ["kill-server"]), panePid };
 }
 
 describe("a Herdr view's writable tile pins its seat before each attach", () => {
@@ -65,6 +67,23 @@ describe("a Herdr view's writable tile pins its seat before each attach", () => 
     expect(await eventually(seat.size, "100x30")).toBe("100x30");
     tile.close();
     expect(await eventually(seat.size, "160x50")).toBe("160x50"); // the tile closed: its own size again
+  });
+
+  // A terminal closing a tile hangs up its pane. A tmux client that exits on a hangup leaves its session before tmux runs
+  // client-detached, so that hook runs in another session's context and the seat's own hook isn't read: without the
+  // tile's own give-back, the seat stayed at the tile's size. Each way of hanging up is driven exactly, not left to a race.
+  it.each([
+    ["its tmux client", (seat: ReturnType<typeof seatOn>) => process.kill(seat.clientPid(), "SIGHUP")],
+    ["its whole pane", (_seat: ReturnType<typeof seatOn>, tile: ReturnType<typeof tileOn>) => process.kill(-tile.panePid(), "SIGHUP")],
+  ] as const)("gives the seat its own size back when %s gets a hangup while the tile has focus", async (_label, hangUp) => {
+    const seat = seatOn("hangup");
+    const tile = tileOn(seat);
+    expect(await eventually(seat.clients, seat.session)).toBe(seat.session);
+    tile.focusIn();
+    expect(await eventually(seat.size, "100x30")).toBe("100x30");
+    hangUp(seat, tile);
+    expect(await eventually(seat.size, "160x50")).toBe("160x50");
+    expect([seat.option("window-size"), seat.option(SEAT_PIN_WIDTH_OPTION), seat.option(SEAT_PIN_HEIGHT_OPTION)]).toEqual(["manual", "160", "50"]);
   });
 
   it("pins a replacement session with the same seat identity before the tile attaches to it", async () => {
@@ -143,6 +162,30 @@ describe("a Herdr view's writable tile pins its seat before each attach", () => 
     expect(seat.option(SEAT_PIN_WIDTH_OPTION)).toBe("");
     expect(seat.hooks()).toEqual([]);
     expect(seat.size()).toBe("160x50");
+  });
+
+  // A Herdr view of a team: several seats on one server, each watched by its own tile. A client format in the focus hook
+  // can name another tile's client, so each seat took the other tile's size; the hook reads its own client's size instead.
+  it("fits each of two seats on one server to its own focused tile, not the other tile", async () => {
+    const socket = server("two");
+    tmux(socket, ["new-session", "-d", "-s", "a@rig", "-x", "160", "-y", "50", "-e", "OPENRIG_NODE_ID=nodeA", "sleep 120"]);
+    tmux(socket, ["new-session", "-d", "-s", "b@rig", "-x", "140", "-y", "45", "-e", "OPENRIG_NODE_ID=nodeB", "sleep 120"]);
+    const size = (session: string) => () => tmux(socket, ["display-message", "-p", "-t", `=${session}:`, "#{window_width}x#{window_height}"]).trim();
+    const watch = (session: string, x: string, y: string) => {
+      const tile = server("tile");
+      const argv = pinnedTileAttachArgv("tmux", ["-L", socket], session);
+      tmux(tile, ["new-session", "-d", "-s", "tile", "-x", x, "-y", y, `env -u TMUX ${argv.map(shellQuote).join(" ")}`]);
+      return () => tmux(tile, ["send-keys", "-t", "tile", "-H", "1b", "5b", "49"]);
+    };
+    const focusA = watch("a@rig", "100", "30");
+    const focusB = watch("b@rig", "90", "25");
+    const sessions = () => tmux(socket, ["list-clients", "-F", "#{session_name}"]).trim().split("\n").sort().join(" ");
+    expect(await eventually(sessions, "a@rig b@rig")).toBe("a@rig b@rig");
+    focusA();
+    expect(await eventually(size("a@rig"), "100x30")).toBe("100x30");
+    focusB();
+    expect(await eventually(size("b@rig"), "90x25")).toBe("90x25");
+    expect(size("a@rig")()).toBe("100x30"); // its own tile still has focus
   });
 });
 

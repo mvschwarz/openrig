@@ -6,7 +6,7 @@ import { createProofPolicyRead, readMissionReadiness, readProjectReadinessAsync 
 import { lifecycleObligations } from "./lifecycle-obligations.js";
 import { renderWorkflowProjectCommand } from "./workflow-projector.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
-import { readWithCurrentParkBoundary } from "./current-park-arm.js";
+import { localQueueWakeSource, readWithCurrentParkBoundary } from "./current-park-arm.js";
 import { isTypedGateBlocker } from "./queue-repository.js";
 // S27 (OPR.0.5.6.27) — the execution view: one JSON document answering the six
 // execution questions (who-where, sequencing, care-dial, done-ness-by-rung, park
@@ -511,6 +511,31 @@ function parseJsonStringList(value: unknown): string[] {
   }
 }
 
+/** #3616's read-back: a mission's planned arrangement as this view reads it (the same reader), for each active slice
+ *  of its composition. `missing` (no mission.yaml) and `malformed` are the view's own states, with its warning. */
+export function readPlannedArrangement(missionsRoot: string, mission: string):
+  | { state: "missing" }
+  | { state: "malformed"; warning: string }
+  | { state: "valid"; slices: Array<{ dir: string; id: string | null; wave: string | null; plannedOwners: Array<{ component: string; owner: string }>; dependsOn: string[] | null }> } {
+  const facts = readMissionSlices(missionsRoot, mission);
+  const arrangement = readArrangement(missionsRoot, mission, facts);
+  if (arrangement.state === "missing") return { state: "missing" };
+  if (arrangement.state === "malformed") return { state: "malformed", warning: arrangement.warning };
+  return {
+    state: "valid",
+    slices: [...arrangement.byDir].map(([dir, entry]) => {
+      const id = facts.find((slice) => slice.dir === dir)?.id;
+      return {
+        dir,
+        id: typeof id === "string" && id !== INDETERMINATE ? id : null,
+        wave: entry.wave ?? null,
+        plannedOwners: entry.plannedOwners.map(({ component, owner }) => ({ component, owner })),
+        dependsOn: entry.dependsOn ?? null,
+      };
+    }),
+  };
+}
+
 /** The manifest arrangement is optional. Missing means compatibility fallback;
  * malformed means the same fallback plus ONE named warning cell in `sources`.
  * A valid manifest becomes the ordering/wave/dependency authority. */
@@ -675,9 +700,10 @@ interface ReviewDrop extends ReviewArtifactFact { slice: string | null }
 /** The legacy global registry, listed and parsed once per execution-view read. */
 interface ReviewRegistry { readable: boolean; drops: ReviewDrop[] }
 
-/** Files read, or time spent, before the registry read yields to the event loop. Both are soft. */
+/** Files read, or time spent, before projection work yields to the event loop. Both are soft:
+ * one synchronous file/SQLite read must finish before another request can run. */
 const REGISTRY_SLICE_FILES = 32;
-const REGISTRY_SLICE_MS = 8;
+const PROJECTION_SLICE_MS = 8;
 
 function readReviewDrop(file: string): ReviewDrop | null {
   let raw: string;
@@ -710,7 +736,7 @@ async function readReviewRegistry(rigsRoot: string): Promise<ReviewRegistry> {
     try { entries = fs.readdirSync(stateDir); } catch { continue; }
     for (const entry of entries.filter((e) => e.startsWith("review"))) {
       for (const file of listReviewFiles(path.join(stateDir, entry)) ?? []) {
-        if (read >= REGISTRY_SLICE_FILES || performance.now() - sliceStart >= REGISTRY_SLICE_MS) {
+        if (read >= REGISTRY_SLICE_FILES || performance.now() - sliceStart >= PROJECTION_SLICE_MS) {
           await new Promise<void>((resolve) => setImmediate(resolve));
           read = 0;
           sliceStart = performance.now();
@@ -911,7 +937,12 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
   );
   const isExternalPark = (r: QueueRowLite): boolean =>
     r.state === "blocked" && isTypedGateBlocker(r.blocked_on) && r.blocked_on!.startsWith("external:");
+  let rowSliceStart = performance.now();
   for (const r of rows.filter((r) => r.state === "in-progress" || (isExternalPark(r) && !activeSlices.has(sliceKey(sliceOfRow(r) ?? ""))))) {
+    if (performance.now() - rowSliceStart >= PROJECTION_SLICE_MS) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      rowSliceStart = performance.now();
+    }
     const slice = sliceOfRow(r);
     if (!slice) continue;
     const wtMatch = r.body?.match(WORKTREE_LINE);
@@ -1295,55 +1326,60 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
   });
 
   // ---- Q5 park honesty ----
-  const q5 = rows
-    .filter((r) => r.state === "blocked" || (r.claimed_at && ["in-progress", "pending"].includes(r.state)))
-    .map((r) => {
-      const activity = deps.seatActivity?.getSeatStateBySession(r.destination_session);
-      const pickup = derivePickup({
-        // As in Q1: a blocked row is parked before its history is read; its armed wake is still looked up below.
-        lastMeaningfulAt: r.state === "blocked" ? undefined : lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
-        activity: activity?.activity, needsInput: activity?.needsInput.count, needsInputReason: activity?.needsInput.reason,
-        backgroundWork: activity?.backgroundWork ?? null, compactionOwedSince: compactionOwedSinceOf(deps, r.destination_session),
-        state: r.state,
-        claimedAt: r.claimed_at,
-        lastHeartbeat: r.last_heartbeat,
-        postClaimMotionCount: Number(r.post_claim_motion ?? 0),
-        now: now(),
-      });
-      const wake = readWithCurrentParkBoundary(boundary => deps.db
-        .prepare(`SELECT w.wake_ref, w.phase FROM queue_transition_wakes w
-          WHERE w.qitem_id = ? AND w.phase = 'armed'
-            AND w.transition_id = (SELECT MAX(a.transition_id) FROM queue_transition_wakes a
-              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed')
-            ${boundary}
-          ORDER BY w.transition_id DESC LIMIT 1`)
-        .get(r.qitem_id)) as { wake_ref: string; phase: string } | undefined;
-      // park_kind is a CLOSED enum from the DESIGN: deliberate-with-wake |
-      // stalled | indeterminate. Nothing else may leak in (the live artifact
-      // once emitted 'working' here), and the enum member is lowercase.
-      let parkKind: "deliberate-with-wake" | "stalled" | "indeterminate";
-      if (pickup.state === "parked" && wake) {
-        parkKind = "deliberate-with-wake";
-      } else if (pickup.state === "stalled-after-claim" || pickup.stall) {
-        parkKind = "stalled";
-      } else {
-        parkKind = "indeterminate";
-      }
-      const ageMinutes = r.claimed_at ? Math.floor((now().getTime() - Date.parse(r.claimed_at)) / 60_000) : null;
-      return {
-        qitem_id: r.qitem_id,
-        pickup_state: pickup.state,
-        ...(pickup.evidence ? { pickup_evidence: pickup.evidence } : {}),
-        ...(pickup.stall ? { pickup_stall: pickup.stall } : {}),
-        park_kind: parkKind,
-        park_kind_basis: wake
-          ? `armed wake ${wake.wake_ref} on queue_transition_wakes`
-          : "no armed wake row (deliberate-park-without-wake vs strand is underivable here — rig parked owns wake diagnosis)",
-        wake_target: wake?.wake_ref ?? null,
-        age_minutes: ageMinutes,
-        source: { qitem_id: r.qitem_id },
-      };
+  const localWakes = localQueueWakeSource(deps.db);
+  const q5 = [];
+  rowSliceStart = performance.now();
+  for (const r of rows.filter((r) => r.state === "blocked" || (r.claimed_at && ["in-progress", "pending"].includes(r.state)))) {
+    if (performance.now() - rowSliceStart >= PROJECTION_SLICE_MS) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      rowSliceStart = performance.now();
+    }
+    const activity = deps.seatActivity?.getSeatStateBySession(r.destination_session);
+    const pickup = derivePickup({
+      // As in Q1: a blocked row is parked before its history is read; its armed wake is still looked up below.
+      lastMeaningfulAt: r.state === "blocked" ? undefined : lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
+      activity: activity?.activity, needsInput: activity?.needsInput.count, needsInputReason: activity?.needsInput.reason,
+      backgroundWork: activity?.backgroundWork ?? null, compactionOwedSince: compactionOwedSinceOf(deps, r.destination_session),
+      state: r.state,
+      claimedAt: r.claimed_at,
+      lastHeartbeat: r.last_heartbeat,
+      postClaimMotionCount: Number(r.post_claim_motion ?? 0),
+      now: now(),
     });
+    const wake = readWithCurrentParkBoundary(boundary => deps.db
+      .prepare(`SELECT w.wake_ref, w.phase FROM ${localWakes} w
+        WHERE w.qitem_id = ? AND w.phase = 'armed'
+          AND w.transition_id = (SELECT MAX(a.transition_id) FROM ${localWakes} a
+            WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed')
+          ${boundary}
+        ORDER BY w.transition_id DESC LIMIT 1`)
+      .get(r.qitem_id)) as { wake_ref: string; phase: string } | undefined;
+    // park_kind is a CLOSED enum from the DESIGN: deliberate-with-wake |
+    // stalled | indeterminate. Nothing else may leak in (the live artifact
+    // once emitted 'working' here), and the enum member is lowercase.
+    let parkKind: "deliberate-with-wake" | "stalled" | "indeterminate";
+    if (pickup.state === "parked" && wake) {
+      parkKind = "deliberate-with-wake";
+    } else if (pickup.state === "stalled-after-claim" || pickup.stall) {
+      parkKind = "stalled";
+    } else {
+      parkKind = "indeterminate";
+    }
+    const ageMinutes = r.claimed_at ? Math.floor((now().getTime() - Date.parse(r.claimed_at)) / 60_000) : null;
+    q5.push({
+      qitem_id: r.qitem_id,
+      pickup_state: pickup.state,
+      ...(pickup.evidence ? { pickup_evidence: pickup.evidence } : {}),
+      ...(pickup.stall ? { pickup_stall: pickup.stall } : {}),
+      park_kind: parkKind,
+      park_kind_basis: wake
+        ? `armed wake ${wake.wake_ref} on queue_transition_wakes`
+        : "no armed wake row (deliberate-park-without-wake vs strand is underivable here — rig parked owns wake diagnosis)",
+      wake_target: wake?.wake_ref ?? null,
+      age_minutes: ageMinutes,
+      source: { qitem_id: r.qitem_id },
+    });
+  }
 
   // ---- Q6 parallelism health ----
   const inProgressSeats = new Set(rows.filter((r) => r.state === "in-progress").map((r) => physicalSessionName(deps.db, r.destination_session)));

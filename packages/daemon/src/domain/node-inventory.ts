@@ -1,4 +1,6 @@
-import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
+import { isRosterReadyNotice } from "./roster-ready-notice.js";
+import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
+import { recordedActivityHooks, recordedRunner, sessionActivityHooksSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { configuredAccount } from "./configured-account.js";
 import { restoreOutcomesByIntendedNode } from "./restore-topology.js";
 import { physicalSessionName } from "./session-registry.js";
@@ -9,6 +11,7 @@ import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
 import { identityVerdictConfirmsSessionMissing, identityVerdictConfirmsExecutorStopped, identityVerdictDownranksRunning } from "./types.js";
+import { isShellForeground } from "./shell-classifier.js";
 import { resolveSeatEffort } from "./seat-effort.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
@@ -48,6 +51,8 @@ import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper } from "./launch-wrapper.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { readStandbyStop } from "./seat-standby.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 // -- Row types for SQL results --
 
@@ -105,6 +110,7 @@ interface InventoryRow {
   session_status: string | null;
   session_community_harness?: string | null;
   session_community_runner?: number | null;
+  session_community_hooks?: string | null;
   intentionally_stopped: number | null;
   stop_attempt: string | null;
   startup_status: string | null;
@@ -393,6 +399,19 @@ function deriveNodeKind(runtime: string | null): "agent" | "infrastructure" {
   return runtime === "terminal" ? "infrastructure" : "agent";
 }
 
+/** NodeInventoryEntry.agentLiveness, from the applicable stored verdict: a running agent seat whose current identity check saw
+ *  a shell in the foreground and didn't verify its agent. Undefined otherwise, and while its startup is still pending: a launch
+ *  marks the session running on its default shell before the agent starts there. */
+function deriveAgentLiveness(
+  runtime: string | null, sessionStatus: string | null, startupStatus: NodeInventoryEntry["startupStatus"],
+  verdict: SeatIdentityVerdict | null,
+): NodeInventoryEntry["agentLiveness"] {
+  const command = verdict?.evidence.observedCommand?.trim().toLowerCase();
+  if (!runtime || sessionStatus !== "running" || startupStatus === "pending" || deriveNodeKind(runtime) !== "agent"
+    || !verdict || verdict.verdict === "verified" || !command || !isShellForeground(command)) return undefined;
+  return { state: "not_verified", reason: "shell_foreground", command: command.replace(/^-/, ""), observedAt: verdict.observedAt };
+}
+
 /**
  * Derives per-node lifecycle state from session/restore truth plus the rig's latest
  * usable snapshot.
@@ -656,7 +675,8 @@ function mapStatus(status: string): NodeRestoreOutcome {
 }
 
 function deriveHeldReason(db: Database.Database, rigId: string, nodeId: string, sessionStatus: string | null): string | null {
-  if (sessionStatus === "running") return null;
+  // A seat attached from an outside program (rig attach) isn't held back from a launch, as it wasn't while its record read running.
+  if (sessionStatus === "running" || sessionStatus === "attached") return null;
 
   const heldRow = db.prepare(
     "SELECT seq, payload FROM events WHERE node_id = ? AND type = 'node.held' ORDER BY seq DESC LIMIT 1"
@@ -933,6 +953,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       s.status as session_status,
       ${sessionCommunityHarnessSelect(db)} as session_community_harness,
       ${sessionCommunityRunnerSelect(db)} as session_community_runner,
+      ${sessionActivityHooksSelect(db)} as session_community_hooks,
       s.intentionally_stopped,
       ${sessionStopAttemptSelect} as stop_attempt,
       s.startup_status,
@@ -1070,7 +1091,13 @@ function buildInventoryItem(
   // Keep registry history intact; only an applicable, explicit absence changes
   // the current status. Unavailable tmux and process mismatches are not absence.
   const paneExited = row.session_status === "running" && identityVerdict?.reason === "pane_exited";
-  const sessionStatus = paneExited ? "exited"
+  // A seat joined with `rig attach` runs in someone else's program (seat-kinds: no inbound transport, an external process
+  // owner), so OpenRig can't see whether it runs: a stored running, or a detached a tmux probe once wrote, isn't its state.
+  // It reads attached, with liveness unknown and its own newest queue action as the only evidence.
+  const externallyAttached = row.binding_attachment_type != null
+    && seatProcessOwner(resolveSeatKind(row.binding_attachment_type)) === "external"
+    && (row.session_status === "running" || row.session_status === "detached");
+  const sessionStatus = externallyAttached ? "attached" : paneExited ? "exited"
     : row.session_status === "running" && identityVerdictConfirmsSessionMissing(identityVerdict) ? "detached" : row.session_status;
   const startupStatus = paneExited || (sessionStatus === "running" && identityVerdictDownranksRunning(identityVerdict?.verdict))
     ? "attention_required" : row.startup_status as NodeInventoryEntry["startupStatus"];
@@ -1084,7 +1111,9 @@ function buildInventoryItem(
   // a row recorded before attempts were kept has none), the session reads exited or superseded, and no binding is left.
   const stopConfirmed = row.intentionally_stopped === 1 && row.stop_attempt === null
     && (row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null;
-  const lifecycleState = keepAliveIncident?.exhausted && sessionStatus !== "running" ? "attention_required" : deriveNodeLifecycleState({
+  const standbyStopped = row.intentionally_stopped === 1 && row.session_status === "exited" && readStandbyStop(db, row.node_id) !== null;
+  const lifecycleState = keepAliveIncident?.exhausted && sessionStatus !== "running" ? "attention_required"
+    : externallyAttached && startupStatus !== "attention_required" && restoreOutcome !== "attention_required" ? "unknown" : deriveNodeLifecycleState({
     sessionStatus,
     startupStatus,
     restoreOutcome,
@@ -1092,6 +1121,7 @@ function buildInventoryItem(
     usableSnapshot,
     identityVerdict: identityVerdict?.verdict ?? null,
   });
+  const agentLiveness = deriveAgentLiveness(row.runtime, sessionStatus, startupStatus, identityVerdict);
   const entry: NodeInventoryEntry = {
     nodeId: row.node_id,
     rigId: row.rig_id,
@@ -1108,15 +1138,17 @@ function buildInventoryItem(
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
     configuredAccount: configuredAccount(row.runtime, Boolean(row.has_claude_token_ref), row.claude_token_ref, row.account_home),
-    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: recordedRunner(row.session_community_runner) }) } : {}),
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: recordedRunner(row.session_community_runner), activityHooks: recordedActivityHooks(row.session_community_hooks) }) } : {}),
     ...(launchWrapper ? { launchWrapper } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
+    ...(externallyAttached ? { externalAttachment: { liveness: "unknown" as const, ...lastOwnQueueAction(db, row.session_name) } } : {}),
     // An explicit down records a failed start's rolled-back session without changing its superseded status.
     intentionallyStopped: stopConfirmed,
+    ...(standbyStopped ? { standbyStopped: true as const } : {}),
     // #2940: a stop recorded but not confirmed yet (the session not yet gone, the daemon lost mid-stop, or a request
     // recorded on a row already exited or superseded that no probe has proven absent: its attempt is still set).
-    ...(row.intentionally_stopped === 1 && !stopConfirmed ? { stopRequested: true } : {}),
+    ...(row.intentionally_stopped === 1 && !stopConfirmed && !standbyStopped ? { stopRequested: true } : {}),
     // #2940: the seat declares keep_alive (absent = off, so other seats' output is unchanged).
     ...(row.keep_alive === 1 ? { keepAlive: true } : {}),
     ...(keepAliveIncident ? { keepAliveIncident } : {}),
@@ -1177,6 +1209,7 @@ function buildInventoryItem(
     // OPR.0.4.3.19 — the liveness identity verdict (third axis). null when
     // never observed; carries evidence on mismatch/missing.
     identityVerdict,
+    ...(agentLiveness ? { agentLiveness } : {}),
     heldReason: deriveHeldReason(db, row.rig_id, row.node_id, sessionStatus),
     ...(row.handover_at ? startedWithoutRequired(db, row.node_id, row.session_id) : {}),
   };
@@ -1607,6 +1640,23 @@ export function seatNeedsAttention(
     || (entry.startedWithoutRequired?.length ?? 0) > 0;
 }
 
+/** The newest queue transition a seat wrote itself (a claim, note or handoff): for a seat attached from an outside program,
+ *  the one sign OpenRig has that it's working. It reads the live history and the archive retention moves finished work to
+ *  (one indexed row from each), so an archived action still counts. Null when it has written none; "unavailable" when its
+ *  history couldn't be read, so a failed read never reads as none. */
+function lastOwnQueueAction(db: Database.Database, session: string | null):
+  Pick<NonNullable<NodeInventoryEntry["externalAttachment"]>, "lastOwnQueueAction" | "lastOwnQueueActionRead"> {
+  if (!session) return { lastOwnQueueAction: null, lastOwnQueueActionRead: "read" };
+  try {
+    const newest = ["queue_transitions", "queue_transitions_archive"]
+      .map((table) => db.prepare(`SELECT transition_id, ts, qitem_id, state FROM ${table} WHERE actor_session = ? ORDER BY transition_id DESC LIMIT 1`)
+        .get(session) as { transition_id: number; ts: string; qitem_id: string; state: string } | undefined)
+      .filter((row) => row !== undefined)
+      .sort((a, b) => b.transition_id - a.transition_id)[0];
+    return { lastOwnQueueAction: newest ? { at: newest.ts, qitemId: newest.qitem_id, state: newest.state } : null, lastOwnQueueActionRead: "read" };
+  } catch { return { lastOwnQueueAction: null, lastOwnQueueActionRead: "unavailable" }; }
+}
+
 /**
  * An explicit hold on a never-launched seat with no outstanding queue work.
  *
@@ -1649,7 +1699,7 @@ export function retainedProviderFailure(
 
 /** The pane's own interactive prompts: a picker or question, and a permission or confirmation. A draft in the input
  *  box is not one. */
-const NATIVE_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt"]);
+const NATIVE_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt", "hook_trust_gate"]);
 
 /**
  * The served activity for a seat with a current Claude authentication or billing failure (`retainedProviderFailure`):
@@ -1855,34 +1905,53 @@ export function deriveCanonicalFromEntry(entry: NodeInventoryEntry): string | nu
 }
 
 export function readAssignedWorkBySession(db: Database.Database): Map<string, AssignedWorkCounts> {
-  const rows = db.prepare(`
-    SELECT destination_session,
-      COUNT(*) as assigned_count,
-      SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) as pending_count,
-      SUM(CASE WHEN state = 'in-progress' THEN 1 ELSE 0 END) as in_progress_count,
-      SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) as blocked_count
-    FROM queue_items
-    WHERE state IN ('pending', 'in-progress', 'blocked')
-    GROUP BY destination_session
-  `).all() as Array<{
-    destination_session: string;
-    assigned_count: number;
-    pending_count: number;
-    in_progress_count: number;
-    blocked_count: number;
-  }>;
-  const out = new Map<string, AssignedWorkCounts>();
-  for (const r of rows) {
-    const address = physicalSessionName(db, r.destination_session);
-    const prior = out.get(address);
-    out.set(address, {
-      assignedWorkCount: (prior?.assignedWorkCount ?? 0) + r.assigned_count,
-      pendingWorkCount: (prior?.pendingWorkCount ?? 0) + r.pending_count,
-      inProgressWorkCount: (prior?.inProgressWorkCount ?? 0) + r.in_progress_count,
-      blockedWorkCount: (prior?.blockedWorkCount ?? 0) + r.blocked_count,
-    });
-  }
-  return out;
+  // The aggregate and notice subtraction must observe one snapshot, including with another connection writing.
+  return db.transaction(() => {
+    const rows = db.prepare(`
+      SELECT destination_session,
+        COUNT(*) as assigned_count,
+        SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) as pending_count,
+        SUM(CASE WHEN state = 'in-progress' THEN 1 ELSE 0 END) as in_progress_count,
+        SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) as blocked_count
+      FROM queue_items
+      WHERE state IN ('pending', 'in-progress', 'blocked')
+      GROUP BY destination_session
+    `).all() as Array<{
+      destination_session: string;
+      assigned_count: number;
+      pending_count: number;
+      in_progress_count: number;
+      blocked_count: number;
+    }>;
+    // Keep ordinary work aggregated in SQLite. Only OpenRig-authored candidates need the shared classifier;
+    // a matching sender alone does not make a row informational.
+    const byDestination = new Map(rows.map(row => [row.destination_session, row]));
+    const candidates = db.prepare(`SELECT qitem_id, source_session, destination_session, state FROM queue_items
+      WHERE state IN ('pending', 'in-progress', 'blocked') AND source_session = ?`)
+      .iterate(OPENRIG_SENDER) as IterableIterator<{ qitem_id: string; source_session: string; destination_session: string; state: string }>;
+    for (const row of candidates) {
+      if (!isRosterReadyNotice(row)) continue;
+      const counts = byDestination.get(row.destination_session);
+      if (!counts) continue; // A candidate without an aggregate destination must not affect another destination.
+      counts.assigned_count--;
+      if (row.state === "pending") counts.pending_count--;
+      else if (row.state === "in-progress") counts.in_progress_count--;
+      else counts.blocked_count--;
+    }
+    const out = new Map<string, AssignedWorkCounts>();
+    for (const r of rows) {
+      if (r.assigned_count === 0) continue;
+      const address = physicalSessionName(db, r.destination_session);
+      const prior = out.get(address);
+      out.set(address, {
+        assignedWorkCount: (prior?.assignedWorkCount ?? 0) + r.assigned_count,
+        pendingWorkCount: (prior?.pendingWorkCount ?? 0) + r.pending_count,
+        inProgressWorkCount: (prior?.inProgressWorkCount ?? 0) + r.in_progress_count,
+        blockedWorkCount: (prior?.blockedWorkCount ?? 0) + r.blocked_count,
+      });
+    }
+    return out;
+  })();
 }
 
 /**
@@ -1897,8 +1966,11 @@ export function hookOrPaneActivity(
   idleYieldsToFrame = false,
   runtime?: string | null,
 ): { source: "hook" | "limit" | "pane"; activity: AgentActivity } | null {
-  // Running/needs_input hooks keep their meaning.
-  if (hookActivity && hookActivity.state !== "unknown" && !(hookActivity.state === "idle" && idleYieldsToFrame)) {
+  // A current hook-review menu can follow Stop without posting another lifecycle hook. Only a capture begun after
+  // that idle hook replaces it; running/needs_input hooks keep their meaning. The structural cache owns freshness.
+  const newerHookReview = runtime === "codex" && structural?.state === "attention" && structural.reason === "hook_trust_gate"
+    && Date.parse(structural.captureStartedAt ?? "") > Date.parse(hookActivity?.eventAt ?? "");
+  if (hookActivity && hookActivity.state !== "unknown" && !(hookActivity.state === "idle" && (idleYieldsToFrame || newerHookReview))) {
     return { source: "hook", activity: hookActivity };
   }
 
@@ -1941,6 +2013,176 @@ export function hookOrPaneActivity(
     };
   }
   return null;
+}
+
+/** A seat's activity now from a live hook, else the cached pane reading (hookOrPaneActivity), without terminal motion.
+ *  Capture-free. Prompt wakes read it; readSeatActivityAsRigPs adds the motion rig ps applies. */
+export function readCurrentSeatActivity(sources: {
+  hooks: Pick<AgentActivityStore, "getLatestForNode">;
+  structural: { getStructuralActivity(sessionName: string): StructuralObservation | null };
+  runtimeOf: (sessionName: string) => string | null;
+}, sessionName: string): { activity: AgentActivity | null; runtime: string | null; structural: StructuralObservation | null } {
+  const runtime = sources.runtimeOf(sessionName);
+  const structural = sources.structural.getStructuralActivity(sessionName);
+  const resolved = hookOrPaneActivity(sources.hooks.getLatestForNode({ sessionName,
+    order: runtime === "claude-code" ? "source" : "arrival" }), structural, false, runtime);
+  return { activity: resolved?.activity ?? null, runtime, structural };
+}
+
+/** A seat's activity as rig ps shows it, capture-free: the hook and the cached pane reading, with the cached terminal
+ *  motion lifting idle or unknown to running (capturelessSeatActivity), and the same placeholder for a seat with
+ *  neither. The provider plan and apply read it for each seat. One rig ps step isn't applied: rig ps reads an idle seat
+ *  as unknown when the identity reconciler's verdict says its tmux couldn't be reached (unseenIdleIsUnknown); here such
+ *  a seat still reads idle. */
+export function readSeatActivityAsRigPs(sources: {
+  hooks: Pick<AgentActivityStore, "getLatestForNode"> & Partial<Pick<AgentActivityStore, "latestUnsupersededProviderFailure">>;
+  structural: { getStructuralActivity(sessionName: string): StructuralObservation | null };
+  motion: { getSeatActivity(sessionName: string): SeatActivity | null };
+  runtimeOf: (sessionName: string) => string | null;
+  now?: () => Date;
+}, sessionName: string): AgentActivity {
+  const now = sources.now?.() ?? new Date();
+  const runtime = sources.runtimeOf(sessionName);
+  const hookActivity = sources.hooks.getLatestForNode({ sessionName, now, order: runtime === "claude-code" ? "source" : "arrival" });
+  const { activity, withMotion } = capturelessSeatActivity({ sessionName, runtime, hookActivity,
+    structural: sources.structural.getStructuralActivity(sessionName), motion: sources.motion.getSeatActivity(sessionName), now,
+    providerFailure: retainedProviderFailure(sources.hooks, { sessionName, runtime, now }, hookActivity) });
+  return activity ?? withMotion({ state: "unknown", reason: "no_runtime_hook", evidenceSource: "session_registry",
+    sampledAt: now.toISOString(), evidence: null, fallback: true });
+}
+
+/**
+ * A seat's activity from what the daemon already holds, capture-free, the way rig ps reads it: its newest hook, the
+ * cached pane reading and the cached terminal motion (needs_input > running > MOTION > idle / unknown). `activity` is
+ * null when there is no hook and no pane verdict; `withMotion` lifts whatever the caller falls back to then.
+ */
+export function capturelessSeatActivity(input: {
+  sessionName: string;
+  runtime: string | null | undefined;
+  hookActivity: AgentActivity | null | undefined;
+  structural: StructuralObservation | null;
+  motion: SeatActivity | null;
+  now: Date;
+  /** The seat's current Claude authentication or billing failure, if any (`retainedProviderFailure`, #3571). */
+  providerFailure?: AgentActivity | null;
+}): { activity: AgentActivity | null; withMotion: (activity: AgentActivity) => AgentActivity } {
+  const { sessionName, runtime, hookActivity, structural, motion } = input;
+  const sampledAt = input.now;
+
+  /**
+   * Freshness is decided HERE, at read time, from the RAW `lastActivityAt` against the request
+   * clock — NEVER from the cached `isActiveWithinWindow` boolean alone.
+   *
+   * WHY (dev50-guard HOLD on 29ad1b2b9): `SeatActivityService.pollSeat` returns null on a tmux
+   * error BEFORE it replaces or deletes the cached record, and `pollAllRunningTmuxSeats` only
+   * evicts seats that are no longer running in the DB. A seat still marked running whose tmux read
+   * keeps failing therefore KEEPS its last observation forever — including a `true`. Trusting that
+   * boolean turned an UNAVAILABLE observation into an affirmative liveness claim: ACTIVITY would
+   * report `running` indefinitely after the instrument went dark.
+   *
+   * That is this ladder's own no-fabrication rule broken in the unwatched direction. Three guards
+   * below stop motion inventing `idle` from silence; none of them stopped a dead cache inventing
+   * `running`. A silent seat and a seat we can no longer SEE are different states, and only the
+   * raw timestamp distinguishes them.
+   *
+   * Fail CLOSED when the fact cannot be aged (absent or unparseable): an un-ageable affirmative is
+   * indistinguishable from a long-dead one, so it must not become a liveness claim.
+   *
+   * The seat's OWN `silenceWindowSeconds` is the threshold — the same one the service used at poll
+   * time. No second threshold is invented here. A negative age (raw fact slightly ahead of the
+   * request clock) still reads live, preserving pollSeat's deliberate clock-skew tolerance.
+   */
+  const motionRunning = (() => {
+    if (motion?.isActiveWithinWindow !== true) return false;
+    const rawMs = motion.lastActivityAt ? Date.parse(motion.lastActivityAt) : Number.NaN;
+    if (!Number.isFinite(rawMs)) return false;
+    const ageSeconds = (sampledAt.getTime() - rawMs) / 1000;
+    return ageSeconds < motion.silenceWindowSeconds;
+  })();
+
+  /**
+   * ACTIVITY D1+D2 — precedence below, except for a current typed usage limit:
+   *
+   *     needs_input > running > MOTION > idle / unknown
+   *
+   * A current, target-bound complete idle frame is the narrow idle exception to motion below.
+   * An explicitly unsupported client version also retains unknown rather than inferring work from redraws.
+   * A generic footer or old idle capture is not completed-idle evidence; D2 remains unchanged.
+   * Live motion otherwise UPGRADES a verdict of `idle` or `unknown`; it never touches `needs_input` or an
+   * already-`running` verdict, and it never MANUFACTURES `idle`. That asymmetry is the whole
+   * safety argument, and it is what each half of the defect needs:
+   *
+   *   D1 (Codex → unknown) is COVERAGE. A Codex seat has no hook, and the structural matcher is
+   *     Claude-shaped over a fixed 8-line tail window, so a tall Codex footer pushes the real work
+   *     line out of view and the seat falls to `unknown`. Motion is a fact about bytes on the pane,
+   *     so it covers every runtime without a matcher per provider — the treadmill this avoids.
+   *   D2 (Claude → idle) is PRECEDENCE. A seat that Stopped and then RESUMED still carries the
+   *     stale positive `idle` hook as its latest, and the old early-return handed that back as
+   *     authoritative before anything else was consulted. A perfect motion source placed further
+   *     down the ladder would still have lost to it. Motion has to outrank a POSITIVE idle hook,
+   *     not merely an absent one.
+   *
+   * Why `needs_input` outranks motion: motion cannot tell "working" from "waiting at a prompt" —
+   * any per-second redraw keeps the window fresh. If motion outranked a needs_input TEXT verdict,
+   * a seat asking for permission would be relabelled `running`, and the parking watch would step
+   * over the one seat that is actually blocked.
+   *
+   * Why motion never yields `idle`: a silent window is not evidence of a quiet agent (a seat can
+   * think for a long time without printing). Deriving `idle` from silence would satisfy
+   * "not unknown" by relabelling the default, which is the closed union rotting rather than the
+   * signal improving. Silence therefore leaves the prior verdict exactly as it was.
+   */
+  const withMotion = (activity: AgentActivity, currentIdleFrame = false): AgentActivity => {
+    if (!motionRunning || activity.reason === "unrecognized_client_version" || (currentIdleFrame && activity.state === "idle")) return activity;
+    if (activity.state !== "idle" && activity.state !== "unknown") return activity;
+    return {
+      state: "running",
+      reason: "window_activity_motion",
+      evidenceSource: "terminal_activity",
+      sampledAt: motion!.lastObservedAt,
+      // The RAW `#{window_activity}` timestamp that earned the verdict — a reader can age it
+      // against their own clock and see for themselves why this seat reads running.
+      evidence: motion!.lastActivityAt ?? null,
+      runtime: runtime ?? null,
+    };
+  };
+  const lift = (activity: AgentActivity) => withMotion(activity);
+
+  // Reuse the existing cached capture. Only a complete supported idle frame, bound to this
+  // target and started in a later second than the last write, distinguishes idle redraw from resumed work.
+  // window_activity has second precision: same-second ordering is unknown. Poll/completion time is not write time.
+  const capturedMs = Date.parse(structural?.idleFrame?.captureStartedAt ?? "");
+  const motionMs = Date.parse(motion?.lastActivityAt ?? "");
+  const currentIdleFrame = structural?.state === "agent_idle"
+    && structural.idleFrame?.sessionName === sessionName
+    && structural.idleFrame?.runtime === runtime
+    && Number.isFinite(capturedMs) && capturedMs <= sampledAt.getTime()
+    && sampledAt.getTime() - capturedMs < DEFAULT_STRUCTURAL_STALE_MS
+    && (!motionRunning || (Number.isFinite(motionMs)
+      && Math.floor(capturedMs / 1000) > Math.floor(motionMs / 1000)));
+
+  // A current Claude auth or billing failure stands over the pane reading and motion, as a limit does (#3571).
+  const providerFailure = providerFailureActivity(input.providerFailure, structural, runtime);
+  if (providerFailure) return { activity: providerFailure, withMotion: lift };
+
+  // An idle hook alone still yields to motion (D2); when a current complete idle frame exists, report
+  // that frame's provenance instead.
+  const resolved = hookOrPaneActivity(hookActivity, structural,
+    motionRunning && (currentIdleFrame || structural?.reason === "unrecognized_client_version"), runtime);
+  if (resolved?.source === "hook") return { activity: withMotion(resolved.activity), withMotion: lift };
+  if (resolved?.source === "limit") return { activity: resolved.activity, withMotion: lift };
+  if (resolved?.source === "pane") return { activity: withMotion(resolved.activity, currentIdleFrame), withMotion: lift };
+
+  // No positive hook and no structural verdict. A stale/unknown hook, if one exists, is delivered
+  // HONESTLY as-is (unknown/stale) — never upgraded to a quiet-seat verdict on arrival age alone.
+  // Live motion DOES upgrade it. A demoted hook is not exotic: a seat whose agent process lacks the
+  // relay's launch environment (for example, relaunched outside the product launcher without
+  // OPENRIG_RUNTIME or an occupant generation) posts no new hooks, so its newest stored hook can be
+  // an old one from a prior tenure, read as generation_mismatch. Product-launched seats carry the
+  // generation and post resolvable hooks. Where a hook is demoted, it — not a positive idle one —
+  // is what stands between a working seat and a truthful label.
+  if (hookActivity) return { activity: withMotion(hookActivity), withMotion: lift };
+  return { activity: null, withMotion: lift };
 }
 
 export async function attachAgentActivity(
@@ -2001,133 +2243,20 @@ export async function attachAgentActivity(
       ? deps.seatActivity?.getSeatActivity(entry.canonicalSessionName) ?? null
       : null;
 
-    /**
-     * Freshness is decided HERE, at read time, from the RAW `lastActivityAt` against the request
-     * clock — NEVER from the cached `isActiveWithinWindow` boolean alone.
-     *
-     * WHY (dev50-guard HOLD on 29ad1b2b9): `SeatActivityService.pollSeat` returns null on a tmux
-     * error BEFORE it replaces or deletes the cached record, and `pollAllRunningTmuxSeats` only
-     * evicts seats that are no longer running in the DB. A seat still marked running whose tmux read
-     * keeps failing therefore KEEPS its last observation forever — including a `true`. Trusting that
-     * boolean turned an UNAVAILABLE observation into an affirmative liveness claim: ACTIVITY would
-     * report `running` indefinitely after the instrument went dark.
-     *
-     * That is this ladder's own no-fabrication rule broken in the unwatched direction. Three guards
-     * below stop motion inventing `idle` from silence; none of them stopped a dead cache inventing
-     * `running`. A silent seat and a seat we can no longer SEE are different states, and only the
-     * raw timestamp distinguishes them.
-     *
-     * Fail CLOSED when the fact cannot be aged (absent or unparseable): an un-ageable affirmative is
-     * indistinguishable from a long-dead one, so it must not become a liveness claim.
-     *
-     * The seat's OWN `silenceWindowSeconds` is the threshold — the same one the service used at poll
-     * time. No second threshold is invented here. A negative age (raw fact slightly ahead of the
-     * request clock) still reads live, preserving pollSeat's deliberate clock-skew tolerance.
-     */
-    const motionRunning = (() => {
-      if (motion?.isActiveWithinWindow !== true) return false;
-      const rawMs = motion.lastActivityAt ? Date.parse(motion.lastActivityAt) : Number.NaN;
-      if (!Number.isFinite(rawMs)) return false;
-      const ageSeconds = (sampledAt.getTime() - rawMs) / 1000;
-      return ageSeconds < motion.silenceWindowSeconds;
-    })();
-
-    /**
-     * ACTIVITY D1+D2 — precedence below, except for a current typed usage limit:
-     *
-     *     needs_input > running > MOTION > idle / unknown
-     *
-     * A current, target-bound complete idle frame is the narrow idle exception to motion below.
-     * An explicitly unsupported client version also retains unknown rather than inferring work from redraws.
-     * A generic footer or old idle capture is not completed-idle evidence; D2 remains unchanged.
-     * Live motion otherwise UPGRADES a verdict of `idle` or `unknown`; it never touches `needs_input` or an
-     * already-`running` verdict, and it never MANUFACTURES `idle`. That asymmetry is the whole
-     * safety argument, and it is what each half of the defect needs:
-     *
-     *   D1 (Codex → unknown) is COVERAGE. A Codex seat has no hook, and the structural matcher is
-     *     Claude-shaped over a fixed 8-line tail window, so a tall Codex footer pushes the real work
-     *     line out of view and the seat falls to `unknown`. Motion is a fact about bytes on the pane,
-     *     so it covers every runtime without a matcher per provider — the treadmill this avoids.
-     *   D2 (Claude → idle) is PRECEDENCE. A seat that Stopped and then RESUMED still carries the
-     *     stale positive `idle` hook as its latest, and the old early-return handed that back as
-     *     authoritative before anything else was consulted. A perfect motion source placed further
-     *     down the ladder would still have lost to it. Motion has to outrank a POSITIVE idle hook,
-     *     not merely an absent one.
-     *
-     * Why `needs_input` outranks motion: motion cannot tell "working" from "waiting at a prompt" —
-     * any per-second redraw keeps the window fresh. If motion outranked a needs_input TEXT verdict,
-     * a seat asking for permission would be relabelled `running`, and the parking watch would step
-     * over the one seat that is actually blocked.
-     *
-     * Why motion never yields `idle`: a silent window is not evidence of a quiet agent (a seat can
-     * think for a long time without printing). Deriving `idle` from silence would satisfy
-     * "not unknown" by relabelling the default, which is the closed union rotting rather than the
-     * signal improving. Silence therefore leaves the prior verdict exactly as it was.
-     */
-    const withMotion = (activity: AgentActivity, currentIdleFrame = false): AgentActivity => {
-      if (!motionRunning || activity.reason === "unrecognized_client_version" || (currentIdleFrame && activity.state === "idle")) return activity;
-      if (activity.state !== "idle" && activity.state !== "unknown") return activity;
-      return {
-        state: "running",
-        reason: "window_activity_motion",
-        evidenceSource: "terminal_activity",
-        sampledAt: motion!.lastObservedAt,
-        // The RAW `#{window_activity}` timestamp that earned the verdict — a reader can age it
-        // against their own clock and see for themselves why this seat reads running.
-        evidence: motion!.lastActivityAt ?? null,
-        runtime: entry.runtime ?? null,
-      };
-    };
-
     const hookActivity = entry.canonicalSessionName ? deps.activityStore?.getLatestForNode({
       nodeId: entry.nodeId,
       sessionName: entry.canonicalSessionName,
       now: sampledAt,
       order: entry.runtime === "claude-code" ? "source" : "arrival",
     }) : null;
-    // Reuse the existing cached capture. Only a complete supported idle frame, bound to this
-    // target and started in a later second than the last write, distinguishes idle redraw from resumed work.
-    // window_activity has second precision: same-second ordering is unknown. Poll/completion time is not write time.
     const structural = entry.canonicalSessionName
       ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName) ?? null
       : null;
-    const capturedMs = Date.parse(structural?.idleFrame?.captureStartedAt ?? "");
-    const motionMs = Date.parse(motion?.lastActivityAt ?? "");
-    const currentIdleFrame = structural?.state === "agent_idle"
-      && structural.idleFrame?.sessionName === entry.canonicalSessionName
-      && structural.idleFrame?.runtime === entry.runtime
-      && Number.isFinite(capturedMs) && capturedMs <= sampledAt.getTime()
-      && sampledAt.getTime() - capturedMs < DEFAULT_STRUCTURAL_STALE_MS
-      && (!motionRunning || (Number.isFinite(motionMs)
-        && Math.floor(capturedMs / 1000) > Math.floor(motionMs / 1000)));
-
-    // A current Claude auth or billing failure stands over the pane reading and motion, as a limit does (#3571).
-    const providerFailure = providerFailureActivity(retainedProviderFailure(deps.activityStore, { nodeId: entry.nodeId,
-      sessionName: entry.canonicalSessionName, runtime: entry.runtime, now: sampledAt }, hookActivity), structural, entry.runtime);
-    if (providerFailure) return { ...entry, agentActivity: providerFailure };
-
-    // An idle hook alone still yields to motion (D2); when a current complete idle frame exists, report
-    // that frame's provenance instead.
-    const resolved = hookOrPaneActivity(hookActivity, structural,
-      motionRunning && (currentIdleFrame || structural?.reason === "unrecognized_client_version"), entry.runtime);
-    if (resolved?.source === "hook") return { ...entry, agentActivity: withMotion(resolved.activity) };
-    if (resolved?.source === "limit") return { ...entry, agentActivity: resolved.activity };
-    if (resolved?.source === "pane") return { ...entry, agentActivity: withMotion(resolved.activity, currentIdleFrame) };
-
-    // No positive hook and no structural verdict. A stale/unknown hook, if one exists, is delivered
-    // HONESTLY as-is (unknown/stale) — never upgraded to a quiet-seat verdict on arrival age alone.
-    // Live motion DOES upgrade it. A demoted hook is not exotic: a seat whose agent process lacks the
-    // relay's launch environment (for example, relaunched outside the product launcher without
-    // OPENRIG_RUNTIME or an occupant generation) posts no new hooks, so its newest stored hook can be
-    // an old one from a prior tenure, read as generation_mismatch. Product-launched seats carry the
-    // generation and post resolvable hooks. Where a hook is demoted, it — not a positive idle one —
-    // is what stands between a working seat and a truthful label.
-    if (hookActivity) {
-      return {
-        ...entry,
-        agentActivity: withMotion(hookActivity),
-      };
-    }
+    const { activity, withMotion } = capturelessSeatActivity({ sessionName: entry.canonicalSessionName ?? "", runtime: entry.runtime,
+      hookActivity, structural, motion, now: sampledAt,
+      providerFailure: retainedProviderFailure(deps.activityStore, { nodeId: entry.nodeId, sessionName: entry.canonicalSessionName,
+        runtime: entry.runtime, now: sampledAt }, hookActivity) });
+    if (activity) return { ...entry, agentActivity: activity };
 
     if (!captureFallback) {
       // CHEAP DEFAULT — no per-node tmux capture. A hook-less seat's pane-heuristic needs_input

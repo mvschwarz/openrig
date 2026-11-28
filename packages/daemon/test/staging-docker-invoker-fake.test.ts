@@ -121,3 +121,74 @@ describe.skipIf(process.platform === "win32")("makeRealStagingDocker — cleanup
     expect(kill).not.toHaveBeenCalled();
   });
 });
+
+// The order a real pipe allows: the producer's EOF is forwarded to the consumer, the consumer reads to the end and
+// closes, and its close can be seen here BEFORE the producer's own close. That order once read as "the producer was
+// still writing" (a CI flake on Linux runners, staging-docker-invoker.test.ts DUAL-EXIT). These force it.
+describe.skipIf(process.platform === "win32")("makeRealStagingDocker — the consumer's close seen before the producer's (fake processes)", () => {
+  const tick = () => new Promise((resolveTick) => setImmediate(resolveTick));
+  const start = () => makeRealStagingDocker({ command: "docker", tarCommand: "tar", stepTimeoutMs: 60_000 })(
+    ["exec", "-i", "c", "tar", "-xf", "-"], ["-cf", "-", "."],
+  );
+
+  it("a producer that ended its feed and then fails is reported by its own exit code, not as still writing", async () => {
+    const consumer = new FakeChild(CONSUMER_PID);
+    const producer = new FakeChild(PRODUCER_PID);
+    spawnMock.mockReturnValueOnce(consumer).mockReturnValueOnce(producer);
+    const kill = fakeKill(consumer);
+
+    const step = start();
+    producer.stdout.end(); // the feed ends, and pipe() ends the consumer's stdin
+    await tick();
+    consumer.close(0); // the consumer read to the end and closed first
+    await tick();
+    producer.stderr.write("tar: a file changed as we read it\n");
+    producer.close(3); // then the producer's own close arrives
+    const res = await step;
+
+    expect(res.code).toBe(3);
+    expect(res.stderr).toContain("tar-side (stdinFrom) failed: exit 3");
+    expect(res.stderr).toContain("tar: a file changed as we read it");
+    expect(res.stderr).not.toContain("still producing");
+    expect(kill).not.toHaveBeenCalledWith(-PRODUCER_PID, expect.anything());
+  });
+
+  it("a producer that ended its feed and then succeeds makes a successful step", async () => {
+    const consumer = new FakeChild(CONSUMER_PID);
+    const producer = new FakeChild(PRODUCER_PID);
+    spawnMock.mockReturnValueOnce(consumer).mockReturnValueOnce(producer);
+    const kill = fakeKill(consumer);
+
+    const step = start();
+    producer.stdout.end();
+    await tick();
+    consumer.stdout.write("staged");
+    consumer.close(0);
+    await tick();
+    producer.close(0);
+    const res = await step;
+
+    expect(res).toEqual({ stdout: "staged", stderr: "", code: 0 });
+    expect(kill).not.toHaveBeenCalledWith(-PRODUCER_PID, expect.anything());
+  });
+
+  it("a producer still writing when the consumer closes is killed, and the step says the feed didn't arrive", async () => {
+    const consumer = new FakeChild(CONSUMER_PID);
+    const producer = new FakeChild(PRODUCER_PID);
+    spawnMock.mockReturnValueOnce(consumer).mockReturnValueOnce(producer);
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
+      if (pid === -PRODUCER_PID) setImmediate(() => producer.close(null, "SIGKILL"));
+      return true;
+    }) as typeof process.kill);
+
+    const step = start();
+    producer.stdout.write("part of the feed"); // its stdout hasn't ended
+    await tick();
+    consumer.close(0);
+    const res = await step;
+
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain("tar-side (stdinFrom) was still producing when the consumer exited");
+    expect(kill).toHaveBeenCalledWith(-PRODUCER_PID, "SIGKILL");
+  });
+});

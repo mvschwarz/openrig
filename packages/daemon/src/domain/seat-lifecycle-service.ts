@@ -1,3 +1,4 @@
+import { earlierHandoverSuccessorQuery } from "../db/migrations/200_sessions_earlier_handover_origin.js";
 import { validateStatuslineThrottle } from "./claude-statusline-throttle.js";
 import { communityHarnessOf, isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
@@ -45,6 +46,7 @@ import { planCwdPreparation } from "./seat-cwd-preparation.js";
 import { resolvePermissionPolicyAttachment, validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import type { PaneCutoverTiming } from "./pane-cutover.js";
+import { terminatePaneInPlace } from "./pane-cutover.js";
 import {
   effortPrecedence, emittedEffortFromArgv, readNativeEffort, readSeatEffort, resolveSeatEffort, unknownLevelWarning,
   type EffortResolution, type NativeEffortObservation,
@@ -59,7 +61,7 @@ import {
   type InPlaceRestartReport, type InPlaceRestartTarget, type InPlaceVerifyResult,
 } from "./seat-restart-in-place.js";
 import { CommunityHarnessRuntimeAdapter, seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
-import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { seatRecordedCommunityHarness, sessionCommunityHarnessSelect } from "./session-registry.js";
 import { seatLaunchAdditionsReport } from "./seat-launch-additions.js";
 import { seatSkillPaths } from "./seat-skill-storage.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
@@ -163,6 +165,7 @@ export interface SeatRefusal {
     | "seat_ref_required"
     | "seat_not_found"
     | "seat_ambiguous"
+    | "seat_name_shared"
     | "missing_model"
     | "missing_cwd"
     | "invalid_cwd"
@@ -487,8 +490,9 @@ export class SeatLifecycleService {
     const preset = isCommunityHarnessRuntime(runtime) ? loadCommunityHarnessPreset(runtime) : undefined;
     const declaration = preset?.ok ? preset.preset.modelCatalog : undefined;
     if (!declaration) {
+      const diagnostic = preset?.ok ? preset.modelCatalogDiagnostic : preset?.diagnostic;
       return { ok: true as const, seat, runtime, saved,
-        catalog: { status: "unavailable" as const, reason: "No supported local catalog for this seat's runtime." } };
+        catalog: { status: "unavailable" as const, ...(diagnostic ?? { reason: "No supported local catalog for this seat's runtime." }) } };
     }
     const observedAt = new Date().toISOString();
     const { runtimeVersion } = declaration;
@@ -629,7 +633,7 @@ export class SeatLifecycleService {
       return { ok: false, code: "startup_context_runtime_mismatch", message: "The saved startup context belongs to a different runtime." };
     }
     // Resolved as launch resolves it, so a recorded community harness finds its adapter too.
-    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, this.latestSession(node.id)?.community_harness);
+    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, seatRecordedCommunityHarness(this.db, node.id));
     if (!adapter) return { ok: false, code: "runtime_adapter_missing", message: "The configured runtime adapter is unavailable." };
 
     const warnings: string[] = [];
@@ -1570,7 +1574,9 @@ export class SeatLifecycleService {
         message: `Persisted startup context runtime '${startup.context.runtime}' does not match current node runtime '${node.runtime ?? "missing"}'.`,
       };
     }
-    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, this.latestSession(node.id)?.community_harness);
+    // The harness the seat was last launched for, even when a newer session lost the selection (#4047: a restore launch
+    // that couldn't tell the harness left a bare shell's row on top), so this fresh launch is how such a seat recovers.
+    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, seatRecordedCommunityHarness(this.db, node.id));
     if (!adapter) {
       return {
         ok: false as const,
@@ -2214,24 +2220,38 @@ export class SeatLifecycleService {
    * needs input) and child processes are reported for the operator to judge, not refused. Identity, typing
    * guard, adopted sessions, unreadable tmux and settings drift are named refusals before any signal.
    */
-  async restartInPlace(input: { seatRef: string; reason?: string; plan?: boolean; operator?: string | null }): Promise<RestartInPlaceResult> {
+  async restartInPlace(input: { seatRef: string; reason?: string; plan?: boolean; operator?: string | null; nodeId?: string }): Promise<RestartInPlaceResult> {
     if (!input.plan) {
       const required = this.requireReason(input.reason ?? "");
       if (required) return required;
     }
     const resolved = this.resolveSeat(input.seatRef);
-    if ("code" in resolved) return resolved;
+    // #3625: a caller that selected the seat by its node (an assignment) passes it, so a name that now resolves to another
+    // seat, to more than one (another rig took it meanwhile), or to none (its rig was archived), restarts nothing, and is
+    // refused as a name that no longer reaches that seat alone.
+    if (input.nodeId !== undefined && "code" in resolved && resolved.code === "seat_ambiguous") {
+      return { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" now names more than one seat, not only the one this restart was for; nothing was restarted.` };
+    }
+    // The same when the node is gone by the time its target is read (a removal held the seat's lease first).
+    const gone = <T,>(r: T | SeatRefusal): T | SeatRefusal => input.nodeId !== undefined && typeof r === "object" && r !== null
+      && "code" in r && r.code === "seat_not_found"
+      ? { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" no longer names the seat this restart was for, or any seat; nothing was restarted.` }
+      : r;
+    if ("code" in resolved) return gone(resolved);
+    if (input.nodeId !== undefined && resolved.nodeId !== input.nodeId) {
+      return { ok: false, code: "seat_name_shared", message: `"${input.seatRef}" now names the seat in rig ${resolved.entry.rigName} (${resolved.entry.rigId}), not the one this restart was for; nothing was restarted.` };
+    }
     const prepared = this.inPlaceRestarter();
     if ("code" in prepared) return prepared;
     if (input.plan) {
-      const target = await this.inPlaceTarget(resolved, input.seatRef);
+      const target = gone(await this.inPlaceTarget(resolved, input.seatRef));
       return "code" in target ? target : prepared.plan(target);
     }
     // Recorded before waiting for the lease: a restart that ran meanwhile refuses this one (no repeat
     // on a slow reply).
     const seenStartedSeq = prepared.latestStartedSeq(resolved.nodeId);
     const run = async (): Promise<RestartInPlaceResult> => {
-      const target = await this.inPlaceTarget(resolved, input.seatRef);
+      const target = gone(await this.inPlaceTarget(resolved, input.seatRef));
       if ("code" in target) return target;
       return prepared.execute(target, { reason: input.reason ?? "", operator: input.operator ?? null, seenStartedSeq });
     };
@@ -2345,6 +2365,16 @@ export class SeatLifecycleService {
       if (changed) refuse(changed);
       checked.guard.checkInput(resolved.nodeId);
     });
+    // Only the checked daemon reaper requests standby. Ordinary operator stops still close the pane.
+    const standby = checked && operator === "daemon:seat-reaper" && reason === "idle_reap";
+    const binding = standby ? this.sessionRegistry.getBindingForNode(resolved.nodeId) : null;
+    const target = binding?.attachmentType === "tmux" && binding.tmuxSession === session.session_name && binding.tmuxPane
+      ? { session: session.session_name, pane: binding.tmuxPane, nodeId: resolved.nodeId } : null;
+    const standbyPane = target ? await this.tmuxAdapter.standbyPaneIdentity(target, false) : null;
+    if (standby && (!standbyPane || !this.db.prepare(`SELECT 1 FROM sessions WHERE id = ?
+      AND restore_policy = 'resume_if_possible' AND length(trim(resume_token)) > 0 AND resume_type <> 'none'`).get(session.id))) {
+      return { ok: false, code: "selection_changed", message: "Standby requires the exact bound pane and a resumable conversation." };
+    }
     // #2940: a supported stop records its request durably before the first step that stops anything, after the target
     // was resolved under the lifecycle lease. A daemon lost after this point leaves a pending stop, which the startup
     // reconcile confirms once the session is gone; it is never read as a fall.
@@ -2364,7 +2394,9 @@ export class SeatLifecycleService {
     // request stays recorded, and the result says so.
     const undoRequest = () => !request || this.sessionRegistry.revertStopRequest(session.id, request.attemptId, request.prev);
     const keptNote = " The stop request stays recorded: the row changed meanwhile, so this attempt's request couldn't be put back.";
-    const kill = checked
+    const kill = target && standbyPane
+      ? await this.stopStandbyPane(target, standbyPane, beforeEffect)
+      : checked
       ? await this.tmuxAdapter.killSession(session.session_name, beforeEffect)
       : await this.tmuxAdapter.killSession(session.session_name);
     // #2940: a keep_alive seat whose session ended before the kill reached it is gone either way. Its stop is confirmed,
@@ -2414,7 +2446,7 @@ export class SeatLifecycleService {
         // An internal replacement stop or an unconfirmed kill must still affect health.
         this.sessionRegistry.updateStatus(session.id, "exited");
       }
-      this.sessionRegistry.clearBinding(resolved.nodeId);
+      if (!standbyPane) this.sessionRegistry.clearBinding(resolved.nodeId);
       persisted = this.eventBus.persistWithinTransaction({
         type: "session.stopped",
         rigId: seat.rigId,
@@ -2423,6 +2455,7 @@ export class SeatLifecycleService {
         sessionName: session.session_name,
         reason: reason.trim(),
         operator: operator ?? null,
+        ...(standbyPane ? { standbyPane } : {}),
       });
       return null;
     });
@@ -2443,6 +2476,37 @@ export class SeatLifecycleService {
     }
     return { ok: true, seat, sessionName: session.session_name, sessionId: session.id,
       ...(communityHarnessOf(session.community_harness, (this.db.prepare("SELECT runtime FROM nodes WHERE id=?").get(resolved.nodeId) as { runtime: string | null } | undefined)?.runtime) ? { paneOnly: true } : {}) };
+  }
+
+  private async stopStandbyPane(target: { session: string; pane: string; nodeId: string }, identity: string,
+    beforeEffect?: () => Promise<void>): Promise<import("../adapters/tmux.js").TmuxResult> {
+    let began = false;
+    try {
+      const processes = await this.tmuxAdapter.observeStandbyProcesses(target.pane);
+      if (!processes) return { ok: false, code: "standby_unconfirmed", message: "The pane's foreground runner could not be observed." };
+      // The exit check reads every observation this stop accepted before signalling, not just the first: a runner
+      // first seen in a later pre-signal look is still required to be gone (only looks after the last signal are out of scope).
+      const accepted = [processes];
+      const result = await terminatePaneInPlace(this.tmuxAdapter, target.pane,
+        { pollMs: 100, timeoutMs: 3_000, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), ...this.inPlaceRestartTiming },
+        "Standby process", target.nodeId, undefined, { witness: { target, identity, processes, observations: accepted },
+          processesGone: async () => {
+            for (const observed of accepted) if (!await this.tmuxAdapter.standbyProcessesGone(observed)) return false;
+            return true;
+          }, beforeEffect: async () => {
+          if (await this.tmuxAdapter.standbyPaneIdentity(target, false) !== identity) {
+            throw Object.assign(new Error("The standby pane changed before stop."), { code: "selection_changed" });
+          }
+          await beforeEffect?.();
+          began = true;
+        } });
+      if (result.ok && await this.tmuxAdapter.standbyPaneIdentity(target, true) === identity) return { ok: true };
+      return { ok: false, code: "standby_unconfirmed", message: result.ok ? "The stopped pane could not be verified." : result.message, stopPhase: "kill_attempted" };
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      return { ok: false, code: "code" in error && typeof error.code === "string" ? error.code : "standby_unconfirmed",
+        message: error.message, stopPhase: began ? "kill_attempted" : "none" };
+    }
   }
 
   /** #2940: whether the session row still carries a stop request. */
@@ -2813,13 +2877,12 @@ export class SeatLifecycleService {
     return row ?? null;
   }
 
-  /** From 0.7.9 a fresh, fork or rebuild handover records its successor as launched (#2440); a successor from before
-   *  keeps origin=claimed. Name that case rather than suggest `rig unclaim`, which would end OpenRig's management. */
+  /** Migration 200 repairs established earlier successors. A released one still reads claimed; explain that case only
+   *  from the same positive evidence, never merely because this node had some earlier handover. */
   private earlierHandoverRefusal(nodeId: string, session: { id: string; session_name: string }, refuses: string): SeatRefusal | null {
-    if (this.latestSession(nodeId)?.id !== session.id) return null;
     const handover = this.db.prepare(
-      "SELECT continuity_outcome, handover_at FROM nodes WHERE id = ? AND handover_result = 'complete' AND continuity_outcome IN ('fresh', 'forked', 'rebuilt')",
-    ).get(nodeId) as { continuity_outcome: string; handover_at: string | null } | undefined;
+      `SELECT continuity_outcome, handover_at FROM (${earlierHandoverSuccessorQuery}) WHERE session_id = ? AND node_id = ?`,
+    ).get(session.id, nodeId) as { continuity_outcome: string; handover_at: string | null } | undefined;
     if (!handover) return null;
     return {
       ok: false,

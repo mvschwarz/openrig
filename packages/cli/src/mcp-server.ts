@@ -803,6 +803,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_chatroom_send", routes: ["POST /api/rigs/:rigId/chat/send"], effect: "additive", access: "work" },
   { tool: "rig_chatroom_watch", routes: ["GET /api/rigs/:rigId/chat/history"], effect: "read", access: "work" },
   { tool: "rig_add", routes: ["POST /api/rigs/:rigId/pods/:podNamespace/members"], effect: "additive", access: "owner" },
+  { tool: "rig_network_request", routes: ["GET /api/network/bindings", "POST /api/network/bindings/:id/requests"], effect: "additive", access: "work" },
   { tool: "rig_queue_create", routes: ["POST /api/queue/create", "GET /api/queue/:qitemId"], effect: "additive", access: "work" },
   { tool: "rig_queue_show", routes: ["GET /api/queue/:qitemId", "GET /api/queue/:qitemId/transitions", "GET /api/queue/list"], effect: "read", access: "work" },
   { tool: "rig_queue_list", routes: ["GET /api/queue/list"], effect: "read", access: "work" },
@@ -823,6 +824,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_queue_decide", routes: ["POST /api/queue/:qitemId/delegated-decision"], effect: "destructive", access: "work" },
   { tool: "rig_queue_handoff", routes: ["POST /api/queue/:qitemId/handoff"], effect: "destructive", access: "work" },
   { tool: "rig_queue_unclaim", routes: ["POST /api/queue/:qitemId/unclaim"], effect: "destructive", access: "work" },
+  { tool: "rig_seat_decide_permission", routes: ["POST /api/activity/permission-requests/:askId/decide"], effect: "destructive", access: "work" },
 ];
 
 /** How a member works its inbox, and asks a person while keeping the work: one versioned text, carried in this server's
@@ -887,14 +889,16 @@ function askWhichAssistant(canList: boolean, frontDoor: boolean): string {
 
 /** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
  *  that works its inbox. The team's questions to it are the person's to answer. */
-export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v5";
+export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v6";
 export const FRONT_DOOR_WORKFLOW = [
   `Front door (${FRONT_DOOR_WORKFLOW_VERSION}). This seat is a person's agent in their own app: you hand the team their work and bring back what it produced, and you aren't one of its members.`,
   "The team's questions are the person's, and an answer covers only the question it answered: a later one, even one like it, goes back to them, unless they told you outright to decide that kind of question. Approving a plan, a task or 'go ahead' isn't an answer to the questions that work raises. Never tell the team they approved something, or will answer a question, unless they said so, and don't send them to a seat's terminal to answer the team's questions: those come to this seat as items.",
   askWhichAssistant(true, true),
   "Items addressed to your seat (rig_queue_list with owned set) are usually the team's questions about work you handed it. They're the person's to answer, not yours: show each to the person with the team's draft, and record only what the person tells you.",
   "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and exactly what the person typed in resolution, with no label, quotation marks or words of your own (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them unless they told you outright to decide that kind of question: then answer only what's clearly inside it, and say in resolution that you decided under their instruction, not that they answered, and tell them you did. Don't claim an item you can't close with their words or under such an instruction.",
-  "Where the app runs the openrig plugin's hooks (Claude Code, Codex), a task that reaches an address OpenRig issued to this conversation is brought into it with its recorded sender. Otherwise nothing wakes this conversation when the team finishes, and it has no wake of its own: tell the person you'll check when they ask, then check your work and your items when they ask or come back. Offer a wake only where their app actually has one, such as Claude Desktop's scheduled tasks.",
+  "Where the app runs the openrig plugin's hooks (Claude Code, Codex), a task that reaches an address OpenRig issued to this conversation is brought into it with its recorded sender. Otherwise nothing wakes this conversation when the team finishes, and it has no wake of its own, so the person hears from the team when they next write to you.",
+  "While work you handed over is open, start each of your turns by listing your items (rig_queue_list with owned set) and checking that work, before anything else and whatever the person's message is about, and tell them first about any question waiting for them, then answer what they wrote. If their message answers that question, record it as above rather than asking it again. If their app asks them to approve each OpenRig call, tell them once that choosing an approval that lasts for OpenRig's read tools (list and show), such as 'Always allow', where the app offers one, lets these checks run without asking.",
+  "Offer a wake only where their app actually has one, such as a Claude Desktop scheduled task that checks your items, and say what it needs. Where the app asks before each OpenRig call, each run waits there and shows the person only 'Needs your input', not the team's question, until they approve it or choose an approval that lasts across runs for OpenRig's read tools ('Always allow', or 'Allow for all scheduled runs'), where the app offers one. Don't promise that a wake will reach them by itself: once they've chosen such an approval, say a run can, not that it will.",
 ].join(" ");
 const FRONT_DOOR_INSTRUCTIONS = [...SHARED_INSTRUCTIONS, FRONT_DOOR_WORKFLOW].join("\n");
 // An external caller's first paragraph says what the connection is for, on its own: a client may show the model only the
@@ -1152,6 +1156,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const hostBindingsLoader = options.hostBindingsLoader ?? loadHostBindings;
   // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
   const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+  /** Whether this server runs under a seat OpenRig launched: only OpenRig's launch sets OPENRIG_NODE_ID, and its seat's
+   *  processes carry it. Claude Code passes it to the MCP servers it starts, unless CLAUDE_CODE_MCP_ALLOWLIST_ENV limits
+   *  their environment; Codex passes it only when its entry's env_vars names it. Where a call also checks the sender, a seat
+   *  the client already resolved (a pane's bound seat) counts too. With neither, this server can't tell a seat from a
+   *  person's own conversation: a seat configured for its tools (OPENRIG_SESSION_NAME) is only a name. The hook bridge
+   *  decides for itself, from its own environment: it stays out of a seat on OPENRIG_NODE_ID or OPENRIG_SESSION_NAME. */
+  const inManagedSeat = (): boolean => !!readOpenRigEnv("OPENRIG_NODE_ID", "RIGGED_NODE_ID")?.trim();
   /** A tool's optional `host`: that registered http host's client and bearer, or this server's own client when none is
    *  named. A granted connection (an authenticated non-owner) reaches only the daemon serving it, so it can't name one.
    *  The remote client is bound to this server's seat, so a write it makes there names the calling agent as its sender
@@ -1278,6 +1289,52 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     if (detail.status >= 400) return mapResult(detail);
     const name = ((detail.data ?? {}) as RigDetail).rig?.name;
     return scope?.rig(name) ? name as string : outOfScope(`Rig ${handle}`);
+  };
+  /** Every row tagged with this conversation's key, widening the page until it holds them all, as the hook bridge's
+   *  conversationRows does; none when a read fails. */
+  const issuedRows = async (tag: string): Promise<Array<{ returnRoute?: unknown; returnRouteBasis?: unknown; tags?: unknown }>> => {
+    for (let limit = 100; ; limit *= 2) {
+      const res = await client.get(`/api/queue/list?${new URLSearchParams({ tag, limit: String(limit) }).toString()}`);
+      if (res.status >= 400 || !Array.isArray(res.data)) return [];
+      if (res.data.length < limit) return res.data;
+    }
+  };
+  /** Addresses OpenRig issued to this stdio server's own creates (an explicit or default `returnRoute: auto`), as each
+   *  create's answer names them. They're the conversation's own when it has no key to record them under: an app that isn't
+   *  Claude Code or Codex, such as Claude Desktop's chat, asks the team through this server and its questions come back
+   *  there. Held for this server's process, as a key is held for its Claude Code process. */
+  const issuedToThisServer = new Set<string>();
+  /** The address OpenRig issued this stdio server's own conversation, when `qitemId` is addressed there: one recorded under
+   *  the conversation key it derives itself (as its creates record it), or one this server's own create was issued
+   *  (issuedToThisServer). The conversation then acts as that address, as `OPENRIG_SESSION_NAME=<address> rig ...` does in
+   *  a shell, with or without a seat configured for its tools. Never under a seat OpenRig launched (inManagedSeat), which
+   *  acts as itself. That's attribution, not proof of a person (a relay still reads relayed and unconfirmed). Null
+   *  otherwise, or when a read fails: the call goes as before. */
+  const ownConversationAddress = async (qitemId: string): Promise<string | null> => {
+    if (access || inManagedSeat()) return null;
+    const key = options.conversationKey?.() ?? null;
+    if (!key && issuedToThisServer.size === 0) return null;
+    try {
+      // Its sender is the seat configured for its tools, or none: any other (a pane's bound seat) isn't this conversation.
+      if ((await client.senderIdentity()).session !== seatOf()) return null;
+      const tag = key ? conversationKeyTag(key) : null;
+      const [item, rows] = await Promise.all([client.get(`/api/queue/${encodeURIComponent(qitemId)}`), tag ? issuedRows(tag) : []]);
+      const address = item.status < 400 ? (item.data as { destinationSession?: unknown } | null)?.destinationSession : undefined;
+      if (typeof address !== "string") return null;
+      if (issuedToThisServer.has(address)) return address;
+      return tag && rows.some((row) => row.returnRoute === address && (row.returnRouteBasis === "issued"
+        || row.returnRouteBasis === "issued-actor") && Array.isArray(row.tags) && row.tags.includes(tag)) ? address : null;
+    } catch { return null; }
+  };
+  /** The client a call on `qitemId` goes through: bound to this conversation's issued address when the item is addressed
+   *  there (ownConversationAddress), so a person's own conversation claims, closes or decides its own items as that
+   *  address; else this server's own. */
+  const clientFor = async (qitemId: string): Promise<DaemonClient> => {
+    const address = await ownConversationAddress(qitemId);
+    if (!address) return client;
+    const bound = clientFactory(client.baseUrl);
+    bound.bindSender(address);
+    return bound;
   };
   const rigOutOfScope = async (handle: string): Promise<TextResult | null> => {
     if (!scope) return null;
@@ -1807,6 +1864,58 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     },
   );
 
+  // Network requests use the same daemon operation and durable request id as the CLI.
+  if (offered("rig_network_request")) server.registerTool(
+    "rig_network_request",
+    {
+      description: "Send a request to a peer through a connected seat's network binding. Omit binding to use your own seat; rig_whoami names its binding. Choose requestId once and retry only with that same id, never a new one. The peer's answer closes that same local queue item, owned by OpenRig: read it with rig_queue_show and qitemId=requestId. To wait, claim a separate row addressed to you, then rig_queue_update it with state blocked and blockedOn=requestId; wakeAfterSeconds is an optional backstop. Check the request once after parking: if already closed or missing, read it now and close your wait row. Use a qitem- id, not a fold:, auth: or external: gate. Only terminal seats can be woken; an external MCP client must check again, with no promised wake.",
+      inputSchema: z.object({
+        binding: z.string().optional().describe("Binding id or connected local seat's address; default: this caller's seat"),
+        peer: z.string().describe("The peer's address on the binding's hub"),
+        requestId: z.string().describe("Your unique id for this request and its local answer item; retry only with this same id"),
+        body: z.string().describe("What to do and what to return"),
+        summary: z.string().optional().describe("One-line summary"),
+      }),
+      annotations: ADDITIVE,
+    },
+    async ({ binding, peer, requestId, body, summary }) => {
+      try {
+        const sender = await client.senderIdentity();
+        const ref = binding ?? sender.session ?? seatOf();
+        if (!ref) return errorResult("Name a network binding or connected seat in binding; this MCP caller has no seat configured.",
+          "binding_required", "Name a network binding or connected seat in binding; this MCP caller has no seat configured.");
+        if (scope) {
+          const listed = await client.get("/api/network/bindings");
+          if (listed.status >= 400) return mapResult(listed);
+          const bindings = (listed.data as { bindings?: Array<{ id: string; localSession: string }> } | null)?.bindings ?? [];
+          const selected = bindings.find((b) => b.id === ref || b.localSession === ref);
+          // The route also accepts recorded and derived seat names, beyond the binding's saved display name.
+          if (!scope.session(selected?.localSession ?? ref)) return outOfScope(`Binding ${ref}`);
+        }
+        const conversation = !access && !inManagedSeat() && sender.session === seatOf();
+        const key = conversation ? options.conversationKey?.() ?? null : null;
+        const auto = conversation && (!!key || !sender.session);
+        const res = await client.post(`/api/network/bindings/${encodeURIComponent(ref)}/requests`, {
+          peer, requestId, body, summary,
+          ...(auto ? { returnRoute: "auto", ...(key ? { tags: [conversationKeyTag(key)] } : {}) } : {}),
+        }, { headers: operatorAuthHeaders(), timeoutMs: 45_000 });
+        if (res.status >= 400) return mapResult(res);
+        const data = (res.data ?? {}) as Record<string, unknown>;
+        if (options.conversationKey && conversation && typeof data.returnRoute === "string"
+          && (data.returnRouteBasis === "issued" || data.returnRouteBasis === "issued-actor")) issuedToThisServer.add(data.returnRoute);
+        const followUp = "Read the answer with rig_queue_show and qitemId equal to localQitemId. OpenRig owns that item; the peer's answer closes it in place. "
+          + "To wait, claim a separate row addressed to you, then rig_queue_update it with state blocked and blockedOn equal to localQitemId; wakeAfterSeconds is an optional backstop. "
+          + "Check the request once after parking: if already closed or missing, read it now and close your wait row. Only terminal seats can be woken; an external MCP client must check again, with no promised wake.";
+        return mapResult({ ...res, data: { ...data, followUp } }, (value) => value.state === "refused",
+          { structured: true, structuralCode: "network_request_refused" });
+      } catch (err) {
+        const failure = caught(err);
+        return { ...failure, content: [{ type: "text", text: `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${requestId}, and retry only with that same requestId.` }],
+          structuredContent: { ...failure.structuredContent, localQitemId: requestId, outcome: "unknown" } };
+      }
+    },
+  );
+
   // 19-23. Queue tools: the same routes `rig queue` uses, for a client without a shell. The source
   // and actor are this server's seat (OPENRIG_SESSION_NAME in its env), stamped on every request by
   // DaemonClient, so the identity is configured once, where the server is set up.
@@ -1829,7 +1938,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         tier: z.string().optional().describe("Tier (as rig queue create --tier)"),
         qitemId: z.string().optional().describe("A request id you choose, unique to this request (for example qitem- and random letters), so an uncertain create can be checked by it; pass the same one to retry, never a new one (default: a new id)"),
         revises: z.string().optional().describe("The qitemId of the work this asks to revise"),
-        returnRoute: z.string().optional().describe("Where this work's questions and its seats' prompts come back to you as tasks (as rig queue create --return-route): auto issues an address for this conversation, and is the default when this connection has no seat of its own; self takes this seat's own address."),
+        returnRoute: z.string().optional().describe("Where this work's questions and its seats' prompts come back to you as tasks (as rig queue create --return-route): auto issues an address for this conversation, and is the default in a person's own Claude Code or Codex conversation whose key this server can read, even with a seat configured here, but not in a seat OpenRig launched; self takes this seat's own address."),
         alert: z.boolean().optional().describe("For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now (as rig queue create --alert). It stands out in Slack. Without it the ask still posts to Slack unless the person's Slack subscription is urgent-only, in which case it waits on Steering and the TUI"),
         host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
@@ -1935,14 +2044,19 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       // With no seat, the task goes to its destination as from the unknown sender, with the note at the top of its body.
       const note = unknownSenderNote("task");
       // Slice 15: the key of the conversation (Claude Code or Codex) that started this stdio server, on this host's daemon.
-      // A connection with no seat whose conversation has one asks for an issued return route by default, so the team's
-      // questions about this work come back to it, where the openrig plugin's hooks find them under that key; the issued
-      // address is then the row's declared sender (claimed:v1), and the note says where the questions go instead of "no
-      // return address". With no key (another app, an HTTP connection, another host's daemon) nothing could read that
-      // address, so the create keeps the unknown sender and the usual path for its questions.
-      const wantsKey = !access && !target.remote && (returnRoute === undefined ? note !== null : returnRoute.trim() === "auto");
+      // A person's own conversation with one asks for an issued return route by default, so the team's questions about this
+      // work come back to it, where the openrig plugin's hooks find them under that key. That holds with or without a seat
+      // configured for its tools: with one, the seat stays the row's sender; with none, the issued address is the row's
+      // declared sender (claimed:v1), and the note says where the questions go instead of "no return address". A seat
+      // OpenRig launched (inManagedSeat, or a sender the client already resolved that isn't the configured seat) has its
+      // own delivery, and the hooks never read an issued address there, so it gets no such default. An explicit returnRoute always decides. With no key (another app, an HTTP connection, another
+      // host's daemon, or Codex without its session id in this server's env) nothing could read that address, so the create
+      // keeps its sender and the usual path for its questions.
+      const wantsKey = !access && !target.remote && (returnRoute === undefined
+        ? !inManagedSeat() && (await client.senderIdentity()).session === seatOf()
+        : returnRoute.trim() === "auto");
       const key = wantsKey ? options.conversationKey?.() ?? null : null;
-      const route = returnRoute ?? (note && key ? "auto" : undefined);
+      const route = returnRoute ?? (key ? "auto" : undefined);
       const taskNote = note && route === "auto"
         ? note.replace(/ There's no return address: it follows this by its task id\.\]$/, " Its team's questions come back to this conversation's issued return route.]") : note;
       const sentTags = callerTags(tags, !!access?.external);
@@ -1955,6 +2069,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           ...(alert ? { humanAlert: true } : {}),
           ...(lineage ? { chainOfRecord: lineage.chainOfRecord } : {}),
         });
+        // The address OpenRig issued this stdio server's create on its own daemon: the team's questions about this work come
+        // there, and this conversation answers them as that address (ownConversationAddress), with or without a key.
+        const created = (res.status < 400 ? res.data ?? {} : {}) as { returnRoute?: unknown; returnRouteBasis?: unknown };
+        if (options.conversationKey && !access && !target.remote && !inManagedSeat() && typeof created.returnRoute === "string"
+          && (created.returnRouteBasis === "issued" || created.returnRouteBasis === "issued-actor")) issuedToThisServer.add(created.returnRoute);
         // An external caller reusing the id of an item it can't see learns only that the id is taken, never that item's
         // parties.
         const conflict = (res.data ?? {}) as { error?: unknown; existingSource?: unknown; existingDestination?: unknown };
@@ -2138,7 +2257,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const denied = await itemOutOfScope(qitemId);
         if (denied) return denied;
-        const res = await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
+        const res = await (await clientFor(qitemId)).post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
         // An external caller's claimed item goes through the same projection as show and list.
         const view = externalView(scope);
         return mapResult(view && res.status < 400 ? { ...res, data: projectForExternal(res.data, view) } : res, undefined, { structured: true });
@@ -2180,7 +2299,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           const blocker = blockedOn?.startsWith("qitem-") ? await client.get(`/api/queue/${encodeURIComponent(blockedOn)}`) : null;
           if (!blocker || blocker.status >= 400 || !scope?.item(blocker.data)) return outOfScope(`Blocker ${blockedOn ?? "(none named)"}`);
         }
-        const res = await hostPost(target, `/api/queue/${encodeURIComponent(qitemId)}/update`, {
+        const res = await hostPost(host ? target : { ...target, client: await clientFor(qitemId) }, `/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state, closureReason, closureTarget, summary, evidenceRef, blockedOn, wakeAfterSeconds, transitionNote: note, resolution, reopen,
         });
         // An external caller's updated item goes through the same projection as show and list.
@@ -2271,10 +2390,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           const why = options.unfilledSeat ? unfilledSeatText(options.unfilledSeat) : "OPENRIG_SESSION_NAME isn't set where it was configured";
           const message = `This server has no seat: ${why}, so it acts as no seat and never as another seat. Reads work. `
             + `Messages (rig_send), new tasks (rig_queue_create) and chat go through as the unknown sender ${unknownSender}, each `
-            + "with a note saying so: there's no return address, so follow a task by its qitemId with rig_queue_show. "
-            + "Claiming, updating, handing off or deciding a task, answering a question asked of a seat, and listing your own "
-            + "items (owned or mine) need this app's seat; reply to the team's questions as a message or a new task naming the "
-            + "question's qitemId. To act as this app's address on the team, such as cursor@my-team, the server needs "
+            + "with a note saying so. A task created with returnRoute auto gets an address of this conversation's own: the team's "
+            + "questions about it come there, and this server claims and answers them as that address. Without one there's no "
+            + "return address, so follow a task by its qitemId with rig_queue_show. Claiming, updating, handing off or deciding "
+            + "any other item, answering a question asked of a seat, and listing your own items (owned or mine) need this app's "
+            + "seat; reply to those questions as a message or a new task naming the question's qitemId. To act as this app's address on the team, such as cursor@my-team, the server needs "
             + "OPENRIG_SESSION_NAME: in Claude Code, set the plugin's OpenRig seat; in Codex, pass it with --env on codex mcp add. "
             + "VS Code, Copilot CLI and Cursor can't give a plugin's server a value: add your own rig mcp serve --front-door "
             + "server with OPENRIG_SESSION_NAME in its env and turn the plugin's openrig server off (in VS Code, give yours "
@@ -2940,6 +3060,35 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const denied = await itemOutOfScope(qitemId, "owner");
         if (denied) return denied;
         return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/unclaim`, { reason }), undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 37. rig_seat_decide_permission — answer a seat's permission ask, the route `rig seat decide-permission` uses
+  if (offered("rig_seat_decide_permission")) server.registerTool(
+    "rig_seat_decide_permission",
+    {
+      description: "Answer a seat's permission ask (qitem-runner-permission-…) with one of the options it offers, as rig seat decide-permission does. Show your person the exact action first. A plain yes or no is their own answer: set relay and pass their exact words in personSaid; it's recorded as relayed by you, unconfirmed, since OpenRig didn't get it from them. For their words or a condition, decide whether this exact action meets them, with reason and personSaid. With no seat, the decision names this conversation's own address when the ask is addressed to it. An ask already answered, ended in the seat's terminal, or stale comes back as it is, and nothing is decided. A reply with native.notReached is recorded but hasn't reached the seat's prompt (its hook isn't reading the ask): tell your person what it says.",
+      inputSchema: z.object({
+        askId: z.string().describe("The ask's id (qitem-runner-permission-…)"),
+        option: z.string().describe("One of the ask's options, by its id: allow or deny for a seat's own Claude Code prompt"),
+        relay: z.boolean().optional().describe("A seat's own prompt only: the person chose this option themselves and you pass it on exactly; recorded as relayed by you, not your decision, and unconfirmed"),
+        personSaid: z.string().optional().describe("The person's own words, exactly as they gave them, recorded as your report of what they said"),
+        reason: z.string().optional().describe("Why, recorded with the decision (say what the person meant)"),
+      }),
+      annotations: DESTRUCTIVE,
+    },
+    async ({ askId, option, relay, personSaid, reason }) => {
+      try {
+        const denied = await itemOutOfScope(askId);
+        if (denied) return denied;
+        // A conversation with no seat answers its own ask as the address it was issued, not as someone outside a seat.
+        const decider = await clientFor(askId);
+        return mapResult(await decider.post(`/api/activity/permission-requests/${encodeURIComponent(askId)}/decide`, {
+          optionId: option, reason: reason ?? "", ...(personSaid !== undefined ? { personSaid } : {}), ...(relay ? { relay: true } : {}),
+        }), undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }

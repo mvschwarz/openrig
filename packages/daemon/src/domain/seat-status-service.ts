@@ -3,7 +3,8 @@ import type { ClaudeCompactionEnforcer, ObservedCompaction } from "./claude-comp
 import path from "node:path";
 import { TerminalPolicyStore } from "./terminal-policy.js";
 import type { RigRepository } from "./rig-repository.js";
-import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
+import { attachTerminalActivityAndWork, deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
+import type { SeatActivityService } from "./seat-activity-service.js";
 import { parseSessionName } from "./session-name.js";
 import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
 import type { NodeInventoryEntry, SeatIdentityVerdict } from "./types.js";
@@ -42,13 +43,25 @@ export interface SeatStatus {
   permissions_to: string | null;
   /** Whether the seat's newest session was launched as a community runner, the kind that submits permission requests. */
   runner: boolean;
+  /** #4003: `launched` when OpenRig launched the seat's newest session; `claimed` when it adopted one it didn't launch, which
+   *  stop, restart and clean refuse; null with no session or an unreadable record. */
+  origin: "launched" | "claimed" | null;
   current_occupant: string | null;
   /** The session record's own status. A pane OpenRig can't confirm as the seat's runtime (a bare shell) keeps it
    *  `running`; `lifecycle_state` says how the seat reads. */
   session_status: string | null;
+  /** The same capture-free activity projection served by rig ps --nodes. */
+  activityState?: NodeInventoryEntry["activityState"];
+  /** A seat attached from an outside program (`rig attach`): its liveness is unknown to OpenRig, and its own newest queue
+   *  action is the only evidence (node-inventory's externalAttachment). */
+  external_attachment?: NonNullable<NodeInventoryEntry["externalAttachment"]>;
+  standby_stopped?: true;
   /** The seat's state as `rig ps --nodes` shows it (node-inventory's lifecycleState): `attention_required`, never
    *  `running`, while startup needs attention or the pane's process identity down-ranks it. */
   lifecycle_state: NodeInventoryEntry["lifecycleState"];
+  /** Beside the lifecycle, as `rig ps --nodes` reads it (node-inventory's agentLiveness): the current identity check saw a
+   *  shell in the pane's foreground and didn't verify the seat's agent. Absent otherwise. */
+  agent_liveness?: NonNullable<NodeInventoryEntry["agentLiveness"]>;
   session_reason: SeatIdentityVerdict["reason"];
   startup_status: NodeInventoryEntry["startupStatus"];
   occupant_lifecycle: NodeInventoryEntry["occupantLifecycle"];
@@ -100,10 +113,12 @@ export class SeatStatusService {
   private env: NodeJS.ProcessEnv;
   private compactionEnforcer?: Pick<ClaudeCompactionEnforcer, "recoverSeat" | "observedCompaction" | "getOwedRestore">;
   private activityStore?: Pick<AgentActivityStore, "getPermissionStopForNode">;
+  private seatActivity?: SeatActivityService;
 
   constructor(deps: { rigRepo: RigRepository; env?: NodeJS.ProcessEnv; compactionEnforcer?: SeatStatusService["compactionEnforcer"];
-    activityStore?: SeatStatusService["activityStore"] }) {
+    activityStore?: SeatStatusService["activityStore"]; seatActivity?: SeatActivityService }) {
     this.activityStore = deps.activityStore;
+    this.seatActivity = deps.seatActivity;
     this.compactionEnforcer = deps.compactionEnforcer;
     this.rigRepo = deps.rigRepo;
     this.env = deps.env ?? process.env;
@@ -168,7 +183,8 @@ export class SeatStatusService {
   }
 
   private entriesForRig(rigId: string): NodeInventoryEntry[] {
-    return getNodeInventory(this.rigRepo.db, rigId);
+    const entries = getNodeInventory(this.rigRepo.db, rigId);
+    return this.seatActivity ? attachTerminalActivityAndWork(entries, { db: this.rigRepo.db, seatActivity: this.seatActivity }) : entries;
   }
 
   private projectStatus(seatRef: string, entry: NodeInventoryEntry): SeatStatus {
@@ -187,9 +203,14 @@ export class SeatStatusService {
       launch_cwd: entry.cwd,
       permissions_to: this.rigRepo.getNodePermissionsTo(entry.nodeId),
       runner: this.launchedAsRunner(entry.nodeId),
+      origin: this.sessionOrigin(entry.nodeId),
       current_occupant: entry.canonicalSessionName,
       session_status: entry.sessionStatus,
+      ...(entry.externalAttachment ? { external_attachment: entry.externalAttachment } : {}),
+      ...(entry.standbyStopped ? { standby_stopped: true as const } : {}),
       lifecycle_state: entry.lifecycleState,
+      ...(entry.agentLiveness ? { agent_liveness: entry.agentLiveness } : {}),
+      ...(entry.activityState !== undefined ? { activityState: entry.activityState } : {}),
       session_reason: entry.identityVerdict?.reason ?? null,
       startup_status: entry.startupStatus,
       occupant_lifecycle: entry.occupantLifecycle,
@@ -231,9 +252,9 @@ export class SeatStatusService {
     if (!file) return {};
     let session: GuidanceSession | null = null;
     try {
-      const row = db.prepare("SELECT origin, created_at, startup_completed_at FROM sessions WHERE node_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      const row = db.prepare("SELECT origin, created_at, startup_completed_at FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
         .get(entry.nodeId) as { origin: string; created_at: string | null; startup_completed_at: string | null } | undefined;
-      if (row) session = { origin: row.origin === "claimed" ? "claimed" : "launched", createdAt: row.created_at, startupCompletedAt: row.startup_completed_at };
+      if (row && (row.origin === "claimed" || row.origin === "launched")) session = { origin: row.origin, createdAt: row.created_at, startupCompletedAt: row.startup_completed_at };
     } catch { /* no session to place the blocks against: they read unknown */ }
     return { guidance: readGuidanceProjection({ db, file, runtime: entry.runtime, session }) };
   }
@@ -244,6 +265,16 @@ export class SeatStatusService {
     enforcer.recoverSeat({ sessionName: session, cwd: entry.cwd, runtime: entry.runtime });
     const observed = enforcer.observedCompaction(session);
     return observed ? { compaction: { ...observed, owedRestore: enforcer.getOwedRestore(session) } } : {};
+  }
+
+  /** #4003: whether OpenRig launched the seat's newest session, or adopted one it didn't launch (stop, restart and clean
+   *  refuse those); null with no session, or when the record can't be read. */
+  private sessionOrigin(nodeId: string): "launched" | "claimed" | null {
+    try {
+      const row = this.rigRepo.db.prepare("SELECT origin FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+        .get(nodeId) as { origin: string | null } | undefined;
+      return row?.origin === "claimed" || row?.origin === "launched" ? row.origin : null;
+    } catch { return null; }
   }
 
   private launchedAsRunner(nodeId: string): boolean {

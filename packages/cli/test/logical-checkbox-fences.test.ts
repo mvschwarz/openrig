@@ -37,6 +37,28 @@ describe("proof-contract fenced examples", () => {
     expect(parseProofContract(document)).toEqual(["first", "second"]);
   });
 
+  it("indexes only visible promises around comment blocks", () => {
+    const block = ["<!-- deferred", "- [ ] hidden", "```", "-->", "- [ ] shipped",
+      "```md", "<!--", "```", "- [x] verified"].join("\n");
+    expect(parseProofContract("## Proof contract\n" + block)).toEqual(["shipped", "verified"]);
+    expect(parseLogicalCheckboxes(block).map(item => item.sourceLine)).toEqual([5, 9]);
+  });
+
+  it("preserves a nested item's continuation across an indented comment", () => {
+    const block = ["  - [ ] ship", "    <!-- deferred", "    - [ ] hidden", "    -->",
+      "    with tests", "<!-- outside -->", "    new paragraph"].join("\n");
+    expect(parseLogicalCheckboxes(block)).toEqual([
+      { checked: false, rawText: "ship with tests", sourceLine: 1 },
+    ]);
+  });
+
+  it.each(["    ", "\t"])("does not open an HTML comment inside indented code (%j)", indent => {
+    const block = [indent + "<!-- literal example", "", "- [ ] verified"].join("\n");
+    expect(parseLogicalCheckboxes(block)).toEqual([
+      { checked: false, rawText: "verified", sourceLine: 3 },
+    ]);
+  });
+
   it("ignores the remainder of an unclosed example", () => {
     expect(parseLogicalCheckboxes("~~~md\n- [ ] example")).toEqual([]);
   });
