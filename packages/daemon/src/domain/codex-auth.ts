@@ -406,7 +406,7 @@ export type AuthSignOutResult =
   | { ok: false; reason: "invalid_profile" | "unsafe_path" };
 
 export const SIGN_OUT_NOTE = "This removes the copies stored in this Codex home only; it doesn't revoke the login at OpenAI. "
-  + "Codex's own logout (codex logout) revokes an active login, so run it first while the login is still active.";
+  + "Native Codex logout, this local cleanup and revocation at the provider are separate operations.";
 
 /** A candidate login file's bytes, read through one descriptor opened without following a link and checked to be a plain,
  *  single-link file, with the inode it was read from; null otherwise. The caller scrubs the buffer. */

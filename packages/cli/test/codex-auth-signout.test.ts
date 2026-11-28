@@ -43,9 +43,9 @@ async function run(args: string[]): Promise<{ out: string; exitCode: number | un
 }
 
 describe("authSignOut: every stored copy of one login, and nothing else", () => {
-  it("the reported failure, then the repair: Codex's own logout leaves the saved copies; sign-out removes every copy of that login", () => {
+  it("the reported failure, then the repair: with the active auth file removed, the saved copies stay; sign-out removes every copy of that login", () => {
     write(paths.activeAuth, login("acct-A", "r2"));
-    fs.rmSync(paths.activeAuth);   // what Codex's own logout does to this home: auth.json goes, the saved copies stay
+    fs.rmSync(paths.activeAuth);   // the reported state after a logout: auth.json gone, the saved copies still there
     expect(names(paths)).toContain("codex-aaaaaaaaaaaa.json");
     const r = authSignOut(paths, "codex-aaaaaaaaaaaa");
     expect(r).toEqual({ ok: true, target: "profile", removedActive: false, removedProfiles: ["before-switch-20261128T075000.123Z", "codex-aaaaaaaaaaaa"],
