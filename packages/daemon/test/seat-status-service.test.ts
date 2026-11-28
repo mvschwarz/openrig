@@ -12,6 +12,8 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { managedBlockBodyHash } from "../src/domain/managed-block-records.js";
+import { SeatActivityService } from "../src/domain/seat-activity-service.js";
+import { CODEX_ACTIVITY_RUNG_INVENTORY } from "../src/domain/activity-taxonomy.js";
 
 describe("SeatStatusService", () => {
   let db: Database.Database;
@@ -32,6 +34,21 @@ describe("SeatStatusService", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it("exposes the cached needs-input oracle without another pane read", () => {
+    const rig = rigRepo.createRig("hook-status");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "codex" });
+    const name = "worker@hook-status";
+    const session = sessionRegistry.registerSession(node.id, name);
+    sessionRegistry.updateStatus(session.id, "running");
+    const oracle = new SeatActivityService({ tmux: { readPaneLastActivity: async () => { throw new Error("no pane reads"); } } });
+    oracle.declareRungInventory({ seatNodeId: node.id, sessionName: name }, CODEX_ACTIVITY_RUNG_INVENTORY);
+    oracle.reportEvidence({ seatNodeId: node.id, sessionName: name, rung: "needs-input-chrome", sourceId: "test:current-menu",
+      seq: 1, observedAt: new Date().toISOString(), needsInput: { count: 1, reason: "hook_trust_gate" } });
+    expect(new SeatStatusService({ rigRepo, seatActivity: oracle }).getStatus(name)).toMatchObject({ ok: true, status: {
+      activityState: { display: "needs-input", needsInput: { count: 1, reason: "hook_trust_gate" } },
+    } });
   });
 
   it("reports a recorded standby only for the stopped session that owns the pane", () => {

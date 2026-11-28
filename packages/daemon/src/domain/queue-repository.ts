@@ -78,7 +78,7 @@ export interface RecordRelayOwnerNotificationTransportFailedInput extends Format
   qitemId: string;
   actorSession?: string;
 }
-import { HELD_SENDER_NOTICE_PREFIX, WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
+import { DRAFT_HELD_ELIGIBLE_TAG, HELD_RETRY_NOT_ADMITTED, HELD_SENDER_NOTICE_PREFIX, WAKE_INTENT_PREFIX, type DraftHeldPassEnd, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import { readStandbyStop } from "./seat-standby.js";
 import { physicalSessionName, SessionRegistry } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
@@ -474,6 +474,9 @@ export interface QueueNudgeTransport {
   retentionTarget?(session: string, input?: import("./seat-delivery-guard.js").AdmissionInput): import("./seat-delivery-guard.js").GuardTarget | null;
   draftAwareTarget?(session: string): import("./seat-delivery-guard.js").GuardTarget | null;
   configureGuardedWakes?(applicable: (entries: readonly QueueWakeFacts[]) => boolean, fenced?: (qitemId: string) => boolean): void;
+  /** Whether a draft-held retry the seat's hook bridge hands back to typing may still go: no drain or pending restore
+   *  stops it. A mode change doesn't hold one the bridge already has (#3991). */
+  configureHeldRetryAdmission?(admitted: (sessionName: string) => boolean): void;
   send(
     sessionName: string,
     // (h): stampISO threads the nudge's compose time so the transport's delivered-latency calc can
@@ -1513,6 +1516,9 @@ export class QueueRepository {
       if (!row || this.transferFence(row.qitemId) || row.destinationSession !== entry.destinationSession) return false;
       return entry.outboxId.startsWith(WAKE_INTENT_PREFIX) ? this.currentWakeIntent(entry) : isBlockerLive(row.state);
     }), qitemId => !!this.transferFence(qitemId));
+    // A retry the bridge already has was admitted by its pass, so only a drain or a restore holds it now, as the bridge's
+    // own waiter would; the pass's own admission (draft-aware mode too) is in deliverDraftHeldMessagesOnIdle.
+    transport.configureHeldRetryAdmission?.(sessionName => !this.draftHeldPaused(sessionName));
   }
 
   private currentWakeIntent(entry: QueueWakeFacts): boolean {
@@ -2559,6 +2565,107 @@ export class QueueRepository {
       const row = this.getById(qitem_id);
       if (row) this.transitionLog.append({ qitemId: qitem_id, state: row.state, actorSession: "wake-ladder@system",
         transitionNote: `${LADDER_ATTEMPT_PREFIX} ${tries + 1}/${cap} outcome=${row.lastNudgeResult ?? outcome} trigger=seat-idle` });
+    }
+  }
+
+  /** Seats with a draft-held delivery pass running, so overlapping idle observations don't race each other. */
+  private readonly draftHeldPasses = new Set<string>();
+
+  /** Whether a drain or a pending restore stops draft-held delivery to this seat now, at any of its addresses (#3991). */
+  private draftHeldPaused(sessionName: string, addresses: readonly string[] = this.resolveSessionAddresses(sessionName)): boolean {
+    return addresses.some(address => this.deliveryDrains.holds(address))
+      || [sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address));
+  }
+
+  /** The seats holding draft-held messages, for the periodic offer (createDraftHeldReoffer); none without an outbox. */
+  draftHeldSeats(): Array<{ session: string; newest: string }> {
+    return this.outbox?.draftHeldSeats() ?? [];
+  }
+
+  /** Messages held only for a draft in the seat's input (tagged {@link DRAFT_HELD_ELIGIBLE_TAG} when first held) go once the
+   *  seat is idle under the draft-aware guard, oldest first, each through the existing guarded delivery: it reads the
+   *  input again and holds the message again if the input still isn't clear, and every other delivery condition applies.
+   *  Each message keeps its own outcome, and the pass stops at the first that isn't delivered, so order holds; one whose own
+   *  paste was refused is withdrawn and no longer holds the rest, so the pass goes on past it. Only a held
+   *  entry is reopened (compare-and-set), so a delivered, in-flight or uncertain one is never sent again. Messages held
+   *  before this behaviour, hold-mode messages and other held reasons carry no tag and stay held.
+   *
+   *  The list is read again before each message, so one held while the pass runs (a later message behind an earlier one
+   *  from its sender) goes in its turn. Each send re-reads the pass's own conditions (draft-aware mode, drain, restore)
+   *  under its delivery lease (`retryAdmission`), so a change that took effect while it waited keeps it held. The result
+   *  says how the pass ended, for the periodic offer (DraftHeldReoffer). */
+  async deliverDraftHeldMessagesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<DraftHeldPassEnd> {
+    if (state !== "idle" || !this.outbox || !this.transport?.draftAwareTarget?.(sessionName)) return "skipped";
+    const addresses = this.resolveSessionAddresses(sessionName);
+    if (!addresses.length) return "skipped";
+    const paused = () => this.draftHeldPaused(sessionName, addresses);
+    if (paused()) return "paused";
+    const key = addresses[0]!;
+    if (this.draftHeldPasses.has(key)) return "skipped";
+    this.draftHeldPasses.add(key);
+    // Entries this pass has already taken or left (another occupant's custody), so a re-read never takes one twice.
+    const seen = new Set<string>();
+    try {
+      for (;;) {
+        const next = (this.db.prepare(`SELECT outbox_id FROM outbox_entries WHERE delivery_state = 'retained'
+          AND destination_session IN (${addresses.map(() => "?").join(",")})
+          AND EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags,'[]')) WHERE value = ?)
+          ORDER BY ts_dispatched, rowid`).all(...addresses, DRAFT_HELD_ELIGIBLE_TAG) as Array<{ outbox_id: string }>)
+          .find(row => !seen.has(row.outbox_id));
+        if (!next) return "done";
+        const { outbox_id } = next;
+        seen.add(outbox_id);
+        // A restore or drain can start while the preceding send awaited its delivery lease.
+        if (paused()) return "paused";
+        const target = this.transport.draftAwareTarget?.(sessionName);
+        if (!target) return "paused";
+        const entry = this.outbox.getById(outbox_id);
+        // Match the same complete binding as the transport guard. Earlier-occupant custody remains held and listed,
+        // without being claimed or preventing a later message for the current occupant from going.
+        if (!entry?.guardBinding || JSON.stringify(entry.guardBinding) !== JSON.stringify(target)) continue;
+        if (!this.outbox.reopenHeld(outbox_id)) return "done";
+        if (!this.outbox.claimForDelivery(outbox_id)) return "done";
+        let heldFor: string | undefined;
+        try {
+          const result = await this.transport.send(entry.destinationSession, entry.body, {
+            committedOutboxIds: [outbox_id], actorSession: entry.senderSession,
+            ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}),
+            retryAdmission: () => !paused() && !!this.transport?.draftAwareTarget?.(sessionName),
+          });
+          heldFor = result.reason;
+          if ((result.reason === "guard_target_changed" || result.reason === HELD_RETRY_NOT_ADMITTED) && result.sent !== true
+            && (result.sent === false || result.inputPhase === "not_reached")
+            && result.inputPhase !== "attempted" && result.inputPhase !== "written") {
+            // Custody, the mode, a drain or a restore can change while the transport waits for the lease. This positive
+            // no-write result returns the already-held message to its list, even if a conditional transport finalized its
+            // refusal first. A changed occupant leaves later messages for the current one free to go; the others stop.
+            this.outbox.retainUnwritten(outbox_id);
+            if (result.reason === HELD_RETRY_NOT_ADMITTED) return "paused";
+            continue;
+          }
+          if (this.outbox.getById(outbox_id)?.deliveryState === "sending") {
+            // An early guard refusal can precede the transport's receipt handling. Settle this claim by the existing
+            // outcome rules, without a destination: a plain message must never tell cold start to start its seat.
+            const outcome = this.classifyWakeResult(result);
+            if (outcome.classified !== "bridged") this.outbox.finalizeDelivery(outbox_id,
+              outcome.classified === "verified" ? "delivered" : outcome.classified);
+          }
+        } catch (error) {
+          // A thrown send has no positive no-write result. Keep its uncertainty, never an in-flight or retryable claim.
+          this.outbox.finalizeDelivery(outbox_id, "indeterminate");
+          throw error;
+        }
+        const settled = this.outbox.getById(outbox_id);
+        const after = settled?.deliveryState;
+        // Its own paste was refused before anything was written, which withdrew it from automatic retry (it stays held,
+        // with its result). It no longer holds later messages back, so the pass goes on to them rather than ending as a draft.
+        if (after === "retained" && !settled?.tags?.includes(DRAFT_HELD_ELIGIBLE_TAG)) continue;
+        // Held again because the guard couldn't read the input or its clients' activity: uncertainty, not a draft seen,
+        // so the periodic offer keeps trying (DraftHeldReoffer) while the guard still decides each delivery.
+        if (after !== "delivered") return after === "retained" ? heldFor === "draft_input_unknown" ? "unknown" : "draft" : "done";
+      }
+    } finally {
+      this.draftHeldPasses.delete(key);
     }
   }
 

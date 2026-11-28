@@ -808,6 +808,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_chatroom_send", routes: ["POST /api/rigs/:rigId/chat/send"], effect: "additive", access: "work" },
   { tool: "rig_chatroom_watch", routes: ["GET /api/rigs/:rigId/chat/history"], effect: "read", access: "work" },
   { tool: "rig_add", routes: ["POST /api/rigs/:rigId/pods/:podNamespace/members"], effect: "additive", access: "owner" },
+  { tool: "rig_network_request", routes: ["GET /api/network/bindings", "POST /api/network/bindings/:id/requests"], effect: "additive", access: "work" },
   { tool: "rig_queue_create", routes: ["POST /api/queue/create", "GET /api/queue/:qitemId"], effect: "additive", access: "work" },
   { tool: "rig_queue_show", routes: ["GET /api/queue/:qitemId", "GET /api/queue/:qitemId/transitions", "GET /api/queue/list"], effect: "read", access: "work" },
   { tool: "rig_queue_list", routes: ["GET /api/queue/list"], effect: "read", access: "work" },
@@ -1869,6 +1870,58 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }, { structuralCode: "member_not_launched" });
       } catch (err) {
         return caught(err);
+      }
+    },
+  );
+
+  // Network requests use the same daemon operation and durable request id as the CLI.
+  if (offered("rig_network_request")) server.registerTool(
+    "rig_network_request",
+    {
+      description: "Send a request to a peer through a connected seat's network binding. Omit binding to use your own seat; rig_whoami names its binding. Choose requestId once and retry only with that same id, never a new one. The peer's answer closes that same local queue item, owned by OpenRig: read it with rig_queue_show and qitemId=requestId. To wait, claim a separate row addressed to you, then rig_queue_update it with state blocked and blockedOn=requestId; wakeAfterSeconds is an optional backstop. Check the request once after parking: if already closed or missing, read it now and close your wait row. Use a qitem- id, not a fold:, auth: or external: gate. Only terminal seats can be woken; an external MCP client must check again, with no promised wake.",
+      inputSchema: z.object({
+        binding: z.string().optional().describe("Binding id or connected local seat's address; default: this caller's seat"),
+        peer: z.string().describe("The peer's address on the binding's hub"),
+        requestId: z.string().describe("Your unique id for this request and its local answer item; retry only with this same id"),
+        body: z.string().describe("What to do and what to return"),
+        summary: z.string().optional().describe("One-line summary"),
+      }),
+      annotations: ADDITIVE,
+    },
+    async ({ binding, peer, requestId, body, summary }) => {
+      try {
+        const sender = await client.senderIdentity();
+        const ref = binding ?? sender.session ?? seatOf();
+        if (!ref) return errorResult("Name a network binding or connected seat in binding; this MCP caller has no seat configured.",
+          "binding_required", "Name a network binding or connected seat in binding; this MCP caller has no seat configured.");
+        if (scope) {
+          const listed = await client.get("/api/network/bindings");
+          if (listed.status >= 400) return mapResult(listed);
+          const bindings = (listed.data as { bindings?: Array<{ id: string; localSession: string }> } | null)?.bindings ?? [];
+          const selected = bindings.find((b) => b.id === ref || b.localSession === ref);
+          // The route also accepts recorded and derived seat names, beyond the binding's saved display name.
+          if (!scope.session(selected?.localSession ?? ref)) return outOfScope(`Binding ${ref}`);
+        }
+        const conversation = !access && !inManagedSeat() && sender.session === seatOf();
+        const key = conversation ? options.conversationKey?.() ?? null : null;
+        const auto = conversation && (!!key || !sender.session);
+        const res = await client.post(`/api/network/bindings/${encodeURIComponent(ref)}/requests`, {
+          peer, requestId, body, summary,
+          ...(auto ? { returnRoute: "auto", ...(key ? { tags: [conversationKeyTag(key)] } : {}) } : {}),
+        }, { headers: operatorAuthHeaders(), timeoutMs: 45_000 });
+        if (res.status >= 400) return mapResult(res);
+        const data = (res.data ?? {}) as Record<string, unknown>;
+        if (options.conversationKey && conversation && typeof data.returnRoute === "string"
+          && (data.returnRouteBasis === "issued" || data.returnRouteBasis === "issued-actor")) issuedToThisServer.add(data.returnRoute);
+        const followUp = "Read the answer with rig_queue_show and qitemId equal to localQitemId. OpenRig owns that item; the peer's answer closes it in place. "
+          + "To wait, claim a separate row addressed to you, then rig_queue_update it with state blocked and blockedOn equal to localQitemId; wakeAfterSeconds is an optional backstop. "
+          + "Check the request once after parking: if already closed or missing, read it now and close your wait row. Only terminal seats can be woken; an external MCP client must check again, with no promised wake.";
+        return mapResult({ ...res, data: { ...data, followUp } }, (value) => value.state === "refused",
+          { structured: true, structuralCode: "network_request_refused" });
+      } catch (err) {
+        const failure = caught(err);
+        return { ...failure, content: [{ type: "text", text: `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${requestId}, and retry only with that same requestId.` }],
+          structuredContent: { ...failure.structuredContent, localQitemId: requestId, outcome: "unknown" } };
       }
     },
   );

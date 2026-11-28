@@ -875,12 +875,27 @@ describe("network connector", () => {
       const app = new Hono();
       app.use("*", async (c, next) => { c.set("rigRepo" as never, new RigRepository(db) as never); c.set("queueRepo" as never, repo as never); await next(); });
       app.route("/api/network", networkRoutes({ home, hubConnect: hub.connect }));
-      const res = await app.request(`/api/network/bindings/${binding.id}/requests`, { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ requesterOf: work.qitemId, requestId: "route-question", body: "Which audience?" }) });
+      const request = { requesterOf: work.qitemId, requestId: "route-question", body: "Which audience?", returnRoute: "auto" };
+      const res = await app.request(`/api/network/bindings/${binding.id}/requests`, { method: "POST",
+        headers: { "content-type": "application/json", "X-OpenRig-Session": "reviewer@lab" }, body: JSON.stringify(request) });
       expect(res.status).toBe(supported ? 201 : 409);
-      expect(await res.json()).toMatchObject(supported ? { localQitemId: "route-question", state: "sent" } : { error: "requester_question_unsupported" });
+      const response = await res.json();
+      expect(response).toMatchObject(supported ? { localQitemId: "route-question", state: "sent" } : { error: "requester_question_unsupported" });
       expect(hub.creates).toBe(supported ? 1 : 0);
       if (!supported) expect(repo.getById("route-question")).toBeNull();
+      else {
+        const local = repo.getById("route-question")!;
+        expect(local).toMatchObject({ sourceSession: "reviewer@lab", returnRouteBasis: "issued" });
+        expect(repo.listTransitions("route-question")[0]).toMatchObject({ identityProvenance: "transport:v1" });
+        expect(local.returnRoute).toMatch(/^conversation-[a-f0-9]{12}@kernel$/);
+        expect(local.tags).toContain("network-requester-question");
+        expect(hub.items.get(response.hubQitemId)).toMatchObject({ requesterOf: "hub-work" });
+        const retry = await app.request(`/api/network/bindings/${binding.id}/requests`, { method: "POST",
+          headers: { "content-type": "application/json", "X-OpenRig-Session": "later-caller@lab" }, body: JSON.stringify(request) });
+        expect(retry.status).toBe(201);
+        expect(await retry.json()).toMatchObject({ sourceSession: "reviewer@lab", returnRoute: local.returnRoute, returnRouteBasis: "issued" });
+        expect(hub.creates).toBe(1);
+      }
     });
 
     it("pins the route by work id, mirrors its wait, and resumes the same work on the explicit answer", async () => {

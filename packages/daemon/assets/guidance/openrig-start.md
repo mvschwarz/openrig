@@ -25,6 +25,9 @@ mean the session was quiet.**
 
 ```bash
 rig send <session> "message"     # types into their terminal and presses enter
+```
+
+```bash
 rig capture <session>            # reads what is on their screen
 ```
 

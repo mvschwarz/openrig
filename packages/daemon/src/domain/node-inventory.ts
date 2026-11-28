@@ -11,6 +11,7 @@ import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
 import { identityVerdictConfirmsSessionMissing, identityVerdictConfirmsExecutorStopped, identityVerdictDownranksRunning } from "./types.js";
+import { isShellForeground } from "./shell-classifier.js";
 import { resolveSeatEffort } from "./seat-effort.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
@@ -396,6 +397,19 @@ function computeRecoveryGuidance(input: {
 
 function deriveNodeKind(runtime: string | null): "agent" | "infrastructure" {
   return runtime === "terminal" ? "infrastructure" : "agent";
+}
+
+/** NodeInventoryEntry.agentLiveness, from the applicable stored verdict: a running agent seat whose current identity check saw
+ *  a shell in the foreground and didn't verify its agent. Undefined otherwise, and while its startup is still pending: a launch
+ *  marks the session running on its default shell before the agent starts there. */
+function deriveAgentLiveness(
+  runtime: string | null, sessionStatus: string | null, startupStatus: NodeInventoryEntry["startupStatus"],
+  verdict: SeatIdentityVerdict | null,
+): NodeInventoryEntry["agentLiveness"] {
+  const command = verdict?.evidence.observedCommand?.trim().toLowerCase();
+  if (!runtime || sessionStatus !== "running" || startupStatus === "pending" || deriveNodeKind(runtime) !== "agent"
+    || !verdict || verdict.verdict === "verified" || !command || !isShellForeground(command)) return undefined;
+  return { state: "not_verified", reason: "shell_foreground", command: command.replace(/^-/, ""), observedAt: verdict.observedAt };
 }
 
 /**
@@ -1107,6 +1121,7 @@ function buildInventoryItem(
     usableSnapshot,
     identityVerdict: identityVerdict?.verdict ?? null,
   });
+  const agentLiveness = deriveAgentLiveness(row.runtime, sessionStatus, startupStatus, identityVerdict);
   const entry: NodeInventoryEntry = {
     nodeId: row.node_id,
     rigId: row.rig_id,
@@ -1194,6 +1209,7 @@ function buildInventoryItem(
     // OPR.0.4.3.19 — the liveness identity verdict (third axis). null when
     // never observed; carries evidence on mismatch/missing.
     identityVerdict,
+    ...(agentLiveness ? { agentLiveness } : {}),
     heldReason: deriveHeldReason(db, row.rig_id, row.node_id, sessionStatus),
     ...(row.handover_at ? startedWithoutRequired(db, row.node_id, row.session_id) : {}),
   };
@@ -1683,7 +1699,7 @@ export function retainedProviderFailure(
 
 /** The pane's own interactive prompts: a picker or question, and a permission or confirmation. A draft in the input
  *  box is not one. */
-const NATIVE_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt"]);
+const NATIVE_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt", "hook_trust_gate"]);
 
 /**
  * The served activity for a seat with a current Claude authentication or billing failure (`retainedProviderFailure`):
@@ -1950,8 +1966,11 @@ export function hookOrPaneActivity(
   idleYieldsToFrame = false,
   runtime?: string | null,
 ): { source: "hook" | "limit" | "pane"; activity: AgentActivity } | null {
-  // Running/needs_input hooks keep their meaning.
-  if (hookActivity && hookActivity.state !== "unknown" && !(hookActivity.state === "idle" && idleYieldsToFrame)) {
+  // A current hook-review menu can follow Stop without posting another lifecycle hook. Only a capture begun after
+  // that idle hook replaces it; running/needs_input hooks keep their meaning. The structural cache owns freshness.
+  const newerHookReview = runtime === "codex" && structural?.state === "attention" && structural.reason === "hook_trust_gate"
+    && Date.parse(structural.captureStartedAt ?? "") > Date.parse(hookActivity?.eventAt ?? "");
+  if (hookActivity && hookActivity.state !== "unknown" && !(hookActivity.state === "idle" && (idleYieldsToFrame || newerHookReview))) {
     return { source: "hook", activity: hookActivity };
   }
 
