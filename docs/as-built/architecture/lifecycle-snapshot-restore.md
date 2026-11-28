@@ -506,6 +506,12 @@ via runtime parsers + redaction (`packages/cli/src/restore-packet/`).
 
 ### Shared history inspection
 
+For an OMP seat, the list also returns `recordedHistories` when the seat
+registry holds a well-formed RPC or native OMP session-file token. Each entry
+contains the OpenRig session ID and resume type. This inspection works before a
+compatible snapshot exists and keeps native paths private. Only entries in
+`histories` supply snapshot references for validation.
+
 `GET /api/startup/:rigId/nodes/:nodeId/history` lists captured histories for one durable node in the current, policy-ranked restore snapshot. `POST` to the same path plus `/validate` with exactly `{ "snapshotId": "…", "historySessionId": "…" }` rechecks one listed choice. Both routes use startup's terminal bearer authentication. The CLI exposes the same server decisions with `rig seat history --rig <rig-id> --node-id <node-id> --json`; pass both `--snapshot-id` and `--history-session-id` to validate. These calls perform no snapshot capture, token refresh, launch, or database write.
 
 The list includes captured Claude and Codex rows that the current restore policy and native resume adapter can structurally attempt. Codex requires an explicit `codex_id` and token; implicit `codex_last` cannot name a particular history. Claude accepts `claude_id` and `claude_name` with tokens. The server checks exact rig and node membership, the snapshot's intended roster and runtime, and the node's current occupant compatibility. A change to a sibling node does not retarget or invalidate this node's list. A changed or pruned snapshot, removed history row, same-name replacement node, ambiguous current occupant, or incompatible source is refused; validation never substitutes another history.

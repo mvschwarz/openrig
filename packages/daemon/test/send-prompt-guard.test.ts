@@ -15,6 +15,7 @@ import { RunnerCore } from "../src/adapters/pi-runner.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import type { PreparedInput } from "../src/domain/runtime-adapter.js";
 
 // The open ship-authorizing AskUserQuestion from the 2026-06-20 incident (highlighted default first).
 const SHIP_PROMPT = [
@@ -106,9 +107,11 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     withBus?: boolean;
     now?: () => Date;
     activityEndpointFile?: () => { baseUrl: string; token: string } | null;
+    prepareInput?: (session: string, text: string) => PreparedInput;
   }) {
     return new SessionTransport({
       db, rigRepo, sessionRegistry, tmuxAdapter: tmux, agentActivityStore,
+      runtimeAdapters: { "omp-tui": { prepareInput: opts?.prepareInput ?? (() => async () => {}) } },
       ...(opts?.withBus === false ? {} : { eventBus }),
       ...(opts?.now ? { now: opts.now } : {}),
       ...(opts?.activityEndpointFile ? { activityEndpointFile: opts.activityEndpointFile } : {}),
@@ -125,6 +128,206 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     const rows = db.prepare("SELECT payload FROM events WHERE type = 'transport.prompt_override' ORDER BY seq").all() as Array<{ payload: string }>;
     return rows.map((r) => JSON.parse(r.payload) as Record<string, unknown>);
   }
+
+  function seedOmp() {
+    const seat = "omp-input@my-rig";
+    const node = rigRepo.addNode(rigId, "omp.input", { role: "worker", runtime: "omp-tui" });
+    const session = sessionRegistry.registerSession(node.id, seat);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat });
+    agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Stop", subtype: "end_turn" });
+    return seat;
+  }
+
+  it.each([["\x1b[B", "Down"], ["\x1bOA", "Up"]])("sends the named OMP menu key for %j once without pasting or submitting", async (sequence, key) => {
+    const seat = seedOmp();
+    agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Notification", subtype: "permission_prompt" });
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ sendText, sendKeys }));
+    const result = await transport.send(seat, sequence, { dangerouslyInteract: true, verify: true, reason: "Inspect the next menu choice" });
+    expect(result).toMatchObject({ ok: true, sent: true, verified: false, promptInteraction: "unverified" });
+    expect(overrideEvents()).toHaveLength(1);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys.mock.calls).toHaveLength(1);
+    expect(sendKeys).toHaveBeenCalledWith(seat, [key], expect.any(Function), expect.any(Object));
+  });
+
+  it("recognizes the OMP approval choices when the activity hook has aged out", async () => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    const menu = ["│ ❯ Approve │", "│   Approve bash for this session │", "│   Deny │",
+      "│ ↑/↓ choose · enter select · ctrl+y approve · esc deny · type to deny and steer │"].join("\n");
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => menu, sendText, sendKeys }),
+      { now: () => new Date(Date.now() + 600_000) });
+    expect(await transport.send(seat, "\x1b[B", { dangerouslyInteract: true, reason: "Inspect next choice" }))
+      .toMatchObject({ ok: true, promptInteraction: "unverified" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  // Stock OMP 18.22.0 docks the key hints below a full-width divider.
+  const ompApprovalFooter = "│ ↑/↓ choose · ⏎ select · Ctrl+⏎/Ctrl+Q approve · ⎋ deny · Ctrl+O details · type to deny and steer │";
+  const ompApprovalChoices = [
+    "╭─ Allow tool: bash ─────╮", "│ Command: pwd │",
+    "│ ❯ Approve │", "│   Approve bash for this session │", "│   Deny │",
+  ];
+  it("checks a visible native approval after an idle hook and permits a menu quoted above the editor", async () => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    let pane = [...ompApprovalChoices, "├────────────────────────┤", ompApprovalFooter, "╰────────────────────────╯"].join("\n");
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys }));
+    expect(await transport.send(seat, "first")).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(sendText).not.toHaveBeenCalled();
+    pane += "\nThe operator quoted the old menu above.\n❯ ";
+    expect(await transport.send(seat, "second")).toMatchObject({ ok: true });
+    expect(sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["Switch Model", "Configuration error", "↓/↑ models · ⏎ use for this session · ⇥ provider · type to search · @ quick roles · ⎋ close"],
+    ["Switch Task Model", "Task subagent switch — spawned task agents use this model", "↑/↓ models · ⏎ use for Task subagents · ⇥ provider · type to search · ⎋ close"],
+    ["Switch Model", "Quick role switch — applies its model and thinking for this session", "↑/↓ roles · ⏎ apply role model · type to search · ⎋ close"],
+    ["Switch Model", "Session-only switch — role…", "↑/↓ models · ⏎ use for…"],
+  ])("blocks an ordinary send at a current OMP %s picker after an idle hook (%s)", async (title, status, hints) => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    let pane = ["╭─ " + title + " ─────────╮", "│ " + status + " │", "│ ❯ provider/model │", "│ " + hints + " │", "╰──────────────────╯"].join("\n");
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys }));
+    expect(await transport.send(seat, "hello")).toMatchObject({
+      ok: false, reason: "target_needs_input", activity: { reason: "selection_prompt" },
+    });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+    pane += "\nHere is the menu we saw.\n❯ ";
+    expect(await transport.send(seat, "hello")).toMatchObject({ ok: true });
+  });
+
+  // Stock OMP 18.22 draws its running timer and empty composer gutter below an open approval.
+  const ompApprovalFrame = [...ompApprovalChoices, "├────────────────────────┤", ompApprovalFooter, "╰────────────────────────╯"];
+  const ompStatusBand = "⠇ 1m > ◔ example-model > 📁 /project > $0.00 ▶─2%────────1M─";
+  it.each([
+    [15_000, [ompStatusBand, "╰─"], "runtime_hook"],
+    [15_001, [ompStatusBand, "╰─"], "pane_heuristic"],
+    [100_845, [ompStatusBand, "╰─"], "pane_heuristic"],
+    [84_903, [], "pane_heuristic"],
+  ] as const)("guards the OMP approval at hook age %d ms with trailer %j", async (age, trailer, evidenceSource) => {
+    const seat = seedOmp();
+    const occurredAt = new Date();
+    agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Notification",
+      subtype: "permission_prompt", occurredAt: occurredAt.toISOString() });
+    const menu = [...ompApprovalFrame, ...trailer].join("\n");
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => menu, sendText, sendKeys }),
+      { now: () => new Date(occurredAt.getTime() + age) });
+    expect(await transport.send(seat, "ordinary message")).toMatchObject({
+      ok: false, reason: "target_needs_input", activity: { reason: "permission_prompt", evidenceSource },
+    });
+    expect(await transport.send(seat, "\x1b[B", { dangerouslyInteract: true, reason: "Inspect next choice" }))
+      .toMatchObject({ ok: true, sent: true, promptInteraction: "unverified" });
+    expect(overrideEvents()).toHaveLength(1);
+    expect(sendKeys).toHaveBeenCalledExactlyOnceWith(seat, ["Down"], expect.any(Function), expect.any(Object));
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["new output", "The tool finished.", ompStatusBand, "╰─"],
+    ["operator draft", ompStatusBand, "╰─ working on this"],
+    ["ordinary text above the gutter", "The tool finished.", "╰─"],
+  ])("does not read an old OMP approval as current with %s below it", (_label, ...tail) => {
+    const pane = [...ompApprovalFrame, ...tail].join("\n");
+    expect(classifyPaneActivity(pane, { runtime: "omp-tui" }).reason).not.toBe("permission_prompt");
+  });
+
+  it.each([
+    ["├────────────────────────┤", "│ ⏎ deny and send · Ctrl+Q approve · ⎋ deny │"],
+    ["│ unrelated output │", ompApprovalFooter],
+  ])("sends an explicit delayed OMP arrow even when the pane no longer shows navigable choices (%s, %s)", async (separator, footer) => {
+    const seat = seedOmp();
+    agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Notification", subtype: "permission_prompt" });
+    const menu = [...ompApprovalChoices, separator, footer, "╰────────────────────────╯"].join("\n");
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => menu, sendText, sendKeys }),
+      { now: () => new Date(Date.now() + 84_903) });
+    expect(await transport.send(seat, "\x1b[B", { dangerouslyInteract: true, reason: "Inspect next choice" }))
+      .toMatchObject({ ok: true, sent: true, warning: expect.any(String) });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).toHaveBeenCalledExactlyOnceWith(seat, ["Down"], expect.any(Function), expect.any(Object));
+    expect(overrideEvents()).toHaveLength(1);
+  });
+
+  it("refuses a single OMP arrow at an unrecognized pane when the audit cannot be persisted", async () => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => "Unrecognized pane", sendText, sendKeys }), {
+      withBus: false, now: () => new Date(Date.now() + 10 * 60_000),
+    });
+    const result = await transport.send(seat, "\x1b[B", { dangerouslyInteract: true, reason: "Inspect next choice" });
+    expect(result).toMatchObject({ ok: false, reason: "prompt_override_audit_unavailable", activity: { state: "unknown" },
+      sent: false, inputPhase: "not_reached" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("keeps OMP navigation out of ordinary sends, non-menu prompts and combined input", async () => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ sendText, sendKeys }));
+    const opts = { dangerouslyInteract: true, reason: "Inspect a menu choice" };
+    expect(await transport.send(seat, "\x1b[B", opts)).toMatchObject({ ok: true, sent: true });
+    expect(overrideEvents()).toHaveLength(1);
+    sendKeys.mockClear();
+    agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Notification", subtype: "permission_prompt" });
+    expect(await transport.send(seat, "\x1b[B")).toMatchObject({ ok: false, reason: "target_needs_input" });
+    for (const input of ["\x1b[B\r", "\x1b[B\x1b[A", "x\x1b[B", "\x1b[Bx"]) {
+      expect(await transport.send(seat, input, opts)).toMatchObject({ ok: false, sent: false, reason: "omp_menu_navigation_unavailable" });
+    }
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("waits for OMP ingestion beyond the old delay before submitting a message", async () => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    let acknowledge!: () => void;
+    const receipt = new Promise<void>(resolve => { acknowledge = resolve; });
+    const prepareInput = vi.fn(() => async () => { await receipt; return "OMP normalized tabs or line endings in the staged text."; });
+    const transport = makeTransport(mockTmux({ sendText, sendKeys }), { prepareInput });
+    const delivered = transport.send(seat, "slow message\r\nsecond line");
+    await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(1));
+    await new Promise(resolve => setTimeout(resolve, 350));
+    expect(sendKeys).not.toHaveBeenCalled();
+    expect(prepareInput).toHaveBeenCalledWith(seat, "slow message\r\nsecond line");
+    acknowledge();
+    expect(await delivered).toMatchObject({ ok: true, warning: expect.stringContaining("normalized") });
+    expect(sendKeys).toHaveBeenCalledExactlyOnceWith(seat, ["Enter"]);
+  });
+
+  it("reports a staged OMP paste on receipt failure without Enter or duplicate delivery", async () => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ sendText, sendKeys }), {
+      prepareInput: () => async () => { throw new Error("OMP paste was not acknowledged"); },
+    });
+    expect(await transport.send(seat, "queued work")).toMatchObject({
+      ok: false, sent: true, inputPhase: "written", reason: "submit_failed",
+    });
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("disarms the OMP request when paste fails", async () => {
+    const seat = seedOmp();
+    const cancel = vi.fn();
+    const receipt = Object.assign(vi.fn(async () => {}), { cancel });
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = makeTransport(mockTmux({ sendText: async () => ({ ok: false, code: "tmux_error", message: "pane gone" }), sendKeys }), {
+      prepareInput: () => receipt,
+    });
+    expect((await transport.send(seat, "text")).ok).toBe(false);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(receipt).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
 
   // Real runner -> real hook normalization/store -> real ordinary-send guard.
   it.each([

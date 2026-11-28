@@ -119,7 +119,9 @@ export const LATEST_WINS_EFFORT_PRECEDENCE: EffortPrecedenceRule = {
 
 export const effortPrecedence: EffortPrecedenceRule = LATEST_WINS_EFFORT_PRECEDENCE;
 
-export type EffortRuntime = "claude-code" | "codex" | "pi";
+export type EffortRuntime = "claude-code" | "codex" | "pi" | "omp" | "omp-tui";
+
+const ompEffortLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"];
 
 /** Levels each runtime is known to accept (Codex 0.153.4's service lists these when it rejects one;
  *  Claude Code's --effort levels; Pi's `--thinking` levels from `pi --help`, the same at the tested
@@ -128,12 +130,14 @@ export type EffortRuntime = "claude-code" | "codex" | "pi";
 export const KNOWN_EFFORT_LEVELS: Record<EffortRuntime, readonly string[]> = {
   codex: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   "claude-code": ["low", "medium", "high", "xhigh", "max"],
+  omp: ompEffortLevels,
+  "omp-tui": ompEffortLevels,
   pi: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 };
 
 export function unknownLevelWarning(runtime: EffortRuntime, level: string | null): string | undefined {
   if (level === null || KNOWN_EFFORT_LEVELS[runtime].includes(level)) return undefined;
-  const name = runtime === "codex" ? "Codex" : runtime === "pi" ? "Pi" : "Claude Code";
+  const name = runtime === "codex" ? "Codex" : runtime === "pi" ? "Pi" : runtime === "omp-tui" || runtime === "omp" ? "OMP" : "Claude Code";
   const consequence = runtime === "pi"
     ? "Pi doesn't reject the turn: it ignores a level it doesn't know (printing a warning) and keeps the level it would use without the flag (a model suffix, the resumed session's level, or its default)"
     : "the runtime may reject every turn until it is changed";
@@ -152,7 +156,7 @@ export function emittedEffortFromArgv(runtime: EffortRuntime, argv: string[]): {
     if (runtime === "claude-code") {
       if (arg === "--effort") { found = argv[index + 1] ?? null; index += 1; }
       else if (arg.startsWith("--effort=")) found = arg.slice("--effort=".length);
-    } else if (runtime === "pi") {
+    } else if (runtime === "pi" || runtime === "omp" || runtime === "omp-tui") {
       if (arg === "--thinking") { found = argv[index + 1] ?? null; index += 1; }
       else if (arg.startsWith("--thinking=")) found = arg.slice("--thinking=".length);
     } else {
@@ -190,7 +194,7 @@ const TAIL_BYTES = 4_000_000;
  * rollout. A turn before the process started belongs to an earlier launch of the same conversation,
  * so it is never reported as this launch's effort.
  */
-export function readNativeEffort(runtime: Exclude<EffortRuntime, "pi">, transcriptPath: string | null, processStartedAt: string | null): NativeEffortObservation {
+export function readNativeEffort(runtime: Exclude<EffortRuntime, "pi" | "omp" | "omp-tui">, transcriptPath: string | null, processStartedAt: string | null): NativeEffortObservation {
   if (!transcriptPath) return { state: "not_verified", detail: "The native transcript for this session isn't known to OpenRig." };
   const since = lstartToMinTs(processStartedAt ?? undefined);
   if (since === undefined) return { state: "not_verified", detail: "The running process's start time could not be read, so a turn can't be tied to this launch." };

@@ -52,6 +52,8 @@ interface SidecarRaw {
   /** Claude's statusline `cost.total_cost_usd`: a cumulative client-side estimate for the native session. */
   cost?: { total_cost_usd?: number | null } | null;
   sampled_at?: string;
+  /** Who wrote the sample, when it isn't Claude's status line: OMP's seat extension writes "omp_extension". */
+  source?: string;
 }
 
 interface ContextUsageRow {
@@ -294,7 +296,8 @@ export class ContextUsageStore {
     return {
       availability: "known",
       reason: null,
-      source: "claude_statusline_json",
+      // An OMP seat's extension writes this same sidecar from OMP's own context accounting, and says so.
+      source: raw.source === "omp_extension" ? "omp_extension_json" : "claude_statusline_json",
       usedPercentage: cw.used_percentage ?? null,
       remainingPercentage: cw.remaining_percentage ?? null,
       contextWindowSize: cw.context_window_size ?? null,
@@ -414,7 +417,7 @@ export class ContextUsageStore {
     }
     if (!this.runnerObservations) return null;
     // Preserve all existing built-in collectors.
-    if (!seat || !seat.runtime || ["claude-code", "codex", "omp", "terminal", "stub"].includes(seat.runtime)) return null;
+    if (!seat || !seat.runtime || ["claude-code", "codex", "omp", "omp-tui", "terminal", "stub"].includes(seat.runtime)) return null;
     if (seat.session_name !== sessionName) return this.unknownUsage("session_mismatch");
     const read = this.runnerObservations.getRunnerObservation(nodeId, "context", { freshnessMs: FRESHNESS_THRESHOLD_MS, runtime: seat.runtime });
     if (!read.report) return this.unknownUsage(read.reason === "stale" || read.reason === "session_mismatch" ? read.reason : "no_data");

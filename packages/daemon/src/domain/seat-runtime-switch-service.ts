@@ -21,7 +21,7 @@ import type { EventBus } from "./event-bus.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { QueueRepository } from "./queue-repository.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import type { RuntimeAdapter } from "./runtime-adapter.js";
+import type { RuntimeAdapter, PreparedInput } from "./runtime-adapter.js";
 import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import type { PersistedEvent } from "./types.js";
@@ -177,7 +177,7 @@ const COSTS = [
   "A second process runs on the target's account until cutover.",
   "Messages sent to the seat while it switches are held, not typed; rig send says the seat is switching and until when, and they need sending again afterwards.",
   "A failed switch can leave the target runtime's prepared files (its seat storage and projections).",
-  "Codex, Claude Code and Pi runtime switches; single-pane seats only.",
+  "Single-pane seats support Codex, Claude Code, Pi, OMP RPC (omp) and the native OMP UI (omp-tui).",
 ];
 
 const PI_ACCOUNT_COSTS = [
@@ -215,10 +215,13 @@ export class SeatRuntimeSwitchService {
   async setRuntime(input: SetRuntimeInput): Promise<SetRuntimeResult> {
     const refuse = (code: string, message: string, guidance?: string): RuntimeSwitchRefusal => ({ ok: false, code, message, ...(guidance ? { guidance } : {}) });
     // A built-in runtime, or a community harness whose installed preset defines it. Anything else is a typo, not a target.
-    if (input.runtime !== "codex" && input.runtime !== "claude-code" && input.runtime !== "pi" && !isCommunityHarnessRuntime(input.runtime)) {
-      return refuse("invalid_runtime_settings", "Choose --runtime codex, --runtime claude-code, --runtime pi, or the name of an installed community harness (rig community-harness list).");
+    if (input.runtime !== "codex" && input.runtime !== "claude-code" && input.runtime !== "pi" && input.runtime !== "omp" && input.runtime !== "omp-tui" && !isCommunityHarnessRuntime(input.runtime)) {
+      return refuse("invalid_runtime_settings", "Choose --runtime codex, --runtime claude-code, --runtime pi, --runtime omp, --runtime omp-tui, or the name of an installed community harness (rig community-harness list).");
     }
     const target: SwitchRuntime = input.runtime;
+    if ((target === "omp" || target === "omp-tui") && (input.accountHome !== undefined || input.accountToken !== undefined || input.clearAccountHome)) {
+      return refuse("invalid_runtime_settings", "OMP uses its isolated seat home and provider credentials; account-home switching is not supported.");
+    }
     if (input.clearAccountHome !== undefined && typeof input.clearAccountHome !== "boolean") return refuse("invalid_runtime_settings", "clearAccountHome must be true or false.");
     if (input.clearAccountHome && (input.accountHome !== undefined || input.accountToken !== undefined)) return refuse("invalid_runtime_settings", "Choose either an account home/token or clearAccountHome, not both.");
     if (input.accountHome !== undefined) {
@@ -275,8 +278,8 @@ export class SeatRuntimeSwitchService {
     const sourceRuntime: string = node.runtime ?? "";
     const sourceIsCommunity = !!sourceRuntime && isCommunityHarnessRuntime(sourceRuntime)
       && communityHarnessOf(seatCommunityHarnessSelect(db, node.id), sourceRuntime) !== null;
-    if (!sourceIsCommunity && sourceRuntime !== "codex" && sourceRuntime !== "claude-code" && sourceRuntime !== "pi") {
-      return refuse("runtime_switch_unsupported", `${seatRef} runs ${node.runtime ?? "an unknown runtime"}; only Codex, Claude Code, Pi and community-harness seats can change runtime.`);
+    if (!sourceIsCommunity && sourceRuntime !== "codex" && sourceRuntime !== "claude-code" && sourceRuntime !== "pi" && sourceRuntime !== "omp" && sourceRuntime !== "omp-tui") {
+      return refuse("runtime_switch_unsupported", `${seatRef} runs ${node.runtime ?? "an unknown runtime"}; only Codex, Claude Code, Pi, OMP and community-harness seats can change runtime.`);
     }
     if (node.runtime === "pi" && target === "claude-code") {
       try {
@@ -411,7 +414,7 @@ export class SeatRuntimeSwitchService {
   }): Promise<SetRuntimeResult> {
     const { db, rigRepo, sessionRegistry, tmuxAdapter: tmux } = this.deps;
     const { node, sessionName, target, materials } = ctx;
-    const changesPiRuntime = target !== node.runtime && (target === "pi" || node.runtime === "pi");
+    const changesPiRuntime = target !== node.runtime && (target === "pi" || node.runtime === "pi" || target === "omp" || node.runtime === "omp" || target === "omp-tui" || node.runtime === "omp-tui");
     const failed = (message: string, guidance?: string): RuntimeSwitchRefusal => ({ ok: false, code: "runtime_switch_failed", committed: false, message,
       guidance: guidance ?? `${ctx.seatRef} is unchanged on ${node.runtime}. Correct the cause and try again.` });
     // Refuse unreadable target settings before an active switch can hold sends to the current occupant.
@@ -550,10 +553,7 @@ export class SeatRuntimeSwitchService {
     const claudeSuccessor = target === "claude-code";
     const drawnPane = successorPane;
     if (claudeSuccessor && drawnPane) await waitForClaudeInputBox(() => tmux.capturePaneScreen(drawnPane), this.sleep);
-    const typed = await tmux.sendText(row.staging_session, packet);
-    if (!typed.ok) return abandon(`The handover couldn't be typed to the successor: ${typed.message}.`);
-    await this.sleep(200);
-    const entered = await tmux.sendKeys(row.staging_session, ["Enter"]);
+    const entered = await this.sendRuntimeInput(row.staging_session, packet, target);
     if (!entered.ok) return abandon(`The handover couldn't be submitted to the successor: ${entered.message}.`);
     if (claudeSuccessor) await this.submitStagedHandover(row.staging_session, packet);
 
@@ -642,7 +642,7 @@ export class SeatRuntimeSwitchService {
           target === "pi" && node.runtime === "pi" && ctx.input.effort === undefined ? readSeatEffort(db, node.id)?.choice ?? null : null, materials.settings.advisor.value, materials.settings.codexConfigProfile.value,
           ...(spec ? [spec.name, spec.version, spec.hash, spec.restorePolicy] : []), ctx.sessionName, at, node.id);
       db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = CASE WHEN ? THEN ? ELSE claude_token_ref END WHERE id = ?")
-        .run(ctx.input.accountHome ?? null, ctx.input.accountHome !== undefined || node.accountHome || (target !== node.runtime && (target === "pi" || node.runtime === "pi")) ? 1 : 0,
+        .run(ctx.input.accountHome ?? null, ctx.input.accountHome !== undefined || node.accountHome || (target !== node.runtime && (target === "pi" || node.runtime === "pi" || target === "omp" || node.runtime === "omp" || target === "omp-tui" || node.runtime === "omp-tui")) ? 1 : 0,
           ctx.input.accountToken ? JSON.stringify(ctx.input.accountToken) : null, node.id);
       new NativePermissionStore(db).write(node.id, ctx.selection, ctx.input.requestedBy?.trim() || ctx.sessionName, ctx.input.reason);
       // One explicit Codex choice: the switch's mode replaces the seat's envelope here, and the event says so.
@@ -730,6 +730,27 @@ export class SeatRuntimeSwitchService {
     }
   }
 
+  /** A tmux paste is not proof the OMP composer has received it. */
+  private async sendRuntimeInput(session: string, text: string, runtime: string): Promise<{ ok: boolean; message?: string }> {
+    let received: PreparedInput | undefined;
+    let submitting = false;
+    try {
+      if (runtime === "omp-tui") {
+        const adapter = this.deps.runtimeAdapters?.["omp-tui"];
+        if (!adapter?.prepareInput) throw new Error("OMP input acknowledgement unavailable; no text was sent.");
+        received = adapter.prepareInput(session, text);
+      }
+      const pasted = await this.deps.tmuxAdapter.sendText(session, text);
+      if (!pasted.ok) return pasted;
+      if (received) await received();
+      else await this.sleep(200);
+      submitting = true;
+      return await this.deps.tmuxAdapter.sendKeys(session, ["Enter"]);
+    } catch (error) {
+      return { ok: false, message: `${(error as Error).message} ${submitting ? "Submission was not confirmed" : "Enter was withheld"}; inspect staged input before retrying.` };
+    } finally { received?.cancel?.(); }
+  }
+
   /** After the commit: retire the predecessor (in the staging session), carry the successor's runtime on the seat's
    *  session, and tell the successor it holds the seat. Idempotent enough for recovery to call again. */
   private async finishCommitted(row: Pick<SwitchRow, "id" | "node_id" | "canonical_session" | "staging_session" | "to_runtime" | "from_runtime" | "successor_generation">): Promise<{ ok: true } | { ok: false; message: string }> {
@@ -744,8 +765,7 @@ export class SeatRuntimeSwitchService {
       // Held messages are never replayed, so the activation tells the successor of them, as a started seat is told (#2431).
       const held = heldMessagesNotice(db, row.node_id, row.canonical_session);
       const text = `OpenRig: runtime switch ${row.id} committed. You now hold ${row.canonical_session} on ${row.to_runtime}; the ${row.from_runtime} occupant has retired. Carry on from the handover: the seat's queue rows and claims are yours.${held ? ` ${held}` : ""}`;
-      const typed = await tmux.sendText(row.canonical_session, text);
-      const entered = typed.ok ? (await this.sleep(200), await tmux.sendKeys(row.canonical_session, ["Enter"])) : typed;
+      const entered = await this.sendRuntimeInput(row.canonical_session, text, row.to_runtime);
       if (!entered.ok) problems.push(`the activation message couldn't be delivered (${entered.message})`);
     }
     const at = this.now().toISOString();

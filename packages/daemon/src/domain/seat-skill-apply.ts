@@ -31,7 +31,7 @@ export interface SeatRef {
   nodeId: string;
   rigId: string;
   logicalId: string;
-  runtime: "claude-code" | "codex";
+  runtime: "claude-code" | "codex" | "omp-tui";
   sessionName: string;
   cwd: string;
 }
@@ -85,9 +85,9 @@ export function resolveSeat(db: Db, sessionName: string): { ok: true; seat: Seat
     FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`).get(sessionName) as
     { nodeId: string; rigId: string; logicalId: string; runtime: string | null; cwd: string | null } | undefined;
   if (!row) return { ok: false, error: `no OpenRig seat has the session ${sessionName}` };
-  if (row.runtime !== "claude-code" && row.runtime !== "codex") {
+  if (row.runtime !== "claude-code" && row.runtime !== "codex" && row.runtime !== "omp-tui") {
     const runtime = row.runtime ?? "unknown";
-    return { ok: false, error: `${sessionName} is a ${runtime} seat; seat skills are kept for Claude Code and Codex seats`, unsupportedRuntime: runtime };
+    return { ok: false, error: `${sessionName} is a ${runtime} seat; seat skills are kept for Claude Code, Codex and OMP seats`, unsupportedRuntime: runtime };
   }
   return { ok: true, seat: { nodeId: row.nodeId, rigId: row.rigId, logicalId: row.logicalId, runtime: row.runtime, sessionName, cwd: row.cwd ?? "." } };
 }
@@ -204,7 +204,7 @@ export async function applySeatSkills(input: {
     try { writeSeatSkillRouter(paths); } catch { /* reported by the inspection: the router isn't there as written */ }
   }
   const result = (delivery: SeatSkillApplyResult["delivery"]): SeatSkillApplyResult => ({ inspection: inspectSeatSkills(seat, input.occupant, db, input.bootstrapLine ?? null), disk, delivery });
-  if (seat.runtime !== "codex") return result({ state: "not-sent", reason: "a Claude seat reads its skills from its own plugin; nothing is sent to the running session" });
+  if (seat.runtime !== "codex") return result({ state: "not-sent", reason: seat.runtime === "omp-tui" ? "native skills are read at launch; reload or relaunch OMP to discover newly installed skills" : "a Claude seat reads its skills from its own plugin; nothing is sent to the running session" });
   // An unreadable selection never reaches the catalog or the seat.
   if (!disk.ok) return result({ state: "not-sent", reason: disk.selection === "unreadable"
     ? "the seat's stored selection couldn't be read, so nothing was reconciled or sent" : "the seat's selection was not reconciled, so its list was not sent" });

@@ -766,8 +766,8 @@ export class SeatLifecycleService {
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const runtime = resolved.entry.runtime ?? "unknown";
-    if (runtime !== "claude-code" && runtime !== "codex" && runtime !== "pi") {
-      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${this.settingTargetLabel(input)}" runs ${runtime}; reasoning effort applies to claude-code, codex and pi seats only.` };
+    if (runtime !== "claude-code" && runtime !== "codex" && runtime !== "pi" && runtime !== "omp" && runtime !== "omp-tui") {
+      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${this.settingTargetLabel(input)}" runs ${runtime}; reasoning effort applies to claude-code, codex, pi, omp and omp-tui seats only.` };
     }
 
     const from = this.readEffort(seat.nodeId);
@@ -863,8 +863,8 @@ export class SeatLifecycleService {
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const runtime = resolved.entry.runtime ?? "unknown";
-    if (runtime !== "claude-code" && runtime !== "codex" && runtime !== "pi") {
-      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${seatRef}" runs ${runtime}; reasoning effort applies to claude-code, codex and pi seats only.` };
+    if (runtime !== "claude-code" && runtime !== "codex" && runtime !== "pi" && runtime !== "omp" && runtime !== "omp-tui") {
+      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${seatRef}" runs ${runtime}; reasoning effort applies to claude-code, codex, pi, omp and omp-tui seats only.` };
     }
     const saved = this.readEffort(seat.nodeId);
     if (!saved) {
@@ -881,6 +881,9 @@ export class SeatLifecycleService {
     if (!session || TERMINAL_SESSION_STATUSES.has(session.status) || !target) {
       emitted = { state: "unknown", detail: "The seat has no running session, so no launch to read." };
       observed = { state: "not_verified", detail: "The seat has no running session." };
+    } else if (runtime === "omp" || runtime === "omp-tui") {
+      emitted = { state: "unknown", detail: "OMP effort is saved for the next managed continuation; launch argv has not been verified." };
+      observed = { state: "not_verified", detail: runtime === "omp-tui" ? "Use /effort in OMP to inspect or change this live session's level." : "OMP RPC does not report the effort applied to the live turn." };
     } else if (runtime === "pi") {
       ({ emitted, observed } = await this.piEffort(seat.nodeId, session.session_name, saved));
     } else {

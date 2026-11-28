@@ -85,14 +85,17 @@ describe("a seat folder missing on this machine isn't recreated by the Codex or 
 // The daemon's own wiring: each Pi-family adapter it builds gets the check. OMP builds its own filesystem operations, so a
 // missing folderPresent there reads every folder as present and the shared merge recreates the missing one.
 describe("the daemon gives the Pi and OMP adapters it builds the missing-folder check", () => {
-  it.each(["pi", "omp"])("%s: guidance meant for a missing seat folder is skipped and named", async (runtime) => {
+  it.each(["pi", "omp", "omp-tui"])("%s: guidance meant for a missing seat folder is skipped and named", async (runtime) => {
     const s = setup();
     const { db, deps } = await createDaemon({ dbPath: ":memory:", tmuxExec: async () => "",
       cmuxFactory: async () => { throw Object.assign(new Error("fixture: no cmux"), { code: "ENOENT" }); } });
     try {
       const projected = await deps.runtimeAdapters[runtime]!.project(s.plan(runtime, [s.guidance]), s.binding);
+      const delivered = await deps.runtimeAdapters[runtime]!.deliverStartup([s.sop], s.binding);
       expect(fs.existsSync(s.cwd), "the missing seat folder").toBe(false);
       expect(projected.warnings).toEqual(expect.arrayContaining([`role.md: not written, because ${s.cwd} doesn't exist on this machine`]));
+      expect(delivered.delivered).toBe(0);
+      expect(delivered.warnings).toEqual(expect.arrayContaining([`SOP.md: not written, because ${s.cwd} doesn't exist on this machine`]));
     } finally { db.close(); }
   });
 });

@@ -11,7 +11,7 @@ import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
-import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile, ProjectionResult, StartupDeliveryResult, ReadinessResult } from "../src/domain/runtime-adapter.js";
+import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile, ProjectionResult, StartupDeliveryResult, ReadinessResult, PreparedInput } from "../src/domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -235,6 +235,151 @@ describe("StartupOrchestrator", () => {
       binding: { ...makeBinding(), nodeId: seed.nodeId, tmuxPane: "%1" } }));
     expect(result.startupStatus).toBe("attention_required");
     expect(grants.get(grant.grantId)?.revokedAt).not.toBeNull();
+  });
+
+  describe("OMP native input acknowledgement", () => {
+    const sources = ["initial_identity", "restore_preload", "post_launch_file", "after_files", "after_ready"] as const;
+
+    function ompStartup(source: typeof sources[number], prepareInput?: RuntimeAdapter["prepareInput"]) {
+      const seed = seedSession();
+      db.prepare("UPDATE nodes SET runtime = 'omp-tui' WHERE id = ?").run(seed.nodeId);
+      const file = (name: string, required = true): ResolvedStartupFile => ({
+        path: name, absolutePath: `/tmp/${name}`, ownerRoot: "/tmp", deliveryHint: "send_text", required,
+        appliesOn: ["fresh_start", "restore"],
+      });
+      // Model the adapter's required/optional handling: a failed optional file is swallowed and the
+      // adapter tries the next file. The orchestrator must still hold every later native input.
+      const deliverStartup: RuntimeAdapter["deliverStartup"] = vi.fn(async (files, _binding, send) => {
+        const result: StartupDeliveryResult = { delivered: 0, failed: [] };
+        for (const entry of files) {
+          try { await send!(`file:${entry.path}`); result.delivered++; }
+          catch (error) { if (entry.required) result.failed.push({ path: entry.path, error: String(error) }); }
+        }
+        return result;
+      });
+      const adapter = mockAdapter({ runtime: "omp-tui", prepareInput, deliverStartup,
+        launchHarness: vi.fn(async () => ({ ok: true })) });
+      const first = makeAction({ type: "send_text", value: "first action", phase: source === "after_files" ? "after_files" : "after_ready" });
+      const later = makeAction({ value: "/later action", phase: source === "after_ready" ? "after_ready" : "after_files", idempotent: false });
+      const input = makeInput(seed, {
+        adapter,
+        ...(source === "restore_preload" ? { isRestore: true, resumeToken: "/tmp/saved.jsonl", resumeType: "omp_session" } : {}),
+        resolvedStartupFiles: source === "post_launch_file" ? [file("optional.md", false), file("required.md")]
+          : source === "initial_identity" || source === "restore_preload" ? [file("role.md"), file("extra.md")] : [],
+        startupActions: [
+          ...(source === "initial_identity" ? [makeIdentityAction()] : source === "post_launch_file" ? [] : [first]),
+          later, makeAction({ value: "/last action" }),
+        ],
+      });
+      return { seed, input, adapter };
+    }
+
+    it.each(sources)("waits for the %s receipt before Enter and follows with later input only after it arrives", async source => {
+      const calls: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const waits: Array<ReturnType<typeof vi.fn>> = [];
+      const cancels: Array<ReturnType<typeof vi.fn>> = [];
+      const prepareInput = vi.fn((_session: string, _text: string): PreparedInput => {
+        calls.push("prepare");
+        const first = waits.length === 0;
+        const wait = vi.fn(async () => {
+          calls.push("receive");
+          if (first) {
+            await gate;
+            return "OMP normalized tabs or line endings in the staged text.";
+          }
+        });
+        const cancel = vi.fn();
+        waits.push(wait); cancels.push(cancel);
+        return Object.assign(wait, { cancel });
+      });
+      vi.mocked(tmux.sendText).mockImplementation(async () => { calls.push("paste"); return { ok: true }; });
+      vi.mocked(tmux.sendKeys).mockImplementation(async () => { calls.push("enter"); return { ok: true }; });
+      const { input } = ompStartup(source, prepareInput);
+      const pending = createOrchestrator({ readFile: file => `read:${file}` }).startNode(input);
+      await vi.waitFor(() => expect(waits[0]).toHaveBeenCalledOnce());
+      expect(calls).toEqual(["prepare", "paste", "receive"]);
+      expect(tmux.sendText).toHaveBeenCalledOnce();
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      release();
+      expect(await pending).toMatchObject({ ok: true, startupStatus: "ready", warnings: expect.arrayContaining([expect.stringContaining("normalized")]) });
+      expect(calls.slice(0, 4)).toEqual(["prepare", "paste", "receive", "enter"]);
+      expect(prepareInput.mock.calls).toEqual(vi.mocked(tmux.sendText).mock.calls);
+      expect(tmux.sendKeys).toHaveBeenCalledTimes(prepareInput.mock.calls.length);
+      for (const cancel of cancels) expect(cancel).toHaveBeenCalledOnce();
+    });
+
+    it.each(sources)("leaves an uncertain %s visible for attention without submitting or replaying later work", async source => {
+      const cancel = vi.fn();
+      const receipt = Object.assign(vi.fn(async () => { throw new Error("native receipt timed out"); }), { cancel });
+      const { input, seed } = ompStartup(source, vi.fn(() => receipt));
+      const orchestrator = createOrchestrator({ readFile: file => `read:${file}` });
+      const result = await orchestrator.startNode(input);
+      expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+      if (!result.ok) expect(result.errors.join(" ")).toContain("native receipt timed out");
+      expect(tmux.sendText).toHaveBeenCalledOnce();
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(orchestrator.canContinueStartup(seed.nodeId, seed.sessionId)).toBe(false);
+      expect(sessionRegistry.getSessionsForRig(seed.rigId).find(session => session.id === seed.sessionId)?.startupStatus).toBe("attention_required");
+    });
+
+    it.each(["paste-result", "paste-throw", "enter-result", "enter-throw"] as const)("holds later actions after an uncertain %s failure", async failure => {
+      const cancel = vi.fn();
+      const receipt = Object.assign(vi.fn(async () => {}), { cancel });
+      if (failure === "paste-result") vi.mocked(tmux.sendText).mockResolvedValueOnce({ ok: false, code: "tmux_error", message: "partial paste" });
+      if (failure === "paste-throw") vi.mocked(tmux.sendText).mockRejectedValueOnce(new Error("partial paste"));
+      if (failure === "enter-result") vi.mocked(tmux.sendKeys).mockResolvedValueOnce({ ok: false, code: "tmux_error", message: "partial submit" });
+      if (failure === "enter-throw") vi.mocked(tmux.sendKeys).mockRejectedValueOnce(new Error("partial submit"));
+      const { input, seed } = ompStartup("after_files", vi.fn(() => receipt));
+      const orchestrator = createOrchestrator();
+      const result = await orchestrator.startNode(input);
+      expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+      expect(tmux.sendText).toHaveBeenCalledOnce();
+      expect(tmux.sendKeys).toHaveBeenCalledTimes(failure.startsWith("enter") ? 1 : 0);
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(orchestrator.canContinueStartup(seed.nodeId, seed.sessionId)).toBe(false);
+    });
+
+    it("does not paste when the OMP adapter has no acknowledgement capability", async () => {
+      const { input } = ompStartup("after_ready");
+      expect(await createOrchestrator().startNode(input)).toMatchObject({ ok: false, startupStatus: "attention_required" });
+      expect(tmux.sendText).not.toHaveBeenCalled();
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+    });
+
+    it.each([true, false])("settles the native held-message receipt before marking startup ready (acknowledged=%s)", async acknowledged => {
+      const cancel = vi.fn();
+      const received = Object.assign(vi.fn(async () => { if (!acknowledged) throw new Error("notice receipt timed out"); }), { cancel });
+      const prepareInput = vi.fn(() => received);
+      const { input, seed } = ompStartup("after_ready", prepareInput);
+      cancel.mockImplementation(() => sessionRegistry.getSessionsForRig(seed.rigId)[0]?.startupStatus);
+      input.startupActions = [];
+      db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql);
+      const outbox = new OutboxHandler(db);
+      outbox.retain({ outboxId: "held-omp-startup", senderSession: "planner@test-rig", destinationSession: "r01-impl", body: "Do not replay this work" },
+        { nodeId: seed.nodeId, session: "r01-impl", occupant: null, pane: null });
+      const heldBefore = outbox.getById("held-omp-startup");
+      const result = await createOrchestrator().startNode(input);
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready", warnings: expect.arrayContaining([expect.stringContaining("1 held message")]) });
+      expect(prepareInput).toHaveBeenCalledWith("r01-impl", expect.stringContaining("1 held message"));
+      expect(tmux.sendText).toHaveBeenCalledOnce();
+      expect(tmux.sendKeys).toHaveBeenCalledTimes(acknowledged ? 1 : 0);
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(cancel).toHaveReturnedWith("pending");
+      if (!acknowledged) expect(result.warnings).toContainEqual(expect.stringContaining("Held-message notice submission unconfirmed: notice receipt timed out"));
+      expect(outbox.getById("held-omp-startup")).toEqual(heldBefore);
+    });
+
+    it.each([true, false])("treats an empty OMP plan as preserved context only during contained replay (preserve=%s)", async preserveStartupContext => {
+      const { input, adapter } = ompStartup("after_ready");
+      input.startupActions = [];
+      input.preserveStartupContext = preserveStartupContext;
+      if (preserveStartupContext) { input.isRestore = true; input.resumeToken = "/tmp/saved.jsonl"; input.resumeType = "omp_session"; }
+      expect(await createOrchestrator().startNode(input)).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(adapter.project).toHaveBeenCalledTimes(preserveStartupContext ? 0 : 1);
+    });
   });
 
   it("community contract: launch surfaces undelivered startup files without placing or pasting them", async () => {

@@ -29,6 +29,29 @@ function fixture(runtime: string, name = "workshop") {
     launchPosture: "floor" } as NodeBinding;
   return { db, rigRepo, rig, node, store, registry, session, binding };
 }
+
+describe.each(["omp", "omp-tui"])("%s approval policy", runtime => {
+  it.each(["kernel", "workshop"])("keeps the floor in %s unless a policy is configured", rigName => {
+    const { store, node, rig, rigRepo, binding } = fixture(runtime, rigName);
+    vi.stubEnv("OPENRIG_YOLO", "1");
+
+    expect(store.apply(binding, runtime)).toMatchObject({ kernelAuthority: false, launchPosture: "floor" });
+    expect(store.resolve(node.id, runtime)).toMatchObject({
+      effectiveMode: "always-ask", source: "system_default", launchPosture: "floor",
+    });
+
+    rigRepo.setRigPermissionPolicy(rig.id, "builtin:yolo");
+    expect(store.resolve(node.id, runtime)).toMatchObject({
+      effectiveMode: "yolo", source: "rig_spec", launchPosture: "full_bypass",
+    });
+
+    rigRepo.setNodePermissionPolicy(node.id, "builtin:locked");
+    expect(store.resolve(node.id, runtime)).toMatchObject({
+      effectiveMode: "always-ask", source: "member_spec", launchPosture: "floor",
+    });
+  });
+});
+
 function transport() {
   const send = vi.fn(async () => ({ ok: false as const, message: "inert boundary" }));
   const tmux = { sendShellCommand: send, sendText: send } as unknown as TmuxAdapter;

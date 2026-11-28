@@ -8,7 +8,7 @@ Canonical OpenRig skills and hooks for cross-runtime agent topology coordination
 its path-only topology/work trace.
 
 **Hooks:** activity tracking, compaction continuity, the default-on refocus channel, and on Claude the permission
-answer. Refocus is post-compaction on both runtimes, threshold-triggered on Claude, on-demand on both, configurable
+answer. Refocus is post-compaction on all three runtimes, threshold-triggered on Claude, on-demand on all three, configurable
 off, and never runs at fresh session start.
 
 **The permission answer (Claude Code):** when a seat's Claude asks permission for a tool call, `permission-answer.cjs`
@@ -74,9 +74,17 @@ manifest's commands, which still use `node` (the Codex manifest's run `$OPENRIG_
 One skill targets Claude Code's compaction behavior specifically:
 - `claude-compaction-restore` — used to rebuild a Claude Code agent's working mental model after `/compact`, from JSONL transcripts and touched files
 
-This is NOT Codex-self-targeting (Codex's compaction is handled internally and doesn't need rebuild SOPs). But Codex agents acting as orchestrators frequently invoke this skill when restoring a peer Claude that has compacted — that's exactly when it's needed. Both runtimes ship it.
+This is NOT Codex-self-targeting (Codex's compaction is handled internally and doesn't need rebuild SOPs). But Codex agents acting as orchestrators frequently invoke this skill when restoring a peer Claude that has compacted — that's exactly when it's needed. All three runtimes ship it.
 
 All other skills are cross-runtime by design.
+
+## Oh My Pi (OMP)
+
+An OMP seat selecting `openrig-core` loads the package's `omp.extensions` entry with `-e`.
+The plugin supplies skills, `/refocus`, and refocus on the next prompt after compaction.
+Only managed seats and their main conversations run refocus. Personal sessions get skills.
+The daemon's separate, always-loaded seat extension is the sole activity producer.
+Select `runtime: omp-tui` on a member to load the native extension. The `omp` runtime continues to use the RPC runner.
 
 ## Distribution
 

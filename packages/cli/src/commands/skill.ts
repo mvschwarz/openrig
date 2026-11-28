@@ -79,7 +79,7 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
   cmd
     .command("loadout")
     .description("Inspect or reconcile the composed managed skill loadout for one Claude/Codex working directory, or (with --seat) one seat's own skills")
-    .option("--runtime <runtime>", "Target runtime: claude-code or codex (folder mode; required there)")
+    .option("--runtime <runtime>", "Target runtime: claude-code, codex or omp-tui (folder mode; required there)")
     .option("--seat <session>", "Seat mode: a seat's own skills, kept outside the project. `self` is this seat (its OPENRIG_SESSION_NAME)")
     .option("--wait-for-idle <ms>", "Seat mode with --apply: wait up to this long for the seat to be idle before telling it")
     .option("--resend", "Seat mode with --apply: send this list again after an earlier attempt that failed or wasn't confirmed, once you've checked the seat")
@@ -108,8 +108,8 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
         process.exitCode = 1;
         return;
       }
-      if (opts.runtime !== "claude-code" && opts.runtime !== "codex") {
-        console.error("invalid_runtime: --runtime must be claude-code or codex");
+      if (opts.runtime !== "claude-code" && opts.runtime !== "codex" && opts.runtime !== "omp-tui") {
+        console.error("invalid_runtime: --runtime must be claude-code, codex or omp-tui");
         process.exitCode = 1;
         return;
       }
@@ -261,7 +261,7 @@ different hashes have different bytes; that alone doesn't say which is newer or 
 
 What it doesn't say: whether a copy is safe to refresh or overwrite. For a managed copy in a working folder, run the
 read-only loadout check first (no --apply):
-  rig skill loadout --runtime <claude-code|codex> --cwd <target> --project-root <project> --json
+  rig skill loadout --runtime <claude-code|codex|omp-tui> --cwd <target> --project-root <project> --json
 It reports each copy as current; stale, still OpenRig's last projection, so --apply can refresh it; conflicting;
 shadowed; or missing. Read the detail of conflicting and shadowed: conflicting can mean the bytes differ or that the
 target couldn't be inspected, which leaves any difference unknown, and a confirmed difference doesn't prove a
@@ -339,7 +339,7 @@ it. Don't move global skills into a project just to get a record.
         console.log("PASS: all active skills have provenance and verified freshness");
       }
       console.log("Refreshing a copy? This audit doesn't say whether that's safe. For a managed copy, run the read-only "
-        + "rig skill loadout --runtime <claude-code|codex> --cwd <target> --project-root <project> --json first; "
+        + "rig skill loadout --runtime <claude-code|codex|omp-tui> --cwd <target> --project-root <project> --json first; "
         + "rig skill audit --help says what its answers mean.");
     });
 

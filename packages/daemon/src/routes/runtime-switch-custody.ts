@@ -28,12 +28,12 @@ export function runtimeSwitchActivityRole(
   db: Database.Database,
   session: string | null | undefined,
   generation: string | null | undefined,
-): { id: string; role: "staged_successor" | "retired_predecessor" } | null {
+): { id: string; role: "staged_successor" | "retired_predecessor"; targetRuntime: string; stagingSession: string } | null {
   if (!session || !generation) return null;
   try {
-    const row = db.prepare(`SELECT id, committed_at FROM seat_runtime_switches WHERE ${NAMED_BY_SWITCH}
-      ORDER BY created_at DESC LIMIT 1`).get(session, generation, generation) as { id: string; committed_at: string | null } | undefined;
-    return row ? { id: row.id, role: row.committed_at ? "retired_predecessor" : "staged_successor" } : null;
+    const row = db.prepare(`SELECT id, committed_at, to_runtime, staging_session FROM seat_runtime_switches WHERE ${NAMED_BY_SWITCH}
+      ORDER BY created_at DESC LIMIT 1`).get(session, generation, generation) as { id: string; committed_at: string | null; to_runtime: string; staging_session: string } | undefined;
+    return row ? { id: row.id, targetRuntime: row.to_runtime, stagingSession: row.staging_session, role: row.committed_at ? "retired_predecessor" : "staged_successor" } : null;
   } catch {
     return null;
   }

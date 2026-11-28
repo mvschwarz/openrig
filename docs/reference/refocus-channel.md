@@ -89,6 +89,12 @@ seconds, where they used to stop it at 5; the other OpenRig hooks keep theirs. S
 pass 5 seconds now completes instead of being stopped with nothing delivered, and a hook that hangs outside its lookups
 can hold a prompt for up to those 60 seconds.
 
+For native OMP seats (`runtime: omp-tui`), the wrapper allows 25 seconds. Lookups get at most 23 seconds,
+leaving 1.5 seconds for the issue report and 0.5 seconds for process overhead. If
+`OPENRIG_REFOCUS_BUDGET_MS` exceeds 23000, the seat displays both budgets at session start.
+Refocus stays pending until OMP accepts the custom message into the conversation. If OMP cancels
+or retries prompt preparation, the next preparation can deliver the pending context.
+
 A configured REF resolution failure degrades loudly in the delivered payload while still completing the hook — a
 refocus must never break a seat's turn.
 

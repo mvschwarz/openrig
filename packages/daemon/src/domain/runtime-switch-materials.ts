@@ -18,7 +18,7 @@ import { readSeatEffort } from "./seat-effort.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
 
 /** A seat's runtime for a switch: a built-in one, or a community harness's name, which its installed preset defines. */
-export type SwitchRuntime = "codex" | "claude-code" | "pi" | (string & {});
+export type SwitchRuntime = "codex" | "claude-code" | "pi" | "omp" | "omp-tui" | (string & {});
 
 /** Where an effective target setting came from. `native_default` means OpenRig passes no flag. */
 export type RuntimeSwitchSettingSource = "explicit" | "agent_spec" | "native_default";
@@ -137,7 +137,7 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
 
   // Saved startup files are runtime-neutral except the seat-skills pointer and a Codex seat's catalog; those are rebuilt
   // for the target. Managed guidance the target projects isn't also delivered as a file (the launch's own rule).
-  const sourceSeat = node.runtime === "codex" || node.runtime === "claude-code" || node.runtime === "pi"
+  const sourceSeat = node.runtime === "codex" || node.runtime === "claude-code" || node.runtime === "pi" || node.runtime === "omp-tui"
     ? seatSkillPaths({ rigId: node.rigId, logicalId: node.logicalId, runtime: node.runtime }, input.openrigHome) : undefined;
   const pointer = seatSkillsPointerStartupFile();
   const projectedGuidance = new Set(plan.entries
@@ -198,11 +198,17 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
     }),
     async prepare(binding, adapter) {
       const notes: string[] = [];
+      if (runtime === "omp-tui") {
+        const guidance = await adapter.guidanceFileFor?.(binding);
+        if (!guidance?.file) throw new Error(guidance?.note ?? "OMP private guidance destination is unavailable");
+        binding.guidanceFile = guidance.file;
+        if (guidance.note) notes.push(guidance.note);
+      }
       if (runtime === "claude-code") notes.push(...ensureSeatSkillPlugin(seatSkills));
       // A community harness takes no skills or guidance, so there is nothing to project for it, and the note says so.
       if (skillLoadout && isCommunityHarnessRuntime(runtime)) {
         notes.push(`${runtime} is a community harness: it takes no skills, so the seat's skill loadout isn't projected.`);
-      } else if (skillLoadout && runtime !== "pi") {
+      } else if (skillLoadout && runtime !== "pi" && runtime !== "omp") {
         const skillRuntime = runtime as SkillRuntime;
         const reconcile = (selected: SkillLoadout) => reconcileSkillLoadout({ loadout: selected, runtime: skillRuntime, cwd, apply: true,
           topologyOwner: input.canonicalSession, location: seatSkillLocation(seatSkills, skillRuntime) });

@@ -898,6 +898,9 @@ login. A source account override or Claude token is cleared only at commit;
 credentials are never converted between runtimes. Pi-to-Pi account changes keep
 Pi settings, but cross-runtime switches resolve settings afresh for the target.
 
+Use `--runtime omp` for the OMP RPC runner or `--runtime omp-tui` for the
+native OMP terminal. Both accept a target `--model` and `--effort`.
+
 A runtime listed by `rig community-harness list` can be the target too: pass its
 name, for example `--runtime cursor`. The switch needs that harness's preset
 installed on the daemon, and refuses with `runtime_target_unavailable` when it
@@ -942,7 +945,7 @@ What it costs:
   again afterwards to reach whoever holds the seat.
 - **Leftover files after a failed switch.** The target runtime's prepared seat
   storage and projections can remain.
-- **Codex, Claude Code and Pi, single-pane seats.** Startup slash commands aren't
+- **Single-pane seats running Codex, Claude Code, Pi or either OMP mode.** Startup slash commands aren't
   run by a switch; the dry run lists them.
 
 ## Stop your teams

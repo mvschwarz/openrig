@@ -229,6 +229,8 @@ export class NativePermissionStore {
   }
 
   resolve(nodeId: string, runtime: string): ResolvedSeatPermission {
+    const omp = runtime === "omp" || runtime === "omp-tui";
+    const floorMode = omp ? "always-ask" : runtime === "codex" ? "floor" : "acceptEdits";
     // Level 1: Explicit per-seat selection (records actor + reason, overrides member and rig)
     const explicit = this.read(nodeId);
     if (explicit) {
@@ -294,7 +296,7 @@ export class NativePermissionStore {
       if (effectivePosture === "auto") {
         if (runtime !== "claude-code") {
           return {
-            effectiveMode: "floor",
+            effectiveMode: omp ? "always-ask" : "floor",
             source: "member_spec",
             launchPosture: "floor",
             fallbackReason: noAutoModeFallback(runtime),
@@ -310,7 +312,7 @@ export class NativePermissionStore {
 
       if (effectivePosture === "full_bypass") {
         return {
-          effectiveMode: "full_bypass",
+          effectiveMode: omp ? "yolo" : "full_bypass",
           source: "member_spec",
           launchPosture: "full_bypass",
         };
@@ -318,7 +320,7 @@ export class NativePermissionStore {
 
       // effectivePosture === "floor" (e.g. builtin:locked, none, or custom floor policy)
       return {
-        effectiveMode: runtime === "codex" ? "floor" : "acceptEdits",
+        effectiveMode: floorMode,
         source: "member_spec",
         launchPosture: "floor",
       };
@@ -343,7 +345,7 @@ export class NativePermissionStore {
       if (posture === "auto") {
         if (runtime !== "claude-code") {
           return {
-            effectiveMode: "floor",
+            effectiveMode: omp ? "always-ask" : "floor",
             source: "rig_spec",
             launchPosture: "floor",
             fallbackReason: noAutoModeFallback(runtime),
@@ -359,7 +361,7 @@ export class NativePermissionStore {
 
       if (posture === "full_bypass") {
         return {
-          effectiveMode: "full_bypass",
+          effectiveMode: omp ? "yolo" : "full_bypass",
           source: "rig_spec",
           launchPosture: "full_bypass",
         };
@@ -367,7 +369,7 @@ export class NativePermissionStore {
 
       // posture === "floor" (e.g. builtin:locked, none)
       return {
-        effectiveMode: runtime === "codex" ? "floor" : "acceptEdits",
+        effectiveMode: floorMode,
         source: "rig_spec",
         launchPosture: "floor",
       };
@@ -375,7 +377,7 @@ export class NativePermissionStore {
 
     // Level 4: System default floor
     return {
-      effectiveMode: runtime === "codex" ? "floor" : "acceptEdits",
+      effectiveMode: floorMode,
       source: "system_default",
       launchPosture: "floor",
     };

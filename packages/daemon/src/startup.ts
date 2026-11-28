@@ -1,4 +1,6 @@
 import { HookBridge } from "./domain/hook-bridge.js";
+import { ompSeatLocation } from "./domain/omp-seat-location.js";
+import { seatSkillPathsForNode } from "./domain/seat-skill-storage.js";
 import { beginStartupPhase, recordStartupPhase } from "./domain/startup-phase-timing.js";
 import { RunnerChannel } from "./domain/runner-channel.js";
 import { ActivityGrantStore } from "./domain/activity-grants.js";
@@ -82,6 +84,10 @@ import { prepareCodexSeatFolder, prepareCodexTeamWorkspace } from "./domain/code
 import { resolveCodexGitAddDirs } from "./domain/codex-git-add-dirs.js";
 import { PiResumeAdapter } from "./adapters/pi-resume.js";
 import { OmpResumeAdapter } from "./adapters/omp-resume.js";
+import { OmpTuiResumeAdapter } from "./adapters/omp-tui-resume.js";
+import { OmpTuiRuntimeAdapter } from "./adapters/omp-tui-runtime-adapter.js";
+import { OmpSeatLauncher } from "./adapters/omp-seat-launch.js";
+import { contextUsageDirectory, telemetrySidecarPath } from "./domain/telemetry-state-paths.js";
 import { OMP_PROVIDER_ENV_VARS, OMP_PROVIDER_EXTRA_ENV_VARS } from "./adapters/pi-runner-protocol.js";
 import { RigSpecExporter } from "./domain/rigspec-exporter.js";
 import { PodRepository } from "./domain/pod-repository.js";
@@ -830,8 +836,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   );
   // OMP's extra provider keys reach OMP seats only (fresh launch and handover
   // successors); every other runtime's seat env is unchanged.
+  const ompProviderEnv = collectAllowlistedProviderAuthEnv(startupSettings.recoveryProviderAuthEnvAllowlistRaw, process.env, "omp");
   const runtimeSessionEnv: Record<string, Record<string, string | undefined>> = {
-    omp: collectAllowlistedProviderAuthEnv(startupSettings.recoveryProviderAuthEnvAllowlistRaw, process.env, "omp"),
+    omp: ompProviderEnv,
+    "omp-tui": ompProviderEnv,
   };
   const transcriptStore = new TranscriptStore({
     enabled: transcriptsEnabled,
@@ -899,7 +907,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       }
     },
   });
-  const { SeatLaunchEnvironment } = await import("./domain/seat-launch-environment.js");
+  const { SeatLaunchEnvironment, launchExecutable } = await import("./domain/seat-launch-environment.js");
   const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome,
     (nodeId, runtime, ignoreAccountHome) => runtime === "pi"
       ? effectiveRuntimeHome(db, nodeId, "pi", undefined, ignoreAccountHome)
@@ -961,6 +969,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const piStateRoot = nodePath.join(OPENRIG_HOME, "state", "pi");
   const piStateRootForSession = (session: string) => piAccountStateRoot(db, piStateRoot, session);
   const ompStateRoot = nodePath.join(OPENRIG_HOME, "state", "omp");
+  const ompStateRootForSession = (session: string) => piAccountStateRoot(db, ompStateRoot, session, "omp");
   const piRunnerEntryPath = nodePath.resolve(import.meta.dirname, "./adapters/pi-runner.js");
   // OPR.0.7.0.2: Pi seats report cost facts from persisted entries only while usage.pi_cost_facts is on;
   // read at each launch and resume, so the switch takes effect at the next one.
@@ -988,12 +997,46 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     { stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath },
     { runnerGrant: resumeRunnerGrant("pi"), accountHomeForSession: session => seatRuntimeHomeBySession(db, session, "pi"), stateRootForSession: piStateRootForSession, seatLaunchEnvironment, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled },
   );
+  // OMP runs its own terminal UI natively in the seat's pane. One launcher starts it for the runtime adapter (fresh,
+  // resume, fork) and for legacy restore's resume adapter, with the seat extension the daemon ships loaded into it.
+  const ompFsOps = {
+    readBytes: (p: string) => fs.readFileSync(p),
+    folderPresent,
+    copyFile: (source: string, destination: string) => fs.copyFileSync(source, destination),
+    readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+    writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+    exists: (p: string) => fs.existsSync(p),
+    mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+    listFiles: (dir: string) => fs.readdirSync(dir, { recursive: true, withFileTypes: true })
+      .filter((entry) => !entry.isDirectory()).map((entry) => nodePath.relative(dir, nodePath.join(entry.parentPath, entry.name))),
+    statMode: (p: string) => fs.statSync(p).mode,
+    chmod: (p: string, m: number) => fs.chmodSync(p, m),
+    linkInfo: lstatLinkInfo,
+  };
+  const ompSeatLauncher = new OmpSeatLauncher({
+    seatLocation: session => ompSeatLocation(db, session),
+    seatSkillsRootForSession: sessionName => {
+      const row = db.prepare(`SELECT n.id FROM sessions s JOIN nodes n ON n.id = s.node_id
+        WHERE s.session_name = ? AND n.runtime = 'omp-tui' ORDER BY s.id DESC LIMIT 1`).get(sessionName) as { id: string } | undefined;
+      return row ? seatSkillPathsForNode(db, row.id)?.skillsRoot : undefined;
+    },
+    tmux: tmuxAdapter,
+    fsOps: ompFsOps,
+    stateRoot: nodePath.join(OPENRIG_HOME, "state", "omp-tui"),
+    seatExtensionPath: nodePath.resolve(import.meta.dirname, "../assets/omp/openrig-seat.js"),
+    seatLaunchEnvironment,
+    // The same `omp` preflight probes, pinned so a pane whose PATH differs still starts it. Absent: the pane's PATH.
+    resolveOmpExecutable: () => launchSessionEnv.PATH ? launchExecutable("omp", launchSessionEnv.PATH, process.cwd()) : undefined,
+    contextSidecarPath: (sessionName) => telemetrySidecarPath(contextUsageDirectory(OPENRIG_HOME), sessionName),
+    nodeExecutable: process.execPath,
+  });
   const ompResume = new OmpResumeAdapter(
     tmuxAdapter,
     { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }) },
     { stateRoot: ompStateRoot, runnerEntryPath: piRunnerEntryPath },
-    { runnerGrant: resumeRunnerGrant("omp") },
+    { runnerGrant: resumeRunnerGrant("omp"), stateRootForSession: ompStateRootForSession },
   );
+  const ompTuiResume = new OmpTuiResumeAdapter(ompSeatLauncher, (p: string) => fs.existsSync(p));
   // Services infrastructure (RigEnv) — created early so restore/bootstrap can use it
   const { ComposeServicesAdapter } = await import("./adapters/compose-services-adapter.js");
   const { ServiceOrchestrator } = await import("./domain/service-orchestrator.js");
@@ -1015,7 +1058,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const restoreOrchestrator = new RestoreOrchestrator({
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
-    checkpointStore, nodeLauncher, tmuxAdapter, claudeResume, codexResume, piResume, ompResume,
+    checkpointStore, nodeLauncher, tmuxAdapter, claudeResume, codexResume, piResume, ompResume, ompTuiResume,
     transcriptStore, serviceOrchestrator,
     getDesiredClaudeActivityHooks: createDesiredClaudeActivityHooksReader(db, {
       exists: (p: string) => fs.existsSync(p), readFile: (p: string) => fs.readFileSync(p, "utf-8"),
@@ -1224,7 +1267,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // OPR.0.4.6.PI1 — the RPC-first Pi adapter (runner-in-a-pane). Same fsOps
   // shape as the Codex adapter; seat isolation roots under piStateRoot.
   const piAdapter = new PiRuntimeAdapter({ runnerGrants, managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), linkInfo: lstatLinkInfo }, stateRootForSession: piStateRootForSession, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
-  const ompAdapter = new OmpRuntimeAdapter({ runnerGrants, managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, stateRoot: ompStateRoot, runnerEntryPath: piRunnerEntryPath });
+  const ompAdapter = new OmpRuntimeAdapter({ runnerGrants, managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, stateRoot: ompStateRoot, stateRootForSession: ompStateRootForSession, runnerEntryPath: piRunnerEntryPath });
+  const ompTuiAdapter = new OmpTuiRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: ompFsOps, launcher: ompSeatLauncher,
+    boundPaneForSession: session => {
+      const address = sessionRegistry.resolveAddress(session);
+      if (address?.sessionName !== session) return null;
+      const binding = sessionRegistry.getBindingForNode(address.nodeId);
+      return binding?.attachmentType === "tmux" && binding.tmuxSession === session ? binding.tmuxPane : null;
+    },
+  });
   // OPR.0.5.1.1 — the stub runtime adapter (Pi-shaped node-script runner in a pane).
   // Same fsOps shape as Pi; the compiled runner entry lives in the daemon dist.
   const { StubRuntimeAdapter } = await import("./adapters/stub-runtime-adapter.js");
@@ -1424,7 +1475,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     rosterReadyNotice: (rigId, sessions) => noticeRosterReady(queueRepoInstance, rigId, sessions),
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
-    adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter, runnerGrants }),
+    adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "omp-tui": ompTuiAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter, runnerGrants }),
     tmuxAdapter,
     agentImageLibrary,
     continuityPolicyMaterializer,
@@ -1503,6 +1554,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     "codex": codexAdapter,
     "pi": piAdapter,
     "omp": ompAdapter,
+    "omp-tui": ompTuiAdapter,
     "stub": stubAdapter,
     "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter(),
   }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter, runnerGrants });
@@ -1632,7 +1684,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     codexRollout: (threadId, sessionName, reporting) => reporting
       ? contextUsageStore.readCodexTranscriptPath(threadId)
       : contextUsageStore.readCodexAndNormalize({ threadId, sessionName }).transcriptPath,
-    piRunner: (sessionName) => piAdapter.readRunnerSidecar(sessionName),
+    piRunner: (sessionName, runtime) => (runtime === "omp" ? ompAdapter : piAdapter).readRunnerSidecar(sessionName),
+    ompTuiState: sessionName => ompTuiAdapter.readSeatState(sessionName),
   });
   const { HealthProjectionService, LiveContextHealthSource } = await import("./domain/health-detectors.js");
   const healthSettingsStore = new ContextPackSettingsStore();
@@ -1676,9 +1729,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader (the adapter exposes it).
     piRunnerStateStore: piAdapter,
     ompRunnerStateStore: ompAdapter,
+    ompTuiStateStore: { readSessionFile: session => ompTuiAdapter.readLiveSessionFile(session) },
   });
   const selfAttachService = new SelfAttachService({
     db, rigRepo, podRepo, sessionRegistry, eventBus, tmuxAdapter, transcriptStore,
+    verifyOmpAdoptedStorage: session => ompTuiAdapter.verifyAdoptedStorage(session),
     tmuxServer: tmuxSelection,
     claudeContextProvisioner: claudeAdapter,
     // OPR.0.4.3.28 B3 — echo the resolved activity url+token into the self-attach
@@ -2911,6 +2966,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       capture: seat => deriveResumeToken({ runtime: seat.runtime, sessionName: seat.canonicalSessionName ?? "", nodeId: seat.nodeId }, {
         contextUsageStore, claudeProcessStartedAt, resumeTokenCapturer: resumeMetadataRefresher,
         piRunnerStateStore: piAdapter, ompRunnerStateStore: ompAdapter,
+        ompTuiStateStore: { readSessionFile: session => ompTuiAdapter.readLiveSessionFile(session) },
       }),
     });
     // The outbound network connector: a pass per active `rig network` binding. With none, it makes no network call.
@@ -3218,6 +3274,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     codex: codexAdapter,
     pi: piAdapter,
     omp: ompAdapter,
+    "omp-tui": ompTuiAdapter,
   }, usageSamplesStore, () => providerWindowSamplesFromSignals(
     collectClaudeSignalsFromProviderUsageDirectory(
       providerUsageDirectory(OPENRIG_HOME),

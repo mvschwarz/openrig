@@ -7,7 +7,7 @@ import { communityHarnessRuntimeSwitchesSchema } from "../src/db/migrations/179_
 it("retains history when a switch may name a community harness", () => {
   const db = createDb();
   try {
-    migrate(db, ALL_MIGRATIONS.filter(migration => migration.name !== communityHarnessRuntimeSwitchesSchema.name));
+    migrate(db, ALL_MIGRATIONS.filter(migration => migration.name < communityHarnessRuntimeSwitchesSchema.name));
     db.exec("INSERT INTO rigs (id, name) VALUES ('rig', 'upgrade'); INSERT INTO nodes (id, rig_id, logical_id) VALUES ('seat', 'rig', 'dev.build');");
     const insert = db.prepare(`INSERT INTO seat_runtime_switches
       (id, node_id, canonical_session, staging_session, predecessor_pane, predecessor_generation, successor_generation, from_runtime, to_runtime, reason, plan_json, deadline_at)
@@ -15,10 +15,11 @@ it("retains history when a switch may name a community harness", () => {
     insert.run("old", "staging-old", "after-old", "claude-code");
     // Before this migration a harness name is refused by the column itself, not only by the service.
     expect(() => insert.run("refused", "staging-refused", "after-refused", "cursor")).toThrow();
-    const before = db.prepare("SELECT * FROM seat_runtime_switches WHERE id = 'old'").get();
+    const before = db.prepare("SELECT * FROM seat_runtime_switches WHERE id = 'old'").get() as Record<string, unknown>;
 
     migrate(db, ALL_MIGRATIONS);
-    expect(db.prepare("SELECT * FROM seat_runtime_switches WHERE id = 'old'").get()).toEqual(before);
+    // Every pre-upgrade column must survive, including when a later migration adds a column.
+    expect(db.prepare("SELECT * FROM seat_runtime_switches WHERE id = 'old'").get()).toMatchObject(before);
     // One open switch per seat, so the older row is closed before the next one is staged, as a real switch would be.
     db.exec("UPDATE seat_runtime_switches SET phase = 'abandoned' WHERE id = 'old'");
     insert.run("cursor", "staging-cursor", "after-cursor", "cursor");

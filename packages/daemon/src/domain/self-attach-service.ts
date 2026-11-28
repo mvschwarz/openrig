@@ -51,6 +51,7 @@ interface SelfAttachServiceDeps {
   sessionRegistry: SessionRegistry;
   eventBus: EventBus;
   tmuxAdapter?: TmuxAdapter;
+  verifyOmpAdoptedStorage?: (sessionName: string) => Promise<unknown>;
   tmuxServer?: { socketPath?: string; mode: "inherit" | "isolated" };
   transcriptStore?: TranscriptStore;
   claudeContextProvisioner?: {
@@ -98,6 +99,7 @@ interface TmuxAttachContext {
 export type SelfAttachContext = ExternalCliAttachContext | TmuxAttachContext;
 
 export class SelfAttachService {
+  private readonly verifyOmpAdoptedStorage?: SelfAttachServiceDeps["verifyOmpAdoptedStorage"];
   readonly db: Database.Database;
   private rigRepo: RigRepository;
   private podRepo: PodRepository;
@@ -110,6 +112,7 @@ export class SelfAttachService {
   private tmuxServer: SelfAttachServiceDeps["tmuxServer"];
 
   constructor(deps: SelfAttachServiceDeps) {
+    this.verifyOmpAdoptedStorage = deps.verifyOmpAdoptedStorage;
     if (deps.db !== deps.rigRepo.db) throw new Error("SelfAttachService: rigRepo must share the same db handle");
     if (deps.db !== deps.podRepo.db) throw new Error("SelfAttachService: podRepo must share the same db handle");
     if (deps.db !== deps.sessionRegistry.db) throw new Error("SelfAttachService: sessionRegistry must share the same db handle");
@@ -273,6 +276,10 @@ export class SelfAttachService {
     cwd?: string | null,
   ): Promise<SelfAttachResult> {
     try {
+      if (runtime === "omp-tui" && result.attachmentType === "tmux") {
+        // The attachment already committed. Readiness retries this read-only verification if the pane is unavailable.
+        await this.verifyOmpAdoptedStorage?.(result.sessionName).catch(() => {});
+      }
       this.maybeProvisionContextCollector(runtime, cwd, result.sessionName, result.attachmentType);
       await this.maybeStartTranscriptCapture(rigName, result.sessionName, result.attachmentType);
       this.eventBus.notifySubscribers(result.event);

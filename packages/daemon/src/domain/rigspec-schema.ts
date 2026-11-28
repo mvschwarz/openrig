@@ -605,7 +605,7 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   }
   if (member["launch_wrapper"] !== undefined) {
     if (!isLaunchWrapperRuntime(member["runtime"])) {
-      errors.push(`${prefix}.launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
+      errors.push(`${prefix}.launch_wrapper: only valid when runtime is "pi", "omp-tui", "codex", "claude-code" or a supported community harness`);
     }
     try { validateLaunchWrapper(member["launch_wrapper"], `${prefix}.launch_wrapper`); }
     catch (error) { errors.push((error as Error).message); }
@@ -1475,7 +1475,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
 // -- Legacy flat-node RigSpec validation (pre-reboot) --
 // TODO: Remove when AS-T08b/AS-T12 migrate all consumers
 
-const LEGACY_KNOWN_RUNTIMES = new Set(["claude-code", "codex", "pi", "omp"]);
+const LEGACY_KNOWN_RUNTIMES = new Set(["claude-code", "codex", "pi", "omp", "omp-tui"]);
 const LEGACY_KNOWN_RESTORE_POLICIES = new Set(["resume_if_possible", "relaunch_fresh", "checkpoint_only"]);
 
 export class LegacyRigSpecSchema {
@@ -1563,7 +1563,7 @@ export class LegacyRigSpecSchema {
         }
         if (node["launch_wrapper"] !== undefined) {
           if (!isLaunchWrapperRuntime(node["runtime"])) {
-            errors.push(`nodes.${nodeWhere}.launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
+            errors.push(`nodes.${nodeWhere}.launch_wrapper: only valid when runtime is "pi", "omp-tui", "codex", "claude-code" or a supported community harness`);
           }
           try { validateLaunchWrapper(node["launch_wrapper"], `nodes.${nodeWhere}.launch_wrapper`); }
           catch (error) { errors.push((error as Error).message); }

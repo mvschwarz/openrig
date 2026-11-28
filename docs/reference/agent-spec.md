@@ -298,7 +298,7 @@ exactly like that list: when the profile is selected, a resource that isn't avai
 **Skills resolve more widely than other resources.** For Claude Code and Codex seats, a skill ID that no declared
 resource provides is looked up at launch in the project's runtime skill folder in the seat's cwd (`<cwd>/.claude/skills` or
 `<cwd>/.agents/skills`), then the `skills/` folder beside the RigSpec, then the home skill folder, then the managed
-skills root. Pi looks only in the `skills/` folder beside the RigSpec. OMP does no filesystem discovery, so its
+skills root. Pi and `omp-tui` look in the `skills/` folder beside the RigSpec. RPC OMP does no filesystem discovery, so its
 `uses.skills` references need declared resources. A discovered skill's ID is its `SKILL.md` frontmatter `name`, and a declared resource wins over a discovered skill with the
 same ID. When a profile selects a skill from inside the spec's own folder and the managed catalog holds a different
 copy, the spec's copy is used and launch warns `skill_bundle_precedence`. Any other differing copy fails launch with
@@ -391,6 +391,8 @@ Recognized runtime resource types:
 - `codex_config_fragment` — upsert a TOML fragment into `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) inside an OpenRig-managed block.
 
 Unknown runtime resource types are still copied to the Claude or Codex runtime extension directory for agent-visible context.
+
+The `omp-tui` adapter loads native OMP extensions and selected portable plugin skills. It writes managed guidance under the seat’s private agent directory.
 
 #### Following Claude fragments
 

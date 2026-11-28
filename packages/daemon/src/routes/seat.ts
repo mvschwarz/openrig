@@ -333,6 +333,13 @@ function handoverDeps(c: Context): ConstructorParameters<typeof SeatHandoverServ
         ? { readSessionFile: omp.readSessionFile.bind(omp) }
         : undefined;
     })(),
+    ompTuiStateStore: (() => {
+      const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
+      const omp = adapters?.["omp-tui"] as { readLiveSessionFile?: (sessionName: string) => Promise<{ ok: true; sessionFile: string } | { ok: false; reason: string }> } | undefined;
+      return typeof omp?.readLiveSessionFile === "function"
+        ? { readSessionFile: omp.readLiveSessionFile.bind(omp) }
+        : undefined;
+    })(),
     // GHOST-STAGE (e/Class-B) — the canonical OccupantInvalidator so commit()'s re-key call fires
     // (invalidate the retiring occupant's seat-name-keyed stores before the successor accumulates any).
     occupantInvalidator: (c.get("occupantInvalidator" as never) as import("../domain/occupant-invalidator.js").OccupantInvalidator | undefined) ?? undefined,

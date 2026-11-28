@@ -250,6 +250,10 @@ export interface ForkSource {
  *  `launchInstructions`, the launch's own developer instructions and no file at all. */
 export interface GuidanceChoice { file: string | null; note?: string; launchInstructions?: true }
 
+/** Prepare before typing and await after paste, before Enter. A warning describes a change to the staged text.
+ *  Cancel releases the request and must be idempotent. */
+export type PreparedInput = (() => Promise<void | string>) & { cancel?: () => void };
+
 export interface RuntimeAdapter {
   /** Optional environment-driver v1 operations. Absence means unsupported; the host launch path is unchanged. */
   readonly environment?: Pick<import("./environment-platform.js").EnvironmentPlatform, "protocolVersion" | "create" | "attach" | "project" | "validate" | "forNode">;
@@ -261,6 +265,8 @@ export interface RuntimeAdapter {
   /** Check launch preconditions before an in-place handover ends the predecessor.
    * A concrete conflict refuses; an inconclusive check may allow launch with a warning. */
   preflightLaunch?(binding: NodeBinding): Promise<{ ok: true; warnings?: string[] } | { ok: false; error: string }>;
+  /** Native input acknowledgement, when supported. Preparation must precede the paste it acknowledges. */
+  prepareInput?(sessionName: string, text: string): PreparedInput;
   /** The file an adapter's project() writes for a skill when it lives outside
    *  the Claude project tree, for "already in place" detection. Absent = the
    *  instantiator's default target. */

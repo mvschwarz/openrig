@@ -1512,6 +1512,17 @@ describe("supported seat and queue integration", () => {
 
 describe("deliberate override preserves existing input", () => {
   const override = { dangerouslyInteract: true, reason: "fixture interaction", verify: false };
+  it("records an explicit OMP arrow once when the bound pane has no recognized selector", async () => {
+    const f = fixture(undefined, { runtime: "omp-tui", idleHook: false });
+    f.bodies.a = null;
+    const result = await f.send("omp-arrow", "\x1b[B", override);
+    expect(result).toMatchObject({ ok: true, sent: true, verified: false, warning: expect.stringContaining("No Enter") });
+    expect(f.writes).toHaveLength(1);
+    expect(f.writes[0]).toMatch(/^keys:a:.*send-keys.*%1.*Down/);
+    expect(f.submissions).toEqual([]);
+    expect(f.db.prepare("SELECT payload FROM events WHERE type='transport.prompt_override'").all()).toHaveLength(1);
+  });
+
   it("keeps explicit terminal interaction draft protection with a native input preference", async () => {
     const f = fixture();
     f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();

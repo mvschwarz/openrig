@@ -23,6 +23,23 @@ export function probeTimeoutOutcome(
   return { status: "error", error: timeout.message };
 }
 
+/** A shell can also return 127 when an installed OMP fails to find one of its own dependencies. */
+function ompExecutableMissing(error: unknown): boolean {
+  const failure = error as { code?: unknown; path?: unknown; stderr?: unknown } | null;
+  if (failure?.code === "ENOENT") {
+    return failure.path === undefined || (typeof failure.path === "string" && /(?:^|\/)omp$/.test(failure.path));
+  }
+  return failure?.code === 127 && typeof failure.stderr === "string"
+    && /(?:^|[\s:])omp: (?:command )?not found\s*$|command not found: omp\s*$/m.test(failure.stderr);
+}
+
+function probeFailureSummary(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error)).split("\n", 1)[0]!;
+  const stderr = (error as { stderr?: unknown } | null)?.stderr;
+  const detail = typeof stderr === "string" ? stderr.trim().split("\n", 1)[0] : undefined;
+  return (detail && detail !== message ? `${message}: ${detail}` : message).slice(0, 256);
+}
+
 // OPR.0.4.6.PI1 — Pi's documented Node engine floor (package.json engines).
 export const PI_NODE_ENGINE_FLOOR = "22.19.0";
 
@@ -129,8 +146,8 @@ export class RuntimeVerifier {
   }
 
   /** OMP is an independent executable; do not inherit Pi's Node engine check. */
-  async verifyOmp(): Promise<RuntimeVerification> {
-    const result = await this.verifyVersionOrHelp("omp", "omp");
+  async verifyOmp(runtime: "omp" | "omp-tui" = "omp"): Promise<RuntimeVerification> {
+    const result = await this.verifyVersionOrHelp("omp", runtime);
     this.persist(result);
     return result;
   }
@@ -148,7 +165,7 @@ export class RuntimeVerifier {
         case "claude-code": results.push(await this.verifyClaude()); break;
         case "codex": results.push(await this.verifyCodex()); break;
         case "pi": results.push(await this.verifyPi()); break;
-        case "omp": results.push(await this.verifyOmp()); break;
+        case "omp": case "omp-tui": results.push(await this.verifyOmp(runtime)); break;
         default: {
           const v = this.buildVerification(runtime, "not_found", null, null, `unknown runtime: ${runtime}`);
           this.persist(v);
@@ -185,6 +202,10 @@ export class RuntimeVerifier {
         if (helpErr instanceof ProbeTimeoutError) {
           const outcome = probeTimeoutOutcome(binary, "help", helpErr);
           if (!("fallBackToHelp" in outcome)) return this.buildVerification(canonicalName, outcome.status, null, null, outcome.error);
+        }
+        if (binary === "omp" && !(ompExecutableMissing(err) && ompExecutableMissing(helpErr))) {
+          return this.buildVerification(canonicalName, "error", null, null,
+            `omp --version failed: ${probeFailureSummary(err)}; omp --help failed: ${probeFailureSummary(helpErr)}`);
         }
         return this.buildVerification(canonicalName, "not_found", null, null, `${binary} not found`);
       }

@@ -600,7 +600,7 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(git(sibling, "status", "--porcelain=v1", "--untracked-files=all")).toBe(visible);
   });
 
-  it("composes both runtime projections in one Git working tree", () => {
+  it.each([["codex", "claude-code"], ["omp-tui", "codex"], ["omp-tui", "claude-code"]] as const)("composes %s then %s in one Git working tree", (first, second) => {
     const f = fixture([]);
     writeSkill(f.catalog, "managed");
     commit(f.root);
@@ -608,16 +608,16 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(selected.ok).toBe(true);
     if (!selected.ok) return;
 
-    expect(reconcileSkillLoadout({ loadout: selected.loadout, runtime: "codex", cwd: f.project, apply: true }))
+    expect(reconcileSkillLoadout({ loadout: selected.loadout, runtime: first, cwd: f.project, apply: true }))
       .toMatchObject({ ok: true, applied: true });
-    expect(reconcileSkillLoadout({ loadout: selected.loadout, runtime: "claude-code", cwd: f.project, apply: true }))
+    expect(reconcileSkillLoadout({ loadout: selected.loadout, runtime: second, cwd: f.project, apply: true }))
       .toMatchObject({ ok: true, applied: true });
-    expect(reconcileSkillLoadout({ loadout: selected.loadout, runtime: "codex", cwd: f.project, apply: true }))
+    expect(reconcileSkillLoadout({ loadout: selected.loadout, runtime: first, cwd: f.project, apply: true }))
       .toMatchObject({ ok: true, applied: false });
 
     const manifestIgnore = readFileSync(join(f.project, ".openrig", "skill-loadouts", ".gitignore"), "utf8");
-    expect(manifestIgnore).toContain("# BEGIN OpenRig managed skill loadout codex");
-    expect(manifestIgnore).toContain("# BEGIN OpenRig managed skill loadout claude-code");
+    expect(manifestIgnore).toContain("# BEGIN OpenRig managed skill loadout " + first);
+    expect(manifestIgnore).toContain("# BEGIN OpenRig managed skill loadout " + second);
     expect(git(f.root, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
   });
 

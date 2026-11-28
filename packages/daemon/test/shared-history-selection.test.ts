@@ -68,6 +68,33 @@ describe("authenticated shared history selection", () => {
     expect(paneProbe).not.toHaveBeenCalled();
   });
 
+  it.each(["omp", "omp-tui"])("lists only recorded %s identities for the selected seat without a snapshot", async runtime => {
+    const f = fixture();
+    db.prepare("DELETE FROM snapshots WHERE rig_id=?").run(f.rig.id);
+    db.prepare("UPDATE nodes SET runtime=? WHERE id IN (?,?)").run(runtime, f.node.id, f.other.id);
+    const type = runtime === "omp" ? "omp_session_file" : "omp_tui_session_file";
+    db.prepare("UPDATE sessions SET resume_type=?, resume_token=? WHERE id IN (?,?)").run(type, "/private/seat/session.jsonl", f.current.id, f.foreign.id);
+    db.prepare("UPDATE sessions SET resume_type=?, resume_token=? WHERE id=?").run(type, "/invalid-token", f.old.id);
+    const writes = () => (db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+    const before = writes();
+    const response = await request(f.path);
+    const raw = await response.text();
+    expect(response.status).toBe(200);
+    expect(JSON.parse(raw)).toMatchObject({ snapshotId: null, histories: [], recordedHistories: [{ historySessionId: f.current.id, resumeType: type }] });
+    expect(raw).not.toContain("/private");
+    expect(raw).not.toContain(f.foreign.id);
+    expect((await request(f.path, undefined, false)).status).toBe(401);
+    expect((await request(`${f.path}/validate`, { snapshotId: f.snapshot.id, historySessionId: f.current.id })).status).toBe(409);
+    expect(writes()).toBe(before);
+    const earlierType = runtime === "omp" ? "omp_tui_session_file" : "omp_session_file";
+    db.prepare("UPDATE sessions SET resume_type=?, resume_token=? WHERE id=?").run(earlierType, "/private/old/session.jsonl", f.old.id);
+    const histories = await (await request(f.path)).json();
+    expect(histories.recordedHistories).toContainEqual({ historySessionId: f.old.id, resumeType: earlierType });
+    expect(histories.histories).toEqual([]);
+    setup.rigRepo.archiveRig(f.rig.id);
+    expect((await request(f.path)).status).toBe(404);
+  });
+
   it("requires terminal auth and validates the exact request body", async () => {
     const f = fixture();
     expect((await request(f.path, undefined, false)).status).toBe(401);

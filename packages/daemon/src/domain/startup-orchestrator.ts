@@ -11,7 +11,7 @@ import { isClaudeResumeType } from "../adapters/claude-resume.js";
 import type { StartupAction, StartupProofSelection, StartupFailureStage } from "./types.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile, HarnessLaunchResult,
-  ProjectionResult, StartupDeliveryResult, ForkSource, ReadinessResult,
+  ProjectionResult, StartupDeliveryResult, ForkSource, ReadinessResult, PreparedInput,
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
 import { isClaudeFragmentEntry, type ProjectionPlan, type ResolveClaudeFragments } from "./projection-planner.js";
@@ -247,6 +247,8 @@ type StartupDeliveryInput = StartupInput & {
   heldInputs?: number;
   /** A one-shot (non-idempotent) startup action was typed, so the startup must not be delivered again as a whole. */
   oneShotSent?: boolean;
+  /** OMP left input unconfirmed: later startup actions must not paste over it or press Enter. */
+  inputDeliveryFailure?: string;
 };
 
 export type StartupResult = { warnings?: string[] } & (
@@ -404,6 +406,10 @@ export class StartupOrchestrator {
     }
     // OPR.0.7.0.13 (Codex C2): a Codex seat with its own storage gets its skills there, and its catalog, rebuilt after
     // this launch's projection, is what its per-seat startup text delivers.
+    if (input.adapter.runtime === "omp-tui" && !input.binding.seatSkillsRoot) {
+      const storage = seatSkillPathsForNode(this.db, input.nodeId);
+      if (storage) input = { ...input, binding: { ...input.binding, seatSkillsRoot: storage.skillsRoot } };
+    }
     const codexSeatSkills = input.adapter.runtime === "codex" ? seatSkillPathsForNode(this.db, input.nodeId) : undefined;
     if (codexSeatSkills && !input.binding.seatSkillsRoot) input = { ...input, binding: { ...input.binding, seatSkillsRoot: codexSeatSkills.skillsRoot } };
     // A seat whose storage a link refused keeps its skills' target there, where each is refused and named; they never
@@ -469,10 +475,11 @@ export class StartupOrchestrator {
       deliveryInput.binding = { ...deliveryInput.binding, ...guidance };
     }
 
-    // 2. Project resources. A contained Claude resume has an intentionally empty
-    // replay plan, not a newly selected profile with activity hooks removed.
-    // RestoreOrchestrator already reconciled the saved activity selection before
-    // native resume. Fresh launches still project empty plans to support removal.
+    // 2. Project resources. A contained resume has an intentionally empty replay plan,
+    // not a newly selected profile with Claude hooks or OMP plugins removed.
+    // RestoreOrchestrator already reconciled Claude's saved activity selection before
+    // native resume. OMP keeps its selected plugin manifest. Fresh launches still
+    // project empty plans to support removal.
     let projectionPlan = input.plan;
     if (input.continueFreshStartup && input.adapter.runtime === "claude-code") {
       // The native start already had its chance to refresh these files. A context continuation must not rewrite them.
@@ -505,7 +512,7 @@ export class StartupOrchestrator {
       }
     }
     let projectionResult: ProjectionResult;
-    if (!(input.preserveStartupContext && input.adapter.runtime === "claude-code" && input.plan.entries.length === 0)) try {
+    if (!(input.preserveStartupContext && (input.adapter.runtime === "claude-code" || input.adapter.runtime === "omp-tui") && input.plan.entries.length === 0)) try {
       const skip = input.replaySkip;
       const projectedPlan = skip && skip.entryIds.size > 0
         ? { ...projectionPlan, entries: projectionPlan.entries.filter((e) => !(e.category === "skill" && skip.entryIds.has(e.effectiveId))) }
@@ -954,7 +961,7 @@ export class StartupOrchestrator {
         : await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
       if (!initialPrompt.ok) {
         errors.push(initialPrompt.error);
-        return this.fail(input, "failed", errors, undefined, false, undefined, false, "initial_prompt", true);
+        return this.fail(deliveryInput, "failed", errors, undefined, false, undefined, false, "initial_prompt", true);
       }
       postLaunchFiles = initialPrompt.remainingFiles;
       if (challenge) await this.sendProofInstruction(deliveryInput, challenge.challengeId);
@@ -987,7 +994,7 @@ export class StartupOrchestrator {
         const preload = await this.deliverRestorePreloadPrompt(deliveryInput, preloadActions, postLaunchFiles);
         if (!preload.ok) {
           errors.push(preload.error);
-          return this.fail(input, "failed", errors, undefined, false, undefined, false, "restore_preload", true);
+          return this.fail(deliveryInput, "failed", errors, undefined, false, undefined, false, "restore_preload", true);
         }
         postLaunchFiles = preload.remainingFiles;
         for (const a of preloadActions) consumedActions.add(a);
@@ -997,14 +1004,17 @@ export class StartupOrchestrator {
     // 7. Deliver post-launch files (send_text → TUI, now that harness is ready)
     if (postLaunchFiles.length > 0) {
       try {
-        // Keep reads/provisioning and required/optional errors in the adapter. Only Claude's
-        // already-partitioned interactive files use the same bounded check as startup actions.
-        const checkedSend = input.adapter.runtime === "claude-code" ? async (content: string) => {
+        // Keep reads/provisioning and required/optional errors in the adapter. Claude's submission checks and
+        // OMP's native input acknowledgement share the same boundary as startup actions.
+        const checkedSend = input.adapter.runtime === "claude-code" || input.adapter.runtime === "omp-tui" ? async (content: string) => {
           const failure = await this.sendInteractiveText(deliveryInput, content, "post_launch_file");
           if (failure) throw new Error(failure.error);
         } : undefined;
         const deliveryResult = await input.adapter.deliverStartup(postLaunchFiles, input.binding, checkedSend);
         warnings.push(...(deliveryResult.warnings ?? []));
+        if (deliveryInput.inputDeliveryFailure) {
+          return this.fail(deliveryInput, "attention_required", [deliveryInput.inputDeliveryFailure], undefined, false, undefined, false, "post_launch_files", true);
+        }
         if (deliveryResult.failed.length > 0) {
           for (const f of deliveryResult.failed) {
             errors.push(`Post-launch file delivery failed: ${f.path}: ${f.error}`);
@@ -1039,6 +1049,9 @@ export class StartupOrchestrator {
 
     const held = owed();
     if (held) return held;
+    if (deliveryInput.inputDeliveryFailure) {
+      return this.fail(deliveryInput, "attention_required", [deliveryInput.inputDeliveryFailure], undefined, false, undefined, false, "post_delivery_readiness", true);
+    }
 
     // Delivering the first native prompt can reveal a provider refusal or
     // interactive gate. Bundled identity/preload prompts consume their files,
@@ -1104,7 +1117,12 @@ export class StartupOrchestrator {
     const heldNotice = input.binding.tmuxSession ? heldMessagesNotice(this.db, input.nodeId, input.sessionName ?? input.binding.tmuxSession) : null;
     if (heldNotice) {
       warnings.push(heldNotice);
-      await this.sessionTransport.send(input.binding.tmuxSession!, heldNotice, { openrigNotice: true }).catch(() => undefined);
+      if (input.adapter.runtime === "omp-tui") {
+        const failure = await this.sendInteractiveText(deliveryInput, heldNotice, "after_ready");
+        if (failure) warnings.push(`Held-message notice submission unconfirmed: ${failure.error}`);
+      } else {
+        await this.sessionTransport.send(input.binding.tmuxSession!, heldNotice, { openrigNotice: true }).catch(() => undefined);
+      }
     }
 
     // Local native runtimes and terminal seats need a new pane observation after launch and context delivery,
@@ -1201,7 +1219,7 @@ export class StartupOrchestrator {
   }
 
   private fail(
-    input: StartupInput & { submissionDiagnostics?: StartupSubmissionDiagnostic[] },
+    input: StartupInput & { submissionDiagnostics?: StartupSubmissionDiagnostic[]; inputDeliveryFailure?: string },
     status: "attention_required" | "failed",
     errors: string[],
     evidence?: string,
@@ -1213,6 +1231,12 @@ export class StartupOrchestrator {
     probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence,
     readinessCode?: string,
   ): StartupResult {
+    if (input.inputDeliveryFailure) {
+      // An OMP paste or submission may already be in the native composer. Keep the occupant visible for
+      // inspection, and never make the whole startup replayable after an uncertain delivery.
+      status = "attention_required";
+      pendingContext = false;
+    }
     if (input.firstInputPassed) {
       pendingContext = false;
       errors.push("First startup input was passed at launch; submission is unconfirmed. Inspect the pane before sending anything again.");
@@ -1485,6 +1509,10 @@ export class StartupOrchestrator {
     // Contained startup is passed at launch through the verified guest input file. A viewer can exit
     // between any observation and input; never use its host terminal as a fallback destination.
     if (input.adapter.environment) return { error: "Environment startup input was not passed through the guest launch; no host input was sent" };
+    if (input.inputDeliveryFailure) {
+      input.heldInputs = (input.heldInputs ?? 0) + 1;
+      return { error: `Later startup input was held: ${input.inputDeliveryFailure}` };
+    }
     // After a refused turn nothing more is typed into the seat. The held input is counted, and startNode reports it as
     // owed (ahead of any later error) before it would mark the seat ready, so returning here never reads as delivered.
     if (input.adapter.runtime === "claude-code" && input.sendOrder > 0 && (input.refusedTurn ??= await this.refusedTurn(input))) {
@@ -1501,12 +1529,35 @@ export class StartupOrchestrator {
     input.sendOrder = sendOrder;
     input.lastSubmissionConfirmed = false;
     input.lastSubmissionUnconfirmedReason = undefined;
-    const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
-    if (!textResult.ok) {
-      return { error: (textResult as { message?: string }).message ?? "unknown" };
+    let received: PreparedInput | undefined;
+    if (input.adapter.runtime === "omp-tui") {
+      try {
+        if (!input.adapter.prepareInput) throw new Error("OMP input acknowledgement unavailable; no text was sent.");
+        received = input.adapter.prepareInput(tmuxSession, text);
+      } catch (error) {
+        input.inputDeliveryFailure = (error as Error).message;
+        return { error: input.inputDeliveryFailure };
+      }
     }
-
-    await this.sleep(200);
+    try {
+      const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
+      if (!textResult.ok) {
+        const error = (textResult as { message?: string }).message ?? "unknown";
+        if (received) input.inputDeliveryFailure = `${error} Input may be staged; inspect it before retrying.`;
+        return { error: input.inputDeliveryFailure ?? error };
+      }
+      if (received) {
+        const warning = await received();
+        if (warning) input.warnings.push(warning);
+      } else await this.sleep(200);
+    } catch (error) {
+      if (!received) throw error;
+      input.inputDeliveryFailure = `${(error as Error).message} Enter was not sent; input may be staged. Inspect it before retrying.`;
+      input.lastSubmissionUnconfirmedReason = input.inputDeliveryFailure;
+      return { error: input.inputDeliveryFailure };
+    } finally {
+      received?.cancel?.();
+    }
     // The previous turn can refuse after the pre-paste check. Leave our new paste alone rather than submitting it
     // into that refusal. It is already typed, not an unsent input, and must not be replayed by seat continue.
     if (input.adapter.runtime === "claude-code" && sendOrder > 1 && (input.refusedTurn ??= await this.refusedTurn(input))) {
@@ -1514,9 +1565,18 @@ export class StartupOrchestrator {
       input.lastSubmissionUnconfirmedReason = UNCONFIRMED_STAGED;
       return null;
     }
-    const submitResult = await this.tmuxAdapter.sendKeys(tmuxSession, ["Enter"]);
+    let submitResult;
+    try {
+      submitResult = await this.tmuxAdapter.sendKeys(tmuxSession, ["Enter"]);
+    } catch (error) {
+      if (input.adapter.runtime !== "omp-tui") throw error;
+      input.inputDeliveryFailure = `${error instanceof Error ? error.message : String(error)} Enter submission is unconfirmed; input may be staged. Inspect it before retrying.`;
+      return { error: input.inputDeliveryFailure };
+    }
     if (!submitResult.ok) {
-      return { error: (submitResult as { message?: string }).message ?? "unknown" };
+      const error = (submitResult as { message?: string }).message ?? "unknown";
+      if (input.adapter.runtime === "omp-tui") input.inputDeliveryFailure = `${error} Input may be staged; inspect it before retrying.`;
+      return { error: input.inputDeliveryFailure ?? error };
     }
 
     if (input.adapter.runtime !== "claude-code") return null;

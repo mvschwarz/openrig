@@ -2,11 +2,17 @@ import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 import { piAccountStateRoot, piAccountSwitchStateRoot } from "../src/domain/pi-account-state.js";
 import { piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
 import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
+import { OmpTuiRuntimeAdapter } from "../src/adapters/omp-tui-runtime-adapter.js";
+import { OmpSeatLauncher } from "../src/adapters/omp-seat-launch.js";
+import { ompSeatLocation } from "../src/domain/omp-seat-location.js";
+import { ompFiles } from "./helpers/omp-files.js";
+import { createHash } from "node:crypto";
 import { withCommunityHarnessResolver } from "../src/adapters/community-harness-runtime-adapter.js";
 import { providerRoutes } from "../src/routes/provider.js";
 // Slice 16: a live seat moves between Codex and Claude Code, successor first. Real repositories on an in-memory
 // database; tmux and the runtime adapters are fakes that keep which pane each session holds, so the exchange, the
-// rollback and the retirement are observable. Nothing native runs here; the native cases are named in the PR.
+// rollback and the retirement are observable. The OMP regressions below use the real adapter and on-disk state.
+// No native runtime runs here; separate stock-binary probes exercise OMP itself.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
@@ -98,13 +104,15 @@ describe("live seat runtime switch", () => {
     launchHarness: vi.fn(async () => ({ ok: true, resumeToken: runtime === "codex" ? "0198b1f0-0000-7000-8000-000000000001" : "11111111-2222-4333-8444-555555555555",
       resumeType: runtime === "codex" ? "codex_id" : "claude_id" })),
     checkReady,
+    guidanceFileFor: () => ({ file: path.join(home, runtime, "AGENTS.md") }),
+    prepareInput: () => async () => {},
     project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
     deliverStartup: vi.fn(async () => ({ delivered: [], failed: [] })),
   }) as unknown as RuntimeAdapter;
 
   const service = (overrides: Partial<ConstructorParameters<typeof SeatRuntimeSwitchService>[0]> = {}) => new SeatRuntimeSwitchService({
     db, rigRepo, sessionRegistry, discoveryRepo: new DiscoveryRepository(db), eventBus, tmuxAdapter: fakeTmux as unknown as TmuxAdapter, queueRepo,
-    runtimeAdapters: { codex: adapter("codex"), "claude-code": adapter("claude-code"), pi: adapter("pi") },
+    runtimeAdapters: { codex: adapter("codex"), "claude-code": adapter("claude-code"), pi: adapter("pi"), omp: adapter("omp"), "omp-tui": adapter("omp-tui") },
     occupantInvalidator: new DefaultOccupantInvalidator({ enforcer: { invalidateOccupant: vi.fn() }, contextUsage: { invalidateOccupantSidecar: vi.fn() }, queue: queueRepo }),
     activityOracle: { declareOccupantSwap }, openrigHome: home, readinessTimeoutMs: 1000, confirmPollMs: 1000,
     sleep: async (ms) => { clock += ms; await onSleep?.(); }, now: () => new Date(clock),
@@ -151,6 +159,171 @@ describe("live seat runtime switch", () => {
     predecessorGeneration = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
   });
   afterEach(() => { db.close(); fs.rmSync(home, { recursive: true, force: true }); });
+
+  // Only tmux and the external OMP process are simulated here. The adapter, launch state, switch journal,
+  // projection and receipt verification all use their production code and actual files.
+  it.each(["success", "missing-handover", "wrong-hash", "replaced-process", "missing-activation"])(
+    "switches with the real OMP adapter and verifies receipts: %s", async scenario => {
+      const project = path.join(home, "project"); fs.mkdirSync(project);
+      const sharedGuidance = path.join(project, "AGENTS.md"); fs.writeFileSync(sharedGuidance, "Operator project guidance\n");
+      db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(project, nodeId);
+      const makeLauncher = () => new OmpSeatLauncher({ tmux: fakeTmux as unknown as TmuxAdapter, fsOps: ompFiles,
+        stateRoot: path.join(home, "state", "omp-tui"), seatExtensionPath: "/seat.js", sleep: async () => {},
+        seatLocation: session => ompSeatLocation(db, session), contextSidecarPath: session => path.join(home, `${session}.context.json`),
+      });
+      const launcher = makeLauncher();
+      let writerPid = 902;
+      let writerStart = "2020-01-01T00:00:00Z";
+      const processes = vi.fn(async () => [{ pid: writerPid, ppid: 901, command: "omp", startedAt: writerStart }]);
+      const target = new OmpTuiRuntimeAdapter({ tmux: fakeTmux as unknown as TmuxAdapter, fsOps: ompFiles, launcher,
+        sleep: async () => {}, listProcesses: processes });
+      const originalPaths = launcher.paths(SEAT);
+      fs.mkdirSync(originalPaths.agentDir, { recursive: true });
+      fs.writeFileSync(path.join(originalPaths.agentDir, "auth.json"), "original seat credentials");
+      fs.writeFileSync(originalPaths.statePath, "original seat state");
+      let staging = "";
+      let started = false;
+      Object.assign(fakeTmux, {
+        getPanePid: async () => 901,
+        hasSession: async (session: string) => panes.has(session),
+        sendShellCommand: async (session: string, command: string) => {
+          staging = session;
+          expect(session).not.toBe(SEAT);
+          const files = launcher.paths(session);
+          expect(files.statePath).not.toBe(originalPaths.statePath);
+          expect(command).toContain(`${SEAT}.context.json`);
+          const pending = JSON.parse(fs.readFileSync(files.statePath, "utf8"));
+          const sessionFile = path.join(files.sessionsDir, "conversation.jsonl"); fs.writeFileSync(sessionFile, "{}");
+          fs.writeFileSync(files.statePath, JSON.stringify({ ...pending, ready: true, pid: 902, nodeId, generation: openSwitch()!.successor_generation, sessionFile,
+            sessionId: "omp-conversation", auth: "ok", inputProtocol: 1 }));
+          started = true;
+          return { ok: true };
+        },
+      });
+      fakeTmux.getPaneCommand.mockImplementation(async () => started ? "omp" : "zsh");
+      let last: { session: string; text: string; requestId: string; sha256: string } | undefined;
+      fakeTmux.sendText.mockImplementation(async (session, text) => {
+        typed.push({ target: session, text });
+        const files = launcher.paths(session);
+        const state = JSON.parse(fs.readFileSync(files.statePath, "utf8"));
+        const request = JSON.parse(fs.readFileSync(`${files.statePath}.input.json`, "utf8"));
+        const sha256 = createHash("sha256").update(text).digest("hex");
+        expect(request).toMatchObject({ launchId: state.launchId, sha256 });
+        expect(request.id).toBeTruthy();
+        last = { session, text, requestId: request.id, sha256 };
+        if ((session === staging && scenario === "missing-handover") || (session === SEAT && scenario === "missing-activation")) return { ok: true };
+        fs.writeFileSync(files.statePath, JSON.stringify({ ...state,
+          launchId: scenario === "replaced-process" ? "another-process" : state.launchId,
+          inputReceipt: { sequence: (state.inputReceipt?.sequence ?? 0) + 1, requestId: request.id,
+            sha256: scenario === "wrong-hash" ? "wrong" : sha256 },
+        }));
+        return { ok: true };
+      });
+      const svc = service({ runtimeAdapters: { "omp-tui": target } });
+      fakeTmux.sendKeys.mockImplementation(async () => {
+        expect(last).toBeDefined();
+        expect(target.readSeatState(last!.session)?.inputReceipt).toMatchObject({ requestId: last!.requestId, sha256: last!.sha256 });
+        if (last!.text.includes("--confirm")) {
+          const row = openSwitch()!;
+          svc.confirm({ seatRef: SEAT, switchId: row.id, actorSession: SEAT, generation: row.successor_generation, note: "Ready" });
+        }
+        return { ok: true };
+      });
+      const result = await svc.setRuntime({ seatRef: SEAT, runtime: "omp-tui", model: "openrouter/fixture", reason: "Use stock OMP" });
+      expect(fs.readFileSync(sharedGuidance, "utf8")).toBe("Operator project guidance\n");
+      expect(fs.readFileSync(path.join(launcher.paths(staging).agentDir, "AGENTS.md"), "utf8")).toContain("openrig");
+      expect(fs.readFileSync(path.join(originalPaths.agentDir, "auth.json"), "utf8")).toBe("original seat credentials");
+      expect(fs.readFileSync(originalPaths.statePath, "utf8")).toBe("original seat state");
+      expect(JSON.parse(fs.readFileSync(`${launcher.paths(staging).statePath}.input.json`, "utf8"))).toEqual({});
+      if (["missing-handover", "wrong-hash", "replaced-process"].includes(scenario)) {
+        expect(result).toMatchObject({ ok: false, committed: false });
+        expect(fakeTmux.sendKeys).not.toHaveBeenCalled();
+        expect(nodeRow().runtime).toBe("codex");
+        expect(launcher.paths(SEAT)).toEqual(originalPaths);
+        return;
+      }
+      expect(result).toMatchObject({ ok: true, changed: true, recoveryPending: scenario === "missing-activation" });
+      expect(fakeTmux.sendKeys).toHaveBeenCalledTimes(scenario === "success" ? 2 : 1);
+      expect(nodeRow().runtime).toBe("omp-tui");
+      // Reconstruct the launcher as after a daemon restart: no in-memory aliases may be needed.
+      const restartedLauncher = makeLauncher();
+      const restarted = new OmpTuiRuntimeAdapter({ tmux: fakeTmux as unknown as TmuxAdapter, fsOps: ompFiles,
+        launcher: restartedLauncher, sleep: async () => {}, listProcesses: processes,
+        boundPaneForSession: session => session === SEAT ? sessionRegistry.getBindingForNode(nodeId)?.tmuxPane ?? null : null });
+      expect(restartedLauncher.paths(SEAT)).toEqual(launcher.paths(staging));
+      expect(restarted.readSessionFile(SEAT)).toMatchObject({ ok: true, sessionFile: expect.stringContaining(staging) });
+      if (scenario === "success") {
+        const received = restarted.prepareInput(SEAT, "Next operator message");
+        await fakeTmux.sendText(SEAT, "Next operator message");
+        await received();
+        await fakeTmux.sendKeys();
+        sessionRegistry.registerClaimedSession(nodeId, SEAT, "adopt");
+        expect(restartedLauncher.paths(SEAT)).toEqual(originalPaths);
+        processes.mockImplementationOnce(async () => {
+          // A second adoption while the daemon is checking the first cannot inherit its proof.
+          sessionRegistry.registerClaimedSession(nodeId, SEAT, "adopt");
+          return [{ pid: writerPid, ppid: 901, command: "omp", startedAt: writerStart }];
+        });
+        expect(await restarted.readLiveSessionFile(SEAT)).toMatchObject({ ok: false });
+        expect(restartedLauncher.paths(SEAT)).toEqual(originalPaths);
+        const binding = sessionRegistry.getBindingForNode(nodeId)!;
+        expect(await restarted.checkReady({ ...binding, cwd: project })).toMatchObject({ ready: true });
+        expect(makeLauncher().paths(SEAT)).toEqual(launcher.paths(staging));
+        // The durable storage proof does not prove the sidecar's writer is still alive during an identity read.
+        processes.mockResolvedValueOnce([{ pid: writerPid, ppid: 901, command: "omp", startedAt: writerStart }]).mockResolvedValueOnce([]);
+        expect(await restarted.readLiveSessionFile(SEAT, undefined, binding.tmuxPane!)).toMatchObject({ ok: false });
+        // Reusing the address and pane with a replacement process cannot expose the previous writer's files.
+        writerPid = 903;
+        sessionRegistry.registerClaimedSession(nodeId, SEAT, "adopt");
+        expect(await restarted.readLiveSessionFile(SEAT)).toMatchObject({ ok: false });
+        expect(restartedLauncher.paths(SEAT)).toEqual(originalPaths);
+        expect(restarted.readSessionFile(SEAT)).toMatchObject({ ok: false });
+        expect(() => restarted.prepareInput(SEAT, "operator message")).toThrow();
+        // A reused PID beneath the right pane is still a different process if it started after cutover.
+        writerPid = 902;
+        writerStart = new Date(clock + 10_000).toISOString();
+        const sidecar = launcher.paths(staging).statePath;
+        fs.writeFileSync(sidecar, JSON.stringify({ ...JSON.parse(fs.readFileSync(sidecar, "utf8")), updatedAt: writerStart }));
+        expect(await restarted.readLiveSessionFile(SEAT)).toMatchObject({ ok: false });
+        expect(restartedLauncher.paths(SEAT)).toEqual(originalPaths);
+        sessionRegistry.registerSession(nodeId, SEAT);
+        expect(ompSeatLocation(db, SEAT).storageSession).toBe(SEAT);
+      }
+    });
+
+  it("refuses linked private OMP guidance before launch without changing the project", async () => {
+    const project = path.join(home, "project"); fs.mkdirSync(project);
+    const shared = path.join(project, "AGENTS.md"); fs.writeFileSync(shared, "Operator guidance");
+    db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(project, nodeId);
+    const launcher = new OmpSeatLauncher({ tmux: fakeTmux as unknown as TmuxAdapter, fsOps: ompFiles,
+      stateRoot: path.join(home, "state/omp"), seatExtensionPath: "/seat.js", seatLocation: session => ompSeatLocation(db, session) });
+    const target = new OmpTuiRuntimeAdapter({ tmux: fakeTmux as unknown as TmuxAdapter, fsOps: ompFiles, launcher });
+    const launch = vi.spyOn(target, "launchHarness");
+    fakeTmux.createSession.mockImplementation(async session => {
+      panes.set(session, "%5");
+      const agentDir = launcher.paths(session).agentDir; fs.mkdirSync(agentDir, { recursive: true });
+      fs.symlinkSync(shared, path.join(agentDir, "AGENTS.md"));
+      return { ok: true };
+    });
+    expect(await service({ runtimeAdapters: { "omp-tui": target } }).setRuntime({ seatRef: SEAT, runtime: "omp-tui", reason: "Try switch" }))
+      .toMatchObject({ ok: false, committed: false, message: expect.stringContaining("link") });
+    expect(launch).not.toHaveBeenCalled();
+    expect(fs.readFileSync(shared, "utf8")).toBe("Operator guidance");
+    expect(sessionRegistry.getBindingForNode(nodeId)).toMatchObject({ tmuxPane: "%0" });
+  });
+
+  it.each([["codex", "omp"], ["omp", "codex"], ["omp", "omp-tui"], ["omp-tui", "omp"], ["codex", "omp-tui"], ["omp-tui", "codex"], ["claude-code", "omp-tui"], ["omp-tui", "claude-code"]])("switches %s to %s only after successor confirmation", async (from, to) => {
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(from, nodeId);
+    const svc = service(); successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: to!, reason: "Use stock runtime" }))
+      .toMatchObject({ ok: true, changed: true, from, to, recoveryPending: false });
+    expect(nodeRow().runtime).toBe(to);
+    if (to === "omp") {
+      const base = path.join(home, "state", "omp");
+      expect(piAccountStateRoot(db, base, SEAT, "omp")).toBe(piAccountSwitchStateRoot(base, openSwitch()!.successor_generation));
+    }
+    expect(sessionRegistry.getBindingForNode(nodeId)).toMatchObject({ tmuxSession: SEAT, tmuxPane: "%5" });
+  });
 
   it.each(["pi", "codex", "claude-code"])("switches %s to Pi only after confirmation and selects durable isolated state", async from => {
     db.prepare("UPDATE nodes SET runtime = ?, model = 'mistral/devstral', effort_choice = 'max', codex_config_profile = NULL WHERE id = ?").run(from, nodeId);
@@ -585,6 +758,7 @@ describe("live seat runtime switch", () => {
       { setting: "codex config profile", value: "fast" }, { setting: "native permission choice", value: "codex:full_bypass" }]));
     expect(plan.costs.join(" ")).toMatch(/new conversation.*isn't converted/);
     expect(plan.costs.join(" ")).toMatch(/deferred change_runtime/);
+    expect(plan.costs.join(" ")).toContain("OMP RPC (omp) and the native OMP UI (omp-tui)");
     expect(openSwitch()).toBeUndefined();
     expect(fakeTmux.createSession).not.toHaveBeenCalled();
     expect(nodeRow().runtime).toBe("codex");
@@ -1118,6 +1292,13 @@ describe("live seat runtime switch", () => {
     expect(openSwitch()).toMatchObject({ phase: "abandoned" });
   });
 
+  it.each(["omp", "omp-tui"])("previews the selected %s runtime without staging a pane", async runtime => {
+    const preview = await service().setRuntime({ seatRef: SEAT, runtime, reason: "preview", dryRun: true });
+    expect(preview).toMatchObject({ ok: true, dryRun: true, from: "codex", to: runtime });
+    expect(nodeRow().runtime).toBe("codex");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM seat_runtime_switches").get()).toEqual({ count: 0 });
+  });
+
   describe("what can't switch is said before anything stops", () => {
     it("the same runtime with settings names the existing setters; without settings nothing changes", async () => {
       expect(await service().setRuntime({ seatRef: SEAT, runtime: "codex", reason: "x", model: "gpt-6" }))
@@ -1136,10 +1317,10 @@ describe("live seat runtime switch", () => {
         message: expect.stringMatching(/it has no bound tmux pane/),
         guidance: expect.stringMatching(/start it first.*never started.*declare the other runtime.*rig spec.*doesn't carry this seat's edges, settings or queued work/s) });
     });
-    it("a seat on another runtime", async () => {
-      db.prepare("UPDATE nodes SET runtime = 'omp' WHERE id = ?").run(nodeId);
+    it("a seat on an unsupported runtime", async () => {
+      db.prepare("UPDATE nodes SET runtime = 'unknown' WHERE id = ?").run(nodeId);
       expect(await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "x", dryRun: true }))
-        .toMatchObject({ ok: false, code: "runtime_switch_unsupported", message: expect.stringMatching(/only Codex, Claude Code, Pi and community-harness seats can change runtime/) });
+        .toMatchObject({ ok: false, code: "runtime_switch_unsupported", message: expect.stringMatching(/only Codex, Claude Code, Pi, OMP and community-harness seats can change runtime/) });
     });
     it("a community harness target whose preset this daemon doesn't have", async () => {
       // The runtime name alone doesn't prove a preset is installed: an unknown name and an uninstalled harness both refuse.

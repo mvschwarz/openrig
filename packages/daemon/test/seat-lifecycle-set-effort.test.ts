@@ -257,13 +257,13 @@ describe("SeatLifecycleService.setEffort and effortReport on a Pi seat", () => {
     expect(none.warning).toContain("ignores a level it doesn't know");
   });
 
-  it("an OMP seat is still refused", async () => {
-    const { node, sessionName } = piSeat("omp");
+  it.each(["omp", "omp-tui"])("saves a %s seat's next-launch effort without claiming native observation", async runtime => {
+    const { node, sessionName } = piSeat(runtime);
     const result = await service.setEffort({ seatRef: sessionName, effort: "high", reason: "x" });
-    expect(result).toMatchObject({ ok: false, code: "effort_unsupported_runtime" });
-    if (!result.ok) expect(result.message).toContain("claude-code, codex and pi seats only");
-    expect(await service.effortReport(sessionName)).toMatchObject({ ok: false, code: "effort_unsupported_runtime" });
-    expect(nodeRow(db, node.id).effort_choice).toBeNull();
+    expect(result).toMatchObject({ ok: true, runtime, changed: true, saved: { choice: "high", effective: "high" } });
+    const report = await service.effortReport(sessionName);
+    expect(report).toMatchObject({ ok: true, runtime, observed: { state: "not_verified" } });
+    expect(nodeRow(db, node.id).effort_choice).toBe("high");
   });
 
   it("the level sent and the level Pi recorded agree", async () => {

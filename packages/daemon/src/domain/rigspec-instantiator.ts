@@ -2765,7 +2765,7 @@ export class PodRigInstantiator {
     // OPR.0.7.0.13 — a team seat's skills go to storage OpenRig owns for this rig and logical seat, not into the
     // person's project: for Claude, reached through the seat's own plugin; for Codex, through the catalog its per-seat
     // startup text delivers. Made for every Claude and Codex seat, so profile skills land there even with no loadout.
-    const seatRuntime = configResult.config.runtime === "claude-code" || configResult.config.runtime === "codex" ? configResult.config.runtime : undefined;
+    const seatRuntime = configResult.config.runtime === "claude-code" || configResult.config.runtime === "codex" || configResult.config.runtime === "omp-tui" ? configResult.config.runtime : undefined;
     const seatSkills = seatRuntime ? seatSkillPaths({ rigId: input.rigId, logicalId: input.qualifiedId, runtime: seatRuntime }) : undefined;
     let loadoutReceipts = 0;
     if (seatSkills && seatRuntime === "claude-code") {
@@ -2802,7 +2802,7 @@ export class PodRigInstantiator {
     if (
       configResult.config.skillLoadout
       && this.deps.skillReconciler
-      && (configResult.config.runtime === "claude-code" || configResult.config.runtime === "codex")
+      && (configResult.config.runtime === "claude-code" || configResult.config.runtime === "codex" || configResult.config.runtime === "omp-tui")
     ) {
       const reconcile = (selected: SkillLoadout) => this.deps.skillReconciler!({
         loadout: selected,
@@ -2989,7 +2989,7 @@ export class PodRigInstantiator {
       tmuxSession: launchResult.binding.tmuxSession,
       tmuxWindow: null,
       // Only the run-grant launch owners need this anchor; unrelated builtins keep their existing session target.
-      tmuxPane: input.member.runtime === "pi" || input.member.runtime === "omp" || isCommunityHarnessRuntime(input.member.runtime) ? launchResult.binding.tmuxPane : null,
+      tmuxPane: input.member.runtime === "pi" || input.member.runtime === "omp" || input.member.runtime === "omp-tui" || isCommunityHarnessRuntime(input.member.runtime) ? launchResult.binding.tmuxPane : null,
       cmuxWorkspace: null,
       cmuxSurface: null,
       updatedAt: "",

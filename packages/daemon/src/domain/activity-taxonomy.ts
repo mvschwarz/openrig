@@ -102,7 +102,8 @@ export interface RungDeclaration {
   /** Hooks only: the source sees every turn boundary in order, so its last idle or attention boundary holds until the
    *  next instead of expiring with the hook window. A working boundary still expires: a turn whose end was lost must not
    *  read working forever. Its posts are taken in the source's own order. A runner that reads its child's whole event
-   *  stream declares it, and so does a community preset whose declared hooks include a turn start. */
+   *  stream declares it, as do OMP's in-process seat extension and a community preset whose declared hooks include a
+   *  turn start. */
   durableBoundaries?: true;
 }
 
@@ -111,7 +112,7 @@ export interface RungDeclaration {
  *  never inherits its predecessor's rung authority. */
 export interface AdapterRungInventory {
   adapterId: string;
-  runtime: "claude-code" | "codex" | "pi" | "omp" | "tmux-generic" | "community-harness" | "community-runner";
+  runtime: "claude-code" | "codex" | "pi" | "omp" | "omp-tui" | "tmux-generic" | "community-harness" | "community-runner";
   rungs: RungDeclaration[];
   /** A plain community preset's recorded `activity_hooks`, sorted: the hook events its own script posts. Part of the
    *  inventory's identity, so a seat re-declares when its recorded declaration changes. */
@@ -240,9 +241,11 @@ export const COMMUNITY_HARNESS_RUNG_INVENTORY: AdapterRungInventory = {
   rungs: [{ rung: "window-sampling", lifecycleCoverage: "partial", initialTrust: "positive-only" }],
 };
 
-/** pi and omp run under OpenRig's runner, which reads the child's RPC event stream and posts each turn boundary as a
- *  hook (agent_start, turn_start, tool calls, agent_end; attention; process exit). Those hooks decide, and a boundary
- *  holds until the next one. A quiet pane can be mid-turn, so window sampling stays positive-only. */
+/** Pi and RPC OMP run under OpenRig's runner, which reads the child's RPC event stream; omp-tui runs natively with OpenRig's seat
+ *  extension loaded into it, which reads the same lifecycle events in process. Either way every turn boundary is seen
+ *  in order and posted as a hook (agent_start, turn_start, tool calls, agent_end; attention; process exit). Those hooks
+ *  decide, and a boundary holds until the next one. A quiet pane can be mid-turn, so window sampling stays
+ *  positive-only. */
 const RUNNER_ACTIVITY_RUNGS: RungDeclaration[] = [
   { rung: "lifecycle-hooks", lifecycleCoverage: "full", initialTrust: "authoritative", durableBoundaries: true },
   { rung: "window-sampling", lifecycleCoverage: "partial", initialTrust: "positive-only" },
@@ -300,6 +303,7 @@ export function runtimeRungInventory(runtime: string | null, communityHarness?: 
   if (runtime === "codex") return CODEX_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "pi") return PI_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "omp") return OMP_ACTIVITY_RUNG_INVENTORY;
+  if (runtime === "omp-tui") return { ...OMP_ACTIVITY_RUNG_INVENTORY, runtime, adapterId: "omp-tui-runtime-adapter" };
   // A runner reports for itself, so its recorded hook declaration is ignored.
   if (communityHarnessOf(communityHarness, runtime)) {
     if (communityRunner === true) return COMMUNITY_RUNNER_RUNG_INVENTORY;

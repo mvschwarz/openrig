@@ -246,6 +246,10 @@ configurations, as below; do not take the pin from a cached page summary.
    (`claude auth login` or `codex login`, then recheck). If they choose the
    team as it is, plan it and say which seat will wait for that sign-in. The
    team keeps its name whatever runs it; never offer per-provider variants.
+   - When they ask for Oh My Pi, check that the stock `omp` executable is on the
+     daemon's PATH. In the team's `rig.yaml`, use `runtime: omp` for the default
+     RPC runner. If they want OMP's interactive terminal, set that member to
+     `runtime: omp-tui`. For seat credentials, see `rig context get reference/rig-spec.md`.
    - **A built-in team needs a provider they don't have:** author an adapted
      copy. Copy the shipped spec's whole folder (the folder of `sourcePath`
      from the preview) to one outside the spec library, for example

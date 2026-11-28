@@ -283,6 +283,7 @@ interface SeatHandoverServiceDeps {
   piRunnerStateStore?: ResumeTokenCaptureDeps["piRunnerStateStore"];
   /** OMP runner sidecar reader for independently isolated OMP seats. */
   ompRunnerStateStore?: ResumeTokenCaptureDeps["ompRunnerStateStore"];
+  ompTuiStateStore?: ResumeTokenCaptureDeps["ompTuiStateStore"];
   /** Readiness timeout for the successor launch (tests shorten it). */
   readinessTimeoutMs?: number;
   /** Injectable sleep for the successor readiness backoff (tests). */
@@ -349,6 +350,7 @@ export class SeatHandoverService {
   private discoveryRepo: DiscoveryRepository;
   private eventBus: EventBus;
   private tmuxAdapter: TmuxAdapter;
+  private runtimeAdapters: Record<string, RuntimeAdapter>;
   private successorLauncher: SuccessorSessionLauncher;
   private captureDeps: ResumeTokenCaptureDeps;
   private occupantInvalidator: OccupantInvalidator | null;
@@ -378,6 +380,7 @@ export class SeatHandoverService {
     this.discoveryRepo = deps.discoveryRepo;
     this.eventBus = deps.eventBus;
     this.tmuxAdapter = deps.tmuxAdapter;
+    this.runtimeAdapters = deps.runtimeAdapters ?? {};
     this.occupantInvalidator = deps.occupantInvalidator ?? null;
     this.activityOracle = deps.activityOracle ?? null;
     this.predecessorRecapResolver = deps.predecessorRecapResolver ?? null;
@@ -407,6 +410,7 @@ export class SeatHandoverService {
       resumeTokenCapturer: deps.resumeTokenCapturer ?? null,
       piRunnerStateStore: deps.piRunnerStateStore ?? null,
       ompRunnerStateStore: deps.ompRunnerStateStore ?? null,
+      ompTuiStateStore: deps.ompTuiStateStore ?? null,
     };
   }
 
@@ -1556,9 +1560,15 @@ export class SeatHandoverService {
     const held = heldMessagesNotice(this.db, input.node.id, discovered.tmuxSession);
     if (held && "result" in committed) {
       committed.result.warnings = [held];
-      // #2985: a recovery types nothing into the successor it adopts.
       const typed = input.reportedSource.mode !== "discovered" && input.restorePacket?.status !== "unconfirmed" && !input.recovered;
-      try { if (typed && (await this.tmuxAdapter.sendText(discovered.tmuxSession, held)).ok) { await this.sleep(200); await this.tmuxAdapter.sendKeys(discovered.tmuxSession, ["Enter"]); } }
+      try {
+        if (typed) {
+          const delivered = await this.sendInteractiveText(discovered.tmuxSession, held, input.node.runtime);
+          if (input.node.runtime === "omp-tui" && (!delivered.ok || delivered.confirmation === "unconfirmed")) {
+            committed.result.warnings.push(`Held-message notice submission unconfirmed: ${delivered.ok ? delivered.reason : delivered.message}`);
+          }
+        }
+      }
       catch { /* the notice is best-effort */ }
     }
     // #2426: the successor's preparation is named on the result, as a launch names it.
@@ -1693,16 +1703,8 @@ export class SeatHandoverService {
     }
     if (info.guidanceNote) lines.push("", info.guidanceNote);
     const packet = lines.join("\n");
-    const sent = await this.tmuxAdapter.sendText(successorSession, packet);
-    if (!sent.ok) {
-      return { ok: false, message: (sent as { message?: string }).message ?? "send_text failed" };
-    }
-    // Same spike-proven 200ms settle as the restore packet (staged-not-consumed class).
-    await this.sleep(200);
-    const submit = await this.tmuxAdapter.sendKeys(successorSession, ["Enter"]);
-    if (!submit.ok) {
-      return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
-    }
+    const submitted = await this.sendInteractiveText(successorSession, packet, info.runtime);
+    if (!submitted.ok || submitted.confirmation === "unconfirmed") return submitted;
     const delivered = await this.confirmPacketSubmission(successorSession, packet, info.runtime);
     if (!delivered.ok && delivered.kind === "staged") {
       return { ok: true, confirmation: "unconfirmed", reason: delivered.message };
@@ -1733,21 +1735,47 @@ export class SeatHandoverService {
     },
   ): Promise<RestorePacketDelivery> {
     const packet = buildRestorePacket({ ...info, handoverAt: this.now().toISOString() });
-    const sent = await this.tmuxAdapter.sendText(successorSession, packet);
-    if (!sent.ok) {
-      return { ok: false, message: (sent as { message?: string }).message ?? "send_text failed" };
-    }
-    // B16 rework (r2 live door finding): the SHARED paste-then-submit sequencing — the transport's
-    // spike-proven 200ms settle between send_text and Enter (session-transport.ts, "Wait 200ms").
-    // Without it the multi-KB packet sat STAGED-UNSENT as collapsed paste blocks in the successor's
-    // input box (r2 measured 46s until a manual Enter) — the handover committed complete while the
-    // packet was never consumed: the staged-not-consumed class, shipped by the product itself.
-    await this.sleep(200);
-    const submit = await this.tmuxAdapter.sendKeys(successorSession, ["Enter"]);
-    if (!submit.ok) {
-      return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
-    }
+    const submitted = await this.sendInteractiveText(successorSession, packet, info.runtime);
+    if (!submitted.ok || submitted.confirmation === "unconfirmed") return submitted;
     return this.confirmPacketSubmission(successorSession, packet, info.runtime);
+  }
+
+  /** All handover input uses the runtime's receipt when available, including the post-commit notice. */
+  private async sendInteractiveText(successorSession: string, packet: string, runtime: string | null): Promise<RestorePacketDelivery> {
+    let received: ReturnType<NonNullable<RuntimeAdapter["prepareInput"]>> | undefined;
+    if (runtime === "omp-tui") {
+      try {
+        const adapter = this.runtimeAdapters["omp-tui"];
+        if (!adapter?.prepareInput) throw new Error("OMP input acknowledgement unavailable; no text was sent.");
+        received = adapter.prepareInput(successorSession, packet);
+      } catch (error) {
+        return { ok: false, message: (error as Error).message };
+      }
+    }
+    try {
+      const sent = await this.tmuxAdapter.sendText(successorSession, packet);
+      if (!sent.ok) {
+        const message = (sent as { message?: string }).message ?? "send_text failed";
+        return { ok: false, message: received ? `${message} Input may be staged; inspect it before retrying.` : message };
+      }
+      if (received) {
+        try { await received(); }
+        catch (error) {
+          return { ok: true, confirmation: "unconfirmed", reason: `${(error as Error).message} Enter was not sent; input may be staged. Inspect it before retrying.` };
+        }
+      } else await this.sleep(200);
+      const submit = await this.tmuxAdapter.sendKeys(successorSession, ["Enter"]);
+      if (!submit.ok) {
+        const message = (submit as { message?: string }).message ?? "submit failed";
+        return { ok: false, message: received ? `${message} Input may be staged; inspect it before retrying.` : message };
+      }
+      return { ok: true, confirmation: "confirmed" };
+    } catch (error) {
+      if (!received) throw error;
+      return { ok: false, message: `${error instanceof Error ? error.message : String(error)} Input delivery is unconfirmed; inspect the composer before retrying.` };
+    } finally {
+      received?.cancel?.();
+    }
   }
 
   private async confirmPacketSubmission(
