@@ -145,6 +145,22 @@ describe("cursor-bound composer input", () => {
     }
   });
 
+  // OBS1 (11-28): Claude 2.1.322 and 2.1.323, 80 columns, as banked after a pasted prompt was submitted. The input box is
+  // empty, and the draft-aware guard used to read it as unknown and hold the next send.
+  it.each(["Removed 1 invisible character from your prompt", "Removed 3 invisible characters from your prompt"])(
+    "reads the paste hint with %j beside it", notice => {
+      const frame = (body: string, right = notice) => {
+        const snapshot = claude(body);
+        snapshot.screen = snapshot.screen.replace("? for shortcuts", `  paste again to expand         ${right}`);
+        return snapshot;
+      };
+      expect(inspectComposerInput(frame(""), "claude-code").state).toBe("empty");
+      expect(inspectComposerInput(frame("person's draft"), "claude-code").state).toBe("text");
+      for (const nearMiss of [notice + " now", notice.replace("Removed", "Added"), notice.replace("prompt", "draft"), "Removed some invisible characters from your prompt"]) {
+        expect(inspectComposerInput(frame("", nearMiss), "claude-code")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+      }
+    });
+
   it.each(["", "person's draft"])("reads the observed clipped auto-update footer with input %j", body => {
     // A complete synthetic frame; the retained partial capture cannot supply physical cursor rows.
     const snapshot = claude(body);
