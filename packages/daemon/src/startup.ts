@@ -1606,6 +1606,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { CurrentModelReader } = await import("./domain/model-divergence/current-model-reader.js");
   const { ProcessCensus: ModelProcessCensus } = await import("./domain/process-census.js");
   const { CodexThreadIdResolver: ModelThreadResolver } = await import("./domain/codex-thread-id.js");
+  const { readThreadIdAcrossHomes } = await import("./domain/model-divergence/codex-thread-homes.js");
   const modelCensus = new ModelProcessCensus();
   const modelThreads = new ModelThreadResolver({ defaultHome: daemonHome, codexHome: configuredCodexHome });
   // A seat with its own CODEX_HOME logs its threads there. The read is gated by the process's identity, so after the
@@ -1623,14 +1624,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     native: {
       getPanePid: async (target) => tmuxAdapter.getPanePid ? tmuxAdapter.getPanePid(target) : null,
       listProcesses: () => modelCensus.list(),
-      readThreadIdByPid: async (pid, identity) => {
-        const resolvers = [modelThreads, ...declaredRuntimeHomes(db, "codex").filter(home => home !== configuredCodexHome).map(modelThreadsFor)];
-        for (const resolver of resolvers) {
-          const threadId = identity === undefined ? await resolver.resolveUngatedLegacy(pid) : await resolver.resolve(pid, identity);
-          if (threadId) return threadId;
-        }
-        return undefined;
-      },
+      readThreadIdByPid: async (pid, identity) => readThreadIdAcrossHomes(
+        [modelThreads, ...declaredRuntimeHomes(db, "codex").filter(home => home !== configuredCodexHome).map(modelThreadsFor)], pid, identity),
     },
     codexRollout: (threadId, sessionName, reporting) => reporting
       ? contextUsageStore.readCodexTranscriptPath(threadId)
