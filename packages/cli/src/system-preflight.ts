@@ -196,10 +196,11 @@ export class SystemPreflight {
       } else if (available === "available") {
         checks.push({ name: "port_available", ok: true });
       } else {
-        // A start that ended pending leaves its child listening here, and the next start finishes that start: it checks the
-        // child against the reservation first, and while the reservation stands it starts no other daemon.
-        // The finish says what it is waiting for, so this check adds no text of its own.
-        checks.push(this.reservedFor(effectiveHost, effectivePort)
+        // A start that ended pending leaves its child listening, and the next start finishes that start at the launch's own
+        // endpoint: it checks the child against the reservation first, and while the reservation stands it starts no other
+        // daemon, so the port a new launch would take can't block that finish. The finish says what it is waiting for, so
+        // this check adds no text of its own.
+        checks.push(this.pendingStartStands()
           ? { name: "port_available", ok: true }
           : {
             name: "port_available",
@@ -217,10 +218,8 @@ export class SystemPreflight {
     };
   }
 
-  /** The start reservation whose child was launched at exactly this endpoint, if one stands. */
-  private reservedFor(host: string, port: number): object | undefined {
-    let pending: ReturnType<NonNullable<PreflightDeps["pendingStart"]>>;
-    try { pending = this.deps.pendingStart?.(); } catch { return undefined; }
-    return pending && pending.port === port && (pending.host ?? "127.0.0.1") === host ? pending : undefined;
+  /** Whether a start reservation naming a process that isn't positively gone stands, as the start reads it. */
+  private pendingStartStands(): boolean {
+    try { return this.deps.pendingStart?.()?.pid !== undefined; } catch { return false; }
   }
 }

@@ -190,11 +190,27 @@ describe("SystemPreflight", () => {
     expect(result.checks.find((c) => c.name === "port_available")).toEqual({ name: "port_available", ok: true });
   });
 
+  // While a reservation stands, this start only finishes that launch (at the launch's own endpoint) or is refused by it,
+  // so the port it would choose for a new launch can't block the finish.
   it.each([
     ["at another port", (port: number) => ({ pid: 5151, host: "127.0.0.1", port: port + 1 })],
     ["at another host", (port: number) => ({ pid: 5151, host: "127.0.0.2", port })],
-    ["that can't be read", () => { throw new Error("unreadable"); }],
-  ] as const)("still refuses an occupied port with a start reservation %s", async (_case, reservation) => {
+    ["that records no endpoint", () => ({ pid: 5151 })],
+  ] as const)("lets a start through to the finish with a standing start reservation %s", async (_case, reservation) => {
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as net.AddressInfo).port;
+    const pf = createPreflight({ daemonStatus: { state: "stale" }, pendingStart: () => reservation(port) });
+    const result = await pf.run({ port, host: "127.0.0.1" });
+    server.close();
+    expect(result.ready).toBe(true);
+    expect(result.checks.find((c) => c.name === "port_available")).toEqual({ name: "port_available", ok: true });
+  });
+
+  it.each([
+    ["with no start reservation", () => undefined],
+    ["with a start reservation that can't be read", () => { throw new Error("unreadable"); }],
+  ] as const)("still refuses an occupied port %s", async (_case, reservation) => {
     const server = net.createServer();
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as net.AddressInfo).port;

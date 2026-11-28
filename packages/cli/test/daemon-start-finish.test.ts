@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import net from "node:net";
-import { pendingStartEndpoint, startDaemon, STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
+import { LEGACY_STATE_FILE, pendingStartEndpoint, startDaemon, STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import { SystemPreflight } from "../src/system-preflight.js";
 import { acquireDaemonStartLock, finishStartReservation } from "../src/daemon-start-lock.js";
 import { realDeps } from "../src/commands/daemon.js";
@@ -172,6 +172,48 @@ describe("an ordinary start finishes a start that ended pending", () => {
     expect(JSON.parse(f.files.get(STATE_FILE)!)).toEqual({ pid: CHILD, port: 7433, host: "127.0.0.1", db: DB, startedAt: "2026-11-28T03:30:00.000Z" });
     expect(f.deps.spawn).not.toHaveBeenCalled();
     expect(f.deps.kill).not.toHaveBeenCalled();
+  });
+
+  // The finish checks the child again on the other side of publication, as a start does. When that check fails, it takes
+  // back only what it wrote, so its "Nothing was published or retired" stays true: a leftover it replaced goes back as it was.
+  it.each([
+    ["puts back the leftover daemon.json it replaced", descriptor({ pid: 6262, startedAt: "2026-11-27T22:00:00.000Z" })],
+    ["removes the daemon.json it wrote when there was none", undefined],
+  ] as const)("when the child fails its check right after publication, %s", async (_case, state) => {
+    const f = setup(state === undefined ? {} : { state });
+    let published = false;
+    const write = f.deps.writeFile;
+    f.deps.writeFile = vi.fn((p: string, value: string) => { write(p, value); if (p === STATE_FILE) published = true; });
+    f.deps.processStartToken = (pid) => pid === CHILD ? (published ? "lstart:Sat Nov 28 03:30:00 2026" : TOKEN) : undefined;
+    const outcome = await start(f.deps);
+    expect(f.deps.writeFile).toHaveBeenCalledWith(STATE_FILE, expect.stringContaining(`"pid": ${CHILD}`));
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/already reserved/);
+    expect((outcome as Error).message).toMatch(/PID 5151 is now another process than the reserved child .* at publication; startup not accepted\. Nothing was published or retired/);
+    expect(f.files.get(STATE_FILE)).toBe(state);
+    expect(fs.readFileSync(lockFile(), "utf8")).toBe(reservation());
+    expect(finishedArchives()).toEqual([]);
+    expect(f.deps.spawn).not.toHaveBeenCalled();
+    expect(f.deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("when the child fails its check right after publication over a leftover at the legacy path, removes its own daemon.json and leaves the legacy one as it was", async () => {
+    // The finish read the leftover from the legacy home and wrote the primary daemon.json: taking that back must not
+    // copy the legacy bytes into the primary path, where later reads would find them first.
+    const leftover = descriptor({ pid: 6262, startedAt: "2026-11-27T22:00:00.000Z" });
+    const f = setup();
+    f.files.set(LEGACY_STATE_FILE, leftover);
+    let published = false;
+    const write = f.deps.writeFile;
+    f.deps.writeFile = vi.fn((p: string, value: string) => { write(p, value); if (p === STATE_FILE) published = true; });
+    f.deps.processStartToken = (pid) => pid === CHILD ? (published ? "lstart:Sat Nov 28 03:30:00 2026" : TOKEN) : undefined;
+    const outcome = await start(f.deps);
+    expect(f.deps.writeFile).toHaveBeenCalledWith(STATE_FILE, expect.stringContaining(`"pid": ${CHILD}`));
+    expect((outcome as Error).message).toMatch(/at publication; startup not accepted\. Nothing was published or retired/);
+    expect(f.files.has(STATE_FILE)).toBe(false);
+    expect(f.files.get(LEGACY_STATE_FILE)).toBe(leftover);
+    expect(fs.readFileSync(lockFile(), "utf8")).toBe(reservation());
+    expect(f.deps.spawn).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -380,12 +422,14 @@ describe("the database-holder check an older reservation's finish relies on", ()
 // read and reclaim, and a spawn spy. Start's preflight lets the reserved child's port through; the child then dies before
 // the finish, so the reservation is reclaimed and the start falls through to an ordinary start. No spawn may follow.
 describe("a reservation whose child dies after preflight let its port through", () => {
-  it.each([false, true])("never spawns onto the occupied port (a dead daemon's daemon.json too: %s)", async (withState) => {
+  it.each([
+    [false, "its own"], [true, "its own"], [false, "another"],
+  ] as const)("never spawns onto the occupied port (a dead daemon's daemon.json too: %s; the launch at %s port)", async (withState, at) => {
     const server = net.createServer((socket) => socket.destroy());
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as net.AddressInfo).port;
     const f = setup(withState ? { state: descriptor({ pid: 999 }) } : {});
-    fs.writeFileSync(lockFile(), header() + childRecord({ port, db: DB }));
+    fs.writeFileSync(lockFile(), header() + childRecord({ port: at === "its own" ? port : 7433, db: DB }));
     const live = realDeps();
     f.deps.fetch = vi.fn(live.fetch);
     f.deps.isPortOccupied = vi.fn(live.isPortOccupied!);
@@ -396,12 +440,38 @@ describe("a reservation whose child dies after preflight let its port through", 
       pendingStart: () => pendingStartEndpoint(f.deps), openrigHome: home,
     });
     try {
-      expect((await preflight.run({ host: "127.0.0.1", port })).ready).toBe(true);
+      expect((await preflight.run({ host: "127.0.0.1", port })).checks.filter((c) => !c.ok)).toEqual([]);
       f.alive.delete(CHILD);
       const outcome = await startDaemon({ ...opts, port }, f.deps).catch((error: Error) => error);
       expect(f.deps.spawn).not.toHaveBeenCalled();
       expect(outcome).toBeInstanceOf(Error);
       expect((outcome as Error).message).toMatch(/already in use|EADDRINUSE|occupied/i);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+// The person changed the configured port after a start ended pending, and something unrelated now holds the new one.
+// The finish works at the launch's own endpoint, so preflight lets the start reach it.
+describe("a start whose configured port differs from the pending launch's", () => {
+  it("finishes the pending launch at its own port when another process holds the configured one", async () => {
+    const server = net.createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const configured = (server.address() as net.AddressInfo).port;
+    const f = setup({ state: descriptor({ pid: 6262 }) });
+    const preflight = new SystemPreflight({
+      exec: async (cmd) => cmd === "tmux list-sessions" ? "" : "tmux 3.6a",
+      configStore: { resolve: () => ({ daemon: { host: "127.0.0.1", port: configured }, db: { path: path.join(home, "db.sqlite") }, transcripts: { path: home } }) } as never,
+      getDaemonStatus: async () => ({ state: "stale" }),
+      pendingStart: () => pendingStartEndpoint(f.deps), openrigHome: home,
+    });
+    try {
+      expect((await preflight.run({ host: "127.0.0.1", port: configured })).checks.filter((c) => !c.ok)).toEqual([]);
+      const state = await startDaemon({ ...opts, port: configured }, f.deps);
+      expect(state.finished).toMatchObject({ publication: "written", replacedPid: 6262 });
+      expect(JSON.parse(f.files.get(STATE_FILE)!)).toMatchObject({ pid: CHILD, port: 7433 });
+      expect(f.deps.spawn).not.toHaveBeenCalled();
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
