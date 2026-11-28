@@ -1709,8 +1709,11 @@ your circumstances is configuration, and the ones that are not, another agent ca
 - **What a team seat may do without asking.** Claude seats in a team that OpenRig launches run
   `rig` commands, project reads and common test commands without a prompt; lifecycle commands
   (`rig up`, `rig down`, `rig seat stop`, `rig daemon stop` and similar) ask, and since 0.7.24 so
-  does `rig seat decide-permission`, so a seat can't approve its own waiting tool call. Routine `rig`
-  commands used to prompt, so don't widen permissions to avoid prompts. Codex team seats run
+  does `rig seat decide-permission`, so a seat can't approve its own waiting tool call. Since 0.7.25
+  the one exception is the seat named in `agents.operator_session`, the host's receiving agent: it
+  settles the permission requests a person answered, so it runs `rig seat decide-permission` without
+  a prompt, and a setting it can't read keeps the ask. Routine `rig` commands used to prompt, so
+  don't widen permissions to avoid prompts. Codex team seats run
   `workspace-write` with the workspace root and their pod's state folder writable. When Codex's
   own config check shows a default-sandbox seat is eligible, OpenRig turns its network access on
   (`network_access = false` keeps it off); if that check can't be read, the launch is left
@@ -1736,23 +1739,28 @@ your circumstances is configuration, and the ones that are not, another agent ca
   0.7.24; `openrig-core` 0.1.40's `PermissionRequest` hook). For up to a day it's an ask
   (`qitem-runner-permission-…`) with the exact action, to the person chosen for the seat
   (`rig seat set-permissions-to <seat> --to <person>`), else the conversation that handed the seat
-  its work, else the default person. They see it in the Feed and Steering, through their connector,
-  or in their own conversation. The prompt stays open in the seat's terminal, and whichever answer
-  comes first counts, as Allow once or Deny: never a lasting permission change. **Pass on a person's
-  plain choice** with `rig seat decide-permission <ask> --option allow|deny --relay --person-said
-  "<their words>"` (recorded as relayed by you), or **your judgment of their words** with `--reason`
-  and `--person-said`; MCP clients use `rig_seat_decide_permission`. Don't type into the seat: that
+  its work. They see it in the Feed and Steering, through their connector, or in their own
+  conversation. Since 0.7.25 it never falls back to the default person: with neither, no one is
+  asked, nothing is decided, and the prompt stays in the seat's terminal with its usual alert.
+  `rig seat status <seat>` says who the seat's own prompts are asked of. This is a team Claude Code
+  seat's own prompt; a runner seat's permission requests still go to the default person when no one
+  is chosen for the seat (above). The prompt stays open in the seat's terminal, and whichever
+  answer comes first counts, as Allow once or Deny: never a lasting permission change. **Pass on a
+  person's plain choice** with `rig seat decide-permission <ask> --option allow|deny --relay
+  --person-said "<their words>"` (recorded as relayed by you), or **your
+  judgment of their words** with `--reason` and `--person-said`: a condition is theirs to set and
+  yours to judge, so ask them back only when you can't tell what they meant or whether this exact
+  action meets it. MCP clients use `rig_seat_decide_permission`. Don't type into the seat: that
   answers in the terminal. Prompts that need the person's own input, such as `AskUserQuestion`, stay
-  in the terminal, and with no one to ask nothing is decided and the terminal prompt carries on.
-  While the question is open, OpenRig holds its usual alert about the seat's waiting prompt; once
-  it's decided, the seat's next prompt alerts as usual. `rig seat set-permissions-to <seat> --deny`
-  keeps a Claude Code seat's prompts in its terminal only: on a Claude Code seat that stops the
-  question and refuses nothing. The notes' known issues: overlapping requests for the same command
-  can withdraw the later question and report it answered in the terminal (answer that prompt in the
-  terminal); if you registered yourself as the default person, a prompt on work that didn't come
-  from your conversation, such as during startup, goes to the Feed and Steering rather than to your
-  conversation; and a team Claude Code seat named as `agents.operator_session` now gets a permission
-  prompt when it settles a runner's permission request.
+  in the terminal. While the question is open, OpenRig holds its usual alert about the seat's
+  waiting prompt; once it's decided, the seat's next prompt alerts as usual.
+  `rig seat set-permissions-to <seat> --deny` keeps a Claude Code seat's prompts in its terminal
+  only: on a Claude Code seat that stops the question and refuses nothing. Fixed in 0.7.25: a later
+  question stays open when an earlier identical call finishes, and a receiving agent named in
+  `agents.operator_session` settles the permission requests you answered without a terminal prompt
+  for each, as before 0.7.24. *(This paragraph and the `rig seat decide-permission` line under
+  "What a team seat may do without asking" are corrected for 0.7.25. The rest of this map still
+  teaches through `capability-delta-v0.7.24`.)*
 - **`permission_policy: builtin:auto`**, and a fixed order for a seat's first launch:
   `rig seat set-permissions`, then the member policy, then the rig policy, then the system floor.
   See `docs/reference/rig-spec.md#built-in-permission-policies`.
