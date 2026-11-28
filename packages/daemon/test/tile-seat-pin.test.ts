@@ -2,8 +2,12 @@
 // the tile, where it stayed. These cells run the real pinned tile script on isolated tmux servers: a 160x50 seat, and a
 // 100x30 "tile" (a pane on a second server running the tile's argv, as a Herdr tile does), with focus in and out sent as
 // the terminal would send them.
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { pinnedTileAttachArgv, SEAT_PIN_HEIGHT_OPTION, SEAT_PIN_WIDTH_OPTION, tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
@@ -235,4 +239,37 @@ describe("which tiles pin their seat", () => {
     const argv = provider.last!.opened[0]!.attachArgv!;
     expect(argv).toEqual(pins ? pinnedTileAttachArgv(argv[5]!, argv.slice(6), "a@r") : tileAttachArgv(argv[5]!, argv.slice(6), "a@r", false));
   });
+
+  it("pinnedTileAttachArgv waits for a missing session to appear at start before attaching (#3873)", async () => {
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-tile-wait-"));
+    try {
+      const marker = nodePath.join(dir, "ready");
+      const attached = nodePath.join(dir, "attached");
+      const fakeTmux = nodePath.join(dir, "tmux");
+      fs.writeFileSync(
+        fakeTmux,
+        [
+          "#!/bin/sh",
+          'if [ "$1" = "display-message" ]; then',
+          `  if [ ! -f "${marker}" ]; then touch "${marker}"; exit 1; fi`,
+          '  printf "%s\\n" "123 \\$1:seat"',
+          "  exit 0",
+          "fi",
+          'if [ "$1" = "show-environment" ]; then exit 1; fi',
+          'if [ "$1" = "attach" ]; then',
+          `  printf "%s\\n" "$*" > "${attached}"`,
+          "  exit 0",
+          "fi",
+          "exit 0",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const argv = pinnedTileAttachArgv(fakeTmux, [], "seat", 3);
+      expect(argv.every((word) => !/['\u0000-\u001f\u007f]/.test(word))).toBe(true);
+      await promisify(execFile)(argv[0]!, argv.slice(1), { timeout: 10_000 });
+      expect(fs.readFileSync(attached, "utf8").trim()).toBe("attach -t $1");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
 });

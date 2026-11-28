@@ -87,9 +87,13 @@ export function pinnedTileAttachArgv(
     `giveback() { "$@" display-message -p -t "\${snapshot#* }:" "#{window_id} #{window-size} w#{${w}} h#{${h}} p#{${WINDOW_SIZE_PRIOR_OPTION}}" 2>/dev/null | {`,
     'read -r gid gws gw gh gp || exit 0;',
     '[ "$gws" = manual ] && [ "$gw" != w ] && [ "$gp" = p ] && "$@" resize-window -t "$gid" -x "${gw#w}" -y "${gh#h}" 2>/dev/null; }; };',
-    `snapshot=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}:#{session_name}" 2>/dev/null) || { exec "$@" attach -t "=$target"; };`,
-    // display-message may succeed with empty/fallback context for a missing target.
-    `if [ "\${snapshot#*:}" != "$target" ]; then exec "$@" attach -t "=$target"; fi;`,
+    `wait_left=${retrySeconds}; snapshot=;`,
+    'while [ "$wait_left" -gt 0 ]; do',
+    'probe=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}:#{session_name}" 2>/dev/null) || probe=;',
+    'if [ "${probe#*:}" = "$target" ]; then snapshot=$probe; break; fi;',
+    'sleep 1; wait_left=$((wait_left - 1));',
+    'done;',
+    'if [ -z "$snapshot" ]; then exec "$@" attach -t "=$target"; fi;',
     'snapshot=${snapshot%%:*};',
     // From here the seat is known: a hangup or TERM ends the tile with its size given back.
     'trap "giveback \\"\\$@\\"; exit 0" HUP TERM;',
