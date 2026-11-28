@@ -276,7 +276,8 @@ and effective modes and retains the text `Typing guard: on (hold)` for hold.
 
 A held send immediately returns `outcome: "retained"`, `sent: false`, its exact
 reason and the saved attempt's `outboxIds`. No automatic
-retry is scheduled. `rig send` to several seats and `rig broadcast` print a held
+retry is scheduled, except for a message held only for a draft (see "Messages held
+for a draft" below). `rig send` to several seats and `rig broadcast` print a held
 recipient as `retained, not delivered; inspect with rig seat held-messages`, never
 as sent, and their summary adds the held count (`1/3 delivered, 1 held`). A held
 recipient alone doesn't make the command fail. The reasons are:
@@ -309,7 +310,7 @@ refusal nor retries an attempt; missing metadata cannot establish which check
 caused a historical refusal.
 
 Clearing a draft, changing modes or restarting does not flush saved messages or
-callbacks. To try again, send a current request: it rechecks the recipient and input.
+callbacks, except a message held only for a draft (below). To try again, send a current request: it rechecks the recipient and input.
 A caller abort before paste cancels input; after a write may have started, the
 result preserves that uncertainty rather than claiming nothing was sent.
 
@@ -325,10 +326,12 @@ preserving evidence; it does not deliver a message or close queue work.
 A seat holds one message per sender, so one sender can't fill its held quota and
 drop everyone else's messages. A sender's newest held message retires its earlier
 ones at that seat into itself (`retired_by: outbox@system`, reason `coalesced into
-<id>`), in every mode, `draft-aware` included. The newest names them: `rig seat
+<id>`), in every mode, `draft-aware` included, except a message held only for a
+draft, which keeps its own outcome (below). The newest names them: `rig seat
 held-messages` shows `coalesced: { count, outboxIds }` on it, and each coalesced
-record stays readable with `--id`. Held messages are never replayed (a `draft-aware`
-queue wake's bounded retry, below, delivers only an entry still held), so this changes
+record stays readable with `--id`. Held messages are never replayed, except a message
+held only for a draft (below), and a `draft-aware` queue wake's bounded retry, below,
+delivers only an entry still held, so this changes
 no delivery. A `draft-aware` attempt takes its sender's place only once it settles
 as held; one that is then delivered leaves the held messages as they are. A queue
 wake to a `draft-aware` seat counts its sender's held message there as room, by the
@@ -342,6 +345,63 @@ watchdog's reminders (one per job), and an unattributed sender.
 
 A backlog held before this change clears at that sender's next held message to the
 seat, or at once with `rig seat retire-held-message`.
+
+**Messages held for a draft.** In `draft-aware` mode, a plain message from an agent
+or a person that is held only because the input showed a draft (`draft_input_busy`,
+`draft_input_unknown` or `draft_input_changed`) is marked when it's first held, and
+its result says it goes once the input is clear.
+
+- When the seat is idle with `draft-aware` still on, marked messages are sent oldest
+  first, each through the same guarded delivery. That delivery reads the input again
+  and holds the message again if it still isn't clear.
+- A try runs when the seat's activity changes, and the seat-activity check offers it
+  again when the state stays the same: about every 4.5 seconds after a try that met
+  recent typing, a drain, a restore or an input it couldn't read, and at once for a newly
+  held message. A draft it saw in the input on two tries waits until the pane changes. A
+  try that couldn't read the input, or its clients' activity, isn't a draft seen, so the
+  offers go on and the next one finds a reader that has recovered.
+- Each message keeps its own outcome, and the pass stops at the first one that isn't
+  delivered, except one whose own paste was just refused, which it goes past (below).
+  A delivered or uncertain message is never sent again. A drain, a pending
+  restore or leaving `draft-aware` stops the pass until it clears, including one that
+  takes effect while the message waits for its turn to type, or just before its paste;
+  nothing is typed then. One the pass gave to the seat's hook bridge waits there through
+  a drain that starts later, as the bridge's automatic deliveries do (below).
+- Order holds per sender: while a sender's marked message is still owed at the seat
+  (held, or being tried again), that sender's later plain message is held behind it
+  (`draft_held_behind_earlier`), marked too, and typed after it, even with the input
+  clear or with the seat's hook bridge live. Other senders' messages aren't held behind
+  it. This holds for messages that are saved with room in the seat's held quota; one
+  that can't be saved goes as it would without it.
+- A marked message whose own paste is then refused (control characters, a long Codex
+  paste, the viewport) is no longer owed: it stays held and readable, its result says to
+  send it again changed, and later messages stop waiting behind it: the same pass goes
+  on to them.
+- A marked message being tried again when the daemon stopped, including one the hook
+  bridge had handed back for typing, reads uncertain after the restart: it isn't typed
+  again, and later messages don't wait behind it. One that was only queued for the bridge
+  stays queued and still owed, and the bridge delivers it (below).
+- A message held for an earlier occupant of the seat stays held and listed. Later
+  messages for the current occupant still go.
+- Marked messages aren't coalesced by the one-per-sender rule above. Instead, one
+  sender keeps at most five at a seat. Past that, its oldest is coalesced into the
+  newest (`coalesced into <id>`, readable with `--id`), and the sender's result names
+  it.
+- At a full quota, a new message takes its sender's place as above, among that sender's
+  unmarked held messages: marked ones aren't replaced. When marked messages fill the
+  quota, a new one can't be held, and it says the seat's held quota is full.
+- Not marked, so held as above:
+  - messages held before this behaviour;
+  - `hold`-mode messages;
+  - other held reasons;
+  - queue wakes, which have their own retry;
+  - messages from OpenRig's own senders (the daemon, `system:*` actors, watchdogs).
+- Leaving `draft-aware` (to `off` or `hold`) leaves marked messages held until it's on
+  again.
+- Releasing `hold` tells the seat once what was held, with `rig seat held-messages`.
+  Nothing held is typed. That notice is one best-effort attempt when the release takes
+  effect: a daemon restart before then, or the notice itself being held, leaves no
+  notice. `rig seat held-messages` always lists what's held.
 
 ### Claude hook bridge (opt-in)
 
@@ -386,10 +446,10 @@ The bridge is used only for an occupant launched with it, once its waiter has ar
 - A waiter is live while it has polled within 20 s and its seat is idle or within 15 minutes of its turn's start; with no waiter polling, while the seat is in a turn the bridge waits on, for at most 15 minutes.
 - A new message goes behind messages already queued for the seat, even after the seat opts out, so they're typed in order. A send cancelled while it waits for the seat's lease isn't queued.
 - Messages already queued are typed in order, by one sweep at a time (every 5 s) once they've waited 20 s without a live waiter. The sweep takes back each message under the seat's delivery lease, just before typing it; one the bridge took first isn't typed, and nothing behind it overtakes it. A waiter's poll takes the same lease, so it can't take the next message while an earlier one is being typed.
-- A daemon restart leaves messages that were only queued for the bridge queued; they aren't marked indeterminate. A batch a waiter had taken before the restart is named uncertain by the bridge after it, as above.
+- A daemon restart leaves messages that were only queued for the bridge queued; they aren't marked indeterminate, and the bridge delivers each once, by the rules above: to a waiter at the seat's next turn boundary, or typed after the bound. Restart recovery runs before the bridge's sweep can take one. A batch a waiter had taken before the restart reads uncertain after it, and a message the bridge had handed back for typing isn't sent again.
 - A waiter exits by itself shortly before its hook timeout and reports that it expired. The next turn re-arms it.
 
-**What still decides first.** The typing guard: hold and the interruption levels hold or refuse as for typed delivery. A rig's delivery drain holds the bridge's automatic deliveries (queue wakes) as it holds typed ones: while the seat's rig is drained, no waiter takes them and no fallback types them, at any point up to the moment of typing, and they're delivered in their order once the drain ends. A direct send and an explicit queue notification pass a drain, and pass any held wakes, as on the typed path. A queue wake whose row no longer wants it (claimed, closed or moved on) isn't handed over: it ends `failed` (`not-delivered`), as the typed path refuses it. If the drain can't be read, delivery goes ahead and the daemon log says so.
+**What still decides first.** The typing guard: hold and the interruption levels hold or refuse as for typed delivery. A rig's delivery drain holds the bridge's automatic deliveries (queue wakes, and a held message's retry) as it holds typed ones: while the seat's rig is drained, no waiter takes them and no fallback types them, and they're delivered in their order once the drain ends. A fallback reads the drain under the seat's lease when it takes one back for typing; a held message's retry is also read again just before its paste, and one a drain or a pending restore refuses there goes back to the held list. A change of the seat's typing mode alone doesn't hold a retry the bridge already has: the typing guard decides it as for any typed delivery. A direct send and an explicit queue notification pass a drain, and pass any held wakes, as on the typed path. A queue wake whose row no longer wants it (claimed, closed or moved on) isn't handed over: it ends `failed` (`not-delivered`), as the typed path refuses it. If the drain can't be read, delivery goes ahead and the daemon log says so.
 The bridge only replaces how an admitted message reaches the seat. Watchdog reminders and queue wakes take the same path.
 
 **Cost.** Each wake is one model turn on the seat's own login. A burst of messages to an idle seat can cost several.
@@ -521,8 +581,10 @@ current parked-row eligibility and stop checks still apply. This changes message
 structured continuity actions such as creating a cutover baton.
 
 The parked-owner supervisor also retries current obligations despite an earlier failed, unknown or unrecorded attempt.
-Its first reminder to a seat waits until the seat's waiting state has been unchanged for 5 minutes, then goes on the next
-watchdog tick, so a seat that just handed work off or asked a person isn't interrupted; a seat still holding the work after
+An owner with open obligations whose activity is unknown is also eligible; the reminder and its evidence note say
+activity was unknown. `rig parked` still reports that uncertainty. Unknown activity gets no waiting-state grace.
+For a positively idle seat, its first reminder waits until the waiting state has been unchanged for 5 minutes, then goes
+on the next watchdog tick, so a seat that just handed work off or asked a person isn't interrupted; a seat still holding the work after
 that is reminded as before. A seat at an approval or question prompt gets no grace, so the prompt-blocked alert isn't delayed.
 A recorded success to the same known occupant waits for a change in its obligations, and then for that owner's
 minimum interval: one hour by default, counted from the reminder that was typed and submitted (an attempt that may or

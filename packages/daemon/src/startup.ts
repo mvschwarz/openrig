@@ -119,6 +119,7 @@ import { readClaudeSelfReportEvidence, verifiedSelfReportPid } from "./adapters/
 import { replaceFile } from "./adapters/replace-file.js";
 import { stageCodexActivityRelay } from "./adapters/codex-activity-relay.js";
 import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
+import { attachDraftHeldReoffer } from "./domain/draft-held-reoffer.js";
 import { deriveSelfHostIdSource, SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./domain/seat-identity-store.js";
 import { DaemonLifecycleStore } from "./domain/daemon-lifecycle-store.js";
@@ -179,6 +180,7 @@ import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
 import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
 import { makeSeatPoolExecutor, seatPoolQueueEffects } from "./domain/seat-pool-executor.js";
+import { runSeatPoolDispatchGuard } from "./domain/seat-pool-dispatch-guard.js";
 import { SeatLifecycleService } from "./domain/seat-lifecycle-service.js";
 import { convergeOp } from "./domain/topology-converge.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
@@ -716,7 +718,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       if (activity.state === "unknown") return null;
       if (runtime === "claude-code" && activity.state === "needs_input"
           && !["permission_prompt", "selection_prompt"].includes(activity.reason)) return null;
-      return activity.state === "needs_input" && ["permission_prompt", "selection_prompt"].includes(activity.reason);
+      return activity.state === "needs_input" && ["permission_prompt", "selection_prompt", "hook_trust_gate"].includes(activity.reason);
     },
     permissionPromptChanged: (sessionName, confirmed, runtime) => {
       const latest = agentActivityStore.getLatestForNode({ sessionName });
@@ -760,10 +762,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // An idle seat may have cleared the draft its draft-aware guard held a wake for (#48).
     void queueRepoInstance.retryDraftHeldWakesOnIdle(sessionName, state)
       .catch(error => console.warn(`Draft-held wake retry: ${error instanceof Error ? error.name : typeof error}`));
+    // A plain message held only for that draft goes then too, in order, each through the same guarded delivery.
+    void queueRepoInstance.deliverDraftHeldMessagesOnIdle(sessionName, state)
+      .catch(error => console.warn(`Draft-held message delivery: ${error instanceof Error ? error.name : typeof error}`));
     restoredSeatActivity?.(sessionName, state);
     rexSeatActivity?.(sessionName, { activity, runtime });
   };
   seatStructuralActivityService.attachActivityChanged(retryPromptWakes);
+  // A held message whose last try met the person's recent typing, a drain or a restore is offered again from the same
+  // per-tick sweep, even when the seat's state stays the same (#3991). No capture or delivery path of its own.
+  attachDraftHeldReoffer(seatStructuralActivityService, queueRepoInstance, sessionName => currentSeatActivity(sessionName).activity?.state,
+    { onError: error => console.warn(`Draft-held message re-offer: ${error instanceof Error ? error.name : typeof error}`) });
   eventBus.subscribe(event => { if (event.type === "agent.activity") retryPromptWakes(event.sessionName); });
   // #3315 — whether the daemon reaches its tmux server is state of its own (terminal-server-seats.ts): recorded once
   // per change, delivery to its seats held meanwhile, its return noticed by a read-only probe and owed work offered
@@ -1883,6 +1892,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           return true;
         }
       });
+      // The previous process's deliveries are settled first: the sweep below is the first thing in this process that can
+      // take a claim, and it starts before the server binds, so a later recovery could overwrite a live claim's result.
+      t.guardedDelivery?.recover();
       // Slice 13: messages queued for a hook bridge that has no live arm are typed after the bound; claimed batches whose
       // waiter is gone without an ack become indeterminate.
       setInterval(() => { void t.sweepHookBridge().catch(() => {}); }, 5_000).unref();
@@ -2647,8 +2659,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start. The policy hands each
     // evaluation to the executor, composed with the queue, the outbox's held messages, the delivery guard's custody,
     // the seats' activity and the rig's events, the drain's effects (the delivery guard's lifecycle lease, the
-    // `auto-rehydrate` capture and the checked seat stop), and the add: the model member as the export writes it, and the
-    // member add of `rig add` (convergeOp over this daemon's instantiator); it runs only through the policy.
+    // `auto-rehydrate` capture and the checked seat stop), the add: the model member as the export writes it, and the
+    // member add of `rig add` (convergeOp over this daemon's instantiator), and the comeback: the snapshot selection for
+    // a retained node and the restore orchestrator's launchSingleNode with that explicit snapshotId, this daemon's
+    // runtime adapters and the filesystem, and the dispatch guard's runner; it runs only through the policy.
     const seatPoolSlots = new SeatPoolSlotsRepository(db);
     const seatPoolStops = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter });
     const seatPoolExecutor = makeSeatPoolExecutor({
@@ -2680,6 +2694,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         converge: (rigId, op, rigRoot, opts) => convergeOp({ instantiator: podInstantiator }, rigId, op, rigRoot, opts),
         makeFolder: (folder) => { fs.mkdirSync(folder, { recursive: true }); },
       },
+      comeback: {
+        select: (rigId, nodeId, logicalId) => snapshotRepo.selectComebackSnapshot(rigId, nodeId, logicalId),
+        launch: (rigId, logicalId, { snapshotId }) => restoreOrchestrator.launchSingleNode(rigId, logicalId, {
+          snapshotId,
+          adapters: runtimeAdaptersMap,
+          fsOps: { exists: (path: string) => fs.existsSync(path) },
+        }),
+      },
+      // #4061: the block's `dispatch_guard`, run as an argv with a short timeout, once per planned move.
+      dispatchGuard: runSeatPoolDispatchGuard,
     });
     const seatPoolPolicy = makeSeatPoolPolicy({ cycle: (job) => seatPoolExecutor.cycle(job) });
     void seatPoolPolicy;
@@ -3322,7 +3346,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // OPR.0.5.6.1 — bind the delivery policies' late gateway ref.
   lateGatewayDispatch.fn = (op, ref, payload, opts) => gatewaySubsystem.dispatch(op, ref, payload, opts);
 
-  // `ui.enabled` (default off): the web UI pages and its terminal WebSocket. Read once at start.
+  // `ui.enabled` (default off): serve the web UI pages and assets. Read once at start.
   deps.webUiEnabled = opts?.webUiEnabled ?? new ContextPackSettingsStore().resolveOne("ui.enabled").value === true;
   // /api browser boundary: this machine's exact Tailscale MagicDNS name, looked up on demand.
   deps.selfNameDiscovery = () => discoverTailscaleSelfNames({ timeoutMs: 1500 });

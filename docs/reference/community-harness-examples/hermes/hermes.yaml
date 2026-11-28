@@ -9,5 +9,8 @@ limits:
   - creation settings (model, provider, max turns) come from the seat's Hermes config.yaml, not from flags
   - no guidance, skills or startup files are placed
   - needs-input and approval prompts are read from the screen only
+  - fresh handover passes its restore packet through --query-file; native submission and consumption are unconfirmed
+  - initial input transport is covered with a stand-in; unattended startup needs checking with the installed Hermes
+first_input: true                 # Hermes v0.23.4: --query-file seeds the interactive session on a real TTY
 names_conversation: true
 passes_model: false              # the launcher maps OPENRIG_MODEL for a new session; set true once checked with the real harness

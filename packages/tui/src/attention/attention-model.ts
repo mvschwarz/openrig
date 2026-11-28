@@ -106,6 +106,13 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
           lines.push({ text: `Or answer in your own words: reply <text>, ${as}${verb === "answer" ? " (it fills the first unanswered question and closes the request)" : ""}.` });
         }
       }
+      // An open update addressed to a person can be dismissed here, as the terminal's act on their behalf. Opening it stays
+      // passive; a closed update offers nothing and shows its state.
+      if (d.item.dismiss && d.item.id.startsWith("queue-update:")) {
+        const recipient = d.item.recipient ? ` on ${d.item.recipient}'s behalf` : "";
+        lines.push(listItem(`Dismiss update as ${actingAs(read, d.item.dismiss.actorSession)}${recipient} (closes it; not approval, proof of delivery or a reply)`,
+          { type: "act", act: "answer", qitemId: d.item.id.slice("queue-update:".length), verb: "dismiss", actorSession: d.item.dismiss.actorSession }));
+      }
       // The settings page that decides this request directly (a pairing request's Approve and Deny), opened on it.
       if (d.item.settingsLink) lines.push(listItem(d.item.settingsLink.label, { type: "config-category", category: d.item.settingsLink.category, focus: d.item.settingsLink.focus }));
       if (d.item.asker) {

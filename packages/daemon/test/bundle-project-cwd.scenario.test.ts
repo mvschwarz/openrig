@@ -1,13 +1,14 @@
 // Model-free installed-path scenario. The generic YAML scenario runner passes a
 // global --cwd, so it cannot exercise per-member bundle cwd resolution.
 // Use its hermetic daemon/tmux helpers and the actual bundle-install CLI instead.
-import { it, expect } from "vitest";
+import { it, expect, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { prepareHermeticEnv } from "./helpers/hermetic-env.js";
 import { spawnScenarioDaemon, runRig, type ScenarioDaemon } from "./helpers/scenario-daemon.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import { pack } from "../src/domain/bundle-archive.js";
 import { computeIntegrity } from "../src/domain/bundle-integrity.js";
 
@@ -36,8 +37,16 @@ it("a real bundle install starts both terminal seats in their carried project fo
     daemon = await spawnScenarioDaemon(scaffold, { rigBin });
     const installed = await runRig(["bundle", "install", bundle, "--target", target, "--yes", "--json"], daemon.readEnv, rigBin, 120_000);
     expect(installed.code, installed.stdout + installed.stderr).toBe(0);
-    const panes = execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "list-panes", "-a", "-F", "#{pane_current_path}"], { env: daemon.readEnv, encoding: "utf8" }).trim().split("\n").sort();
-    expect(panes).toEqual([path.join(projects, "demo", "api"), path.join(projects, "demo", "ui")].sort());
+    const paneIds = execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "list-panes", "-a", "-F", "#{pane_id}"], { env: daemon.readEnv, encoding: "utf8" }).trim().split("\n");
+    // Read the shell's real cwd: tmux 3.4 escapes '$' in pane_current_path's format output.
+    const panes = (await Promise.all(paneIds.map(async (pane, index) => {
+      const receipt = path.join(scaffold.root, `pane-cwd-${index}.txt`);
+      execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "send-keys", "-t", pane, "-l", `pwd -P > ${shellQuote(receipt)}`], { env: daemon.readEnv });
+      execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "send-keys", "-t", pane, "Enter"], { env: daemon.readEnv });
+      await vi.waitFor(() => expect(fs.readFileSync(receipt, "utf8").trimEnd()).not.toBe(""), { timeout: 20_000 });
+      return fs.readFileSync(receipt, "utf8").trimEnd();
+    }))).sort();
+    expect(panes).toEqual(["api", "ui"].map(name => fs.realpathSync(path.join(projects, "demo", name))).sort());
     expect(fs.readFileSync(path.join(panes[0]!, "marker"), "utf8")).toBe("api");
     expect(fs.readFileSync(path.join(panes[1]!, "marker"), "utf8")).toBe("ui");
     expect(fs.existsSync(path.join(target, "${project:demo}"))).toBe(false);

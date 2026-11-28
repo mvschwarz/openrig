@@ -34,6 +34,7 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
 import { SeatPoolSlotsRepository } from "../src/domain/seat-pool-slots.js";
+import { runSeatPoolDispatchGuard } from "../src/domain/seat-pool-dispatch-guard.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 
 // What production startup hands the watchdog's delivery and two of its policies, recorded on the way through to the
@@ -462,6 +463,46 @@ describe("the seat-pool add's composition (#3395)", () => {
       expect(executorDeps.db).toBe(db);
     } finally {
       exported.mockRestore(); addMember.mockRestore();
+    }
+  });
+});
+
+describe("the seat-pool dispatch guard's composition (#4061)", () => {
+  it("Startup composes the seat-pool executor with the daemon's dispatch guard runner, which runs the block's `dispatch_guard` as an argv.", () => {
+    expect(composed.seatPoolExecutor).toHaveLength(1);
+    const executorDeps = composed.seatPoolExecutor[0]!.deps as SeatPoolExecutorDeps;
+    expect(executorDeps.dispatchGuard).toBe(runSeatPoolDispatchGuard);
+  });
+});
+
+describe("the seat-pool comeback's composition (#3395)", () => {
+  it("Startup composes the seat-pool comeback with the snapshot repository's comeback selection and the restore orchestrator's launchSingleNode, always with the explicit snapshotId, the daemon's runtime adapters and the filesystem, and the executor exposes its own `comeback`.", async () => {
+    expect(composed.seatPoolExecutor).toHaveLength(1);
+    const { deps: composedDeps, executor } = composed.seatPoolExecutor[0]! as { deps: SeatPoolExecutorDeps; executor: { comeback?: unknown } };
+    // without these the executor brings no drained slot back
+    const comeback = composedDeps.comeback;
+    expect(comeback).toBeDefined();
+    expect(typeof executor.comeback).toBe("function");
+
+    const selection = { chosen: null, read: 2, failed: [] };
+    const select = vi.spyOn(deps.snapshotRepo, "selectComebackSnapshot").mockReturnValue(selection);
+    const launched = { ok: false, code: "snapshot_not_found", message: "pinned" };
+    const launch = vi.spyOn(deps.restoreOrchestrator, "launchSingleNode").mockResolvedValue(launched);
+    try {
+      // the selection: the daemon's own snapshot repository
+      expect(comeback!.select("rig-pin", "node-pin", "dev.impl-s1")).toBe(selection);
+      expect(select).toHaveBeenCalledWith("rig-pin", "node-pin", "dev.impl-s1");
+      // the launch: launchSingleNode with the explicit snapshot id, the runtime adapters and the filesystem
+      expect(await comeback!.launch("rig-pin", "dev.impl-s1", { snapshotId: "snap-pin" })).toBe(launched);
+      expect(launch).toHaveBeenCalledTimes(1);
+      const [rigId, logicalId, opts] = launch.mock.calls[0]!;
+      expect([rigId, logicalId]).toEqual(["rig-pin", "dev.impl-s1"]);
+      expect(opts).toEqual({ snapshotId: "snap-pin", adapters: expect.any(Object), fsOps: { exists: expect.any(Function) } });
+      expect(Object.keys(opts!.adapters!)).toEqual(expect.arrayContaining(["claude-code", "codex", "terminal"]));
+      expect(opts!.fsOps!.exists(scratch)).toBe(true);
+      expect(opts!.fsOps!.exists(path.join(scratch, "no-such-path"))).toBe(false);
+    } finally {
+      select.mockRestore(); launch.mockRestore();
     }
   });
 });

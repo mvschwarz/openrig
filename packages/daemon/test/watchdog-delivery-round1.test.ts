@@ -23,7 +23,8 @@ import type { StructuralObservation } from "../src/domain/seat-structural-activi
 const seat = "worker@test", stores: Database.Database[] = [];
 const absent: SendResult = { ok: false, sessionName: seat, sent: false, inputPhase: "not_reached", reason: "tmux_unavailable", error: "Terminal service not yet listening" };
 const delivered: SendResult = { ok: true, sessionName: seat, sent: true };
-beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z")); });
+// Only the clock is faked: a pass takes a real event-loop turn between due jobs, which a faked setImmediate never runs.
+beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-01-01T00:00:00Z")); });
 afterEach(() => { for (const db of stores.splice(0)) if (db.open) db.close(); vi.useRealTimers(); });
 const later = (s: number) => vi.setSystemTime(Date.now() + s * 1000);
 function fixture(send: (session: string, body: string) => Promise<SendResult>, saved?: Buffer, digest = false,

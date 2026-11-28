@@ -159,4 +159,18 @@ describe("seat pool slots (#3395 Piece 1)", () => {
       db.close();
     }
   });
+
+  it("settleAddNotRunning writes only an add's attempt: an issued comeback on the same row is left as it is.", () => {
+    const { db, rigRepo, slots, rig, model } = setup();
+    try {
+      const agent = rigRepo.addNode(rig.id, "dev.impl-s1", { runtime: "claude-code" });
+      const slot = slots.insert({ modelNodeId: model.id, slotNumber: 1, nodeId: agent.id, phase: "drained", at: AT });
+      expect(slots.reserveComeback({ slotId: slot.slotId, attemptId: "cb-1", snapshotId: "snap-1" })).toBe(true);
+      expect(slots.issueAttempt(slot.slotId, "cb-1", JSON.stringify({ snapshotId: "snap-1" }))).toBe(true);
+      expect(slots.settleAddNotRunning(slot.slotId, "cb-1", { outcome: JSON.stringify({ status: "not_running" }), hold: "{}", at: AT })).toBe(false);
+      expect(slots.get(slot.slotId)).toMatchObject({ phase: "adding", attemptKind: "comeback", attemptState: "issued", reuseHold: null });
+    } finally {
+      db.close();
+    }
+  });
 });

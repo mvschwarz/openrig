@@ -13,7 +13,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { ProcessCensus } from "../src/domain/process-census.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
-import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { DRAFT_HELD_ELIGIBLE_TAG, OutboxHandler } from "../src/domain/outbox-handler.js";
 import { HOOK_BRIDGE_LIVE_BOUND_MS, HOOK_BRIDGE_TURN_BOUND_MS, HookBridge } from "../src/domain/hook-bridge.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -536,6 +536,61 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     expect(s.bridge.queued(s.nodeId).map((r) => r.outboxId)).toEqual([wake.id]);
   });
 
+  // #3991 r5: OpenRig's automatic retry of a message held for a draft goes to a live bridge like any plain message. A rig's
+  // drain that starts after it was queued holds it there, as it holds a queue wake.
+  const heldRetryInBridge = async (s: Awaited<ReturnType<typeof seat>>, repo: QueueRepository) => {
+    await s.guard.set(s.nodeId, { mode: "draft-aware" }, "human@team", "keep draft");
+    const id = "draft-held-retry-1";
+    // A message held for the person's draft and marked for the retry, as the guarded delivery leaves it.
+    new OutboxHandler(s.db).retain({ outboxId: id, senderSession: "peer@team", destinationSession: s.sessionName,
+      body: "From: peer@team\n---\nheld for the draft\n---" }, s.guard.target(s.sessionName));
+    s.db.prepare("UPDATE outbox_entries SET tags=json_array(?) WHERE outbox_id=?").run(DRAFT_HELD_ELIGIBLE_TAG, id);
+    const { armId } = s.optInAndArm();
+    // The draft has cleared: the pass's retry goes to the live bridge.
+    expect(await repo.deliverDraftHeldMessagesOnIdle(s.sessionName, "idle")).toBe("done");
+    expect(s.bridge.queued(s.nodeId).map((r) => r.outboxId)).toEqual([id]);
+    expect(s.writes).toEqual([]);
+    return { id, armId };
+  };
+
+  it("holds a draft-held retry the bridge took when the rig's drain starts after: the poll waits and the sweeps type nothing; after the drain the waiter gets it once (#3991 r5)", async () => {
+    const s = await seat();
+    const repo = queueOn(s);
+    s.drainWith((name) => repo.deliveryDrains.holds(name));
+    const { id, armId } = await heldRetryInBridge(s, repo);
+    const endDrain = beginDrain(s, repo, "m-r5-1");
+    expect(s.bridge.poll(s.nodeId, armId)).toEqual({ action: "wait" });
+    s.advance(HOOK_BRIDGE_TURN_BOUND_MS + 1);
+    expect(await s.transport.sweepHookBridge()).toEqual([]);
+    expect(await s.transport.sweepHookBridge({ nodeId: s.nodeId })).toEqual([]);
+    expect(s.writes).toEqual([]);
+    expect(s.bridge.queued(s.nodeId).map((r) => r.outboxId)).toEqual([id]);
+    endDrain();
+    const polled = s.bridge.poll(s.nodeId, armId) as { action: string; messages: Array<{ outboxId: string }> };
+    expect(polled.action).toBe("deliver");
+    expect(polled.messages.map((m) => m.outboxId)).toEqual([id]);
+    expect(s.bridge.queued(s.nodeId)).toEqual([]);
+    expect(await s.transport.sweepHookBridge()).toEqual([]);
+    expect(s.writes).toEqual([]);
+  });
+
+  it("doesn't hand back a draft-held retry whose rig's drain began after the sweep selected it, before the final handback (#3991 r5)", async () => {
+    const s = await seat();
+    const repo = queueOn(s);
+    s.drainWith((name) => repo.deliveryDrains.holds(name));
+    const { id } = await heldRetryInBridge(s, repo);
+    s.advance(HOOK_BRIDGE_TURN_BOUND_MS + 1);
+    let release!: () => void;
+    const holding = s.guard.exclusive(s.nodeId, () => new Promise<void>((r) => { release = r; }));
+    const sweeping = s.transport.sweepHookBridge();
+    await new Promise((r) => setTimeout(r, 30)); // the sweep has selected it and waits for the seat's lease
+    beginDrain(s, repo, "m-r5-2");
+    release(); await holding;
+    expect(await sweeping).toEqual([]);
+    expect(s.writes).toEqual([]);
+    expect(s.bridge.queued(s.nodeId).map((r) => r.outboxId)).toEqual([id]);
+  });
+
   it("lets a direct send and the explicit resolve notice pass a drain-held wake; the held wake arrives after the drain ends (R7-2)", async () => {
     const s = await seat();
     const { armId } = s.optInAndArm();
@@ -703,4 +758,46 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     }
   });
 
+});
+
+// #3991 round 4: restart recovery and the bridge's queue. A message the bridge positively queued and no waiter took is
+// still owed after a restart, and the bridge delivers it once; one a waiter had claimed stays uncertain.
+describe("restart recovery and the hook bridge's queue", () => {
+  const stateOf = (s: Awaited<ReturnType<typeof seat>>, id: string) => new OutboxHandler(s.db).getById(id)?.deliveryState;
+  const receiptState = (s: Awaited<ReturnType<typeof seat>>, id: string) =>
+    (s.db.prepare("SELECT json_extract(guard_delivery,'$.state') AS st FROM outbox_entries WHERE outbox_id=?").get(id) as { st: string | null } | undefined)?.st;
+
+  it("a message only queued for the bridge stays queued through restart recovery, and the bridge types it once after the bound", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const queued = await s.transport.send(s.sessionName, "From: peer@team\n---\nqueued before the restart\n---", { actorSession: "peer@team" });
+    expect(queued.outcome).toBe("bridged");
+    const id = queued.outboxIds![0]!;
+    // The restart: its waiter is gone, and startup runs recovery before the bridge's sweep.
+    s.bridge.expired(s.nodeId, s.sessionName, armId);
+    s.transport.guardedDelivery!.recover();
+    expect([stateOf(s, id), receiptState(s, id)]).toEqual(["sending", "queued"]);
+    s.advance(HOOK_BRIDGE_LIVE_BOUND_MS);
+    const typed = await s.transport.sweepHookBridge();
+    expect(typed.map(r => r.outboxId)).toEqual([id]);
+    expect(stateOf(s, id)).toBe("delivered");
+    expect(s.writes).toEqual(["paste", "keys"]);
+    expect(await s.transport.sweepHookBridge()).toEqual([]);   // once
+    expect(s.writes).toEqual(["paste", "keys"]);
+  });
+
+  it("a batch a waiter had claimed before the restart reads uncertain after recovery and is never sent again", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const queued = await s.transport.send(s.sessionName, "From: peer@team\n---\nclaimed before the restart\n---", { actorSession: "peer@team" });
+    const id = queued.outboxIds![0]!;
+    expect(s.bridge.poll(s.nodeId, armId)).toMatchObject({ action: "deliver" });   // the waiter took it, with no ack
+    expect(receiptState(s, id)).toBe("claimed");
+    s.bridge.expired(s.nodeId, s.sessionName, armId);
+    s.transport.guardedDelivery!.recover();
+    expect(stateOf(s, id)).toBe("indeterminate");
+    s.advance(HOOK_BRIDGE_LIVE_BOUND_MS);
+    expect(await s.transport.sweepHookBridge()).toEqual([]);
+    expect(s.writes).toEqual([]);
+  });
 });
