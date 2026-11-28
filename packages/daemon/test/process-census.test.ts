@@ -1,9 +1,12 @@
 // OPR.0.5.3.10 mini-req 3 — the census contract: coalescing, freshness reuse,
 // honest failure. Deterministic (injected lister + clock).
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { ProcessCensus } from "../src/domain/process-census.js";
+import { readProcessTable } from "../src/domain/process-table.js";
+import { restoreProc, serveFakeProc } from "./helpers/fake-proc.js";
 
 const ROWS = [{ pid: 1, ppid: 0, command: "init" }];
+afterEach(() => { restoreProc(); });
 
 describe("ProcessCensus", () => {
   it("coalesces concurrent callers onto ONE in-flight enumeration", async () => {
@@ -63,5 +66,22 @@ describe("ProcessCensus", () => {
     // A NEW cycle fetches again (stale window).
     await census.cycleLister()();
     expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("fresh read bypasses an earlier in-flight shared readProcessTable() snapshot", async () => {
+    const startedAt = "Fri Oct  2 20:00:00 2026";
+    serveFakeProc([
+      { pid: 10, ppid: 1, pgid: 10, tpgid: 20, name: "zsh", startedAt, command: "zsh" },
+      { pid: 20, ppid: 10, pgid: 20, tpgid: 20, name: "claude", startedAt, command: "claude --session-id A" },
+    ]);
+    const inFlight = readProcessTable();
+    serveFakeProc([
+      { pid: 10, ppid: 1, pgid: 10, tpgid: 21, name: "zsh", startedAt, command: "zsh" },
+      { pid: 21, ppid: 10, pgid: 21, tpgid: 21, name: "claude", startedAt, command: "claude --session-id B" },
+    ]);
+    const census = new ProcessCensus({ freshnessMs: 0 });
+    const [staleRows, freshRows] = await Promise.all([inFlight, census.list({ fresh: true })]);
+    expect(staleRows.map((row) => row.pid)).toEqual([10, 20]);
+    expect(freshRows.map((row) => row.pid)).toEqual([10, 21]);
   });
 });

@@ -9,6 +9,7 @@ import {
   paneClaudeSessionIdArgument,
   resolveIdentityVerifiedClaudeRecord,
   resolveLiveCodexThreadId,
+  verifiedPaneProcessChain,
   type ProcessRow,
 } from "../src/domain/model-divergence/current-generation-record.js";
 
@@ -205,6 +206,26 @@ describe("resolveLiveCodexThreadId", () => {
   it("a codex process whose logs yield nothing is a NAMED reason", async () => {
     const out = await resolveLiveCodexThreadId("s", { ...deps, readThreadIdByPid: () => undefined });
     expect(!out.ok && out.reason).toContain("yielded no thread id");
+  });
+
+  it("uses the same executable-aware matcher for preloaded node launchers and chain validation, while skipping tool children", async () => {
+    const rows: ProcessRow[] = [
+      { pid: 10, ppid: 1, command: "-zsh", startedAt: "Fri Oct  2 20:00:00 2026" },
+      { pid: 31, ppid: 10, command: "node --require preload.js /path/to/codex resume 019f6343-aaaa-bbbb-cccc-ddddeeeeffff", startedAt: "Fri Oct  2 20:00:00 2026" },
+      { pid: 32, ppid: 31, command: "grep codex src/app.ts", startedAt: "Fri Oct  2 20:00:00 2026" },
+      { pid: 33, ppid: 31, command: "sh -c echo claude codex", startedAt: "Fri Oct  2 20:00:00 2026" },
+      { pid: 34, ppid: 31, command: "node --require /path/to/codex /tmp/other.js", startedAt: "Fri Oct  2 20:00:00 2026" },
+    ];
+    const readPids: number[] = [];
+    const out = await resolveLiveCodexThreadId("s", {
+      getPanePid: async () => 10,
+      listProcesses: async () => rows,
+      readThreadIdByPid: (pid) => { readPids.push(pid); return pid === 31 ? "thread-preloaded" : "wrong-thread"; },
+    });
+    expect(out).toEqual({ ok: true, id: "thread-preloaded" });
+    expect(readPids).toEqual([31]);
+    const chain = JSON.parse(verifiedPaneProcessChain(rows, 10, "codex")) as Array<Array<[number, number, string | null, string]>>;
+    expect(chain.flat().map(([pid]) => pid).sort((a, b) => a - b)).toEqual([10, 31]);
   });
 });
 

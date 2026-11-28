@@ -224,6 +224,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
   let runtimeMatch = classifyPaneRuntimeMatch(command, input.runtime);
   const normalizedCommand = command?.trim().toLowerCase() ?? "";
   let lineageMatch: ProcessRow | null = null;
+  let paneStartedAt: string | undefined;
   const expectedResumeToken = input.expectedResumeToken ?? null;
   const strictNativeLineage = input.requireExactResumeLineage === true
     && expectedResumeToken !== null
@@ -279,7 +280,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
     if (processReadFailure) return unavailable(processReadFailure);
     const current = await recheckPane();
     if (!current.ok) return unavailable(current.error);
-    if (native?.panePid === pid && current.sameProcess) lineageMatch = native.process;
+    if (native?.panePid === pid && current.sameProcess) { lineageMatch = native.process; paneStartedAt = native.paneStartedAt; }
   } else if (claudeProcessProof) {
     // A known token always requires exact proof. Only non-strict, tokenless
     // wrappers and version labels may use runtime occupancy; this never proves resume continuity.
@@ -293,7 +294,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
     if (processReadFailure) return unavailable(processReadFailure);
     const current = await recheckPane();
     if (!current.ok) return unavailable(current.error);
-    if (native?.panePid === pid && current.sameProcess) lineageMatch = native.process;
+    if (native?.panePid === pid && current.sameProcess) { lineageMatch = native.process; paneStartedAt = native.paneStartedAt; }
   } else if (runtimeMatch === "match" && strictNativeLineage) {
     let rows: NativeProcessRow[];
     try {
@@ -308,6 +309,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
       const current = await recheckPane();
       if (!current.ok) return unavailable(current.error);
       if (!current.sameProcess) lineageMatch = null;
+      else paneStartedAt = rows.find((row) => row.pid === pid)?.startedAt;
     }
   }
   const runtimeAmbiguous = input.runtime === "codex" || claudeProcessProof ? lineageMatch === null : runtimeMatch === "match" && (strictNativeLineage
@@ -333,6 +335,8 @@ export async function rebindAndVerifyPaneIdentity(input: {
       registeredPane: pane.id,
       observedPid: lineageMatch?.pid ?? pid,
       observedPanePid: pid,
+      ...(lineageMatch?.startedAt ? { observedPidStartedAt: lineageMatch.startedAt } : {}),
+      ...(paneStartedAt ? { observedPanePidStartedAt: paneStartedAt } : {}),
       observedCommand: lineageMatch?.command ?? command,
       matchedLayer: runtimeAmbiguous || unconfirmed ? null : 1,
     },
@@ -348,18 +352,20 @@ export async function rebindAndVerifyPaneIdentity(input: {
     return true;
   })();
   if (!published) {
-    // The periodic identity sweep (every 5 s) can store a newer verdict while this check runs. When that verdict
-    // verified the same process in the same pane, and the binding is still that pane, it confirms this check; anything
-    // else (another verdict, pane, process or binding) still supersedes it. A sweep that verified the pane by its label
-    // (a Claude seat whose pane reads `claude`) names only the pane's own process, no native one, so it agrees when that
-    // is this check's pane process.
     const newer = identityStore.getForNode(input.nodeId);
     const binding = input.sessionRegistry.getBindingForNode(input.nodeId);
+    // A label-only sweep records the pane process in observedPid.
+    const paneOnly = newer?.evidence.observedPanePid == null;
+    const newerPaneStartedAt = paneOnly
+      ? newer?.evidence.observedPidStartedAt
+      : newer.evidence.observedPanePidStartedAt;
     const confirmed = verdict.verdict === "verified" && newer?.verdict === "verified"
       && newer.sessionName === input.sessionName && newer.evidence.registeredPane === pane.id
       && (newer.evidence.observedPanePid ?? newer.evidence.observedPid) === pid
-      && (newer.evidence.observedPid === verdict.evidence.observedPid
-        || (newer.evidence.observedPanePid == null && newer.evidence.observedPid === pid))
+      && (paneOnly || newer.evidence.observedPid === verdict.evidence.observedPid)
+      && (!paneStartedAt || !newerPaneStartedAt || paneStartedAt === newerPaneStartedAt)
+      && (paneOnly || !verdict.evidence.observedPidStartedAt || !newer.evidence.observedPidStartedAt
+        || newer.evidence.observedPidStartedAt === verdict.evidence.observedPidStartedAt)
       && binding?.tmuxSession === input.sessionName && binding.tmuxPane === pane.id;
     if (!confirmed) return { ok: false, reason: "identity_unverified", detail: "A newer pane identity observation superseded this check" };
   }

@@ -644,7 +644,7 @@ function rotationProcess(row: NativeProcessRow, rotation: ClaudeResumeRotation |
 }
 
 /** `afterScript`: found by the script-launch or symlink rule, not the exact-path match; its first proof must be pinned. */
-export type NativeProcessObservation = { panePid: number; process: NativeProcessRow; fingerprint: string; afterScript?: true };
+export type NativeProcessObservation = { panePid: number; paneStartedAt?: string; process: NativeProcessRow; fingerprint: string; afterScript?: true };
 export type CodexProcessObservation = NativeProcessObservation;
 
 /** The process still running the frozen `#!` script: the kernel starts it as `<interpreter> [one shebang option] <script>
@@ -710,7 +710,7 @@ function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: 
     }
     if (runtime === "codex" && !belongsToPane) return [];
   }
-  return matches.map(({ process, chain }) => ({ panePid, process,
+  return matches.map(({ process, chain }) => ({ panePid, paneStartedAt: chain.at(-1)?.startedAt, process,
     fingerprint: JSON.stringify(chain.map(row => runtime === "codex"
       ? [row.pid, row.ppid, row.startedAt, row.pgid, row.tpgid, row.executableName, row.command, row.executablePath, row.argv]
       : [row.pid, row.ppid, row.startedAt, row.pgid, row.tpgid, row.executableName, row.command, row.executablePath])) }));

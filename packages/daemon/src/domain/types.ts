@@ -860,6 +860,10 @@ export interface SeatIdentityVerdict {
     observedPid: number | null;
     /** Pane root observed in the same verdict; absent on legacy verdicts. */
     observedPanePid?: number | null;
+    /** Start time (`ps lstart`) of `observedPid` when proven from the process table. */
+    observedPidStartedAt?: string | null;
+    /** Start time (`ps lstart`) of `observedPanePid` when proven from the process table. */
+    observedPanePidStartedAt?: string | null;
     observedCommand: string | null;
     matchedLayer: number | null;
   };

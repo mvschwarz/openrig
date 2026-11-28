@@ -59,6 +59,72 @@ export type ClaudeRecordSelection =
   | { ok: true; id: string; path: string; source: "generation-sidecar" | "verified-pane-argument" }
   | { ok: false; reason: string };
 
+function tokenBasename(token: string): string {
+  return basename(token.replace(/^['"]|['"]$/g, "").replace(/^-/, "")).toLowerCase().replace(/\.exe$/, "");
+}
+
+const JS_RUNTIME_VALUE_FLAGS = new Set([
+  "-r", "--require", "--import", "--loader", "--experimental-loader",
+  "-C", "--conditions", "--preload", "--env-file", "--env-file-if-exists",
+  "-c", "--config", "--cwd", "--tsconfig-override", "--import-map",
+  "--redirect-warnings", "--title", "--input-type", "--diagnostic-dir",
+  "--icu-data-dir", "--openssl-config", "--max-http-header-size",
+]);
+const JS_RUNTIME_INLINE_FLAGS = new Set(["-e", "--eval", "-p", "--print"]);
+
+function jsRuntimeScriptToken(argv0: string, args: string[]): string | undefined {
+  let index = (argv0 === "deno" || argv0 === "bun") && args[0] === "run" ? 1 : 0;
+  while (index < args.length) {
+    const token = args[index]!;
+    if (token === "--") return args[index + 1];
+    if (JS_RUNTIME_INLINE_FLAGS.has(token) || /^--(?:eval|print)=/.test(token)) return undefined;
+    if (JS_RUNTIME_VALUE_FLAGS.has(token)) { index += 2; continue; }
+    if (token.startsWith("-")) { index += 1; continue; }
+    return token;
+  }
+  return undefined;
+}
+
+function isRuntimeCommand(command: string, runtime: "claude-code" | "codex"): boolean {
+  let parts = command.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return false;
+  if (tokenBasename(parts[0]!) === "env") {
+    let i = 1;
+    while (i < parts.length) {
+      const token = parts[i]!;
+      if (token === "--") { i += 1; break; }
+      if (token === "-u" || token === "--unset" || token === "-C" || token === "--chdir") { i += 2; continue; }
+      if (token.startsWith("-") || token.includes("=")) { i += 1; continue; }
+      break;
+    }
+    if (i >= parts.length) return false;
+    parts = parts.slice(i);
+  }
+  const argv0 = tokenBasename(parts[0]!);
+  if (isShellForeground(argv0)) return false;
+  const matchesToken = runtime === "claude-code"
+    ? (token: string) => commandNamesClaude(token.replace(/^['"]|['"]$/g, ""))
+    : (token: string) => tokenBasename(token) === "codex";
+  if (matchesToken(parts[0]!)) return true;
+  if (argv0 === "node" || argv0 === "bun" || argv0 === "deno") {
+    const scriptToken = jsRuntimeScriptToken(argv0, parts.slice(1));
+    return scriptToken !== undefined && matchesToken(scriptToken);
+  }
+  return false;
+}
+
+const isCodexRuntimeCommand = (command: string): boolean => isRuntimeCommand(command, "codex");
+
+function hasClaudeSessionArg(command: string): boolean {
+  return /--(?:session-id|resume)[= ][0-9a-f-]{36}/.test(command);
+}
+
+function matchesRuntimeRoot(row: ProcessRow | undefined, matches: (command: string) => boolean): boolean {
+  if (!row) return false;
+  const argv0 = basename((row.command.trim().split(/\s+/)[0] ?? "").replace(/^-/, "").replace(/^['"]|['"]$/g, ""));
+  return !isShellForeground(argv0) && matches(row.command);
+}
+
 /** `parentPid` itself and its descendants whose command matches `matches`, breadth-first: a runtime exec'd at launch
  *  IS the pane's process. A shell at the root isn't one, even when its arguments name the runtime: `bash -c` keeps its
  *  whole script in argv while a later command runs. (Deliberately local: the two existing walkers are module-private in
@@ -71,8 +137,7 @@ function findDescendants(processes: ProcessRow[], parentPid: number, matches: (c
     byParent.set(p.ppid, list);
   }
   const root = processes.find((p) => p.pid === parentPid);
-  const rootArgv0 = basename((root?.command.trim().split(/\s+/)[0] ?? "").replace(/^-/, "").replace(/^['"]|['"]$/g, ""));
-  const out: number[] = root && !isShellForeground(rootArgv0) && matches(root.command) ? [root.pid] : [];
+  const out: number[] = root && matchesRuntimeRoot(root, matches) ? [root.pid] : [];
   const queue = [parentPid];
   while (queue.length > 0) {
     const pid = queue.shift()!;
@@ -82,13 +147,6 @@ function findDescendants(processes: ProcessRow[], parentPid: number, matches: (c
     }
   }
   return out;
-}
-
-function commandBasenameIs(name: string): (command: string) => boolean {
-  return (command) => command.trim().split(/\s+/).filter(Boolean).some((token) => {
-    const unquoted = token.replace(/^['"]|['"]$/g, "");
-    return unquoted.split("/").pop() === name;
-  });
 }
 
 /** The pane process's Claude session-id LAUNCH ARGUMENT. It is authoritative only after the caller
@@ -227,6 +285,43 @@ function cleanString(value: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/** Positive evidence only: true when both the verdict and the live census row carry start times and they differ. */
+export function processStartMismatchesVerdict(
+  row: ProcessRow | undefined,
+  recordedStartedAt: string | null | undefined,
+): boolean {
+  return Boolean(recordedStartedAt && row?.startedAt && row.startedAt !== recordedStartedAt);
+}
+
+/** Snapshot of every contributing runtime process chain up to `panePid` (PID, PPID, start time, command). */
+export function verifiedPaneProcessChain(
+  processes: ProcessRow[],
+  panePid: number,
+  runtime: "claude-code" | "codex",
+  nativePid?: number,
+): string {
+  const byPid = new Map(processes.map((row) => [row.pid, row]));
+  const pinnedNative = nativePid !== undefined
+    && (nativePid !== panePid || matchesRuntimeRoot(byPid.get(panePid), (cmd) => isRuntimeCommand(cmd, runtime)));
+  const leafMatcher = runtime === "claude-code"
+    ? (command: string) => (pinnedNative
+      ? commandNamesClaude(command) && hasClaudeSessionArg(command)
+      : isRuntimeCommand(command, "claude-code") || (commandNamesClaude(command) && hasClaudeSessionArg(command)))
+    : isCodexRuntimeCommand;
+  const leafSet = new Set<number>(findDescendants(processes, panePid, leafMatcher));
+  if (pinnedNative) leafSet.add(nativePid);
+  const leaves = [...leafSet].sort((a, b) => a - b);
+  return JSON.stringify(leaves.map((leaf) => {
+    const chain: Array<[number, number, string | null, string]> = [];
+    const seen = new Set<number>();
+    for (let row = byPid.get(leaf); row && !seen.has(row.pid); row = row.pid === panePid ? undefined : byPid.get(row.ppid)) {
+      seen.add(row.pid);
+      chain.push([row.pid, row.ppid, row.startedAt ?? null, row.command]);
+    }
+    return chain;
+  }));
+}
+
 /** The live codex occupant's thread id, via its own pid's log join — bypasses the stored resume
  *  token entirely (the stored token is exactly what went stale on the specimen class). */
 export async function resolveLiveCodexThreadId(
@@ -236,7 +331,7 @@ export async function resolveLiveCodexThreadId(
   const panePid = await deps.getPanePid(sessionTarget);
   if (!panePid) return { ok: false, reason: `no live pane pid for ${sessionTarget}` };
   const processes = await deps.listProcesses();
-  const codexPids = findDescendants(processes, panePid, commandBasenameIs("codex"));
+  const codexPids = findDescendants(processes, panePid, isCodexRuntimeCommand);
   if (codexPids.length === 0) return { ok: false, reason: `no codex process under the live pane of ${sessionTarget}` };
   const ids = new Set<string>();
   const readStarts = new Map<number, string | undefined>();

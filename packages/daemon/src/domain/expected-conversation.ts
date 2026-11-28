@@ -6,7 +6,12 @@ import type { ContextUsageStore } from "./context-usage-store.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { ProcessCensus } from "./process-census.js";
 import { CodexThreadIdResolver } from "./codex-thread-id.js";
-import { resolveIdentityVerifiedClaudeRecord, resolveLiveCodexThreadId } from "./model-divergence/current-generation-record.js";
+import {
+  processStartMismatchesVerdict,
+  resolveIdentityVerifiedClaudeRecord,
+  resolveLiveCodexThreadId,
+  verifiedPaneProcessChain,
+} from "./model-divergence/current-generation-record.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 
@@ -62,8 +67,29 @@ export async function resolveExpectedConversation(expected: ExpectedConversation
   try {
     rootPid = await tmux.getPanePid(pane);
     if (!rootPid || rootPid !== (proof.evidence.observedPanePid ?? proof.evidence.observedPid)) unavailable("The pane process no longer matches its verified occupant.");
-    const deps = { getPanePid: () => tmux.getPanePid(pane), listProcesses: (opts?: { fresh?: boolean }) => census.list(opts),
-      readThreadIdByPid: async (pid: number, startedAt?: string) => startedAt ? threads.resolve(pid, startedAt) : undefined };
+    const processes = await census.list();
+    const nativePid = proof.evidence.observedPanePid != null ? proof.evidence.observedPid ?? undefined : undefined;
+    const recordedRootStart = proof.evidence.observedPanePidStartedAt
+      ?? (proof.evidence.observedPanePid == null || proof.evidence.observedPid === rootPid ? proof.evidence.observedPidStartedAt : undefined);
+    const verifiedProcesses: Array<[string, number, string | null | undefined]> = [["pane root", rootPid, recordedRootStart]];
+    if (nativePid !== undefined && nativePid !== rootPid) {
+      verifiedProcesses.push([
+        `native ${expected.runtime === "claude-code" ? "Claude" : "Codex"} process`,
+        nativePid,
+        proof.evidence.observedPidStartedAt,
+      ]);
+    }
+    for (const [label, verifiedPid, recordedStart] of verifiedProcesses) {
+      if (processStartMismatchesVerdict(processes.find((row) => row.pid === verifiedPid), recordedStart)) {
+        unavailable(`The pane process no longer matches its verified occupant: its ${label} start time changed since verification.`);
+      }
+    }
+    const chain = verifiedPaneProcessChain(processes, rootPid, expected.runtime, nativePid);
+    const deps = {
+      getPanePid: async () => rootPid!,
+      listProcesses: async (opts?: { fresh?: boolean }) => opts?.fresh ? census.list(opts) : processes,
+      readThreadIdByPid: async (pid: number, startedAt?: string) => startedAt ? threads.resolve(pid, startedAt) : undefined,
+    };
     if (expected.runtime === "claude-code") {
       const sidecar = store.readSidecar(expected.sessionName);
       const selected = await resolveIdentityVerifiedClaudeRecord({ sessionName: expected.sessionName, generation,
@@ -90,6 +116,10 @@ export async function resolveExpectedConversation(expected: ExpectedConversation
     }
     assertCurrent();
     if (await tmux.getPanePid(pane) !== rootPid) mismatch("The pane process changed during native resolution.");
+    const closingProcesses = await census.list({ fresh: true });
+    if (verifiedPaneProcessChain(closingProcesses, rootPid, expected.runtime, nativePid) !== chain) {
+      mismatch("The pane process changed during native resolution.");
+    }
     assertCurrent();
   } catch (error) {
     if (error instanceof DeliveryGuardError) throw error;

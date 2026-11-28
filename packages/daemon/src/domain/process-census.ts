@@ -18,7 +18,7 @@ import type { ProcessRow } from "./model-divergence/current-generation-record.js
 
 export interface ProcessCensusOpts {
   /** The underlying enumeration (default: the shared process-table lister). */
-  list?: () => Promise<ProcessRow[]>;
+  list?: (opts?: { fresh?: boolean }) => Promise<ProcessRow[]>;
   /** Reuse window for a successful census. Default 2000ms. */
   freshnessMs?: number;
   /** Injectable clock (tests). */
@@ -26,7 +26,7 @@ export interface ProcessCensusOpts {
 }
 
 export class ProcessCensus {
-  private readonly listFn: () => Promise<ProcessRow[]>;
+  private readonly listFn: (opts?: { fresh?: boolean }) => Promise<ProcessRow[]>;
   private readonly freshnessMs: number;
   private readonly now: () => number;
   private inFlight: Promise<ProcessRow[]> | null = null;
@@ -48,7 +48,7 @@ export class ProcessCensus {
       }
       if (this.inFlight) return this.inFlight;
     }
-    const run: Promise<ProcessRow[]> = this.listFn().then(
+    const run: Promise<ProcessRow[]> = (opts.fresh ? this.listFn({ fresh: true }) : this.listFn()).then(
       (rows) => {
         // An enumeration a fresh one replaced still answers its own callers, but doesn't overwrite the newer one.
         if (this.inFlight === run) {
@@ -78,10 +78,10 @@ export class ProcessCensus {
   }
 }
 
-async function defaultCensusList(): Promise<ProcessRow[]> {
+async function defaultCensusList(opts?: { fresh?: boolean }): Promise<ProcessRow[]> {
   // r2-B2: the STRICT lister — a failed `ps` must REJECT here so the census's
   // honest-failure path is reachable in production (the lenient variant's []
   // would have been cached as an empty SUCCESS for the freshness window).
   const { defaultListProcessesStrict } = await import("./resume-metadata-refresher.js");
-  return defaultListProcessesStrict();
+  return defaultListProcessesStrict(opts);
 }
