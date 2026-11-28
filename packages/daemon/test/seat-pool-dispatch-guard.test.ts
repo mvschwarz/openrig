@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -89,6 +89,21 @@ describe("seat-pool dispatch guard runner (#4061)", () => {
         else process.env[key] = value;
       }
     }
+  });
+
+  it("A guard doesn't get a bearer_env name the host registry configures, and an ordinary variable still arrives.", async () => {
+    await inTemp(async (home) => {
+      fs.writeFileSync(path.join(home, "hosts.yaml"),
+        "hosts:\n  - id: remote-a\n    transport: http\n    url: http://127.0.0.1:9\n    bearer_env: SYNTH_POOL_GUARD_BEARER\n");
+      vi.stubEnv("OPENRIG_HOME", home);
+      vi.stubEnv("SYNTH_POOL_GUARD_BEARER", "synthetic-bearer");
+      vi.stubEnv("OPENRIG_POOL_GUARD_PLAIN", "kept");
+      try {
+        const script = "const e = process.env; if ('SYNTH_POOL_GUARD_BEARER' in e) process.exit(3);"
+          + " process.exit(e.OPENRIG_POOL_GUARD_PLAIN === 'kept' ? 0 : 4)";
+        expect(await runSeatPoolDispatchGuard(guard(script))).toEqual({ verdict: "allow" });
+      } finally { vi.unstubAllEnvs(); }
+    });
   });
 
   it("A guard that can't be started is a guard error.", async () => {
