@@ -1128,11 +1128,15 @@ function sharesPidNamespace(state: DaemonState, deps: LifecycleDeps): boolean {
   return own === "host" || own === INITIAL_PID_NAMESPACE;
 }
 
-function removeMatchingState(deps: LifecycleDeps, stateFile: string, state: DaemonState): void {
+/** Removes daemon.json while it still names exactly `state`, or, given `restore`, writes those bytes back in its place. */
+function removeMatchingState(deps: LifecycleDeps, stateFile: string, state: DaemonState, restore?: string): void {
   // A concurrent start/rebind must not have its state removed by an old stop/status.
   const current = readState(deps);
   if (current?.pid === state.pid && current.startedAt === state.startedAt && current.port === state.port
-    && current.host === state.host && current.db === state.db) deps.removeFile(stateFile);
+    && current.host === state.host && current.db === state.db) {
+    if (restore === undefined) deps.removeFile(stateFile);
+    else deps.writeFile(stateFile, restore);
+  }
 }
 
 interface StartReservation {
@@ -1324,7 +1328,8 @@ async function finishPendingStart(opts: StartOptions, deps: LifecycleDeps): Prom
       const after = identity.recheck(" at publication");
       if (after) throw new Error(`${after}; startup not accepted`);
     } catch (error) {
-      removeMatchingState(deps, STATE_FILE, state);
+      // Take back only what this attempt wrote: a leftover it replaced goes back as it was, so nothing has changed.
+      removeMatchingState(deps, STATE_FILE, state, leftover ? existingRaw! : undefined);
       throw error;
     }
     published = { state, publication: "written" };
