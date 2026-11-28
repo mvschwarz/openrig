@@ -928,7 +928,9 @@ export class SessionRegistry {
             WHERE node_id = ?`
           )
           .run(
-            fields.attachmentType ?? existing.attachment_type ?? "tmux",
+            // A write that names a tmux session and no type binds a tmux pane (rig bind, a launch, a pane repair): it's a
+            // tmux binding, even over a node attached from an outside program, so its readers never call it attached.
+            fields.attachmentType ?? (fields.tmuxSession ? "tmux" : existing.attachment_type) ?? "tmux",
             fields.tmuxSession ?? existing.tmux_session,
             fields.tmuxWindow ?? existing.tmux_window,
             fields.tmuxPane ?? existing.tmux_pane,
@@ -1066,6 +1068,18 @@ export function sessionCommunityHarnessSelect(db: Database.Database, alias = "s"
     sessionsHaveCommunityHarness.set(db, has);
   }
   return has ? `${alias}.agent_app` : "NULL";
+}
+
+/** The community harness a seat was last launched for: the selection on the newest of its session rows that records one.
+ *  A newer row without one, such as the provisional session of a restore launch that couldn't tell the harness (#4047),
+ *  doesn't hide it. Null when no row records one, or on a schema without the column. Callers still require it to name the
+ *  seat's current runtime (`communityHarnessOf`), so a seat never launched for an installed preset gets no adapter. */
+export function seatRecordedCommunityHarness(db: Database.Database, nodeId: string): string | null {
+  const app = sessionCommunityHarnessSelect(db);
+  if (app === "NULL") return null;
+  const row = db.prepare(`SELECT ${app} AS app FROM sessions s WHERE s.node_id = ? AND ${app} IS NOT NULL
+    ORDER BY s.created_at DESC, s.id DESC LIMIT 1`).get(nodeId) as { app: string } | undefined;
+  return row?.app ?? null;
 }
 
 const sessionsHaveCommunityRunner = new WeakMap<Database.Database, boolean>();

@@ -1199,6 +1199,16 @@ describe("member pool block (#3395 Piece 1)", () => {
     expect(member(spec).pool).toMatchObject({ max: 0, cwdTemplate: "/work/{rig}/shared" });
   });
 
+  it("A `dispatch_guard` argv validates with no advisory, normalizes to `dispatchGuard`, and round-trips through the spec text as the same list (#4061).", () => {
+    const spec = withPool({ max: 3, dispatch_guard: ["/usr/local/bin/pool-guard", "--strict", "a b"] });
+    expect(RigSpecSchema.validate(spec)).toEqual({ valid: true, errors: [] });
+    expect(member(spec).pool).toMatchObject({ max: 3, dispatchGuard: ["/usr/local/bin/pool-guard", "--strict", "a b"] });
+    const normalized = RigSpecSchema.normalize(spec);
+    const again = RigSpecSchema.normalize(RigSpecCodec.parse(RigSpecCodec.serialize(normalized)) as Record<string, unknown>);
+    expect(again.pods[0]!.members[0]!.pool).toEqual(normalized.pods[0]!.members[0]!.pool);
+    expect(member(withPool({ max: 3 })).pool).not.toHaveProperty("dispatchGuard");
+  });
+
   it("`pool: {}` validates with no advisory and normalizes to the explicit clear; an absent key stays absent.", () => {
     const spec = withPool({});
     expect(RigSpecSchema.validate(spec)).toEqual({ valid: true, errors: [] });
@@ -1217,6 +1227,10 @@ describe("member pool block (#3395 Piece 1)", () => {
     ["an unknown placeholder", { max: 3, cwd_template: "/work/{user}/{slot}" }, "dev.impl pool.cwd_template: may use only the placeholders {rig} and {slot}; pool not used"],
     ["a placeholder nested in another", { max: 3, cwd_template: "/work/{r{slot}ig}" }, "dev.impl pool.cwd_template: may use only the placeholders {rig} and {slot}; pool not used"],
     ["a non-boolean drain", { max: 3, drain: "yes" }, "dev.impl pool.drain: must be true or false; pool not used"],
+    ["a guard as a shell string", { max: 3, dispatch_guard: "/usr/local/bin/guard --strict" }, "dev.impl pool.dispatch_guard: must be a non-empty list of non-empty strings: the command, then its arguments; pool not used"],
+    ["an empty guard", { max: 3, dispatch_guard: [] }, "dev.impl pool.dispatch_guard: must be a non-empty list of non-empty strings: the command, then its arguments; pool not used"],
+    ["a guard argument that isn't text", { max: 3, dispatch_guard: ["/usr/local/bin/guard", 3] }, "dev.impl pool.dispatch_guard: must be a non-empty list of non-empty strings: the command, then its arguments; pool not used"],
+    ["a guard command that isn't absolute", { max: 3, dispatch_guard: ["guard", "--strict"] }, "dev.impl pool.dispatch_guard: the command must be an absolute path; pool not used"],
     ["not a mapping", 3, "dev.impl pool: must be a mapping, e.g. { max: 3 } (use {} to clear a stored pool); pool not used"],
   ])("Each bad field (wrong type, out of bounds, `max < min`, a non-absolute `cwd_template` or one with an unknown placeholder) raises `<member> pool.<field>: <reason>; pool not used`, drops the whole block, and the rig still loads with the spec `valid` (%s).", (_case, pool, advisory) => {
     const spec = withPool(pool);
@@ -1241,7 +1255,7 @@ describe("member pool block (#3395 Piece 1)", () => {
     const spec = withPool({ max: 3, adopt: ["dev.other"] });
     expect(RigSpecSchema.validate(spec)).toEqual({
       valid: true, errors: [],
-      advisories: ["dev.impl pool.adopt: unknown field; known fields are max, min, dispatch_after_s, idle_grace_s, cooldown_s, dispatch_tag, cwd_template, drain; pool not used"],
+      advisories: ["dev.impl pool.adopt: unknown field; known fields are max, min, dispatch_after_s, idle_grace_s, cooldown_s, dispatch_tag, cwd_template, drain, dispatch_guard; pool not used"],
     });
     expect(member(spec).pool).toBeUndefined();
     expect(member(spec).unusablePool).toEqual({ raw: { max: 3, adopt: ["dev.other"] } });

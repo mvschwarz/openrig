@@ -29,6 +29,14 @@ constraint-induced circumvention: under goal pressure, agents build shadow trans
 credentials, and weaker proof instead of the direct authorized path. Keep only explicitly stated
 external or irreversible boundaries — public push / PR / publish, and destruction of canonical data.
 
+## Running `rig` in Claude Code's Bash tool
+
+Run one plain `rig` command per Bash tool call, without shell variable assignments, command
+substitutions (`$(...)`) or loops. Put queue-row text in a file and pass `--body-file` with its
+literal absolute path. A compound command can stop at a permission prompt even when `Bash(rig:*)`
+is allowed, with nobody at the seat to answer. Prepare the file in a separate tool call, then run
+the `rig` command by itself. The send and queue examples below show this shape.
+
 ## Coordination primitives — when to use which
 
 Three coordination surfaces, used together for forward-momentum work. Internalize this
@@ -1707,7 +1715,10 @@ grant never get them.
 - **Over stdio, and over HTTP with no grants:** the server acts as one seat, the `OPENRIG_SESSION_NAME` in its
   environment. Every request carries that identity, so no tool call names a sender. Without it, messages, new tasks and
   chat go through as an unknown sender (`unknown-mcp-` and eight hex digits, one per `rig mcp serve` process) with a
-  note at the top, and claim, update, hand off, unclaim and decide are refused with `actor_required`.
+  note at the top, and claim, update, hand off, unclaim and decide are refused with `actor_required`. The exception
+  is over stdio, for an item addressed to an address OpenRig issued this conversation: one recorded under its
+  conversation key, or one a create through the same server process was issued (`returnRoute` `auto`). The server
+  claims, updates and decides such an item as that address.
 - **Over HTTP with grants:** each caller acts as its own grant's seat.
 
 ### Over HTTP: an assistant that can't start a local process

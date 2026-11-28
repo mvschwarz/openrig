@@ -57,6 +57,9 @@ export interface RigStatusObject {
   status: RigAggStatus;
   seatsTotal: number;
   seatsRunning: number;
+  /** Seats attached from an outside program (rig attach), whose liveness is unknown: not counted running here. Present
+   *  only when there are some. */
+  seatsAttached?: number;
   /** true when the rig can be recovered without operator action (down/partial);
    *  false when blocked (needs a decision) or already up. */
   recoverable: boolean;
@@ -140,6 +143,8 @@ export function composeRigStatus(input: ComposeRigStatusInput): RigStatusObject 
 
   const seatsTotal = nodes.length;
   const seatsRunning = nodes.filter((n) => n.lifecycleState === "running").length;
+  // Only a seat attached from an outside program (rig attach) reads unknown; its count is said beside the running one.
+  const seatsAttached = nodes.filter((n) => n.lifecycleState === "unknown").length;
   const lifecycle = deriveRigLifecycleState(nodes.map((n) => n.lifecycleState));
 
   // --- Aggregate fold (precedence: blocked > unknown > lifecycle/kernel) ------
@@ -172,7 +177,7 @@ export function composeRigStatus(input: ComposeRigStatusInput): RigStatusObject 
   // --- src[] provenance (composed, not inferred) -----------------------------
   const actionCounts = countActions(perSeat);
   const src: string[] = [
-    `ps: ${seatsRunning}/${seatsTotal} running · lifecycle=${lifecycle}`,
+    `ps: ${seatsRunning}/${seatsTotal} running${seatsAttached ? ` · ${seatsAttached} attached` : ""} · lifecycle=${lifecycle}`,
     `restore-plan: ${actionCounts}`,
   ];
   if (recovery) src.push(`restore-check: ${recovery.status}`);
@@ -185,6 +190,7 @@ export function composeRigStatus(input: ComposeRigStatusInput): RigStatusObject 
     status,
     seatsTotal,
     seatsRunning,
+    ...(seatsAttached ? { seatsAttached } : {}),
     recoverable,
     perSeat,
     src,

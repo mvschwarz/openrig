@@ -336,6 +336,8 @@ export type RigEvent =
       requestedBy: string | null; generation: string; previousGeneration: string;
       settings: Record<string, { value: string | null; source: string }>; dropped: Array<{ setting: string; value: string }>;
       permissionSelection: string; claimsMoved: number }
+  | { type: "seat.handover_first_input_passed"; rigId: string; nodeId: string; occupantGeneration: string | null;
+      path: string; submission: "unconfirmed"; consumption: "unconfirmed"; launchCommand: "accepted" | "unconfirmed"; binding: "not_committed" }
   | { type: "seat.handover_completed"; rigId: string; nodeId: string; logicalId: string; previousOccupant: string; currentOccupant: string; source: string; reason: string; operator: string | null;
       /** OPR.0.5.5.5 (fix B2) — the executed source outcome, persisted so the DURABLE
        *  record (not just the command response) carries what primed the successor:
@@ -815,7 +817,9 @@ export interface NodeRecoveryGuidance {
 // Per-node lifecycle projection derived from session/restore state plus snapshot resume metadata.
 // L2 cold-start truth model: distinguishes a recoverable detached node from a node that would
 // fresh-launch, and surfaces "attention required" for the post-L3 Claude resume-prompt proxy.
-export type NodeLifecycleState = "running" | "detached" | "recoverable" | "attention_required";
+/** `unknown`: a seat joined with `rig attach` as an external CLI runs in someone else's program, so OpenRig can't see
+ *  whether it's running (see `NodeInventoryEntry.externalAttachment`). */
+export type NodeLifecycleState = "running" | "detached" | "recoverable" | "attention_required" | "unknown";
 
 /**
  * OPR.0.4.3.19 — the liveness identity verdict for a managed seat.
@@ -922,10 +926,20 @@ export interface NodeInventoryEntry {
   configuredAccount?: string | null;
   /** Present only on a community harness's seat: its label, maintainer and declared limits. */
   communityHarness?: import("./community-harness-presets.js").CommunityHarnessLabel;
-  /** Effective current status; confirmed session absence projects as detached. */
+  /** Effective current status; confirmed session absence projects as detached. A seat joined with `rig attach` as an
+   *  external CLI reads `attached`: OpenRig can't see its process, so a stored running or detached isn't its state. */
   sessionStatus: string | null;
   /** Persisted session status, retained for history and registry-based rollups. */
   storedSessionStatus?: string | null;
+  /** Present only on a seat attached from an outside program (`rig attach`, an external CLI): OpenRig can't type into it
+   *  or see its process, so its liveness is unknown. Its own newest queue action (a claim, note or handoff it wrote, live or
+   *  archived) is the only sign OpenRig has that it's working; null when it has written none. `lastOwnQueueActionRead` is
+   *  "unavailable" when that history couldn't be read, and then the null says nothing about it. */
+  externalAttachment?: {
+    liveness: "unknown";
+    lastOwnQueueAction: { at: string; qitemId: string; state: string } | null;
+    lastOwnQueueActionRead: "read" | "unavailable";
+  };
   /** The latest session was explicitly stopped and has no replacement binding.
    * It remains non-running, but is not a missing member in the rig lifecycle. */
   intentionallyStopped?: boolean;
@@ -1068,6 +1082,12 @@ export interface NodeInventoryEntry {
    * heartbeat — process identity only.
    */
   identityVerdict?: SeatIdentityVerdict | null;
+  /** The agent behind a recorded-running agent seat, beside its lifecycle: present only when the current identity check (the
+   *  verdict above) saw a shell as the pane's foreground command and didn't verify the seat's agent there, once its startup
+   *  is no longer pending. It shows a stored shell observation; delivery checks the target again and applies its runtime's
+   *  own policy. It isn't proof the agent stopped: it can run behind a wrapper. Absent otherwise, which claims nothing. Read
+   *  from the stored verdict; nothing new is probed. */
+  agentLiveness?: { state: "not_verified"; reason: "shell_foreground"; command: string; observedAt: string };
   /** OPR.0.3.4.11 — held reason derived from the latest `node.held` event.
    *  Null when no held event, or superseded by a running session / later launch. */
   heldReason?: string | null;

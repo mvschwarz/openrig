@@ -10,7 +10,7 @@ import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
 import { isBoundTerminalSeat } from "./domain/terminal-seat.js";
 import { seatRuntimeHomeBySession, seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
-import { recordedRecoveryInability, reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
+import { recheckHeldNotices, recordedRecoveryInability, reportPreparationFailure, reportRestoreDeliveryFailure, reportRestoreUptakeUnknown, seatNameCarried, settleCompactionNotices, wireCompactionNoticeSeatRemoval } from "./domain/compaction-restore-notice.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
 import { TerminalPolicyStore } from "./domain/terminal-policy.js";
@@ -119,6 +119,7 @@ import { readClaudeSelfReportEvidence, verifiedSelfReportPid } from "./adapters/
 import { replaceFile } from "./adapters/replace-file.js";
 import { stageCodexActivityRelay } from "./adapters/codex-activity-relay.js";
 import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
+import { attachDraftHeldReoffer } from "./domain/draft-held-reoffer.js";
 import { deriveSelfHostIdSource, SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./domain/seat-identity-store.js";
 import { DaemonLifecycleStore } from "./domain/daemon-lifecycle-store.js";
@@ -174,11 +175,12 @@ import { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { resolveWorkflowHumanDestination } from "./domain/workflow-human-destination.js";
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
-import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "./domain/policies/parked-owner-consumer.js";
+import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, parkedOwnerSpecYaml } from "./domain/policies/parked-owner-consumer.js";
 import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
 import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
 import { makeSeatPoolExecutor, seatPoolQueueEffects } from "./domain/seat-pool-executor.js";
+import { runSeatPoolDispatchGuard } from "./domain/seat-pool-dispatch-guard.js";
 import { SeatLifecycleService } from "./domain/seat-lifecycle-service.js";
 import { convergeOp } from "./domain/topology-converge.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
@@ -716,7 +718,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       if (activity.state === "unknown") return null;
       if (runtime === "claude-code" && activity.state === "needs_input"
           && !["permission_prompt", "selection_prompt"].includes(activity.reason)) return null;
-      return activity.state === "needs_input" && ["permission_prompt", "selection_prompt"].includes(activity.reason);
+      return activity.state === "needs_input" && ["permission_prompt", "selection_prompt", "hook_trust_gate"].includes(activity.reason);
     },
     permissionPromptChanged: (sessionName, confirmed, runtime) => {
       const latest = agentActivityStore.getLatestForNode({ sessionName });
@@ -760,10 +762,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // An idle seat may have cleared the draft its draft-aware guard held a wake for (#48).
     void queueRepoInstance.retryDraftHeldWakesOnIdle(sessionName, state)
       .catch(error => console.warn(`Draft-held wake retry: ${error instanceof Error ? error.name : typeof error}`));
+    // A plain message held only for that draft goes then too, in order, each through the same guarded delivery.
+    void queueRepoInstance.deliverDraftHeldMessagesOnIdle(sessionName, state)
+      .catch(error => console.warn(`Draft-held message delivery: ${error instanceof Error ? error.name : typeof error}`));
     restoredSeatActivity?.(sessionName, state);
     rexSeatActivity?.(sessionName, { activity, runtime });
   };
   seatStructuralActivityService.attachActivityChanged(retryPromptWakes);
+  // A held message whose last try met the person's recent typing, a drain or a restore is offered again from the same
+  // per-tick sweep, even when the seat's state stays the same (#3991). No capture or delivery path of its own.
+  attachDraftHeldReoffer(seatStructuralActivityService, queueRepoInstance, sessionName => currentSeatActivity(sessionName).activity?.state,
+    { onError: error => console.warn(`Draft-held message re-offer: ${error instanceof Error ? error.name : typeof error}`) });
   eventBus.subscribe(event => { if (event.type === "agent.activity") retryPromptWakes(event.sessionName); });
   // #3315 — whether the daemon reaches its tmux server is state of its own (terminal-server-seats.ts): recorded once
   // per change, delivery to its seats held meanwhile, its return noticed by a read-only probe and owed work offered
@@ -1882,6 +1891,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           return true;
         }
       });
+      // The previous process's deliveries are settled first: the sweep below is the first thing in this process that can
+      // take a claim, and it starts before the server binds, so a later recovery could overwrite a live claim's result.
+      t.guardedDelivery?.recover();
       // Slice 13: messages queued for a hook bridge that has no live arm are typed after the bound; claimed batches whose
       // waiter is gone without an ack become indeterminate.
       setInterval(() => { void t.sweepHookBridge().catch(() => {}); }, 5_000).unref();
@@ -2646,8 +2658,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start. The policy hands each
     // evaluation to the executor, composed with the queue, the outbox's held messages, the delivery guard's custody,
     // the seats' activity and the rig's events, the drain's effects (the delivery guard's lifecycle lease, the
-    // `auto-rehydrate` capture and the checked seat stop), and the add: the model member as the export writes it, and the
-    // member add of `rig add` (convergeOp over this daemon's instantiator); it runs only through the policy.
+    // `auto-rehydrate` capture and the checked seat stop), the add: the model member as the export writes it, and the
+    // member add of `rig add` (convergeOp over this daemon's instantiator), and the comeback: the snapshot selection for
+    // a retained node and the restore orchestrator's launchSingleNode with that explicit snapshotId, this daemon's
+    // runtime adapters and the filesystem, and the dispatch guard's runner; it runs only through the policy.
     const seatPoolSlots = new SeatPoolSlotsRepository(db);
     const seatPoolStops = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter });
     const seatPoolExecutor = makeSeatPoolExecutor({
@@ -2679,6 +2693,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         converge: (rigId, op, rigRoot, opts) => convergeOp({ instantiator: podInstantiator }, rigId, op, rigRoot, opts),
         makeFolder: (folder) => { fs.mkdirSync(folder, { recursive: true }); },
       },
+      comeback: {
+        select: (rigId, nodeId, logicalId) => snapshotRepo.selectComebackSnapshot(rigId, nodeId, logicalId),
+        launch: (rigId, logicalId, { snapshotId }) => restoreOrchestrator.launchSingleNode(rigId, logicalId, {
+          snapshotId,
+          adapters: runtimeAdaptersMap,
+          fsOps: { exists: (path: string) => fs.existsSync(path) },
+        }),
+      },
+      // #4061: the block's `dispatch_guard`, run as an argv with a short timeout, once per planned move.
+      dispatchGuard: runSeatPoolDispatchGuard,
     });
     const seatPoolPolicy = makeSeatPoolPolicy({ cycle: (job) => seatPoolExecutor.cycle(job) });
     void seatPoolPolicy;
@@ -2781,6 +2805,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           history: {
             listForJob: (jobId, limit) => watchdogHistoryLogInstance.listForJob(jobId, limit),
             countForJob: (jobId) => watchdogHistoryLogInstance.countForJob(jobId),
+            latestAcceptedSendTo: (jobId, targetSession, occupantGeneration) =>
+              watchdogHistoryLogInstance.latestAcceptedSendTo(jobId, targetSession, occupantGeneration),
+            refusedAttemptSince: (jobId, targetSession, afterHistoryId, occupantGeneration) =>
+              watchdogHistoryLogInstance.refusedAttemptSince(jobId, targetSession, afterHistoryId, occupantGeneration),
           },
           // Best-effort attempt reporting; actual prompt and failure recovery still use the existing ladder.
           rows: {
@@ -2914,6 +2942,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     {
       const parkedOwnerJob = (rigName: string) => {
         const anchor = makeRigAnchor(rigName);
+        // The ensure rewrites the spec: an operator's owner_min_interval_s in the current job's spec is carried over.
+        let priorSpecYaml: string | null = null;
+        try {
+          priorSpecYaml = watchdogJobsRepoInstance.listExactTuple(PARKED_OWNER_POLICY_NAME, anchor, null)
+            .filter((job) => job.state === "active" || job.state === "stopped").at(-1)?.specYaml ?? null;
+        } catch { /* an unreadable prior job keeps the default spec */ }
         return {
           policy: PARKED_OWNER_POLICY_NAME,
           targetSession: anchor,
@@ -2921,7 +2955,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           intervalSeconds: 120,
           activeWakeIntervalSeconds: null,
           scanIntervalSeconds: null,
-          specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${anchor}\ncontext:\n  rig: ${rigName}\n`,
+          specYaml: parkedOwnerSpecYaml(rigName, priorSpecYaml),
         };
       };
       // #3634: a name is armed while it has an unarchived row or a running seat (the seats diagnoseRig reads, so a rig
@@ -3153,6 +3187,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         // gate is inert (never compares a stale generation as if live).
         {
           onPreparationFailure: (failure) => reportPreparationFailure(db, queueRepoInstance, failure, recoveryInability),
+          onHeldNoticesRecheck: (sessionName) => recheckHeldNotices(db, queueRepoInstance, sessionName, recoveryInability),
           onRestoreDeliveryFailure: (failure) => reportRestoreDeliveryFailure(db, queueRepoInstance, failure, { unable: recoveryInability }),
           onRestoreDeliveryComplete: (receipt) => reportRestoreDeliveryFailure(db, queueRepoInstance, receipt, { completed: true, unable: recoveryInability }),
           onRestoreUptakeUnknown: (unknown) => reportRestoreUptakeUnknown(db, queueRepoInstance, unknown, recoveryInability),

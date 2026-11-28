@@ -1654,6 +1654,7 @@ members:
       dispatch_tag: role:impl
       cwd_template: /work/{rig}/{slot}
       drain: false
+      dispatch_guard: [/usr/local/bin/pool-guard, --strict]
 ```
 
 Stored and validated; it has no runtime effect until the seat pool job is armed.
@@ -1668,6 +1669,7 @@ Stored and validated; it has no runtime effect until the seat pool job is armed.
 | `dispatch_tag` | non-empty string | none: every row to the model | Move only the model's rows that carry this tag. |
 | `cwd_template` | absolute path; only `{rig}` and `{slot}` | none: the model's folder | Each pool agent's working folder, with `{rig}` and `{slot}` filled in. `{slot}` is optional: without it the agents share one folder. |
 | `drain` | `true` or `false` | `false` | Empties the pool. |
+| `dispatch_guard` | non-empty list of non-empty strings; the first an absolute path | none: no guard | A command, with its own arguments, asked once per planned move; exit 75 vetoes that move. See [Seat pools: the dispatch guard](seat-pools.md#the-dispatch-guard). Never a shell string. |
 
 - **Validation:** whatever is wrong inside the block is an advisory, never a spec error, reported as
   `<pod>.<member> pool.<field>: <reason>; pool not used`: a wrong type, a value out of bounds, `max` below `min`, a
@@ -1677,6 +1679,8 @@ Stored and validated; it has no runtime effect until the seat pool job is armed.
   seat replaces a stored block whole, clears it with `pool: {}` and leaves it unchanged when the key is absent. A block
   that can't be used is stored as written (as JSON: a number JSON can't hold, such as `.inf` or `.nan`, is stored as
   `null`, still unusable), with its error, rather than clearing the one before; it is not a removal.
+  A `dispatch_guard` written as one string (`"/usr/local/bin/pool-guard --strict"`), an empty list, a list item that
+  isn't non-empty text, or a command that isn't an absolute path is an advisory like the others.
   A fresh launch of the seat from its recorded launch keeps the stored block.
 - **Export and bundles:** `rig spec export` leaves the pool's agents out and writes the model member with its block;
   an edge touching a pool agent is left out and named in a "Not carried" line. `rig bundle create` doesn't count pool
@@ -1833,9 +1837,12 @@ request was never delivered or was delivered and no complete restore map followe
 restore-delivery failures. If the seat has no recorded
 parent session (including when it is outside the recorded topology), these notices go to the
 configured registered human operator, or the default registered person when no operator is set.
-If no registered person can be selected, OpenRig creates no notice rather than inventing a
-destination: `rig compact <seat> --state` reports a restore-delivery notice failure, while a
-preparation notice is tried again on later polls. A parent is the source of a `delegates_to` edge
+If no registered person can be selected, they go to the receiving agent (`agents.operator_session`,
+else the kernel operator seat when this host has one), and the notice says it is a receiver fallback,
+not the person's selection. With neither, OpenRig creates no notice rather than inventing a
+destination: `rig compact <seat> --state` reports a restore-delivery notice failure, and for a
+preparation notice its `preparationNotice` reads `not_addressed` with the reason; later polls try
+again. A parent is the source of a `delegates_to` edge
 to the seat; declare one when an agent should receive these notices. With multiple parents, the
 parent session with the latest creation time is selected; `escalates_to` is not used for these
 notices. The restore-delivery notice to a person omits local paths and
@@ -1851,7 +1858,11 @@ named, for the next route. A notice already with an agent that becomes unable th
 same row with its history, to the next capable recipient: a pending notice with a wake, a claimed one
 without. Unknown or unread capacity is not inability. When no capable recipient resolves, the notice
 stays with the first agent the route reached and says plainly that no capable recipient was
-established. Otherwise existing notices keep their destination when the topology changes.
+established. The notices an unable agent holds are re-checked on each of its polls, with or without
+a fresh usage sample and also when nobody can receive its own notice, so a capable recipient chosen
+later takes them at the next poll; once
+the agent can act again, the ones it kept stop saying that no capable recipient was established.
+Otherwise existing notices keep their destination when the topology changes.
 
 A `delegates_to` edge also decides routing. A seat's stuck-row findings and recovery go to its most
 recently started parent. A person's top-level Slack message in the rig's mapped channel goes to the rig's

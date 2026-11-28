@@ -1,3 +1,5 @@
+import { isRosterReadyNotice } from "./roster-ready-notice.js";
+import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
 import { recordedActivityHooks, recordedRunner, sessionActivityHooksSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { configuredAccount } from "./configured-account.js";
 import { restoreOutcomesByIntendedNode } from "./restore-topology.js";
@@ -9,6 +11,7 @@ import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
 import { identityVerdictConfirmsSessionMissing, identityVerdictConfirmsExecutorStopped, identityVerdictDownranksRunning } from "./types.js";
+import { isShellForeground } from "./shell-classifier.js";
 import { resolveSeatEffort } from "./seat-effort.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
@@ -49,6 +52,7 @@ import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.j
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper } from "./launch-wrapper.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { readStandbyStop } from "./seat-standby.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 // -- Row types for SQL results --
 
@@ -395,6 +399,19 @@ function deriveNodeKind(runtime: string | null): "agent" | "infrastructure" {
   return runtime === "terminal" ? "infrastructure" : "agent";
 }
 
+/** NodeInventoryEntry.agentLiveness, from the applicable stored verdict: a running agent seat whose current identity check saw
+ *  a shell in the foreground and didn't verify its agent. Undefined otherwise, and while its startup is still pending: a launch
+ *  marks the session running on its default shell before the agent starts there. */
+function deriveAgentLiveness(
+  runtime: string | null, sessionStatus: string | null, startupStatus: NodeInventoryEntry["startupStatus"],
+  verdict: SeatIdentityVerdict | null,
+): NodeInventoryEntry["agentLiveness"] {
+  const command = verdict?.evidence.observedCommand?.trim().toLowerCase();
+  if (!runtime || sessionStatus !== "running" || startupStatus === "pending" || deriveNodeKind(runtime) !== "agent"
+    || !verdict || verdict.verdict === "verified" || !command || !isShellForeground(command)) return undefined;
+  return { state: "not_verified", reason: "shell_foreground", command: command.replace(/^-/, ""), observedAt: verdict.observedAt };
+}
+
 /**
  * Derives per-node lifecycle state from session/restore truth plus the rig's latest
  * usable snapshot.
@@ -658,7 +675,8 @@ function mapStatus(status: string): NodeRestoreOutcome {
 }
 
 function deriveHeldReason(db: Database.Database, rigId: string, nodeId: string, sessionStatus: string | null): string | null {
-  if (sessionStatus === "running") return null;
+  // A seat attached from an outside program (rig attach) isn't held back from a launch, as it wasn't while its record read running.
+  if (sessionStatus === "running" || sessionStatus === "attached") return null;
 
   const heldRow = db.prepare(
     "SELECT seq, payload FROM events WHERE node_id = ? AND type = 'node.held' ORDER BY seq DESC LIMIT 1"
@@ -1073,7 +1091,13 @@ function buildInventoryItem(
   // Keep registry history intact; only an applicable, explicit absence changes
   // the current status. Unavailable tmux and process mismatches are not absence.
   const paneExited = row.session_status === "running" && identityVerdict?.reason === "pane_exited";
-  const sessionStatus = paneExited ? "exited"
+  // A seat joined with `rig attach` runs in someone else's program (seat-kinds: no inbound transport, an external process
+  // owner), so OpenRig can't see whether it runs: a stored running, or a detached a tmux probe once wrote, isn't its state.
+  // It reads attached, with liveness unknown and its own newest queue action as the only evidence.
+  const externallyAttached = row.binding_attachment_type != null
+    && seatProcessOwner(resolveSeatKind(row.binding_attachment_type)) === "external"
+    && (row.session_status === "running" || row.session_status === "detached");
+  const sessionStatus = externallyAttached ? "attached" : paneExited ? "exited"
     : row.session_status === "running" && identityVerdictConfirmsSessionMissing(identityVerdict) ? "detached" : row.session_status;
   const startupStatus = paneExited || (sessionStatus === "running" && identityVerdictDownranksRunning(identityVerdict?.verdict))
     ? "attention_required" : row.startup_status as NodeInventoryEntry["startupStatus"];
@@ -1088,7 +1112,8 @@ function buildInventoryItem(
   const stopConfirmed = row.intentionally_stopped === 1 && row.stop_attempt === null
     && (row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null;
   const standbyStopped = row.intentionally_stopped === 1 && row.session_status === "exited" && readStandbyStop(db, row.node_id) !== null;
-  const lifecycleState = keepAliveIncident?.exhausted && sessionStatus !== "running" ? "attention_required" : deriveNodeLifecycleState({
+  const lifecycleState = keepAliveIncident?.exhausted && sessionStatus !== "running" ? "attention_required"
+    : externallyAttached && startupStatus !== "attention_required" && restoreOutcome !== "attention_required" ? "unknown" : deriveNodeLifecycleState({
     sessionStatus,
     startupStatus,
     restoreOutcome,
@@ -1096,6 +1121,7 @@ function buildInventoryItem(
     usableSnapshot,
     identityVerdict: identityVerdict?.verdict ?? null,
   });
+  const agentLiveness = deriveAgentLiveness(row.runtime, sessionStatus, startupStatus, identityVerdict);
   const entry: NodeInventoryEntry = {
     nodeId: row.node_id,
     rigId: row.rig_id,
@@ -1116,6 +1142,7 @@ function buildInventoryItem(
     ...(launchWrapper ? { launchWrapper } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
+    ...(externallyAttached ? { externalAttachment: { liveness: "unknown" as const, ...lastOwnQueueAction(db, row.session_name) } } : {}),
     // An explicit down records a failed start's rolled-back session without changing its superseded status.
     intentionallyStopped: stopConfirmed,
     ...(standbyStopped ? { standbyStopped: true as const } : {}),
@@ -1182,6 +1209,7 @@ function buildInventoryItem(
     // OPR.0.4.3.19 — the liveness identity verdict (third axis). null when
     // never observed; carries evidence on mismatch/missing.
     identityVerdict,
+    ...(agentLiveness ? { agentLiveness } : {}),
     heldReason: deriveHeldReason(db, row.rig_id, row.node_id, sessionStatus),
     ...(row.handover_at ? startedWithoutRequired(db, row.node_id, row.session_id) : {}),
   };
@@ -1612,6 +1640,23 @@ export function seatNeedsAttention(
     || (entry.startedWithoutRequired?.length ?? 0) > 0;
 }
 
+/** The newest queue transition a seat wrote itself (a claim, note or handoff): for a seat attached from an outside program,
+ *  the one sign OpenRig has that it's working. It reads the live history and the archive retention moves finished work to
+ *  (one indexed row from each), so an archived action still counts. Null when it has written none; "unavailable" when its
+ *  history couldn't be read, so a failed read never reads as none. */
+function lastOwnQueueAction(db: Database.Database, session: string | null):
+  Pick<NonNullable<NodeInventoryEntry["externalAttachment"]>, "lastOwnQueueAction" | "lastOwnQueueActionRead"> {
+  if (!session) return { lastOwnQueueAction: null, lastOwnQueueActionRead: "read" };
+  try {
+    const newest = ["queue_transitions", "queue_transitions_archive"]
+      .map((table) => db.prepare(`SELECT transition_id, ts, qitem_id, state FROM ${table} WHERE actor_session = ? ORDER BY transition_id DESC LIMIT 1`)
+        .get(session) as { transition_id: number; ts: string; qitem_id: string; state: string } | undefined)
+      .filter((row) => row !== undefined)
+      .sort((a, b) => b.transition_id - a.transition_id)[0];
+    return { lastOwnQueueAction: newest ? { at: newest.ts, qitemId: newest.qitem_id, state: newest.state } : null, lastOwnQueueActionRead: "read" };
+  } catch { return { lastOwnQueueAction: null, lastOwnQueueActionRead: "unavailable" }; }
+}
+
 /**
  * An explicit hold on a never-launched seat with no outstanding queue work.
  *
@@ -1654,7 +1699,7 @@ export function retainedProviderFailure(
 
 /** The pane's own interactive prompts: a picker or question, and a permission or confirmation. A draft in the input
  *  box is not one. */
-const NATIVE_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt"]);
+const NATIVE_PROMPT_REASONS: ReadonlySet<string> = new Set(["selection_prompt", "permission_prompt", "hook_trust_gate"]);
 
 /**
  * The served activity for a seat with a current Claude authentication or billing failure (`retainedProviderFailure`):
@@ -1860,34 +1905,53 @@ export function deriveCanonicalFromEntry(entry: NodeInventoryEntry): string | nu
 }
 
 export function readAssignedWorkBySession(db: Database.Database): Map<string, AssignedWorkCounts> {
-  const rows = db.prepare(`
-    SELECT destination_session,
-      COUNT(*) as assigned_count,
-      SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) as pending_count,
-      SUM(CASE WHEN state = 'in-progress' THEN 1 ELSE 0 END) as in_progress_count,
-      SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) as blocked_count
-    FROM queue_items
-    WHERE state IN ('pending', 'in-progress', 'blocked')
-    GROUP BY destination_session
-  `).all() as Array<{
-    destination_session: string;
-    assigned_count: number;
-    pending_count: number;
-    in_progress_count: number;
-    blocked_count: number;
-  }>;
-  const out = new Map<string, AssignedWorkCounts>();
-  for (const r of rows) {
-    const address = physicalSessionName(db, r.destination_session);
-    const prior = out.get(address);
-    out.set(address, {
-      assignedWorkCount: (prior?.assignedWorkCount ?? 0) + r.assigned_count,
-      pendingWorkCount: (prior?.pendingWorkCount ?? 0) + r.pending_count,
-      inProgressWorkCount: (prior?.inProgressWorkCount ?? 0) + r.in_progress_count,
-      blockedWorkCount: (prior?.blockedWorkCount ?? 0) + r.blocked_count,
-    });
-  }
-  return out;
+  // The aggregate and notice subtraction must observe one snapshot, including with another connection writing.
+  return db.transaction(() => {
+    const rows = db.prepare(`
+      SELECT destination_session,
+        COUNT(*) as assigned_count,
+        SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) as pending_count,
+        SUM(CASE WHEN state = 'in-progress' THEN 1 ELSE 0 END) as in_progress_count,
+        SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) as blocked_count
+      FROM queue_items
+      WHERE state IN ('pending', 'in-progress', 'blocked')
+      GROUP BY destination_session
+    `).all() as Array<{
+      destination_session: string;
+      assigned_count: number;
+      pending_count: number;
+      in_progress_count: number;
+      blocked_count: number;
+    }>;
+    // Keep ordinary work aggregated in SQLite. Only OpenRig-authored candidates need the shared classifier;
+    // a matching sender alone does not make a row informational.
+    const byDestination = new Map(rows.map(row => [row.destination_session, row]));
+    const candidates = db.prepare(`SELECT qitem_id, source_session, destination_session, state FROM queue_items
+      WHERE state IN ('pending', 'in-progress', 'blocked') AND source_session = ?`)
+      .iterate(OPENRIG_SENDER) as IterableIterator<{ qitem_id: string; source_session: string; destination_session: string; state: string }>;
+    for (const row of candidates) {
+      if (!isRosterReadyNotice(row)) continue;
+      const counts = byDestination.get(row.destination_session);
+      if (!counts) continue; // A candidate without an aggregate destination must not affect another destination.
+      counts.assigned_count--;
+      if (row.state === "pending") counts.pending_count--;
+      else if (row.state === "in-progress") counts.in_progress_count--;
+      else counts.blocked_count--;
+    }
+    const out = new Map<string, AssignedWorkCounts>();
+    for (const r of rows) {
+      if (r.assigned_count === 0) continue;
+      const address = physicalSessionName(db, r.destination_session);
+      const prior = out.get(address);
+      out.set(address, {
+        assignedWorkCount: (prior?.assignedWorkCount ?? 0) + r.assigned_count,
+        pendingWorkCount: (prior?.pendingWorkCount ?? 0) + r.pending_count,
+        inProgressWorkCount: (prior?.inProgressWorkCount ?? 0) + r.in_progress_count,
+        blockedWorkCount: (prior?.blockedWorkCount ?? 0) + r.blocked_count,
+      });
+    }
+    return out;
+  })();
 }
 
 /**
@@ -1902,8 +1966,11 @@ export function hookOrPaneActivity(
   idleYieldsToFrame = false,
   runtime?: string | null,
 ): { source: "hook" | "limit" | "pane"; activity: AgentActivity } | null {
-  // Running/needs_input hooks keep their meaning.
-  if (hookActivity && hookActivity.state !== "unknown" && !(hookActivity.state === "idle" && idleYieldsToFrame)) {
+  // A current hook-review menu can follow Stop without posting another lifecycle hook. Only a capture begun after
+  // that idle hook replaces it; running/needs_input hooks keep their meaning. The structural cache owns freshness.
+  const newerHookReview = runtime === "codex" && structural?.state === "attention" && structural.reason === "hook_trust_gate"
+    && Date.parse(structural.captureStartedAt ?? "") > Date.parse(hookActivity?.eventAt ?? "");
+  if (hookActivity && hookActivity.state !== "unknown" && !(hookActivity.state === "idle" && (idleYieldsToFrame || newerHookReview))) {
     return { source: "hook", activity: hookActivity };
   }
 

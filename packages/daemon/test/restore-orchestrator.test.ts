@@ -585,7 +585,8 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.nodes.find((n) => n.logicalId === "desk")?.status).toBe("left_attached");
     const named = result.result.warnings.filter((line) => line.includes("conversation"));
     expect(named).toHaveLength(1);
-    expect(named[0]).toMatch(/worker@r99 \([a-z]+\) has the same recorded claude_id conversation as desk-app@r99 \(running\), outside this restore/);
+    // It's named by what OpenRig knows of it: attached from an outside program, its liveness unknown.
+    expect(named[0]).toMatch(/worker@r99 \([a-z]+\) has the same recorded claude_id conversation as desk-app@r99 \(attached\), outside this restore/);
     expect(result.result.warnings.join("\n")).not.toContain("conv-x");
   });
 
@@ -3694,9 +3695,18 @@ describe("RestoreOrchestrator", () => {
         expect(outcome.status).not.toBe("resumed");
         if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
         // Attempted lineage, not readiness: a gate Claude draws after starting (the resume chooser, workspace trust, project
-        // MCP approval) keeps the launch for a person, with its resume token.
-        else if (mode === "chooser" || mode === "trust" || mode === "mcp") expect(latest.resumeToken).toBe(token);
+        // MCP approval, or its login refusal as the resumed conversation's latest reply) keeps the launch for a person, with
+        // its resume token.
+        else if (mode === "chooser" || mode === "trust" || mode === "mcp" || mode === "login") expect(latest.resumeToken).toBe(token);
         else expect(latest.resumeToken).toBeNull();
+        // A seat resumed to its login refusal waits for its person to sign in: never a failed resume.
+        if (mode === "login") {
+          expect({ status: outcome.status, startup: latest.startupStatus }).toEqual({ status: "attention_required", startup: "attention_required" });
+          expect(outcome.error).toContain("The resumed Claude conversation's latest reply is Claude's login refusal (\"Not logged in · Please run /login\"). "
+            + "If this seat isn't signed in, open its terminal and run /login there.");
+          expect(outcome.error).not.toMatch(/timed out|resume failed/);
+          expect(outcome.attentionEvidence).toBe("● Not logged in · Please run /login");
+        }
       }
       if (mode === "error") {
         expect(tmux.killSession).toHaveBeenCalledTimes(1);

@@ -882,11 +882,13 @@ it("a new prompt that clears while the tick awaits hook reviews gets no stale wa
   await tick();
   const id = alerts()[0]!.qitemId;
   await later(14_000, "Notification", "permission_prompt");
+  const readHookReviews = vi.fn(async () => { await later(1_000, "UserPromptSubmit", null); return []; });
   await runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value, log: () => {},
     resolveOrchestrator: () => lead, readPermissionPrompts: read, retryIntervalSeconds: 1,
-    // The seat moves on while this read is pending: its next turn starts, so the second prompt is gone.
-    readHookReviews: async () => { await later(1_000, "UserPromptSubmit", null); return []; },
+    // A separate cached hook-gate candidate keeps the read in flight while this seat's next turn clears its prompt.
+    readHookReviewCandidates: () => ["codex@hook-fixture"], readHookReviews,
     attemptWake: async (_id, target) => { woken.push(target); return "verified"; } });
+  expect(readHookReviews).toHaveBeenCalledOnce();
   expect(woken).toEqual([lead]);
   expect(newPromptNotes(id)).toEqual([]);
 });

@@ -1,5 +1,5 @@
 // A listing reads what every row needs once for all its rows instead of once per row: the last meaningful transitions
-// in one windowed query, and (with it) the waiting view's statements, the owners' activity and the row itself. Each
+// in one indexed batch query, and (with it) the waiting view's statements, the owners' activity and the row itself. Each
 // batched read must answer exactly what the per-row read answers, and a listing must project the same items.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";

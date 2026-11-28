@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { DaemonClient } from "../src/daemon-client.js";
+import { DaemonClient, dismissFailureNotice } from "../src/daemon-client.js";
 import { hydrateSnapshot } from "../src/hydrate.js";
 import { createViewState, emptySnapshot, computeExplorerRows } from "../src/state.js";
 import { attentionLines, replyAct, answerRequest } from "../src/attention/attention-model.js";
@@ -180,6 +180,56 @@ it("answers a question ask from its request view: an act per open option, reply 
   expect(replyAct(read, asked.id, "Neither, call it Gamma")).toEqual({ type: "act", act: "answer", qitemId: "two-questions", verb: "answer",
     actorSession: "human-founder@kernel", decision: "Neither, call it Gamma" });
   expect(replyAct(read, null, "words")).toMatchObject({ type: "notice" });
+});
+
+it("dismisses an open informational update from its detail, as the terminal's act; a closed one offers nothing", () => {
+  const update = { id: "queue-update:fyi", kind: "update" as const, summary: "Build finished", unblocks: null, urgency: "routine", at: "2026-11-20T12:00:00Z",
+    scope: "instance · project unknown", project: null, source: "/api/queue/fyi", recipient: "parkingmeter@external", dismiss: { actorSession: "parkingmeter@external" } };
+  const detailOf = (item: AttentionItem) => {
+    const snap: FleetSnapshot = { ...emptySnapshot(), attentionRead: { scope: "instance", readAt: update.at, items: [item], sources: [], detail: { item, lines: ["State: pending"], files: [] }, detailError: null } };
+    const view = createViewState({ instanceId: "attention-dismiss", getSnapshot: () => snap });
+    view.dispatch({ type: "attention-open", id: item.id });
+    return attentionLines(view.get(), snap, 200);
+  };
+  const lines = detailOf(update);
+  const dismiss = lines.find(l => l.action?.type === "act");
+  expect(dismiss?.text).toContain("Dismiss update as human@host (unattributed) on parkingmeter@external's behalf (closes it; not approval, proof of delivery or a reply)");
+  expect(dismiss?.action).toEqual({ type: "act", act: "answer", qitemId: "fyi", verb: "dismiss", actorSession: "parkingmeter@external" });
+  expect(answerRequest(dismiss!.action as Extract<Action, { type: "act"; act: "answer" }>))
+    .toEqual({ qitemId: "fyi", verb: "dismiss", actorSession: "parkingmeter@external", authority: "primary-user" });
+  expect(detailOf({ ...update, dismiss: undefined }).some(l => l.action?.type === "act")).toBe(false);
+});
+
+it("says a dismiss changed nothing only when the daemon refused it, not when it failed or got no answer", async () => {
+  const failure = async (fetchImpl: typeof fetch) => {
+    const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl });
+    return dismissFailureNotice(await client.missionControlAction({ verb: "dismiss", qitemId: "fyi", actorSession: "parkingmeter@external", authority: "primary-user" })
+      .then(() => { throw new Error("expected the dismiss to fail"); }, (err: unknown) => err));
+  };
+  const refused = await failure((async () => Response.json({ error: "qitem_already_terminal", state: "done" }, { status: 409 })) as typeof fetch);
+  expect(refused).toMatch(/^Not dismissed, nothing changed: .*409 — qitem_already_terminal/);
+  const unanswered = await failure((async () => { throw new TypeError("fetch failed"); }) as typeof fetch);
+  expect(unanswered).not.toContain("nothing changed");
+  expect(unanswered).toContain("Dismiss not confirmed, the daemon didn't answer: fetch failed. It may have been dismissed");
+  // A 500 can follow a committed write (the daemon failed after it), so it isn't read as "nothing changed".
+  const failed = await failure((async () => Response.json({ error: "internal" }, { status: 500 })) as typeof fetch);
+  expect(failed).not.toContain("nothing changed");
+  expect(failed).toMatch(/^Dismiss not confirmed, the daemon failed while answering: .*500 — internal\. It may have been dismissed/);
+  // A 200 whose body can't be read doesn't confirm the close either.
+  const unreadable = await failure((async () => new Response("{\"verb\":\"dism", { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch);
+  expect(unreadable).not.toContain("nothing changed");
+  expect(unreadable).toContain("Dismiss not confirmed, the daemon's answer couldn't be read");
+});
+
+it("bounds a dismiss write, headers and body, with a deadline", async () => {
+  const signals: (AbortSignal | null | undefined)[] = [];
+  const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async (_url, init) => {
+    signals.push(init?.signal);
+    return Response.json({ verb: "dismiss", qitemId: "fyi", closedQitem: {} });
+  }) as typeof fetch });
+  await client.missionControlAction({ verb: "dismiss", qitemId: "fyi", actorSession: "parkingmeter@external", authority: "primary-user" });
+  expect(signals[0]).toBeInstanceOf(AbortSignal);
+  expect(signals[0]?.aborted).toBe(false);
 });
 
 it("sends an answer act's choice or words in the one mission-control write", async () => {

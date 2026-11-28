@@ -43,9 +43,15 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       head: ${{ steps.plan.outputs.head }}
     steps:
+      # The plan decides which required check names this run reports, so it runs the BASE branch's copy
+      # of the script, never the pull request's. `pull_request.base.sha` is a commit on the base branch;
+      # a dispatch (which needs write access to start) uses the branch it was dispatched from.
+      # Without this, a pull request that edits scripts/ci-macos-ready-plan.mjs would be graded by its
+      # own copy, which can name the two required checks with `package: "none"` and skip every step.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha || github.ref_name }}
           sparse-checkout: scripts/ci-macos-ready-plan.mjs
           sparse-checkout-cone-mode: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
