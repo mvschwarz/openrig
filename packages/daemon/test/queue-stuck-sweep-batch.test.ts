@@ -237,6 +237,8 @@ describe("runStuckSweep: batched reads and a yielding loop", () => {
   }
 
   it("runs the per-row recovery or successor query only to re-check a finding it is about to create", async () => {
+    // Count the fast-index path; slow-build fallback has separate controlled-clock coverage.
+    vi.spyOn(performance, "now").mockReturnValue(0);
     custodyRows(130);
     // first pass: the custody loop reads successors in one batch; each of the 130 new findings re-checks its own
     // source live right before the create, without the batch index (a rebuild scans every chain_of_record): the row's

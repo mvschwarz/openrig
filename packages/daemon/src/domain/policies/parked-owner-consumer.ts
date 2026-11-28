@@ -398,7 +398,12 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
       const next = ordered.findIndex(seat => seat.sessionName === lastTarget) + 1;
       const seats = [...ordered.slice(next), ...ordered.slice(0, next)];
 
+      let seatIndex = 0;
       for (const seat of seats) {
+        // Let the event loop take a turn between seats (the #2649 pattern): this evaluate diagnoses a whole rig, and
+        // without real I/O between seats it held the loop for the whole rig. Seat order and every per-seat rule are
+        // unchanged; the delivery-time recheck of open rows (below) already reads current state.
+        if (seatIndex++ > 0) await new Promise<void>((resolve) => setImmediate(resolve));
         // #3315: first, so it holds whatever else the seat reads as (a seat on a lost server often reads indeterminate):
         // no reservation and no transition per scan for a seat whose terminal server does not answer; the first scan
         // after it answers again sends the reminder.
