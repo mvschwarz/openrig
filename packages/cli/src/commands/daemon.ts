@@ -1,6 +1,7 @@
 import { signalProbe, createProcessLiveness, readProcessState } from "../process-liveness.js";
 import { Command } from "commander";
 import fs from "node:fs";
+import path from "node:path";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { acquireDaemonStartLock, archiveSpentReservation, bootedAtMs, currentBootId, finishStartReservation, markReservationRetained, processStartToken } from "../daemon-start-lock.js";
@@ -14,6 +15,7 @@ import {
   startDaemon,
   stopDaemon,
   getDaemonStatus,
+  pendingStartEndpoint,
   readLogs,
   tailLogs,
   type LifecycleDeps,
@@ -70,11 +72,14 @@ export function realDeps(): LifecycleDeps {
       try { fds = fs.readdirSync(`/proc/${pid}/fd`); } catch { fds = undefined; }
       if (fds) return fds.some((fd) => { try { return fs.readlinkSync(`/proc/${pid}/fd/${fd}`) === real; } catch { return false; } });
     }
+    // lsof exits 1 both when nothing it was asked about is found and on an error, so ask for the process's own open files:
+    // a listing answers either way, and no listing is reported as unread, never as "not held".
     try {
-      const holders = execFileSync("lsof", ["-t", "--", real], { encoding: "utf-8", timeout: 2_000, maxBuffer: 64 * 1024 });
-      return holders.split("\n").some((line) => line.trim() === String(pid));
+      const listed = execFileSync("lsof", ["-a", "-p", String(pid), "-Fn"], { encoding: "utf-8", timeout: 2_000, maxBuffer: 1024 * 1024 });
+      return listed.split("\n").some((line) => line.startsWith("n") && (line.slice(1) === real || line.slice(1) === file));
     } catch (error) {
-      return lsofFailure(error);
+      const failure = lsofFailure(error);
+      return failure === false ? { failure: `lsof listed no open files for PID ${pid}` } : failure;
     }
   };
 
@@ -251,6 +256,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             exec: quietPreflightExec,
             configStore,
             getDaemonStatus: () => getDaemonStatus(getDeps()),
+            pendingStart: () => pendingStartEndpoint(getDeps()),
             openrigHome: OPENRIG_DIR,
           });
         const preflightResult = await preflight.run({ port: effectivePort, host: effectiveHost });
@@ -270,7 +276,9 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           {
             port: effectivePort,
             host: hostForDaemon,
-            db: opts.db ?? config.db.path,
+            // A relative --db is made absolute once, here: the child, its reservation and daemon.json then name the same
+            // file, and a later start from another directory compares that path.
+            db: opts.db !== undefined ? path.resolve(opts.db) : config.db.path,
             transcriptsEnabled: config.transcripts.enabled,
             transcriptsPath: config.transcripts.path,
             workspaceRoot: config.workspace.root,

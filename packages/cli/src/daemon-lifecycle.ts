@@ -1426,7 +1426,9 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
     if ("changed" in mark) return refuse(`the reservation changed while stop was checking it: ${mark.changed}`);
     if ("written" in mark) current = mark.written;
     else {
-      // A claim that is not this stop's may be a removal in progress, which only follows a dead child: check it again.
+      // A claim that is not this stop's may be a removal in progress, which only follows a dead child, or a start finishing
+      // this launch, whose child is alive and which holds it for its publication only. Either way the stop checks the
+      // child again and goes on: a person asked for it, and a claim an interrupted operation left must not block every stop.
       const again = childIdentity(" after the stopping mark");
       if (again) { mark.release?.(); return refuse(again); }
       if (mark.release) holding = mark;
@@ -1699,6 +1701,13 @@ function findSiblingHome(deps: LifecycleDeps): DaemonStatus["siblingHint"] {
 /** T2 — read-only: the live launcher (else child) PID named by a start reservation, or undefined
  *  when there is no reservation, it is unreadable, or every PID it names is dead. */
 function liveStartReservation(deps: LifecycleDeps): DaemonStatus["startPending"] {
+  const reservation = pendingStartEndpoint(deps);
+  return reservation && { pid: reservation.pid, ...(reservation.since ? { since: reservation.since } : {}) };
+}
+
+/** The same read, with the endpoint the reservation's child was launched at: start's preflight lets that child hold
+ *  that port, since the start then checks it against the reservation before anything else. */
+export function pendingStartEndpoint(deps: LifecycleDeps): { pid: number; since?: string; host?: string; port?: number } | undefined {
   const reservation = observeStartReservation({
     home: deps.homeDir ?? OPENRIG_DIR,
     bootId: deps.bootId?.(),
@@ -1707,7 +1716,8 @@ function liveStartReservation(deps: LifecycleDeps): DaemonStatus["startPending"]
       ? deps.processLiveness(pid) : deps.isProcessAlive(pid) ? "alive" : "dead",
   });
   if (!reservation || reservation.liveness === "dead" || reservation.pid === undefined) return undefined;
-  return { pid: reservation.pid, ...(reservation.since ? { since: reservation.since } : {}) };
+  return { pid: reservation.pid, ...(reservation.since ? { since: reservation.since } : {}),
+    ...(reservation.host ? { host: reservation.host } : {}), ...(reservation.port ? { port: reservation.port } : {}) };
 }
 
 export async function getDaemonStatus(

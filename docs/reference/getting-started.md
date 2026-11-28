@@ -1573,8 +1573,15 @@ passes the usual startup readiness, publishes `daemon.json` for it (or keeps a
 longer running (after a crash, for example) is replaced, as an ordinary start replaces it.
 The child keeps the settings it was launched with: this `rig daemon start` doesn't
 reconfigure its port, host or database.
+Readiness alone isn't always enough. A reservation written by an OpenRig before this
+change doesn't record the child's database, so the finish publishes only the database a
+`daemon.json` already names, or this start's own (`--db` or the configured path), and only
+while the child has that file open. On an OS that gives no boot ID (Windows), the
+reservation can't be matched to this boot, so the finish doesn't apply there.
 Its output reports the publication, the reservation and the readiness on separate lines.
-When any check fails, it changes nothing and the start error says why.
+When publication succeeds but the reservation can't be archived, the output says
+`Reservation: kept` and why, the start doesn't fail, and the next `rig daemon start`
+retires it. When any check fails, it changes nothing and the start error says why.
 A wait shorter than the host needs only makes the start end pending sooner; it doesn't
 stop the child.
 Set the wait to what the host and its supervisor expect. A longer wait doesn't make a slow

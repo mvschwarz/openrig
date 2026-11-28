@@ -44,3 +44,9 @@ it("daemon start --port 0 reaches startup asking for any free port", async () =>
   expect(startDaemon).toHaveBeenCalledTimes(1);
   expect(vi.mocked(startDaemon).mock.calls[0]![0]).toMatchObject({ port: 0 });
 });
+
+it("daemon start --db with a relative path reaches startup with that path made absolute once", async () => {
+  await daemonCommand({} as never).parseAsync(["start", "--db", "relative/openrig.sqlite"], { from: "user" });
+  expect(startDaemon).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(startDaemon).mock.calls[0]![0]).toMatchObject({ db: join(process.cwd(), "relative/openrig.sqlite") });
+});

@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import type { ChildProcess } from "node:child_process";
+import { spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { startDaemon, STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import { acquireDaemonStartLock, finishStartReservation } from "../src/daemon-start-lock.js";
+import { realDeps } from "../src/commands/daemon.js";
 // Resolve the startup import before a fake clock can finish with no timer yet scheduled.
 import "@openrig/daemon/instance-initialization";
 
@@ -352,5 +353,23 @@ describe("the start that ends pending", () => {
     expect(JSON.parse(f.files.get(STATE_FILE)!)).toMatchObject({ pid: CHILD, port: 7433, db: DB });
     expect(f.deps.spawn).toHaveBeenCalledTimes(1);
     expect(f.deps.databaseHeldBy).not.toHaveBeenCalled(); // the reservation names its database
+  });
+});
+
+describe("the database-holder check an older reservation's finish relies on", () => {
+  it("answers from the process's own open files, and reports a process it can't list as unread, never as not holding it", () => {
+    const check = realDeps().databaseHeldBy!;
+    const held = path.join(home, "held.sqlite"), other = path.join(home, "other.sqlite");
+    fs.writeFileSync(held, ""); fs.writeFileSync(other, "");
+    const fd = fs.openSync(held, "r");
+    try {
+      expect(check(process.pid, held)).toBe(true);
+      expect(check(process.pid, other)).toBe(false);
+      // A process that has exited: whatever lsof answers (exit 1, or not installed), it's a failure, not "not held".
+      const gone = spawnSync(process.execPath, ["-e", ""]).pid;
+      expect(check(gone, held)).toEqual({ failure: expect.any(String) });
+    } finally {
+      fs.closeSync(fd);
+    }
   });
 });

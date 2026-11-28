@@ -35,6 +35,9 @@ interface PreflightDeps {
   exec: (cmd: string) => Promise<string>;
   configStore: ConfigStore;
   getDaemonStatus: () => Promise<DaemonStatus>;
+  /** A start reservation whose process isn't positively gone, with the endpoint its child was launched at (a start that
+   *  ended pending leaves that child listening there). Absent = an occupied port always refuses, as before. */
+  pendingStart?: () => { pid?: number; host?: string; port?: number } | undefined;
   openrigHome?: string;
   riggedHome?: string;
 }
@@ -193,13 +196,18 @@ export class SystemPreflight {
       } else if (available === "available") {
         checks.push({ name: "port_available", ok: true });
       } else {
-        checks.push({
-          name: "port_available",
-          ok: false,
-          error: `Port ${effectivePort} is already in use on ${effectiveHost}.`,
-          reason: "The daemon cannot bind to a port that is already occupied.",
-          fix: `Run rig config set daemon.port ${effectivePort + 1} and retry, or find the existing process with lsof -nP -iTCP:${effectivePort} -sTCP:LISTEN.`,
-        });
+        // A start that ended pending leaves its child listening here, and the next start finishes that start: it checks the
+        // child against the reservation first, and while the reservation stands it starts no other daemon.
+        const pending = this.reservedFor(effectiveHost, effectivePort);
+        checks.push(pending
+          ? { name: "port_available", ok: true, warning: `Port ${effectivePort} on ${effectiveHost} is held by an earlier start${pending.pid ? ` (reserved by pid ${pending.pid})` : ""}; this start checks that start before anything else and starts no other daemon while it is reserved.` }
+          : {
+            name: "port_available",
+            ok: false,
+            error: `Port ${effectivePort} is already in use on ${effectiveHost}.`,
+            reason: "The daemon cannot bind to a port that is already occupied.",
+            fix: `Run rig config set daemon.port ${effectivePort + 1} and retry, or find the existing process with lsof -nP -iTCP:${effectivePort} -sTCP:LISTEN.`,
+          });
       }
     }
 
@@ -207,5 +215,12 @@ export class SystemPreflight {
       ready: checks.every((c) => c.ok),
       checks,
     };
+  }
+
+  /** The start reservation whose child was launched at exactly this endpoint, if one stands. */
+  private reservedFor(host: string, port: number): { pid?: number } | undefined {
+    let pending: ReturnType<NonNullable<PreflightDeps["pendingStart"]>>;
+    try { pending = this.deps.pendingStart?.(); } catch { return undefined; }
+    return pending && pending.port === port && (pending.host ?? "127.0.0.1") === host ? pending : undefined;
   }
 }
