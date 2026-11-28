@@ -83,6 +83,10 @@ const SANCTIONED: Record<string, { sites: number; why: string }> = {
     sites: 1,
     why: "seat removal closes only the removed generation's roster-ready notice with no-follow-on in the same transaction as deleting the node; persisted queue events are published after commit",
   },
+  "domain/network/network-requests.ts": {
+    sites: 1,
+    why: "requester-question initial non-terminal wait committed atomically with its network receipt; queue notifications are deferred until the outer transaction commits",
+  },
   "domain/stream-intake.ts": {
     sites: 1,
     why: "stream intake note batching: transition note and priority update committed in the same transaction as advancing the durable cursor; notifications after commit",
@@ -222,9 +226,9 @@ describe("P34 RED 3 — the enumeration guard (rev 2: call-site granularity)", (
   it("the LIVE corpus matches the sanctioned set exactly, by CALL SITE", () => {
     const result = checkCallSites(realCorpus(), SANCTIONED);
     expect(result.violations).toEqual([]);
-    // Counts SITES, not files. 17 sites across 8 files.
+    // Counts SITES, not files. 18 sites across 9 files.
     expect(result.examined).toBe(TOTAL_SITES);
-    expect(result.examined).toBe(17);
+    expect(result.examined).toBe(18);
     expect(result.vacuous).toBe(false);
   });
 
@@ -328,6 +332,6 @@ describe("P34 RED 5 — KNOWN-NEGATIVE: a guard that examines nothing must FAIL"
   it("the LIVE run is NOT vacuous and examined the expected number of SITES", () => {
     const live = checkCallSites(realCorpus(), SANCTIONED);
     expect(live.vacuous).toBe(false);
-    expect(live.examined).toBe(17);
+    expect(live.examined).toBe(18);
   });
 });
