@@ -33,7 +33,7 @@ import { abortableSleep, POSSIBLY_POSTED_CLASS, subsystemSlackDeliver } from "./
 import { InboundRouter, SLACK_THREAD_ROOT_TAG, handleEnvelope, type SocketEnvelope, type SlackEvent, type SlackBlockActions, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
 import { ThreadSeatMap, formatPostedStamp } from "./thread-seat-map.js";
-import { makeThreadRouteResolver } from "./thread-routing.js";
+import { makeThreadReader, makeThreadRouteResolver } from "./thread-routing.js";
 import { resolveInboundChannelDestination, resolveOutboundChannel, unsupportedChannelMapFields } from "./channel-map.js";
 import { resolveRigRepresentative } from "../../queue-owner.js";
 import { recoveryTag } from "../../queue-recovery.js";
@@ -380,6 +380,11 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const inbound = effectiveInboundDestination(cfg, receiver?.session ?? null);
   const inboundNote = inboundDestinationNote(inbound, receiver);
   if (inbound.from === "default") log(`slack inbound: ${inboundNote}`);
+  // Where a person's top-level message in a channel goes (its `inbound` seat or its rig's representative), and so who reads a
+  // reply in a thread OpenRig's machinery posted there (thread-routing.ts).
+  const resolveChannelReader = (channel: string | undefined) =>
+    resolveInboundChannelDestination(cfg, channel, (rig) => resolveRigRepresentative(opts.queueRepo.db, rig));
+  const threadReader = makeThreadReader({ unroutedDestination: inbound.destination, resolveChannelDestination: resolveChannelReader });
   const inboundRouting = { fallback: "local", destination: inbound.destination, destinationFrom: inbound.from, ...(inboundNote ? { destinationNote: inboundNote } : {}) };
   const dead = new DeadLetterStore<SlackEvent>(path.join(stateDir(opts.home), "slack-inbound-deadletter.jsonl"));
   const deadActions = new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl"));
@@ -594,6 +599,10 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // #96 — where a replyTo update posts. Walks back through earlier threaded updates (which
   // open no root of their own) to the item that owns the root.
   const MAX_REPLY_TO_CHAIN = REPLY_TO_CHAIN_LIMIT;
+  // The root's seat answers in its own thread, and so does the seat its replies reach: for a root OpenRig's machinery
+  // posted, that is the channel's reader, so the seat that got the person's reply can answer there.
+  const ownsRoot = (root: { seat: string; channel: string }, sender: string): boolean =>
+    root.seat === sender || threadReader(root.seat, root.channel) === sender;
   const deriveReplyToChoice = (p: OutboundPostPayload, channel: string): ReplyToChoice => {
     let item = p.replyTo ? opts.queueRepo.getById(p.replyTo) : null;
     for (let depth = 0; item && depth < MAX_REPLY_TO_CHAIN; depth++) {
@@ -604,7 +613,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // Who the root belongs to is checked before where it is, so a reply that isn't the root's
         // says so even when it also posts in another channel.
         if (root.human !== (p.destinationSession ?? "")) return { kind: "fallback", reason: "root-other-human", threadTs: root.threadTs };
-        if (root.seat !== (p.sourceSession ?? "")) return { kind: "fallback", reason: "root-other-seat", threadTs: root.threadTs };
+        if (!ownsRoot(root, p.sourceSession ?? "")) return { kind: "fallback", reason: "root-other-seat", threadTs: root.threadTs };
         if (root.channel !== channel) return { kind: "fallback", reason: "root-other-channel", threadTs: root.threadTs };
         return { kind: "thread", threadTs: root.threadTs };
       }
@@ -617,7 +626,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         if (root) {
           if (root.state === "closed") return { kind: "fallback", reason: "root-closed", threadTs: root.threadTs };
           if (root.human !== (p.destinationSession ?? "")) return { kind: "fallback", reason: "root-other-human", threadTs: root.threadTs };
-          if (root.seat !== (p.sourceSession ?? "")) return { kind: "fallback", reason: "root-other-seat", threadTs: root.threadTs };
+          if (!ownsRoot(root, p.sourceSession ?? "")) return { kind: "fallback", reason: "root-other-seat", threadTs: root.threadTs };
           if (root.channel !== channel) return { kind: "fallback", reason: "root-other-channel", threadTs: root.threadTs };
           return { kind: "thread", threadTs: root.threadTs };
         }
@@ -1474,8 +1483,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         map: threadMap,
         unroutedDestination: inbound.destination,
         // A person's top-level message in a channel the map routes: its `inbound` seat or its rig's representative.
-        resolveChannelDestination: (channel) =>
-          resolveInboundChannelDestination(cfg, channel, (rig) => resolveRigRepresentative(opts.queueRepo.db, rig)),
+        resolveChannelDestination: resolveChannelReader,
         log,
       }),
       // A person's top-level message is its answer's root, marked as theirs, and stamped on their row

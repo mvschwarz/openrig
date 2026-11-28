@@ -328,6 +328,34 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
     });
 
+    it("a daemon alert's channel reader can answer the inbound Slack reply in the same thread", async () => {
+      const humanReply = await connectInbound();
+      const alert = await repo.create({ sourceSession: "daemon@kernel", destinationSession: "affected@rig",
+        summary: "A seat needs attention", body: "A seat needs attention.", tags: ["wake-escalation"], nudge: false });
+      // A root a daemon-authored alert already has: an existing root routes the same way, with no migration.
+      new ThreadSeatMap(db).open({ threadTs: "900.1", channel: "C-TEST", human, seat: "daemon@kernel", conversationId: alert.qitemId });
+      await humanReply("900.1", "905.1");
+      const received = inboundRow("905.1")!;
+      expect(received).toMatchObject({ destinationSession: "operator-agent@kernel", replyTo: alert.qitemId });
+      expect(repo.getById(alert.qitemId)?.state).toBe("pending"); // the reply doesn't close the alert
+      const answer = await repo.create({ ...request, sourceSession: "operator-agent@kernel", humanIntent: "update", body: "Looking at it.",
+        replyTo: received.qitemId });
+      await deliver(answer.qitemId);
+      expect({ thread: posts.at(-1)?.thread_ts, fallback: repo.getById(answer.qitemId)?.replyToFallback })
+        .toEqual({ thread: "900.1", fallback: null });
+    });
+
+    it("a seat that isn't a daemon alert's channel reader still can't post in its thread", async () => {
+      const alert = await repo.create({ sourceSession: "daemon@kernel", destinationSession: "affected@rig",
+        summary: "A seat needs attention", body: "A seat needs attention.", tags: ["wake-escalation"], nudge: false });
+      new ThreadSeatMap(db).open({ threadTs: "910.1", channel: "C-TEST", human, seat: "daemon@kernel", conversationId: alert.qitemId });
+      const other = await repo.create({ ...request, sourceSession: "affected@rig", humanIntent: "update", body: "Not my thread.",
+        replyTo: alert.qitemId });
+      await deliver(other.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      expect(repo.getById(other.qitemId)?.replyToFallback).toBe("root-other-seat (thread 910.1)");
+    });
+
     it("#822: an answer to a reply the person typed in an OpenRig thread posts in that thread", async () => {
       const humanReply = await connectInbound();
       const decision = await repo.create({ ...request, humanAlert: true });
