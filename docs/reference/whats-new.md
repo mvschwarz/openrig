@@ -1,7 +1,7 @@
 # What changed in OpenRig 0.7.25
 
 This note is for an agent on an install that was just upgraded to 0.7.25.
-OpenRig 0.7.25 is a patch for people who work with their OpenRig team from a Claude Code or Codex conversation that is not an OpenRig seat. The team's questions and results reach that conversation more reliably, including Claude Code in Claude Desktop's Code tab, and a message held while a person drafts in a seat is typed once their input is clear. The daemon stays responsive with many seats and the TUI open, and recovery says more plainly what a seat needs.
+OpenRig 0.7.25 is a patch for people who work with their OpenRig team from a Claude Code or Codex conversation that is not an OpenRig seat. The team's questions reach that conversation more reliably, and results return automatically to Claude Code conversations using the OpenRig plugin. A message held while a person drafts in a seat is typed once their input is clear. Recovery also says more plainly what a seat needs.
 
 ## Before you upgrade
 
@@ -27,7 +27,7 @@ This release adds ten database migrations, which apply at the first start. Nine 
 
 ## Working with your team from your own conversation
 
-Claude Code's waiter and the plugin's MCP server find `rig` on a login shell's PATH, so Claude Code in Claude Desktop's Code tab hears the team once `rig`'s folder is on PATH in your login profile, and the no-`rig` notice says how to put it there. A Codex conversation started before `rig` was installed keeps looking and gets its wakes, and the wake keeps delivering after a large backlog and over a long session. A conversation whose MCP entry names no seat answers its team's questions as the address its own request was issued, and one whose entry names a seat still hears its own questions. A chat app using `rig mcp serve --front-door` checks the team every turn and says what a scheduled check needs. The stuck-work sweep no longer reports your conversation as an undelivered address, an answer to a question from a rig the daemon doesn't know closes it, and agents read the `rigs` skill in parts when a read comes back shortened. ([#4032](https://github.com/mvschwarz/openrig/pull/4032), [#4064](https://github.com/mvschwarz/openrig/pull/4064), [#4029](https://github.com/mvschwarz/openrig/pull/4029), [#3971](https://github.com/mvschwarz/openrig/pull/3971), [#4059](https://github.com/mvschwarz/openrig/pull/4059), [#3992](https://github.com/mvschwarz/openrig/pull/3992), [#4063](https://github.com/mvschwarz/openrig/pull/4063), [#3976](https://github.com/mvschwarz/openrig/pull/3976), [#3972](https://github.com/mvschwarz/openrig/pull/3972), [#4025](https://github.com/mvschwarz/openrig/pull/4025))
+Claude Code's waiter and the plugin's MCP server find `rig` on a login shell's PATH, and the no-`rig` notice says how to put `rig`'s folder on PATH in your login profile. A Codex conversation gets its wakes, and the wake keeps delivering after a large backlog and over a long session. A conversation whose MCP entry names no seat answers its team's questions as the address its own request was issued, and one whose entry names a seat still hears its own questions. A chat app using `rig mcp serve --front-door` checks the team every turn and says what a scheduled check needs. The stuck-work sweep no longer reports your conversation as an undelivered address, an answer to a question from a rig the daemon doesn't know closes it, and agents read the `rigs` skill in parts when a read comes back shortened. ([#4032](https://github.com/mvschwarz/openrig/pull/4032), [#4064](https://github.com/mvschwarz/openrig/pull/4064), [#4029](https://github.com/mvschwarz/openrig/pull/4029), [#3971](https://github.com/mvschwarz/openrig/pull/3971), [#4059](https://github.com/mvschwarz/openrig/pull/4059), [#3992](https://github.com/mvschwarz/openrig/pull/3992), [#4063](https://github.com/mvschwarz/openrig/pull/4063), [#3976](https://github.com/mvschwarz/openrig/pull/3976), [#3972](https://github.com/mvschwarz/openrig/pull/3972), [#4025](https://github.com/mvschwarz/openrig/pull/4025))
 
 Permission questions: a later question stays open when an earlier identical call finishes, a receiving agent judges a person's conditional answer and asks back only when it can't tell, and `rig seat status` says who a Claude Code seat's own prompts are asked of. ([#3990](https://github.com/mvschwarz/openrig/pull/3990), [#3992](https://github.com/mvschwarz/openrig/pull/3992))
 
@@ -41,9 +41,9 @@ A Codex seat waiting at Codex's "Hooks need review" menu reads as needing input 
 
 Community presets can declare their own activity hooks (`activity_hooks`), a fresh handover to one that declares `first_input` passes its restore packet as the first input, Hermes gets its first startup turn through a query file, and a community seat's fresh launch finds its harness past a newer session that lost it. A never-launched Claude seat keeps its chosen account, a seat joined with `rig attach` reads as attached, managed Claude restores read packaged role guidance, a fork handover's Claude is proven ready by its own session, and compaction recovery notices reach an agent able to act, or say no one could. ([#4052](https://github.com/mvschwarz/openrig/pull/4052), [#4045](https://github.com/mvschwarz/openrig/pull/4045), [#4035](https://github.com/mvschwarz/openrig/pull/4035), [#4009](https://github.com/mvschwarz/openrig/pull/4009), [#4031](https://github.com/mvschwarz/openrig/pull/4031), [#3962](https://github.com/mvschwarz/openrig/pull/3962), [#4051](https://github.com/mvschwarz/openrig/pull/4051), [#4044](https://github.com/mvschwarz/openrig/pull/4044), [#4053](https://github.com/mvschwarz/openrig/pull/4053), [#4036](https://github.com/mvschwarz/openrig/pull/4036), [#4011](https://github.com/mvschwarz/openrig/pull/4011), [#4042](https://github.com/mvschwarz/openrig/pull/4042), [#3996](https://github.com/mvschwarz/openrig/pull/3996), [#3995](https://github.com/mvschwarz/openrig/pull/3995), [#4008](https://github.com/mvschwarz/openrig/pull/4008), [#4034](https://github.com/mvschwarz/openrig/pull/4034), [#4054](https://github.com/mvschwarz/openrig/pull/4054))
 
-## A responsive daemon
+## Lighter daemon reads
 
-`/api/health` reads only the context samples added since its last read, so the TUI's polling no longer holds up a busy daemon, and an open execution view keeps the daemon answering over a long queue history. The roster read behind snapshots is indexed. ([#3993](https://github.com/mvschwarz/openrig/pull/3993), [#4062](https://github.com/mvschwarz/openrig/pull/4062), [#4037](https://github.com/mvschwarz/openrig/pull/4037))
+`/api/health` reads only the context samples added since its last read. Execution-view projections yield between rows and use indexed lookups for recent meaningful transitions. The roster read behind snapshots is indexed. ([#3993](https://github.com/mvschwarz/openrig/pull/3993), [#4062](https://github.com/mvschwarz/openrig/pull/4062), [#4037](https://github.com/mvschwarz/openrig/pull/4037))
 
 ## Accounts, queue and views
 
@@ -68,13 +68,17 @@ Also: fixes to `rig daemon stop` and `rig daemon start --port 0`, `rig import` w
 - A Claude Code seat that runs several `rig` commands in one Bash call, or builds one from shell variables, can stop at an approval prompt. One plain `rig` command per call avoids it.
 - After `rig seat restart --keep-conversation`, a Codex seat runs without OpenRig's startup guidance; the restart plan says so.
 - A team seat can send its final result to the operator instead of your conversation; if a result seems late, ask your agent to check the team's progress.
-- Bringing the team's work into your own Codex conversation hasn't been confirmed on a live Codex run yet. If something doesn't arrive, ask your agent to list the tasks at its conversation's address.
+- Automatic delivery of the team's work into your own Codex conversation needs OpenRig's plugin hooks loaded and trusted in that conversation. If something doesn't arrive, ask your agent to list the tasks at its conversation's address.
 - A `rig send` while Claude's `AskUserQuestion` dialog is open can become its answer.
 - When a Codex seat's `config.toml` or `hooks.json` is a symbolic link, hook trust is recorded under the link's target, so hooks may need review again. With a linked `config.toml`, OpenRig can miss a setting that turns its hooks off and set them up anyway. Review hook prompts yourself.
 - The tmux outage record is in memory, so a restart during a loss records it again.
 - Only one earlier restore packet is kept aside while a new one builds.
 - A percent `context-usage-threshold` doesn't fire for a Pi seat; use a token threshold.
 - A return route doesn't guarantee a question's arrival.
+- When automatic idle stopping is enabled for a rig (`policies.seat_scale`), an open "Team seats and edges recorded" notice counts as pending work, so that seat's idle timer does not start until the notice is closed.
+- In a synthetic comparison with 0.7.24, eight queue list/show CLI reads were 16-26% slower, adding about 51-94 ms per call. The measured daemon reads, two view commands and start-to-ready timings did not show the same slowdown. The slowdown is in the CLI's start-up for rig queue commands, not in the daemon.
+- If you upgrade from 0.7.24, each seat may get the "Team seats and edges recorded" notice once more at the first start after the upgrade. It's information only.
+- A new Claude Code seat can occasionally show ready before its startup prompt is submitted. If work does not start, open the seat's terminal and submit the staged startup prompt; draft-aware delivery may hold messages until the input clears.
 
 ## Credits
 
