@@ -113,8 +113,12 @@ export function runSeatPoolDispatchGuard(
       return finish({ verdict: "error", message: why ? `${how}: ${why}` : how });
     };
     // The verdict is the exit code. Its output is read until the pipes close, or briefly after the exit when something it
-    // started still holds them; the exit code is not lost to that.
-    child.on("close", (code, signal) => settle(code, signal));
+    // started still holds them; the exit code is not lost to that. Its group goes when the pipes close too: a child it
+    // started with its own stdio (ignored, or a file) does not hold them and would outlive the verdict otherwise.
+    child.on("close", (code, signal) => {
+      killGroup();
+      settle(code, signal);
+    });
     child.on("exit", (code, signal) => {
       exited = { code, signal };
       if (done) return;

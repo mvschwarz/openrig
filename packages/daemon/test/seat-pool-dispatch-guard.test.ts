@@ -124,4 +124,15 @@ describe("seat-pool dispatch guard runner (#4061)", () => {
       expect(await stillAlive([childPid!])).toEqual([]);
     });
   });
+
+  it("A guard that exits leaving a child with its own stdio (not holding the pipes) is read by its exit code, and the child is killed.", async () => {
+    await inTemp(async (dir) => {
+      const file = path.join(dir, "pids.json");
+      expect(await runSeatPoolDispatchGuard(guard(withChild(file, "ignore", "console.log('busy'); process.exit(75)")), { timeoutMs: 5000 }))
+        .toEqual({ verdict: "veto", message: "busy" });
+      // the child never held the pipes, so the close came at the guard's exit; it still goes with the guard's group
+      const [, childPid] = JSON.parse(fs.readFileSync(file, "utf8")) as number[];
+      expect(await stillAlive([childPid!])).toEqual([]);
+    });
+  });
 });
