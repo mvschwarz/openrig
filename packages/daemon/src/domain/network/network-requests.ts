@@ -14,6 +14,7 @@ import { QueueRepositoryError, type QueueItem, type QueueRepository } from "../q
 import { OPENRIG_SENDER } from "../../lib/pane-envelope.js";
 import { NetworkBindingError, readNetworkCredential, type NetworkBinding, type NetworkBindingStore } from "./network-bindings.js";
 import { connectMcpHub, HubError, type HubConnect, type HubItem, type HubSession, type HubTeam } from "./hub-client.js";
+import type { NetworkWait } from "../queue-waiting.js";
 
 export interface NetworkRequestDeps {
   db: Database.Database;
@@ -40,6 +41,9 @@ interface RequestRow {
   local_qitem_id: string; binding_id: string; node_id: string; hub_url: string; hub_seat: string; peer: string; hub_qitem_id: string;
   body_sha256: string; created_at: string; hub_created_at: string | null; checked_at: string | null;
   settled_at: string | null; outcome: string | null; last_error: string | null;
+  requester_local_qitem_id?: string | null;
+  requester_hub_qitem_id?: string | null;
+  remote_wait?: string | null;
 }
 
 const HUB_TIMEOUT_MS = 30_000;
@@ -182,14 +186,23 @@ const handedOn = (item: HubItem): boolean => item.state === "handed-off" || (ite
 type CreateOutcome = { kind: "created"; item: HubItem } | { kind: "found"; item: HubItem } | { kind: "refused"; error: HubError }
   | { kind: "unknown"; error: HubError };
 
+/** A requester question is confirmed only with the hub's persisted relation, including on same-id readback. */
+function confirmedQuestion(receipt: RequestRow, item: HubItem, kind: "created" | "found"): CreateOutcome {
+  if (receipt.requester_hub_qitem_id && item.requesterOf !== receipt.requester_hub_qitem_id) {
+    return { kind: "unknown", error: new HubError("unavailable", "The hub did not confirm the question's original-work relation. No name-based fallback was sent.") };
+  }
+  return { kind, item };
+}
+
 /** Create the request on the hub under its derived id. A refusal with the hub's own code, or the hub holding a different
  *  request under that id, is definite; anything else (a timeout, a lost connection, an answer that can't be read) leaves
  *  the outcome unknown. A revoked credential is thrown, for the caller to handle. */
 async function createOnHub(hub: HubSession, receipt: RequestRow, payload: { body: string; summary: string | null }): Promise<CreateOutcome> {
   try {
-    const created = await hub.create({ qitemId: receipt.hub_qitem_id, destination: receipt.peer, body: payload.body, summary: payload.summary });
+    const route = receipt.requester_hub_qitem_id ? { requesterOf: receipt.requester_hub_qitem_id } : { destination: receipt.peer };
+    const created = await hub.create({ qitemId: receipt.hub_qitem_id, ...route, body: payload.body, summary: payload.summary });
     if (created.createWarning) return { kind: "refused", error: new HubError("refused", "The hub already holds a different request under this id.", created.createWarning) };
-    return { kind: "created", item: created };
+    return confirmedQuestion(receipt, created, "created");
   } catch (error) {
     if (!(error instanceof HubError) || error.kind === "revoked") throw error;
     // The id is taken: another create of this request (a command retry and a pass can overlap) may have landed first and
@@ -197,7 +210,7 @@ async function createOnHub(hub: HubSession, receipt: RequestRow, payload: { body
     // read, the outcome stays unknown, a refused credential included: the hub may hold the request all the same.
     if (error.kind === "refused" && error.code === "qitem_id_reuse") {
       try {
-        return { kind: "found", item: await hub.show(receipt.hub_qitem_id) };
+        return confirmedQuestion(receipt, await hub.show(receipt.hub_qitem_id), "found");
       } catch (shown) {
         if (!(shown instanceof HubError)) throw shown;
         return { kind: "unknown", error: shown };
@@ -208,7 +221,7 @@ async function createOnHub(hub: HubSession, receipt: RequestRow, payload: { body
 }
 
 /** What stops a create just before it starts: the binding no longer active, or the local item closed or erased here. */
-type CreateStop = "binding" | "closed" | "erased";
+type CreateStop = "binding" | "closed" | "erased" | "requester";
 type BeforeCreate = { kind: "ready"; payload: { body: string; summary: string | null } } | { kind: "stopped"; stop: CreateStop };
 
 /** Read right before a remote create, never from a copy taken before an await: the binding the create goes through and the
@@ -218,6 +231,12 @@ function beforeCreate(deps: NetworkRequestDeps, bindingId: string, receipt: Requ
   if (!live() || deps.bindings.get(bindingId)?.state !== "active") return { kind: "stopped", stop: "binding" };
   const local = deps.queueRepo.getById(receipt.local_qitem_id);
   if (local && LOCAL_CLOSED.has(local.state)) return { kind: "stopped", stop: "closed" };
+  if (receipt.requester_local_qitem_id) {
+    const work = deps.queueRepo.getById(receipt.requester_local_qitem_id);
+    if (!work || LOCAL_CLOSED.has(work.state) || work.destinationSession !== currentSession(deps.db, receipt.node_id)) {
+      return { kind: "stopped", stop: "requester" };
+    }
+  }
   const payload = local ? requestPayload(local, receipt) : null;
   return payload ? { kind: "ready", payload } : { kind: "stopped", stop: "erased" };
 }
@@ -233,11 +252,14 @@ async function reachOnHub(deps: NetworkRequestDeps, hub: HubSession, bindingId: 
   live: () => boolean = () => true): Promise<Reached> {
   if (showFirst) {
     try {
-      return { kind: "found", item: await hub.show(receipt.hub_qitem_id) };
+      return confirmedQuestion(receipt, await hub.show(receipt.hub_qitem_id), "found");
     } catch (error) {
       if (!(error instanceof HubError) || error.kind === "revoked") throw error;
       if (receipt.hub_created_at || error.kind !== "refused" || error.code !== "qitem_not_found") return { kind: "unknown", error };
     }
+  }
+  if (receipt.requester_hub_qitem_id && !await hub.offers("rig_queue_create", "requesterOf")) {
+    return { kind: "unknown", error: new HubError("unavailable", "This hub no longer advertises requester questions; no create or name-based fallback was sent.") };
   }
   const ready = beforeCreate(deps, bindingId, receipt, live);
   if (ready.kind === "stopped") return ready;
@@ -247,7 +269,8 @@ async function reachOnHub(deps: NetworkRequestDeps, hub: HubSession, bindingId: 
 /** Why a create didn't start, on the receipt. A close or erasure here settles the request; an ended binding leaves it open
  *  for a new binding for the same seat, hub and participant to take over. */
 function stopBeforeCreate(deps: NetworkRequestDeps, receipt: RequestRow, stop: CreateStop, now: () => Date): void {
-  if (stop === "closed") settle(deps, receipt, "local_closed", now);
+  if (stop === "requester") refuse(deps, receipt, new HubError("refused", "The original work is no longer active for this seat; no requester question was sent.", "requester_unreachable"), now);
+  else if (stop === "closed") settle(deps, receipt, "local_closed", now);
   else if (stop === "erased") settle(deps, receipt, "unknown", now, "The request's text is gone here, so it can't be sent.");
   else noteError(deps, receipt, "The binding wasn't active at the create, so nothing was sent through it.");
 }
@@ -258,15 +281,20 @@ function stopBeforeCreate(deps: NetworkRequestDeps, receipt: RequestRow, stop: C
  *  its id. The same `requestId` with the same request returns where it stands; with another request it's refused. A local
  *  item closed or erased here since it was recorded starts no peer work. */
 export async function originateNetworkRequest(deps: NetworkRequestDeps, binding: NetworkBinding,
-  input: { peer: unknown; requestId: unknown; body: unknown; summary?: unknown;
+  input: { peer?: unknown; requesterOf?: unknown; requestId: unknown; body: unknown; summary?: unknown;
     /** The route records the actual caller; direct/internal callers keep the binding seat as before. */
     caller?: Pick<Parameters<QueueRepository["create"]>[0], "sourceSession" | "identityProvenance" | "identityPrincipal" | "returnRoute" | "returnRouteBasis" | "tags"> }): Promise<NetworkRequestResult> {
   const now = deps.now ?? (() => new Date());
-  const peer = text(input.peer);
+  if (input.requesterOf !== undefined && !text(input.requesterOf)) {
+    throw new NetworkBindingError("invalid_request_route", "--requester-of needs a non-empty work id; it never falls back to a named peer.");
+  }
+  const requesterLocal = text(input.requesterOf) || null;
+  const peer = text(input.peer) || (requesterLocal ? `requester of ${requesterLocal}` : "");
   const requestId = text(input.requestId);
   const body = typeof input.body === "string" ? input.body : "";
   const summary = text(input.summary) || null;
   if (!peer) throw new NetworkBindingError("invalid_peer", "Name the peer as rig network peers lists it.");
+  if (requesterLocal && text(input.peer)) throw new NetworkBindingError("invalid_request_route", "Choose a peer or --requester-of, not both.");
   if (!requestId || /\s/.test(requestId)) throw new NetworkBindingError("invalid_request_id", "Give the request an id of your own with no spaces, unique to this request; retry only with the same id.");
   if (!body.trim()) throw new NetworkBindingError("invalid_body", "The request needs a body: what to do and what to return.");
   const token = usableToken(deps, binding);
@@ -280,7 +308,7 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
   const existing = deps.db.prepare("SELECT * FROM network_requests WHERE local_qitem_id = ?").get(requestId) as RequestRow | undefined;
   if (existing) {
     if (existing.node_id !== binding.nodeId || existing.hub_url !== binding.hubUrl || existing.hub_seat !== binding.hubSeat
-      || existing.peer !== peer || existing.body_sha256 !== bodySha) throw reused();
+      || existing.peer !== peer || existing.body_sha256 !== bodySha || (existing.requester_local_qitem_id ?? null) !== requesterLocal) throw reused();
     if (existing.outcome === "refused") return result(existing, "refused", `The hub refused this request earlier: ${existing.last_error ?? "no reason recorded"}. ${requestId} is closed failed.`);
     if (existing.hub_created_at) {
       // Already closed here: a row parked on it now would never wake, so the wait hint would mislead.
@@ -293,6 +321,28 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
       return result(existing, "unknown", `${requestId} was settled (${existing.outcome}) before the hub confirmed hub item ${hubId}, so nothing more is read for it. ${existing.last_error ?? ""}`.trim());
     }
   } else {
+    let requesterHub: string | null = null;
+    const waitVersion = (work: QueueItem) => `network-requester-state:${sha256(JSON.stringify([work.state, work.blockedOn, work.destinationSession]))}`;
+    let firstWaitVersion: string | undefined;
+    if (requesterLocal) {
+      // Discovery precedes even the local receipt: old hubs may silently ignore unknown arguments.
+      try {
+        if (!await withHub(deps, binding, token, hub => hub.offers("rig_queue_create", "requesterOf"))) {
+          throw new NetworkBindingError("requester_question_unsupported", "This network's hub does not support asking the requester. No question or wait was written; no name-based fallback was sent.", 409);
+        }
+      } catch (error) { throw hubRefusal(error); }
+      const work = deps.queueRepo.getById(requesterLocal);
+      const taken = deps.db.prepare("SELECT binding_id, hub_qitem_id FROM network_receipts WHERE local_qitem_id = ? AND settled_at IS NULL")
+        .get(requesterLocal) as { binding_id: string; hub_qitem_id: string } | undefined;
+      const origin = taken ? deps.bindings.get(taken.binding_id) : null;
+      if (!work || LOCAL_CLOSED.has(work.state) || work.destinationSession !== session || !taken || !origin
+        || origin.nodeId !== binding.nodeId || origin.hubUrl !== binding.hubUrl || origin.hubSeat !== binding.hubSeat) {
+        throw new NetworkBindingError("requester_unreachable", "Name active network work this seat owns through this binding. No question or wait was written.", 409);
+      }
+      if (/^(fold:|auth:|external:)/.test(requestId)) throw new NetworkBindingError("invalid_request_id", "A question receipt needs an ordinary item id, not a gate reference.");
+      requesterHub = taken.hub_qitem_id;
+      firstWaitVersion = waitVersion(work);
+    }
     // Recorded first: the seat's request, held by OpenRig until the answer closes it. Nothing wakes anyone for it.
     try {
       const local = await deps.queueRepo.create({
@@ -305,10 +355,13 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
         destinationSession: OPENRIG_SENDER,
         summary: summary ? `${summaryLead(peer)}: ${summary}` : summaryLead(peer),
         body: `${requestHead({ peer, hub_url: binding.hubUrl, hub_seat: binding.hubSeat, hub_qitem_id: hubId })}${body}${requestFoot(requestId)}`,
-        tags: [`network-binding:${binding.id}`, `network-peer:${peer}`, `network-hub-item:${hubId}`, "network-direction:outbound", ...(input.caller?.tags ?? [])],
+        tags: [`network-binding:${binding.id}`, `network-peer:${peer}`, `network-hub-item:${hubId}`, "network-direction:outbound",
+          ...(requesterLocal ? ["network-requester-question", firstWaitVersion!] : []), ...(input.caller?.tags ?? [])],
         nudge: false,
       });
       if (local.createWarning) throw reused();
+      // Idempotent create returns the original row: recovery must use its first observed work state.
+      firstWaitVersion = (local.tags ?? []).find(tag => tag.startsWith("network-requester-state:"));
       const blocker = networkRequestBlocker(hubId);
       if (local.state !== "blocked" || local.blockedOn !== blocker) {
         if (LOCAL_CLOSED.has(local.state)) throw reused();
@@ -319,9 +372,28 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
       if (error instanceof QueueRepositoryError && (error.code === "qitem_id_reuse" || error.code === "qitem_erased")) throw reused();
       throw error;
     }
-    deps.db.prepare(`INSERT INTO network_requests (local_qitem_id, binding_id, node_id, hub_url, hub_seat, peer, hub_qitem_id, body_sha256, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
-      .run(requestId, binding.id, binding.nodeId, binding.hubUrl, binding.hubSeat, peer, hubId, bodySha, now().toISOString());
+    if (requesterLocal) {
+      // Establish the receipt and its initial wait together. Recovery (including an overlapping create that lost
+      // this insert) must not replay the mutation over a dependency the owner selected later.
+      const committed = deps.db.transaction(() => {
+        const inserted = deps.db.prepare(`INSERT INTO network_requests (local_qitem_id, binding_id, node_id, hub_url, hub_seat, peer, hub_qitem_id, body_sha256, created_at, requester_local_qitem_id, requester_hub_qitem_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
+          .run(requestId, binding.id, binding.nodeId, binding.hubUrl, binding.hubSeat, peer, hubId, bodySha, now().toISOString(), requesterLocal, requesterHub);
+        if (inserted.changes === 0) return [];
+        const work = deps.queueRepo.getById(requesterLocal);
+        if (work && !LOCAL_CLOSED.has(work.state) && work.destinationSession === session && work.blockedOn !== requestId
+          && firstWaitVersion === waitVersion(work)) {
+          return deps.queueRepo.updateWithinTransaction({ qitemId: work.qitemId, actorSession: session, state: "blocked", blockedOn: requestId,
+            transitionNote: "Waiting on the requester's explicit answer through the network question receipt." }).persistedEvents;
+        }
+        return [];
+      })();
+      deps.queueRepo.notifyCommitted(committed);
+    } else {
+      deps.db.prepare(`INSERT INTO network_requests (local_qitem_id, binding_id, node_id, hub_url, hub_seat, peer, hub_qitem_id, body_sha256, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
+        .run(requestId, binding.id, binding.nodeId, binding.hubUrl, binding.hubSeat, peer, hubId, bodySha, now().toISOString());
+    }
   }
   const receipt = deps.db.prepare("SELECT * FROM network_requests WHERE local_qitem_id = ?").get(requestId) as RequestRow;
 
@@ -353,6 +425,7 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
   }
   if (outcome.kind === "stopped") {
     stopBeforeCreate(deps, receipt, outcome.stop, now);
+    if (outcome.stop === "requester") return result(receipt, "refused", "The original work is no longer active for this seat; no requester question was sent.");
     return result(receipt, "unknown", outcome.stop === "binding"
       ? `${binding.id} wasn't active when ${requestId} was to be created on the hub, so nothing was sent. A new binding for the same seat, hub and participant picks it up.`
       : `${requestId} was ${outcome.stop === "closed" ? "closed" : "erased"} here before the hub confirmed hub item ${hubId}, so it isn't sent.`);
@@ -387,6 +460,40 @@ function settle(deps: NetworkRequestDeps, receipt: RequestRow, outcome: string, 
 
 function noteError(deps: NetworkRequestDeps, receipt: RequestRow, message: string): void {
   deps.db.prepare("UPDATE network_requests SET last_error = ? WHERE local_qitem_id = ?").run(message.slice(0, 500), receipt.local_qitem_id);
+}
+
+/** Only the hub's explicit wait travels. Arbitrary notes and question text never enter the receipt. */
+async function retainNetworkWait(deps: NetworkRequestDeps, binding: NetworkBinding, hub: HubSession, receipt: RequestRow,
+  shown: HubItem, now: () => Date, live: () => boolean): Promise<void> {
+  if (!Object.hasOwn(receipt, "remote_wait")) return; // Older minimal databases have no requester-question schema.
+  let wait: NetworkWait | null = shown.state === "blocked"
+    ? { kind: "another-request", hubQitemId: null, localQitemId: null, blockerState: null, observedAt: now().toISOString() } : null;
+  if (wait && shown.blockedOn) {
+    try {
+      const question = await hub.show(shown.blockedOn);
+      if (question.requesterOf === shown.qitemId && question.destinationSession === binding.hubSeat) {
+        const taken = deps.db.prepare("SELECT local_qitem_id FROM network_receipts WHERE binding_id = ? AND hub_qitem_id = ?")
+          .get(binding.id, question.qitemId) as { local_qitem_id: string } | undefined;
+        wait = { ...wait, kind: "requester-question", hubQitemId: question.qitemId,
+          localQitemId: taken?.local_qitem_id ?? null, blockerState: question.state };
+      }
+    } catch (error) {
+      // An unreadable blocker is an honest generic wait, never an excuse to expose its id or settle this work.
+      if (!(error instanceof HubError) || error.kind === "revoked" || !live()) throw error;
+    }
+  }
+  if (!live()) return;
+  let prior: NetworkWait | null = null;
+  try { prior = JSON.parse(receipt.remote_wait ?? "null") as NetworkWait | null; } catch { /* replace an unreadable cache */ }
+  const state = (value: NetworkWait | null) => value ? { ...value, observedAt: undefined } : null;
+  if (JSON.stringify(state(prior)) !== JSON.stringify(state(wait))) {
+    if (!writeLocal(deps, receipt, now, () => deps.queueRepo.update({ qitemId: receipt.local_qitem_id, actorSession: OPENRIG_SENDER,
+      transitionNote: wait?.kind === "requester-question" ? "The network work is waiting on a question to its requester."
+        : wait ? "The network work is waiting on another request; its details are not visible here." : "The network work is no longer blocked on another request." }))) return;
+  }
+  deps.db.prepare("UPDATE network_requests SET remote_wait = ? WHERE local_qitem_id = ? AND settled_at IS NULL")
+    .run(wait ? JSON.stringify(wait) : null, receipt.local_qitem_id);
+  receipt.remote_wait = wait ? JSON.stringify(wait) : null;
 }
 
 /** A write to the local item that can't stop a pass. If the queue refuses it because someone here closed the item
@@ -465,14 +572,17 @@ export async function reconcileNetworkRequests(deps: NetworkRequestDeps, binding
         end = null;
       }
     }
-    if (stopped) return stopped;
     if (!end || handedOn(end)) {
+      await retainNetworkWait(deps, binding, hub, receipt, shown, now, live);
+      if (stopped) return stopped;
       if (receipt.last_error !== HANDED_ON_UNREADABLE && writeLocal(deps, receipt, now,
         () => deps.queueRepo.update({ qitemId: local.qitemId, actorSession: OPENRIG_SENDER, transitionNote: HANDED_ON_UNREADABLE }))) {
         noteError(deps, receipt, HANDED_ON_UNREADABLE);
       }
       continue;
     }
+    await retainNetworkWait(deps, binding, hub, receipt, end, now, live);
+    if (!live()) return null;
     if (!HUB_FINAL.has(end.state)) continue;
     // The local item closes the way the hub item did: failed as failed, a cancel or a refusal as itself, never as success.
     // A reason the local queue takes only with a target here (escalation) is named in the note, and the close is no-follow-on.
@@ -502,6 +612,7 @@ export function noteEndedBindingRequests(deps: Pick<NetworkRequestDeps, "db" | "
     return;
   }
   for (const receipt of open) {
+    if (Object.hasOwn(receipt, "remote_wait")) deps.db.prepare("UPDATE network_requests SET remote_wait = NULL WHERE local_qitem_id = ?").run(receipt.local_qitem_id);
     if (receipt.last_error === BINDING_ENDED) continue;
     try {
       const local = deps.queueRepo.getById(receipt.local_qitem_id);

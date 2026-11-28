@@ -2,14 +2,17 @@ import { expect, it } from "vitest";
 import { fixture } from "./seat-reaper-fixture.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
+import { noticeRosterReady, rosterReadyNoticeId } from "../src/domain/roster-ready-notice.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SeatReaperService } from "../src/domain/seat-reaper-service.js";
 
-it.each([false, true])("uses the real checked stop and lifecycle lease (uncertain=%s)", async uncertain => {
+it.each([false, true])("uses the real checked stop and lifecycle lease with an open roster-ready notice (uncertain=%s)", async uncertain => {
   // Given real lifecycle/guard/adapter services, with only OS terminal effects replaced.
   const f = fixture(); let killed = false;
+  expect(await noticeRosterReady(new QueueRepository(f.db, f.bus, {}), "r", ["worker@test"])).toEqual([]);
   const commands: string[] = [];
   const tmux = new TmuxAdapter(async command => {
     commands.push(command);
@@ -42,7 +45,11 @@ it.each([false, true])("uses the real checked stop and lifecycle lease (uncertai
     ? ["kill -TERM -4343", "kill -KILL -4343"] : ["kill -TERM -4343"]);
   expect(commands.some(command => command.includes("kill-session") || command.includes("detach-client"))).toBe(false);
   expect(killed).toBe(!uncertain);
+  expect(f.events()).not.toContainEqual(expect.objectContaining({ decision: "pending-work" }));
+  expect(f.db.prepare("SELECT state FROM queue_items WHERE qitem_id = ?").get(rosterReadyNoticeId("r", "worker@test")))
+    .toEqual({ state: "pending" });
   expect(f.events()).toContainEqual(expect.objectContaining({ phase: "effect", budgetConsumed: true,
+    eligibility: expect.objectContaining({ inbox: 0 }),
     result: expect.objectContaining(uncertain ? { ok: false, code: "stop_uncertain" } : { ok: true }) }));
   if (!uncertain) {
     expect(f.db.prepare("SELECT status,intentionally_stopped FROM sessions WHERE id='s'").get()).toEqual({ status: "exited", intentionally_stopped: 1 });

@@ -7,6 +7,10 @@
 // records what a seat would have seen at its first turn.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
+import { parse as parseYaml } from "yaml";
+import { resolveLaunchCwd, type PlannedProjectRoots } from "../src/domain/cwd-resolution.js";
+import { rigPreflight } from "../src/domain/rigspec-preflight.js";
 import path from "node:path";
 import os from "node:os";
 import type Database from "better-sqlite3";
@@ -28,7 +32,7 @@ import { PodBundleSourceResolver, LegacyBundleSourceResolver } from "../src/doma
 import { existingArchive, MARKER } from "./helpers/bundle-login-fixture.js";
 import { pack } from "../src/domain/bundle-archive.js";
 import { computeIntegrity } from "../src/domain/bundle-integrity.js";
-import { routeBundleContents, routingFailureWarnings, type BundleContentRouting } from "../src/domain/bundle-content-routing.js";
+import { routeBundleContents, routingFailureWarnings, type BundleContentRouting, type BundleContentRoutingOptions } from "../src/domain/bundle-content-routing.js";
 import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 import type { FsOps } from "../src/domain/package-resolver.js";
@@ -79,7 +83,7 @@ function realFsOps(): FsOps {
   } as FsOps;
 }
 
-async function buildBundleWithPack(workDir: string, packManifest = PACK_MANIFEST, services = false): Promise<string> {
+async function buildBundleWithPack(workDir: string, packManifest = PACK_MANIFEST, services = false, projectCwd = false): Promise<string> {
   const staging = path.join(workDir, "staging");
   fs.mkdirSync(path.join(staging, "agents", "impl"), { recursive: true });
   fs.mkdirSync(path.join(staging, "context-packs", "demo"), { recursive: true });
@@ -88,6 +92,14 @@ async function buildBundleWithPack(workDir: string, packManifest = PACK_MANIFEST
   fs.writeFileSync(path.join(staging, "agents", "impl", "agent.yaml"), `name: impl\nversion: "1.0"\n`);
   fs.writeFileSync(path.join(staging, "context-packs", "demo", "manifest.yaml"), packManifest);
   fs.writeFileSync(path.join(staging, "context-packs", "demo", "intro.md"), "# Demo world\n");
+  if (projectCwd) {
+    fs.mkdirSync(path.join(staging, "project", "api"), { recursive: true });
+    fs.mkdirSync(path.join(staging, "project", "ui"), { recursive: true });
+    fs.writeFileSync(path.join(staging, "project", "project.yaml"), "schema: openrig.project/v0alpha1\nid: demo\n");
+    fs.writeFileSync(path.join(staging, "project", "api", "marker"), "api");
+    fs.writeFileSync(path.join(staging, "project", "ui", "marker"), "ui");
+    fs.writeFileSync(path.join(staging, "rig.yaml"), `version: "0.2"\nname: routed-rig\npods:\n  - id: dev\n    label: Dev\n    members:\n      - {id: api, agent_ref: "builtin:terminal", profile: none, runtime: terminal, cwd: "\${project:demo}/api"}\n      - {id: ui, agent_ref: "builtin:terminal", profile: none, runtime: terminal, cwd: "\${project:demo}/ui"}\n    edges: []\nedges: []\n`);
+  }
   const integrity = computeIntegrity(staging, {
     readFile: (p: string) => fs.readFileSync(p, "utf-8"),
     readFileBuffer: (p: string) => fs.readFileSync(p),
@@ -102,7 +114,7 @@ name: routed
 version: "0.1.0"
 created_at: "2026-10-04T00:00:00Z"
 rig_spec: rig.yaml
-agents:
+${projectCwd ? "project: {id: demo, path: project}\n" : ""}agents:
   - name: impl
     version: "1.0"
     path: agents/impl
@@ -166,7 +178,79 @@ describe("bundle contents are routed before any seat launches", () => {
     fs.rmSync(workDir, { recursive: true, force: true });
   });
 
-  function orchestrator(route?: (bundlePath: string) => Promise<BundleContentRouting>, extra: Partial<ConstructorParameters<typeof BootstrapOrchestrator>[0]> = {}): BootstrapOrchestrator {
+  it("installs a real bundle into selected roots before either member's first turn, without rewriting the archive", async () => {
+    const projects = path.join(workDir, "selected-projects"), catalog = path.join(workDir, "workspace.yaml");
+    vi.stubEnv("OPENRIG_WORKSPACE_ROOT", workDir);
+    vi.stubEnv("OPENRIG_WORKSPACE_PROJECTS_ROOT", projects);
+    vi.stubEnv("OPENRIG_WORKSPACE_CATALOG_PATH", catalog);
+    bundlePath = await buildBundleWithPack(workDir, PACK_MANIFEST, false, true);
+    const before = createHash("sha256").update(fs.readFileSync(bundlePath)).digest("hex");
+    let firstTurn: string[] = [];
+    podInstantiator.instantiate.mockImplementation(async (yaml: string, rigRoot: string, opts: { plannedProjectRoots?: PlannedProjectRoots; cwdOverride?: string; prelaunchHook: Hook }) => {
+      expect(fs.existsSync(catalog)).toBe(false);
+      const preflight = await rigPreflight({ rigSpecYaml: yaml, rigRoot, cwdOverride: opts.cwdOverride, plannedProjectRoots: opts.plannedProjectRoots, fsOps: realFsOps() as never, exec: noExec });
+      expect(preflight.errors.join("\n")).toBe("");
+      expect(fs.existsSync(projects)).toBe(false);
+      const hook = await opts.prelaunchHook("rig-1");
+      if (!hook.ok) return { ok: false, code: hook.code, message: hook.message };
+      const raw = parseYaml(yaml);
+      firstTurn = raw.pods[0].members.map((member: { cwd: string }) => {
+        const cwd = resolveLaunchCwd(member.cwd, rigRoot, opts.cwdOverride);
+        return fs.readFileSync(path.join(cwd, "marker"), "utf8");
+      });
+      return { ok: true, result: { rigId: "rig-1", specName: "routed-rig", specVersion: "0.2", nodes: [] } };
+    });
+    const result = await orchestrator().bootstrap({ sourceKind: "rig_bundle", sourceRef: bundlePath, mode: "apply", targetRoot: path.join(workDir, "selected-install") });
+    expect(result.status).toBe("completed"); expect(firstTurn).toEqual(["api", "ui"]);
+    expect(result.bundleRouting?.projectRegistration?.projectRoot).toBe(path.join(projects, "demo"));
+    expect(createHash("sha256").update(fs.readFileSync(bundlePath)).digest("hex")).toBe(before);
+  });
+
+  it("plans a carried project without writing it, then associates a renamed install with the effective name", async () => {
+    const projects = path.join(workDir, "projects"), catalog = path.join(workDir, "workspace.yaml");
+    vi.stubEnv("OPENRIG_WORKSPACE_ROOT", workDir);
+    vi.stubEnv("OPENRIG_WORKSPACE_PROJECTS_ROOT", projects);
+    vi.stubEnv("OPENRIG_WORKSPACE_CATALOG_PATH", catalog);
+    bundlePath = await buildBundleWithPack(workDir, PACK_MANIFEST, false, true);
+    // The plan uses the real preflight, not the launch stand-in.
+    const app = orchestrator();
+    Object.assign(podInstantiator, { deps: { fsOps: realFsOps() } });
+    const plan = await app.bootstrap({ sourceKind: "rig_bundle", sourceRef: bundlePath, mode: "plan", rigName: "renamed-team" });
+    expect(plan.status).toBe("planned");
+    expect(fs.existsSync(catalog)).toBe(false); expect(fs.existsSync(projects)).toBe(false);
+    const installed = await app.bootstrap({ sourceKind: "rig_bundle", sourceRef: bundlePath, mode: "apply", rigName: "renamed-team" });
+    expect(installed.status).toBe("completed");
+    expect(parseYaml(fs.readFileSync(catalog, "utf8")).projects.find((p: { id: string }) => p.id === "demo").rigs).toEqual(["renamed-team"]);
+  });
+
+  it("does not launch members when actual project routing fails after a successful preview", async () => {
+    vi.stubEnv("OPENRIG_WORKSPACE_ROOT", workDir);
+    vi.stubEnv("OPENRIG_WORKSPACE_PROJECTS_ROOT", path.join(workDir, "projects"));
+    vi.stubEnv("OPENRIG_WORKSPACE_CATALOG_PATH", path.join(workDir, "workspace.yaml"));
+    bundlePath = await buildBundleWithPack(workDir, PACK_MANIFEST, false, true);
+    const result = await orchestrator(async () => ({ routingFailures: [{ kind: "project", error: "fixture write failed" }] })).bootstrap({ sourceKind: "rig_bundle", sourceRef: bundlePath, mode: "apply" });
+    expect(result.status).toBe("failed"); expect(result.errors.join(" ")).toContain("fixture write failed");
+    expect(seenAtLaunch).toBeNull();
+  });
+
+  it("a carried project's conflicting id stops before first launch; an explicit cwd keeps the existing override path", async () => {
+    const catalog = path.join(workDir, "workspace.yaml");
+    vi.stubEnv("OPENRIG_WORKSPACE_ROOT", workDir);
+    vi.stubEnv("OPENRIG_WORKSPACE_PROJECTS_ROOT", path.join(workDir, "projects"));
+    vi.stubEnv("OPENRIG_WORKSPACE_CATALOG_PATH", catalog);
+    fs.writeFileSync(catalog, "projects:\n  - {id: demo, root: .}\n");
+    bundlePath = await buildBundleWithPack(workDir, PACK_MANIFEST, false, true);
+    const app = orchestrator();
+    const refused = await app.bootstrap({ sourceKind: "rig_bundle", sourceRef: bundlePath, mode: "apply" });
+    expect(refused.status).toBe("failed"); expect(refused.errors.join(" ")).toContain("different root");
+    expect(podInstantiator.instantiate).not.toHaveBeenCalled();
+    const overridden = await app.bootstrap({ sourceKind: "rig_bundle", sourceRef: bundlePath, mode: "apply", cwdOverride: workDir });
+    expect(overridden.status).toBe("completed");
+    expect(podInstantiator.instantiate.mock.calls[0]![2]).toMatchObject({ cwdOverride: workDir });
+    expect(fs.existsSync(path.join(workDir, "projects"))).toBe(false);
+  });
+
+  function orchestrator(route?: (bundlePath: string, opts?: BundleContentRoutingOptions) => Promise<BundleContentRouting>, extra: Partial<ConstructorParameters<typeof BootstrapOrchestrator>[0]> = {}): BootstrapOrchestrator {
     return new BootstrapOrchestrator({
       db,
       bootstrapRepo: new BootstrapRepository(db),
@@ -194,7 +278,7 @@ describe("bundle contents are routed before any seat launches", () => {
       bundleSourceResolver: new LegacyBundleSourceResolver({ fsOps: realFsOps() }),
       podBundleSourceResolver: new PodBundleSourceResolver(),
       podInstantiator: podInstantiator as never,
-      routeBundleContents: route ?? ((p) => routeBundleContents(p, { onContextPacksRouted: () => { rescans += 1; } })),
+      routeBundleContents: route ?? ((p, opts) => routeBundleContents(p, { ...opts, onContextPacksRouted: () => { rescans += 1; } })),
       ...extra,
     });
   }

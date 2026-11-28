@@ -947,11 +947,12 @@ describe("MCP Server", () => {
     // v2: the closure reason a finished item takes, and scope described from the grant, not the tool list.
     for (const part of ["closure reason no-follow-on", "a listed tool isn't access", "names the shared roots you may read"]) expect(MEMBER_WORKFLOW).toContain(part);
     // v3: an item titled "Checked on …" is OpenRig's check on other work, to act on, not a task to close.
-    expect(MEMBER_WORKFLOW_VERSION).toBe("member-workflow/v3");
+    // v4: requester questions use the imported work's route, never its copied sender name.
+    expect(MEMBER_WORKFLOW_VERSION).toBe("member-workflow/v4");
     expect(MEMBER_WORKFLOW).toContain("An item titled \"Checked on …\" is OpenRig's check on other work, not a task: act on the item it names, or the items it lists, and the check closes itself.");
     const doc = fs.readFileSync(new URL("../../../docs/reference/hosted-members.md", import.meta.url), "utf8");
     expect(doc).toContain(`> ${MEMBER_WORKFLOW}`);
-    for (const old of ["member-workflow/v1", "member-workflow/v2"]) expect(doc).not.toContain(old);
+    for (const old of ["member-workflow/v1", "member-workflow/v2", "member-workflow/v3"]) expect(doc).not.toContain(old);
     await cleanup();
   });
 
@@ -1028,6 +1029,12 @@ describe("MCP Server", () => {
     if (offered.has("rig_queue_create")) expect(instructions).toContain(`${ASK_LISTED} ${ASK_CONNECTED_PICKUP} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);
     // A grant that can send and read back what it sent carries the retry rule; one that only works its inbox doesn't.
     expect(instructions.includes(RETRY_RULE)).toBe(offered.has("rig_queue_create"));
+    expect(instructions.includes("inputSchema.properties.requesterOf")).toBe(offered.has("rig_queue_create"));
+    if (offered.has("rig_queue_create")) {
+      expect(instructions).toContain("write no question or name-based fallback");
+      expect(instructions).toContain("A person address is not a blocker this scoped connection may name");
+      expect(instructions).toContain("canceled, denied or failed is not approval");
+    }
     await external.close();
     await server.close();
   });

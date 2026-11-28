@@ -5,6 +5,10 @@ import { getOpenRigHome, readOpenRigUrl } from "../openrig-compat.js";
 import { join } from "node:path";
 import { ConfigStore } from "../config-store.js";
 import { formatDaemonHostForUrl } from "../client.js";
+import { resolveConfiguredDaemonTarget } from "../daemon-lifecycle.js";
+import { currentBootId, observeStartReservation } from "../daemon-start-lock.js";
+import { createProcessLiveness, signalProbe, readProcessState } from "../process-liveness.js";
+import type { DaemonUnverifiedEvidence } from "@openrig/daemon/crash-cart";
 
 // `rig crash-cart --json` — the daemon-DOWN recovery verdict emit (plan c015d9ed §C3, coupling ruling
 // option A). Prints ONE JSON = the 3-state detector verdict + (on DOWN) the discovery — READ-ONLY, a
@@ -62,6 +66,28 @@ export function crashCartEvidenceUrl(openrigUrl: string | undefined, state: { ho
     : `http://${formatDaemonHostForUrl(state?.host ?? "127.0.0.1")}:${state?.port ?? 7433}/healthz`;
 }
 
+/** Only an endpoint match lets local process evidence describe an explicit target. A URL path,
+ * query or different port is not this home's listener. Loopback spellings name the same host. */
+function matchesTarget(url: string, endpoint: { host?: string; port: number }): boolean {
+  try {
+    const selected = new URL(url);
+    const local = new URL(`http://${formatDaemonHostForUrl(endpoint.host ?? "127.0.0.1")}:${endpoint.port}`);
+    const host = (value: string) => value.toLowerCase().replace(/^\[|\]$/g, "");
+    const selectedHost = host(selected.hostname);
+    const localHost = host(local.hostname);
+    const loopback = (h: string) => h === "::1" || /^127\.\d+\.\d+\.\d+$/.test(h);
+    const sameHost = selectedHost === localHost
+      || (selectedHost === "localhost" && loopback(localHost))
+      || (localHost === "localhost" && loopback(selectedHost))
+      || (localHost === "0.0.0.0" && (selectedHost === "localhost" || /^127\./.test(selectedHost)))
+      // The daemon uses a dual-stack wildcard bind, which also accepts IPv4 loopback.
+      || (localHost === "::" && (selectedHost === "localhost" || loopback(selectedHost)));
+    return selected.protocol === local.protocol && selected.port === local.port
+      && selected.pathname === "/" && !selected.search && !selected.hash
+      && sameHost;
+  } catch { return false; }
+}
+
 /**
  * The real verdict: LAZY-imports the narrow @openrig/daemon/crash-cart subpath at invocation (dep
  * rail 2 — rig startup + other verbs never load the daemon module) and composes the shipped detector
@@ -71,43 +97,64 @@ export function crashCartEvidenceUrl(openrigUrl: string | undefined, state: { ho
 async function realEmit(): Promise<CrashCartEmit> {
   const cc = await import("@openrig/daemon/crash-cart");
   const home = getOpenRigHome();
-  const openrigUrl = readOpenRigUrl();
+  const explicitUrl = readOpenRigUrl();
+  const processLiveness = createProcessLiveness({ signal: signalProbe, readProcessState });
+  const bootId = currentBootId();
+  const readReservation = () => observeStartReservation({
+    home,
+    readFile: (file) => existsOrThrow(file) ? readFileSync(file, "utf8") : null,
+    processLiveness,
+    bootId,
+  });
+  const configured = resolveConfiguredDaemonTarget();
+  const recorded = cc.readDaemonJson(home);
+  const reservation = readReservation();
+  const localEndpoint = recorded ?? configured;
+  const selectedEndpoint = reservation && reservation.liveness !== "dead" && reservation.port
+    ? { host: reservation.host ?? configured.host, port: reservation.port } : localEndpoint;
+  // Resolve once. Verdict retries, evidence and discovery all address this target even if files change.
+  const openrigUrl = explicitUrl ?? `http://${formatDaemonHostForUrl(selectedEndpoint.host ?? "127.0.0.1")}:${selectedEndpoint.port}`;
+  let lastEvidence: DaemonUnverifiedEvidence;
+  const readProcessEvidence = (state: { pid: number; host?: string; port: number } | undefined) => {
+    const pending = readReservation();
+    const pendingEndpoint = pending?.port
+      ? { host: pending.host ?? configured.host, port: pending.port } : localEndpoint;
+    if (pending && pending.liveness !== "dead" && matchesTarget(openrigUrl, pendingEndpoint)) {
+      return { mayBeRunning: true, pidState: `start pending (${pending.liveness}${pending.pid === undefined ? "" : `, pid ${pending.pid}`}${pending.since ? `, since ${pending.since}` : ""})` };
+    }
+    if (state && matchesTarget(openrigUrl, state)) {
+      const liveness = processLiveness(state.pid);
+      return { mayBeRunning: liveness !== "dead", pidState: `${liveness} (pid ${state.pid})` };
+    }
+    return { mayBeRunning: false, pidState: explicitUrl
+      ? "explicit target; no matching local daemon record or startup reservation"
+      : "no matching daemon.json or live startup reservation" };
+  };
   const probeClassified = (url: string) =>
     cc.probeHealthz(url, { fetch: (u, init) => fetch(u, init as RequestInit), timeoutMs: 700 });
   const detectDeps = {
     openrigHome: home,
     readDaemonJson: cc.readDaemonJson,
-    isProcessAlive: cc.isProcessAlive,
+    isProcessAlive: (pid: number) => processLiveness(pid) !== "dead",
     probeHealthz: probeClassified,
     openrigUrl,
+    readProcessEvidence,
+    onEvidence: (evidence: DaemonUnverifiedEvidence) => { lastEvidence = evidence; },
   };
   return cc.emitCrashCartState({
     resolveState: () =>
       cc.resolveDaemonState({ ...detectDeps, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), maxProbes: 3, retryDelayMs: 400 }),
-    assembleEvidence: async () => {
-      const state = cc.readDaemonJson(home);
-      const pidState = state
-        ? cc.isProcessAlive(state.pid)
-          ? `alive (pid ${state.pid})`
-          : `dead (pid ${state.pid})`
-        : "no daemon.json";
-      const url = crashCartEvidenceUrl(openrigUrl, state);
-      const probeResult = await probeClassified(url);
-      return { pidState, probeResult, failedSignal: `healthz ${probeResult} at ${url}` };
-    },
+    assembleEvidence: async () => lastEvidence,
     loadDiscovery: async () => {
       const { discovery } = await cc.loadCrashCartDiscovery({
-        openrigHome: home,
+        ...detectDeps,
         readDaemonJson: readDaemonJsonWithDb,
-        isProcessAlive: cc.isProcessAlive,
-        probeHealthz: (url) => probeClassified(url).then((r) => r === "answered"),
         copyFile: copyFileSync,
         exists: existsOrThrow,
         configuredDbPath: new ConfigStore().resolve().db.path,
         makeScratchDir: () => mkdtempSync(join(tmpdir(), "crash-cart-")),
         removeScratchDir: (d) => rmSync(d, { recursive: true, force: true }),
         openDb: cc.openDaemonDbReadonly,
-        openrigUrl,
       });
       return discovery;
     },

@@ -110,6 +110,16 @@ export class RigSpecExporter {
     }).map((node) => node.logicalId).sort();
   }
 
+  /** Per-seat changes to shared startup layers are not expressible in a rig export. */
+  seatStartupTextNotCarried(rigId: string): string[] {
+    const rig = this.exportableNodes(rigId);
+    if (!rig) return [];
+    return rig.nodes.filter(node => {
+      const recipe = this.rigRepo.getNodeLaunchRecipe(node.id);
+      return (recipe?.startupTextOverrides?.length ?? 0) > 0 || (recipe?.startupTextPrivateLayers?.length ?? 0) > 0;
+    }).map(node => node.logicalId).sort();
+  }
+
   /** Member declarations that cannot be honestly represented by this rig's single export root. */
   memberStartupNotCarried(rigId: string): Array<{ logicalId: string; reason: "source unavailable" | "different source root" }> {
     const rig = this.exportableNodes(rigId);

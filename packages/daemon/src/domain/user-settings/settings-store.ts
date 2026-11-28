@@ -128,8 +128,7 @@ export const SETTINGS_VALID_KEYS = [
   "ui.preview.max_pins",
   "ui.preview.default_lines",
   "ui.timezone",
-  // The web UI and its terminal WebSocket are off unless this is true (read at daemon start).
-  // The web UI and its terminal WebSocket are off unless this is true (read at daemon start).
+  // The web UI pages and assets are off unless this is true (read at daemon start).
   "ui.enabled",
   // TUI topology: whether a remote rig's seats may be read through this daemon (off by default).
   "ui.topology_remote_seats",

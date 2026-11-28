@@ -134,7 +134,7 @@ import { scopesRoutes } from "./routes/scopes.js";
 import { telemetryRoutes } from "./routes/telemetry.js";
 import { proofRoutes } from "./routes/proof.js";
 import { scopeApproveRoutes } from "./routes/scope-approve.js";
-import { registerTerminalAuthOnly, registerTerminalWs } from "./routes/terminal-ws.js";
+import { registerTerminalWs } from "./routes/terminal-ws.js";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { steeringRoutes } from "./routes/steering.js";
 import { healthSummaryRoutes } from "./routes/health-summary.js";
@@ -337,7 +337,7 @@ export interface AppDeps {
   missionControlBearerToken?: string | null;
   terminalBearerToken?: string | null;
   enableNodeWebSocket?: boolean;
-  /** `ui.enabled`: serve the web UI pages and its terminal WebSocket. Off unless true; /api routes are unaffected. */
+  /** `ui.enabled`: serve the web UI pages and assets. Off unless true; terminal API routes are independent. */
   webUiEnabled?: boolean;
   /** This machine's own extra names for the /api browser boundary (createDaemon wires the
    *  Tailscale MagicDNS self-name lookup). Absent: loopback, IP literals and OS names only. */
@@ -890,15 +890,13 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/compaction", compactionRoutes({ bearerToken: deps.terminalBearerToken ?? null }));
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let injectWebSocket: (server: any) => void = () => {};
-  // The terminal WebSocket only serves the web UI, so it exists only while the web UI is on.
-  if (deps.enableNodeWebSocket && deps.webUiEnabled === true) {
+  // Terminal API clients also run outside the daemon's web UI; keep the existing auth and browser boundary.
+  if (deps.enableNodeWebSocket) {
     const ws = createNodeWebSocket({ app });
     injectWebSocket = ws.injectWebSocket as never;
     _lastInjectWebSocket = injectWebSocket;
     registerTerminalWs(app, ws.upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null,
       fixedGeometry: () => deps.settingsStore?.resolveOne("terminal.fixed_geometry").value === true });
-  } else if (deps.enableNodeWebSocket) {
-    registerTerminalAuthOnly(app, { bearerToken: deps.terminalBearerToken ?? null });
   }
   app.route("/api/activity", activityRoutes);
   app.route("/api/ask", askRoutes);

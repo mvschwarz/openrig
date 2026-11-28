@@ -431,6 +431,11 @@ function projectForExternal<T>(row: T, view: ExternalView): T {
     }
   }
   if (fields.blockedOn != null && !shows(fields.blockedOn)) fields.blockedOn = null;
+  // A network wait can refer to another daemon's item. This caller's view grants no reach by such a reference.
+  const genericNetworkWait = (value: unknown) => value && typeof value === "object"
+    ? { kind: "another-request", hubQitemId: null, localQitemId: null, blockerState: null,
+      observedAt: (value as { observedAt?: unknown }).observedAt } : undefined;
+  if (fields.networkWait) fields.networkWait = genericNetworkWait(fields.networkWait);
   if (fields.closingTransition) fields.closingTransition = projectForExternal(fields.closingTransition, view);
   // The daemon's custody advisory names the target in its target and its message.
   const advisory = fields.handoffAdvisory as { target?: unknown } | null | undefined;
@@ -829,7 +834,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
 
 /** How a member works its inbox, and asks a person while keeping the work: one versioned text, carried in this server's
  *  instructions and quoted in docs/reference/hosted-members.md. Change it here, bump the version, and update the quote. */
-export const MEMBER_WORKFLOW_VERSION = "member-workflow/v3";
+export const MEMBER_WORKFLOW_VERSION = "member-workflow/v4";
 /** What the connection itself authorizes. */
 const MEMBER_AUTHORITY = "If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may.";
 export const MEMBER_WORKFLOW = [
@@ -838,6 +843,7 @@ export const MEMBER_WORKFLOW = [
   "Say what you can reach from your grant, not from the tool list: a listed tool isn't access. rig_artifact_read's answer for an item names the shared roots you may read, and none means no shared files.",
   MEMBER_AUTHORITY,
   "When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask.",
+  "For imported network work, use the requester-question instruction in its body; its local daemon sender is a relay, not the original requester. Never guess the requester by a copied seat name.",
   "If it came from a person (an address ending in @external that isn't a shared channel; the item's 'Shared channel:' line names one), set it blocked with blockedOn that person and, as its summary, the question with a short form of what you'll do: the person sees the summary and the item, not your note, which keeps the record. Link a longer draft as an https evidenceRef. Their answer returns the item to you in progress.",
   "Otherwise ask as a new item, to the seat it came from or, for a shared channel's item, to your rig's lead (rig_team shows it), with your question and draft. Then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again.",
   "Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.",
@@ -930,6 +936,10 @@ function externalInboxInstructions(tools: ReadonlySet<string>): string {
   return [...sharedInstructions((tool) => tools.has(tool)),
     ...(tools.has("rig_queue_create") && tools.has("rig_queue_show") ? [RETRY_RULE] : []),
     `Items addressed to your seat are yours${tools.has("rig_queue_list") ? ": rig_queue_list with owned set lists them" : ""}. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.`,
+    ...(tools.has("rig_queue_create") && tools.has("rig_queue_show") ? [
+      "To ask an item's original requester a question, first check tools/list: rig_queue_create must advertise inputSchema.properties.requesterOf. Only then create a question with requesterOf set to the work's qitemId and a stable question qitemId, without destination; block the same work on that question's id with rig_queue_update. If requesterOf isn't advertised, this hub does not support asking the requester: keep the work open, report unsupported, and write no question or name-based fallback. A person address is not a blocker this scoped connection may name.",
+      "An explicit ask-me-first is the person's decision, never the relay's inference. Carry their actual attributed answer back to the question. Until a person route exists and they answer, keep it unresolved. Resume the same work after reading the question's actual outcome; canceled, denied or failed is not approval. Check held active items as well as new pending ones; the hub may restore in-progress with its original pickup kept.",
+    ] : []),
   ].join("\n");
 }
 
