@@ -20,10 +20,18 @@
  *  INHERITED Object.prototype member instead of undefined — the detector then threw mid-pass and
  *  the advisory fabricated a canonical id. With no prototype, every non-measured key reads
  *  undefined and both consumers' `?? `/null fallbacks behave. Keep this representation when
- *  extending the map; the suites pin the prototype and the behavior. */
+ *  extending the map; the suites pin the prototype and the behavior.
+ *
+ *  Measured against Claude Code 2.1.322's `/model` picker (test/fixtures/claude-model-2.1.322.txt):
+ *  Opus 5.5, Fable 5.2, Sonnet 5.5, Haiku 5.5. Update these when Claude Code moves an alias. */
 export const CANONICAL_MODEL_PINS: Record<string, string> = Object.assign(
   Object.create(null) as Record<string, string>,
-  { fable: "claude-fable-5-1" },
+  {
+    opus: "claude-opus-5-5",
+    fable: "claude-fable-5-2",
+    sonnet: "claude-sonnet-5-5",
+    haiku: "claude-haiku-5-5",
+  },
 );
 
 /**
