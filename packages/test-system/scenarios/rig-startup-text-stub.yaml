@@ -1,0 +1,20 @@
+version: "0.2"
+name: rig-startup-text
+culture_file: culture.md
+pods:
+  - id: work
+    label: Work
+    members:
+      - id: worker
+        agent_ref: "local:agents/startup-worker"
+        profile: default
+        runtime: stub
+        cwd: .
+        startup:
+          actions:
+            - type: send_text
+              value: "old startup instruction"
+              phase: after_ready
+              applies_on: [fresh_start, restore]
+              idempotent: true
+    edges: []

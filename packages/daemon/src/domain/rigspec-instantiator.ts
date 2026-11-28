@@ -2483,6 +2483,25 @@ export class PodRigInstantiator {
     } };
   }
 
+  /** Resolve today's recipe source for inspection without starting or changing the seat. */
+  async inspectStartupActions(rigId: string, nodeId: string): Promise<StartupAction[] | null> {
+    const node = this.deps.rigRepo.getRig(rigId)?.nodes.find(candidate => candidate.id === nodeId);
+    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
+    if (!node || !recipe) return null;
+    const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
+    if (!context) return null;
+    const member = this.persistedMember(node, context.member);
+    const layers = this.rigStartupLayers(recipe.rigSpec, recipe.rigRoot, rigId);
+    if (member.agentRef === "builtin:terminal") return resolveStartup({ specStartup: { files: [], actions: [] }, profileStartup: undefined,
+      rigCultureFile: layers.cultureFile, rigStartup: layers.startup, podStartup: context.pod.startup, memberStartup: member.startup, operatorStartup: undefined }).actions;
+    const resolved = resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
+    if (!resolved.ok) return null;
+    const config = await resolveNodeConfigAsync({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
+      profileName: member.profile, specRoot: recipe.rigRoot, cwdOverride: node.cwd ?? undefined, member, pod: context.pod,
+      rig: this.withRigStartupLayers(recipe.rigSpec, layers), skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
+    return config.ok ? config.config.startup.actions : null;
+  }
+
   seatClaudeFragments: ResolveClaudeFragments = async (rigId, nodeId) => {
     const resolved = await this.resolvePersistedSeatConfig(rigId, nodeId, "current");
     if (!resolved.ok) return resolved;
@@ -3193,6 +3212,10 @@ export class PodRigInstantiator {
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.launchExistingTerminalMember(input));
     }
+    const terminalRigLayers = this.rigStartupLayers(input.rigSpec, input.rigRoot, input.rigId);
+    const startup = resolveStartup({ specStartup: { files: [], actions: [] }, profileStartup: undefined,
+      rigCultureFile: terminalRigLayers.cultureFile, rigStartup: terminalRigLayers.startup,
+      podStartup: input.pod.startup, memberStartup: input.member.startup, operatorStartup: undefined });
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
     const terminalPolicyAttachment = this.resolveMemberPolicyAttachment(input.member.permissionPolicy, input.rigSpec.permissionPolicy, input.rigRoot);
     if (terminalPolicyAttachment) this.persistNodePolicyProvenance(input.nodeId, terminalPolicyAttachment);
@@ -3243,16 +3266,6 @@ export class PodRigInstantiator {
         .run("checkpoint_only", launchResult.session.id);
     } catch { /* best-effort */ }
 
-    const terminalRigLayers = this.rigStartupLayers(input.rigSpec, input.rigRoot, input.rigId);
-    const startup = resolveStartup({
-      specStartup: { files: [], actions: [] },
-      profileStartup: undefined,
-      rigCultureFile: terminalRigLayers.cultureFile,
-      rigStartup: terminalRigLayers.startup,
-      podStartup: input.pod.startup,
-      memberStartup: input.member.startup,
-      operatorStartup: undefined,
-    });
     const resolvedFiles = this.buildTerminalResolvedStartupFiles(terminalRigLayers, input.rigRoot, input.pod, input.member);
     const binding: NodeBinding = {
       id: launchResult.binding.id,
