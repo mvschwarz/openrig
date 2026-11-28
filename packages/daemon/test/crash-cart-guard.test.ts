@@ -10,7 +10,7 @@ import { assertDaemonDown, DaemonLiveError } from "../src/domain/crash-cart-disc
 
 const noDaemonJson = () => undefined;
 const deadPid = () => false;
-const silentHealthz = async () => false;
+const silentHealthz = async () => "refused" as const;
 
 function deps(over: Partial<Parameters<typeof assertDaemonDown>[0]> = {}) {
   return {
@@ -43,7 +43,7 @@ describe("assertDaemonDown — fail-closed guard for the direct read", () => {
   });
 
   it("REFUSES when a /healthz probe answers even if the pid looks dead (wedged/foreign daemon)", async () => {
-    const probeHealthz = vi.fn(async (url: string) => url.includes("7433"));
+    const probeHealthz = vi.fn(async (url: string) => url.includes("7433") ? "answered" as const : "refused" as const);
     await expect(
       assertDaemonDown(
         deps({
@@ -80,7 +80,7 @@ describe("assertDaemonDown — fail-closed guard for the direct read", () => {
   });
 
   it("honors OPENRIG_URL: probes it and REFUSES if it answers (bypassing the state file)", async () => {
-    const probeHealthz = vi.fn(async (url: string) => url.startsWith("http://foreign"));
+    const probeHealthz = vi.fn(async (url: string) => url.startsWith("http://foreign") ? "answered" as const : "refused" as const);
     await expect(
       assertDaemonDown(deps({ openrigUrl: "http://foreign-daemon:8080", probeHealthz })),
     ).rejects.toBeInstanceOf(DaemonLiveError);
