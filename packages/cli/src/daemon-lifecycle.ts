@@ -1328,8 +1328,9 @@ async function finishPendingStart(opts: StartOptions, deps: LifecycleDeps): Prom
       const after = identity.recheck(" at publication");
       if (after) throw new Error(`${after}; startup not accepted`);
     } catch (error) {
-      // Take back only what this attempt wrote: a leftover it replaced goes back as it was, so nothing has changed.
-      removeMatchingState(deps, STATE_FILE, state, leftover ? existingRaw! : undefined);
+      // Take back only what this attempt wrote: a leftover it replaced in this path goes back as it was, so nothing has
+      // changed. One read from the legacy home was never touched, so only the attempted daemon.json is removed.
+      removeMatchingState(deps, STATE_FILE, state, leftover && stateFile === STATE_FILE ? existingRaw! : undefined);
       throw error;
     }
     published = { state, publication: "written" };

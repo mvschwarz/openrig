@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import net from "node:net";
-import { pendingStartEndpoint, startDaemon, STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
+import { LEGACY_STATE_FILE, pendingStartEndpoint, startDaemon, STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import { SystemPreflight } from "../src/system-preflight.js";
 import { acquireDaemonStartLock, finishStartReservation } from "../src/daemon-start-lock.js";
 import { realDeps } from "../src/commands/daemon.js";
@@ -195,6 +195,25 @@ describe("an ordinary start finishes a start that ended pending", () => {
     expect(finishedArchives()).toEqual([]);
     expect(f.deps.spawn).not.toHaveBeenCalled();
     expect(f.deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("when the child fails its check right after publication over a leftover at the legacy path, removes its own daemon.json and leaves the legacy one as it was", async () => {
+    // The finish read the leftover from the legacy home and wrote the primary daemon.json: taking that back must not
+    // copy the legacy bytes into the primary path, where later reads would find them first.
+    const leftover = descriptor({ pid: 6262, startedAt: "2026-11-27T22:00:00.000Z" });
+    const f = setup();
+    f.files.set(LEGACY_STATE_FILE, leftover);
+    let published = false;
+    const write = f.deps.writeFile;
+    f.deps.writeFile = vi.fn((p: string, value: string) => { write(p, value); if (p === STATE_FILE) published = true; });
+    f.deps.processStartToken = (pid) => pid === CHILD ? (published ? "lstart:Sat Nov 28 03:30:00 2026" : TOKEN) : undefined;
+    const outcome = await start(f.deps);
+    expect(f.deps.writeFile).toHaveBeenCalledWith(STATE_FILE, expect.stringContaining(`"pid": ${CHILD}`));
+    expect((outcome as Error).message).toMatch(/at publication; startup not accepted\. Nothing was published or retired/);
+    expect(f.files.has(STATE_FILE)).toBe(false);
+    expect(f.files.get(LEGACY_STATE_FILE)).toBe(leftover);
+    expect(fs.readFileSync(lockFile(), "utf8")).toBe(reservation());
+    expect(f.deps.spawn).not.toHaveBeenCalled();
   });
 
   it.each([
