@@ -8,8 +8,10 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
 import type { RigSpec } from "../src/domain/types.js";
 import {
+  diffSeatEnvKeys,
   mergeSeatEnv,
   parseSeatEnvAssignment,
+  parseSeatEnvKeys,
   seatEnvLaunchVars,
   SEAT_ENV_KEYS_VAR,
 } from "../src/domain/seat-env.js";
@@ -97,6 +99,17 @@ describe("merging", () => {
   it("lists the declared names for the managed Claude launch, and nothing when none are declared", () => {
     expect(seatEnvLaunchVars({ A: "1", B: "2" })).toEqual({ A: "1", B: "2", [SEAT_ENV_KEYS_VAR]: "A,B" });
     expect(seatEnvLaunchVars({})).toEqual({});
+  });
+
+  it("parses stored seat env keys and partitions dropped keys into remove vs reconcile", () => {
+    expect(parseSeatEnvKeys(undefined)).toEqual([]);
+    expect(parseSeatEnvKeys("")).toEqual([]);
+    expect(parseSeatEnvKeys("DO_NOT_TRACK,SHARED,OPENRIG_NODE_ID,TMUX,TMUX_PANE,bad-key,SHARED")).toEqual(["DO_NOT_TRACK", "SHARED"]);
+    expect(diffSeatEnvKeys("DO_NOT_TRACK,SHARED,HOME", {
+      SHARED: "v2", HOME: "/daemon-home", OPENRIG_NODE_ID: "n1", [SEAT_ENV_KEYS_VAR]: "SHARED",
+    })).toEqual({ nextDeclaredKeys: ["SHARED"], remove: ["DO_NOT_TRACK"], reconcile: ["HOME"] });
+    expect(diffSeatEnvKeys("DO_NOT_TRACK,SHARED", { OPENRIG_NODE_ID: "n1" }))
+      .toEqual({ nextDeclaredKeys: [], remove: ["DO_NOT_TRACK", "SHARED"], reconcile: [] });
   });
 });
 

@@ -3188,12 +3188,12 @@ export class TmuxAdapter {
   }
 
   /** Remove one variable from a session's environment. Ordinary names inherit the server's value
-   *  afterwards, if any. Credentials and the launching session's own identity are marked removed
-   *  instead, so they cannot come back from the server's global environment. */
-  async unsetSessionEnv(session: string, key: string): Promise<void> {
+   *  afterwards, if any. Credentials, parent-session identity, and callers passing `remove: true`
+   *  are marked removed (`-r`) so no global value comes through. */
+  async unsetSessionEnv(session: string, key: string, opts?: { remove?: boolean }): Promise<void> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
-    const mustNotInherit = isTmuxCredentialEnvKey(key) || parentSessionEnvKeys(await this.globalEnvironment()).includes(key);
+    const mustNotInherit = opts?.remove || isTmuxCredentialEnvKey(key) || parentSessionEnvKeys(await this.globalEnvironment()).includes(key);
     const flag = mustNotInherit ? "-r" : "-u";
     await this.run(["tmux", "set-environment", "-t", target, flag, key],
       `tmux set-environment -t ${shellQuote(target)} ${flag} ${shellQuote(key)}`);

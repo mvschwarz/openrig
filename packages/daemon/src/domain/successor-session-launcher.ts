@@ -1,6 +1,6 @@
 import { ActivityGrantStore } from "./activity-grants.js";
 import { ulid } from "ulid";
-import { seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
+import { SEAT_ENV_KEYS_VAR, diffSeatEnvKeys, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "./claude-core-plugin-env.js";
 import type { PaneTerminal, TmuxAdapter } from "../adapters/tmux.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
@@ -335,6 +335,7 @@ export class SuccessorSessionLauncher {
       return { ok: false, code: terminated.code ?? "retiree_not_terminated", step: "create_successor", message: terminated.message, replacementStarted: false };
     }
     input.onReplacementStarted?.();
+    const envSyncWarnings = await this.syncSeatSessionEnv(departingSession, env);
     // KI-14: the respawn command must be EXPLICIT. `respawn-pane` without a command re-runs the
     // pane's creation (or last-respawn) command — the default shell only for createSession panes.
     // Adopted/hand-recovered panes carry a full harness invocation there (`codex … resume
@@ -404,7 +405,7 @@ export class SuccessorSessionLauncher {
       cwd: input.node.cwd ?? undefined,
     });
 
-    const warnings = [...preflightWarnings, ...(respawned.warnings ?? [])];
+    const warnings = [...preflightWarnings, ...envSyncWarnings, ...(respawned.warnings ?? [])];
     return {
       ok: true,
       discoveredId: discovered.id,
@@ -661,6 +662,59 @@ export class SuccessorSessionLauncher {
     observed = await this.tmuxAdapter.getPaneCommand(paneId);
     if (observed && isShellForeground(observed, expectedShell)) return { ok: true };
     return { ok: false, observed };
+  }
+
+  /** Reconcile dropped OpenRig-owned keys (`-r` when absent, `setSessionEnv` when supplied by
+   *  `sessionEnv`) and sync `OPENRIG_SEAT_ENV_KEYS` before respawn, retaining failed keys to retry. */
+  private async syncSeatSessionEnv(session: string, nextEnv: Readonly<Record<string, string>>): Promise<string[]> {
+    if (typeof this.tmuxAdapter.getSessionEnv !== "function") return [];
+    let previousKeysRaw: string | undefined;
+    try {
+      previousKeysRaw = await this.tmuxAdapter.getSessionEnv(session, SEAT_ENV_KEYS_VAR);
+    } catch {
+      return [`Could not read ${SEAT_ENV_KEYS_VAR} for session "${session}" before respawn; dropped seat environment keys may remain.`];
+    }
+    const warnings: string[] = [];
+    const retainedFailedKeys: string[] = [];
+    const { nextDeclaredKeys, remove, reconcile } = diffSeatEnvKeys(previousKeysRaw, nextEnv);
+    if (typeof this.tmuxAdapter.unsetSessionEnv === "function") {
+      for (const key of remove) {
+        try {
+          await this.tmuxAdapter.unsetSessionEnv(session, key, { remove: true });
+        } catch {
+          retainedFailedKeys.push(key);
+          warnings.push(`Could not remove dropped seat environment key ${key} from session "${session}" before respawn.`);
+        }
+      }
+    }
+    if (typeof this.tmuxAdapter.setSessionEnv === "function") {
+      for (const key of reconcile) {
+        try {
+          await this.tmuxAdapter.setSessionEnv(session, key, nextEnv[key]!);
+        } catch {
+          retainedFailedKeys.push(key);
+          warnings.push(`Could not restore session environment key ${key} for session "${session}" before respawn.`);
+        }
+      }
+    }
+    const effectiveKeys = [...nextDeclaredKeys, ...retainedFailedKeys];
+    const effectiveKeysRaw = effectiveKeys.length > 0 ? effectiveKeys.join(",") : undefined;
+    if (effectiveKeysRaw !== undefined) {
+      if (effectiveKeysRaw !== previousKeysRaw && typeof this.tmuxAdapter.setSessionEnv === "function") {
+        try {
+          await this.tmuxAdapter.setSessionEnv(session, SEAT_ENV_KEYS_VAR, effectiveKeysRaw);
+        } catch {
+          warnings.push(`Could not update ${SEAT_ENV_KEYS_VAR} for session "${session}" before respawn.`);
+        }
+      }
+    } else if (previousKeysRaw !== undefined && typeof this.tmuxAdapter.unsetSessionEnv === "function") {
+      try {
+        await this.tmuxAdapter.unsetSessionEnv(session, SEAT_ENV_KEYS_VAR, { remove: true });
+      } catch {
+        warnings.push(`Could not clear ${SEAT_ENV_KEYS_VAR} for session "${session}" before respawn.`);
+      }
+    }
+    return warnings;
   }
 
   /**

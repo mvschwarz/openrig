@@ -131,6 +131,18 @@ describe.skipIf(process.platform === "win32")("native tmux session launch enviro
       });
     });
 
+    it(`${mode}: unsetSessionEnv with remove marks an ordinary name removed so no global fallback comes through`, async () => {
+      await withServer(mode, async (adapter, home, tmux) => {
+        await tmux(["set-environment", "-g", "DO_NOT_TRACK", "from-global"]);
+        await tmux(["set-environment", "-g", "UNRELATED_GLOBAL", "stay"]);
+        await tmux(["set-environment", "-t", "=worker-long", "DO_NOT_TRACK", "from-seat"]);
+        await adapter.unsetSessionEnv("worker-long", "DO_NOT_TRACK", { remove: true });
+        const env = await nextPaneEnv(home, tmux, "worker-long");
+        expect(env.some(line => line.startsWith("DO_NOT_TRACK="))).toBe(false);
+        expect(env).toContain("UNRELATED_GLOBAL=stay");
+      });
+    });
+
     it(`${mode}: preserves absent/unset variables and invalid-key rejection`, async () => {
       await withServer(mode, async (adapter, _home, tmux) => {
         expect(await adapter.getSessionEnv("worker-long", "OPENRIG_UNSET_FIXTURE")).toBeUndefined();
