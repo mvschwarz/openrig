@@ -16,10 +16,15 @@ When your hub is an account's network, enroll this daemon once with the one-time
 seats by name:
 
 ```bash
-rig network enroll <code> --site <site URL>
+rig network enroll <code> --site <site URL>          # or --code-file <path>, or --code-stdin
 rig network connect <seat> --as <name>
 ```
 
+- To keep the code out of your shell history and the process list, give it with `--code-file <path>` (a regular file;
+  surrounding whitespace is trimmed) or `--code-stdin` (for example, piped from a password manager) instead of as the
+  argument. Use exactly one of the three. The code is read by the `rig` command and sent to the daemon in the request,
+  never on another command line. A file or input that can't be read, or is empty, stops the enroll; nothing else is
+  tried. Standard input is read only with `--code-stdin`.
 - `enroll` trades the code, with this daemon's host id, for an installation key. The key is stored like a participant's
   token, under `<OpenRig home>/network-secrets/<installation>/key.json`, and is never returned or shown. A refused
   code says why; get a new one from the account page. If the account doesn't answer,

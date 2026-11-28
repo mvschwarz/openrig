@@ -9,6 +9,10 @@ export interface NetworkDeps {
   lifecycleDeps: LifecycleDeps;
   clientFactory: (url: string) => Pick<DaemonClient, "get" | "post">;
   readTokenFile?: (path: string) => string;
+  /** `rig network enroll --code-file`: the one-time code, read from the file the person named. */
+  readCodeFile?: (path: string) => string;
+  /** `rig network enroll --code-stdin`: all of standard input, read only when that flag is given. */
+  readStdin?: () => Promise<string>;
 }
 
 interface Binding {
@@ -42,12 +46,28 @@ interface Installation { id: string; site: string; installationId: string; name:
 
 const enrolled = (i: Installation) => `Enrolled at ${i.site} as installation ${i.name ?? i.installationId} (${i.id})`;
 
-/** The participant's token, read from the file the account gave the person. A file others can read is used, with a note. */
-function defaultReadTokenFile(path: string): string {
+/** A secret read from a file the person named, trimmed. It must be a regular file; one others can read is used, with a
+ *  note that names the file and never what's in it. */
+function readSecretFile(path: string, noteEnd: string): string {
   const stat = lstatSync(path);
   if (!stat.isFile()) throw new Error(`${path} isn't a regular file.`);
-  if ((stat.mode & 0o077) !== 0) console.error(`Note: ${path} can be read by other users of this machine; OpenRig keeps its own private copy.`);
+  if ((stat.mode & 0o077) !== 0) console.error(`Note: ${path} can be read by other users of this machine${noteEnd}`);
   return readFileSync(path, "utf8").trim();
+}
+
+/** The participant's token, read from the file the account gave the person. */
+const defaultReadTokenFile = (path: string): string => readSecretFile(path, "; OpenRig keeps its own private copy.");
+
+/** The one-time enrollment code, read from a file so it stays out of shell history and process listings. */
+const defaultReadCodeFile = (path: string): string => readSecretFile(path, ".");
+
+/** All of standard input. A terminal gets a one-line prompt on stderr, since it waits for the person to type. */
+async function defaultReadStdin(): Promise<string> {
+  if (process.stdin.isTTY) console.error("Reading the one-time code from standard input; end it with Ctrl-D.");
+  process.stdin.setEncoding("utf8");
+  let data = "";
+  for await (const chunk of process.stdin) data += chunk as string;
+  return data;
 }
 
 /** A hub URL as status prints it: a query string or a fragment can carry a credential the person pasted, so neither is
@@ -118,12 +138,37 @@ export function networkCommand(depsOverride?: NetworkDeps): Command {
 
   cmd.command("enroll")
     .description("Enroll this daemon in an account with the one-time code its page shows, so seats connect by name")
-    .argument("<code>", "The one-time code from the account page")
+    .argument("[code]", "The one-time code from the account page; or give it with --code-file or --code-stdin")
     .requiredOption("--site <url>", "The account's site")
+    .option("--code-file <path>", "Read the one-time code from this file, so it stays out of shell history and process listings")
+    .option("--code-stdin", "Read the one-time code from standard input")
     .option("--allow-http", "Accept a plain-http site: the installation key and tokens cross the network unencrypted")
     .option("--replace", "Replace this daemon's enrollment at the site, once the account accepts the new code (after a lost key or a removed installation)")
     .option("--json", "Print JSON")
-    .action(async (code: string, opts: { site: string; allowHttp?: boolean; replace?: boolean; json?: boolean }) => {
+    .action(async (codeArgument: string | undefined, opts: { site: string; codeFile?: string; codeStdin?: boolean; allowHttp?: boolean; replace?: boolean; json?: boolean }) => {
+      // Exactly one source. The code is read here and sent in the request body; no message names its value.
+      const sources = [codeArgument !== undefined, opts.codeFile !== undefined, opts.codeStdin === true].filter(Boolean).length;
+      if (sources !== 1) {
+        console.error(`Give the one-time code${sources ? " once" : ""}: as the argument, with --code-file <path>, or with --code-stdin.`);
+        process.exitCode = 1;
+        return;
+      }
+      let code = codeArgument;
+      if (opts.codeFile !== undefined) {
+        try { code = (getDeps().readCodeFile ?? defaultReadCodeFile)(opts.codeFile); } catch (error) {
+          console.error(`Can't read the code file: ${(error as Error).message}`);
+          process.exitCode = 1;
+          return;
+        }
+        if (!code) { console.error(`The code file ${opts.codeFile} is empty.`); process.exitCode = 1; return; }
+      } else if (opts.codeStdin) {
+        try { code = (await (getDeps().readStdin ?? defaultReadStdin)()).trim(); } catch (error) {
+          console.error(`Can't read the code from standard input: ${(error as Error).message}`);
+          process.exitCode = 1;
+          return;
+        }
+        if (!code) { console.error("Standard input held no code."); process.exitCode = 1; return; }
+      }
       const daemon = await client();
       if (!daemon) return;
       const res = await daemon.post<Record<string, unknown>>("/api/network/installations", { code, site: opts.site, allowHttp: opts.allowHttp === true, replace: opts.replace === true },
