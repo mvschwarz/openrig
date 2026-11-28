@@ -1,0 +1,287 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import type { ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { startDaemon, STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
+import { acquireDaemonStartLock, finishStartReservation } from "../src/daemon-start-lock.js";
+// Resolve the startup import before a fake clock can finish with no timer yet scheduled.
+import "@openrig/daemon/instance-initialization";
+
+// A start that hit its readiness deadline leaves its child running and its reservation naming it (#3315). The next
+// ordinary `rig daemon start` finishes that start once the child is ready: it publishes daemon.json for exactly that
+// child (or keeps a matching one) and retires that launch's reservation, with no spawn and no signal. Every PID here is
+// fictional: liveness, start tokens and the listener are simulated, and kill/spawn are vi.fn.
+const LAUNCHER = 4242;
+const CHILD = 5151;
+const TOKEN = "lstart:Sat Nov 28 02:26:30 2026";
+const DB = "/srv/openrig-home/openrig.sqlite";
+const BOOT = "boot-A";
+const NS = "host";
+const BIND = { mode: "explicit" as const, hosts: ["127.0.0.1"], tailscaleDetected: false };
+
+let home: string;
+beforeEach(() => { home = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-start-finish-")); });
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+const lockFile = () => path.join(home, "daemon-start.lock");
+const header = () => JSON.stringify({ launcherPid: LAUNCHER, startedAt: "2026-11-28T02:26:29.000Z", bootId: BOOT }) + "\n";
+const childRecord = (extra: Record<string, unknown> = {}) =>
+  JSON.stringify({ childPid: CHILD, startToken: TOKEN, pidNamespace: NS, host: "127.0.0.1", port: 7433, ...extra }) + "\n";
+/** What this CLI's start records, the database included. */
+const reservation = () => header() + childRecord({ db: DB });
+/** What an older CLI's start recorded (0.7.20 to 0.7.25): the child's identity, but no database. */
+const olderReservation = () => header() + childRecord();
+const descriptor = (extra: Record<string, unknown> = {}) =>
+  JSON.stringify({ pid: CHILD, port: 7433, host: "127.0.0.1", db: DB, startedAt: "2026-11-28T02:31:50.000Z", ...extra }, null, 2);
+const opts = { port: 7433, db: DB, readinessWaitSeconds: 1 };
+
+function setup(o: {
+  lock?: string | null;
+  state?: string;
+  alive?: number[];
+  token?: string;
+  held?: boolean | { failure: string };
+  listenerPid?: number;
+  ready?: boolean;
+} = {}) {
+  if (o.lock !== null) fs.writeFileSync(lockFile(), o.lock ?? reservation());
+  const files = new Map<string, string>();
+  if (o.state !== undefined) files.set(STATE_FILE, o.state);
+  const alive = new Set(o.alive ?? [CHILD]);
+  const real = (p: string) => p.startsWith(home + path.sep);
+  const liveness = (pid: number) => alive.has(pid) ? "alive" as const : "dead" as const;
+  const deps: LifecycleDeps = {
+    homeDir: home,
+    acquireStartLock: vi.fn(() => acquireDaemonStartLock(home, { bootId: BOOT, bootedAtMs: Date.parse("2026-11-28T00:00:00Z"), processLiveness: liveness, pidNamespace: NS })),
+    spawn: vi.fn(() => { throw new Error("test: spawn"); }),
+    fetch: vi.fn(async (url: string) => {
+      if (!url.startsWith("http://127.0.0.1:7433/") || o.ready === false) throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+      return { ok: true, json: async () => ({ pid: o.listenerPid ?? CHILD, bind: BIND }) };
+    }),
+    kill: vi.fn(() => true),
+    readFile: (p) => real(p) ? (fs.existsSync(p) ? fs.readFileSync(p, "utf8") : null) : files.get(p) ?? null,
+    writeFile: vi.fn((p: string, value: string) => { if (real(p)) fs.writeFileSync(p, value); else files.set(p, value); }),
+    removeFile: vi.fn((p: string) => { if (real(p)) fs.rmSync(p, { force: true }); else files.delete(p); }),
+    exists: (p) => real(p) ? fs.existsSync(p) : files.has(p),
+    mkdirp: vi.fn(),
+    openForAppend: () => 3,
+    isProcessAlive: (pid) => alive.has(pid),
+    processLiveness: liveness,
+    pidNamespace: () => NS,
+    bootId: () => BOOT,
+    processStartToken: (pid) => pid === CHILD && alive.has(CHILD) ? o.token ?? TOKEN : undefined,
+    finishStartReservation: vi.fn(finishStartReservation),
+    databaseHeldBy: vi.fn(() => o.held ?? true),
+  };
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  return { deps, files, alive };
+}
+
+async function start(deps: LifecycleDeps, startOpts: Parameters<typeof startDaemon>[0] = opts) {
+  const outcome = startDaemon(startOpts, deps).catch((error: Error) => error);
+  await vi.runAllTimersAsync();
+  return outcome;
+}
+
+const finishedArchives = () => fs.readdirSync(home).filter((name) => name.startsWith("daemon-start.lock.finished-"));
+
+/** Nothing changed: no spawn or signal, no publication, and the reservation is where it was, as it was. */
+function expectUntouched(f: ReturnType<typeof setup>, outcome: unknown, lock: string, reason: RegExp, state?: string) {
+  expect(outcome).toBeInstanceOf(Error);
+  expect((outcome as Error).message).toMatch(/already reserved/);
+  expect((outcome as Error).message).toMatch(reason);
+  expect(f.deps.spawn).not.toHaveBeenCalled();
+  expect(f.deps.kill).not.toHaveBeenCalled();
+  expect(f.deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
+  expect(f.files.get(STATE_FILE)).toBe(state);
+  expect(fs.readFileSync(lockFile(), "utf8")).toBe(lock);
+  expect(finishedArchives()).toEqual([]);
+}
+
+describe("an ordinary start finishes a start that ended pending", () => {
+  beforeEach(() => { vi.useFakeTimers({ now: new Date("2026-11-28T03:30:00.000Z") }); });
+
+  it("publishes daemon.json for the reserved child once it is ready, and retires that launch's reservation, with no spawn or signal", async () => {
+    const f = setup();
+    const raw = reservation();
+    const outcome = await start(f.deps);
+    expect(outcome).not.toBeInstanceOf(Error);
+    const state = outcome as Awaited<ReturnType<typeof startDaemon>>;
+    expect(state).toMatchObject({ pid: CHILD, port: 7433, host: "127.0.0.1", db: DB });
+    expect(JSON.parse(f.files.get(STATE_FILE)!)).toEqual({ pid: CHILD, port: 7433, host: "127.0.0.1", db: DB, startedAt: "2026-11-28T03:30:00.000Z" });
+    expect(state.finished).toMatchObject({ publication: "written", readiness: { verified: ["127.0.0.1"] } });
+    expect(f.deps.spawn).not.toHaveBeenCalled();
+    expect(f.deps.kill).not.toHaveBeenCalled();
+    expect(f.deps.acquireStartLock).not.toHaveBeenCalled();
+    expect(fs.existsSync(lockFile())).toBe(false);
+    const archives = finishedArchives();
+    expect(archives).toHaveLength(1);
+    expect(fs.readFileSync(path.join(home, archives[0]!), "utf8")).toBe(raw);
+    expect(state.finished?.reservation).toEqual({ retired: path.join(home, archives[0]!) });
+    expect(fs.readdirSync(home).filter((name) => name.includes(".claim-"))).toEqual([]);
+  });
+
+  it("keeps a matching daemon.json written by hand and only retires an older CLI's reservation, once the child holds that database", async () => {
+    // The field case: an older CLI's reservation records no database, and the operator published the descriptor by hand.
+    const byHand = descriptor();
+    const f = setup({ lock: olderReservation(), state: byHand });
+    const outcome = await start(f.deps);
+    expect(outcome).not.toBeInstanceOf(Error);
+    const state = outcome as Awaited<ReturnType<typeof startDaemon>>;
+    expect(state.finished).toMatchObject({ publication: "already-correct" });
+    expect(f.files.get(STATE_FILE)).toBe(byHand);
+    expect(f.deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
+    expect(f.deps.databaseHeldBy).toHaveBeenCalledWith(CHILD, DB);
+    expect(fs.existsSync(lockFile())).toBe(false);
+    expect(finishedArchives()).toHaveLength(1);
+    expect(f.deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it("publishes for an older CLI's reservation with this start's database only when the child holds it open", async () => {
+    const f = setup({ lock: olderReservation() });
+    const outcome = await start(f.deps);
+    expect(outcome).not.toBeInstanceOf(Error);
+    expect(f.deps.databaseHeldBy).toHaveBeenCalledWith(CHILD, DB);
+    expect(JSON.parse(f.files.get(STATE_FILE)!)).toMatchObject({ pid: CHILD, db: DB });
+    expect(finishedArchives()).toHaveLength(1);
+  });
+
+  it.each([
+    ["the child doesn't hold it", false, /does not hold .*openrig\.sqlite open/],
+    ["that can't be read", { failure: "lsof isn't installed" }, /lsof isn't installed/],
+  ] as const)("changes nothing for an older CLI's reservation when %s", async (_case, held, reason) => {
+    const f = setup({ lock: olderReservation(), held });
+    expectUntouched(f, await start(f.deps), olderReservation(), reason);
+  });
+
+  it.each([
+    ["names another PID", descriptor({ pid: 6262 }), /daemon\.json names PID 6262/],
+    ["names another port", descriptor({ port: 7444 }), /daemon\.json names port 7444/],
+    ["names another database", descriptor({ db: "/elsewhere/openrig.sqlite" }), /daemon\.json names database \/elsewhere\/openrig\.sqlite/],
+    ["names another pid namespace", descriptor({ pidNamespace: "pid:[4026532999]" }), /pid namespace/],
+    ["has no valid start time", descriptor({ startedAt: "later" }), /start time/],
+    ["can't be read", "{not json", /daemon\.json is present but unreadable/],
+  ])("changes nothing when daemon.json %s", async (_case, state, reason) => {
+    const f = setup({ state });
+    expectUntouched(f, await start(f.deps), reservation(), reason, state);
+  });
+
+  it("changes nothing while the reservation's launcher is alive: that start may still publish", async () => {
+    const f = setup({ alive: [LAUNCHER, CHILD] });
+    expectUntouched(f, await start(f.deps), reservation(), /launcher PID 4242 is alive/);
+    expect(f.deps.fetch).not.toHaveBeenCalled();
+  });
+
+  it("changes nothing when the reserved PID is now another process", async () => {
+    const f = setup({ token: "lstart:Sat Nov 28 03:00:00 2026" });
+    expectUntouched(f, await start(f.deps), reservation(), /PID 5151 is now another process/);
+  });
+
+  it("changes nothing when another process answers at the launch endpoint", async () => {
+    const f = setup({ listenerPid: 6262 });
+    expectUntouched(f, await start(f.deps), reservation(), /expected child PID 5151, observed 6262/);
+  });
+
+  it("finishes with the start's own grace when only a listener other than the launch endpoint stays uncertain, and names it", async () => {
+    const f = setup();
+    const bind = { ...BIND, hosts: ["127.0.0.1", "127.0.0.2"] };
+    f.deps.fetch = vi.fn(async (url: string) => {
+      if (url.startsWith("http://127.0.0.2:7433/")) throw new Error("connect ETIMEDOUT");
+      return { ok: true, json: async () => ({ pid: CHILD, bind }) };
+    });
+    const state = await start(f.deps, { ...opts, readinessWaitSeconds: 30 }) as Awaited<ReturnType<typeof startDaemon>>;
+    expect(state.finished).toMatchObject({ publication: "written", readiness: { unverified: ["127.0.0.2"] } });
+    expect(finishedArchives()).toHaveLength(1);
+  });
+
+  it("changes nothing when the child isn't ready within the start's readiness budget, and keeps it running", async () => {
+    const f = setup({ ready: false });
+    expectUntouched(f, await start(f.deps), reservation(), /readiness is not confirmed/);
+    expect(f.alive.has(CHILD)).toBe(true);
+  });
+
+  it("changes nothing for a reservation a stop kept after a shutdown it couldn't verify", async () => {
+    const lock = reservation() + JSON.stringify({ retainedBy: "stop", reason: "not-exited", at: "2026-11-28T03:00:00.000Z" }) + "\n";
+    const f = setup({ lock });
+    expectUntouched(f, await start(f.deps), lock, /a 'rig daemon stop' kept it/);
+  });
+
+  it("changes nothing when another operation holds the reservation's claim", async () => {
+    const f = setup();
+    const claim = `${lockFile()}.claim-${fs.statSync(lockFile()).ino}`;
+    fs.linkSync(lockFile(), claim);
+    expectUntouched(f, await start(f.deps), reservation(), /held by another operation, or it changed/);
+    expect(fs.existsSync(claim)).toBe(true);
+  });
+
+  it("finishes on a repeat after it published but couldn't move the reservation, keeping the descriptor it wrote", async () => {
+    const f = setup();
+    const link = fs.linkSync;
+    const spy = vi.spyOn(fs, "linkSync").mockImplementation((from, to) => {
+      if (String(to).includes(".finished-")) throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+      return link(from, to);
+    });
+    const first = await start(f.deps) as Awaited<ReturnType<typeof startDaemon>>;
+    expect(first.finished).toMatchObject({ publication: "written", reservation: { kept: expect.stringContaining(lockFile()) } });
+    const written = f.files.get(STATE_FILE);
+    expect(JSON.parse(written!)).toMatchObject({ pid: CHILD });
+    expect(fs.readFileSync(lockFile(), "utf8")).toBe(reservation());
+    spy.mockRestore();
+
+    const second = await start(f.deps) as Awaited<ReturnType<typeof startDaemon>>;
+    expect(second.finished).toMatchObject({ publication: "already-correct", reservation: { retired: expect.stringContaining(".finished-") } });
+    expect(f.files.get(STATE_FILE)).toBe(written);
+    expect(fs.existsSync(lockFile())).toBe(false);
+    expect(f.deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it("is an ordinary start afterwards: the published daemon is already running, and nothing spawns", async () => {
+    const f = setup();
+    expect(await start(f.deps)).not.toBeInstanceOf(Error);
+    const after = await start(f.deps);
+    expect(after).toBeInstanceOf(Error);
+    expect((after as Error).message).toMatch(/Daemon already running \(pid 5151 on port 7433\)/);
+    expect(f.deps.spawn).not.toHaveBeenCalled();
+    expect(fs.existsSync(lockFile())).toBe(false);
+  });
+});
+
+describe("the start that ends pending", () => {
+  it("records its database in the child record, and the next start finishes it once the child is ready", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-28T02:26:29.000Z") });
+    const f = setup({ lock: null });
+    const child = Object.assign(new EventEmitter(), { pid: CHILD, exitCode: null, signalCode: null, unref: vi.fn() }) as unknown as ChildProcess;
+    let spawned = false;
+    let ready = false;
+    f.deps.spawn = vi.fn(() => { spawned = true; return child; });
+    f.deps.fetch = vi.fn(async () => {
+      if (!spawned || !ready) throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+      return { ok: true, json: async () => ({ pid: CHILD, bind: BIND }) };
+    });
+    // This test's own process is the launcher; once its start has returned, the reservation's launcher reads as exited.
+    let launcherExited = false;
+    f.deps.processLiveness = (pid) => pid === CHILD ? "alive" : pid === process.pid && !launcherExited ? "alive" : "dead";
+
+    const pending = await start(f.deps);
+    expect(pending).toBeInstanceOf(Error);
+    expect((pending as Error).message).toMatch(/pending after the readiness deadline \(child PID 5151\)/);
+    expect((pending as Error).message).toContain("Once child PID 5151 is ready, run 'rig daemon start' again to finish this start");
+    const lines = fs.readFileSync(lockFile(), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines[1]).toMatchObject({ childPid: CHILD, startToken: TOKEN, pidNamespace: NS, host: "127.0.0.1", port: 7433, db: DB });
+
+    launcherExited = true;
+    ready = true;
+    const finished = await start(f.deps) as Awaited<ReturnType<typeof startDaemon>>;
+    expect(finished.finished).toMatchObject({ publication: "written", reservation: { retired: expect.stringContaining(".finished-") } });
+    expect(JSON.parse(f.files.get(STATE_FILE)!)).toMatchObject({ pid: CHILD, port: 7433, db: DB });
+    expect(f.deps.spawn).toHaveBeenCalledTimes(1);
+    expect(f.deps.databaseHeldBy).not.toHaveBeenCalled(); // the reservation names its database
+  });
+});

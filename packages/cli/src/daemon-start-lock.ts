@@ -12,6 +12,9 @@ export interface ReservedChildIdentity {
   /** Where the child was told to listen (the launch's health endpoint). */
   host: string;
   port: number;
+  /** The database the child was told to open (OPENRIG_DB), so a later start can publish this launch. Absent on
+   *  reservations an older CLI wrote. */
+  db?: string;
 }
 
 export interface DaemonStartLock {
@@ -199,8 +202,10 @@ function archiveIfAbandoned(file: string, stale: StaleLockCheck): string | undef
  * claim to append it, so none lands between this check and the move) keeps the reservation
  * where it is. While the claim exists no other remover can remove `file`, so the winner never removes another
  * launch's lock, whichever archive name each would use. The claim goes once the move is done. A remover that dies
- * holding the claim leaves it, and later removals of that inode refuse until it's cleared by hand. */
-function claimAndArchive(file: string, inspected: fs.Stats, text: string, target: string): boolean {
+ * holding the claim leaves it, and later removals of that inode refuse until it's cleared by hand.
+ * `underClaim` runs after the content check and before the move, still under the claim: a start finishing this launch
+ * publishes there. When it throws, nothing moves and its error is the caller's. */
+function claimAndArchive(file: string, inspected: fs.Stats, text: string, target: string, underClaim?: () => void): boolean {
   const claim = `${file}.claim-${inspected.ino}`;
   try {
     fs.linkSync(file, claim);
@@ -208,14 +213,21 @@ function claimAndArchive(file: string, inspected: fs.Stats, text: string, target
     return false;
   }
   try {
-    const claimed = fs.statSync(claim);
-    if (claimed.dev !== inspected.dev || claimed.ino !== inspected.ino) return false;
-    if (fs.readFileSync(claim, "utf8") !== text) return false;
-    fs.linkSync(file, target);
-    fs.unlinkSync(file);
-    return true;
-  } catch {
-    return false;
+    try {
+      const claimed = fs.statSync(claim);
+      if (claimed.dev !== inspected.dev || claimed.ino !== inspected.ino) return false;
+      if (fs.readFileSync(claim, "utf8") !== text) return false;
+    } catch {
+      return false;
+    }
+    underClaim?.();
+    try {
+      fs.linkSync(file, target);
+      fs.unlinkSync(file);
+      return true;
+    } catch {
+      return false;
+    }
   } finally {
     try { fs.unlinkSync(claim); } catch { /* already gone */ }
   }
@@ -345,6 +357,20 @@ export function processStartToken(pid: number): string | undefined {
  *  replaces an existing name, and only the winner removes the old name, so a concurrent stop or a reservation that
  *  changed meanwhile is left alone. Returns the archive's path, or undefined when nothing was released. */
 export function archiveSpentReservation(file: string, expected: string): string | undefined {
+  return archiveExpected(file, expected, "stopped");
+}
+
+/** A later `rig daemon start` finishes a start that ended pending (its child became ready after the deadline): only
+ *  while the reservation still holds exactly `expected`, under the removers' claim on its inode, `publish` writes or
+ *  confirms that launch's daemon.json, and then the reservation is archived as `<file>.finished-<inode>`. Returns the
+ *  archive's path, or undefined when the reservation stayed: it changed, another operation holds its claim, or it
+ *  couldn't be moved (the caller knows whether `publish` ran). An error from `publish` reaches the caller, and nothing
+ *  moves. */
+export function finishStartReservation(file: string, expected: string, publish: () => void): string | undefined {
+  return archiveExpected(file, expected, "finished", publish);
+}
+
+function archiveExpected(file: string, expected: string, kind: "stopped" | "finished", underClaim?: () => void): string | undefined {
   let fd: number;
   try {
     fd = fs.openSync(file, "r");
@@ -362,7 +388,7 @@ export function archiveSpentReservation(file: string, expected: string): string 
     fs.closeSync(fd);
   }
   if (text !== expected) return undefined;
-  const target = `${file}.stopped-${inspected.ino}`;
+  const target = `${file}.${kind}-${inspected.ino}`;
   // Left for the operator when the claim or the move fails; the caller warns that the reservation was not released.
-  return claimAndArchive(file, inspected, text, target) ? target : undefined;
+  return claimAndArchive(file, inspected, text, target, underClaim) ? target : undefined;
 }
