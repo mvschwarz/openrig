@@ -161,8 +161,41 @@ describe("an ordinary start finishes a start that ended pending", () => {
     expectUntouched(f, await start(f.deps), olderReservation(), reason);
   });
 
+  it("publishes over a leftover daemon.json whose PID is gone (an earlier daemon's crash), and says it replaced it", async () => {
+    const leftover = descriptor({ pid: 6262, port: 7433, db: "/srv/openrig-home/openrig.sqlite", startedAt: "2026-11-27T22:00:00.000Z" });
+    const f = setup({ state: leftover });
+    const state = await start(f.deps) as Awaited<ReturnType<typeof startDaemon>>;
+    expect(state.finished).toMatchObject({ publication: "written", replacedPid: 6262, reservation: { retired: expect.stringContaining(".finished-") } });
+    expect(JSON.parse(f.files.get(STATE_FILE)!)).toEqual({ pid: CHILD, port: 7433, host: "127.0.0.1", db: DB, startedAt: "2026-11-28T03:30:00.000Z" });
+    expect(f.deps.spawn).not.toHaveBeenCalled();
+    expect(f.deps.kill).not.toHaveBeenCalled();
+  });
+
   it.each([
-    ["names another PID", descriptor({ pid: 6262 }), /daemon\.json names PID 6262/],
+    ["is alive", { alive: [CHILD, 6262] }, descriptor({ pid: 6262 })],
+    ["can't be inspected", { unknown: [6262] }, descriptor({ pid: 6262 })],
+    ["is numbered in another pid namespace", {}, descriptor({ pid: 6262, pidNamespace: "pid:[4026532999]" })],
+  ] as const)("changes nothing when daemon.json names another PID that %s", async (_case, o, state) => {
+    const f = setup({ state, ...("alive" in o ? { alive: [...o.alive] } : {}) });
+    if ("unknown" in o) {
+      const liveness = f.deps.processLiveness!;
+      f.deps.processLiveness = (pid) => pid === 6262 ? "unknown" : liveness(pid);
+    }
+    expectUntouched(f, await start(f.deps), reservation(), /daemon\.json names PID 6262, not child PID 5151/, state);
+  });
+
+  it("changes nothing when a leftover daemon.json changes before publication", async () => {
+    const leftover = descriptor({ pid: 6262 });
+    const f = setup({ state: leftover });
+    const changed = descriptor({ pid: 7373 });
+    f.deps.finishStartReservation = vi.fn((file: string, raw: string, publish: () => void) => {
+      f.files.set(STATE_FILE, changed);
+      return finishStartReservation(file, raw, publish);
+    });
+    expectUntouched(f, await start(f.deps), reservation(), /daemon\.json changed while this start checked the child/, changed);
+  });
+
+  it.each([
     ["names another port", descriptor({ port: 7444 }), /daemon\.json names port 7444/],
     ["names another database", descriptor({ db: "/elsewhere/openrig.sqlite" }), /daemon\.json names database \/elsewhere\/openrig\.sqlite/],
     ["names another pid namespace", descriptor({ pidNamespace: "pid:[4026532999]" }), /pid namespace/],

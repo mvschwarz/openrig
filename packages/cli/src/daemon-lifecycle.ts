@@ -34,6 +34,8 @@ export interface DaemonState {
 export interface FinishedStart {
   /** daemon.json: written for the reserved child, or already describing it in full and kept as it was. */
   publication: "written" | "already-correct";
+  /** The PID a leftover daemon.json named, when the one written replaced it: an earlier daemon that is no longer running. */
+  replacedPid?: number;
   /** That launch's reservation: archived here, or kept (why). */
   reservation: { retired: string } | { kept: string };
   /** The startup readiness this start confirmed: every required listener named the child's PID, or which listeners
@@ -1247,10 +1249,21 @@ async function finishPendingStart(opts: StartOptions, deps: LifecycleDeps): Prom
   const existingRaw = deps.exists(stateFile) ? deps.readFile(stateFile) : null;
   if (existingRaw === null && deps.exists(stateFile)) return not("daemon.json is present but unreadable");
   let existing: DaemonState | undefined;
+  // A daemon.json naming another process that is positively gone, numbered in this shell's pid namespace, is an earlier
+  // daemon's leftover (a crash, a kill, a power loss), not a step this launch completed: as an ordinary start does, the
+  // finish publishes over it, and only while its bytes are still the ones read here. A live or uninspectable PID, or
+  // one from another namespace, still declines.
+  let leftover: DaemonState | undefined;
   if (existingRaw !== null) {
     try { existing = JSON.parse(existingRaw) as DaemonState; } catch { return not("daemon.json is present but unreadable"); }
-    const mismatch = existing && typeof existing === "object" ? descriptorMismatch(existing, r) : "daemon.json is present but unreadable";
-    if (mismatch) return not(mismatch);
+    if (existing && typeof existing === "object" && existing.pid !== r.childPid && Number.isSafeInteger(existing.pid)
+      && existing.pid > 0 && liveness(existing.pid) === "dead" && sharesPidNamespace(existing, deps)) {
+      leftover = existing;
+      existing = undefined;
+    } else {
+      const mismatch = existing && typeof existing === "object" ? descriptorMismatch(existing, r) : "daemon.json is present but unreadable";
+      if (mismatch) return not(mismatch);
+    }
   }
   let db = r.db;
   if (!db) {
@@ -1267,6 +1280,7 @@ async function finishPendingStart(opts: StartOptions, deps: LifecycleDeps): Prom
 
   const waitMs = opts.readinessWaitSeconds !== undefined ? opts.readinessWaitSeconds * 1000 : STARTUP_READINESS_DEADLINE_MS;
   const endpoint = `http://${formatDaemonHostForUrl(r.host)}:${r.port}/healthz`;
+  console.error(`An earlier start's child PID ${r.childPid} is reserved: waiting up to ${waitMs / 1000}s for its readiness at ${endpoint} to finish that start, not starting another daemon.`);
   let readiness: Awaited<ReturnType<typeof awaitOwnedReadiness>>;
   try {
     readiness = await awaitOwnedReadiness({
@@ -1292,7 +1306,10 @@ async function finishPendingStart(opts: StartOptions, deps: LifecycleDeps): Prom
       published = { state: existing, publication: "already-correct" };
       return;
     }
-    if (deps.exists(stateFile)) throw new Error("a daemon.json appeared while this start checked the child");
+    const now = deps.exists(stateFile) ? deps.readFile(stateFile) : undefined;
+    if (leftover ? now !== existingRaw : now !== undefined) {
+      throw new Error(leftover ? "daemon.json changed while this start checked the child" : "a daemon.json appeared while this start checked the child");
+    }
     const state: DaemonState = {
       pid: r.childPid, port: r.port!, host: r.host!, db: db!, startedAt: new Date().toISOString(),
       ...(r.pidNamespace !== "host" ? { pidNamespace: r.pidNamespace } : {}),
@@ -1320,6 +1337,7 @@ async function finishPendingStart(opts: StartOptions, deps: LifecycleDeps): Prom
     ...published.state,
     finished: {
       publication: published.publication,
+      ...(leftover && published.publication === "written" ? { replacedPid: leftover.pid } : {}),
       reservation: retired ? { retired } : { kept: `it couldn't be moved; inspect ${file}, and run 'rig daemon start' again to retire it` },
       readiness: readiness.healthy ? { verified: readiness.verified } : { unverified: readiness.unverified! },
     },

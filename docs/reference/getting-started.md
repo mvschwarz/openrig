@@ -1569,9 +1569,11 @@ instead of starting another daemon. It checks that the reservation still names t
 (the same boot and pid namespace, the start gone, the same process) and that the child
 passes the usual startup readiness, publishes `daemon.json` for it (or keeps a
 `daemon.json` that already describes it in full), and retires that start's reservation as
-`daemon-start.lock.finished-<inode>`. Its output reports the publication, the reservation
-and the readiness on separate lines. When any check fails, it changes nothing and the
-start error says why.
+`daemon-start.lock.finished-<inode>`. A `daemon.json` left by an earlier daemon that is no
+longer running (after a crash, for example) is replaced, as an ordinary start replaces it.
+That start's own settings stand: the options given to this `rig daemon start` don't apply.
+Its output reports the publication, the reservation and the readiness on separate lines.
+When any check fails, it changes nothing and the start error says why.
 A wait shorter than the host needs only makes the start end pending sooner; it doesn't
 stop the child.
 Set the wait to what the host and its supervisor expect. A longer wait doesn't make a slow

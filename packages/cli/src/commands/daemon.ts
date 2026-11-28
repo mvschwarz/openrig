@@ -335,10 +335,10 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
         );
         if (state.finished) {
           // This start finished an earlier start that ended pending: no new daemon was started. Each part on its own line.
-          const { publication, reservation, readiness } = state.finished;
-          console.log(`Finished the earlier start of daemon pid ${state.pid} on port ${state.port}; no new daemon was started.`);
+          const { publication, replacedPid, reservation, readiness } = state.finished;
+          console.log(`Finished the earlier start of daemon pid ${state.pid} on port ${state.port}; no new daemon was started, so this command's own options (such as --port, --host and --db) didn't apply: that start's settings stand.`);
           console.log(publication === "written"
-            ? `  Publication: daemon.json written for pid ${state.pid}.`
+            ? `  Publication: daemon.json written for pid ${state.pid}${replacedPid !== undefined ? `, replacing one that named pid ${replacedPid}, which isn't running` : ""}.`
             : `  Publication: daemon.json already described pid ${state.pid}; kept as it was.`);
           if ("retired" in reservation) console.log(`  Reservation: that start's reservation retired to ${reservation.retired}.`);
           else console.error(`  Reservation: kept: ${reservation.kept}.`);
