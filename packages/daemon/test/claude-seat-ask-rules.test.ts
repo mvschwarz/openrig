@@ -178,8 +178,26 @@ function resumeTmux() {
     listSessions: async () => [], listWindows: async () => [], listPanes: async () => [], hasSession: async () => true,
   } as unknown as TmuxAdapter;
 }
-// A classic command quotes each value; a continuation quotes the flag too.
-const inlineSettings = (command: string) => JSON.parse(/--settings'? '([^']*)'/.exec(command)![1]!) as Record<string, any>;
+/** The words a POSIX shell reads from a launch command: single quotes, double quotes (shellQuote writes a quote as
+ *  '"'"'), and backslashes. */
+function shellWords(command: string): string[] {
+  const words: string[] = [];
+  let word = "", inWord = false;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]!;
+    if (c === "'" || c === '"') { const end = command.indexOf(c, i + 1); word += command.slice(i + 1, end); i = end; inWord = true; }
+    else if (c === "\\") { word += command[++i] ?? ""; inWord = true; }
+    else if (/\s/.test(c)) { if (inWord) words.push(word); word = ""; inWord = false; }
+    else { word += c; inWord = true; }
+  }
+  if (inWord) words.push(word);
+  return words;
+}
+// The --settings value as the shell passes it, whether the flag is quoted (a continuation) or not (a classic command).
+const inlineSettings = (command: string) => {
+  const words = shellWords(command);
+  return JSON.parse(words[words.indexOf("--settings") + 1]!) as Record<string, any>;
+};
 
 describe("restore's resume composes the stored asks", () => {
   it("an ordinary restore sends them in its --settings value", async () => {
@@ -193,23 +211,30 @@ describe("restore's resume composes the stored asks", () => {
   });
 
   describe("a same-conversation continuation from captured arguments", () => {
-    // The running process was launched before the seat's selection: its settings lack the asks and carry an old allow.
-    const running = { permissions: { allow: ["Bash(stale *)"] }, custom: "kept", idleCompaction: false };
-    const continueWith = async (rules: unknown, args = ["--settings", JSON.stringify(running), "--model", "opus"]) => {
+    // The running process was launched before the seat's selection: its settings lack the asks and carry an old allow
+    // and an old ask, beside permissions fields the record doesn't own.
+    const running = { permissions: { allow: ["Bash(stale *)"], ask: ["Bash(stale-ask *)"], additionalDirectories: ["/selected/docs"], defaultMode: "auto" },
+      custom: "kept", idleCompaction: false };
+    const continueWith = async (rules: unknown, args = ["--settings", JSON.stringify(running), "--model", "opus"], managed = true) => {
       const tmux = resumeTmux();
       const nativeCommand = vi.fn((_args: string[]) => "retained-launch");
       const prepare = vi.fn(async () => ({ command: nativeCommand, warnings: [], assertCurrent: () => {} }));
-      const resumeArgs: Parameters<ClaudeResumeAdapter["resume"]> = ["seat@rig", "claude_id", "same-conversation", "/repo", "auto", undefined, "auto", "node"];
+      const resumeArgs: Parameters<ClaudeResumeAdapter["resume"]> = ["seat@rig", "claude_id", "same-conversation", "/repo", "auto", undefined, managed ? "auto" : undefined, "node"];
       resumeArgs[14] = rules as never;
       resumeArgs[16] = "/native/claude";
       resumeArgs[19] = { args, configDir: null, warnings: [] };
-      const result = await new ClaudeResumeAdapter(tmux, { claudeManagedLaunch: { prepare } as unknown as ClaudeManagedLaunch }).resume(...resumeArgs);
+      const result = await new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {},
+        ...(managed ? { claudeManagedLaunch: { prepare } as unknown as ClaudeManagedLaunch } : {}) }).resume(...resumeArgs);
+      if (!managed) {
+        const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
+        return { result, sent: [command], settings: inlineSettings(command) };
+      }
       const sent = nativeCommand.mock.calls[0]![0];
       const value = sent[sent.indexOf("--settings") + 1]!;
       return { result, sent, settings: value.startsWith("{") ? JSON.parse(value) as Record<string, any> : value };
     };
 
-    it("sends the stored selection instead of the running process's permissions, keeping its other settings and conversation", async () => {
+    it("sends the stored selection instead of the running process's rule lists, keeping its other settings and conversation", async () => {
       const { sent, settings } = await continueWith(selected);
       expect(settings.permissions.ask).toEqual(selected.ask);
       expect(settings.permissions.deny).toEqual(selected.deny);
@@ -220,8 +245,24 @@ describe("restore's resume composes the stored asks", () => {
       expect(sent).toEqual(expect.arrayContaining(["--model", "opus"]));
     });
 
-    it("leaves the running settings as they are for a seat that records no rules", async () => {
-      const { settings } = await continueWith(undefined);
+    it.each([true, false])("keeps the running process's other permissions fields, such as additionalDirectories (managed: %s)", async managed => {
+      for (const rules of [selected, allowDeny]) {
+        const { settings } = await continueWith(rules, undefined, managed);
+        expect(settings.permissions.additionalDirectories).toEqual(running.permissions.additionalDirectories);
+        expect(settings.permissions.defaultMode).toBe("auto");
+        expect(settings.custom).toBe("kept");
+      }
+    });
+
+    it("drops a running ask the seat's record no longer holds, as it does a running allow", async () => {
+      const { settings } = await continueWith(allowDeny);
+      expect(settings.permissions).not.toHaveProperty("ask");
+      expect(settings.permissions.allow).not.toContain("Bash(stale *)");
+      expect(settings.permissions.deny).toEqual(allowDeny.deny);
+    });
+
+    it.each([true, false])("leaves the running settings as they are for a seat that records no rules (managed: %s)", async managed => {
+      const { settings } = await continueWith(undefined, undefined, managed);
       expect(settings).toEqual(running);
     });
 
@@ -230,6 +271,66 @@ describe("restore's resume composes the stored asks", () => {
       expect(sent).toContain("/custom/settings.json");
       expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([expect.stringMatching(/recorded Claude rules.*not applied/)]) });
     });
+  });
+});
+
+describe("a continuation sends the team default's permission hook with the team's allows (review C1)", () => {
+  const TEAM_HOOK = "claude-team-permissions.cjs";
+  const teamHookEntries = (settings: Record<string, any>) => (settings.hooks?.PreToolUse ?? [])
+    .filter((entry: any) => (entry.hooks ?? []).some((hook: any) => String(hook.command).includes(TEAM_HOOK)));
+  const otherHook = { matcher: "Write", hooks: [{ type: "command", command: "/usr/local/bin/my-check", timeout: 5 }] };
+  // A classic continuation (no managed mode), so the team default applies: teamPermissionDefault, no explicit mode.
+  const continueTeam = async (running: Record<string, unknown>, teamDefault = true) => {
+    const tmux = resumeTmux();
+    const args: Parameters<ClaudeResumeAdapter["resume"]> = ["seat@rig", "claude_id", "same-conversation", "/repo", "floor", undefined, undefined, "node"];
+    args[11] = teamDefault; args[14] = selected; args[16] = "/native/claude";
+    args[19] = { args: ["--settings", JSON.stringify(running), "--model", "opus"], configDir: null, warnings: [] };
+    await new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} }).resume(...args);
+    return inlineSettings(vi.mocked(tmux.sendText).mock.calls[0]![1]);
+  };
+
+  it("adds the team hook when the running process started without it (an explicit mode or a policy, then the team default)", async () => {
+    const settings = await continueTeam({ permissions: { allow: ["Bash(stale *)"] }, custom: "kept" });
+    expect(settings.permissions.allow).toEqual(expect.arrayContaining(TEAM_CLAUDE_ALLOW));
+    expect(teamHookEntries(settings)).toHaveLength(1);
+    expect(settings.permissions.ask).toEqual(selected.ask);
+    expect(settings.custom).toBe("kept");
+  });
+
+  it("replaces a running process's static team asks with the team hook, and keeps its unrelated hooks", async () => {
+    const settings = await continueTeam({ permissions: { allow: [...TEAM_CLAUDE_ALLOW], ask: ["Bash(rig down*)"] },
+      hooks: { PreToolUse: [otherHook], SessionStart: [{ hooks: [{ type: "command", command: "/usr/local/bin/start" }] }] } });
+    expect(teamHookEntries(settings)).toHaveLength(1);
+    expect(settings.hooks.PreToolUse).toEqual(expect.arrayContaining([otherHook]));
+    expect(settings.hooks.SessionStart).toEqual([{ hooks: [{ type: "command", command: "/usr/local/bin/start" }] }]);
+    expect(settings.permissions.ask).toEqual(selected.ask);
+  });
+
+  it("sends one team hook, not two, when the running process already has it", async () => {
+    const composed = settingsOf(operationalLaunchArgs("claude-code", { teamPermissionDefault: true, managedCompaction: false, claudePermissions: selected }));
+    const settings = await continueTeam({ permissions: composed.permissions, hooks: { PreToolUse: [...composed.hooks.PreToolUse, otherHook] } });
+    expect(teamHookEntries(settings)).toEqual(teamHookEntries(composed));
+    expect(settings.hooks.PreToolUse).toEqual(expect.arrayContaining([otherHook]));
+  });
+
+  it("drops a running team hook when the seat's choice no longer uses the team default, keeping other hooks", async () => {
+    const composed = settingsOf(operationalLaunchArgs("claude-code", { teamPermissionDefault: true, managedCompaction: false }));
+    const settings = await continueTeam({ permissions: composed.permissions, hooks: { PreToolUse: [...composed.hooks.PreToolUse, otherHook] } }, false);
+    expect(teamHookEntries(settings)).toHaveLength(0);
+    expect(settings.permissions.allow).not.toEqual(expect.arrayContaining(TEAM_CLAUDE_ALLOW));
+    expect(settings.hooks.PreToolUse).toEqual([otherHook]);
+  });
+
+  it("the pod-aware continuation adds the team hook too", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-ask-")); dirs.push(stateDir);
+    const tmux = resumeTmux();
+    const fsOps = { readFile: () => { throw new Error("none"); }, writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {}, listFiles: () => [] } as unknown as ClaudeAdapterFsOps;
+    await new ClaudeCodeAdapter({ tmux, fsOps, stateDir, sleep: async () => {} }).launchHarness({ id: "b1", nodeId: "n1", tmuxSession: "seat", tmuxWindow: null, tmuxPane: null,
+      cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/project", teamPermissionDefault: true, claudePermissions: selected, claudeExecutable: "/native/claude",
+      claudeLaunch: { args: ["--settings", JSON.stringify({ permissions: { allow: ["Bash(stale *)"] } })], warnings: [] } }, { name: "seat", resumeToken: "same" });
+    const settings = inlineSettings(vi.mocked(tmux.sendText).mock.calls[0]![1]);
+    expect(settings.permissions.allow).toEqual(expect.arrayContaining(TEAM_CLAUDE_ALLOW));
+    expect(teamHookEntries(settings)).toHaveLength(1);
   });
 });
 
@@ -251,14 +352,15 @@ describe("the pod-aware launch composes the stored asks on fresh, resume, fork a
     expect(inlineSettings(command).permissions).toMatchObject({ ask: selected.ask, deny: selected.deny });
   });
 
-  it("a continuation from captured arguments sends the stored selection, not the running permissions", async () => {
-    const running = { permissions: { allow: ["Bash(stale *)"] }, custom: "kept" };
+  it("a continuation from captured arguments sends the stored selection, not the running rule lists", async () => {
+    const running = { permissions: { allow: ["Bash(stale *)"], additionalDirectories: ["/selected/docs"] }, custom: "kept" };
     const { result, command } = await launch({ claudeExecutable: "/native/claude", claudeLaunch: { args: ["--settings", JSON.stringify(running)], warnings: [] } },
       { resumeToken: "same" });
     expect(result).toMatchObject({ ok: true });
     const settings = inlineSettings(command);
     expect(settings.permissions).toMatchObject({ ask: selected.ask, deny: selected.deny });
     expect(settings.permissions.allow).not.toContain("Bash(stale *)");
+    expect(settings.permissions.additionalDirectories).toEqual(["/selected/docs"]);
     expect(settings.custom).toBe("kept");
     expect(command).toContain("'--resume' 'same'");
   });

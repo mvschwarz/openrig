@@ -273,8 +273,10 @@ Larger JSON values go through Claude's native `--settings` file form: a content-
 file under OpenRig's seat-specific `state/claude-settings/` storage. OpenRig publishes the complete
 file atomically and prunes older files only when their bytes still match their digest. It keeps
 the current files and files named by captured live arguments. Continuations
-can rewrite OpenRig's own unchanged files to apply the selected auto-mode block and, for a seat
-with recorded rules, its composed permissions in place of the running ones; foreign files stay
+can rewrite OpenRig's own unchanged files to apply the selected auto-mode block. For a seat with
+recorded rules, cleared ones included, they also send its composed allow, ask and deny lists and the
+team or kernel default's permission hook in place of the running ones, and keep the running
+process's other permissions fields (such as `additionalDirectories`) and other hooks. Foreign files stay
 opaque, and a continuation that can't apply the rules says so. A failed write falls back inline with a warning naming the size and failure, never a size
 refusal. Rules are never truncated or dropped, and shared Claude settings are not changed.
 

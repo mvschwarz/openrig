@@ -1,4 +1,4 @@
-import { composedClaudePermissions, continuationChoiceNotes, CONTINUATION_RULES_NOT_APPLIED, resumedClaudeArguments, sendsClaudePermissions, sentClaudeAutoMode } from "../domain/claude-continuation-launch.js";
+import { composedSeatPermissionPolicy, continuationChoiceNotes, CONTINUATION_RULES_NOT_APPLIED, resumedClaudeArguments, sendsSeatPermissionPolicy, sentClaudeAutoMode } from "../domain/claude-continuation-launch.js";
 import { compactionPacketLaunchEnv, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { transportClaudeSettings } from "./claude-settings-transport.js";
@@ -605,13 +605,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
     let launchArgs = permissionArgs(opts.resumeToken ?? generatedSessionId!);
-    // A seat that records Claude rules sends its composed permissions, not the ones the running process started with.
+    // A seat that records Claude rules sends its composed rule lists and permission hook, not the running process's.
     const continuation = opts.resumeToken ? binding.claudeLaunch : undefined;
-    const seatPermissions = binding.claudePermissions !== undefined ? composedClaudePermissions(launchArgs) : undefined;
+    const seatPolicy = binding.claudePermissions !== undefined ? composedSeatPermissionPolicy(launchArgs) : undefined;
     let nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
-      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture, autoMode.block ?? null, settingsSeat, seatPermissions);
+      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture, autoMode.block ?? null, settingsSeat, seatPolicy);
     const sentNative = !!managed || !!(opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable);
-    if (seatPermissions && continuation?.args && sentNative && !sendsClaudePermissions(nativeArgs, seatPermissions, settingsSeat)) tokenWarnings.push(CONTINUATION_RULES_NOT_APPLIED);
+    if (seatPolicy && continuation?.args && sentNative && !sendsSeatPermissionPolicy(nativeArgs, seatPolicy, settingsSeat)) tokenWarnings.push(CONTINUATION_RULES_NOT_APPLIED);
     // The packet variable follows the grant this launch sends: a continuation sends the running Claude's arguments.
     const packetEnv = compactionPacketLaunchEnv(sentNative ? nativeArgs : launchArgs,
       { openrigHome: this.stateDir, nativeSessionId: opts.resumeToken ?? generatedSessionId! });

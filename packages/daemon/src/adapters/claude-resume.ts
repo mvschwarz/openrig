@@ -1,4 +1,4 @@
-import { composedClaudePermissions, continuationChoiceNotes, CONTINUATION_RULES_NOT_APPLIED, resumedClaudeArguments, sendsClaudePermissions, sentClaudeAutoMode, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
+import { composedSeatPermissionPolicy, continuationChoiceNotes, CONTINUATION_RULES_NOT_APPLIED, resumedClaudeArguments, sendsSeatPermissionPolicy, sentClaudeAutoMode, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
 import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js";
 import { claudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "../domain/claude-auto-mode.js";
 import { compactionPacketLaunchEnv, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
@@ -160,11 +160,11 @@ export class ClaudeResumeAdapter {
       try { wrapperPrefix = this.options.seatLaunchEnvironment.resolveLaunchWrapper(launchWrapper).map(shellQuote).join(" ") + " "; }
       catch { return { ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." }; }
     }
-    // A seat that records Claude rules sends its composed permissions, not the ones the running process started with.
-    const seatPermissions = claudePermissions !== undefined ? composedClaudePermissions(launchArgs) : undefined;
-    let nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture, autoMode.block ?? null, settingsSeat, seatPermissions);
+    // A seat that records Claude rules sends its composed rule lists and permission hook, not the running process's.
+    const seatPolicy = claudePermissions !== undefined ? composedSeatPermissionPolicy(launchArgs) : undefined;
+    let nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture, autoMode.block ?? null, settingsSeat, seatPolicy);
     const sentNative = !!managed || !!(continuation?.args && executable);
-    if (seatPermissions && continuation?.args && sentNative && !sendsClaudePermissions(nativeArgs, seatPermissions, settingsSeat)) tokenWarnings.push(CONTINUATION_RULES_NOT_APPLIED);
+    if (seatPolicy && continuation?.args && sentNative && !sendsSeatPermissionPolicy(nativeArgs, seatPolicy, settingsSeat)) tokenWarnings.push(CONTINUATION_RULES_NOT_APPLIED);
     // The packet variable follows the grant this resume sends: a continuation sends the running Claude's arguments.
     const packetEnv = compactionPacketLaunchEnv(sentNative ? nativeArgs : launchArgs, { openrigHome: this.options.openrigHome, nativeSessionId: resumeToken! });
     if (sentNative) nativeArgs = transportClaudeSettings(nativeArgs, settingsSeat, tokenWarnings, continuation?.args);
