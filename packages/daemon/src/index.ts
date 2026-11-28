@@ -174,16 +174,16 @@ export function startQueueRetentionScheduler(deps: {
  *  unclaimed-obligation net and the dangling-closure custody class, on the config-keyed
  *  cadence (`queue.stuck_sweep_interval_seconds`). Findings route as durable rows to the
  *  owning seats; a clean sweep records only the healthz heartbeat; a failing sweep is loud
- *  on that surface and the log, never a silent skip. Boot sweep + interval, retention
- *  pattern. Returns the interval handle (cleared on shutdown), or null when the queue
- *  repository is absent (direct-construction harnesses). */
+ *  on that surface and the log, never a silent skip. Boot sweep + re-armed timeout (so
+ *  config flips apply to the next pass without a restart). Returns a handle with `stop()`
+ *  (cleared on shutdown), or null when the queue repository is absent. */
 export function startStuckSweepScheduler(deps: {
   rigRepo: { db: import("better-sqlite3").Database };
   queueRepo?: import("./domain/queue-repository.js").QueueRepository;
   stuckSweepStatus?: import("./domain/queue-stuck-sweep.js").StuckSweepStatus;
   /** #331: a finding names the seat's latest context sample from here. */
   contextUsageStore?: import("./domain/context-usage-store.js").ContextUsageStore;
-}): ReturnType<typeof setInterval> | null {
+}): { stop(): void } | null {
   const queueRepo = deps.queueRepo;
   if (!queueRepo) return null;
   const status = createStuckSweepStatus();
@@ -191,29 +191,33 @@ export function startStuckSweepScheduler(deps: {
   const db = deps.rigRepo.db;
   // #331: a finding names what's already known about its seat: held messages and the latest context sample.
   const seatEvidence = seatEvidenceReader(db, deps.contextUsageStore);
-  // A pass yields the event loop, so a tick could start a second pass over the first one (a pass longer than the
-  // interval): one pass at a time, and a tick that finds one still running is skipped.
-  let runningSince: string | null = null;
-  let skipped = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let stopped = false;
   const runOnce = (): void => {
-    if (runningSince) {
-      // Never silent: a pass that hangs (an awaited send that never settles) shows up here on every tick.
-      skipped++;
-      status.pass({ runningSince, skippedTicks: skipped });
-      console.error(`[stuck-sweep] tick skipped: the pass started at ${runningSince} is still running (${skipped} tick(s) skipped)`);
-      return;
-    }
-    runningSince = new Date().toISOString();
-    skipped = 0;
+    if (stopped) return;
+    const runningSince = new Date().toISOString();
     status.pass({ runningSince, skippedTicks: 0 });
     // runStuckSweep never throws (failure is recorded loudly on the status surface);
     // the catch is the never-crash-the-daemon belt for the promise chain itself.
     void runStuckSweep({ db, queueRepo, status, seatEvidence }).catch((err: unknown) => {
       console.error(`[stuck-sweep] scheduler error: ${err instanceof Error ? err.message : String(err)}`);
-    }).finally(() => { runningSince = null; status.pass({ runningSince: null, skippedTicks: skipped }); });
+    }).finally(() => {
+      status.pass({ runningSince: null, skippedTicks: 0 });
+      if (!stopped) {
+        timer = setTimeout(runOnce, resolveStuckSweepIntervalSeconds() * 1000);
+      }
+    });
   };
-  runOnce(); // boot sweep (fire-and-forget)
-  return setInterval(runOnce, resolveStuckSweepIntervalSeconds() * 1000);
+  runOnce(); // boot sweep (fire-and-forget); re-arms on completion
+  return {
+    stop() {
+      stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  };
 }
 
 /** S01 (OPR.0.5.5.1) — start the WAKE-OR-ESCALATE ladder: batons whose wake failed retry
@@ -409,7 +413,7 @@ export async function startServer(port?: number) {
   // once after the first successful bind callback fires.
   let monitorsStarted = false;
   let retentionTimer: ReturnType<typeof setInterval> | null = null;
-  let stuckSweepTimer: ReturnType<typeof setInterval> | null = null;
+  let stuckSweepTimer: { stop(): void } | null = null;
   let wakeLadderScheduler: WakeLadderScheduler | null = null;
   // P7 — lifecycle heartbeat: advance last-seen every tick while running.
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -513,7 +517,7 @@ export async function startServer(port?: number) {
         deps.resumeMetadataRefresher?.stop();
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         if (retentionTimer) clearInterval(retentionTimer);
-        if (stuckSweepTimer) clearInterval(stuckSweepTimer);
+        if (stuckSweepTimer) stuckSweepTimer.stop();
       }],
       ["runtime-probes", () => stopRuntimeProbes()],
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
