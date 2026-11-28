@@ -9,6 +9,7 @@ import {
   authList,
   authSave,
   authSwitch,
+  authSignOut,
   authValidate,
   authSeatSet,
   authSeatsList,
@@ -123,6 +124,40 @@ cross the connection.`)
       console.log(`active_mode: ${r.mode}`);
       console.log("note: Restored saved credential bytes only; sign-in is unverified. Saved credentials may expire, be revoked, or be superseded by refresh elsewhere. Restart the affected seat and use the existing account verification; fresh sign-in may be required.");
       console.log(`note: ${r.note}`);
+    });
+
+  withRuntime(auth.command("sign-out"))
+    .description("Remove one Codex login's matching active and saved login files (auth.json, auth-profiles/*.json) from a Codex home.")
+    .option("--profile <profile>", "Sign out the login saved in this profile (default: the active login)")
+    .option("--codex-home <dir>", "The Codex home to act on (default: CODEX_HOME, else ~/.codex)")
+    .option("--json", "Print the result as JSON (names and counts only)")
+    .addHelpText("after", `
+Removes the active auth.json and the readable, ordinary saved profiles (auth-profiles/*.json) holding the same ChatGPT
+account, whatever saved them: rig auth save, a provider switch's before-switch copy, or another application using that
+profile store. A refreshed copy of the login counts. Other logins, other homes and files it can't check as a login stay,
+and the ones it couldn't check are named. Other locations in the home aren't scanned. Run again, it reports that the
+profile (or active login) it was given is gone.
+
+It doesn't revoke the login at OpenAI. Native Codex logout, this local cleanup and revocation at the provider are separate
+operations. To remove saved profiles after the active auth.json has gone, name one that's still there with --profile.`)
+    .action((opts: { runtime: string; profile?: string; codexHome?: string; json?: boolean }) => {
+      if (!ensureRuntime(opts.runtime)) return;
+      const r = authSignOut(paths(opts.codexHome), opts.profile);
+      if (opts.json) {
+        console.log(JSON.stringify(r));
+        if (!r.ok || r.notRemoved.length) process.exitCode = 1;
+        return;
+      }
+      if (!r.ok) return fail(r.reason);
+      const which = opts.profile ? `the login saved in ${opts.profile}` : "the active login";
+      console.log(`signed_out: ${r.target === "absent" ? `nothing (${opts.profile ? `no profile named ${opts.profile}` : "no active login"} in this home)` : r.target === "unchecked" ? `nothing (${which} could not be checked)` : which}`);
+      console.log(`removed_active: ${r.removedActive ? "yes" : "no"}`);
+      console.log(`removed_profiles: ${r.removedProfiles.length ? r.removedProfiles.join(", ") : "none"}`);
+      if (r.notRemoved.length) console.log(`not_removed: ${r.notRemoved.join(", ")}`);
+      console.log(`kept_profiles: ${r.keptProfiles}`);
+      if (r.unchecked.length) console.log(`unchecked (kept; not read as a login): ${r.unchecked.join(", ")}`);
+      console.log(`note: ${r.note}`);
+      if (r.notRemoved.length) process.exitCode = 1;
     });
 
   withRuntime(auth.command("validate <profile>"))
