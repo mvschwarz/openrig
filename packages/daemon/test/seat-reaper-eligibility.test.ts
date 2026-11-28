@@ -1,6 +1,19 @@
 import { expect, it } from "vitest";
 import { fixture } from "./seat-reaper-fixture.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { noticeRosterReady } from "../src/domain/roster-ready-notice.js";
+import { reapEligibility } from "../src/domain/seat-reaper-eligibility.js";
 import { SeatReaperService } from "../src/domain/seat-reaper-service.js";
+
+it("keeps an otherwise idle seat eligible with an open roster-ready notice", async () => {
+  const f = fixture();
+  expect(await noticeRosterReady(new QueueRepository(f.db, f.bus, {}), "r", ["worker@test"])).toEqual([]);
+  const [seat] = getNodeInventory(f.db, "r");
+  if (!seat) throw new Error("fixture missing seat");
+
+  expect(reapEligibility(f.db, seat, f.state)).toMatchObject({ eligible: true, snapshot: { inbox: 0 } });
+});
 
 it.each([
   ["pending", "pinned@test"], ["blocked", "pinned@test"], ["in-progress", "pinned@test"],
@@ -9,6 +22,7 @@ it.each([
   // Given an addressed live item.
   const f = fixture();
   f.db.exec("UPDATE sessions SET session_name='pinned@test'; UPDATE bindings SET tmux_session='pinned@test'");
+  expect(await noticeRosterReady(new QueueRepository(f.db, f.bus, {}), "r", ["pinned@test"])).toEqual([]);
   f.db.prepare(`INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,body)
     VALUES ('q',datetime('now'),datetime('now'),'sender@test',?,?,'work')`).run(destination, state);
   // When the reaper observes the full threshold.
