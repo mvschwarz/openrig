@@ -101,7 +101,8 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
     | `running` | The agent's latest session runs (or is idle) with its startup `ready`, and the add's call, if it returned, launched it. | `live`; from there it serves and drains like any other agent, and above `max` it receives no row. |
     | `no_node` | No node was created, with the add's code (for example `preflight_failed`). | Removed, which frees its number. |
     | `not_running` | The node exists but does not run: its latest session `exited`, or its executor is confirmed stopped (`probe_absent`), in `attempt.observed`; with the launch's error when the add's call returned. | `drained`, with a reuse hold (JSON `{ code, observed, error? }`: the launch's status or code, or `not_running` when the call never returned; what was observed; the launch's error, if any): never tried again, and it takes no room under `max`. Reported in `slots` every evaluation. |
-    | `unknown` | Anything else (startup not ready, no session yet, or a call that returned a failure or a status other than `launched` while the session runs), with what was read. | Stays `adding` and issued, read again every evaluation until it settles; never issued again, never stopped, and no other free agent is drained because of it. |
+    | `attention_required` or `left_attached` | Unless the agent's latest session `exited` or its executor is confirmed stopped (`not_running` above): the add's call returned `attention_required` or `left_attached` (whatever else the session reads, a session recorded or not), or returned anything else but a launch (a failure) while the agent's latest session runs (or is idle); or the call is not known (after a daemon restart) or returned a launch, and the agent's latest session runs with a startup that needs attention or failed. `left_attached` is reported as such; anything else as `attention_required`, with the launch's status or code in `code` when it is another one (for example `failed`). | `live` and held, with a reuse hold (JSON `{ code, error? }`): it takes room under `max`, but it is not free, receives no row and is never drained by the pool. Reported in `slots` every evaluation, until a later change on its node ends the hold (see *A held slot and a later change*). |
+    | `unknown` | Anything else (startup not ready, or no session yet), with what was read. | Stays `adding` and issued, read again every evaluation until it settles; never issued again, never stopped, and no other free agent is drained because of it. |
 
   - after a daemon restart, an attempt that no process runs any more is settled by the next evaluation: a reservation
     that was never issued is cancelled (`cancelled: not issued`), and an issued add is read again by replaying its
@@ -190,9 +191,45 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
     `no_matching_nodes` or `selection_changed`) is reported `refused` with its code, and the slot goes back to
     `drained` with that code and the snapshot as its reuse hold: the same snapshot is never sent again. A comeback that
     is held or refused keeps the drain's time, so it does not restart the `cooldown_s`;
+  - just before its issue, under the same lease, the comeback is checked as an add is: the job, the holds and the stored
+    block again, and a new plan with the reservation counted. A stopped job, a `rig.stopped`, a lower `max`, `drain:
+    true`, any other change to the block, or surplus that reaches the reservation cancels it: nothing is launched, the
+    slot is `drained` again with no reuse hold (so it stays eligible), and the notes report it under `add.cancelled` as
+    `cancelled: not issued`, with the cause in `code`;
   - right before its launch, the comeback reads the job and the rig again: with the job stopped or the rig down, it is
     never launched, the slot is `drained` again with no reuse hold, and the comeback is reported `refused` with the
     code `held`;
+  - a launch on the slot's node that does not run is never repeated. It is reported in `attempt.status`, never as a
+    stop, and the slot keeps a reuse hold (JSON `{ code, snapshotId, error? }`, the code being the launch's status for
+    the node), unless the node's latest session reads ready when the call returns (an agent someone recovered by hand
+    meanwhile): then the slot is `live` with no hold, reported `running` with the code `later_session`:
+
+    | Launch status for the node | `attempt.status` | The slot |
+    | --- | --- | --- |
+    | `awaiting-decision`, or `failed` with no session of the node running afterwards | `not_running`, with the status in `code` and the launch's error in `message` (for a pod-aware agent with no runtime adapter, the error names `rig seat launch <seat> --fresh`) | `drained` and held: it takes no room, and the other eligible slots or a new number go on within `max`. A rolled-back launch leaves the node's earlier session and binding as they were. |
+    | `attention_required`, `left_attached`, or `failed` while a session of the node still runs | `attention_required` (with `failed` in `code` for a failure) or `left_attached` | `live` and held: it takes room, but it is not free, receives no row and is never drained by the pool. |
+
+    The ready read covers every status in this table, the launch's own session included: a session that reads ready is
+    the pool's test of a usable agent, as with `already_running` below, so a `left_attached` call or a `failed` launch
+    whose own session reads ready also makes the slot `live` with no hold, reported `running` with `later_session`.
+
+    A launch that finds a live session already on the node (one the pool did not start and that is not proven to be an
+    agent: the node is in `alreadyRunning`, nothing was launched) is reported `already_running`, and the slot is `live`
+    with no hold. It takes room like any agent and is free only once idle at its prompt. Neither a hold nor this records a
+    new event per evaluation;
+  - a comeback whose launch call returned something else (another refusal, or an error) stays `adding` and issued with
+    what it returned, is reported `in flight` with that code, and `unknown` in every later evaluation; it is never
+    launched again;
+  - after a daemon restart, a comeback no process runs any more is read again from the `restore.subset_completed` that
+    its launch records before it returns: the newest one after what it was issued on, for its snapshot, that names its
+    node settles it by the table above (or `running`, while its session reads ready). The node's current state comes
+    first: when its latest session reads ready (an agent someone recovered by hand before that read), the slot is `live`
+    with no hold, whatever the event recorded; otherwise an `awaiting-decision` hold (its launch rolled back) is measured
+    from the session the comeback was issued on, so a session someone started since is a later change. Without such an event
+    (a launch that found the agent already running records none), a latest session that reads ready, the one it was
+    issued on included, makes the slot `live` with no hold, and a session on the node newer than the one it was issued
+    on settles it as a later change does (see *A held slot and a later change*). With neither, it stays `adding` and
+    issued, reported `unknown`: it takes room and is never launched again;
   - a comeback that runs is reported `running`, with the `snapshotSelection` it was launched from (`mode:
     "explicit"`), and the slot is `live` again. It comes back with its own stored settings, never the model's: the
     model, effort, Codex profile and permission posture follow the slot's latest saved choices, as in any restore.
@@ -204,7 +241,9 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
     naming the fields that differ (`cwd` is compared only without `cwd_template`, when the slot took the model's
     folder). The warning compares the slot's stored settings: a `cwd` set after the capture is compared at its new
     value while the agent comes back in the captured folder;
-  - every evaluation reports a slot's reuse hold with the slot.
+  - every evaluation reports a slot's reuse hold with the slot;
+  - a held `live` slot takes room under `max` like any agent: when held `live` agents take all the room under `max`,
+    the pool adds nothing and moves no row until a later change on one of them ends its hold.
 - **After `pool: {}`.** Clearing the block on re-apply leaves the job running: it drains the free agents with the
   block it was last ensured with (`context.pool`), leaves busy agents `live` until they are free, and ends
   (`terminal`) once every agent is `drained` and the block is still absent. A `live` agent positively gone (its latest
@@ -224,6 +263,38 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
   engine returns `job_not_active`, with no history, when the job is no longer active before the policy runs or after
   it returns. So a job stopped during an evaluation records nothing; the executor's own check only stops the moves
   and adds left in that evaluation.
+
+### A held slot and a later change
+
+A reuse hold on a `drained` or a `live` slot is kept across evaluations, daemon restarts, and `rig down` then `rig up`
+(a `drained` slot stays down there, as any drained pool agent; a held `live` slot is restored as any member). The pool
+never launches that slot again. With the hold, the slot records what the hold is measured from: the node's latest session
+then (its id, status and startup status; a session a launch rolled back, `superseded`, is never taken as the latest) and
+the rig's latest event. Each evaluation reads every held slot again before it plans, under the model's custody lease, and
+only a later change on the slot's node ends the hold. That read runs only while the job is active, the pool is not held
+(`rig.stopped`), its block is readable and the custody lease is granted; otherwise the holds stay as they are, and a
+recovered session ends its hold at the first evaluation that reads it. The evaluation reports what changed under `laterChanges` (the slot,
+the session, how it read, and the slot's phase and hold after it):
+
+- a restore since the hold that launched the node (a `rig up`, or `rig launch --seats`) and did not run gives the slot
+  that outcome, as a comeback's launch would (`read: restore`), unless the node's latest session reads ready;
+- otherwise a session newer than the recorded one (someone's `rig seat launch --fresh`, a `rig launch --snapshot-id`, a
+  resume by hand) is a change, and so is, for a held `live` slot, a new status or startup status on the recorded session
+  (as `rig seat continue` gives when it reruns startup) or its executor confirmed stopped. For a held `drained` slot,
+  the recorded session counts only when it is resumed (it reads ready or needing attention); marked down or detached,
+  it is no change. A `restore.outcome_reconciled` alone changes nothing.
+
+The node's latest session then decides:
+
+| The latest session | `read` | The slot |
+| --- | --- | --- |
+| Runs (or is idle) with startup `ready`, and its executor is not confirmed stopped | `ready` | `live`, with no hold: it serves, and drains, like any agent. If that leaves the pool above what it wants, surplus drains free agents, newest first. |
+| Exited, or its executor is confirmed stopped (for a held `live` slot, also when the node has no session row) | `absent` | `drained` and eligible, with no hold; except a hold that awaits a decision (`awaiting-decision`) while no session since the recorded one reached `ready`: the slot stays held, now measured from that session. A held `live` slot that becomes `drained` this way, also after a later session put it back in `adding`, counts as a drain step from then for `cooldown_s`. |
+| Runs (or is idle) with a startup that needs attention or failed | `attention` | `live` and held (`attention_required`, or `failed`): it takes room, is not free and receives no row. |
+| Anything else (for example a startup still pending) | `unknown` | Back in `adding`, its last attempt issued again and reported `unknown`, with the hold it had: it counts as an unknown result (it takes room and no other free agent is drained because of it), nothing is launched, and every evaluation reads it again by the node's latest session (and by a restore since then), until it reads one of the rows above. |
+
+The change writes no event, and nothing is stopped. After `pool: {}`, a held `live` slot keeps the job running until a
+later change ends its hold: the pool never drains it.
 
 ### The dispatch guard
 
@@ -268,11 +339,7 @@ gone, its job moves, drains, adds and brings back nothing and reports `held: mod
 
 ## What the job does not do yet
 
-An add whose launch failed or needs attention while its session still runs is reported `unknown` and stays issued;
-nothing yet settles it. So does an add whose node was created but has no session when the daemon restarts: nothing
-launches it again, and deleting that node removes its slot row, which frees its number. The same holds for a comeback
-whose launch does not run and is not refused before it starts (for example one that awaits a decision, finds a live
-session or fails): it stays in flight with its outcome kept. One a daemon restart cut off before its launch stays in
-flight, with no outcome. Nothing yet clears a reuse hold: an add that settled
-`not_running` holds new numbers until its node is deleted, which removes its slot row. An add, or a comeback whose launch
-had already started, that settles running after `rig down` keeps running.
+An add whose node was created but has no session when the daemon restarts stays `unknown`: nothing launches it again,
+and deleting that node removes its slot row, which frees its number. The pool does no live terminal probe of its own: a
+session "present" is one whose executor is not confirmed stopped. An add, or a comeback whose launch had already started,
+that settles running after `rig down` keeps running.
