@@ -1488,6 +1488,7 @@ function findSiblingHome(deps: LifecycleDeps): DaemonStatus["siblingHint"] {
 function liveStartReservation(deps: LifecycleDeps): DaemonStatus["startPending"] {
   const reservation = observeStartReservation({
     home: deps.homeDir ?? OPENRIG_DIR,
+    bootId: deps.bootId?.(),
     readFile: (file) => deps.exists(file) ? deps.readFile(file) : null,
     processLiveness: (pid) => deps.processLiveness
       ? deps.processLiveness(pid) : deps.isProcessAlive(pid) ? "alive" : "dead",

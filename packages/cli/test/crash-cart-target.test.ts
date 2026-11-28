@@ -3,6 +3,8 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crashCartCommand, type CrashCartEmit } from "../src/commands/crash-cart.js";
+import { realDeps } from "../src/commands/daemon.js";
+import { getDaemonStatus } from "../src/daemon-lifecycle.js";
 import { currentBootId } from "../src/daemon-start-lock.js";
 import { crashCartRenderOpts } from "../../tui/src/crash-cart/from-emit.js";
 import { resolveCrashCartKey } from "../../tui/src/crash-cart/keys.js";
@@ -129,6 +131,28 @@ describe("real crash-cart wiring: selected endpoint, reservation and discovery r
     expect(emit.discovery).toBeDefined();
     expect(resolveCrashCartKey("s", crashCartRenderOpts(emit as Parameters<typeof crashCartRenderOpts>[0]))).toBe("start-daemon");
     expect(readFileSync(join(home, "daemon-start.lock"), "utf8")).toBe(before);
+  });
+  it.skipIf(!currentBootId())("status and crash-cart agree on the same earlier-boot and current-boot reservations", async () => {
+    probes("refused");
+    for (const bootId of ["an-earlier-boot", currentBootId()!]) {
+      const before = JSON.stringify({ launcherPid: process.pid, startedAt: "2026-01-01T00:00:00Z", bootId }) + "\n"
+        + JSON.stringify({ childPid: process.pid, host: "127.0.0.1", port: 17433 }) + "\n";
+      writeFileSync(join(home, "daemon-start.lock"), before);
+      const status = await getDaemonStatus({ ...realDeps(), homeDir: home, listDir: () => [] });
+      const emit = await run();
+      if (bootId === "an-earlier-boot") {
+        expect(status.state).toBe("stopped");
+        expect(status.startPending).toBeUndefined();
+        expect(emit.state).toBe("down");
+      } else {
+        expect(status.state).toBe("unverified");
+        expect(status.startPending?.pid).toBe(process.pid);
+        unverified(emit);
+        expect(emit.evidence!.pidState).toContain("start pending");
+      }
+      expect(readFileSync(join(home, "daemon-start.lock"), "utf8")).toBe(before);
+      expect(readdirSync(home)).toEqual(["daemon-start.lock"]);
+    }
   });
   it.skipIf(!currentBootId())("an earlier boot's reservation with an unreadable line stays unverified, as a start keeps it", async () => {
     writeFileSync(join(home, "daemon-start.lock"),
