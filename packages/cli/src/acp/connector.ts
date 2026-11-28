@@ -168,7 +168,7 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
 
   const record = async (outcome: AcpOutcome): Promise<AcpOutcome> => {
     const shown = outcome.text.length > NOTE_TEXT_LIMIT ? `${outcome.text.slice(0, NOTE_TEXT_LIMIT)}\n… (truncated; the full transcript is in ${options.logPath})` : outcome.text;
-    const withUsage: AcpOutcome = { ...outcome, usage: { ...reported } };
+    const withUsage: AcpOutcome = { ...outcome, sessionId, usage: { ...reported } };
     await queue.update(row.qitemId, {
       note: `ACP run ${options.runId} outcome ${outcome.kind}: ${outcome.summary}${shown ? `\n\n${shown}` : ""}\nThis is the agent's report, not a judgment of the work; the row stays open for you to judge and close with your own resolution.\n${describeUsage(withUsage.usage)}`,
     });

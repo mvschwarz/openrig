@@ -154,6 +154,9 @@ rig exec run <row> --harness claude --plan       # what would run, with versions
 rig exec run <row> --harness claude [--wait]     # start it; --wait waits here for the outcome
 rig exec run <row> --cwd /workspace -- cursor-agent acp
 rig exec status <runId|row>                      # state, outcome, usage and cost, and what still runs
+rig exec list [--json]                           # recorded runs for this seat's rig on this host
+rig resource list --kind exec-run --json        # the same runs in the shared resource list
+rig exec run <row> --resume-from <runId>          # continue the last recorded ACP session
 rig exec cancel <runId>
 ```
 
@@ -257,3 +260,28 @@ give its full path instead: `command -v rig` prints it.
 - Progress is read every 2 seconds while a turn is open (`--poll-seconds`).
 - Sessions are found among the 2,000 newest rows you've sent, and a reopened session's questions among the 2,000 newest
   sent to you, so a caller with a lot of traffic, such as a busy seat, can't list or fully reopen its oldest sessions.
+## Shared links for work
+
+From a managed seat, link work resources for other seats in the same rig on
+the same host. References are optional labels, such as a qitem or workflow ID.
+Each URL appears once per kind, with all its associations.
+
+```sh
+rig resource link https://github.com/owner/repo/pull/42 --ref qitem-123
+rig resource link https://gitlab.example/team/repo/-/merge_requests/17 --ref workflow-456
+rig resource link https://docs.example/design --kind design
+rig resource link ./notes/design.md --kind file --id design-path
+rig resource link --kind note --id decision --content "Use the existing queue."
+rig resource list --kind pr --json
+rig resource unlink https://github.com/owner/repo/pull/42 --ref qitem-123
+```
+
+Resources have a kind and an ID, with an optional URI or string value. A path
+is stored as written. Use `--content-file` to explicitly store local UTF-8
+text instead, or `--content` for inline text. Content belongs to the
+association and is visible in JSON output to members of the rig.
+
+GitHub pull requests and GitLab merge requests are examples that derive
+canonical IDs from their URLs. Use `--kind pr` for an enterprise GitHub host.
+The list persists in OpenRig home. It does not grant access to remote
+resources or fetch their status.

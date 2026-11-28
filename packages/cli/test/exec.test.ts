@@ -143,6 +143,36 @@ describe("rig exec", () => {
     expect(readRows(h.queueFile)["qitem-task"]!.state).toBe("in-progress");
   }, 30_000);
 
+  it("lists a run for another seat in the rig and lets its owner resume the recorded session once", async () => {
+    const h = setup("scenario:reply PONG", { FAKE_ACP_LOAD: "1" });
+    const first = await rig(h, ["run", "qitem-task", "--cwd", h.home, "--", process.execPath, FAKE_AGENT]);
+    expect(first.code).toBe(0);
+    const original = await ended(h, startedId(first.out)!);
+    expect(original.sessionId).toBeTruthy();
+    const peer = withEnv(h, { OPENRIG_SESSION_NAME: "reviewer@studio" });
+    const listed = await rig(peer, ["list", "--json"]);
+    expect(JSON.parse(listed.out)).toMatchObject([{ runId: original.runId, owner: SEAT, state: "finished", hasSession: true }]);
+    const resources = await rig(peer, ["resource", "list", "--kind", "exec-run", "--json"]);
+    expect(JSON.parse(resources.out)).toMatchObject([{
+      kind: "exec-run", id: original.runId,
+      details: { owner: SEAT, resumeCommand: `rig exec run qitem-task --resume-from ${original.runId}` },
+    }]);
+    const outside = await rig(withEnv(h, { OPENRIG_SESSION_NAME: "reviewer@elsewhere" }), ["list", "--json"]);
+    expect(JSON.parse(outside.out)).toEqual([]);
+    const outsideResources = await rig(withEnv(h, { OPENRIG_SESSION_NAME: "reviewer@elsewhere" }),
+      ["resource", "list", "--kind", "exec-run", "--json"]);
+    expect(JSON.parse(outsideResources.out)).toEqual([]);
+    const resume = ["run", "qitem-task", "--resume-from", original.runId];
+    expect((await rig(peer, resume)).code).toBe(1);
+    const next = await rig(withEnv(h, { FAKE_ACP_SAVED_SESSION: original.sessionId! }), resume);
+    expect(next.code).toBe(0);
+    expect(await ended(h, startedId(next.out)!)).toMatchObject({
+      loadSession: original.sessionId, sessionId: original.sessionId, cwd: h.home, outcome: "completed",
+    });
+    expect((await rig(h, resume)).code).toBe(1);
+    expect(runIds(h)).toHaveLength(2);
+  }, 30_000);
+
   it("keeps running after the calling CLI exits, and records the outcome as the agent's report", async () => {
     const h = setup("scenario:slow");
     const started = await rig(h, ["run", "qitem-task", "--harness", "claude"]);

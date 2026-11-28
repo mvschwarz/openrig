@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { DaemonClient } from "../client.js";
 import { daemonStatusGuard, getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
+import { sessionRigOf } from "../session-name.js";
+import type { ResourceSource } from "./resource.js";
 import { describeUsage, runAcpAssignment, type AcpOutcomeKind, type AcpQueue, type AcpUsage } from "../acp/connector.js";
 import type { JsonRpcErrorObject } from "../acp/json-rpc-stdio.js";
 import { findRunProcesses, RUN_MARKER } from "../acp/run-processes.js";
@@ -145,6 +147,7 @@ export interface ExecRun {
   self: string;
   permissionsTo?: string;
   loadSession?: string;
+  sessionId?: string;
   pollMs: number;
   adapterVersion?: string;
   native: string;
@@ -206,6 +209,33 @@ function writeRun(run: ExecRun): void {
   writeFileSync(tmp, `${JSON.stringify(run)}\n`);
   renameSync(tmp, runPath(run.runId));
 }
+
+function listExecRuns(rig: string) {
+  let names: string[];
+  try { names = readdirSync(runsDir()); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return [];
+  }
+  return names.filter((name) => /^exec-[a-z0-9-]+\.json$/i.test(name))
+    .flatMap((name) => {
+      const run = readRun(name.slice(0, -5));
+      if (!run || sessionRigOf(run.self) !== rig) return [];
+      const { runId, qitemId, self, harness, state, requestedAt, endedAt, outcome, summary } = run;
+      return [{ runId, qitemId, owner: self, harness, state, requestedAt, endedAt, outcome, summary,
+        hasSession: Boolean(run.sessionId) }];
+    }).sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
+}
+
+export const execRunResourceSource: ResourceSource = {
+  kind: "exec-run",
+  list: (rig) => listExecRuns(rig).map((run) => ({
+    id: run.runId,
+    summary: `${run.qitemId}  ${run.owner}  ${run.harness}  ${run.state}${run.outcome ? `/${run.outcome}` : ""}`,
+    details: { ...run, ...(run.endedAt && run.hasSession && rowRun(run.qitemId) === run.runId
+      ? { resumeCommand: `rig exec run ${run.qitemId} --resume-from ${run.runId}` } : {}) },
+  })),
+};
 
 function topClaim(qitemId: string): { generation: number; runId?: string } | undefined {
   let names: string[];
@@ -342,7 +372,7 @@ export async function runExecConnector(runId: string, queue: AcpQueue | undefine
       progress: (text) => process.stdout.write(text), cancelRequested, detachRequested,
       missingSession: HARNESSES[run.harness]?.missingSession, onSettled: (report) => { settle = report; },
     });
-    await end({ state: "finished", outcome: outcome.kind, summary: outcome.summary, usage: outcome.usage, settle, endedAt: now() });
+    await end({ state: "finished", outcome: outcome.kind, summary: outcome.summary, sessionId: outcome.sessionId, usage: outcome.usage, settle, endedAt: now() });
     return outcome.kind === "completed" ? 0 : 2;
   } catch (error) {
     await end({ state: "finished", outcome: "failed", summary: (error as Error).message, settle, endedAt: now() });
@@ -434,6 +464,24 @@ export function execCommand(deps: ExecDeps = {}): Command {
     });
 
   cmd
+    .command("list")
+    .description("List this rig's temporary worker runs on this host")
+    .option("--json", "JSON output")
+    .action((opts: { json?: boolean }) => {
+      const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+      const rig = seat && sessionRigOf(seat);
+      if (!rig) {
+        console.error("Run rig exec list from a managed seat.");
+        process.exitCode = 1;
+        return;
+      }
+      const runs = listExecRuns(rig);
+      console.log(opts.json ? JSON.stringify(runs, null, 2) : runs.length
+        ? runs.map((run) => `${run.runId}  ${run.qitemId}  ${run.owner}  ${run.harness}  ${run.state}${run.outcome ? `/${run.outcome}` : ""}${run.hasSession ? "  session recorded" : ""}`).join("\n")
+        : "No temporary worker runs for this rig on this host.");
+    });
+
+  cmd
     .command("run <qitemId> [agent...]")
     .description("Start one queue-owned turn on a named harness or an explicit ACP command")
     .option("--harness <name>", `The harness: ${Object.keys(HARNESSES).join(" or ")} (rig exec harnesses)`)
@@ -443,6 +491,7 @@ export function execCommand(deps: ExecDeps = {}): Command {
     .option("--wait", "Wait here for the outcome; leaving the wait (Ctrl-C) never cancels the run")
     .option("--plan", "Show what would run, with its versions, and start nothing")
     .option("--again", "Start another turn on a row whose earlier run has ended")
+    .option("--resume-from <runId>", "Continue the last run's recorded session in its original checkout")
     .option("--poll-seconds <n>", "How often the connector looks for a permission answer", "2")
     .addHelpText("after", `
 A connector owns the run and outlives this command: closing this terminal, or leaving --wait, doesn't stop it.
@@ -462,8 +511,27 @@ harnesses lists what each harness reads). A permission request becomes a row to 
 
 Guide: rig context get reference/acp-agents.md`)
     .addHelpText("after", "\nExplicit ACP command: rig exec run QITEM --cwd /workspace -- /path/to/agent acp")
-    .action(async (qitemId: string, agent: string[], opts: { harness?: string; cwd: string; permissionsTo?: string; loadSession?: string; wait?: boolean; plan?: boolean; again?: boolean; pollSeconds: string }) => {
-      if (Boolean(opts.harness) === Boolean(agent.length)) {
+    .action(async (qitemId: string, agent: string[], opts: { harness?: string; cwd: string; permissionsTo?: string; loadSession?: string; wait?: boolean; plan?: boolean; again?: boolean; resumeFrom?: string; pollSeconds: string }, command: Command) => {
+      const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+      let source: ExecRun | undefined;
+      if (opts.resumeFrom) {
+        if (!/^exec-[a-z0-9-]+$/i.test(opts.resumeFrom) || opts.harness || agent.length || opts.loadSession || command.getOptionValueSource("cwd") === "cli") {
+          console.error("--resume-from requires a run ID and reuses its agent, checkout and session.");
+          process.exitCode = 1;
+          return;
+        }
+        source = readRun(opts.resumeFrom);
+        if (!source?.sessionId || !source.endedAt || source.qitemId !== qitemId || source.self !== seat) {
+          console.error("Select an ended run on this qitem that you own and that has a recorded ACP session.");
+          process.exitCode = 1;
+          return;
+        }
+        opts.cwd = source.cwd;
+        opts.loadSession = source.sessionId;
+        opts.again = true;
+        opts.permissionsTo ??= source.permissionsTo;
+      }
+      if (!source && Boolean(opts.harness) === Boolean(agent.length)) {
         console.error("Choose one named --harness or supply an ACP command after --.");
         process.exitCode = 1;
         return;
@@ -475,14 +543,13 @@ Guide: rig context get reference/acp-agents.md`)
         return;
       }
       const resolved = harness ? resolveHarness(harness) : undefined;
-      const invocation = resolved?.command ? [resolved.command] : agent;
+      const invocation = source?.agent ?? (resolved?.command ? [resolved.command] : agent);
       if (opts.plan) {
         if (resolved) console.log(describeHarness(resolved));
         console.log(`  would run: ${resolved?.problem ? resolved.harness.bin : JSON.stringify(invocation)} for ${qitemId} in ${resolve(opts.cwd)}${opts.loadSession ? `, continuing session ${opts.loadSession}` : ", in a new session"}; permission requests to ${opts.permissionsTo ?? "this seat"}`);
         if (resolved?.problem) process.exitCode = 1;
         return;
       }
-      const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
       if (!seat) { console.error("rig exec run acts as the seat that owns the row, but OPENRIG_SESSION_NAME isn't set"); process.exitCode = 1; return; }
       if (resolved?.problem) { console.error(resolved.problem); process.exitCode = 1; return; }
       const queue = await queueFor();
@@ -490,6 +557,11 @@ Guide: rig context get reference/acp-agents.md`)
       mkdirSync(runsDir(), { recursive: true });
 
       const previousId = rowRun(qitemId);
+      if (source && source.runId !== previousId) {
+        console.error(`${qitemId} has a newer run (${previousId ?? "unknown"}); inspect it before resuming.`);
+        process.exitCode = 1;
+        return;
+      }
       const previous = previousId ? readRun(previousId) : undefined;
       if (previous) {
         const run = await reconcileRun(previous, async () => queue);
@@ -513,9 +585,9 @@ Guide: rig context get reference/acp-agents.md`)
 
       const runId = newId("exec", 4);
       const run: ExecRun = {
-        runId, qitemId, harness: harness?.name ?? "acp", agent: invocation, cwd: resolve(opts.cwd), self: seat,
+        runId, qitemId, harness: source?.harness ?? harness?.name ?? "acp", agent: invocation, cwd: resolve(opts.cwd), self: seat,
         permissionsTo: opts.permissionsTo, loadSession: opts.loadSession, pollMs: Math.max(1, Number(opts.pollSeconds) || 2) * 1000,
-        adapterVersion: resolved?.adapterVersion, native: resolved?.native ?? "unknown", state: "requested", pid: process.pid,
+        adapterVersion: source?.adapterVersion ?? resolved?.adapterVersion, native: source?.native ?? resolved?.native ?? "unknown", state: "requested", pid: process.pid,
         processStart: processStart(process.pid), requestedAt: now(),
         transcript: join(runsDir(), `${runId}.jsonl`), connectorLog: join(runsDir(), `${runId}.connector.log`),
       };
