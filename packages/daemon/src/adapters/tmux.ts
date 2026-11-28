@@ -9,7 +9,7 @@ import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import type { TerminalServerObservation } from "../domain/terminal-server-reachability.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
-import { isTmuxCredentialEnvKey } from "./tmux-credential-env.js";
+import { isTmuxCredentialEnvKey, withoutTmuxCredentialEnv } from "./tmux-credential-env.js";
 import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 import { tmuxOnDaemonServer } from "./tmux-server.js";
@@ -1397,10 +1397,12 @@ export class TmuxAdapter {
         } catch { /* unknown version: keep the original readback */ }
       }
       // tmux normally copies these client values from the daemon on new-session.
-      // Read its configured names, but never reuse values stored on the server.
+      // Read its configured names, but never reuse values stored on the server, and, as the tmux client never has
+      // them, never copy the daemon's own credentials.
       const updated = (await this.run(["tmux", "show-options", "-gv", "update-environment"]))
         .trim().split(/\s+/).filter(key => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
-      const baseline = { ...Object.fromEntries(updated.map(key => [key, process.env[key]])), ...policy.env };
+      const fromDaemon = withoutTmuxCredentialEnv(Object.fromEntries(updated.map(key => [key, process.env[key]])));
+      const baseline = { ...fromDaemon, ...policy.env };
       removeParentSessionEnv(baseline);
       // A seat's own value (its env:, a one-off name, or a name in update-environment) wins over the runtime directory.
       const selected: Record<string, string | undefined> = { ...baseline, ...seatEnv };

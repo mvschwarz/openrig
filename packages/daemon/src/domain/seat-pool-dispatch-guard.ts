@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { isTmuxCredentialEnvKey } from "../adapters/tmux-credential-env.js";
+import { withoutTmuxCredentialEnv } from "../adapters/tmux-credential-env.js";
 
 // #4061 (Ask 1): the seat pool's dispatch guard, an opt-in check the operator sets with the pool block's
 // `dispatch_guard` (an argv: an absolute executable and its own arguments, never a shell string). The executor runs it
@@ -47,9 +47,7 @@ function firstLine(text: string): string {
 
 /** The daemon's environment without the names that grant authority or access, which a spec's command never gets. */
 function guardEnvironment(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) if (isTmuxCredentialEnvKey(key)) delete env[key];
-  return env;
+  return withoutTmuxCredentialEnv(process.env);
 }
 
 /** The daemon's guard runner: the argv by `spawn`, no shell, killed (its whole process group) at the timeout. */
