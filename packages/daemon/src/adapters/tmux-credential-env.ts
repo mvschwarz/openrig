@@ -27,10 +27,18 @@ const NEVER_BEARER_ENV_KEYS: ReadonlySet<string> = new Set(["PATH", "HOME", "SHE
 /** The last registry read: its path, the file's identity and the names it gave. */
 let lastRegistryRead: { path: string; stamp: string; names: ReadonlySet<string> } | undefined;
 
-/** The file's device, inode, size, modified and changed times, or null when it can't be stat'ed. */
+/** How long after its last change the registry file counts as settled: the same 2 seconds as specSignature in
+ *  current-work.ts. */
+const REGISTRY_SETTLED_NS = 2_000_000_000n;
+
+/** The file's device, inode, size, modified and changed times, or null when it can't be stat'ed. A file changed in the
+ *  last couple of seconds gets an empty stamp, as specSignature in current-work.ts does, because a same-size rewrite
+ *  within one coarse timestamp tick wouldn't change it; that file is read every time until it settles. */
 function registryStamp(path: string): string | null {
   try {
     const s = statSync(path, { bigint: true });
+    const changed = s.mtimeNs > s.ctimeNs ? s.mtimeNs : s.ctimeNs;
+    if (BigInt(Date.now()) * 1_000_000n - changed < REGISTRY_SETTLED_NS) return "";
     return `${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}:${s.ctimeNs}`;
   } catch {
     return null;
@@ -41,12 +49,12 @@ function registryStamp(path: string): string | null {
  *  bearers from. Taken from every entry that names one, so an entry the registry's validation would reject (another
  *  host's error, an edit in progress) still keeps its name out; a file that is absent or does not parse names none,
  *  and PATH, HOME, SHELL and TMUX_TMPDIR are never taken. The parsed names are reused until the file's device, inode,
- *  size, modified or changed time changes; a read that fails (EMFILE, EIO…) is not kept, so the next call reads the
- *  file again. */
+ *  size, modified or changed time changes, and not while the file changed in the last couple of seconds; a read that
+ *  fails (EMFILE, EIO…) is not kept, so the next call reads the file again. */
 export function hostRegistryBearerEnvKeys(path: string = defaultHostRegistryPath()): ReadonlySet<string> {
   const stamp = registryStamp(path);
   if (stamp === null) return new Set();
-  if (lastRegistryRead && lastRegistryRead.path === path && lastRegistryRead.stamp === stamp) return lastRegistryRead.names;
+  if (stamp !== "" && lastRegistryRead && lastRegistryRead.path === path && lastRegistryRead.stamp === stamp) return lastRegistryRead.names;
   let text: string;
   try {
     text = readFileSync(path, "utf-8");
