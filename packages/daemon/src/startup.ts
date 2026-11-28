@@ -180,6 +180,7 @@ import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
 import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
 import { makeSeatPoolExecutor, seatPoolQueueEffects } from "./domain/seat-pool-executor.js";
+import { runSeatPoolDispatchGuard } from "./domain/seat-pool-dispatch-guard.js";
 import { SeatLifecycleService } from "./domain/seat-lifecycle-service.js";
 import { convergeOp } from "./domain/topology-converge.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
@@ -2660,7 +2661,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // `auto-rehydrate` capture and the checked seat stop), the add: the model member as the export writes it, and the
     // member add of `rig add` (convergeOp over this daemon's instantiator), and the comeback: the snapshot selection for
     // a retained node and the restore orchestrator's launchSingleNode with that explicit snapshotId, this daemon's
-    // runtime adapters and the filesystem; it runs only through the policy.
+    // runtime adapters and the filesystem, and the dispatch guard's runner; it runs only through the policy.
     const seatPoolSlots = new SeatPoolSlotsRepository(db);
     const seatPoolStops = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter });
     const seatPoolExecutor = makeSeatPoolExecutor({
@@ -2700,6 +2701,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           fsOps: { exists: (path: string) => fs.existsSync(path) },
         }),
       },
+      // #4061: the block's `dispatch_guard`, run as an argv with a short timeout, once per planned move.
+      dispatchGuard: runSeatPoolDispatchGuard,
     });
     const seatPoolPolicy = makeSeatPoolPolicy({ cycle: (job) => seatPoolExecutor.cycle(job) });
     void seatPoolPolicy;

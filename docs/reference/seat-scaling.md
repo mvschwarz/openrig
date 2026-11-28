@@ -80,7 +80,8 @@ lists carry the same six keys):
 
 A fresh install is unchanged: `enabled` is off, so the reaper performs no probe and
 writes no state. A rig is only managed once it is named in `opt_in_rigs` **and**
-`enabled` is on.
+`enabled` is on, and a seat is only stopped once `observe` is off as well: with
+`observe` on, the default, the reaper only logs `would-reap-observe`.
 
 ## Receipts
 
