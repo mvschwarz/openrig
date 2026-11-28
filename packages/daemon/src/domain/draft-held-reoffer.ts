@@ -93,8 +93,9 @@ export function createDraftHeldReoffer(deps: DraftHeldReofferDeps): () => void {
         const until = deps.quietUntil ? await deps.quietUntil(session).catch(() => undefined) : undefined;
         if (typeof until === "number" && until > now()) { wakeNotBefore.set(session, until); return; }
         // A try the seat's own idle report recorded while that read was pending waits its own interval, so it keeps its
-        // one offer.
-        const newest = heldWakeSeats().find(seat => seat.session === session)?.lastTry;
+        // one offer. A failed re-read isn't evidence of a newer try: it's reported, and this seat's guarded pass goes on.
+        let newest: string | undefined;
+        try { newest = heldWakeSeats().find(seat => seat.session === session)?.lastTry; } catch (error) { deps.onError?.(error); }
         if (newest !== undefined && newest !== lastTry && now() - Date.parse(newest) < interval) {
           wakeNotBefore.set(session, Date.parse(newest) + interval);
           return;

@@ -3064,4 +3064,24 @@ describe("draft-held queue wake offers: the terminal's quiet window, a paused of
       expect(unhandled).toEqual([]);
     } finally { process.off("unhandledRejection", onUnhandled); }
   });
+
+  it("reports a failed re-read before the pass and still runs the seat's pass, every time it fails", async () => {
+    const errors: unknown[] = [];
+    let at = Date.parse("2026-11-27T10:00:00.000Z");
+    const lastTry = new Date(at - 10_000).toISOString();
+    let reads = 0;
+    const deliverWakes = vi.fn(async () => "draft" as const);
+    const offer = createDraftHeldReoffer({ heldSeats: () => [], deliver: async () => "done", paneActivity: () => undefined,
+      // Each offer reads the seats for the sweep, again just before the pass, and after it: the one before the pass fails.
+      heldWakeSeats: () => {
+        if (++reads === 2) throw new Error("database is locked");
+        return [{ session: "worker@test", lastTry }];
+      },
+      deliverWakes, now: () => at, onError: error => { errors.push(error); } });
+    offer(); await settle();
+    expect(deliverWakes).toHaveBeenCalledTimes(1);   // the failed read didn't postpone the pass
+    expect(errors.map(e => (e as Error).message)).toEqual(["database is locked"]);
+    reads = 0; at += 4_600; offer(); await settle();
+    expect(deliverWakes).toHaveBeenCalledTimes(1);   // the try it made is offered once, as with a successful read
+  });
 });
