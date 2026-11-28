@@ -24,7 +24,7 @@ beforeEach(() => {
   paths = resolveCodexHome({ CODEX_HOME: path.join(root, "agents") });
   other = resolveCodexHome({ CODEX_HOME: path.join(root, "other") });
   write(profile(paths, "codex-aaaaaaaaaaaa"), login("acct-A", "r2"));            // a sign-in page's pool copy
-  write(profile(paths, "before-switch-2026-11-28T07-50-00Z"), login("acct-A", "r1")); // a provider switch's older copy
+  write(profile(paths, "before-switch-20261128T075000.123Z"), login("acct-A", "r1")); // a provider switch's older copy
   write(profile(paths, "codex-bbbbbbbbbbbb"), login("acct-B", "r1"));            // another account
   write(profile(paths, "work"), login("acct-B", "r3"));                          // another account, saved by name
   write(profile(other, "codex-aaaaaaaaaaaa"), login("acct-A", "r2"));            // the same account in another home
@@ -48,7 +48,7 @@ describe("authSignOut: every stored copy of one login, and nothing else", () => 
     fs.rmSync(paths.activeAuth);   // what Codex's own logout does to this home: auth.json goes, the saved copies stay
     expect(names(paths)).toContain("codex-aaaaaaaaaaaa.json");
     const r = authSignOut(paths, "codex-aaaaaaaaaaaa");
-    expect(r).toEqual({ ok: true, target: "profile", removedActive: false, removedProfiles: ["before-switch-2026-11-28T07-50-00Z", "codex-aaaaaaaaaaaa"],
+    expect(r).toEqual({ ok: true, target: "profile", removedActive: false, removedProfiles: ["before-switch-20261128T075000.123Z", "codex-aaaaaaaaaaaa"],
       notRemoved: [], keptProfiles: 2, unchecked: [], note: SIGN_OUT_NOTE });
     expect(names(paths)).toEqual(["codex-bbbbbbbbbbbb.json", "work.json"]);
     expect(names(other)).toEqual(["codex-aaaaaaaaaaaa.json"]);   // another home is never touched
@@ -58,7 +58,7 @@ describe("authSignOut: every stored copy of one login, and nothing else", () => 
   it("with no profile named, signs out the active login (a newer refresh) and every saved copy of it", () => {
     write(paths.activeAuth, login("acct-A", "r9"));
     const r = authSignOut(paths);
-    expect(r).toMatchObject({ ok: true, target: "active", removedActive: true, removedProfiles: ["before-switch-2026-11-28T07-50-00Z", "codex-aaaaaaaaaaaa"], keptProfiles: 2 });
+    expect(r).toMatchObject({ ok: true, target: "active", removedActive: true, removedProfiles: ["before-switch-20261128T075000.123Z", "codex-aaaaaaaaaaaa"], keptProfiles: 2 });
     expect(fs.existsSync(paths.activeAuth)).toBe(false);
   });
 
@@ -91,7 +91,7 @@ describe("authSignOut: every stored copy of one login, and nothing else", () => 
     fs.linkSync(outside, profile(paths, "hardlinked"));
     write(profile(paths, "torn"), `{"tokens": {"refresh_token": "${SENTINEL}"`);
     const r = authSignOut(paths, "codex-aaaaaaaaaaaa");
-    expect(r).toMatchObject({ ok: true, removedProfiles: ["before-switch-2026-11-28T07-50-00Z", "codex-aaaaaaaaaaaa"],
+    expect(r).toMatchObject({ ok: true, removedProfiles: ["before-switch-20261128T075000.123Z", "codex-aaaaaaaaaaaa"],
       unchecked: ["auth-profiles/codex-cccccccccccc.json", "auth-profiles/hardlinked.json", "auth-profiles/torn.json"] });
     expect(fs.lstatSync(profile(paths, "codex-cccccccccccc")).isSymbolicLink()).toBe(true);
     expect(fs.readFileSync(outside, "utf8")).toContain("acct-A");
@@ -111,7 +111,7 @@ describe("authSignOut: every stored copy of one login, and nothing else", () => 
   it.skipIf(process.getuid?.() === 0)("names a copy it couldn't remove", () => {
     fs.chmodSync(paths.profileDir, 0o500);
     const r = authSignOut(paths, "codex-aaaaaaaaaaaa");
-    expect(r).toMatchObject({ ok: true, removedProfiles: [], notRemoved: ["auth-profiles/before-switch-2026-11-28T07-50-00Z.json", "auth-profiles/codex-aaaaaaaaaaaa.json"] });
+    expect(r).toMatchObject({ ok: true, removedProfiles: [], notRemoved: ["auth-profiles/before-switch-20261128T075000.123Z.json", "auth-profiles/codex-aaaaaaaaaaaa.json"] });
   });
 });
 
@@ -120,7 +120,7 @@ describe("rig auth sign-out", () => {
     const first = await run(["--profile", "codex-aaaaaaaaaaaa"]);
     expect(first.exitCode).toBeUndefined();
     expect(first.out).toContain("signed_out: the login saved in codex-aaaaaaaaaaaa");
-    expect(first.out).toContain("removed_profiles: before-switch-2026-11-28T07-50-00Z, codex-aaaaaaaaaaaa");
+    expect(first.out).toContain("removed_profiles: before-switch-20261128T075000.123Z, codex-aaaaaaaaaaaa");
     expect(first.out).toContain("kept_profiles: 2");
     expect(first.out).toContain("doesn't revoke the login at OpenAI");
     const again = await run(["--profile", "codex-aaaaaaaaaaaa"]);
@@ -129,10 +129,19 @@ describe("rig auth sign-out", () => {
     expect(`${first.out}${again.out}`).not.toContain(SENTINEL);
   });
 
+  it("--json gives a program the same result: names and counts, never a token", async () => {
+    const r = await run(["--profile", "codex-aaaaaaaaaaaa", "--json"]);
+    expect(r.exitCode).toBeUndefined();
+    expect(JSON.parse(r.out)).toMatchObject({ ok: true, target: "profile", removedProfiles: ["before-switch-20261128T075000.123Z", "codex-aaaaaaaaaaaa"], keptProfiles: 2, notRemoved: [] });
+    expect(JSON.parse((await run(["--profile", "codex-aaaaaaaaaaaa", "--json"])).out)).toMatchObject({ ok: true, target: "absent", removedProfiles: [] });
+    expect(JSON.parse((await run(["--profile", "../x", "--json"])).out)).toEqual({ ok: false, reason: "invalid_profile" });
+    expect(r.out).not.toContain(SENTINEL);
+  });
+
   it.skipIf(process.getuid?.() === 0)("exits 1 when a copy couldn't be removed", async () => {
     fs.chmodSync(paths.profileDir, 0o500);
     const r = await run(["--profile", "codex-aaaaaaaaaaaa"]);
     expect(r.exitCode).toBe(1);
-    expect(r.out).toContain("not_removed: auth-profiles/before-switch-2026-11-28T07-50-00Z.json, auth-profiles/codex-aaaaaaaaaaaa.json");
+    expect(r.out).toContain("not_removed: auth-profiles/before-switch-20261128T075000.123Z.json, auth-profiles/codex-aaaaaaaaaaaa.json");
   });
 });

@@ -130,6 +130,7 @@ cross the connection.`)
     .description("Remove every stored copy of one login from a Codex home: the active login, or the one a saved profile holds.")
     .option("--profile <profile>", "Sign out the login saved in this profile (default: the active login)")
     .option("--codex-home <dir>", "The Codex home to act on (default: CODEX_HOME, else ~/.codex)")
+    .option("--json", "Print the result as JSON (names and counts only)")
     .addHelpText("after", `
 Removes the active auth.json and every saved profile holding the same ChatGPT account, whatever saved it: rig auth save,
 a provider switch's before-switch copy, or a sign-in page's account pool. A refreshed copy of the login counts; other
@@ -137,9 +138,14 @@ logins, other homes and files it can't read as a login stay. Running it again re
 
 It doesn't revoke the login at OpenAI. Codex's own logout (codex logout, or /logout in Codex) revokes an active login and
 removes auth.json, but leaves saved profiles; run it first while the login is active, then this with --profile.`)
-    .action((opts: { runtime: string; profile?: string; codexHome?: string }) => {
+    .action((opts: { runtime: string; profile?: string; codexHome?: string; json?: boolean }) => {
       if (!ensureRuntime(opts.runtime)) return;
       const r = authSignOut(paths(opts.codexHome), opts.profile);
+      if (opts.json) {
+        console.log(JSON.stringify(r));
+        if (!r.ok || r.notRemoved.length) process.exitCode = 1;
+        return;
+      }
       if (!r.ok) return fail(r.reason);
       const which = opts.profile ? `the login saved in ${opts.profile}` : "the active login";
       console.log(`signed_out: ${r.target === "absent" ? `nothing (${opts.profile ? `no profile named ${opts.profile}` : "no active login"} in this home)` : which}`);
