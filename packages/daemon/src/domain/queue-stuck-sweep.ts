@@ -1005,6 +1005,7 @@ function defaultIsQueueOnlySeat(db: Database.Database): (session: string) => boo
 }
 
 export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepResult> {
+  const run = async (): Promise<StuckSweepResult> => {
   const log = deps.log ?? ((line: string) => console.error(line));
   const status = deps.status;
   try {
@@ -2896,4 +2897,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     status?.record("failed", { error: message });
     return { outcome: "failed", findings: [], error: message };
   }
+  };
+  return typeof deps.queueRepo.withMemoizedHumanRegistry === "function"
+    ? deps.queueRepo.withMemoizedHumanRegistry(run)
+    : run();
 }

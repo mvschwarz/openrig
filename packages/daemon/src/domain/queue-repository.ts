@@ -7,6 +7,7 @@ import { withUrgentLine } from "./urgent-line.js";
 import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js";
 import type Database from "better-sqlite3";
 import { cooperativeReadFile, readRowsCooperatively } from "./execution-candidate-reader.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import type { EventBus, NotifyRegister } from "./event-bus.js";
 import { loadHumanRegistry, registeredPeople, resolveRegisteredHumanAddress, slackSubscriptionFor, withHumanAlertTag, type HumanFragment, type LoadResult } from "./gateway/human-registry.js";
@@ -1338,6 +1339,9 @@ export class QueueRepository {
   private readonly hasTransitionProvenanceColumn: boolean;
   private readonly hasOwnerNotificationColumns: boolean;
   private readonly loadHumanRegistryFn: () => LoadResult;
+  private readonly humanRegistryMemo = new AsyncLocalStorage<{
+    loaded?: { ok: true; result: LoadResult } | { ok: false; error: unknown };
+  }>();
   /** Registered shared channels (0.7.3): `<id>@external` participants whose rows post to their Slack channel. */
   private readonly sharedChannelsFn: () => ReadonlyArray<{ address: string }>;
   private readonly readSharedChannelsFn: () => ReadonlyArray<{ entityId: string; address: string }> | null;
@@ -1696,7 +1700,7 @@ export class QueueRepository {
       return { kind: input.explicitKind, level: "NOTICE" };
     }
     // Nobody registered yet isn't a broken registry: a row to a registered shared channel still posts (0.7.3).
-    const people = registeredPeople(this.loadHumanRegistryFn());
+    const people = registeredPeople(this.readHumanRegistry());
     if (!people) return null;
     const blockedHuman = resolveRegisteredHumanAddress(input.nextBlockedOn, people);
     const previousBlockedHuman = resolveRegisteredHumanAddress(input.previousBlockedOn, people);
@@ -1805,7 +1809,7 @@ export class QueueRepository {
     try {
       const parsed = parseSessionName(sender);
       if (parsed.kind !== "external") return false;
-      const people = registeredPeople(this.loadHumanRegistryFn());
+      const people = registeredPeople(this.readHumanRegistry());
       if (people === null) return false;
       const channels = this.readSharedChannelsFn();
       if (channels === null) return false;
@@ -1912,11 +1916,11 @@ export class QueueRepository {
   }
 
   private deliverWakeIntentAfterCommit(outboxId: string): void {
-    queueMicrotask(() => {
+    queueMicrotask(() => this.humanRegistryMemo.exit(() => {
       void this.deliverWakeIntent(outboxId).catch((err) => {
         console.error(`Queue wake delivery failed for ${outboxId}:`, err);
       });
-    });
+    }));
   }
 
   /**
@@ -3284,7 +3288,7 @@ export class QueueRepository {
     // (routes/queue.ts stamp-at-FORWARD), and a genuine origin triple arriving from a
     // forward is stored verbatim (never re-stamped, never stripped).
     if (!this.canRecordDestination(input.destinationSession)) {
-      throw destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
+      throw destinationValidationError("destination_session", input.destinationSession, () => this.readHumanRegistry());
     }
 
     let wakeStaged = false;
@@ -3396,7 +3400,7 @@ export class QueueRepository {
     nudge: boolean | undefined;
   } {
     if (!this.canRecordDestination(input.destinationSession)) {
-      throw destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
+      throw destinationValidationError("destination_session", input.destinationSession, () => this.readHumanRegistry());
     }
     const result = this.createInTransactionalContext(input);
     return {
@@ -3591,11 +3595,31 @@ export class QueueRepository {
     return true;
   }
 
+  private readHumanRegistry(): LoadResult {
+    const store = this.humanRegistryMemo.getStore();
+    if (!store) return this.loadHumanRegistryFn();
+    if (!store.loaded) {
+      try {
+        store.loaded = { ok: true, result: this.loadHumanRegistryFn() };
+      } catch (error) {
+        store.loaded = { ok: false, error };
+      }
+    }
+    if (!store.loaded.ok) throw store.loaded.error;
+    return store.loaded.result;
+  }
+
+  /** Run `fn` with the human registry read at most once on this repository for that async execution context. */
+  withMemoizedHumanRegistry<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.humanRegistryMemo.getStore()) return fn();
+    return this.humanRegistryMemo.run({}, fn);
+  }
+
   /** A person by address or by the registry: a registered person may be addressed as their seat or an alias. */
   isPersonAddress(destination: string): boolean {
     if (!destination.includes("@")) return false;
     if (isHumanSeatSessionRef(destination)) return true;
-    const registry = this.loadHumanRegistryFn();
+    const registry = this.readHumanRegistry();
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
   }
 
@@ -3603,7 +3627,7 @@ export class QueueRepository {
    *  terminal actor included (a person address, but a row there asks no one; it waits on Steering and in the Feed, and OpenRig reports it as undeliverable). */
   reachablePerson(address: string | null | undefined): string | null {
     if (!address || address === UNATTRIBUTED_ACTOR) return null;
-    const registry = this.loadHumanRegistryFn();
+    const registry = this.readHumanRegistry();
     return registry.ok ? resolveRegisteredHumanAddress(address, registry.entities) : null;
   }
 
@@ -3612,7 +3636,7 @@ export class QueueRepository {
   answersAsk(item: QueueItem, actorSession: string): boolean {
     if (item.destinationSession === actorSession) return true;
     if (this.isSharedChannel(actorSession)) return false;
-    const registry = this.loadHumanRegistryFn();
+    const registry = this.readHumanRegistry();
     return registry.ok && resolveRegisteredHumanAddress(actorSession, registry.entities) !== null;
   }
 
@@ -3623,13 +3647,13 @@ export class QueueRepository {
 
   /** The registered people this queue resolves addresses against. */
   humanRegistry(): LoadResult {
-    return this.loadHumanRegistryFn();
+    return this.readHumanRegistry();
   }
 
   /** The asked person, when a different registered person is acting on what was asked of them, so the record names both;
    *  else null. An agent, the asked person under another spelling, and an ask to no registered person aren't someone else. */
   askedSomeoneElse(actorSession: string, askedSession: string | null | undefined): string | null {
-    const registry = this.loadHumanRegistryFn();
+    const registry = this.readHumanRegistry();
     if (!registry.ok) return null;
     const asked = resolveRegisteredHumanAddress(askedSession, registry.entities);
     const actor = resolveRegisteredHumanAddress(actorSession, registry.entities);
@@ -3678,7 +3702,7 @@ export class QueueRepository {
       );
     }
     if (!this.canRecordDestination(input.toSession)) {
-      throw destinationValidationError("to_session", input.toSession, this.loadHumanRegistryFn);
+      throw destinationValidationError("to_session", input.toSession, () => this.readHumanRegistry());
     }
     this.assertHumanAlert(input.humanAlert, input.toSession);
 
@@ -3867,7 +3891,7 @@ export class QueueRepository {
       );
     }
     if (!this.canRecordDestination(input.toSession)) {
-      throw destinationValidationError("to_session", input.toSession, this.loadHumanRegistryFn);
+      throw destinationValidationError("to_session", input.toSession, () => this.readHumanRegistry());
     }
     this.assertHumanAlert(input.humanAlert, input.toSession);
 
@@ -6687,7 +6711,7 @@ export class QueueRepository {
   isHumanDestination(destinationSession: string): boolean {
     if (isHumanSeatSessionRef(destinationSession)) return true;
     if (parseSessionName(destinationSession).kind !== "canonical") return false;
-    const registry = this.loadHumanRegistryFn();
+    const registry = this.readHumanRegistry();
     if (!registry.ok) {
       throw new QueueRepositoryError("human_registry_unavailable",
         `Cannot classify '${destinationSession}' as human or agent: human registry unavailable (${registry.error}).`);
@@ -6703,7 +6727,7 @@ export class QueueRepository {
     if (row.state !== "pending" || row.humanIntent === "update" || row.destinationSession !== "human@kernel"
       || !row.lastNudgeResult?.startsWith("unroutable:")) return false;
     try {
-      const registry = this.loadHumanRegistryFn();
+      const registry = this.readHumanRegistry();
       if (registry.ok ? registry.entities.length !== 0 : registry.noHumans !== true) return false;
       return this.classifyDestinationOf(row.destinationSession).class === "unroutable";
     } catch { return false; }
@@ -6715,7 +6739,7 @@ export class QueueRepository {
   isRegisteredHumanUpdate(row: Pick<QueueItem, "state" | "humanIntent" | "destinationSession">): boolean {
     if (row.state !== "pending" || row.humanIntent !== "update") return false;
     try {
-      const registry = this.loadHumanRegistryFn();
+      const registry = this.readHumanRegistry();
       return registry.ok && resolveRegisteredHumanAddress(row.destinationSession, registry.entities) !== null;
     } catch { return false; }
   }
@@ -6792,7 +6816,7 @@ export class QueueRepository {
   classifyDestinationOf(destinationSession: string): DestinationClass {
     return classifyDestination(destinationSession, {
       entities: (() => {
-        const loaded = this.loadHumanRegistryFn();
+        const loaded = this.readHumanRegistry();
         return loaded.ok ? loaded.entities : null;
       })(),
       hasTerminalTransport: (dest) => this.hasTerminalTransport(dest),
@@ -7015,7 +7039,7 @@ export class QueueRepository {
     const owners = knownOwners ?? this.transitionLog.ownerNotificationsForQitems(qitemIds);
     let notes = receiptsAfterEpisodes ? undefined : this.receiptNotesFor(qitemIds);
     let registry: LoadResult | undefined;
-    const loadRegistry = () => (registry ??= this.loadHumanRegistryFn());
+    const loadRegistry = () => (registry ??= this.readHumanRegistry());
     let relayProfiles: LoadRelayProfilesResult | undefined;
     const loadProfiles = (entities: readonly HumanFragment[]) => (relayProfiles ??= loadRelayProfiles(undefined, { entities }));
     let pullOutboxKeys: Set<string> | undefined;
