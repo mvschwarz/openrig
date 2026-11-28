@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { link, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { Command, InvalidArgumentError, Option } from "commander";
-import { z } from "zod";
 import type { DaemonResponse } from "../client.js";
 
 type Request = (call: {
@@ -13,8 +12,15 @@ type Intervention = { readonly actor: string; readonly intervention: string; rea
 type ArchiveAuth = { readonly archive: string; readonly authorization: string };
 type WithHost = { readonly host?: string };
 const base = "/api/queue-transfer";
-const stageResponse = z.object({ stage: z.object({ digest: z.string(), origin: z.object({ hostId: z.string(), mintedAt: z.string() }) }), destinationHostId: z.string() });
-const receiptResponse = z.object({ receipt: z.json() });
+// Every `rig queue` command imports this module to register `queue transfer`, so zod loads at a transfer verb's first
+// parse rather than with the module: loading it here put it on each `rig queue list` and `show` start-up.
+const buildSchemas = (z: typeof import("zod").z) => ({
+  json: z.json(),
+  stage: z.object({ stage: z.object({ digest: z.string(), origin: z.object({ hostId: z.string(), mintedAt: z.string() }) }), destinationHostId: z.string() }),
+  receipt: z.object({ receipt: z.json() }),
+});
+let schemaSet: Promise<ReturnType<typeof buildSchemas>> | undefined;
+const schemas = () => (schemaSet ??= import("zod").then(({ z }) => buildSchemas(z)));
 
 const jsonFile = async (path: string): Promise<unknown> => JSON.parse(await readFile(path, "utf8"));
 
@@ -30,7 +36,7 @@ async function writeRecord(path: string, record: unknown) {
   const temporary = await mkdtemp(join(dirname(out), ".queue-transfer-"));
   try {
     const file = join(temporary, "record");
-    await writeFile(file, `${canonicalQueueJson(z.json().parse(record))}\n`, { mode: 0o600, flag: "wx" });
+    await writeFile(file, `${canonicalQueueJson((await schemas()).json.parse(record))}\n`, { mode: 0o600, flag: "wx" });
     await link(file, out);
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -52,7 +58,7 @@ function accepted(response: DaemonResponse | undefined, compact?: boolean): resp
 async function render(response: DaemonResponse | undefined, opts: Output = {}, unwrapReceipt = false) {
   if (!accepted(response, opts.json)) return;
   print(response.data, opts.json);
-  if (!opts.dryRun && opts.out) await writeRecord(opts.out, unwrapReceipt ? receiptResponse.parse(response.data).receipt : response.data);
+  if (!opts.dryRun && opts.out) await writeRecord(opts.out, unwrapReceipt ? (await schemas()).receipt.parse(response.data).receipt : response.data);
 }
 
 function interventionOptions(command: Command) {
@@ -87,7 +93,7 @@ export function queueTransferCommand(request: Request): Command {
       if (!opts.intervention.trim()) throw new InvalidArgumentError("--intervention must describe the intervention");
       const response = await request({ path: `${base}/staging/${encodeURIComponent(importId)}` });
       if (!accepted(response)) return;
-      const { stage, destinationHostId } = stageResponse.parse(response.data);
+      const { stage, destinationHostId } = (await schemas()).stage.parse(response.data);
       const { AUTHORIZATION_KIND, parseAuthorization } = await import("@openrig/daemon/queue-transfer-records");
       const now = new Date().toISOString();
       const record = parseAuthorization({ kind: AUTHORIZATION_KIND, operationId: randomUUID(), archiveDigest: stage.digest, origin: stage.origin,
