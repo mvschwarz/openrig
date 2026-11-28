@@ -296,6 +296,37 @@ The node's latest session then decides:
 The change writes no event, and nothing is stopped. After `pool: {}`, a held `live` slot keeps the job running until a
 later change ends its hold: the pool never drains it.
 
+### An attempt that settles running after `rig down`
+
+An add, or a comeback whose launch had already started, can settle running after `rig down`: the down found no node to
+stop yet, or it waited for the launch's lifecycle lease and stopped the session the launch had just started. When an
+attempt settles running and the rig's latest `rig.stopped` is newer than what the attempt was issued on, with no
+`restore.completed` after it, the pool stops that attempt's own session, and only it:
+
+- the slot is settled `live` with the attempt's own session as `attempt_result`, and held while the stop runs, with the
+  stop on record first, so a daemon exit before its result leaves the slot held;
+- the stop is the checked stop, `stopSeat({ seatRef, reason, expected: attempt_result })`. The pool never calls it
+  without `expected`, and never stops a slot with no `attempt_result`: a comeback that found the agent already running
+  (`already_running`), or one whose session can't be told apart, is not stopped;
+- an add whose call launched it and whose session that down already stopped on purpose settles running with that
+  session, so the stop confirms the absence;
+- a `restore.completed` after that `rig.stopped`, read before the stop and again at its final step, stops nothing: the
+  hold goes, and the agent stays as any `live` one. An attempt whose result is unknown is not stopped; it is read again
+  as any unknown attempt;
+- an attempt no process runs any more (its call cut off by a daemon restart) is read again only while the pool is not
+  held, so it is never stopped this way: while the down's hold stands it stays as it is, and once a `rig up` completes
+  that `rig up` ends the reason to stop it.
+
+The slot reports the stop under `stop`, with `cause: rig_down` and the `seq` of that `rig.stopped`, never in
+`attempt.status` (the attempt is reported `running`):
+
+| `stop.result` | When | The slot |
+| --- | --- | --- |
+| `stopped` | The stop succeeded: the session is marked stopped on purpose. | `live`, stopped on purpose, with no hold. |
+| `absent` | The stop found the session absent in tmux (`session_not_live`): the down had already stopped it. A confirmed absence, not a stop. | `live`, with no hold. |
+| `changed_owner` | The node's latest session is no longer the attempt's (`selection_changed` with no partial effect): nothing is stopped, and the newer session keeps running. | `live` and held (`changed_owner`), measured from the attempt's own session, so the newer session is a later change, read as any held slot once the down's hold ends. |
+| `unconfirmed` | Anything else, with the real code and message (for example `stop_uncertain`, or `selection_changed` while the attempt's session is still the node's latest). | `live` and held (`compensating_stop`): it takes room, receives no row, and is kept across daemon restarts. Every evaluation of the active job stops the same session again, while the pool is held too, until the stop is confirmed (`stopped`) or tmux confirms the session absent (`absent`, never `stopped`). |
+
 ### The dispatch guard
 
 A `dispatch_guard` in the pool block is a check the operator runs before each move: for example, to keep a row whose
@@ -341,5 +372,6 @@ gone, its job moves, drains, adds and brings back nothing and reports `held: mod
 
 An add whose node was created but has no session when the daemon restarts stays `unknown`: nothing launches it again,
 and deleting that node removes its slot row, which frees its number. The pool does no live terminal probe of its own: a
-session "present" is one whose executor is not confirmed stopped. An add, or a comeback whose launch had already started,
-that settles running after `rig down` keeps running.
+session "present" is one whose executor is not confirmed stopped. An attempt that settles running when the down's
+`rig.stopped` is not recorded yet (the down still stopping other seats) is not stopped by the pool; the down stops the
+session it finds, and one started after it read the rig keeps running.

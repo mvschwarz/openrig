@@ -191,7 +191,8 @@ export interface SeatPoolExecutorDeps {
   slots: Pick<SeatPoolSlotsRepository, "forModel" | "setPhase" | "stopOutcome" | "get" | "reserveAdd" | "issueAttempt"
     | "recordAttemptNode" | "settleAdd" | "settleAddNotRunning" | "recordAttemptOutcome" | "removeAddWithoutNode" | "cancelReservedAdd"
     | "reserveComeback" | "holdComeback" | "settleComebackRefused" | "returnComebackToDrained" | "settleAddHeldLive"
-    | "settleComebackHeld" | "recordHeldSession" | "changeHeld" | "reopenHeld" | "settleIssuedByLater">;
+    | "settleComebackHeld" | "recordHeldSession" | "changeHeld" | "reopenHeld" | "settleIssuedByLater" | "settleAddToStop"
+    | "recordCompensatingStop">;
   jobsRepo: Pick<WatchdogJobsRepository, "getById">;
   queue: SeatPoolQueue;
   /** Messages held for a node in the outbox (OutboxHandler.heldCount). */
@@ -246,22 +247,41 @@ export interface SeatPoolDrainEffects {
 export type SeatPoolStopResult = "stopped" | "absent" | "changed_owner" | "unconfirmed";
 
 export interface SeatPoolStopReport {
-  cause: "drain";
+  /** `drain`: the pool's drain. `rig_down`: the compensating stop of an attempt that settled running after `rig down`,
+   *  with the `seq` of that down's `rig.stopped`. */
+  cause: "drain" | "rig_down";
+  seq?: number;
   result: SeatPoolStopResult;
   code?: string;
   message?: string;
 }
 
-/** The report of a stop from what the checked stop returned. */
-export function seatPoolStopReport(stop: SeatPoolSeatStop): SeatPoolStopReport {
+/** The report of a stop from what the checked stop returned: the drain's, or, with `down`, the compensating stop's,
+ *  naming that down. */
+export function seatPoolStopReport(stop: SeatPoolSeatStop, down?: { seq: number }): SeatPoolStopReport {
+  const of = down === undefined ? { cause: "drain" as const } : { cause: "rig_down" as const, seq: down.seq };
   // A keep_alive seat whose session was already gone is recorded as stopped, but nothing was stopped: an absence.
-  if (stop.ok && stop.alreadyDown) return { cause: "drain", result: "absent", code: "already_down", ...(stop.message ? { message: stop.message } : {}) };
-  if (stop.ok) return { cause: "drain", result: "stopped" };
-  if (stop.code === "session_not_live") return { cause: "drain", result: "absent", code: stop.code, message: stop.message };
+  if (stop.ok && stop.alreadyDown) return { ...of, result: "absent", code: "already_down", ...(stop.message ? { message: stop.message } : {}) };
+  if (stop.ok) return { ...of, result: "stopped" };
+  if (stop.code === "session_not_live") return { ...of, result: "absent", code: stop.code, message: stop.message };
   if (stop.code === "selection_changed" && stop.partialEffect !== true) {
-    return { cause: "drain", result: "changed_owner", code: stop.code, message: stop.message };
+    return { ...of, result: "changed_owner", code: stop.code, message: stop.message };
   }
-  return { cause: "drain", result: "unconfirmed", code: stop.code, message: stop.message };
+  return { ...of, result: "unconfirmed", code: stop.code, message: stop.message };
+}
+
+/** One compensating stop: the attempt that settled running after `rig down`, its own session (`attempt_result`) and the
+ *  `seq` of that down's `rig.stopped`. */
+export interface SeatPoolCompensatingStopRequest {
+  jobId: string;
+  modelNodeId: string;
+  rigId: string;
+  slotId: string;
+  slotNumber: number;
+  attemptId: string;
+  nodeId: string;
+  sessionId: string;
+  seq: number;
 }
 
 export interface SeatPoolExecutor {
@@ -273,6 +293,14 @@ export interface SeatPoolExecutor {
    *  attempt was issued on, and settles the attempt on the slot row. The cycle calls it for each comeback it issued,
    *  after the custody lease is released; the model's next report says what settled. Never rejects. */
   comeback(request: SeatPoolComebackRequest): Promise<void>;
+  /** Stops one attempt that settled running after a `rig down` newer than what it was issued on, through the checked
+   *  stop with `expected` equal to the attempt's own session (`attempt_result`), and records the result on the slot row:
+   *  `stopped` or `absent` (the slot `live`, not held), `changed_owner` (held, measured from the attempt's session, so a
+   *  later change classifies the newer one) or `unconfirmed` (held, with the real code and message, and stopped again by
+   *  a later cycle). A `restore.completed` after that down stops nothing and clears the hold. The add and the comeback
+   *  call it after settling, and each cycle calls it again for a stop left unconfirmed. Never rejects; null when it
+   *  recorded nothing (the slot moved on, or a restore ended the down). */
+  compensatingStop(request: SeatPoolCompensatingStopRequest): Promise<SeatPoolStopReport | null>;
 }
 
 /** The queue's reroute actor and note, as the queue records a reroute (the queue's own rule for "was rerouted"). */
@@ -566,6 +594,8 @@ function attemptView(slot: SeatPoolSlot, inFlightIds?: ReadonlySet<string>): Att
   if (slot.attemptId === null || slot.attemptState === null) return undefined;
   const outcome = readAttemptOutcome(slot.attemptOutcome);
   const text = (key: string) => (typeof outcome[key] === "string" ? { [key]: outcome[key] as string } : {});
+  // Settled running after `rig down` and stopped by the pool: the attempt ran; what the stop did is reported in `stop`.
+  if (slot.attemptState === "settled" && slot.phase === "live" && downStopOf(outcome) !== null) return { id: slot.attemptId, status: "running" };
   if (slot.attemptState === "settled" && slot.phase === "live" && slot.reuseHold !== null) {
     return heldLiveView(slot.attemptId, slotRecord(slot.reuseHold) ?? {});
   }
@@ -634,17 +664,34 @@ function attemptView(slot: SeatPoolSlot, inFlightIds?: ReadonlySet<string>): Att
   return inFlight(slot.attemptId);
 }
 
-/** The slots as reported: each one's attempt and, on a slot the pool does not bring back, its reuse hold, every cycle. */
+/** The compensating stop recorded on a slot's outcome (`stop` with `cause: "rig_down"`), as reported; null when there is
+ *  none (no stop, or the drain's own). */
+function downStopOf(outcome: Record<string, unknown>): SeatPoolStopReport | null {
+  const stop = slotRecord(JSON.stringify(outcome["stop"] ?? null));
+  if (stop === null || stop["cause"] !== "rig_down" || typeof stop["result"] !== "string") return null;
+  return {
+    cause: "rig_down",
+    ...(typeof stop["seq"] === "number" ? { seq: stop["seq"] } : {}),
+    result: stop["result"] as SeatPoolStopResult,
+    ...(typeof stop["code"] === "string" ? { code: stop["code"] } : {}),
+    ...(typeof stop["message"] === "string" ? { message: stop["message"] } : {}),
+  };
+}
+
+/** The slots as reported: each one's attempt, the compensating stop when the pool made one, and, on a slot the pool does
+ *  not bring back, its reuse hold, every cycle. */
 function slotsView(slots: readonly SeatPoolSlot[], inFlightIds?: ReadonlySet<string>): Array<{
-  slotNumber: number; nodeId: string | null; phase: SeatPoolPhase; attempt?: AttemptView; reuseHold?: Record<string, unknown>;
+  slotNumber: number; nodeId: string | null; phase: SeatPoolPhase; attempt?: AttemptView; stop?: SeatPoolStopReport; reuseHold?: Record<string, unknown>;
 }> {
   return slots.map((slot) => {
     const attempt = attemptView(slot, inFlightIds);
+    const stop = downStopOf(readAttemptOutcome(slot.attemptOutcome));
     return {
       slotNumber: slot.slotNumber,
       nodeId: slot.nodeId,
       phase: slot.phase,
       ...(attempt ? { attempt } : {}),
+      ...(stop ? { stop } : {}),
       ...(slot.reuseHold !== null ? { reuseHold: slotRecord(slot.reuseHold) ?? { unreadable: slot.reuseHold } } : {}),
     };
   });
@@ -684,6 +731,7 @@ const NOT_INHERITED = ["pool", "id", "label", "cwd", "session_source", "keep_ali
 
 /** One add issued in a cycle, waiting for its call after the lease is released. */
 interface IssuedAdd {
+  jobId: string;
   slotId: string;
   slotNumber: number;
   logicalId: string;
@@ -698,8 +746,8 @@ interface IssuedAdd {
 }
 
 /** What one add or comeback settled as, reported by the model's next cycle. A comeback whose stored settings differ
- *  from the model's carries a warning naming the fields. */
-interface SettledAdd { slotNumber: number; logicalId: string; nodeId?: string; attempt: AttemptView; warning?: string }
+ *  from the model's carries a warning naming the fields; one the pool stopped after `rig down` carries that `stop`. */
+interface SettledAdd { slotNumber: number; logicalId: string; nodeId?: string; attempt: AttemptView; stop?: SeatPoolStopReport; warning?: string }
 
 /** What a cycle reports for a drained slot it looked at: the comeback issued (with its snapshot and attempt, and the
  *  newer captures skipped because they can't tell the occupant), the reuse hold it got (no snapshot qualifies, or the
@@ -924,11 +972,48 @@ function heldComeback(nodeStatus: string, sessionRuns: boolean): { as: "not_runn
   return null;
 }
 
+/** The reuse hold of a slot whose attempt settled running after `rig down`, while its compensating stop is in flight or
+ *  unconfirmed: only that stop's result ends it, never a later change. */
+const COMPENSATING_STOP = "compensating_stop";
+
+function holdCode(slot: SeatPoolSlot): unknown {
+  return slotRecord(slot.reuseHold)?.["code"];
+}
+
 /** A slot whose hold a later change on its node can end: a reuse hold on a `drained` or `live` slot with a node, and no
- *  attempt running. */
+ *  attempt running. Not the compensating stop's own hold. */
 function isWatchedHold(slot: SeatPoolSlot): boolean {
   return slot.reuseHold !== null && slot.nodeId !== null && (slot.phase === "drained" || slot.phase === "live")
-    && (slot.attemptState === null || slot.attemptState === "settled");
+    && (slot.attemptState === null || slot.attemptState === "settled") && holdCode(slot) !== COMPENSATING_STOP;
+}
+
+/** The rig's event seq an attempt was issued on (`attempt_basis.eventSeq`); null when its basis keeps none. */
+function basisEventSeq(text: string | null): number | null {
+  const seq = slotRecord(text)?.["eventSeq"];
+  return typeof seq === "number" ? seq : null;
+}
+
+/** The `seq` of the rig's latest `rig.stopped` when it is newer than `basisSeq` and no `restore.completed` came after
+ *  it; null otherwise. */
+function downSince(db: Database.Database, rigId: string, basisSeq: number | null): number | null {
+  if (basisSeq === null) return null;
+  const stopped = readSeatPoolHold(db, rigId).stoppedSeq;
+  return stopped !== null && stopped > basisSeq ? stopped : null;
+}
+
+/** Whether a `restore.completed` was recorded on the rig after `seq`. */
+function restoredSince(db: Database.Database, rigId: string, seq: number): boolean {
+  return db.prepare("SELECT 1 FROM events WHERE rig_id = ? AND type = 'restore.completed' AND seq > ? LIMIT 1").get(rigId, seq) !== undefined;
+}
+
+/** The rig of a node; null when the node is gone. */
+function nodeRig(db: Database.Database, nodeId: string): string | null {
+  return (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string } | undefined)?.rig_id ?? null;
+}
+
+/** Whether the session was stopped on purpose (a `rig down`, or any checked stop, records it). */
+function stoppedOnPurpose(db: Database.Database, sessionId: string): boolean {
+  return (db.prepare("SELECT intentionally_stopped AS s FROM sessions WHERE id = ?").get(sessionId) as { s: number } | undefined)?.s === 1;
 }
 
 /** What a later change on a slot's node made of it, as the cycle reports it (`laterChanges`). `read` is how it read: a
@@ -1020,12 +1105,23 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
    *  reuse hold. Unknown: it stays issued, with what was read kept on its row. What settled is returned for the report;
    *  nothing while unknown, or when the row no longer holds the attempt. */
   const settleWithNode = (
-    add: { slotId: string; slotNumber: number; logicalId: string; attemptId: string; nodeId: string },
+    add: { jobId: string; modelNodeId: string; slotId: string; slotNumber: number; logicalId: string; attemptId: string; nodeId: string },
     call: AddCallOutcome | null,
     latest: { id: string; status: string; startupStatus: string | null } | null,
-  ): SettledAdd | null => {
+  ): (SettledAdd & { compensate?: SeatPoolCompensatingStopRequest }) | null => {
     const settlement = classifyAdd(call, latest, deps.confirmedStopped(add.nodeId));
     const entry = (attempt: AttemptView): SettledAdd => ({ slotNumber: add.slotNumber, logicalId: add.logicalId, nodeId: add.nodeId, attempt });
+    // After a `rig down` newer than what the add was issued on, an add that settles running is stopped. So is one its
+    // call launched whose session that down stopped on purpose: it settles running with that session, and the stop
+    // confirms the absence.
+    const rigId = nodeRig(deps.db, add.nodeId);
+    const down = rigId === null ? null : downSince(deps.db, rigId, basisEventSeq(deps.slots.get(add.slotId)?.attemptBasis ?? null));
+    const launched = call !== null && call.ok && call.status === "launched";
+    const stoppedByDown = settlement.status === "not_running" && launched && latest !== null && stoppedOnPurpose(deps.db, latest.id);
+    if (down !== null && rigId !== null && latest !== null && (settlement.status === "running" || stoppedByDown)) {
+      const toStop = settleToStop({ ...add, rigId, sessionId: latest.id, seq: down }, JSON.stringify(call ?? { replayed: true }));
+      return toStop === null ? null : { ...entry({ id: add.attemptId, status: "running" }), compensate: toStop };
+    }
     if (settlement.status === "running") {
       return deps.slots.settleAdd(add.slotId, add.attemptId, {
         outcome: JSON.stringify(call ?? { replayed: true }),
@@ -1064,6 +1160,19 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
     return null;
   };
 
+  /** An attempt that settles running after `rig down`, settled `live` with its own session as `attempt_result` and the
+   *  compensating stop's hold, with the stop on record as in flight before it is made: a daemon exit before its result
+   *  leaves the slot held, and a later cycle stops it again. The stop's request, or null when the row no longer holds
+   *  the issued attempt. */
+  const settleToStop = (request: SeatPoolCompensatingStopRequest, outcome: string): SeatPoolCompensatingStopRequest | null => {
+    const inFlight = { cause: "rig_down", seq: request.seq, result: "unconfirmed", code: "stop_in_flight", sessionId: request.sessionId, at: at() };
+    return deps.slots.settleAddToStop(request.slotId, request.attemptId, {
+      outcome: JSON.stringify({ ...readAttemptOutcome(outcome), stop: inFlight }),
+      result: JSON.stringify({ nodeId: request.nodeId, sessionId: request.sessionId }),
+      hold: JSON.stringify({ code: COMPENSATING_STOP, seq: request.seq }), at: at(),
+    }) ? request : null;
+  };
+
   /** The model's logical id, for the `<model>-s<n>` of a slot read back from its row. */
   const logicalIdOf = (modelNodeId: string, slotNumber: number): string => {
     const row = deps.db.prepare("SELECT logical_id FROM nodes WHERE id = ?").get(modelNodeId) as { logical_id: string } | undefined;
@@ -1076,7 +1185,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
    * no node recorded the row goes, otherwise the node settles it by the same rule as the call that ran it. An operation
    * id with no row is not replayed (that would reserve it anew): unknown, as is any replay that is not one.
    */
-  const settleLeftover = (modelNodeId: string, slot: SeatPoolSlot): SettledAdd | null => {
+  const settleLeftover = (jobId: string, modelNodeId: string, slot: SeatPoolSlot): (SettledAdd & { compensate?: SeatPoolCompensatingStopRequest }) | null => {
     const attemptId = slot.attemptId!;
     const logicalId = logicalIdOf(modelNodeId, slot.slotNumber);
     if (slot.attemptState === "reserved") {
@@ -1106,7 +1215,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
     // An add read with no session yet made none of its own: a session found now is someone else's, so the call that
     // returned without one does not hold it. With still no session, the call is kept with its failure.
     const call = latest !== null && readAttemptOutcome(slot.attemptOutcome)["code"] === "no_session" ? null : keptCall(slot);
-    return settleWithNode({ slotId: slot.slotId, slotNumber: slot.slotNumber, logicalId, attemptId, nodeId: slot.nodeId }, call, latest);
+    return settleWithNode({ jobId, modelNodeId, slotId: slot.slotId, slotNumber: slot.slotNumber, logicalId, attemptId, nodeId: slot.nodeId }, call, latest);
   };
 
   /** Why the model member gives no agent, read from the model node itself (the export leaves these out silently), or null. */
@@ -1169,8 +1278,12 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       }
       const latest = add.operation.read().current.nodes.find((node) => node.id === slot.nodeId)?.latestSession ?? null;
       // An unknown result stays issued; once this call is over, a later cycle reads it again.
-      const entry = settleWithNode({ ...add, nodeId: slot.nodeId }, outcome, latest);
-      if (entry) report(entry);
+      const settledNow = settleWithNode({ ...add, modelNodeId, nodeId: slot.nodeId }, outcome, latest);
+      if (settledNow === null) return;
+      const { compensate, ...entry } = settledNow;
+      // Settled running after `rig down`: stopped through the executor's own `compensatingStop`, after this settle.
+      const stopped = compensate === undefined ? null : await compensatingStopCall(compensate);
+      report(stopped === null ? entry : { ...entry, stop: stopped });
     } catch (error) {
       // The call's outcome stays on the row, so the cycle that reads this attempt again settles it with the call.
       try {
@@ -1259,6 +1372,21 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       // Running, on the same node: settled, and the slot `live`.
       if (!threw && launch.ok && node && node.nodeId === request.nodeId && launchStatusIsRunning(node.status)) {
         const sessionId = latestSession(deps.db, request.nodeId)?.id ?? null;
+        // After a `rig down` newer than what the comeback was issued on, its own session is stopped. With no session of
+        // its own (none can be told apart), nothing is stopped.
+        const down = sessionId === null ? null : downSince(deps.db, request.rigId, basisEventSeq(slot.attemptBasis));
+        if (down !== null && sessionId !== null) {
+          const toStop = settleToStop({
+            jobId: request.jobId, modelNodeId: request.modelNodeId, rigId: request.rigId, slotId: request.slotId, slotNumber: request.slotNumber,
+            attemptId: request.attemptId, nodeId: request.nodeId, sessionId, seq: down,
+          }, stored);
+          if (toStop !== null) {
+            const stopped = await compensatingStopCall(toStop);
+            report({ ...base, attempt: { id: request.attemptId, status: "running", ...(selection ? { snapshotSelection: selection } : {}) },
+              ...(stopped !== null ? { stop: stopped } : {}), ...warning });
+            return;
+          }
+        }
         if (deps.slots.settleAdd(request.slotId, request.attemptId, {
           outcome: stored, result: JSON.stringify({ nodeId: request.nodeId, sessionId }), at: at(),
         })) {
@@ -1595,6 +1723,97 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
     return out;
   };
 
+  /** The slots whose compensating stop runs in this process: a cycle does not stop them again meanwhile. */
+  const stopping = new Set<string>();
+
+  /**
+   * The compensating stop (L15): the attempt that settled running after `rig down` is stopped through the checked stop,
+   * with `expected` equal to its own session, never without it. `stopped` and `absent` leave the slot `live` with no
+   * hold; `changed_owner` holds it measured from the attempt's own session, so a later change on the node classifies
+   * the newer one, which the pool never stops; anything else keeps the hold, with the real code and message, and a later
+   * cycle stops it again. A `restore.completed` after that down (checked before the stop and again at its final step)
+   * stops nothing: the hold goes, and the agent stays as any `live` one. The job not active: nothing is stopped yet.
+   */
+  const compensatingStop = async (request: SeatPoolCompensatingStopRequest): Promise<SeatPoolStopReport | null> => {
+    const down = { seq: request.seq };
+    const record = (hold: Record<string, unknown> | null, stop: Record<string, unknown> | null, result?: string) =>
+      deps.slots.recordCompensatingStop({
+        slotId: request.slotId, attemptId: request.attemptId, holdCode: COMPENSATING_STOP,
+        hold: hold === null ? null : JSON.stringify(hold), stop, ...(result !== undefined ? { result } : {}),
+      });
+    const unconfirmed = (code: string, message: string): SeatPoolStopReport | null => {
+      const report: SeatPoolStopReport = { cause: "rig_down", seq: request.seq, result: "unconfirmed", code, message };
+      return record({ code: COMPENSATING_STOP, seq: request.seq }, { ...report, sessionId: request.sessionId, at: at() }) ? report : null;
+    };
+    if (stopping.has(request.slotId)) return null;
+    stopping.add(request.slotId);
+    try {
+      const slot = deps.slots.get(request.slotId);
+      if (!slot || slot.attemptId !== request.attemptId || slot.phase !== "live" || holdCode(slot) !== COMPENSATING_STOP) return null;
+      // A `rig up` that completed after the down: no stop, and the agent stays.
+      if (restoredSince(deps.db, request.rigId, request.seq)) { record(null, null); return null; }
+      if (deps.jobsRepo.getById(request.jobId)?.state !== "active") return unconfirmed("job_stopped", JOB_STOPPED.message);
+      if (!deps.drain) return unconfirmed("stop_not_composed", "the checked stop is not composed; nothing was stopped");
+      const seatRef = agentNode(deps.db, request.nodeId)?.sessionName ?? null;
+      if (seatRef === null) return unconfirmed("no_canonical_session", "the agent's node has no canonical session name; nothing was stopped");
+      const refused: { code: string | null } = { code: null };
+      let stop: SeatPoolSeatStop;
+      try {
+        stop = await deps.drain.stopSeat({
+          seatRef, reason: `seat pool ${request.jobId}: settled running after rig down (event ${request.seq})`,
+          expected: { nodeId: request.nodeId, sessionId: request.sessionId },
+          recheck: () => {
+            if (!restoredSince(deps.db, request.rigId, request.seq)) return null;
+            refused.code = "restored";
+            return { ok: false, code: "selection_changed", message: "The seat pool's compensating stop stops nothing: a rig up completed after the down." };
+          },
+        });
+      } catch (error) {
+        stop = { ok: false, code: "stop_failed", message: errorMessage(error) };
+      }
+      // Refused at the stop's final step, before any effect, by a `rig up` that completed meanwhile: the agent stays.
+      if (refused.code !== null && !stop.ok && stop.partialEffect !== true) { record(null, null); return null; }
+      const read = seatPoolStopReport(stop, down);
+      // `selection_changed` with no newer session (the seat could not be resolved, or the guard's target changed) is no
+      // change of owner: the attempt's own session may still run, so the stop stays unconfirmed and is made again.
+      const report: SeatPoolStopReport = read.result === "changed_owner" && latestSession(deps.db, request.nodeId)?.id === request.sessionId
+        ? { ...read, result: "unconfirmed" } : read;
+      const kept = { ...report, ...(!stop.ok && stop.partialEffect === true ? { partialEffect: true } : {}), sessionId: request.sessionId, at: at() };
+      if (report.result === "stopped" || report.result === "absent") return record(null, kept) ? report : null;
+      if (report.result === "changed_owner") {
+        // Measured from the attempt's own session: the newer one is a later change, read once the down's hold ends.
+        const measured = heldSession(request.nodeId, sessionViewOf(deps.db, request.sessionId), rigEventSeq(deps.db, request.nodeId));
+        return record({ code: "changed_owner", seq: request.seq }, kept, measured) ? report : null;
+      }
+      return record({ code: COMPENSATING_STOP, seq: request.seq }, kept) ? report : null;
+    } catch (error) {
+      try {
+        return unconfirmed("settle_failed", errorMessage(error));
+      } catch {
+        return { cause: "rig_down", seq: request.seq, result: "unconfirmed", code: "settle_failed", message: errorMessage(error) };
+      }
+    } finally {
+      stopping.delete(request.slotId);
+    }
+  };
+
+  /** The compensating stop through the executor's own `compensatingStop`, read when it is called. */
+  const compensatingStopCall = (request: SeatPoolCompensatingStopRequest): Promise<SeatPoolStopReport | null> =>
+    typeof executor.compensatingStop === "function" ? executor.compensatingStop(request) : Promise.resolve(null);
+
+  /** A compensating stop a cycle stops again: its slot `live`, settled, held by the compensating stop's own hold, with
+   *  the stop on record (in flight when a daemon exit cut it off, or unconfirmed), and not running in this process. */
+  const compensatingLeftover = (jobId: string, modelNodeId: string, rigId: string, slot: SeatPoolSlot): SeatPoolCompensatingStopRequest | null => {
+    if (slot.phase !== "live" || slot.attemptState !== "settled" || slot.attemptId === null || slot.nodeId === null) return null;
+    if (holdCode(slot) !== COMPENSATING_STOP || stopping.has(slot.slotId)) return null;
+    const stop = slotRecord(JSON.stringify(readAttemptOutcome(slot.attemptOutcome)["stop"] ?? null));
+    if (stop === null || stop["cause"] !== "rig_down" || typeof stop["seq"] !== "number" || typeof stop["sessionId"] !== "string") return null;
+    return {
+      jobId, modelNodeId, rigId, slotId: slot.slotId, slotNumber: slot.slotNumber, attemptId: slot.attemptId, nodeId: slot.nodeId,
+      sessionId: stop["sessionId"], seq: stop["seq"],
+    };
+  };
+
   /** One call after another, each after the lease is released; the cycle does not wait for them. */
   const startCalls = (calls: ReadonlyArray<() => Promise<void>>) => {
     if (calls.length === 0) return;
@@ -1605,6 +1824,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
 
   const executor: SeatPoolExecutor = {
     comeback,
+    compensatingStop,
     async idle() {
       while (pending.size > 0) await Promise.all([...pending]);
     },
@@ -1710,10 +1930,17 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       let addNotes: Record<string, unknown> | undefined;
       const issued: IssuedAdd[] = [];
       const comebacks: SeatPoolComebackRequest[] = [];
+      /** The compensating stops this cycle makes after the lease: those left unconfirmed (or cut off by a daemon exit), read
+       *  again whatever holds the pool. A leftover settled here never adds one: its read runs only while the pool is not held. */
+      const toCompensate: SeatPoolCompensatingStopRequest[] = [];
       let thrown: unknown;
       try {
         await deps.custody([modelNodeId], async () => {
           if (!active()) { held = JOB_STOPPED; return; }
+          for (const slot of deps.slots.forModel(modelNodeId)) {
+            const again = compensatingLeftover(job.jobId, modelNodeId, rigId, slot);
+            if (again !== null) toCompensate.push(again);
+          }
           hold = readSeatPoolHold(deps.db, rigId);
           if (hold.stoppedSeq !== null) {
             held = {
@@ -1744,10 +1971,14 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
               if (change) changes.push(change);
               continue;
             }
-            const entry = slot.attemptKind === "add" ? settleLeftover(modelNodeId, slot)
+            const settledNow = slot.attemptKind === "add" ? settleLeftover(job.jobId, modelNodeId, slot)
               : slot.attemptKind === "comeback" && slot.nodeId !== null ? settleComebackLeftover(modelNodeId, slot, changes)
               : null;
-            if (entry) reportSettled(modelNodeId, entry);
+            if (settledNow) {
+              const { compensate, ...entry } = settledNow as SettledAdd & { compensate?: SeatPoolCompensatingStopRequest };
+              if (compensate !== undefined) toCompensate.push(compensate);
+              reportSettled(modelNodeId, entry);
+            }
           }
           // A leftover settled `not_running` here drains its slot, which starts the cooldown the plan could not see: under
           // it, this cycle's drains wait (`drain: true` keeps its exemption), and so does its add, comebacks included.
@@ -2067,7 +2298,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             }
             inFlightAttempts.add(attemptId);
             issued.push({
-              slotId: slot.slotId, slotNumber: slot.slotNumber, logicalId, attemptId, rigId, rigRoot, folder, launchAdditionsFrom, operation,
+              jobId: job.jobId, slotId: slot.slotId, slotNumber: slot.slotNumber, logicalId, attemptId, rigId, rigRoot, folder, launchAdditionsFrom, operation,
               op: { kind: "add_member", pod, member },
             });
             issuedView.push({ slotNumber: slot.slotNumber, logicalId, attempt: inFlight(attemptId) });
@@ -2087,6 +2318,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       // The calls go out after the lease is released, whatever happened after their issue: the comebacks through the
       // executor's own `comeback`, then the new numbers.
       startCalls([
+        ...toCompensate.map((request) => async () => { await compensatingStopCall(request); }),
         ...(comebackCall ? comebacks.map((request) => () => comebackCall(request)) : []),
         ...issued.map((add) => () => runAdd(modelNodeId, add)),
       ]);
