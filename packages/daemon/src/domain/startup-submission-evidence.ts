@@ -36,6 +36,9 @@ export const CLAUDE_STATUS_WARNINGS = [
   // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30), "Restart to apply", or
   // "Restart to update" on its own row (Claude 2.1.319, #2605).
   /^✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))$/,
+  // Claude 2.1.322 and 2.1.323, at the paste hint's right after a pasted prompt is submitted (OBS1 A/B frames, 11-28):
+  // the input box above is empty, and without this the draft-aware guard read it as unknown and held the next send.
+  /^Removed \d+ invisible characters? from your prompt$/,
 ];
 // Claude can draw noninteractive UI rows after its mode footer. They do not
 // replace the composer and should only be skipped when they match a known row.
@@ -133,6 +136,7 @@ export const STARTUP_UNCONFIRMED_REASON = {
   unobservable: "the input box could not be observed",
   unclear: "the input box did not clearly show the prompt as submitted",
   retryRefused: "the guarded Enter retry did not go through",
+  notReported: "Claude did not report taking the prompt, though its input box read empty",
 } as const;
 
 /** Whether the composer holds only Claude's collapsed label for a paste with the expected text's newline count. */
@@ -152,6 +156,12 @@ export const STARTUP_SUBMIT_SETTLE_LOOKS = 25;
 // A prompt still staged after a guarded retry is retried again, up to this many retries in all, each after
 // the 200 ms look. Every retry is guarded: Enter goes in only while the composer holds exactly the text we typed.
 export const STARTUP_SUBMIT_RETRIES = 2;
+// A fresh Claude can lose its first startup Enter while it is still starting: the first look then finds the input box
+// empty because our paste hasn't drawn yet, and that reads as submitted (OBS1, 11-28: 3 of 40 0.7.25 starts read clear
+// there with the prompt left staged, and none of them reported a UserPromptSubmit hook; all 75 starts that did submit
+// reported one, about 2 s after that Enter). So a fresh start's first send waits, at most this long, for this session's
+// own UserPromptSubmit hook before an empty input box counts as submitted, then looks again.
+export const STARTUP_SUBMIT_EVIDENCE_WAIT_MS = 8000;
 
 type ReadPane = () => Promise<string | null>;
 type Sleep = (ms: number) => Promise<void>;
@@ -216,7 +226,7 @@ export interface StartupSubmissionDiagnostic {
   /** Zero-based index in the authored action list, when applicable. */
   actionIndex?: number;
   /** `look` is set only when our collapsed paste was looked at again: 0 for the first look, n for the last. */
-  observations: Array<StartupSubmissionEvidence & { phase: "initial" | "guarded_retry" | "after_retry"; look?: number }>;
+  observations: Array<StartupSubmissionEvidence & { phase: "initial" | "guarded_retry" | "after_retry" | "after_submit_wait"; look?: number }>;
   /** Transport result only; ok does not assert model consumption. */
   retry: "not_run" | "ok" | "refused_or_failed" | "threw";
 }
