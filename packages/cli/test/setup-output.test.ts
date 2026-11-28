@@ -213,3 +213,72 @@ describe("the installer's setup boundary", () => {
     }
   });
 });
+
+// A whole setup run, where the person asked for one: --router-line beside another setup option, a --json run that says
+// what it's doing while it works, and the daemon's default address on a machine with Tailscale.
+describe("setup's whole run: the router line beside other options, --json progress, the daemon address", () => {
+  const ok = (cmd: string) => cmd === "cmux capabilities --json" ? '{"capabilities":[]}' : "available";
+  const run = async (flags: string[], extra: Partial<SetupDeps> = {}) => {
+    process.exitCode = undefined;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 503 })));
+    const logs: string[] = [];
+    const errors: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args) => { logs.push(args.map(String).join(" ")); });
+    vi.spyOn(console, "error").mockImplementation((...args) => { errors.push(args.map(String).join(" ")); });
+    const saved: string[] = [];
+    const deps: SetupDeps = {
+      platform: "darwin", env: {}, exec: vi.fn(ok), readFile: () => null, exists: () => false, writeFile: vi.fn(), mkdirp: vi.fn(),
+      routerLineStore: { resolveWithSource: () => ({ value: false, source: "default", defaultValue: false }), set: (key: string, value: string) => { saved.push(`${key}=${value}`); } },
+      daemonBind: () => ({ explicit: false, tailscaleIp: null }),
+      ...extra,
+    };
+    await new Command().addCommand(setupCommand(deps)).parseAsync(["node", "rig", "setup", ...flags]);
+    return { exitCode: process.exitCode, logs, errors, output: logs.join("\n"), deps, saved };
+  };
+
+  it("--router-line beside another setup option still runs the whole setup and saves the answer as one of its steps", async () => {
+    const r = await run(["--providers", "claude", "--router-line", "yes"]);
+    expect(r.exitCode).toBeUndefined();
+    expect(r.deps.exec).toHaveBeenCalled();
+    expect(r.output).toMatch(/\] tmux_install: /);
+    expect(r.output).toContain("  [APPLIED] router_line: Saved: yes.");
+    expect(r.output).toContain("Setup complete.");
+    expect(r.saved).toEqual(["skills.router_line.enabled=true"]);
+  });
+
+  it("--json says on stderr what it's doing while it runs, and stdout stays one JSON result", async () => {
+    const r = await run(["--json", "--providers", "claude"]);
+    expect(r.exitCode).toBeUndefined();
+    expect(r.logs).toHaveLength(1);
+    const result = JSON.parse(r.logs[0]!) as SetupResult;
+    expect(result.ready).toBe(true);
+    expect(r.errors[0]).toBe("rig setup: running every setup step (installs and checks can take a few minutes); the JSON result prints when they finish.");
+    // Each step says so as it lands, so a long install or check never looks like a hang.
+    for (const step of result.steps) expect(r.errors).toContain(`rig setup: ${step.id}: ${step.status}`);
+    expect(r.errors).toContain("rig setup: verification: running the doctor checks");
+  });
+
+  it("without --json, or in a dry run, it prints no progress lines", async () => {
+    expect((await run(["--providers", "claude"])).errors.filter((line) => line.startsWith("rig setup:"))).toEqual([]);
+    expect((await run(["--json", "--dry-run"])).errors.filter((line) => line.startsWith("rig setup:"))).toEqual([]);
+  });
+
+  it("with Tailscale active and no bind chosen, it says the daemon also listens on the Tailscale address, why, and how to keep it local", async () => {
+    const bind = { daemonBind: () => ({ explicit: false, tailscaleIp: "100.101.102.103" }) };
+    const text = await run(["--providers", "claude"], bind);
+    expect(text.output).toContain("Daemon address: Tailscale is active on this machine, so by default `rig daemon start` listens on 127.0.0.1 and on its Tailscale address, 100.101.102.103: your other OpenRig machines and the web UI can then reach it over your tailnet.");
+    expect(text.output).toContain("  To keep it on this machine only: rig config set daemon.host 127.0.0.1 (it applies from the daemon's next start).");
+    const json = JSON.parse((await run(["--json", "--providers", "claude"], bind)).logs[0]!) as SetupResult;
+    expect(json.daemonBind).toMatchObject({ hosts: ["127.0.0.1", "100.101.102.103"], change: expect.stringContaining("rig config set daemon.host 127.0.0.1") });
+    const plan = JSON.parse((await run(["--json", "--dry-run"], bind)).logs[0]!) as SetupResult;
+    expect(plan.daemonBind?.hosts).toEqual(["127.0.0.1", "100.101.102.103"]);
+  });
+
+  it("says nothing about the address when the bind is chosen, or Tailscale isn't active; the default bind itself is unchanged", async () => {
+    for (const facts of [{ explicit: true, tailscaleIp: null }, { explicit: false, tailscaleIp: null }]) {
+      const r = await run(["--providers", "claude"], { daemonBind: () => facts });
+      expect(r.output).not.toContain("Daemon address:");
+      expect((JSON.parse((await run(["--json", "--providers", "claude"], { daemonBind: () => facts })).logs[0]!) as SetupResult).daemonBind).toBeUndefined();
+    }
+  });
+});

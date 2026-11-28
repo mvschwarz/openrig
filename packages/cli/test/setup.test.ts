@@ -33,6 +33,8 @@ function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
     // Never the person's real config: a path that doesn't exist reads as unanswered.
     routerLineStore: new ConfigStore(join(tmpdir(), "setup-router-line-none", "config.json")),
     recordProviders: vi.fn(),
+    // Never this machine's own network: no Tailscale address unless a case gives one.
+    daemonBind: () => ({ explicit: false, tailscaleIp: null }),
     ...overrides,
   };
 }
@@ -1206,5 +1208,79 @@ describe("rig setup: the router-line question", () => {
     expect(errors.join("\n")).toContain('--router-line takes yes or no, got "maybe".');
     process.exitCode = undefined;
     vi.restoreAllMocks();
+  });
+});
+
+// Answering the router line is one answer, not another setup run. A first user on a machine without Codex answered
+// `rig setup --router-line no`: setup ran every step again, its Codex checks failed, and it exited 1; the --json retry
+// ran the whole setup again and printed nothing for over two minutes.
+describe("rig setup --router-line on its own saves only that answer", () => {
+  let dir: string;
+  let store: ConfigStore;
+  beforeEach(() => {
+    vi.stubEnv("OPENRIG_SKILLS_ROUTER_LINE_ENABLED", "");
+    delete process.env["OPENRIG_SKILLS_ROUTER_LINE_ENABLED"];
+    dir = mkdtempSync(join(tmpdir(), "setup-router-only-"));
+    store = new ConfigStore(join(dir, "config.json"));
+  });
+  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); rmSync(dir, { recursive: true, force: true }); });
+
+  // No Codex on this machine, as in the person's run, so a whole setup would fail its Codex checks.
+  const noCodex = (overrides?: Partial<SetupDeps>) => {
+    const tools = makeDeps().exec;
+    return makeDeps({ routerLineStore: store, exec: vi.fn((cmd: string) => { if (cmd.startsWith("codex")) throw new Error("codex: command not found"); return tools(cmd); }), ...overrides });
+  };
+  const run = async (deps: SetupDeps, args: string[]) => {
+    const errors: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...a) => { errors.push(a.map(String).join(" ")); });
+    const { logs, exitCode } = await captureLogs(async () => {
+      await new Command().addCommand(setupCommand(deps)).parseAsync(["node", "rig", "setup", ...args]);
+    });
+    return { logs, output: logs.join("\n"), exitCode, errors };
+  };
+
+  it("`rig setup --router-line no` exits 0, says it saved no and ran nothing else, and no other step runs", async () => {
+    const deps = noCodex();
+    const r = await run(deps, ["--router-line", "no"]);
+    expect(r.exitCode).toBeUndefined();
+    expect(r.logs).toEqual([
+      "  [APPLIED] router_line: Saved: no. Seats don't add the line.",
+      "Only your router-line answer was saved; no other setup step ran. Run rig setup on its own for the rest.",
+    ]);
+    expect(deps.exec).not.toHaveBeenCalled();
+    expect(deps.writeFile).not.toHaveBeenCalled();
+    expect(store.resolveWithSource("skills.router_line.enabled")).toMatchObject({ value: false, source: "file" });
+  });
+
+  it("with --json it answers at once: one JSON result with the saved step, and nothing else runs", async () => {
+    const deps = noCodex();
+    const r = await run(deps, ["--router-line", "yes", "--json"]);
+    expect(r.exitCode).toBeUndefined();
+    expect(r.logs).toHaveLength(1);
+    const out = JSON.parse(r.logs[0]!);
+    expect(out).toMatchObject({ scope: "router-line", saved: true, steps: [{ id: "router_line", status: "applied" }], routerLine: { answer: "yes", by: "saved" } });
+    expect(out.note).toContain("no other setup step ran");
+    expect(r.errors).toEqual([]);
+    expect(deps.exec).not.toHaveBeenCalled();
+  });
+
+  it("a dry run saves nothing and says so", async () => {
+    const deps = noCodex();
+    const r = await run(deps, ["--router-line", "no", "--dry-run"]);
+    expect(r.exitCode).toBeUndefined();
+    expect(r.logs).toEqual(["  [SKIP] router_line: Dry run: would save your router-line answer: no.", "Dry run: nothing was saved, and no other setup step ran."]);
+    expect(store.resolveWithSource("skills.router_line.enabled").source).toBe("default");
+    expect(deps.exec).not.toHaveBeenCalled();
+  });
+
+  it("an answer it couldn't save exits 1, with the reason and the command that saves it", async () => {
+    const broken = { resolveWithSource: (key: string) => store.resolveWithSource(key), set: () => { throw new Error("EACCES: config.json"); } };
+    const deps = noCodex({ routerLineStore: broken });
+    const r = await run(deps, ["--router-line", "no"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("  [WARN] router_line: Couldn't save the router-line answer: EACCES: config.json");
+    expect(r.output).toContain("       Fix: rig config set skills.router_line.enabled false");
+    expect(r.output).toContain("The answer wasn't saved, and no other setup step ran.");
+    expect(deps.exec).not.toHaveBeenCalled();
   });
 });
