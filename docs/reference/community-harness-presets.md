@@ -38,7 +38,11 @@ it in the harness, then connect it.
 
 ## The preset
 
-One YAML file per harness: `$OPENRIG_HOME/community-harnesses/<name>.yaml`. `rig community-harness list` shows what's
+One YAML file per harness: `$OPENRIG_HOME/community-harnesses/<name>.yaml`. Run
+`rig doctor --community-harnesses` to check installed presets and look up literal executables in the daemon's PATH.
+Invalid presets cause exit status 1. A lookup warning means the executable could not be verified or its lookup
+depends on the daemon's working directory. You can add `--spec <path>` to run the topology check in the same call.
+The command never launches a harness. `rig community-harness list` shows what's
 installed.
 
 ```yaml
