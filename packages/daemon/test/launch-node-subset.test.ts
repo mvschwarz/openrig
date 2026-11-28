@@ -25,6 +25,8 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import { CommunityHarnessRuntimeAdapter, withCommunityHarnessResolver } from "../src/adapters/community-harness-runtime-adapter.js";
 
 function makeTmux(overrides?: Partial<Record<string, (...args: unknown[]) => unknown>>) {
   return {
@@ -491,6 +493,61 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
         fs.rmSync(home, { recursive: true, force: true });
       }
     });
+
+  // Saved sessions for the seat, listed newest first; the selection is read from the newest one by id, not by position.
+  it.each([
+    { name: "its only saved session names the harness", harnesses: ["synth-harness"], started: true },
+    { name: "its newest saved session names the harness", harnesses: ["synth-harness", "other-harness"], started: true },
+    { name: "its newest saved session names another harness", harnesses: ["other-harness", "synth-harness"], started: false },
+    { name: "its newest saved session names no harness", harnesses: [undefined, "synth-harness"], started: false },
+  ])("#4047 a launch-only community seat the snapshot saw detached, when $name", async ({ harnesses, started }) => {
+    const saved = process.env["OPENRIG_HOME"];
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "subset-community-"));
+    const spies = (["project", "deliverStartup", "launchHarness", "checkReady"] as const)
+      .map((method) => vi.spyOn(CommunityHarnessRuntimeAdapter.prototype, method));
+    try {
+      process.env["OPENRIG_HOME"] = home;
+      const presets = path.join(home, "community-harnesses");
+      fs.mkdirSync(presets);
+      fs.writeFileSync(path.join(presets, "synth-harness.yaml"),
+        "format: 1\nname: synth-harness\ncommand: synth-launch\nmaintainer: Example\nlimits: []\nfirst_input: true\n");
+      spies[0]!.mockResolvedValue({ projected: [], skipped: [], failed: [] } as never);
+      spies[1]!.mockResolvedValue({ delivered: 0, failed: [] } as never);
+      spies[2]!.mockResolvedValue({ ok: true } as never);
+      spies[3]!.mockResolvedValue({ ready: true } as never);
+      const { rigId, nodeIds } = seedPodAwareRig();
+      db.prepare("UPDATE nodes SET runtime = 'synth-harness' WHERE id = ?").run(nodeIds[0]);
+      const snapshotId = seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("synth-harness") });
+      const data = JSON.parse((db.prepare("SELECT data FROM snapshots WHERE id = ?").get(snapshotId) as { data: string }).data);
+      data.nodes[0].runtime = "synth-harness";
+      // Captured after a reboot: the seat's session was detached, so the snapshot records no occupant for it.
+      const template = data.sessions[0];
+      data.sessions.splice(0, 1, ...harnesses.map((communityHarness, i) => ({
+        ...template, id: `sess-0-${harnesses.length - i}`, status: "detached", communityHarness, resumeType: null, restorePolicy: "resume_if_possible",
+      })));
+      data.activeOccupantsByNode = { [nodeIds[0]!]: { kind: "absent" }, [nodeIds[1]!]: { kind: "absent" } };
+      db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snapshotId);
+      const adapters = withCommunityHarnessResolver({} as Record<string, RuntimeAdapter>, { tmux: tmux as any, presetsDir: () => presets });
+
+      const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"], { snapshotId, adapters });
+
+      if (!started) {
+        // Today's fail-closed reading: no adapter for a selection that doesn't match the seat's runtime.
+        expect(result.launched![0]).toMatchObject({ logicalId: "dev.driver", status: "attention_required" });
+        expect(spies[2]).not.toHaveBeenCalled();
+        return;
+      }
+      expect(result.launched![0]).toMatchObject({ logicalId: "dev.driver", status: "fresh-primed" });
+      expect(spies[2]).toHaveBeenCalledOnce();
+      // The new session keeps the harness selection, so a later `rig seat launch --fresh` still finds the adapter.
+      const latest = db.prepare("SELECT agent_app FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(nodeIds[0]);
+      expect(latest).toEqual({ agent_app: "synth-harness" });
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+      if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
 
   it.each(["claude-code", "codex", "pi", "omp"])("reports an exited %s agent without replacing its preserved shell", async (runtime) => {
     const { rigId, nodeIds, session } = seedPreservedShell(runtime);
