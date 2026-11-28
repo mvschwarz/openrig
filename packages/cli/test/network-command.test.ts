@@ -328,3 +328,13 @@ it("shows the binding or seat as optional in each verb's usage", () => {
     expect(value).not.toHaveProperty("peer");
   }
 });
+
+
+it.each(["", "   "])("CR rejects supplied blank requesterOf %j without sending a peer request", async (value) => {
+  hubRequests();
+  const ask = join(home, "ask.md"); writeFileSync(ask, "Which audience?");
+  vi.stubEnv("OPENRIG_SESSION_NAME", "dev-impl@lab");
+  const before = posts.length;
+  await expect(cli().parseAsync(["node", "rig", "network", "request", "lead@team", `--requester-of=${value}`, "--id", "blank-requester", "--body-file", ask])).rejects.toThrow();
+  expect(posts).toHaveLength(before);
+});

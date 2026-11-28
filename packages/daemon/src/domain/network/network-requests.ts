@@ -285,6 +285,9 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
     /** The route records the actual caller; direct/internal callers keep the binding seat as before. */
     caller?: Pick<Parameters<QueueRepository["create"]>[0], "sourceSession" | "identityProvenance" | "identityPrincipal" | "returnRoute" | "returnRouteBasis" | "tags"> }): Promise<NetworkRequestResult> {
   const now = deps.now ?? (() => new Date());
+  if (input.requesterOf !== undefined && !text(input.requesterOf)) {
+    throw new NetworkBindingError("invalid_request_route", "--requester-of needs a non-empty work id; it never falls back to a named peer.");
+  }
   const requesterLocal = text(input.requesterOf) || null;
   const peer = text(input.peer) || (requesterLocal ? `requester of ${requesterLocal}` : "");
   const requestId = text(input.requestId);
@@ -319,6 +322,8 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
     }
   } else {
     let requesterHub: string | null = null;
+    const waitVersion = (work: QueueItem) => `network-requester-state:${sha256(JSON.stringify([work.state, work.blockedOn, work.destinationSession]))}`;
+    let firstWaitVersion: string | undefined;
     if (requesterLocal) {
       // Discovery precedes even the local receipt: old hubs may silently ignore unknown arguments.
       try {
@@ -336,6 +341,7 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
       }
       if (/^(fold:|auth:|external:)/.test(requestId)) throw new NetworkBindingError("invalid_request_id", "A question receipt needs an ordinary item id, not a gate reference.");
       requesterHub = taken.hub_qitem_id;
+      firstWaitVersion = waitVersion(work);
     }
     // Recorded first: the seat's request, held by OpenRig until the answer closes it. Nothing wakes anyone for it.
     try {
@@ -350,10 +356,12 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
         summary: summary ? `${summaryLead(peer)}: ${summary}` : summaryLead(peer),
         body: `${requestHead({ peer, hub_url: binding.hubUrl, hub_seat: binding.hubSeat, hub_qitem_id: hubId })}${body}${requestFoot(requestId)}`,
         tags: [`network-binding:${binding.id}`, `network-peer:${peer}`, `network-hub-item:${hubId}`, "network-direction:outbound",
-          ...(requesterLocal ? ["network-requester-question"] : []), ...(input.caller?.tags ?? [])],
+          ...(requesterLocal ? ["network-requester-question", firstWaitVersion!] : []), ...(input.caller?.tags ?? [])],
         nudge: false,
       });
       if (local.createWarning) throw reused();
+      // Idempotent create returns the original row: recovery must use its first observed work state.
+      firstWaitVersion = (local.tags ?? []).find(tag => tag.startsWith("network-requester-state:"));
       const blocker = networkRequestBlocker(hubId);
       if (local.state !== "blocked" || local.blockedOn !== blocker) {
         if (LOCAL_CLOSED.has(local.state)) throw reused();
@@ -367,17 +375,20 @@ export async function originateNetworkRequest(deps: NetworkRequestDeps, binding:
     if (requesterLocal) {
       // Establish the receipt and its initial wait together. Recovery (including an overlapping create that lost
       // this insert) must not replay the mutation over a dependency the owner selected later.
-      deps.db.transaction(() => {
+      const committed = deps.db.transaction(() => {
         const inserted = deps.db.prepare(`INSERT INTO network_requests (local_qitem_id, binding_id, node_id, hub_url, hub_seat, peer, hub_qitem_id, body_sha256, created_at, requester_local_qitem_id, requester_hub_qitem_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
           .run(requestId, binding.id, binding.nodeId, binding.hubUrl, binding.hubSeat, peer, hubId, bodySha, now().toISOString(), requesterLocal, requesterHub);
-        if (inserted.changes === 0) return;
+        if (inserted.changes === 0) return [];
         const work = deps.queueRepo.getById(requesterLocal);
-        if (work && !LOCAL_CLOSED.has(work.state) && work.destinationSession === session && work.blockedOn !== requestId) {
-          deps.queueRepo.update({ qitemId: work.qitemId, actorSession: session, state: "blocked", blockedOn: requestId,
-            transitionNote: "Waiting on the requester's explicit answer through the network question receipt." });
+        if (work && !LOCAL_CLOSED.has(work.state) && work.destinationSession === session && work.blockedOn !== requestId
+          && firstWaitVersion === waitVersion(work)) {
+          return deps.queueRepo.updateWithinTransaction({ qitemId: work.qitemId, actorSession: session, state: "blocked", blockedOn: requestId,
+            transitionNote: "Waiting on the requester's explicit answer through the network question receipt." }).persistedEvents;
         }
+        return [];
       })();
+      deps.queueRepo.notifyCommitted(committed);
     } else {
       deps.db.prepare(`INSERT INTO network_requests (local_qitem_id, binding_id, node_id, hub_url, hub_seat, peer, hub_qitem_id, body_sha256, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
@@ -468,7 +479,7 @@ async function retainNetworkWait(deps: NetworkRequestDeps, binding: NetworkBindi
       }
     } catch (error) {
       // An unreadable blocker is an honest generic wait, never an excuse to expose its id or settle this work.
-      if (!(error instanceof HubError) || error.kind !== "refused") throw error;
+      if (!(error instanceof HubError) || error.kind === "revoked" || !live()) throw error;
     }
   }
   if (!live()) return;
@@ -561,8 +572,9 @@ export async function reconcileNetworkRequests(deps: NetworkRequestDeps, binding
         end = null;
       }
     }
-    if (stopped) return stopped;
     if (!end || handedOn(end)) {
+      await retainNetworkWait(deps, binding, hub, receipt, shown, now, live);
+      if (stopped) return stopped;
       if (receipt.last_error !== HANDED_ON_UNREADABLE && writeLocal(deps, receipt, now,
         () => deps.queueRepo.update({ qitemId: local.qitemId, actorSession: OPENRIG_SENDER, transitionNote: HANDED_ON_UNREADABLE }))) {
         noteError(deps, receipt, HANDED_ON_UNREADABLE);

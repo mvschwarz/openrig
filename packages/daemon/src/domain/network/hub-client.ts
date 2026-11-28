@@ -133,7 +133,7 @@ export const connectMcpHub: HubConnect = async (hubUrl, token, signal) => {
     redirectPolicy: "same-origin",
   });
   // Reuse one advertised catalog in this session; MCP's list-changed notification invalidates it.
-  let catalog: Promise<Tool[]> | null = null;
+  let catalog: Array<Promise<{ tools: Tool[]; nextCursor?: string }>> | null = null;
   const client = new Client({ name: "openrig-network-connector", version: "1" }, {
     listChanged: { tools: { autoRefresh: false, debounceMs: 0, onChanged: () => { catalog = null; } } },
   });
@@ -183,20 +183,21 @@ export const connectMcpHub: HubConnect = async (hubUrl, token, signal) => {
       return { ...item(created), ...(typeof warning?.code === "string" ? { createWarning: warning.code } : {}) };
     },
     offers: async (tool, inputProperty) => {
+      const pages = catalog ??= [];
       try {
-        catalog ??= (async () => {
-          const tools: Tool[] = [];
-          let cursor: string | undefined;
-          do {
-            const page = await client.listTools(cursor === undefined ? undefined : { cursor });
-            tools.push(...page.tools);
-            cursor = page.nextCursor;
-          } while (cursor);
-          return tools;
-        })().catch((error) => { catalog = null; throw error; });
-        const listed = (await catalog).find((entry) => entry.name === tool);
-        return !!listed && (inputProperty === undefined || Object.hasOwn(listed.inputSchema.properties ?? {}, inputProperty));
+        let cursor: string | undefined;
+        for (let index = 0; ; index++) {
+          pages[index] ??= client.listTools(cursor === undefined ? undefined : { cursor });
+          const page = await pages[index]!;
+          // A list-changed notification during the read withdraws this catalog, including positive matches.
+          if (catalog !== pages) return false;
+          const listed = page.tools.find(entry => entry.name === tool);
+          if (listed) return inputProperty === undefined || Object.hasOwn(listed.inputSchema.properties ?? {}, inputProperty);
+          if (!page.nextCursor) return false;
+          cursor = page.nextCursor;
+        }
       } catch (error) {
+        if (catalog === pages) catalog = null;
         throw hubFailure(error);
       }
     },

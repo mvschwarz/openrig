@@ -346,18 +346,25 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
         if (question) {
           let advertised: boolean;
           try { advertised = await hub.offers("rig_queue_create", "requesterOf"); } catch (error) {
-            if (!(error instanceof HubError) || error.kind === "revoked") throw error;
+            if (!(error instanceof HubError) || error.kind === "revoked" || !live()) throw error;
             // Capability discovery can fail while show still works: skip this write, not answer reconciliation.
             throw new HubError("refused", `The requester wait remains local: ${error.message}`, error.code);
           }
           if (!advertised) throw new HubError("refused", "This hub does not advertise requester-question waits; the wait remains local.");
-          const shown = await hub.show(receipt.hub_qitem_id);
-          const hubQuestion = await hub.show(question.hub_qitem_id);
-          const current = deps.queueRepo.getById(end.qitemId);
-          const localQuestion = deps.queueRepo.getById(end.blockedOn);
-          if (live() && localQuestion && !FINAL.has(localQuestion.state) && !HUB_CLOSED.has(hubQuestion.state) && current?.state === "blocked" && current.blockedOn === end.blockedOn && !HUB_CLOSED.has(shown.state)
-            && (shown.state !== "blocked" || shown.blockedOn !== question.hub_qitem_id)) {
-            await hub.block(receipt.hub_qitem_id, question.hub_qitem_id);
+          try {
+            const shown = await hub.show(receipt.hub_qitem_id);
+            const hubQuestion = await hub.show(question.hub_qitem_id);
+            const current = deps.queueRepo.getById(end.qitemId);
+            const localQuestion = deps.queueRepo.getById(end.blockedOn);
+            if (live() && localQuestion && !FINAL.has(localQuestion.state) && !HUB_CLOSED.has(hubQuestion.state) && current?.state === "blocked" && current.blockedOn === end.blockedOn && !HUB_CLOSED.has(shown.state)
+              && (!shown.blockedOn || shown.blockedOn === question.hub_qitem_id)
+              && (shown.state !== "blocked" || shown.blockedOn !== question.hub_qitem_id)) {
+              await hub.block(receipt.hub_qitem_id, question.hub_qitem_id);
+            }
+          } catch (error) {
+            if (!(error instanceof HubError) || error.kind === "revoked" || !live()) throw error;
+            // Wait reporting is optional; a failed read or write cannot prevent other answers returning.
+            throw new HubError("refused", `The requester wait remains local: ${error.message}`, error.code);
           }
         }
       }

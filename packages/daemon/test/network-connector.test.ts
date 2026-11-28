@@ -763,6 +763,111 @@ describe("network connector", () => {
       return { binding: bindings.get(binding.id)!, work: repo.getById(work.qitemId)! };
     };
 
+    it.each(["", "   ", 42, null])("CR rejects explicitly malformed requester target %j before the peer route", async (requesterOf) => {
+      const binding = bind();
+      await expect(originateNetworkRequest(deps, binding, { peer: PEER, requesterOf, requestId: "malformed-target", body: "Which audience?" })).rejects.toMatchObject({ code: "invalid_request_route" });
+      expect(hub.creates).toBe(0);
+      expect(repo.getById("malformed-target")).toBeNull();
+    });
+
+    it.each([false, true])("CR rollback recovery keeps the first work version (later dependency=%s)", async (changed) => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const input = { requesterOf: work.qitemId, requestId: "rollback-question", body: "Which audience?" };
+      const update = repo.updateWithinTransaction.bind(repo);
+      const spy = vi.spyOn(repo, "updateWithinTransaction").mockImplementation(change => {
+        if (change.qitemId === work.qitemId && change.blockedOn === input.requestId) {
+          spy.mockRestore(); throw new Error("fixture: wait transaction rolled back");
+        }
+        return update(change);
+      });
+      await expect(originateNetworkRequest(deps, binding, input)).rejects.toThrow("wait transaction rolled back");
+      expect(db.prepare("SELECT count(*) AS n FROM network_requests WHERE local_qitem_id = ?").get(input.requestId)).toEqual({ n: 0 });
+      if (changed) {
+        await repo.create({ qitemId: "owner-later-wait", sourceSession: "dev-impl@lab", destinationSession: "dev-impl@lab", body: "Later decision", nudge: false });
+        repo.update({ qitemId: work.qitemId, actorSession: "dev-impl@lab", state: "blocked", blockedOn: "owner-later-wait" });
+      }
+      expect((await originateNetworkRequest(deps, binding, input)).state).toBe("sent");
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: changed ? "owner-later-wait" : input.requestId });
+    });
+
+    it("CR wait notifications follow the receipt commit", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const observed: boolean[] = [];
+      const notify = EventBus.prototype.notifySubscribers;
+      vi.spyOn(EventBus.prototype, "notifySubscribers").mockImplementation(function(this: EventBus, event) {
+        observed.push(db.inTransaction); return notify.call(this, event);
+      });
+      await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "commit-question", body: "Which audience?" });
+      expect(observed.length).toBeGreaterThan(0);
+      expect(observed).not.toContain(true);
+    });
+
+    it.each([
+      ["work", "unavailable"], ["question", "unavailable"], ["write", "unavailable"],
+      ["work", "revoked"], ["question", "revoked"], ["write", "revoked"],
+    ] as const)("CR optional wait %s failure %s preserves answer or revocation handling", async (stage, kind) => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const sent = await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "optional-question", body: "Which audience?" });
+      const other = await originateNetworkRequest(deps, binding, { peer: PEER, requestId: "other-answer", body: "Other question" });
+      Object.assign(hub.items.get(other.hubQitemId)!, { state: "done", closureReason: "no-follow-on", resolution: "Other answer" });
+      let failed = false;
+      const connect: HubConnect = async (...args) => {
+        const session = await hub.connect(...args);
+        return { ...session, show: async id => {
+          if (!failed && ((stage === "work" && id === "hub-work") || (stage === "question" && id === sent.hubQitemId))) {
+            failed = true; throw new HubError(kind, "fixture: optional wait read failed");
+          }
+          return session.show(id);
+        }, block: async (...blockArgs) => {
+          if (stage === "write") throw new HubError(kind, "fixture: optional wait write failed");
+          return session.block(...blockArgs);
+        } };
+      };
+      await runNetworkBindingPass({ ...deps, connect }, binding);
+      if (kind === "unavailable") expect(repo.getById("other-answer")).toMatchObject({ state: "done", resolution: "Other answer" });
+      else expect(repo.getById("other-answer")!.state).toBe("blocked");
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: "optional-question" });
+    });
+
+    it("CR wait reporting preserves another hub dependency", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "hub-block-question", body: "Which audience?" });
+      hub.add("hub-owner-dependency", "Owner-selected dependency");
+      Object.assign(hub.items.get("hub-work")!, { state: "blocked", blockedOn: "hub-owner-dependency" });
+      await runNetworkBindingPass(deps, binding);
+      expect(hub.items.get("hub-work")).toMatchObject({ state: "blocked", blockedOn: "hub-owner-dependency" });
+    });
+
+    it.each(["unavailable", "revoked"] as const)("CR blocker read %s remains generic or stops on revocation", async (kind) => {
+      const binding = bind();
+      const first = await originateNetworkRequest(deps, binding, { peer: PEER, requestId: "blocked-answer", body: "First question" });
+      const second = await originateNetworkRequest(deps, binding, { peer: PEER, requestId: "readable-answer", body: "Second question" });
+      Object.assign(hub.items.get(first.hubQitemId)!, { state: "blocked", blockedOn: "unreadable-blocker" });
+      Object.assign(hub.items.get(second.hubQitemId)!, { state: "done", closureReason: "no-follow-on", resolution: "Answer still returns" });
+      hub.duringShow = id => { if (id === "unreadable-blocker") throw new HubError(kind, "fixture: blocker read failed"); };
+      await runNetworkBindingPass(deps, binding);
+      if (kind === "unavailable") {
+        expect(repo.getById("blocked-answer")!.networkWait).toMatchObject({ kind: "another-request", hubQitemId: null });
+        expect(repo.getById("readable-answer")).toMatchObject({ state: "done", resolution: "Answer still returns" });
+      } else expect(repo.getById("readable-answer")!.state).toBe("blocked");
+    });
+
+    it("CR an unreadable hub handoff clears a previous wait projection", async () => {
+      const binding = bind();
+      const sent = await originateNetworkRequest(deps, binding, { peer: PEER, requestId: "handoff-wait", body: "Which audience?" });
+      Object.assign(hub.items.get(sent.hubQitemId)!, { state: "blocked", blockedOn: null });
+      await runNetworkBindingPass(deps, binding);
+      expect(repo.getById("handoff-wait")!.networkWait).toMatchObject({ kind: "another-request" });
+      Object.assign(hub.items.get(sent.hubQitemId)!, { state: "handed-off", successor: null });
+      await runNetworkBindingPass(deps, binding);
+      expect(repo.getById("handoff-wait")).not.toHaveProperty("networkWait");
+      expect(repo.getById("handoff-wait")!.state).toBe("blocked");
+    });
+
     it.each([true, false])("R1 uncertain retry preserves the current dependency (owner selected another=%s)", async (changed) => {
       hub.requesterQuestions = true;
       const { binding, work } = await incoming();
@@ -798,7 +903,7 @@ describe("network connector", () => {
         return row;
       });
       const delayed = originateNetworkRequest(deps, binding, input);
-      await waiting;
+      await Promise.race([waiting, delayed.then(() => { throw new Error("Origination finished before reaching the overlap gate"); })]);
       try {
         const hubId = networkHubRequestId(binding, input.requestId);
         hub.loseCreateAnswer.add(hubId);
@@ -815,8 +920,8 @@ describe("network connector", () => {
       hub.requesterQuestions = true;
       const { binding, work } = await incoming();
       const input = { requesterOf: work.qitemId, requestId: "qitem-incomplete", body: "Which audience?" };
-      const update = repo.update.bind(repo);
-      const spy = vi.spyOn(repo, "update").mockImplementation((change) => {
+      const update = repo.updateWithinTransaction.bind(repo);
+      const spy = vi.spyOn(repo, "updateWithinTransaction").mockImplementation((change) => {
         if (change.qitemId === work.qitemId && change.blockedOn === input.requestId) {
           spy.mockRestore(); throw new Error("fixture: initial wait interrupted");
         }
@@ -1031,6 +1136,7 @@ describe("network connector", () => {
       Object.assign(hub.items.get(sent.hubQitemId)!, { state, closureReason: state === "failed" ? null : state, resolution: "No approval was given." });
       await runNetworkBindingPass(deps, binding);
       expect(repo.getById("qitem-not-approved")).toMatchObject({ state: state === "failed" ? "failed" : "done", resolution: "No approval was given." });
+      if (state !== "failed") expect(repo.getById("qitem-not-approved")!.closureReason).toBe(state);
       expect(repo.getById(work.qitemId)!.state).toBe("pending");
       expect(hub.items.get("hub-work")!.state).toBe("in-progress");
     });

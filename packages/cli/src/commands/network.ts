@@ -256,10 +256,12 @@ no name-based fallback is sent. On support, the same work waits on the question
 receipt and resumes on its actual result. A person decision is never inferred.
 With --requester-of, the optional positional argument names the binding only.`)
     .action(async (first: string | undefined, second: string | undefined, opts: { id: string; bodyFile: string; summary?: string; requesterOf?: string; json?: boolean }, command: Command) => {
-      if (opts.requesterOf && second !== undefined) return command.error("error: --requester-of excludes a peer argument", { code: "commander.excessArguments", exitCode: 1 });
-      if (!opts.requesterOf && first === undefined) return missingArgument(command, "peer");
-      const peer = opts.requesterOf ? undefined : second ?? first;
-      const ref = opts.requesterOf ? first ?? ownSeat(command) : second === undefined ? ownSeat(command) : first!;
+      const requesterRoute = opts.requesterOf !== undefined;
+      if (requesterRoute && !opts.requesterOf?.trim()) return command.error("error: --requester-of needs a non-empty work id", { code: "commander.invalidArgument", exitCode: 1 });
+      if (requesterRoute && second !== undefined) return command.error("error: --requester-of excludes a peer argument", { code: "commander.excessArguments", exitCode: 1 });
+      if (!requesterRoute && first === undefined) return missingArgument(command, "peer");
+      const peer = requesterRoute ? undefined : second ?? first;
+      const ref = requesterRoute ? first ?? ownSeat(command) : second === undefined ? ownSeat(command) : first!;
       let body: string;
       try { body = readFileSync(opts.bodyFile, "utf8"); } catch (error) {
         console.error(`Can't read the body file: ${(error as Error).message}`);
@@ -269,7 +271,7 @@ With --requester-of, the optional positional argument names the binding only.`)
       const daemon = await client();
       if (!daemon) return;
       const res = await daemon.post<Record<string, unknown>>(`/api/network/bindings/${encodeURIComponent(ref)}/requests`,
-        { ...(opts.requesterOf ? { requesterOf: opts.requesterOf } : { peer }), requestId: opts.id, body, summary: opts.summary },
+        { ...(requesterRoute ? { requesterOf: opts.requesterOf } : { peer }), requestId: opts.id, body, summary: opts.summary },
         { headers: operatorAuthHeaders(), timeoutMs: ACCOUNT_WRITE_TIMEOUT_MS });
       finish(res.status, res.data, opts.json, (d) => String(d.message ?? ""));
       // Refused by the hub: the request is recorded and closed failed, which isn't success.
