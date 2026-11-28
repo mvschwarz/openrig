@@ -398,4 +398,155 @@ describe("changing an existing seat's launch directory", () => {
     expect(tmux.sendText).not.toHaveBeenCalled();
     expect(tmux.sendKeys).not.toHaveBeenCalled();
   });
+
+  it("succeeds when expectedNodeId and expectedCwd match the current seat, including via a symlink alias", async () => {
+    const seat = seed();
+    const alias = path.join(root, "old-link");
+    fs.symlinkSync(oldCwd, alias, process.platform === "win32" ? "junction" : "dir");
+    const result = await service.setCwd({
+      seatRef: seat.sessionName,
+      cwd: newCwd,
+      reason: "planned move",
+      expectedNodeId: seat.node.id,
+      expectedCwd: `${alias}${path.sep}`,
+    });
+    expect(result).toMatchObject({ ok: true, from: oldCwd, to: fs.realpathSync(newCwd), changed: true });
+    expect(savedCwd(seat.node.id)).toBe(fs.realpathSync(newCwd));
+    expect(cwdEvents()).toHaveLength(1);
+  });
+
+  it("succeeds when only one expectation is supplied and matches", async () => {
+    const seat = seed();
+    const firstDest = path.join(root, "first-dest");
+    const secondDest = path.join(root, "second-dest");
+    expect(await service.setCwd({
+      seatRef: seat.sessionName,
+      cwd: firstDest,
+      reason: "node-only guard",
+      expectedNodeId: seat.node.id,
+    })).toMatchObject({ ok: true, to: fs.realpathSync(firstDest), changed: true });
+    expect(await service.setCwd({
+      seatRef: seat.sessionName,
+      cwd: secondDest,
+      reason: "cwd-only guard",
+      expectedCwd: firstDest,
+    })).toMatchObject({ ok: true, to: fs.realpathSync(secondDest), changed: true });
+    expect(savedCwd(seat.node.id)).toBe(fs.realpathSync(secondDest));
+  });
+
+  it("refuses with cwd_baseline_changed before creating the destination when expectedNodeId does not match", async () => {
+    const seat = seed();
+    const before = custody();
+    const staleNodeId = "01JSTALENODEID000000000000";
+    const result = await service.setCwd({
+      seatRef: seat.sessionName,
+      cwd: newCwd,
+      reason: "planned move",
+      expectedNodeId: staleNodeId,
+      expectedCwd: oldCwd,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      code: "cwd_baseline_changed",
+      expected: { nodeId: staleNodeId, cwd: oldCwd },
+      current: { nodeId: seat.node.id, cwd: oldCwd },
+    });
+    expect(fs.existsSync(newCwd)).toBe(false);
+    expect(savedCwd(seat.node.id)).toBe(oldCwd);
+    expect(custody()).toEqual(before);
+    expect(cwdEvents()).toEqual([]);
+  });
+
+  it("refuses with cwd_baseline_changed before creating the destination when expectedCwd does not match", async () => {
+    const seat = seed();
+    const movedByOther = path.join(root, "moved-elsewhere");
+    fs.mkdirSync(movedByOther);
+    db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(movedByOther, seat.node.id);
+    const before = custody();
+    const result = await service.setCwd({
+      seatRef: seat.sessionName,
+      cwd: newCwd,
+      reason: "planned move",
+      expectedNodeId: seat.node.id,
+      expectedCwd: oldCwd,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      code: "cwd_baseline_changed",
+      expected: { nodeId: seat.node.id, cwd: oldCwd },
+      current: { nodeId: seat.node.id, cwd: movedByOther },
+    });
+    expect(fs.existsSync(newCwd)).toBe(false);
+    expect(savedCwd(seat.node.id)).toBe(movedByOther);
+    expect(custody()).toEqual(before);
+    expect(cwdEvents()).toEqual([]);
+  });
+
+  it("refuses with cwd_baseline_changed when the seat currently has no saved cwd and expectedCwd is given", async () => {
+    const seat = seed();
+    db.prepare("UPDATE nodes SET cwd = NULL WHERE id = ?").run(seat.node.id);
+    const result = await service.setCwd({
+      seatRef: seat.sessionName,
+      cwd: newCwd,
+      reason: "planned move",
+      expectedCwd: oldCwd,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      code: "cwd_baseline_changed",
+      expected: { cwd: oldCwd },
+      current: { nodeId: seat.node.id, cwd: null },
+    });
+    expect(fs.existsSync(newCwd)).toBe(false);
+    expect(savedCwd(seat.node.id)).toBeNull();
+    expect(cwdEvents()).toEqual([]);
+  });
+
+  it("refuses with cwd_baseline_changed when both expectedNodeId and expectedCwd mismatch", async () => {
+    const seat = seed();
+    const staleNodeId = "01JSTALENODEID000000000000";
+    const staleCwd = path.join(root, "stale-cwd");
+    const result = await service.setCwd({
+      seatRef: seat.sessionName,
+      cwd: newCwd,
+      reason: "planned move",
+      expectedNodeId: staleNodeId,
+      expectedCwd: staleCwd,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      code: "cwd_baseline_changed",
+      expected: { nodeId: staleNodeId, cwd: staleCwd },
+      current: { nodeId: seat.node.id, cwd: oldCwd },
+    });
+    expect(fs.existsSync(newCwd)).toBe(false);
+    expect(savedCwd(seat.node.id)).toBe(oldCwd);
+    expect(cwdEvents()).toEqual([]);
+  });
+
+  it.each([
+    { label: "empty expectedNodeId", extra: { expectedNodeId: "" } },
+    { label: "whitespace expectedNodeId", extra: { expectedNodeId: "node 1" } },
+    { label: "non-string expectedNodeId", extra: { expectedNodeId: 42 } },
+    { label: "null expectedNodeId", extra: { expectedNodeId: null } },
+    { label: "empty expectedCwd", extra: { expectedCwd: "" } },
+    { label: "relative expectedCwd", extra: { expectedCwd: "relative/dir" } },
+    { label: "nul-byte expectedCwd", extra: { expectedCwd: "/tmp/bad\0dir" } },
+    { label: "non-string expectedCwd", extra: { expectedCwd: 42 } },
+    { label: "null expectedCwd", extra: { expectedCwd: null } },
+  ])("rejects malformed expectation ($label) with invalid_expectation before creating the destination", async ({ extra }) => {
+    const seat = seed();
+    const before = custody();
+    const result = await service.setCwd({
+      seatRef: seat.sessionName,
+      cwd: newCwd,
+      reason: "planned move",
+      ...extra,
+    });
+    expect(result).toMatchObject({ ok: false, code: "invalid_expectation" });
+    expect(fs.existsSync(newCwd)).toBe(false);
+    expect(savedCwd(seat.node.id)).toBe(oldCwd);
+    expect(custody()).toEqual(before);
+    expect(cwdEvents()).toEqual([]);
+  });
 });

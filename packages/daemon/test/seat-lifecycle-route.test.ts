@@ -152,7 +152,16 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     expect(stopSeat).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ operator: null }));
   });
 
-  it.each(["null", "[]", "{broken", '{"cwd": 42, "reason": "isolate"}'])("set-cwd rejects malformed input %s without an internal error", async body => {
+  it.each([
+    "null",
+    "[]",
+    "{broken",
+    '{"cwd": 42, "reason": "isolate"}',
+    '{"cwd": "/work/seat", "reason": "isolate", "expectedNodeId": 42}',
+    '{"cwd": "/work/seat", "reason": "isolate", "expectedNodeId": ""}',
+    '{"cwd": "/work/seat", "reason": "isolate", "expectedCwd": "relative/path"}',
+    '{"cwd": "/work/seat", "reason": "isolate", "expectedCwd": null}',
+  ])("set-cwd rejects malformed input %s without an internal error", async body => {
     const res = await setup.app.request("/api/seat/set-cwd/planner%40project", {
       method: "POST", headers: { "Content-Type": "application/json" }, body,
     });
@@ -160,7 +169,51 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     expect(await res.json()).toMatchObject({ ok: false });
   });
 
-  it.each([["cwd_configuration_changed", 409], ["cwd_destination_conflict", 409], ["cwd_check_failed", 500], ["cwd_persistence_failed", 500]] as const)("set-cwd exposes %s with its recovery details", async (code, status) => {
+  it("set-cwd forwards expectedNodeId and expectedCwd when provided", async () => {
+    const result = { ok: true as const, seat: {} as never, from: "/workspace", to: "/workspace/planner",
+      changed: true, effect: "next_launch" as const, warnings: [] };
+    const setCwd = vi.spyOn(SeatLifecycleService.prototype, "setCwd").mockResolvedValue(result);
+    const res = await post("set-cwd", "planner@project", {
+      cwd: "/workspace/planner",
+      reason: "isolate planning",
+      expectedNodeId: "node-123",
+      expectedCwd: "/workspace",
+    });
+    expect(res.status).toBe(200);
+    expect(setCwd).toHaveBeenCalledExactlyOnceWith({
+      seatRef: "planner@project",
+      cwd: "/workspace/planner",
+      reason: "isolate planning",
+      operator: null,
+      expectedNodeId: "node-123",
+      expectedCwd: "/workspace",
+    });
+  });
+
+  it("set-cwd returns 409 cwd_baseline_changed from the real route when an expectation fails", async () => {
+    const { node, sessionName } = seedSeat();
+    const res = await post("set-cwd", sessionName, {
+      cwd: "/tmp/openrig-should-not-be-created-3883",
+      reason: "planned move",
+      expectedNodeId: "01JSTALENODEID000000000000",
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      code: "cwd_baseline_changed",
+      expected: { nodeId: "01JSTALENODEID000000000000" },
+      current: { nodeId: node.id, cwd: null },
+    });
+  });
+
+  it.each([
+    ["invalid_expectation", 400],
+    ["cwd_baseline_changed", 409],
+    ["cwd_configuration_changed", 409],
+    ["cwd_destination_conflict", 409],
+    ["cwd_check_failed", 500],
+    ["cwd_persistence_failed", 500],
+  ] as const)("set-cwd exposes %s with its recovery details", async (code, status) => {
     const result = { ok: false as const, code, message: "The working directory was not changed",
       guidance: "Inspect the reported files and seat status", warnings: ["Protected destination file: /work/seat/.claude/agents/reviewer.md"] };
     vi.spyOn(SeatLifecycleService.prototype, "setCwd").mockResolvedValue(result);

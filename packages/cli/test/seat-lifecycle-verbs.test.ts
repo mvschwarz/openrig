@@ -312,6 +312,70 @@ describe("rig seat set-cwd", () => {
     expect(errors.join("\n")).toContain("inspect and move/merge");
     expect(exitCode).toBe(1);
   });
+
+  it("forwards --expected-node-id and --expected-cwd in the request body when given", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, seat: { logicalId: "planner", rigName: "project" },
+      from: "/srv/shared", to: "/srv/remote/planner", changed: true, effect: "next_launch", warnings: [] } }, calls);
+    const { exitCode } = await captureLogs(() => makeCommand(deps).parseAsync([
+      ...args, "--expected-node-id", "01JNODE123", "--expected-cwd", "/srv/shared", "--json",
+    ]).then(() => {}));
+    expect(calls).toEqual([{ path: "/api/seat/set-cwd/planner%40project", body: {
+      cwd: "/srv/remote/space dir/../planner",
+      reason: "isolate planning",
+      operator: undefined,
+      expectedNodeId: "01JNODE123",
+      expectedCwd: "/srv/shared",
+    } }]);
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("omits the other expectation field when only one of --expected-node-id or --expected-cwd is passed", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const okData = { ok: true, seat: { logicalId: "planner", rigName: "project" },
+      from: "/srv/shared", to: "/srv/remote/planner", changed: true, effect: "next_launch", warnings: [] };
+    await captureLogs(() => makeCommand(makeDeps({ status: 200, data: okData }, calls)).parseAsync([
+      ...args, "--expected-node-id", "01JNODE123", "--json",
+    ]).then(() => {}));
+    await captureLogs(() => makeCommand(makeDeps({ status: 200, data: okData }, calls)).parseAsync([
+      ...args, "--expected-cwd", "/srv/shared", "--json",
+    ]).then(() => {}));
+    expect(calls[0]!.body).toEqual({
+      cwd: "/srv/remote/space dir/../planner",
+      reason: "isolate planning",
+      operator: undefined,
+      expectedNodeId: "01JNODE123",
+    });
+    expect(calls[1]!.body).toEqual({
+      cwd: "/srv/remote/space dir/../planner",
+      reason: "isolate planning",
+      operator: undefined,
+      expectedCwd: "/srv/shared",
+    });
+  });
+
+  it("surfaces a cwd_baseline_changed conflict in JSON and plain output with exit code 1", async () => {
+    const data = {
+      ok: false,
+      code: "cwd_baseline_changed",
+      message: "The seat's node id changed since you inspected it (expected 01JOLD, currently 01JNEW); no directory was created and the cwd was not changed.",
+      guidance: "Re-inspect the seat with: rig ps --nodes --full --json or rig seat status planner@project",
+      expected: { nodeId: "01JOLD" },
+      current: { nodeId: "01JNEW", cwd: "/srv/shared" },
+    };
+    const jsonOut = await captureLogs(() => makeCommand(makeDeps({ status: 409, data }, [])).parseAsync([
+      ...args, "--expected-node-id", "01JOLD", "--json",
+    ]).then(() => {}));
+    expect(JSON.parse(jsonOut.logs[0]!)).toEqual(data);
+    expect(jsonOut.exitCode).toBe(1);
+
+    const plainOut = await captureLogs(() => makeCommand(makeDeps({ status: 409, data }, [])).parseAsync([
+      ...args, "--expected-node-id", "01JOLD",
+    ]).then(() => {}));
+    expect(plainOut.errors.join("\n")).toContain("no directory was created");
+    expect(plainOut.errors.join("\n")).toContain("rig ps --nodes --full --json");
+    expect(plainOut.exitCode).toBe(1);
+  });
 });
 
 describe("rig seat set-model", () => {

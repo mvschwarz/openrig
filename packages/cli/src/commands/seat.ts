@@ -1742,6 +1742,8 @@ A seat can switch itself (its CLI may end when it retires; the daemon finishes).
     .argument("<seat>", "Canonical session name or logical seat ref")
     .requiredOption("--cwd <directory>", "Absolute working directory on the daemon's host; created if missing")
     .requiredOption("--reason <text>", "Audit reason for the future launch directory")
+    .option("--expected-node-id <id>", "Only change if the resolved seat still has this node id (from rig ps --nodes --full --json); refuses with cwd_baseline_changed before creating the folder or saving if it changed. An older daemon ignores this field.")
+    .option("--expected-cwd <directory>", "Only change if the seat's saved launch directory still matches this absolute path on the daemon's host; refuses with cwd_baseline_changed before creating the folder or saving if it changed. An older daemon ignores this field.")
     .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
     .option("--json", "JSON output for agents")
     .description("Save an existing seat's working directory for its next fresh launch or rebuild handover")
@@ -1755,6 +1757,11 @@ an unrecorded file with different content, or two sources for one destination
 refuses the change, naming those paths. It's a point-in-time check, not a
 guarantee against later changes; at adoption, launch applies its own policy.
 (A refusal may leave the new folder created; nothing else changes.)
+
+Pass --expected-node-id and/or --expected-cwd from an earlier inspection to guard
+against a seat recreated or moved in between: if either no longer matches, set-cwd
+refuses with cwd_baseline_changed before creating the new folder or saving anything.
+An older daemon ignores these expectation fields.
 
 The saved directory doesn't move the running process. Adopt it with
   rig seat launch <seat> --fresh --stop --reason <text>   (a blank conversation) or
@@ -1773,10 +1780,17 @@ rig seat restart --keep-conversation (Codex) isn't adoption: it respawns in the
 directory it observes from the running process.
 
 Files in the old directory are left as they are; other seats may still use them.
-Example:
-  rig seat set-cwd planning-lead@project --cwd /work/project/seats/planning-lead --reason "isolate planning"`)
-    .action(async (seat: string, opts: { cwd: string; reason: string; operator?: string; json?: boolean }) => {
-      await runLifecycleVerb("set-cwd", seat, { cwd: opts.cwd, reason: opts.reason, operator: opts.operator }, opts, data => {
+Examples:
+  rig seat set-cwd planning-lead@project --cwd /work/project/seats/planning-lead --reason "isolate planning"
+  rig seat set-cwd planning-lead@project --cwd /work/project/seats/planning-lead --expected-node-id 01J... --expected-cwd /work/project --reason "isolate planning"`)
+    .action(async (seat: string, opts: { cwd: string; reason: string; expectedNodeId?: string; expectedCwd?: string; operator?: string; json?: boolean }) => {
+      await runLifecycleVerb("set-cwd", seat, {
+        cwd: opts.cwd,
+        reason: opts.reason,
+        operator: opts.operator,
+        ...(opts.expectedNodeId !== undefined ? { expectedNodeId: opts.expectedNodeId } : {}),
+        ...(opts.expectedCwd !== undefined ? { expectedCwd: opts.expectedCwd } : {}),
+      }, opts, data => {
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         console.log(`Launch directory for ${s?.logicalId}@${s?.rigName}: ${String(data["to"])}${data["changed"] === false ? " (already selected)" : " (audited)"}.`);
         console.log("set-cwd wrote nothing there but the folder: the next fresh launch or rebuild handover writes its startup files.");
