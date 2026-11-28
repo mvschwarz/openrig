@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 
@@ -15,12 +15,17 @@ describe.skipIf(process.platform === "win32")("native tmux pane paths", () => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tmux-cwd-"));
     const socket = path.join(temp, "owned.sock");
     const cwd = path.join(temp, "work|assets|120");
+    const started = path.join(temp, "started");
     fs.mkdirSync(cwd);
     const env = { ...process.env, HOME: temp };
     delete env.TMUX;
     delete env.TMUX_TMPDIR;
     try {
-      await runFile("tmux", ["-f", "/dev/null", "-S", socket, "new-session", "-d", "-s", "fixture", "-x", "120", "-y", "30", "-c", cwd, "sleep 60"], { env });
+      await runFile("tmux", ["-f", "/dev/null", "-S", socket, "new-session", "-d", "-s", "fixture", "-x", "120", "-y", "30", "-c", cwd,
+        `touch ${shellQuote(started)} && exec sleep 60`], { env });
+      // new-session returns before the pane's process has moved into its directory, and until then tmux reports the
+      // directory its own server runs in. The pane's command marks that it has started, from inside the directory.
+      await vi.waitFor(() => expect(fs.existsSync(started)).toBe(true), { timeout: 10_000, interval: 10 });
       const adapter = new TmuxAdapter(async cmd => {
         expect(cmd).toMatch(/^tmux /);
         return (await run(`tmux -S ${shellQuote(socket)} ${cmd.slice(5)}`, { env })).stdout;

@@ -42,14 +42,15 @@ const client = { get: async () => ({ status: 200, data: { qitemId: 'fixture', st
 const lifecycleDeps = { readFile: p => p === STATE_FILE ? JSON.stringify({ pid: 123, port: 7777, db: 'scratch', startedAt: new Date().toISOString() }) : null,
  exists: p => p === STATE_FILE, isProcessAlive: () => true, fetch: async () => ({ ok: true }) };
 await new Command().addCommand(queueCommand({ lifecycleDeps, clientFactory: () => client })).parseAsync(['node', 'rig', 'queue', 'resolve', 'fixture', '--decision', 'scratch', '--no-notify', '--json']);
-fs.writeFileSync(${JSON.stringify(output)}, JSON.stringify({ terminal: terminalAuthHeaders().Authorization, auth }));
+fs.writeFileSync(${JSON.stringify(`${output}.tmp`)}, JSON.stringify({ terminal: terminalAuthHeaders().Authorization, auth }));
+fs.renameSync(${JSON.stringify(`${output}.tmp`)}, ${JSON.stringify(output)});
 `);
       await run(["set-option", "-g", "default-command", [process.execPath, "--import", pathToFileURL(require.resolve("tsx")).href, script].map(shellQuote).join(" ")]);
       const adapter = new TmuxAdapter(execTmuxCommand, undefined, execArgvCommand, ["-S", socket]);
       const env = Object.fromEntries(Object.entries(daemon.deps.sessionEnv!).filter((entry): entry is [string, string] => entry[1] !== undefined));
       expect((await adapter.createSession("seat", home, { ...env, OPENRIG_SESSION_NAME: "seat@fixture" })).ok).toBe(true);
-      for (let n = 0; n < 200 && !existsSync(output); n++) await new Promise(resolve => setTimeout(resolve, 25));
-      expect(existsSync(output), "scratch seat did not finish CLI header resolution").toBe(true);
+      // The seat renames its finished file into place, so the file is never seen half-written.
+      await vi.waitFor(() => expect(existsSync(output), "scratch seat did not finish CLI header resolution").toBe(true), { timeout: 20_000, interval: 25 });
       expect(JSON.parse(readFileSync(output, "utf8"))).toEqual({ terminal: "Bearer synthetic-terminal", auth: "Bearer synthetic-auth" });
       expect(existsSync(join(home, "terminal-token"))).toBe(false);
       const global = await run(["show-environment", "-g"]);
