@@ -9,12 +9,18 @@
 // process, every replay, every version.
 //
 // THE CLOSED FACT SET (arch Q1): role · nodeKind · lifecycleState ·
-// runtime · pendingWorkCount (the sync pending-only SQL map) · the
-// derived canonical coordinate. Nothing else may influence selection.
+// externallyAttached · runtime · pendingWorkCount (the sync pending-only
+// SQL map) · the derived canonical coordinate. Nothing else may
+// influence selection.
 //
-// GATE ORDER (guard B4, pinned): nodeKind === "agent" AND
-// lifecycleState === "running" filter FIRST, then the managed-seat /
-// coordinate gates, then runtime match, then capacity ordering.
+// GATE ORDER (guard B4, pinned): nodeKind === "agent" AND the live gate
+// FIRST, then the managed-seat / coordinate gates, then runtime match,
+// then capacity ordering. The live gate is lifecycleState === "running",
+// or (#4042) an externally attached seat whose lifecycleState is
+// "unknown": a seat joined with `rig attach` runs in an outside program,
+// so OpenRig can't see whether it's running, but it reads its own queue,
+// so work routed to it reaches it, as it did while its record read
+// running. It still reports lifecycleState=unknown, never running.
 //
 // THE ONE STRING RULE (arch Q5 = guard B2): the seat identity used for
 // BOTH the tiebreak key AND the recorded destination is the DERIVED
@@ -39,6 +45,9 @@ export interface RoleSeatCandidateFacts {
   role: string | null;
   nodeKind: "agent" | "infrastructure";
   lifecycleState: string;
+  /** A seat joined with `rig attach` (an external CLI, node-inventory's externalAttachment): its liveness is unknown, and
+   *  it reads its own queue. Absent reads false. */
+  externallyAttached?: boolean;
   runtime: string | null;
   /** Pending-only backlog (state='pending' items; claimed/in-progress
    *  rank zero) — "least-loaded" = "least unclaimed backlog". */
@@ -119,7 +128,7 @@ export function selectRoleSeat(input: {
       disqualified.push(verdictOf(c, "role_not_declared"));
       continue;
     }
-    if (c.lifecycleState !== "running") {
+    if (c.lifecycleState !== "running" && !(c.externallyAttached === true && c.lifecycleState === "unknown")) {
       disqualified.push(verdictOf(c, `not_live(lifecycleState=${c.lifecycleState})`));
       continue;
     }

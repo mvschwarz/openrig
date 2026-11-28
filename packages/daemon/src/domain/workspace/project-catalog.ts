@@ -93,6 +93,26 @@ function selectInferred(catalogPath: string, id: string, selectedBy: CatalogInfe
   return { ...selected, selectedBy };
 }
 
+/** Each catalog entry's rig association (workspace.yaml `projects[].rigs`), and the ids whose `rigs` isn't a list of rig
+ *  names (ignored, with a warning). The one association rule: inferCatalogProject's rig step reads it, and so does the
+ *  queue's project inference for an untagged row. */
+export function catalogRigClaims(catalogPath: string, warnings: string[] = []): { claims: Map<string, string[]>; malformed: Set<string> } {
+  const claims = new Map<string, string[]>();
+  const malformed = new Set<string>();
+  for (const entry of catalogEntries(catalogPath)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const { id, rigs } = entry as { id?: unknown; rigs?: unknown };
+    if (typeof id !== "string" || rigs === undefined) continue;
+    if (!Array.isArray(rigs) || !rigs.every((name) => typeof name === "string")) {
+      warnings.push(`${catalogPath}: project '${id}' rigs must be a list of rig names; ignored it`);
+      malformed.add(id);
+      continue;
+    }
+    claims.set(id, rigs as string[]);
+  }
+  return { claims, malformed };
+}
+
 /** Steps 3-5 of project selection, used only where the catalog alone would stop
  *  with project_required: the calling rig's association (workspace.yaml
  *  `projects[].rigs`), then the unique deepest project root containing the
@@ -107,19 +127,7 @@ export function inferCatalogProject(
   signals: { rigName?: string | null; cwd?: string | null },
   warnings: string[],
 ): { id: string; root: string; selectedBy: CatalogInferenceBasis } {
-  const claims = new Map<string, string[]>();
-  const malformed = new Set<string>();
-  for (const entry of catalogEntries(catalogPath)) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-    const { id, rigs } = entry as { id?: unknown; rigs?: unknown };
-    if (typeof id !== "string" || rigs === undefined) continue;
-    if (!Array.isArray(rigs) || !rigs.every((name) => typeof name === "string")) {
-      warnings.push(`${catalogPath}: project '${id}' rigs must be a list of rig names; ignored it`);
-      malformed.add(id);
-      continue;
-    }
-    claims.set(id, rigs as string[]);
-  }
+  const { claims, malformed } = catalogRigClaims(catalogPath, warnings);
 
   const rig = signals.rigName ?? null;
   if (rig) {

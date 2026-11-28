@@ -1,6 +1,7 @@
 import { seatSkillPaths, recordSeatSkillWrite, recordSeatSkillFollowing, cleanSeatSkills } from "../src/domain/seat-skill-storage.js";
 import type { RestoreOrchestratorDeps } from "../src/domain/restore-orchestrator.js";
 import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
+import { ClaudeCodeAdapter, replaceClaudeFragment } from "../src/adapters/claude-code-adapter.js";
 import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
 import { startPiRecoveryServer, type RunnerRecoveryReply } from "../src/adapters/pi-recovery-rpc.js";
 import type { PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
@@ -138,6 +139,7 @@ describe("RestoreOrchestrator", () => {
 
   function createOrchestrator(opts?: {
     seatSkillSelection?: RestoreOrchestratorDeps["seatSkillSelection"];
+    resolveClaudeFragments?: RestoreOrchestratorDeps["resolveClaudeFragments"];
     tmux?: TmuxAdapter;
     claude?: ClaudeResumeAdapter;
     codex?: CodexResumeAdapter;
@@ -162,10 +164,107 @@ describe("RestoreOrchestrator", () => {
       freshLaunch: opts?.freshLaunch,
       freshLaunchAvailable: opts?.freshLaunchAvailable,
       seatSkillSelection: opts?.seatSkillSelection,
+      resolveClaudeFragments: opts?.resolveClaudeFragments,
       harnessNotStartedNotice: opts?.harnessNotStartedNotice,
       armContinuity: opts?.armContinuity,
     });
   }
+
+  it.each(["readable source", "unreadable source", "unresolved selection", "no recipe or saved fragments"] as const)("Claude restores the same conversation with %s", async mode => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-claude-fragments-"));
+    try {
+      const target = path.join(cwd, ".mcp.json");
+      const source = path.join(cwd, "fragment.json");
+      const previous = '{ "owner_value": "kept" }\n';
+      fs.writeFileSync(target, previous);
+      fs.writeFileSync(source, mode === "unreadable source" ? "[]" : '{"mcpServers":{"spec-mcp":{"command":"fixture"}}}');
+      const snapshot = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code", cwd }],
+        edges: [], resumeType: "claude_id", resumeToken: "same-conversation",
+      });
+      const tmux = mockTmux();
+      const claude = mockClaudeResume();
+      const adapter = new ClaudeCodeAdapter({
+        tmux, fsOps: {
+          readFile: file => fs.readFileSync(file, "utf8"), writeFile: fs.writeFileSync, replaceFragment: replaceClaudeFragment,
+          exists: fs.existsSync, mkdirp: dir => fs.mkdirSync(dir, { recursive: true }), copyFile: fs.copyFileSync,
+        },
+      });
+      const result = await createOrchestrator({
+        tmux, claude, listProcesses: nativeLineage("claude-code", "same-conversation"),
+        resolveClaudeFragments: async () => {
+          if (mode === "unresolved selection") return { ok: false, reason: mode };
+          if (mode === "no recipe or saved fragments") return { ok: false, reason: mode, missingRecipe: true };
+          return { ok: true, entries: [{
+            category: "runtime_resource", resourceType: "claude_mcp_fragment", onRestore: "follow_source",
+            effectiveId: "spec-mcp", sourceSpec: "fixture", sourcePath: cwd, resourcePath: "fragment.json", absolutePath: source,
+            classification: "safe_projection",
+          }] };
+        },
+      }).restore(snapshot.id, { adapters: { "claude-code": adapter } });
+      expect(result).toMatchObject({ ok: true, result: { nodes: [{ status: "resumed" }] } });
+      expect(vi.mocked(claude.resume).mock.calls.at(-1)?.slice(1, 3)).toEqual(["claude_id", "same-conversation"]);
+      if (mode !== "readable source") {
+        expect(fs.readFileSync(target, "utf8")).toBe(previous);
+        const reason = mode === "unreadable source" ? "a source was not a readable JSON object" : "Claude fragment selection couldn't be resolved";
+        const warnings = result.ok ? result.result.warnings : [];
+        if (mode === "no recipe or saved fragments") {
+          expect(warnings).not.toContainEqual(expect.stringContaining(reason));
+        } else {
+          expect(warnings).toContainEqual(expect.stringContaining(reason));
+        }
+      } else {
+        expect(JSON.parse(fs.readFileSync(target, "utf8"))).toEqual({
+          owner_value: "kept", mcpServers: { "spec-mcp": { command: "fixture" } },
+        });
+      }
+    } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  it("uses today's Claude fragments when an explicitly fresh seat also restores a checkpoint", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "restore-fresh-claude-fragments-"));
+    try {
+      const target = path.join(cwd, ".mcp.json");
+      const previousSource = path.join(cwd, "saved.json");
+      const currentSource = path.join(cwd, "current.json");
+      fs.writeFileSync(previousSource, '{"mcpServers":{"example":{"command":"saved"}}}');
+      fs.writeFileSync(currentSource, '{"mcpServers":{"example":{"command":"current"}}}');
+      const saved = {
+        category: "runtime_resource", resourceType: "claude_mcp_fragment", effectiveId: "saved",
+        sourceSpec: "fixture", sourcePath: cwd, resourcePath: "saved.json", absolutePath: previousSource,
+      } as const;
+      const snapshot = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code", cwd }],
+        edges: [], resumeType: "claude_id", resumeToken: "old-conversation", withCheckpoint: "worker",
+      });
+      const worker = snapshot.data.nodes.find(node => node.logicalId === "worker");
+      if (!worker) throw new Error("Expected the worker in the snapshot");
+      updateSnapshotData(snapshot, data => {
+        data.nodeStartupContext = { [worker.id]: {
+          runtime: "claude-code", projectionEntries: [saved], resolvedStartupFiles: [], startupActions: [],
+        } };
+      });
+      const tmux = mockTmux();
+      const claude = mockClaudeResume();
+      const adapter = new ClaudeCodeAdapter({
+        tmux, fsOps: {
+          readFile: file => fs.readFileSync(file, "utf8"), writeFile: fs.writeFileSync,
+          exists: fs.existsSync, mkdirp: dir => fs.mkdirSync(dir, { recursive: true }), copyFile: fs.copyFileSync,
+        },
+      });
+      vi.spyOn(adapter, "deliverStartup").mockResolvedValue({ delivered: 0, failed: [] });
+      vi.spyOn(adapter, "checkReady").mockResolvedValue({ ready: true });
+      const result = await createOrchestrator({
+        tmux, claude,
+        resolveClaudeFragments: async () => ({ ok: true, entries: [{
+          ...saved, effectiveId: "current", resourcePath: "current.json", absolutePath: currentSource, classification: "safe_projection",
+        }] }),
+      }).restore(snapshot.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["worker"] });
+      expect(result).toMatchObject({ ok: true, result: { nodes: [{ status: "rebuilt" }] } });
+      expect(claude.resume).not.toHaveBeenCalled();
+      expect(JSON.parse(fs.readFileSync(target, "utf8"))).toEqual({ mcpServers: { example: { command: "current" } } });
+    } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+  });
 
   it.each(["follow", "saved", "removed", "edited-catalog", "unavailable-spec", "delivery-failure"] as const)(
     "Codex restore delivers the current catalog only for following seats: %s", async (mode) => {
@@ -486,7 +585,8 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.nodes.find((n) => n.logicalId === "desk")?.status).toBe("left_attached");
     const named = result.result.warnings.filter((line) => line.includes("conversation"));
     expect(named).toHaveLength(1);
-    expect(named[0]).toMatch(/worker@r99 \([a-z]+\) has the same recorded claude_id conversation as desk-app@r99 \(running\), outside this restore/);
+    // It's named by what OpenRig knows of it: attached from an outside program, its liveness unknown.
+    expect(named[0]).toMatch(/worker@r99 \([a-z]+\) has the same recorded claude_id conversation as desk-app@r99 \(attached\), outside this restore/);
     expect(result.result.warnings.join("\n")).not.toContain("conv-x");
   });
 
@@ -3595,9 +3695,18 @@ describe("RestoreOrchestrator", () => {
         expect(outcome.status).not.toBe("resumed");
         if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
         // Attempted lineage, not readiness: a gate Claude draws after starting (the resume chooser, workspace trust, project
-        // MCP approval) keeps the launch for a person, with its resume token.
-        else if (mode === "chooser" || mode === "trust" || mode === "mcp") expect(latest.resumeToken).toBe(token);
+        // MCP approval, or its login refusal as the resumed conversation's latest reply) keeps the launch for a person, with
+        // its resume token.
+        else if (mode === "chooser" || mode === "trust" || mode === "mcp" || mode === "login") expect(latest.resumeToken).toBe(token);
         else expect(latest.resumeToken).toBeNull();
+        // A seat resumed to its login refusal waits for its person to sign in: never a failed resume.
+        if (mode === "login") {
+          expect({ status: outcome.status, startup: latest.startupStatus }).toEqual({ status: "attention_required", startup: "attention_required" });
+          expect(outcome.error).toContain("The resumed Claude conversation's latest reply is Claude's login refusal (\"Not logged in · Please run /login\"). "
+            + "If this seat isn't signed in, open its terminal and run /login there.");
+          expect(outcome.error).not.toMatch(/timed out|resume failed/);
+          expect(outcome.attentionEvidence).toBe("● Not logged in · Please run /login");
+        }
       }
       if (mode === "error") {
         expect(tmux.killSession).toHaveBeenCalledTimes(1);
@@ -4347,6 +4456,47 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  // The update line is Claude's: another runtime's missing conversation keeps the remedy without it.
+  it("a Codex seat's missing conversation pauses with the same remedy, without the Claude update line", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-missing", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", podId: "pod-codex-missing" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "codex_id", "stale-codex-thread", "scrape");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "codex");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const launchHarness = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: "Codex resume failed: no conversation found for the requested thread", recovery: "retry_fresh", missingConversation: true as const });
+    const mockAdapter = {
+      runtime: "codex",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness,
+    };
+    const tmux = mockTmux();
+    Object.assign(tmux, {
+      setRemainOnExit: vi.fn(async () => ({ ok: true })),
+      signalPaneProcess: vi.fn(async () => ({ ok: true })),
+      isPaneDead: vi.fn(async () => true),
+      getDefaultShell: vi.fn(async () => "/bin/sh"),
+      respawnPane: vi.fn(async () => ({ ok: true })),
+    });
+    const orch = createOrchestrator({ tmux });
+    const result = await orch.launchSingleNode(rig.id, node.logicalId, { snapshotId: snap.id, adapters: { codex: mockAdapter } });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.launched!.find((n) => n.nodeId === node.id);
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.error).toContain("no session is running. OpenRig's records can't tell whether this conversation was ever used.");
+      expect(nodeResult!.error).not.toContain("update it and retry");
+    }
+  });
+
   // A Claude seat stopped before its first message saved its launch's pre-assigned token for a
   // conversation Claude never wrote, and never reached its prompt. The records can't tell that from a used conversation that
   // lives elsewhere, so when Claude reports it missing the blank attempt is rolled back and the seat waits, with the one step
@@ -4394,6 +4544,8 @@ describe("RestoreOrchestrator", () => {
       expect(nodeResult!.error).toContain("Original session unresumable");
       expect(nodeResult!.error).toContain("The blank session was rolled back; no session is running");
       expect(nodeResult!.error).toContain("OpenRig's records can't tell whether this conversation was ever used.");
+      // An older Claude Code than the one that saved the conversation can report it missing: updating comes first.
+      expect(nodeResult!.error).toContain("no session is running. If this Claude Code may be older than the one that saved the conversation, update it and retry the restore. OpenRig's records can't tell");
       // The one-seat commands, not a whole-rig re-run, which is refused while sibling seats run. A new pane is gone after the
       // rollback, so the fresh launch is one step; a reused pane is left at a shell under the seat's own session name, which
       // the fresh launch won't replace until the seat is stopped.

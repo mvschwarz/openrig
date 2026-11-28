@@ -38,6 +38,7 @@ interface RigStatusRead {
   status?: string;
   seatsTotal?: number;
   seatsRunning?: number;
+  seatsAttached?: number;
 }
 interface InstanceHealthRead extends ControlPlaneRead {
   selfHostId?: string | null;
@@ -68,6 +69,8 @@ interface NodeInventoryRead {
   effortSource?: "seat_choice" | "authored" | "runtime_default" | null;
   lifecycleState: string;
   sessionStatus?: string | null;
+  /** The seat's binding: `external_cli` is a seat joined with `rig attach`, run by an outside program. */
+  attachmentType?: string | null;
   startupStatus?: string | null;
   terminalActive?: boolean | null;
   /** arch 3a947fb1: raw window_activity ISO (owner idle-age is derived at the
@@ -298,7 +301,10 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
                 : node.communityHarness || node.activityState ? "unknown" : "idle"))
           : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
-    canRun: node.lifecycleState !== "running"
+    // A seat bound to an outside program (rig attach, an external CLI) isn't OpenRig's to start: its launch refuses a
+    // bound seat, and whether that program runs is unknown, never stopped.
+    canRun: node.attachmentType !== "external_cli"
+      && node.lifecycleState !== "running"
       && node.sessionStatus !== "running"
       && node.sessionStatus !== "ready"
       && node.terminalActive !== true,
@@ -400,6 +406,7 @@ export async function hydrateSnapshot(
   sliceDetailName?: string | null,
   currentRigName?: string | null,
   viewContext?: HydrateViewContext,
+  options: { firstPaint?: boolean } = {},
 ): Promise<FleetSnapshot> {
   const readErrors: string[] = [];
   async function safe<T>(label: string, fn: () => Promise<unknown>): Promise<T | null> {
@@ -556,29 +563,39 @@ export async function hydrateSnapshot(
     ?? currentRigName
     ?? null;
   const seatEffortRef = topologyLeaf?.kind === "agent" && drillRig ? `${topologyLeaf.name}@${drillRig}` : null;
+  // Topology's first paint reads only what Topology itself shows: its rigs, hosts and seats. Every other read waits for
+  // the next pass (the live refresh runs it at once), so a slow health or attention read never holds the rigs back.
+  const firstPaint = !!options.firstPaint && wantsTopologyScope;
+  let deferred = false;
+  const readNow = (wanted: boolean): boolean => {
+    if (wanted && firstPaint) deferred = true;
+    return wanted && !firstPaint;
+  };
+  const readHealth = readNow(healthRequested);
+  const readQueues = readNow(seatQueueReads);
 
   const [instanceHealth, healthProjection, agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, instanceFinished, scopesRead, executionRead, sliceDetailRead, connectionsRead, seatEffortRead, hostsRead] = await Promise.all([
     safe<InstanceHealthRead>("health", () => client.health()),
-    !healthRequested ? Promise.resolve(null) : safe<HealthProjectionRead>("health-findings", () => client.healthFindings()),
-    !broadReads ? Promise.resolve(null) : safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
+    !readHealth ? Promise.resolve(null) : safe<HealthProjectionRead>("health-findings", () => client.healthFindings()),
+    !readNow(broadReads) ? Promise.resolve(null) : safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
     readingOnly ? Promise.resolve(null) : safe<RigSummaryRead[]>("rigs-summary", () => client.rigsSummary()),
-    (wantsSpecs || wantsConnections) ? safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()) : Promise.resolve(null),
-    !broadReads ? Promise.resolve(null) : safe<ReviewFleetRead>("review-fleet", () => client.reviewFleet()),
-    !broadReads ? Promise.resolve(null) : safe<StreamItemRead[]>("stream-tail", () => client.streamLatest()),
+    readNow(wantsSpecs || wantsConnections) ? safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()) : Promise.resolve(null),
+    !readNow(broadReads) ? Promise.resolve(null) : safe<ReviewFleetRead>("review-fleet", () => client.reviewFleet()),
+    !readNow(broadReads) ? Promise.resolve(null) : safe<StreamItemRead[]>("stream-tail", () => client.streamLatest()),
     // PULSE ▲ NEEDS YOU + ⧗ BLOCKED + ◌ PARKED — the shipped queue reads (increments 2/2b)
-    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-attention", () => client.queueAttention()),
-    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-blocked", () => client.queueBlocked()),
-    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-in-progress", () => client.queueInProgress()),
+    !readQueues ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-attention", () => client.queueAttention()),
+    !readQueues ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-blocked", () => client.queueBlocked()),
+    !readQueues ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-in-progress", () => client.queueInProgress()),
     // PULSE UP NEXT + JUST FINISHED lane reads (increment 3) — same shipped /list route
-    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
-    !recentlyFinishedReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
-    !broadReads ? Promise.resolve(null) : safe<{ missions: unknown[]; sourceObservation?: { state: string } }>("scopes", () => client.scopesDetailed() as Promise<{ missions: unknown[] }>),
-    !broadReads ? Promise.resolve(null) : safe<{ rows: unknown[] }>("execution", () => client.execution(executionMission ?? undefined) as Promise<{ rows: unknown[] }>),
-    broadReads && sliceDetailName
+    !readQueues ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
+    !readNow(recentlyFinishedReads) ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
+    !readNow(broadReads) ? Promise.resolve(null) : safe<{ missions: unknown[]; sourceObservation?: { state: string } }>("scopes", () => client.scopesDetailed() as Promise<{ missions: unknown[] }>),
+    !readNow(broadReads) ? Promise.resolve(null) : safe<{ rows: unknown[] }>("execution", () => client.execution(executionMission ?? undefined) as Promise<{ rows: unknown[] }>),
+    readNow(broadReads && !!sliceDetailName) && sliceDetailName
       ? safe<SliceDetailSnap>(`slice-detail(${sliceDetailName})`, () => client.sliceDetail(sliceDetailName))
       : Promise.resolve(null),
     wantsConnections ? safe<ConnectionsRead>("connections", () => client.connections()) : Promise.resolve(null),
-    seatEffortRef ? safe<SeatEffortRead>("seat-effort", () => client.seatEffort(seatEffortRef)) : Promise.resolve(null),
+    readNow(!!seatEffortRef) && seatEffortRef ? safe<SeatEffortRead>("seat-effort", () => client.seatEffort(seatEffortRef)) : Promise.resolve(null),
     // Every topology view lists the registered hosts, not only the views that read the attention aggregate.
     wantsTopologyScope ? safe<HostsRead>("hosts", () => client.hosts()) : Promise.resolve(null),
   ]);
@@ -599,7 +616,8 @@ export async function hydrateSnapshot(
   // only this daemon's, never a remote host's.
   const listsAssistants = !viewContext || (viewContext.section === "topology" && viewContext.viewTab === "table"
     && (topologyLeaf?.kind === "host" || topologyLeaf?.kind === "rig"));
-  const connectedAssistants = listsAssistants && !remoteDrill
+  const connectedAssistantsPending = firstPaint && listsAssistants && !remoteDrill;
+  const connectedAssistants = readNow(listsAssistants && !remoteDrill)
     ? await client.hostedMembers().then(connectedAssistantsOf,
       (error: unknown) => ({ unavailable: `the read failed: ${error instanceof Error ? error.message : String(error)}` }))
     : null;
@@ -607,7 +625,7 @@ export async function hydrateSnapshot(
   const recentTransitionsScope = topologyLeaf?.kind === "host"
     ? { kind: "instance" } as const
     : recentTransitionsRig ? { kind: "rig", rig: recentTransitionsRig } as const : null;
-  const recentTransitions = wantsRecent && recentTransitionsScope && !remoteDrill
+  const recentTransitions = readNow(wantsRecent && !!recentTransitionsScope && !remoteDrill) && recentTransitionsScope
     ? await safe<RecentTransitionSnap[]>(
         `queue-recent(${recentTransitionsScope.kind === "instance" ? "instance" : recentTransitionsScope.rig})`,
         () => client.queueRecentTransitions(recentTransitionsScope),
@@ -678,18 +696,19 @@ export async function hydrateSnapshot(
       authoredSpecName: undefined as string | undefined,
     };
     rigs.push(rigRow);
-    if (broadReads && rig.lifecycleState && rig.lifecycleState !== "running") {
+    if (rig.lifecycleState && rig.lifecycleState !== "running" && readNow(broadReads)) {
       // rig-down leg (§4.A): summary lifecycleState verbatim, enriched by the
       // rig-status projection where it answers — composed BESIDE the items.
       const st = await safe<RigStatusRead>(`rig-status(${rig.name})`, () => client.rigStatus(rig.id));
-      const seatDetail = st && st.seatsTotal != null ? `${st.seatsRunning ?? 0}/${st.seatsTotal} seats running` : undefined;
+      const seatDetail = st && st.seatsTotal != null
+        ? `${st.seatsRunning ?? 0}/${st.seatsTotal} seats running${st.seatsAttached ? ` · ${st.seatsAttached} attached` : ""}` : undefined;
       rigsDown.push({
         hostId: `rig:${rig.name}`,
         status: st?.status ? `${rig.lifecycleState} (${st.status})` : rig.lifecycleState,
         ...(seatDetail ? { error: seatDetail } : {}),
       });
     }
-    const spec = (wantsSpecs || wantsConnections)
+    const spec = readNow(wantsSpecs || wantsConnections)
       ? await safe<RigSpecJsonRead>(`rig-spec(${rig.name})`, () => client.rigSpec(rig.id))
       : null;
     rigRow.authoredSpecName = spec?.name;
@@ -704,7 +723,7 @@ export async function hydrateSnapshot(
       if (spec.name) rigSpecRefs.set(spec.name, refs);
     }
   }
-  const seatSession = seatFinishedReads ? seatActivity.find((seat) => seat.logicalId === topologyLeaf?.name)?.session : undefined;
+  const seatSession = readNow(seatFinishedReads) ? seatActivity.find((seat) => seat.logicalId === topologyLeaf?.name)?.session : undefined;
   const seatFinished = seatSession
     ? await safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished(20, seatSession))
     : null;
@@ -716,6 +735,7 @@ export async function hydrateSnapshot(
     displayName: ownName && ownName !== "localhost" ? ownName : undefined,
     reachable: true,
     rigs: rigs.sort(byRigName),
+    ...(connectedAssistantsPending ? { connectedAssistantsPending: true } : {}),
     ...(connectedAssistants ? "unavailable" in connectedAssistants
       ? { connectedAssistantsUnavailable: connectedAssistants.unavailable } : { connectedAssistants: connectedAssistants.assistants } : {}),
   };
@@ -905,7 +925,7 @@ export async function hydrateSnapshot(
           records: healthProjection.records,
           ...(healthProjection.coverage?.length ? { coverage: healthProjection.coverage } : {}),
         }
-      : healthRequested ? { availability: "unavailable", evaluatedAt: null, total: 0, truncated: false, records: [] } : undefined,
+      : healthRequested ? { availability: readHealth ? "unavailable" : "pending", evaluatedAt: null, total: 0, truncated: false, records: [] } : undefined,
     hosts: [localHost, ...remoteHosts],
     ...(topologyRemoteSeats ? { topologyRemoteSeats: true } : {}),
     specs,
@@ -928,6 +948,7 @@ export async function hydrateSnapshot(
       : {}),
     attention: (attention ?? []).map(toQueueRead),
     queueCoverage: !seatQueueReads ? undefined
+      : !readQueues ? "pending"
       : [attention, blocked, inProgress, pending].some(rows => rows === null) ? "unavailable"
       // Existing /list defaults cap the first three reads at 100; pending requests 50.
       : [attention, blocked, inProgress].some(rows => rows!.length >= 100) || pending!.length >= 50 ? "partial"
@@ -941,6 +962,7 @@ export async function hydrateSnapshot(
     hostsDown,
     stream: (streamItems ?? []).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),
     readErrors,
+    ...(deferred ? { pendingReads: true as const } : {}),
   };
 }
 

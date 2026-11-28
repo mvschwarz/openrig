@@ -237,6 +237,7 @@ export async function followInstance(
     const seenRows = new Set(snap.snapshot.trail.map(trailKey));
 
     let reconnectsLeft = maxReconnects;
+    let polling = false;
     // 3. Stream loop with honest degradation.
     while (true) {
       if (streamRes?.body) {
@@ -253,19 +254,18 @@ export async function followInstance(
             headers: { Accept: "text/event-stream" },
             signal: aborter.signal,
           }, { timeoutMs: streamConnectTimeoutMs, timeoutMessage: "Workflow stream connection timed out." });
-          if (retry.ok && retry.body) {
-            streamRes = retry;
-            continue;
-          }
+          if (retry.ok && retry.body) streamRes = retry;
         } catch {
           // fall through to next reconnect / poll fallback
         }
-        continue;
+        if (!streamRes) continue;
+      } else {
+        if (!polling) io.err(`stream unavailable — degrading to poll fallback every ${Math.round(pollIntervalMs / 1000)}s`);
+        polling = true;
+        await io.sleep(pollIntervalMs);
       }
-    // 4. Poll fallback — announced, never silent (the chatroom rule).
-    io.err(`stream unavailable — degrading to poll fallback every ${Math.round(pollIntervalMs / 1000)}s`);
-    while (true) {
-      await io.sleep(pollIntervalMs);
+      // A reconnected stream only carries future events. Catch up from the trace
+      // after opening it, using the same deduplication as the polling fallback.
       const poll = await fetchSnapshot(client, instanceId);
       if (!poll.ok) {
         io.out(JSON.stringify(poll.body ?? { error: "poll_failed" }, null, opts.json ? 0 : 2));
@@ -289,7 +289,6 @@ export async function followInstance(
         else io.out(`  ${glyphFor(poll.snapshot.instance.status)} workflow ${poll.snapshot.instance.status}`);
         return outcomeExitCode(poll.snapshot.instance.status);
       }
-    }
     }
   } finally {
     // Kill the SSE socket so the process exits promptly on outcome

@@ -14,7 +14,7 @@ import { claudePostureFlag } from "../src/adapters/yolo-mode.js";
 import { resolveReadinessTimeoutMs } from "../src/domain/readiness-timeout.js";
 import { claudeCommandSessionToken } from "../src/domain/native-process-lineage.js";
 import { ObservationPass } from "../src/domain/process-observation-pass.js";
-import { CLAUDE_PROCESS_ONLY_RESUME } from "../src/domain/native-resume-probe.js";
+import { CLAUDE_PROCESS_ONLY_RESUME, claudeResumeSignInMessage } from "../src/domain/native-resume-probe.js";
 import { transportClaudeSettings } from "../src/adapters/claude-settings-transport.js";
 
 const probeEvidence = expect.objectContaining({
@@ -133,6 +133,37 @@ it("shares a poll's Claude idle-shell listings without collapsing each two-sampl
   }
   expect(codes).toEqual(["returned_to_shell", "awaiting_runtime", "returned_to_shell"]);
   expect(reads).toBe(4);
+});
+
+// A fork handover's successor whose Claude runs as a child of a non-interactive inner shell (a launch the pane's shell
+// sourced in a subshell, or a claude alias or function): the pane reads `bash`, the inner shell holds the foreground, and the
+// screen has Claude's prompt but not its header. Readiness proves it by the fork's own --session-id, as it does a fresh launch,
+// and a Claude naming another conversation there isn't this fork.
+it.each([
+  ["the fork's own session id", true],
+  ["another conversation's session id", false],
+] as const)("readiness of a forked Claude under an inner shell, when it names %s", async (_case, own) => {
+  const forkId = "11111111-2222-4333-8444-555555555555";
+  const named = own ? forkId : "99999999-8888-4777-8666-555555555555";
+  const startedAt = "Sat Jan  1 12:00:00 2000";
+  const rows = [
+    { pid: 100, ppid: 1, pgid: 100, tpgid: 200, executableName: "bash", command: "-bash", startedAt },
+    { pid: 200, ppid: 100, pgid: 200, tpgid: 200, executableName: "bash", command: "/bin/bash", startedAt },
+    { pid: 300, ppid: 200, pgid: 200, tpgid: 200, executableName: "claude",
+      command: `claude --permission-mode acceptEdits --resume parent --fork-session --session-id ${named} --name seat`, startedAt },
+  ];
+  const tmux = mockTmux();
+  tmux.getPaneCommand = vi.fn(async () => "bash");
+  tmux.capturePaneContent = vi.fn(async () => "earlier output\n❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)");
+  tmux.listPanes = vi.fn(async () => [{ id: "%1" }]) as unknown as TmuxAdapter["listPanes"];
+  tmux.getPanePid = vi.fn(async () => 100);
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), listProcesses: async () => rows, sessionIdFactory: () => forkId });
+  const binding = { ...makeBinding(), tmuxPane: "%1" };
+  expect(await adapter.launchHarness(binding, { name: "seat", forkSource: { kind: "native_id", value: "parent" } }))
+    .toMatchObject({ ok: true, resumeToken: forkId });
+  const ready = await adapter.checkReady(binding);
+  if (own) expect(ready).toMatchObject({ ready: true });
+  else expect(ready).toMatchObject({ ready: false, code: "awaiting_runtime" });
 });
 
 it("reduces enumerations for a sequential poll of Claude idle shells", async () => {
@@ -1059,18 +1090,24 @@ describe("Claude Code runtime adapter", () => {
     );
   });
 
-  it("returns diagnostics from the captured login refusal without changing the timeout outcome", async () => {
+  // A resumed conversation whose latest reply is Claude's login refusal is a seat waiting for its person to sign in: the
+  // launch is kept (attention_required) with the same diagnostics, never "timed out waiting for Claude to become active".
+  it("reports a resumed conversation at Claude's login refusal as waiting for sign-in, with the captured diagnostics", async () => {
     const tmux = mockTmux();
     const content = "❯ fixture-private-prompt\n● Login expired · Please run /login\n\n❯";
     vi.mocked(tmux.capturePaneContent).mockResolvedValue(content);
     vi.mocked(tmux.listPanes).mockResolvedValue([{ id: "%1", index: 0, cwd: "/project", width: 100, height: 30, active: true }]);
-    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => [] });
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
     expect(result).toEqual({
-      ok: false, error: "Claude resume failed: timed out waiting for Claude to become active",
+      ok: false, recovery: "attention_required",
+      error: "The resumed Claude conversation's latest reply is Claude's login refusal (\"Login expired · Please run /login\"). "
+        + "If this seat isn't signed in, open its terminal and run /login there. The conversation was kept, and nothing was typed into it.",
+      evidence: "● Login expired · Please run /login",
       probe: { status: "failed", code: "login_required", loginRefusal: { message: "Login expired · Please run /login", row: "response" },
         capture: { lines: 4, bytes: Buffer.byteLength(content), sha256: createHash("sha256").update(content).digest("hex"), columns: 100, rows: 30 } },
     });
+    // The refused turn may be the seat's own startup text: the report names the refusal, never the screen around it.
     expect(JSON.stringify(result)).not.toContain("fixture-private-prompt");
   });
 
@@ -1645,8 +1682,9 @@ describe("Claude Code runtime adapter", () => {
         const other = { ...claude, command: "claude --permission-mode acceptEdits --resume some-other-session --name other" };
         expect((await run({ readinessTimeoutMs, rows: () => [{ ...pane, tpgid: 11 }, launchScript, other] })).result)
           .toEqual({ ok: false, probe: probeEvidence, error: "Claude resume failed: timed out waiting for Claude to become active" });
+        // A login refusal waits for sign-in like the gates: the launch is kept for its person (see "waits for sign-in" below).
         expect((await run({ readinessTimeoutMs, rows: () => stuck, screen: () => "● Not logged in · Please run /login" })).result)
-          .toEqual({ ok: false, probe: probeEvidence, error: "Claude resume failed: timed out waiting for Claude to become active" });
+          .toMatchObject({ ok: false, recovery: "attention_required", error: expect.stringMatching(/^The resumed Claude conversation's latest reply is Claude's login refusal /) });
       });
     });
 
@@ -1835,10 +1873,48 @@ describe("Claude Code runtime adapter", () => {
       expect(reads).toBeLessThan(25);
     });
 
-    it("does not wait for a Claude that says it needs a login: timed out as before", async () => {
+    it("does not wait longer for a Claude that says it needs a login: it waits for sign-in", async () => {
       const { result, reads } = await run({ screen: () => "● Not logged in · Please run /login" });
-      expect(result).toEqual({ ok: false, probe: probeEvidence, error: "Claude resume failed: timed out waiting for Claude to become active" });
+      expect(result).toEqual({ ok: false, probe: probeEvidence, recovery: "attention_required",
+        error: claudeResumeSignInMessage({ loginRefusal: { message: "Not logged in · Please run /login", row: "response" } }),
+        evidence: "● Not logged in · Please run /login" });
       expect(reads).toBe(17);
+    });
+
+    // Claude Code 2.1.330, never signed in, resumed to the conversation its login refusal saved (fixtures/claude-login-resume-2.1.330.md).
+    describe("a resume of Claude Code 2.1.330 that was never signed in", () => {
+      const screen = (name: string) => fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+      const signIn = claudeResumeSignInMessage({ loginRefusal: { message: "Not logged in · Please run /login", row: "result" } });
+
+      it.each(["claude-login-resume-2.1.330.txt", "claude-login-resume-2.1.330-80x24.txt"])("waits for its person to sign in: %s", async (name) => {
+        const { result, tmux } = await run({ paneCommand: "claude", screen: () => screen(name) });
+        expect(result).toEqual({ ok: false, probe: probeEvidence, recovery: "attention_required", error: signIn,
+          evidence: "  ⎿  Not logged in · Please run /login" });
+        expect(signIn).toBe("The resumed Claude conversation's latest reply is Claude's login refusal (\"Not logged in · Please run /login\"). "
+          + "If this seat isn't signed in, open its terminal and run /login there. The conversation was kept, and nothing was typed into it.");
+        // Nothing is typed into the login screen: the launch line and its own Enter are all that's sent.
+        expect(tmux.sendText).toHaveBeenCalledTimes(1);
+        expect(tmux.sendKeys).toHaveBeenCalledExactlyOnceWith("r01-impl", ["Enter"]);
+        // The report names no turn of the conversation.
+        expect(JSON.stringify(result)).not.toContain("hello");
+      });
+
+      it("a conversation whose latest reply came after the refusal resumes as before", async () => {
+        const { result } = await run({ paneCommand: "claude", screen: () => screen("claude-login-resume-later-turn-2.1.330-80x24.txt") });
+        expect(result).toMatchObject({ ok: true });
+      });
+
+      it("another conversation's Claude in the pane keeps today's result", async () => {
+        const other = { ...claude, command: "claude --permission-mode acceptEdits --resume some-other-session --name other" };
+        const { result } = await run({ paneCommand: "claude", rows: () => [{ ...pane, tpgid: 11 }, launchScript, other],
+          screen: () => screen("claude-login-resume-2.1.330.txt") });
+        expect(result).toEqual({ ok: false, probe: probeEvidence, error: "Claude resume failed: timed out waiting for Claude to become active" });
+      });
+
+      it("a pane provably back at its idle shell, under the refusal Claude left, keeps today's result", async () => {
+        const { result } = await run({ paneCommand: "zsh", rows: () => [pane], screen: () => `${screen("claude-login-resume-2.1.330.txt")}\nuser@host:~/project$ ` });
+        expect(result).toMatchObject({ ok: false, recovery: "retry_fresh", error: expect.stringMatching(/^Claude resume failed: /) });
+      });
     });
 
     it("stops waiting as soon as a real prompt appears during the extra wait: a gate won't clear itself", async () => {

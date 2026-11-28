@@ -26,8 +26,8 @@ export interface AttestationLineage {
 export function attestationLineage(frontmatterRaw: string | null): AttestationLineage | undefined {
   if (!frontmatterRaw) return undefined;
   const read = (key: string): string | null => {
-    const m = new RegExp(`^${key}\\s*:\\s*(.+)$`, "m").exec(frontmatterRaw);
-    return m ? m[1]!.trim().replace(/^["']|["']$/g, "") : null;
+    const m = new RegExp(`^${key}[ \\t]*:[ \\t]*(.*)$`, "m").exec(frontmatterRaw);
+    return m?.[1]?.trim().replace(/^["']|["']$/g, "") || null;
   };
   const lineage: AttestationLineage = {};
   for (const [scope, fields] of [

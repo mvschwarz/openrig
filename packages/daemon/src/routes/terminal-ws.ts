@@ -27,13 +27,6 @@ export function terminalAuthMiddleware(opts: { bearerToken: string | null }) {
   };
 }
 
-/** With the web UI off the WebSocket is not registered, but this same guard still runs in front of the HTTP
- *  terminal routes it matched before (GET /api/terminal/views, /preview, /status), so their behaviour is unchanged. */
-export function registerTerminalAuthOnly(app: Hono, opts: { bearerToken: string | null }): void {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (app as any).get("/api/terminal/:sessionName", terminalAuthMiddleware(opts));
-}
-
 export function registerTerminalWs(
   app: Hono,
   upgradeWebSocket: Parameters<typeof import("@hono/node-ws").createNodeWebSocket>[0] extends { app: infer _A } ? never : never,

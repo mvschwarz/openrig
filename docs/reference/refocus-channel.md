@@ -43,6 +43,20 @@ It keeps explicit disables, refusals, unknown config layers and other plugins' s
 Codex's "continue without trusting" leaves no record: a skip of an otherwise eligible OpenRig-owned update may therefore be superseded on retry.
 OpenRig records its approved bundle in `CODEX_HOME/.openrig-core-hook-trust.json` and leaves Codex's immutable `.hook-trust` baseline untouched.
 Codex 0.164 checks bundle contents when hooks run; a later edit requires native approval again. Older Codex versions enforce their own trust rules.
+**An upgrade waits while a Codex seat runs in that Codex home.** Codex checks each plugin hook against the approvals a
+session loaded when it started, and a running session points its hooks at a newly installed version, so replacing the plugin
+under it turns its refocus and compaction hooks off ("plugin contents changed; hook approval required") until it restarts
+(read from Codex 0.169.0's source, #3385). So OpenRig doesn't replace an installed openrig-core in a Codex home while any
+Codex seat runs there, whether or not it selected the plugin (Codex loads the installed plugin into every session in a home).
+A seat with its own `CODEX_HOME` holds only that home, and a seat whose session or processes can't be read counts as running.
+The running process's home is used: changing its next-launch home does not move the running session. If that home can't
+be read, the warning names the seat and its unreadable home; it holds the upgrade until the process exits or its home can be read.
+Seats started there meanwhile start with the installed version. The daemon log names the seats holding it
+(`codex core plugin deferred: …`) at each daemon start and each Codex start that waits, and a launch or a
+`rig seat restart` that waits lists them in its own warnings too. The upgrade installs at the next Codex start in that home with no other Codex seat running: a fresh launch, a
+resume such as `rig up <rig> --existing`, or `rig seat restart <seat> --keep-conversation`, which installs it after the old
+Codex stops and before the new one starts; a daemon start does it for the daemon's own Codex home. A first install still
+comes only from a daemon start or a fresh start of a seat that selected the plugin.
 The Codex
 column above then applies only to a Codex seat whose plugin selection includes openrig-core: every Codex hook command
 exits 0 before running anything unless OpenRig gave that seat `OPENRIG_SEAT_PROJECT_DIR` and an explicit
@@ -160,6 +174,13 @@ With the switch on:
 - A tag that does not resolve on this host is named, never replaced. A
   retargeted handoff or a remote ancestor gives no assumed mission. A mission
   named only in body text is not evidence.
+- A row that names a mission but no `project:` is read in the catalog project
+  whose entry lists the seat's rig, when that project is healthy, and its label
+  says the project was inferred from the seat's rig. A row whose mission
+  resolves under the configured missions root and not in that project keeps
+  the configured root, as before. Any explicit `project:` tag decides for
+  itself, even another project's. With no project associated with the rig, the
+  row is read under the configured missions root as before.
 - The seat's `LEARNED.md` contributes its `MY JOB HERE` and `STANDING DUTIES`
   sections, and notes and each node's `PROGRESS.md` contribute their
   `Current state` section. When a file has

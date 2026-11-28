@@ -127,6 +127,17 @@ describe("seat typing guard commands", () => {
     expect(cmd.options.find(o => o.long === "--reason")?.mandatory).toBe(true);
   });
 
+  it.each([
+    { origin: "launched", line: "Origin: launched by OpenRig" },
+    { origin: "claimed", line: "Origin: adopted (origin=claimed): OpenRig didn't launch this session, so stop, restart and clean refuse it" },
+    { origin: null, line: "Origin: unknown" },
+    { origin: undefined, line: null },
+    { origin: "unreadable", line: "Origin: unknown" },
+  ])("#4003: seat status names the seat's origin ($origin)", async ({ origin, line }) => {
+    const human = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: { ...STATUS, origin } }, []))
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(human.logs.filter((l) => l.startsWith("Origin:"))).toEqual(line ? [line] : []);
+  });
   it("shows body-free current and historical native recovery evidence in human and JSON seat status", async () => {
     const nativeInput = { input: true, wake: true, cancel: false, target: null,
       unresolved: [{ requestId: "uncertain", runId: "old", inCurrentRun: false, kind: "cancel", stage: "completed", outcome: "requested", destination: "dev@rig" }],
@@ -136,6 +147,34 @@ describe("seat typing guard commands", () => {
     expect(human.logs.join("\n")).toContain('"requestId":"uncertain"'); expect(human.logs).toContain(nativeInput.recovery);
     const json = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig", "--json"]).then(() => undefined));
     expect(JSON.parse(json.logs.join("\n")).nativeInput).toEqual(nativeInput);
+  });
+  it("shows the served hook-review reason in human and JSON seat status", async () => {
+    const activityState = { display: "needs-input", needsInput: { count: 1, reason: "hook_trust_gate" } };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, activityState } }, []);
+    const human = await captureLogs(() => makeCommand(deps)
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(human.logs).toContain("Activity: needs-input (hook_trust_gate)");
+    const json = await captureLogs(() => makeCommand(deps)
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig", "--json"]).then(() => undefined));
+    expect(JSON.parse(json.logs.join("\n")).activityState).toEqual(activityState);
+  });
+  it.each([
+    { name: "a Claude Code seat with no one chosen", data: { runtime: "claude-code", runner: false, permissions_to: null },
+      line: "Own permission prompts asked of (with openrig-core loaded): its work's return route, else no one" },
+    { name: "a Claude Code seat with --deny", data: { runtime: "claude-code", runner: false, permissions_to: "deny" },
+      line: "Own permission prompts asked of (with openrig-core loaded): no one: they stay in the terminal (--deny)" },
+    { name: "a Claude Code seat with a chosen person", data: { runtime: "claude-code", runner: false, permissions_to: "mike@external" },
+      line: "Own permission prompts asked of (with openrig-core loaded): mike@external" },
+    { name: "a runner with no one chosen", data: { runtime: "codex", runner: true, permissions_to: null },
+      line: "Runner permission requests answered by: the default person" },
+    { name: "a runner with --deny", data: { runtime: "codex", runner: true, permissions_to: "deny" },
+      line: "Runner permission requests answered by: no one: refused (--deny)" },
+    { name: "another seat with no one chosen", data: { runtime: "codex", runner: false, permissions_to: null }, line: null },
+  ])("names who is asked the permission prompts of $name", async ({ data, line }) => {
+    const human = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: { ...STATUS, ...data } }, []))
+      .parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    const lines = human.logs.filter((l) => /permission (prompts asked of|requests answered by)/.test(l));
+    expect(lines).toEqual(line ? [line] : []);
   });
   it.each(["request_observed", "completed"])("reports a %s harness observation with time and honest pending state", async state => {
     const permission_stop = { state, command: "Bash: git [arguments hidden]", origin: "harness",
@@ -631,6 +670,39 @@ describe("rig seat status", () => {
     expect(logs).toContain(expected);
   });
 
+  // Slice 60: a killed agent's shell lived on, and the seat read running. The daemon's agent_liveness shows it beside that.
+  it("shows an agent that isn't verified beside a running session, and says nothing when the daemon serves no reading", async () => {
+    const run = async (extra: Record<string, unknown>) => {
+      const deps = makeDeps({ status: 200, data: { ...STATUS, runtime: "hermes", lifecycle_state: "running", ...extra } }, []);
+      return (await captureLogs(async () => {
+        await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+      })).logs;
+    };
+    const shown = await run({ agent_liveness: { state: "not_verified", reason: "shell_foreground", command: "zsh", observedAt: "2026-11-27T12:15:30.000Z" } });
+    expect(shown).toContain("Session: running");
+    expect(shown).toContain("Agent: not verified: the pane's foreground is zsh, not a verified hermes agent (identity check at "
+      + "2026-11-27T12:15:30.000Z). It may have exited to its shell, or run behind a wrapper; rig capture dev-impl@seat-rig shows the pane.");
+    expect((await run({})).some(line => line.startsWith("Agent:"))).toBe(false);
+  });
+
+  // A seat joined with rig attach runs in someone else's program: OpenRig can't see its process, only what it writes.
+  it.each([
+    [{ at: "2026-11-27T08:00:00.000Z", qitemId: "qitem-1", state: "in-progress" },
+      "  Its own last queue action: in-progress on qitem-1 at 2026-11-27T08:00:00.000Z. Work sent to it waits until that program reads its queue."],
+    [null, "  Its own last queue action: none recorded. Work sent to it waits until that program reads its queue."],
+    // A history OpenRig couldn't read is never "none recorded".
+    [null, "  Its own last queue action: couldn't be read. Work sent to it waits until that program reads its queue.", "unavailable"],
+  ])("says a seat attached from an outside program is attached with liveness unknown, never running or detached (case %#)", async (last, line, read = "read") => {
+    const deps = makeDeps({ status: 200, data: { ...STATUS, session_status: "attached", lifecycle_state: "unknown",
+      external_attachment: { liveness: "unknown", lastOwnQueueAction: last, lastOwnQueueActionRead: read } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    expect(logs).toContain("Session: attached from an outside program (rig attach); OpenRig can't see its process, so whether it's running is unknown.");
+    expect(logs).toContain(line);
+    expect(logs.join("\n")).not.toMatch(/Session: (running|detached)/);
+  });
+
   it("returns a nonzero status for an unknown seat", async () => {
     const deps = makeDeps({
       status: 404,
@@ -1094,9 +1166,21 @@ describe("rig seat status", () => {
     const output = logs.join("\n");
     expect(exitCode).toBeUndefined(); // the handover itself completed
     expect(output).toContain("The handover's lineage record (occupant tenure) was NOT written; check the daemon log, which names the first such failure since the daemon started. The seat is already bound to the successor, so don't run the handover again.");
-    expect(output).toContain("The previous occupant's process didn't exit on TERM and was killed; its tmux session was kept, and the successor runs in the same pane.");
+    expect(output).toContain("The previous occupant was stopped by a signal: it didn't exit through its own shutdown, or that couldn't be confirmed. Its tmux session was kept, and the successor runs in the same pane.");
     expect(output).toContain("No conversation continuity was carried: the successor started a fresh conversation.");
     expect(output).not.toContain("session stop");
+  });
+
+  it("#3901: handover human output says how the previous occupant ended, in the daemon's words", async () => {
+    const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT, source: { mode: "rebuild", raw: "rebuild" },
+      sourceOutcome: { mode: "rebuild", primedArtifacts: [], gaps: [] },
+      sideEffects: { departingSessionKilled: false, departingProcess: "ended-graceful", departingProcessDetail: "Claude Code exited on TERM in 0.4 s.",
+        startupContextDelivered: true, provenanceRecordWritten: true } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "rebuild", "--reason", "context wall"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("The previous occupant wasn't forced to stop: it exited through its own shutdown, or had already exited. Its tmux session was kept, and the successor runs in the same pane.\nClaude Code exited on TERM in 0.4 s.");
   });
 
   // #3044: a recovered successor on its fork parent's or the retiring occupant's conversation.
@@ -1180,6 +1264,26 @@ describe("rig seat status", () => {
     expect(exitCode).toBeUndefined();
     expect(output).toContain(`The captured startup context (restore packet) was typed and submitted to the successor; ${reason}.`);
     expect(output).not.toContain("restore packet) was delivered");
+  });
+
+  it("first-input handover output separates passing the launch file from submission and consumption", async () => {
+    const deps = makeDeps({ status: 200, data: {
+      ...HANDOVER_RESULT_FRESH,
+      restorePacket: { status: "unconfirmed", reason: "passed at launch", consumption: "unconfirmed",
+        firstInput: { path: "/private/first-input/attempt.txt", submission: "unconfirmed" } },
+      sideEffects: { ...HANDOVER_RESULT_FRESH.sideEffects, startupContextDelivered: false },
+    } }, []);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "fresh", "--reason", "context-wall"]);
+    });
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
+    expect(output).toContain("passed at launch through /private/first-input/attempt.txt; submission and consumption are unconfirmed");
+    expect(output).toContain("Do not resend the packet or repeat the handover");
+    expect(output).not.toContain("before sending the context again");
+    expect(output).not.toContain("restore packet) was delivered");
+    expect(output).not.toContain("OpenRig delivered no startup context");
   });
 
   it("handover fresh human output says an unconfirmed restore packet was sent, not that nothing was delivered", async () => {

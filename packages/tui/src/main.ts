@@ -18,7 +18,7 @@ import { createStyle, detectColorMode } from "./theme.js";
 import { stylizeLines } from "./stylize.js";
 import { createControlSocket, defaultSocketPath, type ControlSocket } from "./socket-server.js";
 import { demoSnapshot } from "./demo-data.js";
-import { DaemonClient, launchNodeNotice } from "./daemon-client.js";
+import { DaemonClient, dismissFailureNotice, launchNodeNotice } from "./daemon-client.js";
 import { hydrateSnapshot } from "./hydrate.js";
 import { createLiveRefresh } from "./live.js";
 import { resolvePendingAddress } from "./pending-address.js";
@@ -147,7 +147,7 @@ async function run(): Promise<void> {
   const selectedRigName = (): string | null =>
     view.get().drill.find((part) => part.kind === "rig")?.name ?? null;
   const live = client
-    ? createLiveRefresh({ scopeKey: () => pageReadKey(view.get()), hydrate: (page, signal) => hydrateSnapshot(client.forPage(page, signal), reviewCache, view.get().scopesMission, selectedSliceDirectory(), selectedRigName(), view.get()), onFrame: () => draw(), now: () => Date.now() })
+    ? createLiveRefresh({ scopeKey: () => pageReadKey(view.get()), hydrate: (page, signal, firstPaint) => hydrateSnapshot(client.forPage(page, signal), reviewCache, view.get().scopesMission, selectedSliceDirectory(), selectedRigName(), view.get(), { firstPaint }), onFrame: () => draw(), now: () => Date.now() })
     : null;
   let motionTimer: NodeJS.Timeout | null = null;
   // S19 AM-R18 — the open view updates ITSELF: oracle pushes drive the refresh owner.
@@ -196,12 +196,15 @@ async function run(): Promise<void> {
     if (defaultFeedChecked || !client) return;
     defaultFeedChecked = true;
     if (inputRevision !== 0) return;
-    void client.humanAttention(null, "default").then((read) => {
-      if (!opensOnDefaultFeed(read as AttentionRead | null, view.get(), inputRevision === 0)) return;
-      view.dispatch({ type: "jump", section: "needs" });
-      draw();
-      void live?.refresh();
-    }, () => {});
+    // After the page's first answer: on a busy daemon this read takes seconds, and Topology's reads would wait behind it.
+    void (live ? live.answered() : Promise.resolve())
+      .then(() => inputRevision === 0 ? client.humanAttention(null, "default") : null)
+      .then((read) => {
+        if (!opensOnDefaultFeed(read as AttentionRead | null, view.get(), inputRevision === 0)) return;
+        view.dispatch({ type: "jump", section: "needs" });
+        draw();
+        void live?.refresh();
+      }, () => {});
   }
   function commandContext() {
     return currentCommandContext(startup && startup.state.connection !== "up" ? "unverified" : crashCartOpts.daemonState ?? null);
@@ -497,7 +500,8 @@ async function run(): Promise<void> {
       } else if (action.act === "answer") {
         const result = await client.missionControlAction(answerRequest(action));
         const actor = actingAs(snapshot.attentionRead, action.actorSession);
-        view.dispatch({ type: "notice", message: action.verb === "resolve" ? `Resolved ${action.qitemId} as ${actor}: it's unparked for its owner, with your decision.`
+        view.dispatch({ type: "notice", message: action.verb === "dismiss" ? `Dismissed ${action.qitemId} as ${actor}: the update is closed; its body and history stay in its record.`
+          : action.verb === "resolve" ? `Resolved ${action.qitemId} as ${actor}: it's unparked for its owner, with your decision.`
           : action.verb === "approve"
           // A runner's permission request says what became of the answer: handed to its receiving agent, or kept.
           ? result.answer?.message ?? `Approved ${action.qitemId} as ${actor}: the request is closed on its own row.`
@@ -507,7 +511,9 @@ async function run(): Promise<void> {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (action.act === "open-terminal") view.dispatch({ type: "terminal-result", view: action.view, message });
-      view.dispatch({ type: "notice", message: action.act === "open-terminal" ? `Terminal view not confirmed\n${message}` : message });
+      view.dispatch({ type: "notice", message: action.act === "open-terminal" ? `Terminal view not confirmed\n${message}`
+        // A refused dismiss changes nothing; an unanswered one may have landed. The refreshed detail shows the actual state.
+        : action.act === "answer" && action.verb === "dismiss" ? dismissFailureNotice(err) : message });
     } finally {
       if (action.act === "open-terminal") openingTerminal = false;
     }

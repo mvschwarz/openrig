@@ -3,7 +3,8 @@ import type { RunnerReceipt } from "../domain/outbox-handler.js";
 import { RunnerChannel, RunnerChannelError } from "../domain/runner-channel.js";
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
 import { constantTimeEqual } from "../middleware/auth-bearer-token.js";
-import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
+import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedActivityHooks, recordedRunner, sessionActivityHooksSelect,
+  sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -16,6 +17,7 @@ import type { StreamStore } from "../domain/stream-store.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
 import { ActivityGrantStore, grantGeneration, type ActivityGrant } from "../domain/activity-grants.js";
 import { RunnerPermissions, parseRunnerPermissionRequest, type RunnerPermissionSeat } from "../domain/runner-permissions.js";
+import { daemonStopping } from "../daemon-shutdown.js";
 import { RigRepository } from "../domain/rig-repository.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
 import type { ActivityEvidence, EvidenceRoute } from "../domain/activity-taxonomy.js";
@@ -831,6 +833,9 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
       && generation !== null && current?.generationUuid === generation
       && (hookAgentId === null || (typeof hookAgentId === "string" && hookAgentId.trim().length > 0))
       && occurredAt !== null && Number.isFinite(Date.parse(occurredAt));
+    if (body.hookEvent === "PostToolBatch" && attributable && (body.nodeId == null || body.nodeId === seat!.nodeId)) {
+      settleNativePermissionCalls(c, store, seat!, generation!, typeof hookAgentId === "string" ? hookAgentId : null, body.toolCallFingerprints);
+    }
     if ((permissionObservation || body.hookEvent === "PostToolBatch") && attributable
       && (body.nodeId == null || body.nodeId === seat!.nodeId)) {
       try {
@@ -949,8 +954,10 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
   // declaring an inventory (which would reactivate a retired seat).
   const currentSession = oracle && emitted?.nodeId
     ? store.db.prepare(`SELECT s.session_name, s.status, ${sessionCommunityHarnessSelect(store.db)} AS community_harness,
-        ${sessionCommunityRunnerSelect(store.db)} AS community_runner FROM sessions s WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`)
-      .get(emitted.nodeId) as { session_name: string; status: string; community_harness: string | null; community_runner: number | null } | undefined
+        ${sessionCommunityRunnerSelect(store.db)} AS community_runner, ${sessionActivityHooksSelect(store.db)} AS community_hooks
+        FROM sessions s WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`)
+      .get(emitted.nodeId) as { session_name: string; status: string; community_harness: string | null; community_runner: number | null;
+        community_hooks: string | null } | undefined
     : undefined;
   const suppliedSessionName = stringOrNull(body.sessionName);
   if (oracle && emitted?.nodeId && emitted.sessionName
@@ -971,7 +978,8 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
       oracle.declareRungInventory(
         { seatNodeId: emitted.nodeId, sessionName: emitted.sessionName },
         // The same recorded launch facts the reconcile pass reads, so a community seat's first hook gets its own inventory.
-        runtimeRungInventory(runtime, currentSession?.community_harness ?? null, recordedRunner(currentSession?.community_runner)),
+        runtimeRungInventory(runtime, currentSession?.community_harness ?? null, recordedRunner(currentSession?.community_runner),
+          recordedActivityHooks(currentSession?.community_hooks)),
       );
     }
     if (beat) {
@@ -1017,6 +1025,7 @@ for (const [router, installTokenAccepted] of [[activityRoutes, true], [guestActi
   router.post("/permission-requests", (c) => submitPermission(c, installTokenAccepted));
   router.get("/permission-requests/:askId", (c) => readPermission(c, installTokenAccepted));
   router.post("/permission-requests/:askId/withdraw", (c) => withdrawPermission(c, installTokenAccepted));
+  router.post("/permission-requests/:askId/taken", (c) => takePermissionAnswer(c, installTokenAccepted));
 }
 
 // The receiving agent's decision on a request its person answered (`rig seat decide-permission`): on this host's main
@@ -1041,7 +1050,8 @@ activityRoutes.post("/permission-requests/:askId/decide", async (c) => {
     currentGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
     stream: c.get("streamStore" as never) as StreamStore | undefined });
   const decider = transportSenderSession(c) ?? "someone outside a seat";
-  const result = permissions.decide(c.req.param("askId") ?? "", optionId, decider, typeof body.reason === "string" ? body.reason.trim() : "");
+  const result = permissions.decide(c.req.param("askId") ?? "", optionId, decider, typeof body.reason === "string" ? body.reason.trim() : "",
+    { relay: body.relay === true, ...(typeof body.personSaid === "string" ? { personSaid: body.personSaid } : {}) });
   if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, result.code === "not_found" ? 404 : result.code === "not_recorded" ? 409 : 400);
   return c.json(result);
 });
@@ -1063,7 +1073,8 @@ function permissionContext(c: Context, installTokenAccepted: boolean): Permissio
   const permissions = new RunnerPermissions({ db: store.db, queueRepo, eventBus, humanRegistry: () => queueRepo.humanRegistry(),
     ownerOf: (nodeId) => rigRepo.getNodePermissionsTo(nodeId),
     currentGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
-    stream: c.get("streamStore" as never) as StreamStore | undefined });
+    stream: c.get("streamStore" as never) as StreamStore | undefined,
+    stopping: (c.get("daemonStopping" as never) as Promise<void> | undefined) ?? daemonStopping });
   return { store, grant: principal.grant, registry, permissions };
 }
 
@@ -1131,6 +1142,12 @@ async function submitPermission(c: Context, installTokenAccepted: boolean): Prom
   if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, PERMISSION_REFUSAL_STATUS[result.code] ?? 409);
   // No one to ask: permitted at once with the agent's own allow. Nothing waits on a person, so nothing reads needs input.
   if ("state" in result) return c.json({ ...result, ...correlation });
+  // A native ask's seat is at the harness's own prompt, whose own notification records it (Claude's permission_prompt): the
+  // prompt stays answerable in the terminal while the person can also answer here.
+  if (parsed.request.nativeHook) {
+    return c.json({ ok: true, askId: result.askId, created: result.created, ...(result.askedOf ? { askedOf: result.askedOf } : {}),
+      ...(result.answerBy ? { answerBy: result.answerBy } : {}) });
+  }
   // The seat now waits on a person, as when a runner refuses and holds attention. A grant revoked meanwhile records nothing more.
   if (result.created && (!ctx.grant || !("refused" in bindToGrant(c, ctx.store, ctx.grant, body, true)))) {
     recordHookActivity(c, ctx.store, { runtime: ctx.store.resolveSession({ nodeId: seat.nodeId })?.runtime ?? stringOrNull(body.runtime),
@@ -1181,6 +1198,46 @@ async function withdrawPermission(c: Context, installTokenAccepted: boolean): Pr
   const result = ctx.permissions.withdraw(grantSeat(ctx), c.req.param("askId") ?? "", String(body?.reason ?? ""));
   if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, result.code === "not_found" ? 404 : 400);
   return c.json(result);
+}
+
+/** A native ask's hook took the answer it read (`{"optionId"}`), just before returning it to the harness's prompt: recorded
+ *  once, as the hook having it, never as the harness having applied it. A grant marks only its own launch's requests. */
+async function takePermissionAnswer(c: Context, installTokenAccepted: boolean): Promise<Response> {
+  const ctx = permissionContext(c, installTokenAccepted);
+  if ("refused" in ctx) return ctx.refused;
+  let body: Record<string, unknown> = {};
+  try {
+    body = await c.req.json() as Record<string, unknown>;
+  } catch {
+    return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
+  }
+  const optionId = typeof body?.optionId === "string" ? body.optionId.trim() : "";
+  if (!optionId) return c.json({ ok: false, code: "invalid_option", error: "Name the option the hook took: optionId." }, 400);
+  const refusal = grantStillSpeaks(c, ctx, "nothing was recorded.");
+  if (refusal) return refusal;
+  const result = ctx.permissions.taken(grantSeat(ctx), c.req.param("askId") ?? "", optionId);
+  if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, 404);
+  return c.json(result);
+}
+
+/** A seat's Claude tool batch resolved: settle its native permission asks whose exact call is in it (answered in the seat's
+ *  terminal, or the completion of one allowed here). Optional: it never changes how the batch itself is recorded. */
+function settleNativePermissionCalls(c: Context, store: AgentActivityStore, seat: { nodeId: string; sessionName: string }, generation: string,
+  actor: string | null, fingerprints: unknown): void {
+  if (!Array.isArray(fingerprints) || fingerprints.length === 0) return;
+  const queueRepo = c.get("queueRepo" as never) as QueueRepository | undefined;
+  const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+  if (!queueRepo || !eventBus) return;
+  try {
+    const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
+    const rigRepo = (c.get("rigRepo" as never) as RigRepository | undefined) ?? new RigRepository(store.db);
+    new RunnerPermissions({ db: store.db, queueRepo, eventBus, humanRegistry: () => queueRepo.humanRegistry(),
+      ownerOf: (nodeId) => rigRepo.getNodePermissionsTo(nodeId),
+      currentGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null })
+      .settleCompletedCalls({ ...seat, generation }, actor, fingerprints);
+  } catch (error) {
+    console.error(`[activity] native permission asks of ${seat.sessionName} weren't settled from a completed tool batch`, error);
+  }
 }
 
 // ── S19 AM-R18 — the push substrate: GET /api/activity/events (SSE) ──

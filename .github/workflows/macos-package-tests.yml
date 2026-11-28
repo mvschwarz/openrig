@@ -1,10 +1,16 @@
 name: macOS package tests
+# The PR number also identifies fork runs whose REST metadata omits pull_requests.
+run-name: >-
+  ${{ github.event_name == 'pull_request_review' && format('macOS package tests PR #{0}', github.event.pull_request.number) || format('macOS manual run {0}', github.run_id) }}
 
 # Runs the macOS package suites (daemon, cli) for a head a maintainer approved, not for every push. Both are
 # required checks, so a pull request's head merges only after an approval of that exact head starts this workflow
 # and both suites pass on it. A push after the approval leaves the new head without these checks until it is
 # approved again. A manual dispatch runs the same suites under names that aren't required checks. scripts/ci-macos-ready-plan.mjs makes the decision, and scripts/ci-macos-ready-plan.test.mjs
 # tests it. The Linux suites stay in tests.yml and run on every push.
+# An eligible current-head approval cancels this PR's older-head review runs; other PRs and manuals are isolated.
+# A repeat approval of the same head reuses its last passing pair; the merge desk's CI-base check covers later main
+# changes. An explicit retry runs both suites again. API reconciliation errors fall back to the plain suite plan.
 # No provider credentials or operator configuration are supplied; the suites deny external networking.
 
 on:
@@ -15,26 +21,45 @@ on:
 permissions:
   contents: read
 
-# No concurrency group, at the workflow or the job: GitHub keeps one pending run per group and a newer one replaces it,
-# so any shared group would let a later run, even another approval of the same head, replace a waiting approval run.
+# Cancellation does not change the two required suite names.
+# Same-head approvals wait without replacing the only pending coverage. Other events/manuals are isolated.
+# A per-PR cancel-in-progress group would let delayed or irrelevant events cancel the useful newer head.
+concurrency:
+  group: >-
+    macos-package-tests-${{ github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association) && github.event.review.commit_id == github.event.pull_request.head.sha && format('pr-{0}-{1}', github.event.pull_request.number, github.event.review.commit_id) || format('run-{0}', github.run_id) }}
+  queue: max
+  cancel-in-progress: false
 
 jobs:
   plan:
+    # Only the Linux planner may cancel obsolete runs; test jobs retain contents:read alone.
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       head: ${{ steps.plan.outputs.head }}
     steps:
+      # The plan decides which required check names this run reports, so it runs the BASE branch's copy
+      # of the script, never the pull request's. `pull_request.base.sha` is a commit on the base branch;
+      # a dispatch (which needs write access to start) uses the branch it was dispatched from.
+      # Without this, a pull request that edits scripts/ci-macos-ready-plan.mjs would be graded by its
+      # own copy, which can name the two required checks with `package: "none"` and skip every step.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha || github.ref_name }}
           sparse-checkout: scripts/ci-macos-ready-plan.mjs
           sparse-checkout-cone-mode: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/ci-macos-ready-plan.mjs
 
   package-tests:
@@ -90,8 +115,10 @@ jobs:
           # Same system bytes, nonprivileged mode; no system file is changed.
           /usr/bin/install -m 0755 /bin/ps "$suite_root/bin/ps"
           # Only this job's temporary sockets (including tmux) are reachable.
+          # The daemon suite runs with three Vitest workers (Vitest reads VITEST_MAX_WORKERS over its config); the cli
+          # suite keeps Vitest's default.
           env -i HOME="$suite_root/home" PATH="$PATH" TMPDIR="$suite_root" TMUX_TMPDIR="$suite_root" \
-            CI=true TERM=xterm-256color \
+            CI=true TERM=xterm-256color ${{ matrix.package == 'daemon' && 'VITEST_MAX_WORKERS=3' || '' }} \
             sandbox-exec -D IPC_ROOT="$suite_root" -p '(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))(allow network-outbound (subpath (param "IPC_ROOT")))' \
             /bin/bash -s "${{ matrix.package }}" <<'SUITE'
           set -euo pipefail

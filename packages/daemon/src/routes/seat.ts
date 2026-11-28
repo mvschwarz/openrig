@@ -1,6 +1,6 @@
 import { RunnerChannel } from "../domain/runner-channel.js";
 import type { ClaudeCompactionEnforcer } from "../domain/claude-compaction-enforcer.js";
-import { OutboxHandler } from "../domain/outbox-handler.js";
+import { OutboxHandler, heldMessagesNotice } from "../domain/outbox-handler.js";
 import { Hono, type Context } from "hono";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
@@ -131,8 +131,14 @@ seatRoutes.post("/set-typing-guard/:seatRef", async c => {
   const actor = transportSenderSession(c) ?? null;
   try {
     const target = guard.target(c.req.param("seatRef"));
-    const preference = await guard.set(target.nodeId, { mode: body.mode ?? (body.enabled ? "hold" : "off") }, actor, body.reason);
-    return c.json({ ...preference, tradeoff: "Hold retains all automatic input. Each draft-aware request attempts input or immediately holds with the exact refusal reason; retrying is a new attempt. Off permits new sends. Changing mode does not flush earlier held messages." }, preference.pending ? 202 : 200);
+    const preference = await guard.set(target.nodeId, { mode: body.mode ?? (body.enabled ? "hold" : "off") }, actor, body.reason,
+      undefined, () => {
+        // Leaving hold: one notice follows the effective transition. Nothing held is typed.
+        const notice = heldMessagesNotice(guard.db, target.nodeId, target.session);
+        const transport = c.get("sessionTransport" as never) as SessionTransport | undefined;
+        if (notice && transport) void transport.send(target.session, `Automatic input is no longer held. ${notice}`, { openrigNotice: true }).catch(() => undefined);
+      });
+    return c.json({ ...preference, tradeoff: "Hold retains all automatic input. Each draft-aware request attempts input or immediately holds with the exact refusal reason; retrying is a new attempt. Off permits new sends. Changing mode flushes no held message; a message held only for a draft is typed once draft-aware delivery sees a clear input." }, preference.pending ? 202 : 200);
   } catch (error) {
     return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, error instanceof DeliveryGuardError && error.code === "invalid_typing_guard" ? 400 : 409);
   }
@@ -180,6 +186,7 @@ seatRoutes.post("/retire-held-message/:seatRef/:id", async c => {
 seatRoutes.get("/status/:seatRef", async (c) => {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
   const service = new SeatStatusService({ rigRepo, activityStore: c.get("agentActivityStore" as never) as import("../domain/agent-activity-store.js").AgentActivityStore | undefined,
+    seatActivity: c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined,
     compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined });
   const result = service.getStatus(c.req.param("seatRef")!);
 
@@ -233,6 +240,7 @@ seatRoutes.get("/status/node/:nodeId", (c) => {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
   const nodeId = c.req.param("nodeId")!.trim();
   const result = new SeatStatusService({ rigRepo, activityStore: c.get("agentActivityStore" as never) as import("../domain/agent-activity-store.js").AgentActivityStore | undefined,
+    seatActivity: c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined,
     compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined }).getStatusByNodeId(nodeId);
   if (!result.ok) return c.json(result, result.code === "seat_ref_required" ? 400 : 404);
   const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
@@ -577,6 +585,13 @@ const setModelHandler = async (c: Context) => {
 };
 seatRoutes.post("/set-model/:seatRef", setModelHandler);
 seatRoutes.post("/set-model/node/:nodeId", setModelHandler);
+
+const modelCatalogHandler = (c: Context) => {
+  const result = seatLifecycleService(c).modelCatalog(settingTarget(c));
+  return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
+};
+seatRoutes.get("/model-catalog/:seatRef", modelCatalogHandler);
+seatRoutes.get("/model-catalog/node/:nodeId", modelCatalogHandler);
 
 seatRoutes.post("/set-cwd/:seatRef", async (c) => {
   const value: unknown = await c.req.json().catch(() => null);

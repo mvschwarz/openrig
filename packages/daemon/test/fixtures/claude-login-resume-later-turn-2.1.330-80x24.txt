@@ -1,0 +1,24 @@
+user@host:~/project$ claude --resume 6c4f5e21-4444-4555-8666-c77788889999
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   /home/user/project
+
+
+❯ hello
+  ⎿  Not logged in · Please run /login
+
+❯ /exit
+  ⎿  Bye!
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)
+                                                    Not logged in · run /login
+   ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor
+                           Claude Code can't auto-update · run `claude doctor`
+
+
+
+
+

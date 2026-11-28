@@ -18,6 +18,8 @@ import { communityHarnessOf } from "./built-in-runtimes.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, SEAT_SKILLS_BOOTSTRAP_LINE, cleanSeatSkills, seatSkillPaths } from "./seat-skill-storage.js";
 import { settleAutomaticRestore } from "./existing-rig-restore.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
+import { exitPaneRuntime, pinTerminal, runtimeExitStep, type RuntimeExitTiming } from "./runtime-exit.js";
+import type { NativeProcessLister } from "./native-process-lineage.js";
 
 export interface TeardownResult {
   rigId: string;
@@ -50,12 +52,19 @@ export interface TeardownResult {
    *  seat, as `rig unclaim` does, and left the session running as its owner's. A later down names a released session
    *  here too while it keeps the seat's skills for it. Present only when there was one. */
   released?: string[];
+  /** #3901: what the step before the terminals close saw of each Claude Code or Codex seat's agent: `graceful`, it exited
+   *  through its own shutdown (Claude Code on TERM, Codex through /exit) or no agent was left running; `forced`, it was
+   *  seen to end on a signal it doesn't handle or on KILL after the window; `unverified`, its end wasn't seen (it couldn't
+   *  be identified, its exit couldn't be checked, KILL wasn't sent, it was still running after KILL, or its pane's
+   *  terminal had changed). `detail` says which, in a sentence. Each says only what this step saw: whether a terminal then
+   *  closed is the stop's own result (`sessionsKilled`, `errors`). Absent with --force (the terminals close at once) and
+   *  when no such seat was stopped. */
+  runtimeExits?: Array<{ session: string; path: "graceful" | "forced" | "unverified"; detail: string }>;
 }
 
 interface TeardownOptions {
   delete?: boolean;
-  /** Reserved for future graceful-stop support. Currently a no-op because
-   *  tmux kill-session is already immediate — there is no graceful stop to skip. */
+  /** Close the seats' terminals at once, without first letting each agent exit through its own shutdown (#3901). */
   force?: boolean;
   snapshot?: boolean;
 }
@@ -74,6 +83,9 @@ interface TeardownDeps {
   /** Releases a claimed session's seat without stopping the session: `rig unclaim`'s own path. Absent: such a session
    *  goes through the marker-checked stop, as before. */
   releaseClaimedSession?: (sessionId: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /** #3901: the process table each agent's own exit is read from, and its bounded wait (tests); the OS's and 3 s by default. */
+  listProcesses?: NativeProcessLister;
+  runtimeExitTiming?: RuntimeExitTiming;
 }
 
 interface LatestNodeSession {
@@ -133,7 +145,7 @@ export class RigTeardownOrchestrator {
     const currentLiveGuidanceTargets = () => this.liveGuidanceTargets(rigId);
 
     // 2. Get latest session per node
-    const liveSessions = this.getLatestLiveSessions(rigId);
+    const liveSessions = this.deps.sessionRegistry.getLatestLiveSessions(rigId, true);
 
     // 3. Check if already stopped
     if (liveSessions.length === 0) {
@@ -177,7 +189,8 @@ export class RigTeardownOrchestrator {
         // A live namesake cannot supply resume metadata for an archived row.
         // Keep that row's own token in the snapshot, just as the kill below
         // leaves the other owner's session alone.
-        const refreshableSessions = archived.archived_at === null ? liveSessions : liveSessions.filter(
+      const running = liveSessions.filter(session => session.status !== "exited");
+      const refreshableSessions = archived.archived_at === null ? running : running.filter(
           session => findOtherSessionOwner(this.db, session.sessionName, session.nodeId, { ignoreArchived: true }) === null,
         );
         await this.deps.resumeMetadataRefresher.refresh(refreshableSessions);
@@ -215,27 +228,31 @@ export class RigTeardownOrchestrator {
       return result;
     }
 
+    // #3901: before the terminals close, each Claude Code or Codex seat's agent exits through its own shutdown (Claude Code
+    // on TERM, Codex through /exit), all seats at once, each wait bounded, with KILL at the end of its window. Closing the
+    // terminals below is still what stops everything, whatever happened here. --force skips this step.
+    if (!opts?.force) {
+      const exits = await this.exitSeatRuntimes(liveSessions, archived.archived_at !== null);
+      if (exits.length > 0) result.runtimeExits = exits;
+    }
+
     // 5. Kill each live session
     let killFailures = 0;
     const external = new Set<string>();
     const toRelease: LatestNodeSession[] = [];
     for (const session of liveSessions) {
+      const disposition = this.downDisposition(session, archived.archived_at !== null);
       // OpenRig neither launches nor stops a seat joined with `rig attach` as an external CLI, and it has no tmux session:
       // a missing one isn't a stop. Keep its claim, as the historical path below does for non-tmux bindings.
-      if (seatProcessOwner(resolveSeatKind(this.deps.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType)) === "external") {
+      if (disposition === "external") {
         external.add(session.nodeId);
         (result.leftRunning ??= []).push(session.sessionName);
         continue;
       }
-      // An archived rig may retain a stale row for a name now owned by a live rig.
-      // That name cannot identify the archived rig's tmux session for a kill.
-      const ownedByAnotherRig = archived.archived_at !== null && findOtherSessionOwner(
-        this.db, session.sessionName, session.nodeId, { ignoreArchived: true },
-      ) !== null;
-      // A session OpenRig didn't launch (origin claimed: joined with rig attach --self, adopted, bound or reconciled) is
-      // its owner's, whatever marker it carries, so down never stops it. Unless it's positively gone, down releases the
-      // seat as rig unclaim does, after the file cleanups below have counted the seat as still in use.
-      const release = session.origin === "claimed" && this.deps.releaseClaimedSession !== undefined;
+      const ownedByAnotherRig = disposition === "another_rig";
+      // A claimed session is released, unless it's positively gone, after the file cleanups below have counted the seat
+      // as still in use.
+      const release = disposition === "release";
       let absent = ownedByAnotherRig;
       if (!absent && this.deps.tmuxAdapter.probeSession) {
         try {
@@ -538,6 +555,57 @@ export class RigTeardownOrchestrator {
     this.deps.eventBus.notifySubscribers({
       type: "rig.deleted", rigId, seq: persistedSeq, createdAt: persistedAt,
     });
+  }
+
+  /** Which way `rig down` ends a live session: `external` (joined with `rig attach` as an external CLI: left running),
+   *  `another_rig` (an archived rig's stale row for a name a live rig owns now: recorded stopped, never killed),
+   *  `release` (a session OpenRig didn't launch: released as `rig unclaim` does) or `stop` (the marker-checked kill). The
+   *  kill loop and #3901's exit step read it from here, so the exit step only ever reaches a session the kill would end. */
+  private downDisposition(session: LatestNodeSession, archivedRig: boolean): "external" | "another_rig" | "release" | "stop" {
+    if (seatProcessOwner(resolveSeatKind(this.deps.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType)) === "external") return "external";
+    // An archived rig may retain a stale row for a name now owned by a live rig. That name cannot identify the archived
+    // rig's tmux session for a kill.
+    if (archivedRig && findOtherSessionOwner(this.db, session.sessionName, session.nodeId, { ignoreArchived: true }) !== null) return "another_rig";
+    // A session OpenRig didn't launch (origin claimed: joined with rig attach --self, adopted, bound or reconciled) is its
+    // owner's, whatever marker it carries, so down never stops it. Without the release path (older wiring), it goes
+    // through the marker-checked stop, as before.
+    if (session.origin === "claimed" && this.deps.releaseClaimedSession !== undefined) return "release";
+    return "stop";
+  }
+
+  /** #3901: let each seat's agent exit through its own shutdown before its terminal closes. Only a session the kill below
+   *  would end is touched (downDisposition), with the proof the kill itself uses (killSession): the pane's session, read
+   *  with its immutable id and its tmux server (pid and start time) in one read, carries the seat's OpenRig marker, read
+   *  by that id, and each signal and typed input after is held to that session and server. An entry says only what this step saw of the
+   *  agent; whether its terminal then closed is the kill's own result (sessionsKilled, errors). A failure here never
+   *  stops the down. */
+  private async exitSeatRuntimes(sessions: LatestNodeSession[], archivedRig: boolean): Promise<NonNullable<TeardownResult["runtimeExits"]>> {
+    const tmux = this.deps.tmuxAdapter;
+    if (typeof tmux.signalPaneRuntime !== "function" || typeof tmux.paneTerminal !== "function") return [];
+    const timing = this.deps.runtimeExitTiming ?? { pollMs: 100, timeoutMs: 3_000, sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)) };
+    const exits = await Promise.all(sessions.map(async (session): Promise<NonNullable<TeardownResult["runtimeExits"]>[number] | null> => {
+      if (!runtimeExitStep(session.runtime) || this.downDisposition(session, archivedRig) !== "stop") return null;
+      const binding = this.deps.sessionRegistry.getBindingForNode(session.nodeId);
+      if (!binding?.tmuxPane || binding.tmuxSession !== session.sessionName) return null;
+      try {
+        // An unreadable terminal or marker (a session already gone, say) leaves the seat to the stop below, which reports it.
+        const terminal = await tmux.paneTerminal(binding.tmuxPane);
+        if (!terminal || terminal.sessionName !== session.sessionName) return null;
+        const marker = await tmux.getSessionEnv(terminal.sessionId, "OPENRIG_NODE_ID").catch(() => null);
+        if (marker !== session.nodeId) return null;
+        const outcome = await exitPaneRuntime(tmux, { pane: binding.tmuxPane, inputTarget: tmux.deliveryGuard ? session.nodeId : binding.tmuxPane,
+          runtime: session.runtime, pin: pinTerminal(tmux, terminal) }, timing, this.deps.listProcesses);
+        if (!outcome) return null;
+        const at = { session: session.sessionName };
+        if (outcome.state === "exited") return { ...at, path: outcome.path, detail: outcome.detail };
+        if (outcome.state === "no_runtime") return { ...at, path: "graceful", detail: outcome.detail };
+        // Not identified, not verified, still running after KILL, or its terminal changed: this step didn't see it end.
+        return { ...at, path: "unverified", detail: outcome.detail };
+      } catch (err) {
+        return { session: session.sessionName, path: "unverified", detail: `Its agent's own exit couldn't be run: ${(err as Error).message}` };
+      }
+    }));
+    return exits.filter((exit): exit is NonNullable<typeof exit> => exit !== null);
   }
 
   /** Get latest session per node, filtered to live statuses.

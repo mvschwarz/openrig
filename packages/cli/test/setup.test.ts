@@ -630,7 +630,7 @@ describe("rig setup", () => {
       exec: (cmd: string) => {
         if (cmd === "herdr --version") return "herdr 0.9.3\n";
         if (cmd === "brew --version") return "Homebrew 4.0\n";
-        if (cmd === "tmux -V") throw new Error("not found");
+        if (cmd === "tmux -V") throw Object.assign(new Error("Command failed: tmux -V\n/bin/sh: 1: tmux: not found"), { status: 127 });
         if (cmd === "brew install tmux") throw new Error("brew install failed");
         if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
         return "";
@@ -646,6 +646,49 @@ describe("rig setup", () => {
     const herdr = result.steps.find((s) => s.id === "herdr_install");
     expect(herdr).toBeDefined();
     expect(herdr?.status).toBe("pass");
+  });
+
+  it("doesn't install tmux when this shell was refused permission to run it (a sandbox), and says so", async () => {
+    const execs: string[] = [];
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        execs.push(cmd);
+        if (cmd === "herdr --version") return "herdr 0.9.3\n";
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") throw Object.assign(new Error("spawnSync /bin/sh EPERM"), { code: "EPERM" });
+        if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
+        return "";
+      },
+    });
+    const result = await runSetup(deps, {});
+
+    const tmux = result.steps.find((s) => s.id === "tmux_install");
+    expect(tmux?.status).toBe("fail");
+    expect(tmux?.message).toBe("tmux couldn't be run from this shell (spawnSync /bin/sh EPERM).");
+    expect(execs).not.toContain("brew install tmux");
+  });
+
+  // #4028 review X-F1: only evidence that tmux is missing reads as not installed. A version check that timed out (setup's
+  // runner allows 30 s) says nothing either way.
+  it("doesn't install tmux, or call it missing, when its version check timed out, and keeps the check's detail", async () => {
+    const execs: string[] = [];
+    const deps = makeDeps({
+      exec: (cmd: string) => {
+        execs.push(cmd);
+        if (cmd === "herdr --version") return "herdr 0.9.3\n";
+        if (cmd === "brew --version") return "Homebrew 4.0\n";
+        if (cmd === "tmux -V") throw Object.assign(new Error("spawnSync /bin/sh ETIMEDOUT"), { code: "ETIMEDOUT", signal: "SIGTERM" });
+        if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
+        return "";
+      },
+    });
+    const result = await runSetup(deps, {});
+
+    const tmux = result.steps.find((s) => s.id === "tmux_install");
+    expect(tmux?.status).toBe("fail");
+    expect(tmux?.message).toBe("tmux's version check couldn't be completed (spawnSync /bin/sh ETIMEDOUT).");
+    expect(tmux?.message).not.toMatch(/not found|isn't installed/);
+    expect(execs).not.toContain("brew install tmux");
   });
 
   it("uses the extended timeout budget for npm runtime installs", async () => {

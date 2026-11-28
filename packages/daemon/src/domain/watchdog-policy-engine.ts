@@ -969,7 +969,10 @@ export class WatchdogPolicyEngine {
         evaluationNotes:
           delivery.error !== undefined
             ? { ...receiptNotes, deliveryReason: delivery.error }
-            : delivery.status === "retained" ? { ...receiptNotes, outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : receiptNotes ?? null,
+            // A held reminder names what held it: the transport's own reason, or `unknown` where the path that held it
+            // returned none (never inferred). skipReason stays `typing_guard_retained`, which readers match.
+            : delivery.status === "retained" ? { ...receiptNotes, outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true,
+              retainedReason: delivery.transportReason ?? "unknown" } : receiptNotes ?? null,
       });
       if (delivery.occurrenceTracked) this.eventBus.withNotifyEnvelope(account);
       else account();

@@ -147,9 +147,12 @@ A connected seat can also ask the hub's other participants for work, and read th
 the hub as the seat's participant, so the agent never holds the participant's token.
 
 ```bash
-rig network peers <binding-or-seat> [--json]
-rig network request <binding-or-seat> <peer> --id <request-id> --body-file <path> [--summary "<text>"] [--json]
+rig network peers [binding-or-seat] [--json]
+rig network request [binding-or-seat] <peer> --id <request-id> --body-file <path> [--summary "<text>"] [--json]
 ```
+
+Leave out the binding or seat to use your own seat, so a connected seat can type `rig network peers`. With one
+argument, `request` reads it as the peer. Run outside a seat, both still need it.
 
 `peers` lists the seats and members the hub lets the participant address, as the hub's `rig_team` answers for the
 participant's rig. `request` sends one request to a peer, named as `peers` lists it:
@@ -162,6 +165,9 @@ participant's rig. `request` sends one request to a peer, named as `peers` lists
 - **The request is recorded here first,** as a local queue item from the seat to OpenRig, parked on the hub item
   (`external:network-request/<hub item>`). It's addressed to OpenRig rather than the seat, so the seat owes nothing on it
   and isn't reminded about it while it waits. Find it with `rig queue list --mine`.
+  When the CLI runs inside a seat, that calling seat is recorded as the source with `transport:v1` provenance, even
+  when it uses another seat's binding. The JSON response includes `sourceSession`, `returnRoute` and `returnRouteBasis`;
+  the return-route fields are null when no route was requested.
 - **Then it's created on the hub** under an id derived from the seat's node, the hub, the participant and your request
   id, so one request is always one hub item. A create that goes again reads the request from the local item; the
   connector keeps only a hash of it. So a request whose local item was erased, closed or canceled here isn't sent. The
@@ -182,6 +188,27 @@ participant's rig. `request` sends one request to a peer, named as `peers` lists
     - A retry of a request whose earlier create wasn't confirmed, when the hub refuses the binding's credential. The
       earlier create may still be on the hub, so the local item stays open with a note saying so, for a new binding for
       the same seat, hub and participant to read. A new request whose credential is refused is `refused`.
+
+### Requesting through MCP
+
+An agent without a CLI can call `rig_network_request` with `peer`, `requestId`, `body`, and optional `summary`.
+`binding` optionally names a binding id or a connected local seat; omitted, it uses the caller's seat.
+This calls the same daemon route as `rig network request`. The local request id, retry behavior, hub errors,
+and connector reconciliation are the same. Retry only with the same `requestId`, including after a timeout.
+
+The answer stays on that local request item, owned by OpenRig. Call `rig_queue_show` with `qitemId` equal to
+`localQitemId` from the result (the `requestId` you supplied). When the peer finishes, that item closes with its
+answer and the record names who answered. There is no second answer item or automatic wake for its sender.
+The local record keeps the caller's identity, separately from the binding's hub participant. A seatless stdio
+conversation gets an issued return address; where its conversation key is available, it reuses the address
+already issued to that conversation. This does not add a cross-hub question relay.
+
+To wait, create and claim a separate row addressed to your seat, then use `rig_queue_update` on that row with
+`state: "blocked"` and `blockedOn: "<requestId>"`. `wakeAfterSeconds` is an optional backstop for an unanswered
+request. Check the request once after parking: if it is already closed or missing, read its outcome now and close
+your wait row. Choose a `qitem-` id; `fold:`, `auth:` and `external:` prefixes name gates instead of request items.
+Only a seat with a terminal can receive a wake. An external MCP client must check again; neither blocking nor
+`wakeAfterSeconds` promises to wake its conversation. Existing grant scopes still apply.
 
 **Reading the answer:** on each pass, the connector reads every open request's hub item. A grant for sending only (team
 list, queue create and show, without the queue's list) is enough: the connector takes inbound work only when the hub offers

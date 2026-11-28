@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { Hono } from "hono";
 import { providerRoutes } from "../src/routes/provider.js";
 import type { ClaudeSeatRelaunch, ProviderService } from "../src/domain/provider/provider-service.js";
@@ -6,6 +9,8 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { readClaudeSeatTokenRef } from "../src/domain/claude-seat-token.js";
 import type { FourBlockReadModel } from "../src/domain/provider/provider-types.js";
 
 // Slice-04 (OPR.0.5.0.4) seam B — the daemon provider routes (packet 3ffa3c22 §3). Thin handlers
@@ -167,7 +172,7 @@ describe("provider routes", () => {
     expect(seen.map((s) => s.input)).toEqual([
       { seat: "s1", toAccount: "work", tokenFile: "/tokens/work" },
       { seat: "s1", toAccount: "stored-login", tokenFile: null },
-      { seat: "s1", toAccount: "work", forceUnsafe: false, tokenFile: "/tokens/work" },
+      { seat: "s1", toAccount: "work", forceUnsafe: false, tokenFile: "/tokens/work", requestedBy: null },
     ]);
     for (const { claudeSeat } of seen) {
       expect(claudeSeat).toMatchObject({ seat: expect.any(Function), snapshot: expect.any(Function), exclusive: expect.any(Function), relaunchInPane: expect.any(Function) });
@@ -241,6 +246,43 @@ describe("provider routes", () => {
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "failed" });
       launched = { ok: false, code: "snapshot_not_found", message: "no such snapshot" };
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "snapshot_not_found" });
+    } finally { db.close(); }
+  });
+
+  it("a never-launched Claude seat is found by its seat name with no session, and its first-launch reference is saved with a record only while it stays unlaunched", async () => {
+    const db = createFullTestDb();
+    try {
+      const repo = new RigRepository(db), registry = new SessionRegistry(db), eventBus = new EventBus(db);
+      const rig = repo.createRig("fixture-rig");
+      const node = repo.addNode(rig.id, "dev.a", { runtime: "claude-code", cwd: "/work/a" });
+      const codex = repo.addNode(rig.id, "dev.b", { runtime: "codex", cwd: "/work/b" });
+      let lent!: ClaudeSeatRelaunch;
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        for (const [key, value] of Object.entries({ rigRepo: repo, eventBus,
+          providerService: { ...stubService, precheck: async (_i: unknown, _r: unknown, claudeSeat: ClaudeSeatRelaunch) => { lent = claudeSeat; return { safe: true }; } } })) {
+          c.set(key as never, value as never);
+        }
+        await next();
+      });
+      app.route("/api/provider", providerRoutes());
+      await app.request("/api/provider/precheck?seat=dev-a@fixture-rig&toAccount=work&tokenFile=%2Ftokens%2Fwork");
+      expect(lent.seat("dev-a@fixture-rig")).toEqual({ nodeId: node.id, rigId: rig.id, rigName: "fixture-rig", logicalId: "dev.a", running: false, pane: null, pristine: true });
+      expect(lent.seat("dev-b@fixture-rig")).toBeNull(); // a Codex seat keeps the Codex path
+      expect(lent.seat("dev-z@fixture-rig")).toBeNull();
+      const events: Array<{ type: string }> = [];
+      eventBus.subscribe((event) => { events.push(event as { type: string }); });
+      expect(lent.saveFirstLaunchTokenRef!(node.id, { label: "work", tokenFile: "/tokens/work" }, { requestedBy: "rig-admin@ops" })).toEqual({ ok: true });
+      expect(readClaudeSeatTokenRef(db, node.id)).toEqual({ label: "work", tokenFile: "/tokens/work" });
+      expect(events.filter((e) => e.type === "node.claude_token_ref_changed")).toEqual([expect.objectContaining({ rigId: rig.id, nodeId: node.id, logicalId: "dev.a",
+        from: null, to: "work", tokenFile: "/tokens/work", credential: "subscription_token", operator: "rig-admin@ops", effect: "first_launch" })]);
+      // A first launch began (the seat has a session): it's the launched seat now, and nothing is saved over its launch.
+      registry.registerSession(node.id, "dev-a@fixture-rig");
+      expect(lent.saveFirstLaunchTokenRef!(node.id, null, { requestedBy: null })).toMatchObject({ ok: false, code: "seat_launched" });
+      expect(readClaudeSeatTokenRef(db, node.id)).toEqual({ label: "work", tokenFile: "/tokens/work" });
+      expect(lent.seat("dev-a@fixture-rig")).not.toHaveProperty("pristine");
+      expect(lent.saveFirstLaunchTokenRef!(codex.id, null, { requestedBy: null })).toMatchObject({ ok: false, code: "seat_changed" });
+      expect(events.filter((e) => e.type === "node.claude_token_ref_changed")).toHaveLength(1);
     } finally { db.close(); }
   });
 
@@ -322,5 +364,89 @@ describe("provider routes", () => {
     const res = await appWith(null).request("/api/provider/status");
     expect(res.status).toBe(503);
     expect((await res.json()).error).toBe("provider_service_unavailable");
+  });
+});
+
+describe("provider account reference routes (#3625)", () => {
+  // Synthetic file contents, not a credential; no answer may carry them.
+  const CONTENT = "synthetic-content-never-echoed";
+
+  function refsApp(): { app: Hono; dir: string; done: () => void } {
+    const db = createFullTestDb();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "account-ref-routes-"));
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("rigRepo" as never, new RigRepository(db));
+      await next();
+    });
+    app.route("/api/provider", providerRoutes());
+    return { app, dir, done: () => { db.close(); fs.rmSync(dir, { recursive: true, force: true }); } };
+  }
+  const post = (app: Hono, body: unknown) => app.request("/api/provider/account-refs", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+  it("adds, lists and removes; a label with '@' and '.' goes through the path", async () => {
+    const { app, dir, done } = refsApp();
+    try {
+      const token = path.join(dir, "token");
+      fs.writeFileSync(token, CONTENT, { mode: 0o600 });
+      const home = path.join(dir, "codex");
+      fs.mkdirSync(path.join(home, "auth-profiles"), { recursive: true });
+      fs.writeFileSync(path.join(home, "auth-profiles", "work.json"), CONTENT, { mode: 0o600 });
+
+      const added = await post(app, { provider: "claude", label: "ops@team.1", tokenFile: token });
+      expect(added.status).toBe(201);
+      expect(await added.json()).toMatchObject({ ok: true, account: { provider: "claude", label: "ops@team.1", kind: "claude_token_file", file: token } });
+      expect((await post(app, { provider: "codex", label: "work", codexHome: home, login: "work" })).status).toBe(201);
+
+      const all = await (await app.request("/api/provider/account-refs")).json();
+      expect(all.accounts.map((a: { provider: string; label: string }) => `${a.provider}/${a.label}`)).toEqual(["claude/ops@team.1", "codex/work"]);
+      const codex = await (await app.request("/api/provider/account-refs?provider=codex")).json();
+      expect(codex.accounts).toHaveLength(1);
+      expect(JSON.stringify(all)).not.toContain(CONTENT);
+
+      const removed = await app.request(`/api/provider/account-refs/claude/${encodeURIComponent("ops@team.1")}`, { method: "DELETE" });
+      expect(removed.status).toBe(200);
+      expect(await removed.json()).toMatchObject({ ok: true, account: { label: "ops@team.1" } });
+      expect((await app.request(`/api/provider/account-refs/claude/${encodeURIComponent("ops@team.1")}`, { method: "DELETE" })).status).toBe(404);
+    } finally { done(); }
+  });
+
+  it("refuses a malformed request (400), an unusable reference (400) and a duplicate label (409), storing nothing", async () => {
+    const { app, dir, done } = refsApp();
+    try {
+      const open = path.join(dir, "open");
+      fs.writeFileSync(open, CONTENT, { mode: 0o644 });
+      fs.chmodSync(open, 0o644);
+      const ok = path.join(dir, "ok");
+      fs.writeFileSync(ok, CONTENT, { mode: 0o600 });
+
+      const malformed = await post(app, { provider: "claude", label: "a", tokenFile: ok, apiKeyFile: ok });
+      expect(malformed.status).toBe(400);
+      expect(await malformed.json()).toMatchObject({ ok: false, code: "invalid_reference" });
+      expect((await app.request("/api/provider/account-refs", { method: "POST", body: "[]", headers: { "content-type": "application/json" } })).status).toBe(400);
+      expect((await app.request("/api/provider/account-refs", { method: "POST", body: "{", headers: { "content-type": "application/json" } })).status).toBe(400);
+
+      const unusable = await post(app, { provider: "claude", label: "open", apiKeyFile: open });
+      expect(unusable.status).toBe(400);
+      const refusal = await unusable.json();
+      expect(refusal).toMatchObject({ ok: false, code: "reference_unusable" });
+      expect(refusal.message).toContain("must be private (0600 or 0400)");
+      expect(JSON.stringify(refusal)).not.toContain(CONTENT);
+
+      expect((await post(app, { provider: "claude", label: "a", tokenFile: ok })).status).toBe(201);
+      const duplicate = await post(app, { provider: "claude", label: "a", tokenFile: ok });
+      expect(duplicate.status).toBe(409);
+      expect(await duplicate.json()).toMatchObject({ ok: false, code: "duplicate_label" });
+
+      expect((await (await app.request("/api/provider/account-refs")).json()).accounts).toHaveLength(1);
+      expect((await app.request("/api/provider/account-refs?provider=pi")).status).toBe(400);
+      expect((await app.request("/api/provider/account-refs/pi/a", { method: "DELETE" })).status).toBe(400);
+    } finally { done(); }
+  });
+
+  it("is 503 when the daemon wires no database", async () => {
+    const res = await appWith(stubService).request("/api/provider/account-refs");
+    expect(res.status).toBe(503);
   });
 });

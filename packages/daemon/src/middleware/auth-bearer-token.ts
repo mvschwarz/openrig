@@ -1,25 +1,9 @@
-// PL-005 Phase B: bearer-token middleware for /api/mission-control/*.
-//
-// Per slice IMPL § Write Set + audit hard-gates 8 + 9:
-//   - Constant-time bearer comparison via Node `crypto.timingSafeEqual`.
-//     No early-return on byte mismatch.
-//   - 401 with three-part error body on missing or mismatched token
-//     (what failed + why it matters + what to do).
-//   - Daemon refuses to start with a non-loopback bind interface AND
-//     empty bearer config — startup-side check (see startup.ts).
-//
-// MVP context (single-developer, single-user, single-host): one static
-// bearer token sourced from a config field. NO OAuth / SSO / per-user
-// routing / role-based permissions / token rotation. Token holder is
-// fully privileged.
-//
-// Mounted on /api/mission-control/* write verbs at minimum (POST
-// /action, POST /notifications/test). Reads (GET /views, /audit, etc.)
-// MAY be gated under the same token at operator option (Phase B
-// driver default: gate writes only; reads remain open behind tailnet
-// bind for the headed-browser-from-phone case where the operator
-// hasn't typed the token into mobile yet — the bearer is for write
-// integrity, not view confidentiality).
+// Bearer-token middleware for routes that explicitly mount it. The caller
+// selects the operator or terminal token; this is not global authentication.
+// A configured check returns 401 for a missing or mismatched bearer. A null
+// token passes that check through; other route-specific checks still apply.
+// Explicit binds outside loopback/tailnet require an operator token at startup,
+// but that configuration check does not add middleware to other routes.
 
 import { Buffer } from "node:buffer";
 import { timingSafeEqual } from "node:crypto";
@@ -63,22 +47,21 @@ function unauthorizedBody(reason: string, diagnosticContext?: "terminal"): {
 } {
   return {
     error: "unauthorized",
-    message: `${diagnosticContext === "terminal" ? "Terminal" : "Mission Control"} auth failed: ${reason}`,
+    message: `${diagnosticContext === "terminal" ? "Terminal" : "Operator bearer"} auth failed: ${reason}`,
     what_failed: reason,
     why_it_matters: diagnosticContext === "terminal"
       ? "Terminal and transport requests require the configured terminal bearer token to protect terminal access and input."
-      : "Mission Control write verbs require a bearer token because the daemon may be bound on a non-loopback interface (tailnet) where unauthenticated mutation would be unsafe.",
+      : "This route requires the daemon's configured operator bearer token.",
     what_to_do: diagnosticContext === "terminal"
       ? "Use the daemon's terminal bearer token with `Authorization: Bearer <token>`: OPENRIG_TERMINAL_BEARER_TOKEN, or OPENRIG_AUTH_BEARER_TOKEN when terminal auth falls back to it."
-      : "Set OPENRIG_AUTH_BEARER_TOKEN in the daemon's environment, restart the daemon, and resend the request with `Authorization: Bearer <token>`.",
+      : "Send the daemon's configured OPENRIG_AUTH_BEARER_TOKEN with `Authorization: Bearer <token>`. This token applies only to routes that check it.",
   };
 }
 
 export interface AuthBearerTokenOpts {
   /**
-   * The expected bearer token. When this is null, the middleware
-   * lets all requests through (the daemon-level startup check
-   * elsewhere ensures this only happens when bound on loopback).
+   * The expected bearer token. When this is null, this bearer check
+   * passes requests through. Other route-specific checks still apply.
    */
   expectedToken: string | null;
   /** Diagnostic wording only; never selects or compares a token. */
@@ -91,8 +74,8 @@ export interface AuthBearerTokenOpts {
  * or mismatched tokens.
  *
  * When `expectedToken` is null, the middleware passes through. The
- * startup check in `startup.ts` ensures null is only valid when the
- * bind interface is loopback.
+ * explicit-bind startup check requires an operator token outside loopback
+ * and tailnet; it does not configure every route's bearer check.
  */
 export function authBearerTokenMiddleware(
   opts: AuthBearerTokenOpts,
@@ -100,7 +83,7 @@ export function authBearerTokenMiddleware(
   const { expectedToken, diagnosticContext } = opts;
   return async (c, next) => {
     if (expectedToken === null) {
-      // Loopback-only mode (no bearer configured). Pass through.
+      // No token configured for this check. Pass through.
       await next();
       return;
     }
@@ -233,13 +216,10 @@ export class AuthBearerTokenStartupError extends Error {
 }
 
 /**
- * Startup-side check (HARD-GATE audit row 8). Throws an explicit
- * AuthBearerTokenStartupError when the bind interface is genuinely
- * public/LAN AND the bearer token is empty. Loopback or tailscale-IP
- * binds short-circuit (the tailnet is the auth boundary). Hostname
- * binds resolve via DNS first; if resolution yields a loopback or
- * tailnet IP, the same short-circuit applies. Public/LAN binds without
- * a bearer throw and the daemon refuses to start.
+ * Configuration check for an explicit bind outside loopback and tailnet:
+ * require a non-empty operator bearer token. Hostnames are resolved and
+ * checked the same way. This is not global request authentication: only
+ * routes with an explicit bearer check require the selected token.
  */
 export async function assertBindAuthInvariant(opts: {
   host: string;
@@ -263,6 +243,7 @@ export async function assertBindAuthInvariant(opts: {
     `daemon refusing to start: bind host '${opts.host}'${resolvedIp ? ` (resolves to ${resolvedIp})` : ""} is not loopback or tailscale, ` +
       `and OPENRIG_AUTH_BEARER_TOKEN is empty. ` +
       `Either: (a) bind to 127.0.0.1 / localhost, (b) bind to a tailscale interface (100.64.0.0/10 IPv4 or fd7a:115c:a1e0::/48 IPv6), ` +
-      `or (c) set OPENRIG_AUTH_BEARER_TOKEN to a non-empty value before starting the daemon.`,
+      `or (c) set OPENRIG_AUTH_BEARER_TOKEN to a non-empty value before starting the daemon. ` +
+      `This token applies only to routes with an explicit bearer check; it is not global authentication.`,
   );
 }

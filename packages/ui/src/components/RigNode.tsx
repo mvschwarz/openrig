@@ -1,3 +1,4 @@
+import { configuredBudgetLabel, type ConfiguredContextBudget } from "../lib/configured-context-budget.js";
 import { useRef, useEffect, useState } from "react";
 import { Handle, Position } from "@xyflow/react";
 import { displayAgentName } from "../lib/display-name.js";
@@ -21,6 +22,7 @@ import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "
 import { formatRuntimeModel } from "../lib/runtime-brand.js";
 import { postOpenCmux } from "../hooks/useCmuxLaunch.js";
 import { ToolMark } from "./graphics/RuntimeMark.js";
+import { CopySessionNameButton } from "./CopySessionNameButton.js";
 import { ContextBar, SeatEngine } from "./SeatEngine.js";
 
 interface RigNodeData {
@@ -48,6 +50,7 @@ interface RigNodeData {
     cmuxSurface?: string | null;
   } | null;
   contextUsedPercentage?: number | null;
+  contextConfiguredBudget?: ConfiguredContextBudget | null;
   contextFresh?: boolean;
   contextAvailability?: string;
   contextTotalInputTokens?: number | null;
@@ -236,6 +239,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
               (left dot, filled) vs "is this agent close to context
               exhaustion?" (right ring, hollow). */}
           <ContextUsageRing
+            configuredBudget={data.contextConfiguredBudget}
             percent={data.contextUsedPercentage}
             fresh={data.contextFresh}
             availability={data.contextAvailability}
@@ -268,6 +272,9 @@ export function RigNode({ data }: { data: RigNodeData }) {
               title={data.contextFresh ? "Context usage (fresh)" : "Context usage (stale sample)"}
             >
               {data.contextUsedPercentage}%
+              {data.contextConfiguredBudget && <span className="ml-1 text-on-surface-variant font-normal" title={configuredBudgetLabel(data.contextConfiguredBudget)}>
+                / {data.contextConfiguredBudget.usedPercentage == null ? "?" : `${data.contextConfiguredBudget.usedPercentage}%`} budget
+              </span>}
             </div>
           ) : (
             <div className="font-mono text-xs text-on-surface-variant" data-testid="context-badge-unknown">
@@ -344,6 +351,13 @@ export function RigNode({ data }: { data: RigNodeData }) {
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => e.stopPropagation()}
           >
+            {data.canonicalSessionName && (
+              <CopySessionNameButton
+                sessionName={data.canonicalSessionName}
+                testId="toolbar-copy-session-name"
+                className={toolbarIconButtonClass}
+              />
+            )}
             {data.rigId && (
               <button
                 onClick={handleOpenCmux}

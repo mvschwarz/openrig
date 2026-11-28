@@ -31,6 +31,14 @@ to have exited (identity reason `pane_exited`) reads `exited`, with `startupStat
 record is running but the LIFECYCLE is `attention_required` (for example, the seat's startup or restore needs
 attention, or OpenRig can't confirm the pane's process as the seat's runtime, such as a bare shell), its human
 output reads `Session: needs attention`, as `rig ps` reads `att`.
+Beside the LIFECYCLE, a recorded-running agent seat whose current identity check saw a shell as the pane's foreground
+command, without verifying the seat's agent there, serves `agentLiveness` (`agent_liveness` in `rig seat status`):
+`{ state: "not_verified", reason: "shell_foreground", command, observedAt }`, once its startup is no longer pending. It
+shows a stored shell observation; delivery checks the target again and applies its runtime's own policy. A community
+harness's seat can read it with its LIFECYCLE still `running`, because OpenRig can't prove that harness's process. `rig ps --nodes` shows `agent not verified` as the REASON and a `Liveness` line, and
+`rig seat status` shows an `Agent:` line. It isn't proof the agent stopped, since an agent can run behind a wrapper.
+Otherwise the field is absent, which claims nothing. It's read from the identity check's stored verdict, so showing it
+reads nothing new.
 
 The axes never blend. Reachability is strict; revival optimism is a different field
 (omnigent's strict-liveness split). `unknown` is a first-class honest value — the oracle
@@ -156,7 +164,10 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   Codex SessionStart/UserPromptSubmit/Stop/PermissionRequest): standing for Claude; Codex's
   hook rung starts at trial and is promoted after 50 agreeing observations over at least an
   hour. Exactly-once turn boundaries; SubagentStop filtered (it
-  can fire post-turn and must never revive an idle seat). Hook-rung authority is
+  can fire post-turn and must never revive an idle seat). Working and idle posts are taken
+  in the emitter's own order (event time, then its sequence), so a turn's Stop arriving after
+  the next turn's UserPromptSubmit doesn't win. Attention posts (a permission request,
+  needs-input, a usage limit) are applied as they arrive. Hook-rung authority is
   TIME-BOUNDED: the hook rung is the only rung that does not self-date its evidence, so
   persistent cross-rung contradiction degrades it to identity-only, visibly, with a
   rung-health event.
@@ -191,6 +202,16 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   carries an interval holds for two of them, then lapses to unknown, so a runner killed without saying so stops reading
   idle. Silence never clears a pending attention prompt, and a runner that states no interval (omp, an older pi
   runner) keeps the hold-until-the-next-boundary behaviour.
+- **A plain community preset's declared hooks** (`activity_hooks`, recorded at launch): the hook events the
+  harness's own script posts decide working, idle and needs-input, taken in their own order (time, then sequence)
+  as a runner's are, so a delayed older `Stop` that carries its `occurredAt` doesn't read a working seat idle. A post
+  without `occurredAt` is stamped at arrival and ordered by it. Only a declared turn start (`UserPromptSubmit` or `active`) makes an idle
+  boundary hold until the next post; without one it lasts the 15 s hook window, then positive-only sampling decides
+  (working or unknown). A dialog the structural recognizer reads on screen (the `needs-input-chrome` rung, source
+  `community:structural-prompt`) raises needs-input while its frame is fresh (5 s), captured after the inventory
+  began, from the seat's pane where that's known, and started after the seat's latest hook; the next hook, a frame
+  with no dialog or a failed read ends it. The trust rests on the installed preset's declaration, and nothing
+  demotes it automatically. A runner preset ignores the declaration.
 
 Claude permission notifications raise needs-input immediately. A visible permission can clear
 after it has been observed and then disappears. A notification whose dialog was never observed

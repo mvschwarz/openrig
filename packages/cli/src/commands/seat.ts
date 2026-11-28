@@ -39,6 +39,8 @@ interface SeatStatusResponse {
   /** Slice 16: an open runtime switch, or one recovery stopped short of finishing. */
   runtimeSwitch?: { id: string; phase: string; from: string; to: string; committed: boolean; startedAt: string; attention: string | null; outcome: string | null };
   compaction?: { stage: string; detail: string };
+  /** #4003: launched by OpenRig, or adopted (claimed); absent from older daemons. */
+  origin?: "launched" | "claimed" | null;
   current_occupant: string | null;
   /** #3253: the seat's process limits, read back from its process (applied; requested, not applied; unsupported; unknown;
    *  or invalid: the stored value can't be read). `readFrom` says which process was read. */
@@ -81,8 +83,14 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  activityState?: { display: string; needsInput: { count: number; reason: string | null } } | null;
+  external_attachment?: { liveness: "unknown"; lastOwnQueueAction: { at: string; qitemId: string; state: string } | null;
+    lastOwnQueueActionRead?: "read" | "unavailable" };
+  standby_stopped?: true;
   /** The seat's state as `rig ps --nodes` shows it; absent from an older daemon. */
   lifecycle_state?: string;
+  /** Beside the lifecycle: the identity check saw a shell in the pane's foreground and didn't verify the seat's agent. */
+  agent_liveness?: { state: "not_verified"; reason: "shell_foreground"; command: string; observedAt: string };
   launch_cwd?: string | null;
   permissions_to?: string | null;
   runner?: boolean;
@@ -193,8 +201,8 @@ interface SeatHandoverMutationResult {
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending" | "none"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string };
         model?: { requested: string | null; predecessorCompared: false } };
-  /** The restore or rebuild priming packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
-  restorePacket?: { status: "unconfirmed" | "accepted"; reason: string };
+  /** A packet passed at launch or typed afterward, with its submission still unconfirmed. */
+  restorePacket?: { status: "unconfirmed" | "accepted"; reason: string; firstInput?: { path: string; submission: "unconfirmed" }; consumption?: "unconfirmed" };
   /** #2456: the required startup files the successor started without, where a start would have failed. */
   startedWithoutRequired?: string[];
   /** #2985: this handover adopted the running successor of an earlier failed one (`--recover`). */
@@ -203,14 +211,16 @@ interface SeatHandoverMutationResult {
     departingSessionKilled: false;
     /** Absent from an older daemon, whose receipt reported both side effects as a fixed false. */
     departingProcess?: "ended-graceful" | "ended-forced" | "not-touched";
+    /** #3901: what happened to the previous occupant, in a sentence (absent from older daemons). */
+    departingProcessDetail?: string;
     startupContextDelivered: boolean;
     provenanceRecordWritten: boolean;
   };
 }
 
 const DEPARTING_PROCESS_LINES = {
-  "ended-graceful": "The previous occupant's process exited on TERM; its tmux session was kept, and the successor runs in the same pane.",
-  "ended-forced": "The previous occupant's process didn't exit on TERM and was killed; its tmux session was kept, and the successor runs in the same pane.",
+  "ended-graceful": "The previous occupant wasn't forced to stop: it exited through its own shutdown, or had already exited. Its tmux session was kept, and the successor runs in the same pane.",
+  "ended-forced": "The previous occupant was stopped by a signal: it didn't exit through its own shutdown, or that couldn't be confirmed. Its tmux session was kept, and the successor runs in the same pane.",
   "not-touched": "The previous occupant's process wasn't touched: the successor was an existing session.",
 } as const;
 
@@ -277,15 +287,20 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Rig: ${status.rig_name}`);
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
+  if (status.origin !== undefined) console.log(`Origin: ${status.origin === "claimed" ? "adopted (origin=claimed): OpenRig didn't launch this session, so stop, restart and clean refuse it" : status.origin === "launched" ? "launched by OpenRig" : "unknown"}`);
   if (status.nativeInput?.unresolved?.length) {
     console.log(`Native request evidence: ${terminalJson(status.nativeInput.unresolved)}`);
     if (status.nativeInput.recovery) console.log(status.nativeInput.recovery);
   }
   if (status.nativeInput?.target) console.log(`Native turn: ${terminalJson(status.nativeInput.target)}`);
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
-  // Only a runner submits permission requests; a plain seat's own prompts are its harness's.
-  if (status.permissions_to || status.runner) {
-    console.log(`Runner permission requests answered by: ${status.permissions_to === "deny" ? "no one: refused (--deny)" : status.permissions_to ?? "the default person"}`);
+  // A runner submits permission requests. A Claude Code seat that loads openrig-core has its own prompts asked of the
+  // chosen person, else its work's return route, else no one (#3992); other seats' prompts are their harness's.
+  const claudeSeat = status.runtime === "claude-code" && !status.runner;
+  if (status.permissions_to || status.runner || claudeSeat) {
+    console.log(claudeSeat
+      ? `Own permission prompts asked of (with openrig-core loaded): ${status.permissions_to === "deny" ? "no one: they stay in the terminal (--deny)" : status.permissions_to ?? "its work's return route, else no one"}`
+      : `Runner permission requests answered by: ${status.permissions_to === "deny" ? "no one: refused (--deny)" : status.permissions_to ?? "the default person"}`);
   }
   if (status.processLimits) {
     const l = status.processLimits;
@@ -321,8 +336,29 @@ function printHuman(status: SeatStatusResponse): void {
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   // #3185: a bare shell or an unconfirmed pane process keeps the session record running; read the seat as rig ps does.
-  console.log(`Session: ${status.session_status === "running" && status.lifecycle_state === "attention_required"
-    ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
+  const attached = status.external_attachment;
+  if (attached) {
+    // A seat joined with rig attach runs in someone else's program: OpenRig can't see its process, only what it writes.
+    const last = attached.lastOwnQueueAction;
+    console.log("Session: attached from an outside program (rig attach); OpenRig can't see its process, so whether it's running is unknown.");
+    // A history OpenRig couldn't read says so: it's never "none recorded".
+    console.log(`  Its own last queue action: ${attached.lastOwnQueueActionRead === "unavailable" ? "couldn't be read"
+      : last ? `${last.state} on ${last.qitemId} at ${last.at}` : "none recorded"}. Work sent to it waits until that program reads its queue.`);
+  } else {
+    console.log(`Session: ${status.standby_stopped ? "standby (wakes for queued work)" : status.session_status === "running" && status.lifecycle_state === "attention_required"
+      ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
+  }
+  // Beside the lifecycle, as rig ps shows it: a shell where the seat's agent should be, not proof the agent stopped.
+  const agent = status.agent_liveness;
+  if (agent?.state === "not_verified") {
+    console.log(`Agent: not verified: the pane's foreground is ${agent.command}, not a verified ${status.runtime ?? "agent"} agent `
+      + `(identity check at ${agent.observedAt}). It may have exited to its shell, or run behind a wrapper; rig capture `
+      + `${status.seat_ref} shows the pane.`);
+  }
+  if (status.activityState) {
+    const reason = status.activityState.needsInput.count > 0 ? status.activityState.needsInput.reason : null;
+    console.log(`Activity: ${status.activityState.display}${reason ? ` (${reason})` : ""}`);
+  }
   const stop = status.permission_stop;
   if (stop && stop.state !== "unavailable") {
     console.log(`Latest permission observation at ${stop.observed_at}: ${stop.command}; harness permission request (${stop.source}, ${stop.actor})`);
@@ -449,6 +485,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       ? "The handover's lineage record (occupant tenure) was written."
       : "The handover's lineage record (occupant tenure) was NOT written; check the daemon log, which names the first such failure since the daemon started. The seat is already bound to the successor, so don't run the handover again.");
     console.log(DEPARTING_PROCESS_LINES[result.sideEffects.departingProcess]);
+    if (result.sideEffects.departingProcessDetail) console.log(result.sideEffects.departingProcessDetail);
   }
   // OPR.0.5.5.5 — the per-source execution record: what actually carried context.
   if (result.sourceOutcome?.mode === "fork") {
@@ -503,8 +540,11 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
     // #3044: a recovered successor on the retiring occupant's conversation resumed it (the result's warning says so).
     if (result.currentStatus?.continuityOutcome !== "resumed") console.log("No conversation continuity was carried: the successor started a fresh conversation.");
   } else if (result.restorePacket?.status === "unconfirmed") {
-    // The packet was pasted and Enter pressed: the successor may already be working on it, so don't send it again.
-    if (result.source.mode === "rebuild") {
+    // A launch input is not a pasted-and-submitted packet; keep its receipt distinct.
+    if (result.restorePacket.firstInput) {
+      console.log(`The restore packet was passed at launch through ${result.restorePacket.firstInput.path}; submission and consumption are unconfirmed.`);
+      console.log("Do not resend the packet or repeat the handover because its uptake is unknown.");
+    } else if (result.source.mode === "rebuild") {
       console.log(`The rebuild priming packet was sent to the successor, but its submission is unconfirmed: ${result.restorePacket.reason}.`);
       if (result.restorePacket.reason === "the prompt still looked staged in the input box") {
         console.log("Check the successor's current screen. Only if that exact packet is still staged, submit the existing packet once. Do not resend blindly or rerun the handover.");
@@ -1193,8 +1233,8 @@ Examples:
     .command("set-permissions-to")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--to <person>", "The registered person who answers this seat's runner permission requests instead of the default person, such as mike@external")
-    .option("--clear", "Remove the override: the default person answers again")
-    .option("--deny", "Opt in to refusing every runner permission request on this seat")
+    .option("--clear", "Remove the override: a runner's requests go to the default person again, and a Claude Code seat's own prompts to its work's return route, else to no one")
+    .option("--deny", "Opt in to refusing every runner permission request on this seat; on a Claude Code seat, ask no one and leave its prompt in the terminal")
     .requiredOption("--reason <text>", "Audit reason recorded on the node.permissions_to_changed event")
     .option("--operator <address>", "Operator recorded on the audit event (required outside a managed seat)")
     .option("--json", "JSON output for agents")
@@ -1205,6 +1245,13 @@ request to OpenRig, and one person gets an ordinary ask with every option the ag
 offered; the answer goes back to that one request. That person is the default person
 (rig gateway default), unless this override names someone else. When no one can be
 asked, OpenRig's default is to permit the request.
+
+On a Claude Code seat that loads openrig-core, this also chooses who is asked the
+seat's own permission prompt: the chosen person, else the return route of the work
+it's running. With neither, no one is asked, not even the default person, so the
+seat's usual prompt alert isn't held back. There, a prompt no one is asked isn't
+permitted, and --deny stops the question: the prompt stays in the seat's terminal,
+and nothing is refused.
 
 Only a registered person can be chosen (rig gateway human list). A seat address is
 refused. --clear removes the override. --deny is the opt-in for a seat whose requests
@@ -1225,7 +1272,12 @@ Examples:
       await runLifecycleVerb("set-permissions-to", seat, body, opts, (data) => {
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         const name = `${s?.logicalId}@${s?.rigName}`;
-        const owner = (value: unknown) => value === "deny" ? "refused (--deny)" : typeof value === "string" ? value : "the default person";
+        // The receipt doesn't know the seat's kind, so with no one chosen or --deny it names both: a runner's requests and,
+        // on a Claude Code seat that loads openrig-core, its own prompts (#3992).
+        const owner = (value: unknown) => value === "deny"
+          ? "--deny (a runner's requests are refused; a Claude Code seat's own prompts stay in its terminal, asking no one)"
+          : typeof value === "string" ? value
+          : "no one chosen (a runner's requests go to the default person; a Claude Code seat's own prompts go to its work's return route, else to no one)";
         console.log(data["changed"] === false
           ? `${name}'s permission requests already go to ${owner(data["to"])}. No change recorded.`
           : `${name}'s permission requests: ${owner(data["from"])} -> ${owner(data["to"])} (audited).`);
@@ -1237,8 +1289,10 @@ Examples:
     .argument("<request>", "The permission request's id (qitem-runner-permission-…), as the row handed to you names it")
     .requiredOption("--option <id>", "One of the options the agent offered, by its id")
     .option("--reason <text>", "Why, recorded with the decision (say what the person meant)")
+    .option("--person-said <words>", "The person's own words, exactly as they gave them to you, recorded with the decision as your report of what they said")
+    .option("--relay", "A seat's own prompt only: the person chose this option themselves, and you pass it on exactly; recorded as relayed by you, not your decision, and unconfirmed, since OpenRig didn't get it from them")
     .option("--json", "JSON output for agents")
-    .description("Decide a runner seat's permission request that its person answered: one of the agent's offered options")
+    .description("Decide a seat's permission request that its person answered: one of the offered options")
     .addHelpText("after", `
 When a person answers a runner seat's permission request, with a click or in their own
 words, the request goes to this host's receiving agent to decide while the runner waits.
@@ -1247,14 +1301,30 @@ then gives its agent. It's recorded as an agent's decision, not the person's, wi
 deciding seat and the reason. A request that's already decided, withdrawn or stale is
 reported as it is, and nothing is written. See docs/reference/harness-runner-contract.md,
 section 7.
-Example:
-  rig seat decide-permission qitem-runner-permission-0123abcd --option allow --reason "they said go ahead"`)
-    .action(async (request: string, opts: { option: string; reason?: string; json?: boolean }) => {
-      type Decided = { ok?: boolean; state?: string; optionId?: string; code?: string; error?: string };
+
+A seat's own Claude Code prompt can come to you the same way, when your conversation
+handed the seat the work it's running. Show your person the exact action, then:
+- a plain yes or no is their own answer: pass it on with --relay and --person-said. It's
+  recorded as relayed by you, with their words as you report them, and reads unconfirmed:
+  OpenRig didn't get it from them;
+- for words or a condition, decide whether this exact action meets them, with --reason
+  and --person-said. A deny takes their words back to the seat's agent; it's recorded as
+  your judgment, not their no. If you can't tell what they meant, ask them again.
+An answer after the prompt was answered in the seat's terminal, or after its window,
+is too late and isn't sent. If the seat's permission hook isn't reading the ask (it was
+stopped), the answer is recorded and the reply says it hasn't reached the prompt.
+Examples:
+  rig seat decide-permission qitem-runner-permission-0123abcd --option allow --reason "they said go ahead"
+  rig seat decide-permission qitem-runner-permission-4567cdef --option allow --relay --person-said "yes"
+  rig seat decide-permission qitem-runner-permission-4567cdef --option deny --reason "it writes to main" --person-said "only on a branch"`)
+    .action(async (request: string, opts: { option: string; reason?: string; personSaid?: string; relay?: boolean; json?: boolean }) => {
+      type Decided = { ok?: boolean; state?: string; optionId?: string; code?: string; error?: string;
+        native?: { why?: string; message?: string; by?: string; unchanged?: boolean; notReached?: string } };
       let res: { status: number; data: Decided };
       try {
         res = await new DaemonClient().post<Decided>(`/api/activity/permission-requests/${encodeURIComponent(request.trim())}/decide`,
-          { optionId: opts.option.trim(), reason: opts.reason ?? "" });
+          { optionId: opts.option.trim(), reason: opts.reason ?? "",
+            ...(opts.personSaid !== undefined ? { personSaid: opts.personSaid } : {}), ...(opts.relay ? { relay: true } : {}) });
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;
@@ -1268,6 +1338,19 @@ Example:
       }
       if (opts.json) return;
       const state = res.data.state;
+      const native = res.data.native;
+      if (native) {
+        const line = (...parts: Array<string | undefined>) => parts.filter((part) => part).join(" ");
+        // notReached: the seat's hook isn't reading the ask (killed outright, say), so the recorded answer hasn't reached the prompt.
+        console.log(native.unchanged && (state === "answered" || state === "refused")
+          ? line(`Already answered${native.by ? ` by ${native.by}` : ""}: nothing was decided now.`, native.message, native.notReached)
+          : state === "answered" ? line(`Decided: ${res.data.optionId}.`, native.message,
+            native.notReached ?? "The seat's prompt gets it when its hook reads it, unless it was answered in the terminal first.")
+          : state === "withdrawn" || state === "stale" ? `Too late, nothing was decided: the request is ${state}${native.why === "answered_in_terminal" ? ", already answered in the seat's terminal"
+            : native.why === "answer_window_ended" ? ", past its window; the prompt is waiting in the seat's terminal" : native.why ? ` (${native.why})` : ""}.`
+          : `Nothing was decided: the request is ${state}.`);
+        return;
+      }
       console.log(state === "answered" ? `Decided: ${res.data.optionId}. A runner waiting on the request gets it now; one that isn't gets it at its next read.`
         : state === "refused" ? "Decided: refused. A runner waiting on the request gets the refusal now; one that isn't gets it at its next read."
         : `Nothing was decided: the request is ${state}.`);
@@ -1442,7 +1525,7 @@ resume/successor launch reads it at call time. Examples:
     .option("--note <text>", "With --confirm: what you'll do first")
     .option("--recover", "Finish an interrupted switch from its record")
     .option("--json", "JSON output for agents")
-    .description("Move a live Codex, Claude Code or Pi seat to another runtime, successor first")
+    .description("Move a live Codex, Claude Code, Pi or community-harness seat to another runtime, successor first")
     .addHelpText("after", `
 The seat keeps its address, connections, queue rows and claims. Its successor
 starts on the target runtime beside the current occupant, reads a handover, and
@@ -1456,7 +1539,7 @@ later converge reports a deferred change_runtime); the source runtime's model,
 effort, Codex profile and native permission choice are cleared, not mapped; two
 processes run until cutover; messages sent to the seat during the switch are
 held, not typed, and need sending again afterwards.
-Codex, Claude Code and Pi, single-pane seats only. --dry-run lists the details.
+Codex, Claude Code, Pi and installed community-harness seats, single-pane seats only. --dry-run lists the details.
 A seat that has never started has no pane to switch: declare the other runtime for it in its rig spec and bring the team
 up again from that spec. That's a new generation of the seat, without this seat's edges, settings or queued work.
 --clear-account-home returns to configured member/rig/daemon/native selection; it does not restore historical credentials.
@@ -1723,7 +1806,7 @@ Examples:
     .requiredOption("--keep-conversation", "Resume the seat's own conversation in its own pane; never a fresh launch or fork")
     .option("--reason <text>", "Audit reason (required when executing)")
     .option("--plan", "Run every check and show what a restart would keep; nothing is stopped or restarted")
-    .option("--verify", "After a real tool-using turn, check whether the restarted seat can be reported as moved")
+    .option("--verify", "With --keep-conversation, after a real tool-using turn: check whether the restarted seat can be reported as moved")
     .option("--expect-account <text>", "With --verify: the account Codex's /status Account line must name")
     .option("--operator <address>", "Operator recorded on the audit event")
     .option("--host <id>", "Restart a seat on this registered machine, over its SSH entry, as this seat")
@@ -1736,9 +1819,17 @@ exception: an explicit effort choice saved with rig seat set-effort is applied, 
 --plan shows that change. With no saved choice (never set, or cleared with --clear),
 an effort difference refuses as settings_drift, as a pending set-model does; the
 next ordinary managed launch or resume resolves effort instead.
+A developer_instructions command-line difference also doesn't refuse the restart.
+Managed launches use that override for startup guidance, but a manual resume can
+carry a person's own value too. This in-place restart doesn't preserve the override
+or rebuild startup guidance; --plan and the result report when it changes. To
+refresh startup guidance, or adopt new openrig-core in a home other seats share,
+use the normal restore path together: rig down, then rig up --existing.
 This never switches an account (use rig auth switch first), never reads credentials,
 never launches fresh, forks or retries. Peers sharing the Codex home are reported,
-not restarted.
+not restarted. An openrig-core upgrade waiting in the seat's Codex home installs
+between the old Codex's stop and the new one's start, unless another Codex seat still
+runs there; then a warning names those seats.
 Mid-turn activity and child processes are shown in --plan and the result; deciding
 whether to interrupt them is the operator's call.
 An adopted seat (origin=claimed) refuses with claimed_session. The stored conversation
@@ -1841,9 +1932,11 @@ session and leaves its process running), then end that process and the
 underlying tmux session, including any remaining shell. Closing only its
 viewing window leaves the tmux session running. rig down <rig> leaves a
 session OpenRig didn't start running.
-A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 still reads
-adopted and is refused too, until its next launched handover or managed launch;
-the refusal says so. Stopping ends that agent's session and any work in progress:
+A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 was recorded as
+adopted. Where retained handover records identify its successor unambiguously,
+the upgrade records it as launched, so it stops like any other launched seat.
+Missing or ambiguous records keep the adopted origin. rig seat status shows
+each seat's recorded origin. Stopping ends that agent's session and any work in progress:
 check it first (rig capture <seat>) and stop only a seat you own or were asked to
 stop. rig seat launch <seat> --fresh --reason <text> starts
 a fresh occupant there; it does not resume the stopped conversation.

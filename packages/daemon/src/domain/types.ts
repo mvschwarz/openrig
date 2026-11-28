@@ -209,7 +209,8 @@ export type RigEvent =
   | { type: "node.codex_permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; replaced?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.codex_profile_changed"; rigId: string; nodeId: string; from: string | null; to: string | null; observation?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
-  | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; sessionId?: string; reason: string; operator: string | null }
+  | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; sessionId?: string; reason: string; operator: string | null; standbyPane?: string }
+  | import("./seat-reaper-events.js").SeatReapedEvent
   // #2940: the keep_alive supervisor's recovery of a fallen seat. `attempted` is persisted with the attempt's count before
   // its launch starts; `exhausted` once per incident, when the attempts ran out or a launch outcome needs a person.
   | { type: "seat.keep_alive.attempted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number }
@@ -304,6 +305,9 @@ export type RigEvent =
   // A Claude launch that didn't give the seat its own subscription token: Claude started on its config dir's stored
   // login. The reference (label and file path) only; the token value never enters OpenRig.
   | { type: "seat.claude_token_not_applied"; rigId: string; nodeId: string; label: string; tokenFile: string; reason: string }
+  /** A never-launched Claude seat's own credential reference, saved for its first launch (`rig provider switch`): labels and
+   *  the file path only, never its contents. `operator` is the calling seat's session when the request named one. */
+  | { type: "node.claude_token_ref_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; tokenFile: string | null; credential: "subscription_token" | "api_key" | "stored_login"; operator: string | null; effect: "first_launch" }
   | { type: "seat.attention_cleared"; rigId: string; nodeId: string; sessionName: string; from: string; to: "ready"; clearedBy: "evidence" | "operator_attestation"; evidence?: { kind: string; state?: string; reason?: string }; reason?: string; previousError: string | null }
   | { type: "seat.attention_clear_refused"; rigId: string; nodeId: string; sessionId: string; sessionName: string; attentionClass: "restore_outcome"; code: string; attemptId?: number; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   | { type: "rig.imported"; rigId: string; specName: string; specVersion: string }
@@ -332,6 +336,8 @@ export type RigEvent =
       requestedBy: string | null; generation: string; previousGeneration: string;
       settings: Record<string, { value: string | null; source: string }>; dropped: Array<{ setting: string; value: string }>;
       permissionSelection: string; claimsMoved: number }
+  | { type: "seat.handover_first_input_passed"; rigId: string; nodeId: string; occupantGeneration: string | null;
+      path: string; submission: "unconfirmed"; consumption: "unconfirmed"; launchCommand: "accepted" | "unconfirmed"; binding: "not_committed" }
   | { type: "seat.handover_completed"; rigId: string; nodeId: string; logicalId: string; previousOccupant: string; currentOccupant: string; source: string; reason: string; operator: string | null;
       /** OPR.0.5.5.5 (fix B2) — the executed source outcome, persisted so the DURABLE
        *  record (not just the command response) carries what primed the successor:
@@ -505,7 +511,7 @@ export interface PersistedProjectionEntry {
   resourceType?: string;
   mergeStrategy?: string;
   target?: string;
-  /** A skill whose resource says `on_restore: follow_source`, so a replay keeps it recorded as following. */
+  /** A skill or supported runtime fragment whose resource follows today's source. */
   onRestore?: SkillOnRestore;
 }
 
@@ -811,7 +817,9 @@ export interface NodeRecoveryGuidance {
 // Per-node lifecycle projection derived from session/restore state plus snapshot resume metadata.
 // L2 cold-start truth model: distinguishes a recoverable detached node from a node that would
 // fresh-launch, and surfaces "attention required" for the post-L3 Claude resume-prompt proxy.
-export type NodeLifecycleState = "running" | "detached" | "recoverable" | "attention_required";
+/** `unknown`: a seat joined with `rig attach` as an external CLI runs in someone else's program, so OpenRig can't see
+ *  whether it's running (see `NodeInventoryEntry.externalAttachment`). */
+export type NodeLifecycleState = "running" | "detached" | "recoverable" | "attention_required" | "unknown";
 
 /**
  * OPR.0.4.3.19 — the liveness identity verdict for a managed seat.
@@ -914,13 +922,24 @@ export interface NodeInventoryEntry {
   configuredAccount?: string | null;
   /** Present only on a community harness's seat: its label, maintainer and declared limits. */
   communityHarness?: import("./community-harness-presets.js").CommunityHarnessLabel;
-  /** Effective current status; confirmed session absence projects as detached. */
+  /** Effective current status; confirmed session absence projects as detached. A seat joined with `rig attach` as an
+   *  external CLI reads `attached`: OpenRig can't see its process, so a stored running or detached isn't its state. */
   sessionStatus: string | null;
   /** Persisted session status, retained for history and registry-based rollups. */
   storedSessionStatus?: string | null;
+  /** Present only on a seat attached from an outside program (`rig attach`, an external CLI): OpenRig can't type into it
+   *  or see its process, so its liveness is unknown. Its own newest queue action (a claim, note or handoff it wrote, live or
+   *  archived) is the only sign OpenRig has that it's working; null when it has written none. `lastOwnQueueActionRead` is
+   *  "unavailable" when that history couldn't be read, and then the null says nothing about it. */
+  externalAttachment?: {
+    liveness: "unknown";
+    lastOwnQueueAction: { at: string; qitemId: string; state: string } | null;
+    lastOwnQueueActionRead: "read" | "unavailable";
+  };
   /** The latest session was explicitly stopped and has no replacement binding.
    * It remains non-running, but is not a missing member in the rig lifecycle. */
   intentionallyStopped?: boolean;
+  standbyStopped?: true;
   /** #2940: a supported stop was requested and is not confirmed yet; the seat is not reported as exited. */
   stopRequested?: boolean;
   /** #2940: the seat declares keep_alive, so the daemon relaunches it when it falls; absent = off. */
@@ -1059,6 +1078,12 @@ export interface NodeInventoryEntry {
    * heartbeat — process identity only.
    */
   identityVerdict?: SeatIdentityVerdict | null;
+  /** The agent behind a recorded-running agent seat, beside its lifecycle: present only when the current identity check (the
+   *  verdict above) saw a shell as the pane's foreground command and didn't verify the seat's agent there, once its startup
+   *  is no longer pending. It shows a stored shell observation; delivery checks the target again and applies its runtime's
+   *  own policy. It isn't proof the agent stopped: it can run behind a wrapper. Absent otherwise, which claims nothing. Read
+   *  from the stored verdict; nothing new is probed. */
+  agentLiveness?: { state: "not_verified"; reason: "shell_foreground"; command: string; observedAt: string };
   /** OPR.0.3.4.11 — held reason derived from the latest `node.held` event.
    *  Null when no held event, or superseded by a running session / later launch. */
   heldReason?: string | null;
@@ -1241,7 +1266,11 @@ export type SkillOnRestore = "keep_saved" | "follow_source";
 export interface SkillResource { id: string; path: string; onRestore?: SkillOnRestore; }
 export interface GuidanceResource { id: string; path: string; target: string; merge: "managed_block" | "append"; }
 export interface SubagentResource { id: string; path: string; }
-export interface RuntimeResource { id: string; path: string; runtime: string; type: string; }
+export type ClaudeJsonFragmentType = "claude_mcp_fragment" | "claude_settings_fragment";
+export function isClaudeJsonFragmentType(type: unknown): type is ClaudeJsonFragmentType {
+  return type === "claude_mcp_fragment" || type === "claude_settings_fragment";
+}
+export interface RuntimeResource { id: string; path: string; runtime: string; type: string; onRestore?: SkillOnRestore; }
 
 export type PluginSource =
   | { kind: "local"; path: string };
@@ -1844,6 +1873,13 @@ export type ContextUnknownReason =
   | "stale_generation"
   | "no_data";
 
+/** Display-only configured budget. This is not an observed native compaction trigger. */
+export interface ConfiguredContextBudget {
+  tokens: number;
+  usedPercentage: number | null;
+  source: "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+}
+
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
@@ -1858,6 +1894,7 @@ export interface ContextUsage {
   totalInputTokens: number | null;
   totalOutputTokens: number | null;
   currentUsage: string | null;
+  configuredBudget?: ConfiguredContextBudget | null;
   transcriptPath: string | null;
   sessionId: string | null;
   sessionName: string | null;

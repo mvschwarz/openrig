@@ -249,6 +249,24 @@ cited here by number with the code that carries them):
   live sessions (`packages/daemon/src/domain/rig-teardown.ts:117`, capture
   at `:128`, after refreshing resume metadata at `:119`; an already-stopped
   rig returns at `:93–115` without one).
+- Before it closes the terminals, `rig down` lets each Claude Code or Codex
+  seat's agent exit through its own shutdown (#3901,
+  `RigTeardownOrchestrator.exitSeatRuntimes`, `domain/runtime-exit.ts`):
+  Claude Code gets TERM itself, not its pane's shell; Codex gets `/exit`
+  typed into its input box only while that box is empty with no prompt open,
+  and TERM otherwise. All seats go at once. Each waits up to 3 s for the
+  agent's exit, then sends KILL and waits up to 3 s again; the reads and
+  writes between take time of their own. Only sessions the stop below would
+  end are touched (`downDisposition`, shared with the kill loop), with the
+  stop's own proof: the pane's session id and tmux server (pid and start
+  time) read together, the seat's marker read by that id, and each signal and
+  typed input held to that session and server. The exit is read from the process table, never
+  from the pane. Closing the terminals still stops everything afterwards.
+  `--force` skips the step. The result's `runtimeExits` says, per seat, what
+  the step saw, with a sentence: `graceful` (its own shutdown, or no agent
+  left), `forced` (seen to end on a signal it doesn't handle, or on KILL) or
+  `unverified` (its end wasn't seen). Whether a terminal closed is the stop's
+  own result (`sessionsKilled`, `errors`).
 - `rig up <rig-name>`: a source with no `/` and no
   `.yaml`/`.yml`/`.rigbundle`/`.rigtopology` extension is a rig name
   (`packages/daemon/src/domain/up-command-router.ts:49–50`). The CLI refuses
@@ -324,7 +342,27 @@ cited here by number with the code that carries them):
   `POST /api/seat/handover/:seatRef` (`routes/seat.ts:94`), which runs
   `SeatHandoverService.handover` (`seat-handover-service.ts:266`).
   `SuccessorSessionLauncher` (`successor-session-launcher.ts:92`) respawns
-  the same pane in place, so the session name stays the same. The fresh
+  the same pane in place, so the session name stays the same. Before the
+  respawn, the departing occupant exits through its own shutdown where it has
+  one (#3901: `terminatePaneInPlace` in `pane-cutover.ts`, then
+  `runtime-exit.ts`, the same exit `rig down` uses; also a kept-pane relaunch
+  and a runtime switch's retirement), read from the process table. Only then
+  is the pane's shell ended (HUP, then KILL), since the respawn needs a dead
+  pane. Another runtime, an agent that can't be identified, or an exit that
+  couldn't be checked (an unreadable process table or terminal, KILL withheld
+  because its check didn't hold) keeps the pane-level TERM then KILL, reported
+  forced;
+  the handover fails (`retiree_not_terminated`) only for an agent seen running
+  after its KILL, or when the pane's own end can't be established (its dead
+  state unreadable). The pane's terminal (session id and tmux server) is read
+  as the pane is resolved, and the destructive effects (the agent's signals,
+  typed input and the pane-level retirement signals) are held to it, though
+  setting remain-on-exit and the later respawn aren't: a pane seen in another session or on another
+  server is left alone (`guard_target_changed`). A later terminal read that
+  comes back unreadable isn't that: the agent's own signals and typed input
+  go only on a read that matches, and the pane-level signals go on with their
+  own checks (the delivery guard, the pane's pid). `sideEffects.departingProcess`
+  and `departingProcessDetail` say how the occupant ended. The fresh
   source delivers a daemon-built restore packet (`buildRestorePacket`,
   `seat-handover-service.ts:1151`), which is separate from the CLI
   `rig restore-packet` below. The rebuild source primes from the seat's

@@ -1,3 +1,4 @@
+import type { ConfiguredContextBudget } from "../lib/configured-context-budget.js";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { withHostParam } from "../lib/host-param.js";
 import { useSelectedHostId } from "./useHosts.js";
@@ -76,6 +77,7 @@ export interface NodeDetailData {
   hasAssignedWork?: boolean;
   pendingWorkCount?: number;
   contextUsage?: {
+    configuredBudget?: ConfiguredContextBudget | null;
     availability: string;
     reason?: string | null;
     usedPercentage?: number | null;

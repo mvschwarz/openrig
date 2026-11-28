@@ -3,6 +3,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Command } from "commander";
 import { seatCommand } from "../src/commands/seat.js";
+import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type DaemonState, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -68,7 +69,7 @@ describe("rig seat set-permissions-to", () => {
     expect(calls[0]!.path).toBe("/api/seat/set-permissions-to/dev-runner%40perm-rig");
     expect(calls[0]!.body).toEqual({ to: "mike@external", reason: "Mike approves" });
     expect(exitCode).toBeUndefined();
-    expect(logs.join("\n")).toContain("dev.runner@perm-rig's permission requests: the default person -> mike@external (audited).");
+    expect(logs.join("\n")).toContain("dev.runner@perm-rig's permission requests: no one chosen (a runner's requests go to the default person; a Claude Code seat's own prompts go to its work's return route, else to no one) -> mike@external (audited).");
   });
 
   it("--clear posts clear", async () => {
@@ -78,7 +79,7 @@ describe("rig seat set-permissions-to", () => {
       await program.parseAsync(["node", "rig", "seat", "set-permissions-to", "dev.runner", "--clear", "--reason", "back to the default person"]);
     });
     expect(calls[0]!.body).toEqual({ clear: true, reason: "back to the default person" });
-    expect(logs.join("\n")).toContain("mike@external -> the default person");
+    expect(logs.join("\n")).toContain("mike@external -> no one chosen (a runner's requests go to the default person; a Claude Code seat's own prompts go to its work's return route, else to no one)");
   });
 
   it("--deny posts the explicit opt-in to refuse, and prints it", async () => {
@@ -88,7 +89,7 @@ describe("rig seat set-permissions-to", () => {
       await program.parseAsync(["node", "rig", "seat", "set-permissions-to", "dev.runner", "--deny", "--reason", "high stakes"]);
     });
     expect(calls[0]!.body).toEqual({ deny: true, reason: "high stakes" });
-    expect(logs.join("\n")).toContain("the default person -> refused (--deny)");
+    expect(logs.join("\n")).toContain("no one chosen (a runner's requests go to the default person; a Claude Code seat's own prompts go to its work's return route, else to no one) -> --deny (a runner's requests are refused; a Claude Code seat's own prompts stay in its terminal, asking no one)");
   });
 
   it("requires exactly one of --to, --clear or --deny, before any request", async () => {
@@ -102,5 +103,43 @@ describe("rig seat set-permissions-to", () => {
       expect(errors.join("\n")).toContain("exactly one of --to <person>, --clear or --deny");
     }
     expect(calls).toHaveLength(0);
+  });
+});
+
+// Slice 15, orch-advisor's must-fix: a seat's own Claude Code prompt whose permission hook stopped reading its ask (killed
+// outright, say). The daemon's reply says the answer hasn't reached the prompt, and the command prints that instead of
+// saying the prompt gets it.
+describe("rig seat decide-permission on a seat's own Claude Code prompt", () => {
+  const ASK = "qitem-runner-permission-0123456789abcdef01234567";
+  const decide = async (native: Record<string, unknown>) => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    vi.spyOn(DaemonClient.prototype, "post").mockImplementation(async (path: string, body?: unknown) => {
+      calls.push({ path, body });
+      return { status: 200, data: { ok: true, state: "answered", optionId: "allow",
+        native: { hook: "claude-code", answeredAs: "relayed", by: "conversation-0123456789ab@kernel", reported: "yes",
+          message: "Allowed once: conversation-0123456789ab@kernel relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). conversation-0123456789ab@kernel reports they said: \"yes\"", ...native } } } as never;
+    });
+    const program = makeCommand({ status: 200, data: {} }, []);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "seat", "decide-permission", ASK, "--option", "allow", "--relay", "--person-said", "yes"]);
+    });
+    return { calls, logs, exitCode };
+  };
+
+  it("says the answer hasn't reached the prompt when the seat's hook isn't reading the ask", async () => {
+    const notReached = "It hasn't reached dev-impl@perm-rig's prompt: the seat's permission hook hasn't read this ask since 2026-11-25T21:49:50Z, so nothing has taken the answer there (the hook may have been stopped). Check the seat (rig capture dev-impl@perm-rig): if its prompt is still open, an answer in its terminal reaches it.";
+    const { calls, logs, exitCode } = await decide({ hookLastRead: "2026-11-25T21:49:50Z", notReached });
+    expect(calls[0]).toEqual({ path: `/api/activity/permission-requests/${ASK}/decide`, body: { optionId: "allow", reason: "", personSaid: "yes", relay: true } });
+    expect(exitCode).toBeUndefined();
+    expect(logs).toEqual([`Decided: allow. Allowed once: conversation-0123456789ab@kernel relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). conversation-0123456789ab@kernel reports they said: "yes" ${notReached}`]);
+    expect(logs.join("\n")).not.toContain("gets it when its hook reads it");
+    // A second answer is told the first counts, and still that it hasn't reached the prompt.
+    const again = await decide({ unchanged: true, notReached });
+    expect(again.logs).toEqual([`Already answered by conversation-0123456789ab@kernel: nothing was decided now. Allowed once: conversation-0123456789ab@kernel relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). conversation-0123456789ab@kernel reports they said: "yes" ${notReached}`]);
+  });
+
+  it("reads as before while the hook reads the ask", async () => {
+    const { logs } = await decide({ hookLastRead: "2026-11-25T21:49:50Z" });
+    expect(logs).toEqual(["Decided: allow. Allowed once: conversation-0123456789ab@kernel relayed this as the person's answer (unconfirmed: OpenRig didn't get this answer from them). conversation-0123456789ab@kernel reports they said: \"yes\" The seat's prompt gets it when its hook reads it, unless it was answered in the terminal first."]);
   });
 });

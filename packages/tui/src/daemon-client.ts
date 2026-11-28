@@ -11,6 +11,10 @@ export const USAGE_HOSTS_VIEW_WAIT_MS = 20_000;
 /** The fleet Projects view: the daemon answers within its own 10 s view deadline
  *  whatever the registry's size, plus its 5 s read and the transfer. */
 export const FLEET_SCOPES_VIEW_WAIT_MS = 20_000;
+/** Topology's own reads (rigs, seats, hosts and the daemon's identity). A daemon busy with one long request answers
+ *  every other request after it, so these wait as long as the slower views above: a late answer shows as pending,
+ *  never as a failed Topology. Other reads keep 5 s. */
+export const TOPOLOGY_READ_WAIT_MS = 20_000;
 
 export interface DaemonClientOptions {
   baseUrl?: string;
@@ -24,6 +28,27 @@ export interface DaemonClientOptions {
 /** What a person reads when the daemon refuses an answer for want of its operator bearer. Never carries a token. */
 export const ACTION_UNAUTHORIZED = "This daemon refused the answer without its operator bearer token, so nothing was recorded. "
   + "Start the TUI with OPENRIG_AUTH_BEARER_TOKEN set to the token this daemon runs with, then answer again.";
+
+/** The daemon answered a write with a non-OK HTTP status. A 4xx is a refusal: it wrote nothing. A 5xx may follow a
+ *  committed write (the daemon failed after it), so whether it landed isn't known. A write that got no answer (the
+ *  connection failed) rejects with the fetch error instead, also unknown. */
+export class DaemonWriteRefused extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+
+/** The daemon accepted a write (2xx) but its answer couldn't be read, so whether the write landed isn't known. */
+export class DaemonAnswerUnreadable extends Error {}
+
+/** What a person reads when a dismiss fails: "nothing changed" only when the daemon refused it (a 4xx). */
+export function dismissFailureNotice(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof DaemonWriteRefused && err.status < 500) {
+    return `Not dismissed, nothing changed: ${message}. The update's detail shows its current state.`;
+  }
+  const why = err instanceof DaemonWriteRefused ? "the daemon failed while answering"
+    : err instanceof DaemonAnswerUnreadable ? "the daemon's answer couldn't be read" : "the daemon didn't answer";
+  return `Dismiss not confirmed, ${why}: ${message}. It may have been dismissed; the update's detail shows its current state.`;
+}
 
 export class StartupRequestError extends Error {
   constructor(readonly status: number, readonly result: Record<string, unknown>) {
@@ -57,6 +82,8 @@ export interface TerminalOpenResult {
   code?: string;
   notes?: string[];
   reusedWorkspace?: { id: string; tabId: string; view: string };
+  /** herdr-app placed the view in the daemon machine's herdr-core for a window elsewhere: started, never seen. */
+  placement?: { mode: "core"; visibility: "unconfirmed"; viewId: string; host: string };
 }
 
 export interface LaunchNodeResult {
@@ -132,8 +159,8 @@ export class DaemonClient {
     }
   }
 
-  private async get(route: string, fetchImpl = this.fetchImpl): Promise<unknown> {
-    const res = await fetchImpl(`${this.baseUrl}${route}`, { headers: this.headers, signal: AbortSignal.timeout(5_000) });
+  private async get(route: string, fetchImpl = this.fetchImpl, waitMs = 5_000): Promise<unknown> {
+    const res = await fetchImpl(`${this.baseUrl}${route}`, { headers: this.headers, signal: AbortSignal.timeout(waitMs) });
     if (!res.ok) {
       const parsed = await res.json().catch(() => null);
       const detail = parsed && typeof parsed === "object" && "error" in parsed ? ` — ${(parsed as { error: unknown }).error}` : "";
@@ -142,20 +169,22 @@ export class DaemonClient {
     return res.json();
   }
 
-  private async post(route: string, body: unknown, options: { headers?: Record<string, string>; unauthorized?: string } = {}): Promise<unknown> {
+  private async post(route: string, body: unknown, options: { headers?: Record<string, string>; unauthorized?: string; waitMs?: number } = {}): Promise<unknown> {
     const res = await this.fetchImpl(`${this.baseUrl}${route}`, {
       method: "POST",
       headers: { ...(options.headers ?? this.headers), "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      // Bounds the headers and the body read below; without waitMs a write waits as long as the daemon takes.
+      ...(options.waitMs === undefined ? {} : { signal: AbortSignal.timeout(options.waitMs) }),
     });
     const parsed = await res.json().catch(() => null);
-    if (res.status === 401 && options.unauthorized) throw new Error(options.unauthorized);
+    if (res.status === 401 && options.unauthorized) throw new DaemonWriteRefused(401, options.unauthorized);
     if (!res.ok) {
       const detail = parsed && typeof parsed === "object"
         ? "error" in parsed ? ` — ${(parsed as { error: unknown }).error}`
           : "message" in parsed ? ` — ${(parsed as { message: unknown }).message}` : ""
         : "";
-      throw new Error(`daemon write failed: POST ${route} → ${res.status}${detail}`);
+      throw new DaemonWriteRefused(res.status, `daemon write failed: POST ${route} → ${res.status}${detail}`);
     }
     return parsed;
   }
@@ -206,7 +235,7 @@ export class DaemonClient {
   }
 
   health() {
-    return this.get("/healthz");
+    return this.get("/healthz", this.fetchImpl, TOPOLOGY_READ_WAIT_MS);
   }
 
   /** Slice 01 — the provider read model, as `rig provider status --json` prints it. GET only: the daemon answers it
@@ -297,23 +326,23 @@ export class DaemonClient {
 
   // --- Topology (§4.A rows 1–3) ---
   rigGraph(rigId: string) {
-    return this.get(`/api/rigs/${encodeURIComponent(rigId)}/graph`);
+    return this.get(`/api/rigs/${encodeURIComponent(rigId)}/graph`, this.fetchImpl, TOPOLOGY_READ_WAIT_MS);
   }
   ps() {
-    return this.get(`/api/ps`);
+    return this.get(`/api/ps`, this.fetchImpl, TOPOLOGY_READ_WAIT_MS);
   }
   /** With `host`, the rigs of that registered host, read through this daemon (its read-only `?host=` forwarding). */
   rigsSummary(host?: string) {
-    return this.get(host ? `/api/rigs/summary?host=${encodeURIComponent(host)}` : `/api/rigs/summary`);
+    return this.get(host ? `/api/rigs/summary?host=${encodeURIComponent(host)}` : `/api/rigs/summary`, this.fetchImpl, TOPOLOGY_READ_WAIT_MS);
   }
   /** The registered hosts (`rig host list`), each with a quick reachability probe. */
   hosts() {
-    return this.get(`/api/hosts`);
+    return this.get(`/api/hosts`, this.fetchImpl, TOPOLOGY_READ_WAIT_MS);
   }
   /** A rig's node inventory. With `host`, the same route read through this daemon's `?host=` forwarding for a
    *  registered http-transport host (the read-only allowlist covers /api/rigs/:rigId/nodes). */
   rigNodes(rigId: string, host?: string) {
-    return this.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes${host ? `?host=${encodeURIComponent(host)}` : ""}`);
+    return this.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes${host ? `?host=${encodeURIComponent(host)}` : ""}`, this.fetchImpl, TOPOLOGY_READ_WAIT_MS);
   }
   /** The existing per-seat effort report: requested, saved, emitted and observed.
    * A refusal is an answer, so the page reader doesn't count it as a failed read. */
@@ -487,10 +516,16 @@ export class DaemonClient {
       headers: { ...this.actionHeaders, "Content-Type": "application/json" }, body: JSON.stringify({ request, decision }), signal: AbortSignal.timeout(10_000) });
     return { status: res.status, body: await res.json().catch(() => null) as Record<string, unknown> | null };
   }
-  /** The mission-control write Steering uses to answer a request (POST /api/mission-control/action). */
-  missionControlAction(input: { verb: "approve" | "answer" | "resolve"; qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string; authority?: "primary-user" }) {
-    return this.post("/api/mission-control/action", input, { headers: this.actionHeaders, unauthorized: ACTION_UNAUTHORIZED }) as Promise<{ verb: string; qitemId: string; closedQitem: unknown;
-      answer?: { outcome: "recorded" | "answered"; unanswered: string[]; message?: string } }>;
+  /** The mission-control write Steering uses to answer a request, or to dismiss an update (POST /api/mission-control/action). */
+  async missionControlAction(input: { verb: "approve" | "answer" | "resolve" | "dismiss"; qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string; authority?: "primary-user" }) {
+    const dismiss = input.verb === "dismiss";
+    // A dismiss waits at most 10 seconds, as a pair decision does; then its outcome is unknown, not "nothing changed".
+    const result = await this.post("/api/mission-control/action", input, { headers: this.actionHeaders, unauthorized: ACTION_UNAUTHORIZED, ...(dismiss ? { waitMs: 10_000 } : {}) });
+    if (dismiss && (result === null || typeof result !== "object")) {
+      throw new DaemonAnswerUnreadable("POST /api/mission-control/action answered OK without a readable result");
+    }
+    return result as { verb: string; qitemId: string; closedQitem: unknown;
+      answer?: { outcome: "recorded" | "answered"; unanswered: string[]; message?: string } };
   }
   attentionAggregate() {
     return this.get(`/api/queue/attention-aggregate`);
