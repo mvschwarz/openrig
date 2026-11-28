@@ -5,8 +5,9 @@
 // daemon, via COPY-THEN-READ (arch Q1): the daemon DB is WAL-mode, so a post-crash `-wal` holds
 // the last committed-but-unreplayed frames (exactly the where-work-stopped rows we must show).
 // We copy the {db, -wal, -shm} triple to a disposable scratch dir and open the COPY read-only, so
-// SQLite replays the WAL on the copy → a FRESH view with ZERO interference to the originals a
-// restarting daemon will reopen. READ-ONLY by construction: nothing here ever writes daemon state.
+// SQLite reads the copy without opening the originals a restarting daemon will reopen. The
+// pre-copy liveness observation is not atomic writer quiescence or a consistent concurrent-copy
+// guarantee. READ-ONLY by construction: nothing here ever writes daemon state.
 //
 // The read is fail-closed: it REFUSES if a daemon is live (see assertDaemonDown) — never contend
 // with the process it exists to recover. All process/IO probes are injected so the logic is
@@ -14,7 +15,7 @@
 
 import Database from "better-sqlite3";
 import { basename, isAbsolute, join } from "node:path";
-import { formatDaemonHostForUrl } from "./daemon-url.js";
+import { classifyDaemonState, type ClassifyDaemonDeps, type DaemonState } from "./crash-cart-detect.js";
 
 /** Refusal: a live daemon holds the DB, so the direct read is unsafe (route to the live read API). */
 export class DaemonLiveError extends Error {
@@ -45,64 +46,28 @@ export interface DaemonJson {
   startedAt?: string;
 }
 
-export interface AssertDaemonDownDeps {
-  /** `$OPENRIG_HOME` — where daemon.json lives. */
-  openrigHome: string;
-  /** Parse `$OPENRIG_HOME/daemon.json` → the record, or undefined if absent/unparseable (treated as down). */
+/** The selected target changed state between the first verdict and the pre-copy observation. */
+export class DaemonStateChangedError extends DaemonLiveError {
+  constructor(readonly state: Exclude<DaemonState, "down">) {
+    super(`daemon recheck is ${state}; no down-only discovery was read`);
+    this.name = "DaemonStateChangedError";
+  }
+}
+
+export interface AssertDaemonDownDeps extends ClassifyDaemonDeps {
   readDaemonJson: (openrigHome: string) => DaemonJson | undefined;
-  /** True if `pid` is a live process (e.g. `process.kill(pid, 0)` succeeds). */
-  isProcessAlive: (pid: number) => boolean;
-  /** GET `<url>` → true if ANY daemon answered (the control-plane is live). Never throws. */
-  probeHealthz: (url: string) => Promise<boolean>;
-  /** `OPENRIG_URL` override — when set, its /healthz is probed too (bypasses the state file, like getDaemonStatus). */
-  openrigUrl?: string;
 }
 
-const DEFAULT_HOST = "127.0.0.1";
-const DEFAULT_PORT = 7433;
-
-function stripTrailingSlash(u: string): string {
-  return u.endsWith("/") ? u.slice(0, -1) : u;
-}
-
-/**
- * FAIL-CLOSED guard: throw DaemonLiveError if a daemon is live, else resolve. A daemon counts as
- * live if EITHER the recorded pid is alive OR a /healthz probe answers (both must be negative to
- * proceed). Mirrors the daemon's own liveness logic (daemon.json pid + /healthz, honoring
- * OPENRIG_URL) so the crash-cart never disagrees with `getDaemonStatus` about "is it running".
- */
+/** Repeat the same classified observation before disk work. A timeout is uncertainty, not silence.
+ * This is a pre-copy check, not an atomic guarantee that no writer can start during the copy. */
 export async function assertDaemonDown(deps: AssertDaemonDownDeps): Promise<void> {
-  const { openrigHome, readDaemonJson, isProcessAlive, probeHealthz, openrigUrl } = deps;
-
-  // OPENRIG_URL, when set, is a direct daemon target — probe it first (a live answer = refuse).
-  if (openrigUrl && openrigUrl.trim().length > 0) {
-    if (await probeHealthz(`${stripTrailingSlash(openrigUrl.trim())}/healthz`)) {
-      throw new DaemonLiveError(`a daemon answered OPENRIG_URL ${openrigUrl} — refusing the direct read`);
-    }
-  }
-
-  const state = readDaemonJson(openrigHome);
-  if (state) {
-    if (typeof state.pid === "number" && isProcessAlive(state.pid)) {
-      throw new DaemonLiveError(`daemon.json pid ${state.pid} is still alive — refusing the direct read`);
-    }
-    const host = state.host ?? DEFAULT_HOST;
-    const port = state.port ?? DEFAULT_PORT;
-    const url = `http://${formatDaemonHostForUrl(host)}:${port}/healthz`;
-    if (await probeHealthz(url)) {
-      throw new DaemonLiveError(`a daemon answered ${url} — refusing the direct read`);
-    }
-    return;
-  }
-
-  // With an explicit target and no local state, an unrelated default daemon
-  // does not own this instance. The recorded PID/target guards above still win.
-  if (openrigUrl?.trim()) return;
-  // No explicit target or state file: probe the default address.
-  if (await probeHealthz(`http://${DEFAULT_HOST}:${DEFAULT_PORT}/healthz`)) {
-    throw new DaemonLiveError(
-      `a daemon answered the default http://${DEFAULT_HOST}:${DEFAULT_PORT}/healthz — refusing the direct read`,
-    );
+  const state = await classifyDaemonState(deps);
+  if (state !== "down") throw new DaemonStateChangedError(state);
+  // Discovery still reads this home's database. An unrelated explicit target does not override
+  // its recorded live owner, even though that local PID is not evidence about the remote target.
+  const local = deps.readDaemonJson(deps.openrigHome);
+  if (local && deps.isProcessAlive(local.pid)) {
+    throw new DaemonLiveError(`daemon.json pid ${local.pid} is still alive — refusing the direct read`);
   }
 }
 

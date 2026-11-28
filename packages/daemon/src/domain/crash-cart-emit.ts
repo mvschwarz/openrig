@@ -6,7 +6,7 @@
 // injected so this decision layer is deterministic; the CLI verb wires the real detector + read.
 
 import type { DaemonState, DaemonUnverifiedEvidence } from "./crash-cart-detect.js";
-import type { CrashCartDiscovery } from "./crash-cart-discovery.js";
+import { DaemonStateChangedError, type CrashCartDiscovery } from "./crash-cart-discovery.js";
 
 /** The verb's JSON payload. Exactly one of {evidence | discovery | refusal} accompanies the state
  *  (up → none; unverified → evidence; down → discovery, or refusal if the read fail-closed). */
@@ -36,6 +36,9 @@ export async function emitCrashCartState(deps: EmitCrashCartDeps): Promise<Crash
   try {
     return { state, discovery: await deps.loadDiscovery() };
   } catch (e) {
+    if (e instanceof DaemonStateChangedError) {
+      return e.state === "up" ? { state: "up" } : { state: "unverified", evidence: await deps.assembleEvidence() };
+    }
     return { state, refusal: e instanceof Error ? e.message : String(e) };
   }
 }

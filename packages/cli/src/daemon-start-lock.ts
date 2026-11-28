@@ -3,6 +3,64 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+/** Read-only observation of the existing JSON-lines startup reservation. */
+export interface StartReservationObservation {
+  pid?: number;
+  since?: string;
+  host?: string;
+  port?: number;
+  liveness: "alive" | "dead" | "unknown";
+}
+
+/** Shared with daemon status: prefer the launcher, then the child, unless positively dead.
+ * A partial/unreadable reservation is unknown; reading it never archives or releases it. */
+export function observeStartReservation(deps: {
+  home: string;
+  readFile: (file: string) => string | null;
+  processLiveness: (pid: number) => StartReservationObservation["liveness"];
+  /** This boot's ID. A reservation recording another boot's ID is from before a reboot: `rig daemon start` archives
+   *  it whatever its PIDs say, since they may now name unrelated processes, so it is no pending start. */
+  bootId?: string;
+}): StartReservationObservation | undefined {
+  let raw: string | null;
+  try { raw = deps.readFile(path.join(deps.home, "daemon-start.lock")); }
+  catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? undefined : { liveness: "unknown" };
+  }
+  if (raw === null) return undefined;
+  let launcherPid: number | undefined;
+  let childPid: number | undefined;
+  let incomplete = false;
+  let recordedBoot: string | undefined;
+  const result: StartReservationObservation = { liveness: "unknown" };
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const rec = JSON.parse(line) as Record<string, unknown>;
+      const validPid = (pid: unknown): pid is number => typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0;
+      if (validPid(rec.launcherPid)) launcherPid = rec.launcherPid;
+      if (validPid(rec.childPid)) childPid = rec.childPid;
+      if (typeof rec.startedAt === "string") result.since = rec.startedAt;
+      if (typeof rec.bootId === "string" && rec.bootId) recordedBoot = rec.bootId;
+      if (typeof rec.host === "string") result.host = rec.host;
+      if (typeof rec.port === "number" && Number.isInteger(rec.port) && rec.port > 0 && rec.port <= 65535) result.port = rec.port;
+    } catch { incomplete = true; /* retain earlier evidence, but a missing child may still be live */ }
+  }
+  // The start's recorded-boot-ID branch: every line readable, a start time and a recorded PID.
+  const earlierBoot = deps.bootId !== undefined && recordedBoot !== undefined && recordedBoot !== deps.bootId
+    && !incomplete && Number.isFinite(Date.parse(result.since ?? "")) && (launcherPid !== undefined || childPid !== undefined);
+  if (earlierBoot) return { ...result, liveness: "dead" };
+  const pids = [launcherPid, childPid].filter((pid): pid is number => pid !== undefined);
+  for (const pid of pids) {
+    let liveness: StartReservationObservation["liveness"];
+    try { liveness = deps.processLiveness(pid); } catch { liveness = "unknown"; }
+    if (liveness !== "dead") return { ...result, pid, liveness };
+  }
+  // The launcher can die after spawning but before recording its child. As with stale-lock
+  // takeover, only a complete launcher-and-child pair can establish that the start is gone.
+  return { ...result, liveness: launcherPid !== undefined && childPid !== undefined && !incomplete ? "dead" : "unknown" };
+}
+
 /** #3315 — what the child record carries so a later stop can confirm the reservation still names that process. */
 export interface ReservedChildIdentity {
   /** `processStartToken` of the child, read right after the spawn; undefined where the OS gives none. */
