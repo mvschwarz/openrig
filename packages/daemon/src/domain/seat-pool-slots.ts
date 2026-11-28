@@ -18,6 +18,10 @@ import { ulid } from "ulid";
 // A held slot keeps in `attempt_result` the node's latest session as it was when the hold was set (its id, status and
 // startup status): a later change on the node (a newer session, or a new status on that session) is what can clear the
 // hold, and nothing else does.
+//
+// An attempt that settles running after a `rig down` newer than what it was issued on is `live` and held by the
+// compensating stop until that stop's result is recorded: a stop confirmed or an absence confirmed clears the hold; a
+// stop that found another session holds the slot measured from the attempt's own session; anything else keeps it held.
 
 export type SeatPoolSlotPhase = "adding" | "live" | "draining" | "drained";
 export type SeatPoolSlotAttemptKind = "add" | "comeback";
@@ -175,6 +179,40 @@ export class SeatPoolSlotsRepository {
       `UPDATE seat_pool_slots SET attempt_state = 'settled', attempt_outcome = ?, attempt_result = ?, phase = 'live', phase_changed_at = ?
         WHERE slot_id = ? AND attempt_id = ? AND attempt_state = 'issued'`,
     ).run(input.outcome, input.result, input.at, slotId, attemptId).changes === 1;
+  }
+
+  /** An issued add or comeback that settles running after a `rig down` newer than what it was issued on: settled as
+   *  `settleAdd` does, the slot `live` and held by `hold` (the compensating stop's own), in the same write, so the stop
+   *  is on record before it is made and a daemon exit before its result leaves the slot held and read again. */
+  settleAddToStop(slotId: string, attemptId: string, input: { outcome: string; result: string; hold: string; at: string }): boolean {
+    return this.db.prepare(
+      `UPDATE seat_pool_slots SET attempt_state = 'settled', attempt_outcome = ?, attempt_result = ?, reuse_hold = ?, phase = 'live',
+         phase_changed_at = ?
+        WHERE slot_id = ? AND attempt_id = ? AND attempt_state = 'issued'`,
+    ).run(input.outcome, input.result, input.hold, input.at, slotId, attemptId).changes === 1;
+  }
+
+  /**
+   * What a compensating stop returned, only while the slot is still `live` under the same settled attempt and held by
+   * the compensating stop's own hold (`holdCode`): the hold given (null clears it), the `stop` key of the recorded outcome
+   * set (an object) or cleared (null), its other keys kept, and, with `result`, what a hold is measured from.
+   */
+  recordCompensatingStop(input: {
+    slotId: string; attemptId: string; holdCode: string; hold: string | null; stop: Record<string, unknown> | null; result?: string;
+  }): boolean {
+    return this.db.transaction(() => {
+      const row = this.db.prepare(
+        `SELECT attempt_outcome FROM seat_pool_slots WHERE slot_id = ? AND attempt_id = ? AND phase = 'live' AND attempt_state = 'settled'
+           AND json_valid(reuse_hold) AND json_extract(reuse_hold, '$.code') = ?`,
+      ).get(input.slotId, input.attemptId, input.holdCode) as { attempt_outcome: string | null } | undefined;
+      if (!row) return false;
+      const kept = { ...readAttemptOutcome(row.attempt_outcome) };
+      delete kept.stop;
+      const next = input.stop === null ? kept : { ...kept, stop: input.stop };
+      this.db.prepare("UPDATE seat_pool_slots SET reuse_hold = ?, attempt_outcome = ?, attempt_result = COALESCE(?, attempt_result) WHERE slot_id = ?")
+        .run(input.hold, Object.keys(next).length > 0 ? JSON.stringify(next) : null, input.result ?? null, input.slotId);
+      return true;
+    })();
   }
 
   /** An issued add that settled without running (its latest session exited, or its executor is confirmed stopped):
