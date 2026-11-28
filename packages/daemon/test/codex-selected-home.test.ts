@@ -145,6 +145,29 @@ it("seatless startup, disable and projection preserve the other home's bytes; st
   finally { second.db.close(); }
 }, 60000);
 
+it("the startup current-model reader reads the daemon's home, then each declared seat home, and keeps the first answer", async () => {
+  const f = fixture(), seatHome = path.join(f.root, "seat home");
+  fs.mkdirSync(seatHome);
+  vi.spyOn(os, 'homedir').mockReturnValue(f.home);
+  for (const [k, v] of Object.entries(f.env)) vi.stubEnv(k, v);
+  vi.stubEnv('OPENRIG_DB', path.join(f.root, 'instance.sqlite')); vi.stubEnv('OPENRIG_NO_KERNEL', '1');
+  vi.stubEnv('OPENRIG_URL', undefined); vi.stubEnv('OPENRIG_PORT', undefined);
+  const { createDaemon } = await import('../src/startup.js');
+  const daemon = await createDaemon({ dbPath: process.env.OPENRIG_DB!, tmuxExec: async () => '', cmuxFactory: async () => { throw Error('fixture: no cmux'); } });
+  try {
+    daemon.db.prepare("INSERT INTO rigs (id, name, env_json) VALUES ('rig', 'rig', ?)").run(JSON.stringify({ CODEX_HOME: seatHome }));
+    const read = (daemon.deps.currentModelReader as any).deps.native.readThreadIdByPid as (pid: number, identity?: string) => Promise<string | undefined>;
+    const identity = 'Sat Oct  3 00:00:00 2026';
+    expect(await read(42, identity)).toBeUndefined();
+    seed(seatHome, 'seat');
+    expect(await read(42, identity)).toBe('seat');
+    expect(await read(42, undefined)).toBe('seat');
+    seed(f.selected, 'daemon');
+    expect(await read(42, identity)).toBe('daemon');
+    expect(await read(42, 'Sat Oct  3 00:00:00 2037')).toBeUndefined();
+  } finally { daemon.db.close(); }
+}, 60000);
+
 it.each([
   { name: 'unset', selection: undefined },
   { name: 'empty', selection: '' },

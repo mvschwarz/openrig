@@ -22,10 +22,20 @@ import { noteEndedBindingRequests, reconcileNetworkRequests } from "./network-re
 const LOCAL_SOURCE = "daemon@kernel";
 const PAGE = 25;
 const MAX_PAGES = 8;
-/** Receipts looked at per pass, the least recently looked at first, so a long backlog still gives every item a turn. */
-const REPORT_LIMIT = 50;
+/** Receipts looked at per pass. A pass can take PAGE × MAX_PAGES new items, each needing its queued note, and as many can
+ *  finish, each needing its result, so reporting keeps pace with intake at twice that. Those with something to send go
+ *  first, the least recently looked at first within each kind, so a long backlog still gives every item a turn. */
+const REPORT_LIMIT = 2 * PAGE * MAX_PAGES;
 /** How long one binding's pass may take before its connection is closed, so one slow hub can't hold the others. */
 const PASS_TIMEOUT_MS = 60_000;
+/** Reporting starts no new receipt past this share of the pass's deadline. On a slow hub the pass then ends on its own,
+ *  with the rest first in line next time, and the requests the seat sent are still read. */
+const REPORT_SHARE = 0.75;
+/** Taking new work stops at this share of the deadline, so a long intake never uses up reporting's window: what finished
+ *  here keeps reaching the hub while new work keeps arriving. */
+const INTAKE_SHARE = 0.5;
+/** How many local handoffs a hub item's local chain is followed through, for its result and its turn to report. */
+const FINAL_ITEM_HOPS = 20;
 /** A network answers a new connection `grant_authority_unavailable` on purpose until it has set the participant up. A
  *  binding that has never had contact asks again this soon, instead of backing off, for this long after it was made. */
 const SETUP_RETRY_MS = 5_000;
@@ -58,6 +68,8 @@ export interface NetworkPassResult {
   pickupsSent: number;
   resultsSent: number;
   unknown: number;
+  /** The hub's stuck-sweep findings about items this binding holds, answered from the local item, never taken as work. */
+  findingsAnswered: number;
   /** Why the pass stopped early, if it did. `revoked` ended the binding; `no_session` left the hub's items pending;
    *  `local` is a failure here, not the hub's. */
   error?: HubError["kind"] | "credential" | "no_session" | "http_not_allowed" | "local" | "credential_changed";
@@ -88,7 +100,8 @@ const HUB_CLOSED = new Set([...FINAL, "handed-off"]);
 export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding: NetworkBinding,
   opts: { signal?: AbortSignal } = {}): Promise<NetworkPassResult> {
   const now = deps.now ?? (() => new Date());
-  const result: NetworkPassResult = { bindingId: binding.id, taken: 0, pickupsSent: 0, resultsSent: 0, unknown: 0 };
+  const started = performance.now();
+  const result: NetworkPassResult = { bindingId: binding.id, taken: 0, pickupsSent: 0, resultsSent: 0, unknown: 0, findingsAnswered: 0 };
   const currentRevision = () => (deps.bindings.get(binding.id)?.credentialRevision ?? 0) === (binding.credentialRevision ?? 0);
   if (!currentRevision()) return { ...result, error: "credential_changed" };
   // The token goes to a plain-http hub only on the person's recorded choice for this binding.
@@ -114,6 +127,9 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
   // Checked before every take, and again just before a local item is made: an ended binding, the pass's deadline or
   // the connector's stop starts no local work, even when a hub answer arrives late.
   const live = () => !deadline.signal.aborted && currentRevision() && deps.bindings.get(binding.id)?.state === "active";
+  // New work is claimed only before intake's share of the deadline; an item already claimed still becomes local work.
+  const intakeUntil = started + timeoutMs * INTAKE_SHARE;
+  const taking = () => live() && performance.now() < intakeUntil;
 
   let hub: HubSession | null = null;
   try {
@@ -137,17 +153,19 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
       // What this participant already holds (claimed before a restart, or through an earlier binding) comes first.
       const heldStates = requesterQuestions ? ["in-progress", "blocked"] as const : ["in-progress"] as const;
       for (const state of heldStates) {
-        if (!live()) break;
+        if (!taking()) break;
         for (const held of await hub.listOwned(state, PAGE * MAX_PAGES)) {
-          if (!live()) break;
-          if (held.destinationSession === binding.hubSeat && await ensureLocal(deps, binding, hub, held, destination, now, live)) result.taken++;
+          if (!taking()) break;
+          if (held.destinationSession !== binding.hubSeat) continue;
+          if (await answerFinding(deps, binding, hub, held, live)) result.findingsAnswered++;
+          else if (await ensureLocal(deps, binding, hub, held, destination, now, live)) result.taken++;
         }
       }
       // New work, a page at a time: a claim moves an item out of pending, so each page is new items.
-      for (let page = 0; page < MAX_PAGES && live(); page++) {
+      for (let page = 0; page < MAX_PAGES && taking(); page++) {
         const pending = await hub.listOwned("pending", PAGE);
         for (const item of pending) {
-          if (!live()) break;
+          if (!taking()) break;
           if (item.destinationSession !== binding.hubSeat) continue;
           try {
             await hub.claim(item.qitemId);
@@ -156,13 +174,14 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
             if (error instanceof HubError && error.kind === "refused") continue;
             throw error;
           }
-          if (await ensureLocal(deps, binding, hub, item, destination, now, live)) result.taken++;
+          if (await answerFinding(deps, binding, hub, item, live)) result.findingsAnswered++;
+          else if (await ensureLocal(deps, binding, hub, item, destination, now, live)) result.taken++;
         }
         if (pending.length < PAGE) break;
       }
     }
     // Report back what happened locally, for the items this binding holds. A revoked binding never gets here.
-    if (live()) await reportBack(deps, binding, hub, now, result, live);
+    if (live()) await reportBack(deps, binding, hub, now, result, live, started + timeoutMs * REPORT_SHARE);
     // Then the requests this seat sent through the hub: a create whose answer was lost, and each answer that arrived.
     // `live()` includes the credential revision, so a replaced credential stops this between requests.
     const unread = live() ? await reconcileNetworkRequests(deps, binding, hub, now, live) : null;
@@ -270,11 +289,58 @@ async function ensureLocal(deps: NetworkConnectorDeps, binding: NetworkBinding, 
   return inserted && outcome === null;
 }
 
+/** An OpenRig hub's stuck sweep files a finding when a claimed item goes without a change past its threshold, and addresses
+ *  it to the claimant: this participant. Read from the finding's own first lines (`STUCK SWEEP FINDING (<kind>)`, then
+ *  `row: <item>`), as the sweep writes them. */
+const SWEEP_FINDING = /^STUCK SWEEP FINDING \([a-z-]+\)\nrow: (\S+)\n/;
+
+/** A finding about a hub item this binding holds asks where work the seat already has stands. It's answered on the hub
+ *  from the local item and closed there, and never becomes local work: the seat couldn't act on the hub's item, and this
+ *  OpenRig follows the local item itself. Returns false, leaving the item to be taken as work as before, for anything
+ *  else: not a finding, one this connector can't read, one about an item this binding doesn't hold, or one an earlier
+ *  version already made a local item. */
+async function answerFinding(deps: NetworkConnectorDeps, binding: NetworkBinding, hub: HubSession, item: HubItem,
+  live: () => boolean): Promise<boolean> {
+  if (!item.qitemId.startsWith("qitem-recovery-")) return false;
+  if (deps.db.prepare("SELECT 1 FROM network_receipts WHERE local_qitem_id = ?").get(networkLocalItemId(binding, item.qitemId))) return false;
+  const full = item.body == null ? await hub.show(item.qitemId) : item;
+  const about = full.body?.match(SWEEP_FINDING)?.[1];
+  if (!about || !live()) return false;
+  const receipt = deps.db.prepare("SELECT * FROM network_receipts WHERE local_qitem_id = ?").get(networkLocalItemId(binding, about)) as Receipt | undefined;
+  if (!receipt) return false;
+  const local = deps.queueRepo.getById(receipt.local_qitem_id);
+  const end = local?.state === "handed-off" ? finalItem(deps.queueRepo, local) : local;
+  // What the hub hears is the item's progress, as reportBack sends it: no local id, seat or note.
+  // A hub item someone else closed first keeps no result of ours: it stays with the local item, and isn't brought back.
+  const closedElsewhere = receipt.outcome === "closed_on_hub";
+  const unknown = !local || !end || receipt.outcome === "unknown";
+  const where = unknown ? "whether it ran is unknown here, so it won't be run again"
+    : closedElsewhere ? (FINAL.has(end.state)
+      ? `it has finished there, but ${about} was closed here before its result arrived, so the result stays with that OpenRig`
+      : `it's open there again, but ${about} was closed here before its earlier result arrived, so that result stays with that OpenRig`)
+    : FINAL.has(end.state) ? (receipt.settled_at ? `it has finished there, and its result is on ${about}` : `it has finished there, and its result comes back to ${about} next`)
+    : local.claimedAt ? `the seat picked it up at ${local.claimedAt}, and it's still open there`
+    : "it's queued for the seat there and not picked up yet";
+  try {
+    await hub.close(item.qitemId, { state: "done", closureReason: "no-follow-on",
+      resolution: `${binding.hubSeat} holds ${about} through a connected OpenRig: ${where}.${unknown || closedElsewhere || receipt.settled_at ? "" : ` That OpenRig follows it and brings its result back to ${about}.`}` });
+  } catch (error) {
+    if (!(error instanceof HubError) || error.kind !== "refused") throw error;
+    // A refusal can mean the grant cannot close it, not only that someone closed it first.
+    // Only a confirmed close consumes the finding; otherwise take it as ordinary work.
+    try { return HUB_CLOSED.has((await hub.show(item.qitemId)).state); } catch (readError) {
+      if (readError instanceof HubError && readError.kind === "revoked") throw readError;
+      return false;
+    }
+  }
+  return true;
+}
+
 /** The item a local item ends at, following local handoffs: a successor names the item it came from. Null when a
  *  handed-off item has no one successor here (handed to another host, or the record is gone): its outcome is unknown. */
 function finalItem(repo: QueueRepository, start: QueueItem): QueueItem | null {
   let current = start;
-  for (let hop = 0; hop < 20 && current.state === "handed-off"; hop++) {
+  for (let hop = 0; hop < FINAL_ITEM_HOPS && current.state === "handed-off"; hop++) {
     const next = repo.list({ handedOffFrom: current.qitemId, limit: 2 });
     if (next.length !== 1) return null;
     current = next[0]!;
@@ -304,13 +370,40 @@ export function networkClosedElsewhere(db: Database.Database, bindingId: string)
     .map((row) => ({ hubItem: row.hub_qitem_id, localItem: row.local_qitem_id, note: row.last_error }));
 }
 
-async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, hub: HubSession, now: () => Date, result: NetworkPassResult, live: () => boolean): Promise<void> {
-  const open = deps.db.prepare(`SELECT * FROM network_receipts WHERE binding_id = ? AND settled_at IS NULL
-    ORDER BY COALESCE(checked_at, ''), created_at LIMIT ?`).all(binding.id, deps.reportLimit ?? REPORT_LIMIT) as Receipt[];
+/** `until`: on the `performance.now()` clock, the time after which no new receipt is started. */
+async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, hub: HubSession, now: () => Date, result: NetworkPassResult,
+  live: () => boolean, until: number): Promise<void> {
+  // What closes a hub item comes first (a local item that ended, handed on, or whose record is gone), then a pickup to
+  // send, then a queued note. An item still open here with every note sent has nothing to report and only takes its turn.
+  // An item handed on along a chain that's still open here isn't closing yet, so it takes its turn with the open ones
+  // instead of holding every pass's first places; it comes first again once the chain's last item finishes. The chain
+  // is followed as `finalItem` follows it: only through handed-off items, so an item closed `done` while handing on
+  // (handoff-and-complete) ends it, and its result comes first. An ambiguous successor ends the read as unknown,
+  // just as finalItem does; a still-open branch of that ambiguity must not postpone its unknown report.
+  const open = deps.db.prepare(`WITH RECURSIVE chain(root, id, state, hop) AS (
+      SELECT q.qitem_id, q.qitem_id, q.state, 0 FROM network_receipts r JOIN queue_items q ON q.qitem_id = r.local_qitem_id
+        WHERE r.binding_id = ? AND r.settled_at IS NULL AND q.state = 'handed-off'
+      UNION ALL
+      SELECT chain.root, s.qitem_id, s.state, chain.hop + 1 FROM chain JOIN queue_items s ON s.handed_off_from = chain.id
+        WHERE chain.state = 'handed-off' AND chain.hop < ${FINAL_ITEM_HOPS}
+          AND (SELECT COUNT(*) FROM queue_items WHERE handed_off_from = chain.id) = 1),
+    held(root) AS (SELECT DISTINCT root FROM chain WHERE state IN ('pending', 'in-progress', 'blocked'))
+    SELECT r.* FROM network_receipts r LEFT JOIN queue_items q ON q.qitem_id = r.local_qitem_id
+      LEFT JOIN held h ON h.root = r.local_qitem_id
+    WHERE r.binding_id = ? AND r.settled_at IS NULL
+    ORDER BY CASE
+      WHEN q.qitem_id IS NULL OR r.outcome = 'unknown' OR q.state IN ('done', 'canceled', 'denied', 'failed') THEN 0
+      WHEN q.state = 'handed-off' AND h.root IS NULL THEN 0
+      WHEN r.pickup_sent_at IS NULL AND q.claimed_at IS NOT NULL THEN 1
+      WHEN r.queued_sent_at IS NULL THEN 2
+      ELSE 3 END,
+      COALESCE(r.checked_at, ''), r.created_at LIMIT ?`).all(binding.id, binding.id, deps.reportLimit ?? REPORT_LIMIT) as Receipt[];
   const mark = (column: "queued_sent_at" | "pickup_sent_at" | "settled_at", receipt: Receipt, outcome?: string, lastError: string | null = null) =>
     deps.db.prepare(`UPDATE network_receipts SET ${column} = ?, outcome = COALESCE(?, outcome), last_error = ? WHERE local_qitem_id = ?`)
       .run(now().toISOString(), outcome ?? null, lastError, receipt.local_qitem_id);
   for (const receipt of open) {
+    // Past the reporting share of the deadline: the rest keep their place for the next pass.
+    if (performance.now() >= until) break;
     deps.db.prepare("UPDATE network_receipts SET checked_at = ? WHERE local_qitem_id = ?").run(now().toISOString(), receipt.local_qitem_id);
     try {
       const local = deps.queueRepo.getById(receipt.local_qitem_id);
