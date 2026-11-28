@@ -94,13 +94,14 @@ if (${JSON.stringify(boundary)}!=='ack' && (cmd.type==='get_state' && cmd.id==='
 });
 `, { mode: 0o700 });
     let stream: import("node:http").ServerResponse | undefined, pending: import("node:http").ServerResponse | undefined;
-    let refused = false, subscriptions = 0, hellos = 0;
+    let refused = false, laterAccepted = false, subscriptions = 0, hellos = 0;
+    const refuse = (res: import("node:http").ServerResponse) => {
+      res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify({ code })); refused = true;
+    };
     const endpoint = createServer((req, res) => {
       if (req.method === "GET" && req.url === "/api/activity/runner-channel") {
         subscriptions++;
-        if (boundary === "subscription" && subscriptions === 2) {
-          res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify({ code })); refused = true; return;
-        }
+        if (boundary === "subscription" && subscriptions === 2) { refuse(res); return; }
         stream = res; res.writeHead(200, { "content-type": "text/event-stream" }); res.flushHeaders();
         if (subscriptions === 1) for (const [index, id] of ["first", "later"].entries()) res.write(`event: request\nid: ${index + 1}\ndata: ${JSON.stringify({ version: 1, runId: "run", requestId: id, sequence: index + 1,
           kind: boundary === "ack" ? "input" : "wake", payload: boundary === "ack" ? { text: id } : { question: id } })}\n\n`);
@@ -108,13 +109,13 @@ if (${JSON.stringify(boundary)}!=='ack' && (cmd.type==='get_state' && cmd.id==='
       }
       let raw = ""; req.on("data", chunk => { raw += chunk; }); req.on("end", () => {
         const body = JSON.parse(raw || "{}");
-        if (body.type === "hello" && ++hellos === 2 && boundary === "hello") {
-          res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify({ code })); refused = true; return;
-        }
-        if (boundary === "ack" && body.type === "ack" && body.requestId === "first") { pending = res; return; }
+        if (body.type === "hello" && ++hellos === 2 && boundary === "hello") { refuse(res); return; }
+        // The two acks travel on separate connections, so either can arrive first. The refusal of "first" is
+        // answered only once "later" has been accepted, in either order.
+        if (boundary === "ack" && body.type === "ack" && body.requestId === "first") { if (laterAccepted) refuse(res); else pending = res; return; }
         res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ tokenPersisted: true, receipts: [] }));
         if (body.type === "ack" && body.requestId === "later") {
-          if (boundary === "ack") { pending!.writeHead(status, { "content-type": "application/json" }); pending!.end(JSON.stringify({ code })); refused = true; }
+          if (boundary === "ack") { laterAccepted = true; if (pending) refuse(pending); }
           else stream!.end();
         }
       });
