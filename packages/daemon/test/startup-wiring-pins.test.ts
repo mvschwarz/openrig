@@ -34,6 +34,7 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
 import { SeatPoolSlotsRepository } from "../src/domain/seat-pool-slots.js";
+import { runSeatPoolDispatchGuard } from "../src/domain/seat-pool-dispatch-guard.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 
 // What production startup hands the watchdog's delivery and two of its policies, recorded on the way through to the
@@ -463,6 +464,14 @@ describe("the seat-pool add's composition (#3395)", () => {
     } finally {
       exported.mockRestore(); addMember.mockRestore();
     }
+  });
+});
+
+describe("the seat-pool dispatch guard's composition (#4061)", () => {
+  it("Startup composes the seat-pool executor with the daemon's dispatch guard runner, which runs the block's `dispatch_guard` as an argv.", () => {
+    expect(composed.seatPoolExecutor).toHaveLength(1);
+    const executorDeps = composed.seatPoolExecutor[0]!.deps as SeatPoolExecutorDeps;
+    expect(executorDeps.dispatchGuard).toBe(runSeatPoolDispatchGuard);
   });
 });
 

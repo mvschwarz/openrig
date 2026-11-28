@@ -1654,6 +1654,7 @@ members:
       dispatch_tag: role:impl
       cwd_template: /work/{rig}/{slot}
       drain: false
+      dispatch_guard: [/usr/local/bin/pool-guard, --strict]
 ```
 
 Stored and validated; it has no runtime effect until the seat pool job is armed.
@@ -1668,6 +1669,7 @@ Stored and validated; it has no runtime effect until the seat pool job is armed.
 | `dispatch_tag` | non-empty string | none: every row to the model | Move only the model's rows that carry this tag. |
 | `cwd_template` | absolute path; only `{rig}` and `{slot}` | none: the model's folder | Each pool agent's working folder, with `{rig}` and `{slot}` filled in. `{slot}` is optional: without it the agents share one folder. |
 | `drain` | `true` or `false` | `false` | Empties the pool. |
+| `dispatch_guard` | non-empty list of non-empty strings; the first an absolute path | none: no guard | A command, with its own arguments, asked once per planned move; exit 75 vetoes that move. See [Seat pools: the dispatch guard](seat-pools.md#the-dispatch-guard). Never a shell string. |
 
 - **Validation:** whatever is wrong inside the block is an advisory, never a spec error, reported as
   `<pod>.<member> pool.<field>: <reason>; pool not used`: a wrong type, a value out of bounds, `max` below `min`, a
@@ -1677,6 +1679,8 @@ Stored and validated; it has no runtime effect until the seat pool job is armed.
   seat replaces a stored block whole, clears it with `pool: {}` and leaves it unchanged when the key is absent. A block
   that can't be used is stored as written (as JSON: a number JSON can't hold, such as `.inf` or `.nan`, is stored as
   `null`, still unusable), with its error, rather than clearing the one before; it is not a removal.
+  A `dispatch_guard` written as one string (`"/usr/local/bin/pool-guard --strict"`), an empty list, a list item that
+  isn't non-empty text, or a command that isn't an absolute path is an advisory like the others.
   A fresh launch of the seat from its recorded launch keeps the stored block.
 - **Export and bundles:** `rig spec export` leaves the pool's agents out and writes the model member with its block;
   an edge touching a pool agent is left out and named in a "Not carried" line. `rig bundle create` doesn't count pool

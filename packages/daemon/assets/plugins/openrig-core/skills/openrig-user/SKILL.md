@@ -29,6 +29,14 @@ constraint-induced circumvention: under goal pressure, agents build shadow trans
 credentials, and weaker proof instead of the direct authorized path. Keep only explicitly stated
 external or irreversible boundaries — public push / PR / publish, and destruction of canonical data.
 
+## Running `rig` in Claude Code's Bash tool
+
+Run one plain `rig` command per Bash tool call, without shell variable assignments, command
+substitutions (`$(...)`) or loops. Put queue-row text in a file and pass `--body-file` with its
+literal absolute path. A compound command can stop at a permission prompt even when `Bash(rig:*)`
+is allowed, with nobody at the seat to answer. Prepare the file in a separate tool call, then run
+the `rig` command by itself. The send and queue examples below show this shape.
+
 ## Coordination primitives — when to use which
 
 Three coordination surfaces, used together for forward-momentum work. Internalize this

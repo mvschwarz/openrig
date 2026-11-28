@@ -482,6 +482,11 @@ do not establish connectivity to a live peer.
 | `rig mcp token list` | — | `--json` |
 | `rig mcp token revoke <name>` | — | — |
 
+The MCP `rig_network_request` tool reaches the same network request route without a shell. Pass `peer`,
+`requestId`, `body`, optional `summary`, and optional `binding` (otherwise the caller's seat). Read the answer
+on the same local id with `rig_queue_show`; see [network requests through MCP](../reference/network-connector.md#requesting-through-mcp)
+for retry and waiting behavior, including the external client's need to check again.
+
 ### acp
 
 | Invocation | Aliases | Declared options |
@@ -592,6 +597,14 @@ As with the other stages that have no automatic work, work a reader linked with 
 | `rig queue outbox-record` | — | `--sender <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <outboxId>`<br>`--json` |
 | `rig queue outbox-list <senderSession>` | — | `--limit <n>`<br>`--json` |
 | `rig queue erase` | — | `--members <file>`<br>`--rig <id>`<br>`--ids <file>`<br>`--action <action>` (`delete`, `scrub`)<br>`--routine`<br>`--apply`<br>`--actor <session>`<br>`--json` |
+| `rig queue transfer` | — | — |
+| `rig queue transfer authorize <importId>` | — | `--actor <name>` **required**<br>`--intervention <text>` **required**<br>`--out <file>` **required**<br>`--intervention-kind <kind>` (`online-handshake`, `operator-attestation`) **required**<br>`--limits <text>`<br>`--map <from=to...>`<br>`--disposition <qitemId=text...>` |
+| `rig queue transfer relinquish` | — | `--actor <name>` **required**<br>`--intervention <text>` **required**<br>`--out <file>` **required**<br>`--archive <file>` **required**<br>`--authorization <file>` **required**<br>`--host <registered host>`<br>`--limits <text>`<br>`--dry-run` |
+| `rig queue transfer attest` | — | `--actor <name>` **required**<br>`--intervention <text>` **required**<br>`--out <file>` **required**<br>`--archive <file>` **required**<br>`--authorization <file>` **required**<br>`--limits <text>` **required** |
+| `rig queue transfer activate <importId>` | — | `--authorization <file>` **required**<br>`--receipt <file>` **required**<br>`--out <file>`<br>`--json`<br>`--actor <name>`<br>`--dry-run` |
+| `rig queue transfer reconcile` | — | `--archive <file>` **required**<br>`--receipt <file>` **required**<br>`--out <file>`<br>`--json`<br>`--host <registered host>`<br>`--actor <name>` |
+| `rig queue transfer replay <file>` | — | `--host <registered host>` |
+| `rig queue transfer status` | — | `--host <registered host>`<br>`--archive <file>`<br>`--json` |
 
 `rig queue list` accepts repeated exact, case-sensitive `--tag <tag>` filters and requires every tag to match before the result limit. `--mission <id>` and `--slice <id>` add the exact `mission:<id>` and `slice:<id>` tags. Exact duplicates collapse; blank values are rejected; commas inside a tag are literal. The CLI and MCP report a visibly unfiltered nonempty response from an older daemon, but an empty response cannot establish whether the daemon applied the filter.
 
@@ -1279,7 +1292,7 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig network` | — | — |
-| `rig network enroll <code>` | — | `--site <url>` **required**<br>`--allow-http`<br>`--replace`<br>`--json` |
+| `rig network enroll [code]` | — | `--site <url>` **required**<br>`--code-file <path>`<br>`--code-stdin`<br>`--allow-http`<br>`--replace`<br>`--json` |
 | `rig network connect <seat>` | — | `--as <participant>` **required**<br>`--hub <url>`<br>`--token-file <path>`<br>`--allow-http`<br>`--json` |
 | `rig network status` | — | `--json` |
 | `rig network disconnect <binding-or-seat>` | — | `--reason <text>`<br>`--json` |

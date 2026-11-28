@@ -500,6 +500,8 @@ describe("delivery while the server is gone", () => {
       deliver: makeWatchdogDeliver({ sessionTransport: { send }, outbox, now: () => new Date(), retryIntervalSeconds: 300, retryCap: 3 }),
       now: () => new Date() });
     const scheduler = new WatchdogScheduler({ jobsRepo: jobs, policyEngine: engine, now: () => new Date(), onTickError: e => { throw e; } });
+    // A pass takes an event-loop turn between due jobs; with every timer faked, the fake clock runs that turn.
+    const pass = async () => { const done = scheduler.runTickNow(); await vi.advanceTimersByTimeAsync(0); await done; };
     const remind = (message: string) => jobs.register({ policy: "periodic-reminder",
       specYaml: `target: { session: worker@test }\nmessage: ${message}\n`, targetSession: "worker@test", intervalSeconds: 3600,
       registeredBySession: "owner@test" });
@@ -507,7 +509,7 @@ describe("delivery while the server is gone", () => {
     vi.setSystemTime(Date.now() + 3600_000);
 
     terminal.takeAway();
-    await scheduler.runTickNow();
+    await pass();
     expect(send).toHaveBeenCalledTimes(1); // the attempt that finds the loss
     expect(changes.map(c => c.type)).toEqual(["tmux.server_gone"]);
     const fired = eventCount(db, "watchdog.evaluation_fired"), historyRows = history.countForJob(first.jobId);
@@ -517,7 +519,7 @@ describe("delivery while the server is gone", () => {
     const second = remind("Fresh work");
     for (let minute = 0; minute < 8 * 60; minute++) {
       await vi.advanceTimersByTimeAsync(60_000);
-      await scheduler.runTickNow();
+      await pass();
     }
     expect(send).toHaveBeenCalledTimes(1);
     expect(eventCount(db, "watchdog.evaluation_fired")).toBe(fired);
@@ -531,7 +533,7 @@ describe("delivery while the server is gone", () => {
     terminal.bringBack();
     await vi.advanceTimersByTimeAsync(60_000); // the tracker's probe sees it answer
     expect(changes.map(c => c.type)).toEqual(["tmux.server_gone", "tmux.server_back"]);
-    await scheduler.runTickNow();
+    await pass();
     expect(send.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(jobs.getByIdOrThrow(first.jobId).lastFireAt).not.toBeNull();
     expect(jobs.getByIdOrThrow(second.jobId).lastFireAt).not.toBeNull();

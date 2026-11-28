@@ -108,6 +108,10 @@ The `GET /api/terminal/<name>` routes, the websocket included, answer `{ "error"
 for a well-formed but unaccepted Host. It cannot pass a malformed Host or a refused Origin; see
 [Browser access](browser-access.md).
 
+The terminal WebSocket API is available even when `ui.enabled` is false. That setting controls Core's own
+web UI pages and assets, so a separate UI or client can use terminals while those remain off. The existing
+terminal bearer and [Browser access](browser-access.md) rules still apply.
+
 ## Event streams
 
 All of them are server-sent events (`text/event-stream`):

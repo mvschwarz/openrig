@@ -26,6 +26,7 @@ import {
   type SeatPoolExecutorDeps,
 } from "../src/domain/seat-pool-executor.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
+import type { SeatPoolDispatchGuardInput, SeatPoolDispatchGuardVerdict } from "../src/domain/seat-pool-dispatch-guard.js";
 
 // #3395 (Piece 1): the seat-pool executor moves rows waiting for the model, or for a drained agent, to free pool agents.
 // The job is unarmed in the daemon, so each test composes the executor and an engine that has the seat-pool policy.
@@ -62,13 +63,19 @@ function fullDb(): Database.Database {
   return db;
 }
 
-function poolWorld(db: Database.Database = fullDb()) {
+/** `guardRunner: false` composes the executor without a dispatch guard runner. */
+function poolWorld(db: Database.Database = fullDb(), opts: { guardRunner?: boolean } = {}) {
   const bus = new EventBus(db);
   const rigRepo = new RigRepository(db);
   const podRepo = new PodRepository(db);
   const slots = new SeatPoolSlotsRepository(db);
   const sessions = new SessionRegistry(db);
-  const queue = new QueueRepository(db, bus, { resolveSessionAddresses: (name) => sessions.sessionAddresses(name) });
+  /** Each seat's current occupant generation, as the queue stamps it on a claim. */
+  const generations = new Map<string, string>();
+  const queue = new QueueRepository(db, bus, {
+    resolveSessionAddresses: (name) => sessions.sessionAddresses(name),
+    resolveOccupantGeneration: (name) => generations.get(name) ?? null,
+  });
   const outbox = new OutboxHandler(db);
   queue.attachOutbox(outbox); // a move's wake needs it
   const jobsRepo = new WatchdogJobsRepository(db);
@@ -78,7 +85,13 @@ function poolWorld(db: Database.Database = fullDb()) {
   const clock = { now: new Date(Date.now() + 3_600_000) }; // past dispatch_after_s for rows created now
   /** beforeCustody runs when a cycle, its plan read, asks for the model's custody; afterMove after each real move,
    *  before the cycle sees its result. */
-  const hooks: { beforeCustody?: () => void; afterMove?: () => void } = {};
+  const hooks: {
+    beforeCustody?: () => void; afterMove?: () => void;
+    /** The dispatch guard's answer for one move; unset: allow. */
+    guard?: (input: SeatPoolDispatchGuardInput) => Promise<SeatPoolDispatchGuardVerdict>;
+  } = {};
+  /** Every call the executor made to the dispatch guard runner. */
+  const guardCalls: SeatPoolDispatchGuardInput[] = [];
   const effects = seatPoolQueueEffects(queue);
   const deps: SeatPoolExecutorDeps = {
     db, rigRepo, slots, jobsRepo,
@@ -88,6 +101,12 @@ function poolWorld(db: Database.Database = fullDb()) {
     seatState: (id) => activity.get(id) ?? null,
     custody: (ids, fn) => { hooks.beforeCustody?.(); return guard.custody(ids, fn); },
     now: () => clock.now,
+    ...(opts.guardRunner === false ? {} : {
+      dispatchGuard: async (input: SeatPoolDispatchGuardInput) => {
+        guardCalls.push(input);
+        return hooks.guard ? hooks.guard(input) : { verdict: "allow" as const };
+      },
+    }),
   };
   const executor = makeSeatPoolExecutor(deps);
   const engine = new WatchdogPolicyEngine({
@@ -151,8 +170,9 @@ function poolWorld(db: Database.Database = fullDb()) {
     observedAt: new Date(Date.now() + 1000).toISOString(),
   });
   return {
-    db, bus, rigRepo, slots, sessions, queue, outbox, jobsRepo, history, guard, activity, clock, hooks, deps, executor, engine,
-    model, agent, idle, working, row, jobFor, evaluate, lastNotes, read, destinationOf, rerouted, holdMessage, holdModel, paneExited,
+    db, bus, rigRepo, slots, sessions, generations, queue, outbox, jobsRepo, history, guard, activity, clock, hooks,
+    guardCalls, deps, executor, engine, model, agent, idle, working, row, jobFor, evaluate, lastNotes, read, destinationOf,
+    rerouted, holdMessage, holdModel, paneExited,
   };
 }
 
@@ -550,6 +570,325 @@ describe("seat-pool dispatch: also tested, without a numbered control", () => {
       expect(notes).not.toHaveProperty("moved");
       expect(w.queue.getById(q)).toMatchObject({ state: "pending", destinationSession: m.session });
       expect(w.rerouted(q)).toEqual([]);
+    } finally {
+      w.db.close();
+    }
+  });
+});
+
+describe("seat-pool dispatch: the dispatch guard (#4061)", () => {
+  const GUARD = ["/usr/local/bin/pool-guard", "--strict"];
+  const GUARDED: SeatPoolSpec = { ...SPEC, dispatchGuard: GUARD };
+
+  it("With no `dispatch_guard` in the block, the guard runner is never called and the rows move as before.", async () => {
+    const w = poolWorld();
+    try {
+      const m = w.model();
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1);
+      const job = w.jobFor(m);
+      const q = await w.row(m.session);
+      w.hooks.guard = async () => ({ verdict: "veto" });
+
+      await w.evaluate(job.jobId);
+      expect(w.guardCalls).toEqual([]);
+      const notes = w.lastNotes(job.jobId)!;
+      expect(notes.moved).toEqual([{ qitemId: q, from: m.session, to: s1.session }]);
+      expect(notes).not.toHaveProperty("skipped");
+      expect(notes).not.toHaveProperty("guardErrors");
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("The guard is asked once per planned move, with the block's argv, the row, where it waits and the agent it would go to; a block that keeps the same guard is not read as changed between two moves.", async () => {
+    const w = poolWorld();
+    try {
+      const m = w.model(GUARDED);
+      const s1 = w.agent(m, 1, "live");
+      const s2 = w.agent(m, 2, "live");
+      w.idle(s1);
+      w.idle(s2);
+      const job = w.jobFor(m);
+      const q1 = await w.row(m.session);
+      const q2 = await w.row(m.session);
+
+      await w.evaluate(job.jobId);
+      const notes = w.lastNotes(job.jobId)!;
+      const moved = notes.moved as Array<{ qitemId: string; to: string }>;
+      expect(moved).toHaveLength(2);
+      expect(w.guardCalls).toEqual(moved.map((mv) => ({ argv: GUARD, qitemId: mv.qitemId, from: m.session, to: mv.to })));
+      expect(new Set(moved.map((mv) => mv.qitemId))).toEqual(new Set([q1, q2]));
+      expect(new Set(moved.map((mv) => mv.to))).toEqual(new Set([s1.session, s2.session]));
+      expect(notes).not.toHaveProperty("skipped");
+      expect(notes).not.toHaveProperty("guardErrors");
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A veto skips just that move with `guard_refused`: the row stays pending where it was, with no transition and the same waiting clock, the other rows still move, and the next cycle plans it again with no cooldown.", async () => {
+    const w = poolWorld();
+    try {
+      const m = w.model(GUARDED);
+      const s1 = w.agent(m, 1, "live");
+      const s2 = w.agent(m, 2, "live");
+      w.idle(s1);
+      w.idle(s2);
+      const job = w.jobFor(m);
+      const q1 = await w.row(m.session);
+      const q2 = await w.row(m.session);
+      const transitionsBefore = w.queue.transitionLog.listForQitem(q1);
+      const waitingBefore = w.read(m).pending.find((p) => p.qitemId === q1)!.waitingSince;
+      w.hooks.guard = async (input) => (input.qitemId === q1 ? { verdict: "veto", message: "leased by another seat" } : { verdict: "allow" });
+
+      await w.evaluate(job.jobId);
+      let notes = w.lastNotes(job.jobId)!;
+      const vetoed = notes.skipped as Array<{ qitemId: string; from: string; to: string; code: string; message?: string }>;
+      expect(vetoed).toHaveLength(1);
+      expect(vetoed[0]).toMatchObject({ qitemId: q1, from: m.session, code: "guard_refused", message: "leased by another seat" });
+      expect(notes.moved).toEqual([{ qitemId: q2, from: m.session, to: expect.any(String) }]);
+      expect(notes).not.toHaveProperty("failed");
+      expect(notes).not.toHaveProperty("guardErrors");
+      expect(w.queue.getById(q1)).toMatchObject({ state: "pending", destinationSession: m.session });
+      expect(w.queue.transitionLog.listForQitem(q1)).toEqual(transitionsBefore);
+      expect(w.rerouted(q1)).toEqual([]);
+      expect(w.read(m).pending.find((p) => p.qitemId === q1)!.waitingSince).toBe(waitingBefore);
+
+      // the next cycle, the guard letting it go: planned again and moved, with no cooldown in between
+      w.hooks.guard = async () => ({ verdict: "allow" });
+      const freeAgent = vetoed[0]!.to;
+      await w.evaluate(job.jobId);
+      notes = w.lastNotes(job.jobId)!;
+      expect(notes.moved).toEqual([{ qitemId: q1, from: m.session, to: freeAgent }]);
+      expect(w.destinationOf(q1)).toBe(freeAgent);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it.each([
+    ["returns an error", "error"],
+    ["throws", "throws"],
+    ["is not composed", "missing"],
+  ] as const)("When the guard runner %s, the move goes ahead and the notes name the guard error.", async (_title, mode) => {
+    const w = poolWorld(undefined, { guardRunner: mode !== "missing" });
+    try {
+      const m = w.model(GUARDED);
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1);
+      const job = w.jobFor(m);
+      const q = await w.row(m.session);
+      if (mode === "error") w.hooks.guard = async () => ({ verdict: "error", message: "timed out after 2000 ms" });
+      if (mode === "throws") w.hooks.guard = async () => { throw new Error("runner broke"); };
+
+      await w.evaluate(job.jobId);
+      const notes = w.lastNotes(job.jobId)!;
+      expect(notes.moved).toEqual([{ qitemId: q, from: m.session, to: s1.session }]);
+      const message = { error: "timed out after 2000 ms", throws: "runner broke", missing: "no guard runner composed" }[mode];
+      expect(notes.guardErrors).toEqual([{ qitemId: q, from: m.session, to: s1.session, code: "guard_error", message }]);
+      expect(notes).not.toHaveProperty("skipped");
+      expect(notes).not.toHaveProperty("failed");
+      expect(w.destinationOf(q)).toBe(s1.session);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A block changed while the cycle waits for the model's custody is read before the guard: the guard planned under the old block is never run, and the moves are skipped with `pool_block_changed`.", async () => {
+    const w = poolWorld();
+    try {
+      const m = w.model(GUARDED);
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1);
+      const job = w.jobFor(m);
+      const q = await w.row(m.session);
+
+      const held = w.holdModel(m);
+      const cycle = w.engine.evaluate(w.jobsRepo.getByIdOrThrow(job.jobId));
+      await Promise.race([held.planned, cycle]);
+      w.rigRepo.setNodePool(m.nodeId, { spec: SPEC });
+      await held.release();
+      await cycle;
+
+      expect(w.guardCalls).toEqual([]);
+      const notes = w.lastNotes(job.jobId)!;
+      expect(notes.skipped).toEqual([{ qitemId: q, from: m.session, to: s1.session, code: "pool_block_changed" }]);
+      expect(notes).not.toHaveProperty("moved");
+      expect(w.queue.getById(q)).toMatchObject({ state: "pending", destinationSession: m.session });
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A block changed while the guard runs ends the moves with `pool_block_changed`, even when that guard vetoed: the old guard's answer is not recorded.", async () => {
+    const w = poolWorld();
+    try {
+      const m = w.model(GUARDED);
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1);
+      const job = w.jobFor(m);
+      const q = await w.row(m.session);
+      w.hooks.guard = async () => {
+        w.rigRepo.setNodePool(m.nodeId, { spec: SPEC });
+        return { verdict: "veto", message: "old guard" };
+      };
+
+      await w.evaluate(job.jobId);
+      const notes = w.lastNotes(job.jobId)!;
+      expect(notes.skipped).toEqual([{ qitemId: q, from: m.session, to: s1.session, code: "pool_block_changed" }]);
+      expect(notes).toMatchObject({ block: "stored", spec: SPEC });
+      expect(w.queue.getById(q)).toMatchObject({ state: "pending", destinationSession: m.session });
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it.each([
+    ["the agent starts working", "agent_not_free"],
+    ["the row is claimed", "fallback_state_mismatch"],
+    ["a re-apply changes the block", "pool_block_changed"],
+  ] as const)("The guard runs before the final re-check, which stays as it is: when %s while the guard runs, the move is skipped with `%s`.", async (_title, code) => {
+    const w = poolWorld();
+    try {
+      const m = w.model(GUARDED);
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1);
+      const job = w.jobFor(m);
+      const q = await w.row(m.session);
+      w.hooks.guard = async () => {
+        if (code === "agent_not_free") w.working(s1);
+        else if (code === "fallback_state_mismatch") w.queue.claim({ qitemId: q, destinationSession: m.session });
+        else w.rigRepo.setNodePool(m.nodeId, { spec: { ...GUARDED, dispatchTag: "pool" } });
+        return { verdict: "allow" };
+      };
+
+      await w.evaluate(job.jobId);
+      expect(w.guardCalls).toHaveLength(1);
+      const notes = w.lastNotes(job.jobId)!;
+      expect(notes.skipped).toEqual([{ qitemId: q, from: m.session, to: s1.session, code }]);
+      expect(notes).not.toHaveProperty("moved");
+      expect(notes).not.toHaveProperty("failed");
+      expect(w.queue.getById(q)!.destinationSession).toBe(m.session);
+      expect(w.rerouted(q)).toEqual([]);
+    } finally {
+      w.db.close();
+    }
+  });
+});
+
+describe("seat-pool dispatch: a handover's release restarts the waiting clock (#4061)", () => {
+  /** A row to the model, created at `createdAt`, claimed by the model's retiring occupant and released by its handover. */
+  const releasedByHandover = async (w: ReturnType<typeof poolWorld>, m: Model, createdAt: string) => {
+    const q = await w.row(m.session);
+    w.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(createdAt, q);
+    w.generations.set(m.session, "gen-retiring");
+    w.queue.claim({ qitemId: q, destinationSession: m.session });
+    const before = w.queue.transitionLog.listForQitem(q);
+    expect(w.queue.releaseClaimsByGeneration("gen-retiring")).toBe(1);
+    const release = w.queue.transitionLog.listForQitem(q).at(-1)!;
+    return { q, before, release };
+  };
+
+  it("A row a handover released back to the model waits `dispatch_after_s` again from the release, and its creation time and history do not change.", async () => {
+    const w = poolWorld();
+    try {
+      w.clock.now = new Date(); // the queue stamps rows and transitions with the real clock
+      const m = w.model();
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1, w.clock.now.toISOString());
+      const job = w.jobFor(m);
+      const twoHoursAgo = new Date(Date.now() - 2 * 3_600_000).toISOString();
+      const { q, before, release } = await releasedByHandover(w, m, twoHoursAgo);
+
+      expect(w.read(m).pending).toEqual([{ qitemId: q, destination: m.session, waitingSince: release.ts, tags: [] }]);
+      w.clock.now = new Date(Date.parse(release.ts) + (SPEC.dispatchAfterSeconds - 1) * 1000);
+      await w.evaluate(job.jobId);
+      expect(w.lastNotes(job.jobId)).not.toHaveProperty("moved");
+      expect(w.destinationOf(q)).toBe(m.session);
+
+      w.clock.now = new Date(Date.parse(release.ts) + (SPEC.dispatchAfterSeconds + 1) * 1000);
+      await w.evaluate(job.jobId);
+      expect(w.lastNotes(job.jobId)!.moved).toEqual([{ qitemId: q, from: m.session, to: s1.session }]);
+      expect(w.queue.getById(q)!.tsCreated).toBe(twoHoursAgo);
+      const history = w.queue.transitionLog.listForQitem(q);
+      expect(history.slice(0, before.length)).toEqual(before);
+      expect(history[before.length]).toEqual(release);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("A released row goes behind a row that has waited longer at the model, even one created after it.", async () => {
+    const w = poolWorld();
+    try {
+      w.clock.now = new Date();
+      const m = w.model();
+      const s1 = w.agent(m, 1, "live");
+      w.idle(s1, w.clock.now.toISOString());
+      const job = w.jobFor(m);
+      const { q: released } = await releasedByHandover(w, m, new Date(Date.now() - 2 * 3_600_000).toISOString());
+      const waiting = await w.row(m.session);
+      w.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(new Date(Date.now() - 30 * 60_000).toISOString(), waiting);
+
+      w.clock.now = new Date(Date.now() + 3_600_000); // both rows past dispatch_after_s; one free agent
+      await w.evaluate(job.jobId);
+      expect(w.lastNotes(job.jobId)!.moved).toEqual([{ qitemId: waiting, from: m.session, to: s1.session }]);
+      expect(w.destinationOf(released)).toBe(m.session);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("The latest of a reroute and a release restarts the clock, in either order.", async () => {
+    const w = poolWorld();
+    try {
+      w.clock.now = new Date();
+      const m = w.model();
+      const threeHoursAgo = new Date(Date.now() - 3 * 3_600_000).toISOString();
+      const twoHoursAgo = new Date(Date.now() - 2 * 3_600_000).toISOString();
+      const backdate = (transitionId: number) =>
+        w.db.prepare("UPDATE queue_transitions SET ts = ? WHERE transition_id = ?").run(twoHoursAgo, transitionId);
+      const rerouteAndBack = (q: string) => {
+        w.queue.routeToFallback(q, `other@${RIG}`, "operator");
+        w.queue.routeToFallback(q, m.session, "operator");
+        return w.rerouted(q).at(-1)!;
+      };
+
+      // released two hours ago, then rerouted back to the model now: the reroute counts
+      const { q: releasedFirst, release } = await releasedByHandover(w, m, threeHoursAgo);
+      backdate(release.transitionId);
+      const reroute = rerouteAndBack(releasedFirst);
+      // rerouted back to the model two hours ago, then released now: the release counts
+      const reroutedFirst = await w.row(m.session);
+      w.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(threeHoursAgo, reroutedFirst);
+      backdate(rerouteAndBack(reroutedFirst).transitionId);
+      w.queue.claim({ qitemId: reroutedFirst, destinationSession: m.session });
+      expect(w.queue.releaseClaimsByGeneration("gen-retiring")).toBe(1);
+      const lateRelease = w.queue.transitionLog.listForQitem(reroutedFirst).at(-1)!;
+
+      const waiting = new Map(w.read(m).pending.map((p) => [p.qitemId, p.waitingSince]));
+      expect(waiting.get(releasedFirst)).toBe(reroute.ts);
+      expect(waiting.get(reroutedFirst)).toBe(lateRelease.ts);
+      expect(lateRelease.ts).not.toBe(twoHoursAgo);
+    } finally {
+      w.db.close();
+    }
+  });
+
+  it("Only the queue's own release restarts the clock: the release's note recorded by an identified caller, or with a state other than pending, does not.", async () => {
+    const w = poolWorld();
+    try {
+      w.clock.now = new Date();
+      const m = w.model();
+      const twoHoursAgo = new Date(Date.now() - 2 * 3_600_000).toISOString();
+      const q = await w.row(m.session);
+      w.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(twoHoursAgo, q);
+      const note = "released: claimant generation retired (seat handover)";
+      w.queue.transitionLog.append({ qitemId: q, state: "pending", actorSession: "system", identityProvenance: "transport:v1", transitionNote: note });
+      w.queue.transitionLog.append({ qitemId: q, state: "in-progress", actorSession: "system", transitionNote: note });
+
+      expect(w.read(m).pending).toEqual([{ qitemId: q, destination: m.session, waitingSince: twoHoursAgo, tags: [] }]);
     } finally {
       w.db.close();
     }

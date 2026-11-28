@@ -1574,6 +1574,19 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     }
   });
 
+  it("projects observed network waits without exposing another hub's ids or blocker state", async () => {
+    const { asExternal, mine } = await externalAndLead();
+    const id = await mine("Network work");
+    db.prepare("UPDATE queue_items SET destination_session = 'daemon@kernel' WHERE qitem_id = ?").run(id);
+    const wait = { kind: "requester-question", hubQitemId: "qitem-SECRET-HUB", localQitemId: "qitem-SECRET-LOCAL", blockerState: "in-progress", observedAt: "2026-01-01T00:00:00.000Z" };
+    db.prepare(`INSERT INTO network_requests (local_qitem_id,binding_id,node_id,hub_url,hub_seat,peer,hub_qitem_id,body_sha256,created_at,remote_wait)
+      VALUES (?, 'binding-fixture', 'node-fixture', 'https://hub.example/mcp', 'member@hub', 'peer@hub', 'qitem-remote', 'hash', '2026-01-01', ?)`).run(id, JSON.stringify(wait));
+    const shown = await asExternal("rig_queue_show", { qitemId: id });
+    expect(shown.structured.item).toMatchObject({ networkWait: { kind: "another-request", hubQitemId: null, localQitemId: null, blockerState: null, observedAt: wait.observedAt } });
+    expect(shown.text).not.toContain("SECRET");
+    expect((await asExternal("rig_queue_list", { all: true })).text).not.toContain("SECRET");
+  });
+
   it("an escalated task keeps its closure, without the escalation target or the note naming it", async () => {
     const { asExternal, asLead, mine } = await externalAndLead();
     const escalated = await mine("escalate me");

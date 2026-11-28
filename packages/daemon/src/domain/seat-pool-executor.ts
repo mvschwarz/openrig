@@ -20,6 +20,7 @@ import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { seatPoolModelOfJob, type SeatPoolModel } from "./seat-pool-registration.js";
 import { readAttemptOutcome, type SeatPoolSlot, type SeatPoolSlotsRepository } from "./seat-pool-slots.js";
 import { parsePoolBlock, type SeatPoolSpec, type StoredSeatPool } from "./seat-pool-spec.js";
+import type { SeatPoolDispatchGuardRunner, SeatPoolDispatchGuardVerdict } from "./seat-pool-dispatch-guard.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { seatLaunchAdditionPathsForNode } from "./seat-launch-additions.js";
 import type { SeatSkillPaths } from "./seat-skill-storage.js";
@@ -37,6 +38,11 @@ import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 // `idle_grace_s`, and adding agents. The plan is read outside any lease; the hold check, the moves, each drain's
 // decision and the add's reservation and issue run under the delivery guard's custody lease on the model node, and each
 // move and drain re-checks the stored block and the agent just before it.
+//
+// With a `dispatch_guard` in the block (#4061), each planned move first asks the guard, under the same lease and before
+// those re-checks, which stay as they are. A veto skips that move (`guard_refused`): the row stays pending as it was,
+// with no transition, and the next cycle plans it again. A guard that can't run, times out or exits with anything but
+// its two codes is a guard error: the move goes ahead and the notes name it (`guardErrors`).
 //
 // A drain keeps the agent's node, sessions and history. Under the agent's lifecycle lease it reads the agent again (a
 // row or a held message that reached it, or a wake since the plan, sends the slot back to `live`; an agent relaunched
@@ -188,6 +194,9 @@ export interface SeatPoolExecutorDeps {
    *  unit that finds an eligible drained slot takes no new number either. Without these and `add`, a cycle skips the
    *  whole add stage. */
   comeback?: SeatPoolComebackDeps;
+  /** Runs the block's `dispatch_guard` for one move (runSeatPoolDispatchGuard). Without it, a block that sets a guard
+   *  gets a guard error on each move, and the move goes ahead. */
+  dispatchGuard?: SeatPoolDispatchGuardRunner;
 }
 
 /** What the checked stop returned, as the pool reads it (SeatLifecycleService.stopSeat). */
@@ -252,22 +261,43 @@ export interface SeatPoolExecutor {
 /** The queue's reroute actor and note, as the queue records a reroute (the queue's own rule for "was rerouted"). */
 const QUEUE_FALLBACK_ACTOR = "system:queue-fallback";
 const FALLBACK_NOTE = "fallback-routed: ";
+/** The actor and note the queue records when a handover or a fresh launch releases the retiring occupant's claims back
+ *  to pending (`releaseClaimsByGeneration`). */
+const HANDOVER_RELEASE_ACTOR = "system";
+const HANDOVER_RELEASE_NOTE = "released: claimant generation retired (seat handover)";
 /** No cut: list() keeps the newest rows first, so any limit would drop the oldest rows, which move first. */
 const ALL_ROWS = Number.MAX_SAFE_INTEGER;
 /** Refusals that mean the row moved on since it was read: skipped, never a failure. */
 const ROW_MOVED_ON: ReadonlySet<string> = new Set(["fallback_state_mismatch", "fallback_destination_mismatch", "qitem_not_found"]);
+
+/** Asks the guard about one move. A missing runner, or one that throws, is a guard error: the move goes ahead. */
+async function askGuard(
+  run: SeatPoolDispatchGuardRunner | undefined,
+  input: Parameters<SeatPoolDispatchGuardRunner>[0],
+): Promise<SeatPoolDispatchGuardVerdict> {
+  if (run === undefined) return { verdict: "error", message: "no guard runner composed" };
+  try {
+    return await run(input);
+  } catch (error) {
+    return { verdict: "error", message: error instanceof Error ? error.message : String(error) };
+  }
+}
 
 /** A queue-only seat's cold watchdog reminder is about that seat, never its work (the stuck sweep's rule). */
 function isWatchdogReminder(row: { sourceSession: string; tags?: string[] | null }): boolean {
   return row.sourceSession === "watchdog@system" && !!row.tags?.includes("watchdog") && row.tags.includes("queue-only");
 }
 
-/** When the row was last rerouted, from its transitions, or null when it never was. */
-function lastReroute(queueRepo: Pick<QueueRepository, "transitionLog">, qitemId: string): string | null {
+/** When the row's waiting clock last restarted, from its transitions: its latest reroute or its latest release back to
+ *  pending by a handover or a fresh launch, or null when neither happened. Only the queue's own records count (no
+ *  identity provenance). */
+function waitingRestartedAt(queueRepo: Pick<QueueRepository, "transitionLog">, qitemId: string): string | null {
   const transitions = queueRepo.transitionLog.listForQitem(qitemId);
   for (let i = transitions.length - 1; i >= 0; i--) {
     const t = transitions[i]!;
-    if (t.actorSession === QUEUE_FALLBACK_ACTOR && t.transitionNote?.startsWith(FALLBACK_NOTE) && t.identityProvenance === null) return t.ts;
+    if (t.identityProvenance !== null) continue;
+    if (t.actorSession === QUEUE_FALLBACK_ACTOR && t.transitionNote?.startsWith(FALLBACK_NOTE)) return t.ts;
+    if (t.state === "pending" && t.actorSession === HANDOVER_RELEASE_ACTOR && t.transitionNote === HANDOVER_RELEASE_NOTE) return t.ts;
   }
   return null;
 }
@@ -286,7 +316,7 @@ export function seatPoolQueueEffects(
           qitemId: row.qitemId,
           rawDestination: row.destinationSession,
           tags: row.tags ?? [],
-          waitingSince: lastReroute(queueRepo, row.qitemId) ?? row.tsCreated,
+          waitingSince: waitingRestartedAt(queueRepo, row.qitemId) ?? row.tsCreated,
         }));
     },
     openRows: (sessionName) => queueRepo.listOpenObligations(sessionName, ALL_ROWS).length,
@@ -438,10 +468,16 @@ function blockView(stored: StoredSeatPool | undefined): BlockView {
   return "spec" in stored ? { block: "stored", spec: stored.spec } : { block: "unusable", error: stored.error };
 }
 
-/** Whether two stored specs are the same, field by field. */
+/** Whether two stored specs are the same, field by field (the guard's argv item by item). */
 function sameSpec(a: SeatPoolSpec, b: SeatPoolSpec): boolean {
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<keyof SeatPoolSpec>;
-  for (const key of keys) if (a[key] !== b[key]) return false;
+  for (const key of keys) {
+    const x = a[key];
+    const y = b[key];
+    if (Array.isArray(x) && Array.isArray(y)) {
+      if (x.length !== y.length || x.some((item, i) => item !== y[i])) return false;
+    } else if (x !== y) return false;
+  }
   return true;
 }
 
@@ -1098,8 +1134,9 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       let custody: { code: string; message: string } | undefined;
       let blockChanged = false;
       const moved: Move[] = [];
-      const skipped: Array<Move & { code: string }> = [];
+      const skipped: Array<Move & { code: string; message?: string }> = [];
       const failed: Array<Move & { code: string; message: string }> = [];
+      const guardErrors: Array<Move & { code: "guard_error"; message: string }> = [];
       const drains: DrainReport[] = [];
       const toDrain: DrainStep[] = [];
       const restops: Restop[] = [];
@@ -1194,15 +1231,31 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
               gone.push({ slot, nodeId: agent.nodeId, session: agent.sessionName, sessionId });
             }
           }
+          /** The block changed since the plan: this move and the rest are skipped. */
+          const skipRest = (index: number): void => {
+            for (const rest of dispatches.slice(index)) {
+              skipped.push({ qitemId: rest.qitemId, from: read.rawDestination.get(rest.qitemId)!, to: plannedTo(rest.slotNumber), code: "pool_block_changed" });
+            }
+          };
           for (const [index, d] of dispatches.entries()) {
             // A job stopped while an earlier move awaited: no later effect.
             if (!active()) { held = JOB_STOPPED; break; }
             const from = read.rawDestination.get(d.qitemId)!;
-            if (blockChangedNow()) {
-              for (const rest of dispatches.slice(index)) {
-                skipped.push({ qitemId: rest.qitemId, from: read.rawDestination.get(rest.qitemId)!, to: plannedTo(rest.slotNumber), code: "pool_block_changed" });
+            if (blockChangedNow()) { skipRest(index); break; }
+            // The guard, under the block as planned. After its await, the job and the block are read again, and the checks
+            // below run as they would without a guard.
+            const guard = spec.dispatchGuard;
+            if (guard !== undefined) {
+              const to = plannedTo(d.slotNumber);
+              const verdict = await askGuard(deps.dispatchGuard, { argv: guard, qitemId: d.qitemId, from, to });
+              // A job stopped or a block changed while the guard ran ends the moves, whatever the old guard said.
+              if (!active()) { held = JOB_STOPPED; break; }
+              if (blockChangedNow()) { skipRest(index); break; }
+              if (verdict.verdict === "veto") {
+                skipped.push({ qitemId: d.qitemId, from, to, code: "guard_refused", ...(verdict.message ? { message: verdict.message } : {}) });
+                continue;
               }
-              break;
+              if (verdict.verdict === "error") guardErrors.push({ qitemId: d.qitemId, from, to, code: "guard_error", message: verdict.message });
             }
             // The agent again, just before the move: still free, no held message, no open row, not above max.
             const agents = readSeatPoolAgents(deps, deps.slots.forModel(modelNodeId));
@@ -1734,6 +1787,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         ...(moved.length ? { moved } : {}),
         ...(skipped.length ? { skipped } : {}),
         ...(failed.length ? { failed } : {}),
+        ...(guardErrors.length ? { guardErrors } : {}),
         ...(drains.length ? { drains } : {}),
         ...(addNotes && Object.keys(addNotes).length ? { add: addNotes } : {}),
         ...(custody ? { custody } : {}),

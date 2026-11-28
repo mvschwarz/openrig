@@ -24,6 +24,9 @@ export interface SeatPoolSpec {
   cwdTemplate: string | null;
   /** True empties the pool. */
   drain: boolean;
+  /** The dispatch guard: an absolute executable and its own arguments, run once per planned move (#4061); absent: no
+   *  guard, and nothing changes. */
+  dispatchGuard?: string[];
 }
 
 /** One thing wrong with a block: the field (null for the block as a whole) and why. */
@@ -45,7 +48,7 @@ export const SEAT_POOL_DEFAULTS = {
   cooldownSeconds: 60,
 } as const;
 
-const KEYS = ["max", "min", "dispatch_after_s", "idle_grace_s", "cooldown_s", "dispatch_tag", "cwd_template", "drain"] as const;
+const KEYS = ["max", "min", "dispatch_after_s", "idle_grace_s", "cooldown_s", "dispatch_tag", "cwd_template", "drain", "dispatch_guard"] as const;
 const KNOWN_KEYS: ReadonlySet<string> = new Set(KEYS);
 
 function isMapping(value: unknown): value is Record<string, unknown> {
@@ -113,6 +116,16 @@ export function parsePoolBlock(raw: unknown): { ok: true; spec: SeatPoolSpec | n
   const drain = raw["drain"];
   if (drain !== undefined && typeof drain !== "boolean") problems.push({ field: "drain", reason: "must be true or false" });
 
+  // An argv, never a shell string: the executable by absolute path, then its own arguments.
+  const dispatchGuard = raw["dispatch_guard"];
+  if (dispatchGuard !== undefined) {
+    if (!Array.isArray(dispatchGuard) || dispatchGuard.length === 0 || !dispatchGuard.every((arg) => typeof arg === "string" && arg.length > 0)) {
+      problems.push({ field: "dispatch_guard", reason: "must be a non-empty list of non-empty strings: the command, then its arguments" });
+    } else if (!(dispatchGuard[0] as string).startsWith("/")) {
+      problems.push({ field: "dispatch_guard", reason: "the command must be an absolute path" });
+    }
+  }
+
   if (problems.length > 0) return { ok: false, problems };
   return {
     ok: true,
@@ -125,11 +138,12 @@ export function parsePoolBlock(raw: unknown): { ok: true; spec: SeatPoolSpec | n
       dispatchTag: (dispatchTag as string | undefined) ?? null,
       cwdTemplate: (cwdTemplate as string | undefined) ?? null,
       drain: (drain as boolean | undefined) ?? false,
+      ...(dispatchGuard !== undefined ? { dispatchGuard: [...(dispatchGuard as string[])] } : {}),
     },
   };
 }
 
-/** The spec form of a usable block, every field written (the optional text fields only when set). */
+/** The spec form of a usable block, every field written (the optional text fields and the guard only when set). */
 export function serializePoolBlock(spec: SeatPoolSpec): Record<string, unknown> {
   return {
     max: spec.max,
@@ -140,6 +154,7 @@ export function serializePoolBlock(spec: SeatPoolSpec): Record<string, unknown> 
     ...(spec.dispatchTag !== null ? { dispatch_tag: spec.dispatchTag } : {}),
     ...(spec.cwdTemplate !== null ? { cwd_template: spec.cwdTemplate } : {}),
     drain: spec.drain,
+    ...(spec.dispatchGuard !== undefined ? { dispatch_guard: [...spec.dispatchGuard] } : {}),
   };
 }
 
