@@ -943,7 +943,10 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       }
       // WSL2 can silently drop probes to an unused port. A slow live daemon can
       // also time out: do not run a second child's initialization against its DB.
-      if (error instanceof HealthProbeTimeoutError && await deps.isPortOccupied?.(probeHost, port)) {
+      // Only a refusal says nothing listens. Any other failure (a timeout, a listener that resets the connection, a
+      // blocked probe) gets the bind check, so a positively occupied endpoint never reaches a spawn: not even after a
+      // start reservation whose child died was reclaimed, once start's preflight let that child's port through.
+      if (!isRefusedError(error) && await deps.isPortOccupied?.(probeHost, port)) {
         throw new Error(occupiedPortGuidance(port));
       }
     }

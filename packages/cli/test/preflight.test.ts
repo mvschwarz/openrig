@@ -178,7 +178,7 @@ describe("SystemPreflight", () => {
 
   // A start that ended pending leaves its child listening, and status may read a dead PID's leftover daemon.json as
   // stale: the start must still reach the finish, which checks that child before anything else.
-  it("lets a start reservation's own child hold its launch port, and says so", async () => {
+  it("lets a start reservation's own child hold its launch port", async () => {
     const server = net.createServer();
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as net.AddressInfo).port;
@@ -186,7 +186,8 @@ describe("SystemPreflight", () => {
     const result = await pf.run({ port, host: "127.0.0.1" });
     server.close();
     expect(result.ready).toBe(true);
-    expect(result.checks.find((c) => c.name === "port_available")).toMatchObject({ ok: true, warning: expect.stringContaining("held by an earlier start (reserved by pid 5151)") });
+    // The finish says what it waits for; this check adds no text that start would never print.
+    expect(result.checks.find((c) => c.name === "port_available")).toEqual({ name: "port_available", ok: true });
   });
 
   it.each([

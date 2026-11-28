@@ -198,9 +198,9 @@ export class SystemPreflight {
       } else {
         // A start that ended pending leaves its child listening here, and the next start finishes that start: it checks the
         // child against the reservation first, and while the reservation stands it starts no other daemon.
-        const pending = this.reservedFor(effectiveHost, effectivePort);
-        checks.push(pending
-          ? { name: "port_available", ok: true, warning: `Port ${effectivePort} on ${effectiveHost} is held by an earlier start${pending.pid ? ` (reserved by pid ${pending.pid})` : ""}; this start checks that start before anything else and starts no other daemon while it is reserved.` }
+        // The finish says what it is waiting for, so this check adds no text of its own.
+        checks.push(this.reservedFor(effectiveHost, effectivePort)
+          ? { name: "port_available", ok: true }
           : {
             name: "port_available",
             ok: false,
@@ -218,7 +218,7 @@ export class SystemPreflight {
   }
 
   /** The start reservation whose child was launched at exactly this endpoint, if one stands. */
-  private reservedFor(host: string, port: number): { pid?: number } | undefined {
+  private reservedFor(host: string, port: number): object | undefined {
     let pending: ReturnType<NonNullable<PreflightDeps["pendingStart"]>>;
     try { pending = this.deps.pendingStart?.(); } catch { return undefined; }
     return pending && pending.port === port && (pending.host ?? "127.0.0.1") === host ? pending : undefined;

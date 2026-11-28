@@ -4,7 +4,9 @@ import { spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startDaemon, STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
+import net from "node:net";
+import { pendingStartEndpoint, startDaemon, STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
+import { SystemPreflight } from "../src/system-preflight.js";
 import { acquireDaemonStartLock, finishStartReservation } from "../src/daemon-start-lock.js";
 import { realDeps } from "../src/commands/daemon.js";
 // Resolve the startup import before a fake clock can finish with no timer yet scheduled.
@@ -370,6 +372,38 @@ describe("the database-holder check an older reservation's finish relies on", ()
       expect(check(gone, held)).toEqual({ failure: expect.any(String) });
     } finally {
       fs.closeSync(fd);
+    }
+  });
+});
+
+// The reviewer's transition probe (R2-F1): a real listener on the port that isn't OpenRig, the production reservation
+// read and reclaim, and a spawn spy. Start's preflight lets the reserved child's port through; the child then dies before
+// the finish, so the reservation is reclaimed and the start falls through to an ordinary start. No spawn may follow.
+describe("a reservation whose child dies after preflight let its port through", () => {
+  it.each([false, true])("never spawns onto the occupied port (a dead daemon's daemon.json too: %s)", async (withState) => {
+    const server = net.createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as net.AddressInfo).port;
+    const f = setup(withState ? { state: descriptor({ pid: 999 }) } : {});
+    fs.writeFileSync(lockFile(), header() + childRecord({ port, db: DB }));
+    const live = realDeps();
+    f.deps.fetch = vi.fn(live.fetch);
+    f.deps.isPortOccupied = vi.fn(live.isPortOccupied!);
+    const preflight = new SystemPreflight({
+      exec: async (cmd) => cmd === "tmux list-sessions" ? "" : "tmux 3.6a",
+      configStore: { resolve: () => ({ daemon: { host: "127.0.0.1", port }, db: { path: path.join(home, "db.sqlite") }, transcripts: { path: home } }) } as never,
+      getDaemonStatus: async () => ({ state: withState ? "stale" : "unverified" }),
+      pendingStart: () => pendingStartEndpoint(f.deps), openrigHome: home,
+    });
+    try {
+      expect((await preflight.run({ host: "127.0.0.1", port })).ready).toBe(true);
+      f.alive.delete(CHILD);
+      const outcome = await startDaemon({ ...opts, port }, f.deps).catch((error: Error) => error);
+      expect(f.deps.spawn).not.toHaveBeenCalled();
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as Error).message).toMatch(/already in use|EADDRINUSE|occupied/i);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 });

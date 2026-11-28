@@ -45,6 +45,11 @@ export function createIsProcessAlive(deps: ProcessAliveDeps): (pid: number) => b
 export { signalProbe, createProcessLiveness, readProcessState } from "../process-liveness.js";
 export type { SignalOutcome } from "../process-liveness.js";
 
+/** The daemon's own reading of its database path (startup.ts): an in-memory database as it is, any other path absolute. */
+export function daemonDatabasePath(db: string): string {
+  return db === ":memory:" ? db : path.resolve(db);
+}
+
 export function realDeps(): LifecycleDeps {
   const isProcessAlive = createIsProcessAlive({
     signalCheck: (pid) => signalProbe(pid) === "sent",
@@ -276,9 +281,10 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           {
             port: effectivePort,
             host: hostForDaemon,
-            // A relative --db is made absolute once, here: the child, its reservation and daemon.json then name the same
-            // file, and a later start from another directory compares that path.
-            db: opts.db !== undefined ? path.resolve(opts.db) : config.db.path,
+            // A relative database path (--db, db.path or OPENRIG_DB) is made absolute once, here, by the daemon's own rule
+            // (an in-memory database stays as it is): the child, its reservation and daemon.json then name the same file,
+            // and a later start from another directory compares that path.
+            db: daemonDatabasePath(opts.db ?? config.db.path),
             transcriptsEnabled: config.transcripts.enabled,
             transcriptsPath: config.transcripts.path,
             workspaceRoot: config.workspace.root,

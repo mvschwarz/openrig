@@ -50,3 +50,14 @@ it("daemon start --db with a relative path reaches startup with that path made a
   expect(startDaemon).toHaveBeenCalledTimes(1);
   expect(vi.mocked(startDaemon).mock.calls[0]![0]).toMatchObject({ db: join(process.cwd(), "relative/openrig.sqlite") });
 });
+
+it("daemon start --db :memory: keeps the in-memory database as the daemon reads it", async () => {
+  await daemonCommand({} as never).parseAsync(["start", "--db", ":memory:"], { from: "user" });
+  expect(vi.mocked(startDaemon).mock.calls[0]![0]).toMatchObject({ db: ":memory:" });
+});
+
+it("daemon start makes a relative configured database path absolute the same way", async () => {
+  vi.stubEnv("OPENRIG_DB", "configured/openrig.sqlite");
+  await daemonCommand({} as never).parseAsync(["start"], { from: "user" });
+  expect(vi.mocked(startDaemon).mock.calls[0]![0]).toMatchObject({ db: join(process.cwd(), "configured/openrig.sqlite") });
+});
