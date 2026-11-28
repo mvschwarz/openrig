@@ -276,12 +276,15 @@ export class SeatPoolSlotsRepository {
   }
 
   /** A held slot whose node got a later session that has not settled: back to `adding`, its settled attempt issued again
-   *  with the outcome given (an unknown result, read again every cycle), and the hold it had kept. */
-  reopenHeld(input: { slotId: string; attemptId: string; from: "drained" | "live"; outcome: string }): boolean {
+   *  with the outcome given (an unknown result, read again every cycle), and the hold it had kept. A `live` slot takes the
+   *  reopen's time, so a later settle to `drained` (which keeps the phase time) counts its drain from when it left `live`;
+   *  a `drained` one keeps its drain's time. */
+  reopenHeld(input: { slotId: string; attemptId: string; from: "drained" | "live"; outcome: string; at: string }): boolean {
     return this.db.prepare(
-      `UPDATE seat_pool_slots SET phase = 'adding', attempt_state = 'issued', attempt_outcome = ?
+      `UPDATE seat_pool_slots SET phase = 'adding', attempt_state = 'issued', attempt_outcome = ?,
+         phase_changed_at = CASE WHEN phase = 'live' THEN ? ELSE phase_changed_at END
         WHERE slot_id = ? AND attempt_id = ? AND phase = ? AND reuse_hold IS NOT NULL AND attempt_state = 'settled'`,
-    ).run(input.outcome, input.slotId, input.attemptId, input.from).changes === 1;
+    ).run(input.outcome, input.at, input.slotId, input.attemptId, input.from).changes === 1;
   }
 
   /** An issued attempt, of either kind, settled by its node's latest session rather than by its call: the slot goes to

@@ -480,6 +480,88 @@ describe("seat-pool held comeback: a daemon restart in the middle of a comeback 
     expect(w.eventsNaming(s1.nodeId, "restore.subset_completed")).toHaveLength(1);
   });
 
+  it("After a crash between the `awaiting-decision` event and the outcome write, an agent recovered by hand to a ready session before the restarted pool's first evaluation makes `s1` `live` with no hold.", async () => {
+    const w = heldWorld();
+    const { m, s1 } = await w.twoDrained();
+    w.hooks.adapters = (logicalId) => (logicalId === "dev.impl-s1" ? {} : undefined);
+    w.hooks.afterLaunch = () => never();
+    await w.row(m.session);
+    await w.notesOf(m.jobId);
+    await vi.waitFor(() => expect(w.eventsNaming(s1.nodeId, "restore.subset_completed")).toHaveLength(1));
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "adding", attemptKind: "comeback", attemptState: "issued", attemptOutcome: null });
+
+    // the event recorded `awaiting-decision` for `s1`
+    const [event] = w.db.prepare("SELECT payload FROM events WHERE type = 'restore.subset_completed' AND payload LIKE ?").all(`%${s1.nodeId}%`) as Array<{ payload: string }>;
+    expect((JSON.parse(event!.payload) as { result: { nodes: unknown[] } }).result.nodes).toContainEqual(
+      expect.objectContaining({ nodeId: s1.nodeId, status: "awaiting-decision" }));
+
+    w.hooks.afterLaunch = undefined;
+    w.restart(m);
+    // someone recovers the agent by hand before the restarted pool reads the slot
+    const sessionId = w.personSession(s1.nodeId, `dev-impl-s1@${RIG}`, "running", "ready");
+    const notes = await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(notes.laterChanges).toEqual([{
+      slotNumber: 1, logicalId: "dev.impl-s1", nodeId: s1.nodeId,
+      session: { id: sessionId, status: "running", startupStatus: "ready" }, read: "ready", phase: "live",
+    }]);
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "live", reuseHold: null, attemptState: "settled" });
+    // and the next evaluation keeps it so
+    await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "live", reuseHold: null });
+    expect(w.launchesOf("dev.impl-s1")).toBe(1);
+  });
+
+  it("After a crash between the `awaiting-decision` event and the outcome write, a session someone started since that is not ready yet is a later change: the hold is measured from the session the comeback was issued on, so the next evaluation counts `s1` as an unknown result that takes room.", async () => {
+    const w = heldWorld();
+    const { m, s1 } = await w.twoDrained();
+    w.hooks.adapters = (logicalId) => (logicalId === "dev.impl-s1" ? {} : undefined);
+    w.hooks.afterLaunch = () => never();
+    await w.row(m.session);
+    await w.notesOf(m.jobId);
+    await vi.waitFor(() => expect(w.eventsNaming(s1.nodeId, "restore.subset_completed")).toHaveLength(1));
+
+    w.hooks.afterLaunch = undefined;
+    w.restart(m);
+    w.personSession(s1.nodeId, `dev-impl-s1@${RIG}`, "running", "pending");
+    await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "drained", attemptState: "settled" });
+    expect(w.holdOf(m, 1)).toMatchObject({ code: "awaiting-decision" });
+    const notes = await w.notesOf(m.jobId);
+    expect(notes.laterChanges).toEqual([expect.objectContaining({ slotNumber: 1, read: "unknown", phase: "adding" })]);
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "adding", attemptState: "issued" });
+    expect(w.launchesOf("dev.impl-s1")).toBe(1);
+  });
+
+  it("After a crash between an `attention_required` event and the outcome write, the restarted pool holds `s1` `live` from the session its launch left, and the next evaluation keeps that hold.", async () => {
+    const w = heldWorld();
+    const { m, s1 } = await w.twoDrained();
+    w.hooks.harness = (session) => (session === `dev-impl-s1@${RIG}` ? { ok: false, error: "resume picker is open", recovery: "attention_required" } : undefined);
+    w.hooks.afterLaunch = () => never();
+    await w.row(m.session);
+    await w.notesOf(m.jobId);
+    await vi.waitFor(() => expect(w.eventsNaming(s1.nodeId, "restore.subset_completed")).toHaveLength(1));
+    const [event] = w.db.prepare("SELECT payload FROM events WHERE type = 'restore.subset_completed' AND payload LIKE ?").all(`%${s1.nodeId}%`) as Array<{ payload: string }>;
+    expect((JSON.parse(event!.payload) as { result: { nodes: unknown[] } }).result.nodes).toContainEqual(
+      expect.objectContaining({ nodeId: s1.nodeId, status: "attention_required" }));
+
+    w.hooks.harness = undefined;
+    w.hooks.afterLaunch = undefined;
+    w.restart(m);
+    await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "live", attemptState: "settled" });
+    expect(w.holdOf(m, 1)).toMatchObject({ code: "attention_required" });
+    const hold = w.slotOf(m, 1).reuseHold;
+    const notes = await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(notes.laterChanges ?? []).toEqual([]);
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "live", attemptState: "settled", reuseHold: hold });
+    expect(w.launchesOf("dev.impl-s1")).toBe(1);
+  });
+
   it("With no event after the crash, `s1` is `unknown`, takes room, and is not issued again.", async () => {
     const w = heldWorld();
     const { m, s1 } = await w.twoDrained();
@@ -522,7 +604,8 @@ describe("seat-pool held comeback: across rig down and rig up (#3395 Piece 1)", 
     expect(down.snapshotId).toEqual(expect.any(String));
     const up = await w.restorer.restore(down.snapshotId!, { adapters: w.adapters, fsOps: { exists: (p) => fs.existsSync(p) } });
     expect(up.ok, JSON.stringify(up)).toBe(true);
-    expect(JSON.stringify(up)).toMatch(new RegExp(`"keptDown":\\[[^\\]]*"nodeId":"${s1.nodeId}"[^\\]]*"reason":"drained pool agent, not started"`));
+    expect(up.ok ? up.result.keptDown : undefined).toContainEqual(
+      expect.objectContaining({ nodeId: s1.nodeId, reason: "drained pool agent, not started" }));
     expect(w.sessionsOf(s1.nodeId).filter((s) => s.status === "running" || s.status === "idle")).toEqual([]);
     expect(w.slotOf(m, 1)).toMatchObject({ phase: "drained", reuseHold: hold });
     // the model came back
@@ -878,6 +961,25 @@ describe("seat-pool held comeback: what a later change is measured from (#3395 P
     expect(w.launchesOf("dev.impl-s1")).toBe(1);
   });
 
+  it("A comeback a later ready session settled is reported `running` by that settlement after the slot is drained later.", async () => {
+    const w = heldWorld();
+    const { m, s1 } = await w.twoDrained();
+    w.rigRepo.setNodePool(m.nodeId, { spec: { ...HELD, max: 1 } });
+    w.hooks.beforeLaunch = () => never();
+    await w.row(m.session);
+    await w.notesOf(m.jobId);
+    w.hooks.beforeLaunch = undefined;
+    w.restart(m);
+    await w.notesOf(m.jobId);
+    w.personSession(s1.nodeId, `dev-impl-s1@${RIG}`, "running", "ready");
+    await w.notesOf(m.jobId);
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "live", reuseHold: null, attemptState: "settled" });
+    // a later drain moves only the phase; the attempt settled as it did
+    w.db.prepare("UPDATE seat_pool_slots SET phase = 'drained' WHERE slot_id = ?").run(w.slotOf(m, 1).slotId);
+    const notes = await w.notesOf(m.jobId);
+    expect(slotView(notes, 1)).toMatchObject({ phase: "drained", attempt: { status: "running", code: "later_session" } });
+  });
+
   it("A held `live` slot whose node a later restore launched and left awaiting a decision takes that outcome: it is `drained` and held, and is not brought back.", async () => {
     const w = heldWorld();
     const { m, s1 } = await w.twoDrained();
@@ -934,6 +1036,56 @@ describe("seat-pool held comeback: what a later change is measured from (#3395 P
     expect(notes.laterChanges).toEqual([expect.objectContaining({ slotNumber: 1, read: "ready", phase: "live" })]);
     expect(w.slotOf(m, 1)).toMatchObject({ phase: "live", reuseHold: null, attemptState: "settled" });
     expect(w.launchesOf("dev.impl-s1")).toBe(1);
+  });
+
+  it("A held `awaiting-decision` slot reopened by a later session that a launch then rolls back stays held when the node's earlier session had read ready before it ended: only a session after the hold that reached `ready` ends it.", async () => {
+    const w = heldWorld();
+    const { m, s1 } = await w.heldS1();
+    w.db.prepare("UPDATE queue_items SET state = 'done'").run();
+    // the node's earlier session exited after it had read ready
+    const earlier = w.sessionsOf(s1.nodeId).filter((s) => s.status !== "superseded").at(-1)!;
+    w.sessions.updateStatus(earlier.id, "exited");
+    w.sessions.updateStartupStatus(earlier.id, "ready");
+    const later = w.personSession(s1.nodeId, `dev-impl-s1@${RIG}`, "running", "pending");
+    await w.notesOf(m.jobId);
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "adding", attemptState: "issued" });
+    // a launch rolls that session back: the earlier one is the node's latest again
+    w.db.prepare("UPDATE sessions SET status = 'superseded' WHERE id = ?").run(later);
+    await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "drained", attemptState: "settled" });
+    expect(w.holdOf(m, 1)).toMatchObject({ code: "awaiting-decision" });
+    // so it is never brought back
+    await w.row(m.session);
+    w.afterCooldown();
+    await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(w.launchesOf("dev.impl-s1")).toBe(1);
+  });
+
+  it("A held `live` slot put back in `adding` by a later session that then ends counts its drain from when it left `live`, not from when it went `live`.", async () => {
+    const w = heldWorld();
+    const { m, s1 } = await w.twoDrained();
+    w.hooks.harness = (session) => (session === `dev-impl-s1@${RIG}` ? { ok: false, error: "resume picker is open", recovery: "attention_required" } : undefined);
+    await w.row(m.session);
+    await w.comeBack(m);
+    w.hooks.harness = undefined;
+    w.db.prepare("UPDATE queue_items SET state = 'done'").run();
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "live", attemptState: "settled" });
+    expect(w.holdOf(m, 1)).toMatchObject({ code: "attention_required" });
+    const wentLive = w.slotOf(m, 1).phaseChangedAt;
+    w.clock.now = new Date(w.clock.now.getTime() + 600_000);
+    const later = w.personSession(s1.nodeId, `dev-impl-s1@${RIG}`, "running", "pending");
+    await w.notesOf(m.jobId);
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "adding", attemptState: "issued" });
+    const leftLive = w.clock.now.toISOString();
+    w.clock.now = new Date(w.clock.now.getTime() + 60_000);
+    w.sessions.updateStatus(later, "exited");
+    await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "drained" });
+    expect(w.slotOf(m, 1).phaseChangedAt).not.toBe(wentLive);
+    expect(Date.parse(w.slotOf(m, 1).phaseChangedAt)).toBeGreaterThanOrEqual(Date.parse(leftLive));
   });
 
   it("An add cut off by a restart whose session runs with a startup that needs attention is held `live`, not left `unknown`.", async () => {

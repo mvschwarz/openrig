@@ -626,6 +626,28 @@ describe("seat-pool add: while max drops and across a restart (#3395 Piece 1)", 
     expect(w.stopSeat).not.toHaveBeenCalled();
   });
 
+  it("An add whose failed call left no session keeps that call on its row while a later cycle still finds no session.", async () => {
+    const w = lifecycleWorld();
+    const m = await w.model({ max: 1, min: 1 });
+    w.launchHarness.mockResolvedValueOnce({ ok: false, error: "harness exited" });
+    w.hooks.afterAdd = () => {
+      const agent = w.nodeOf(m.rigId, "dev.impl-s1")!;
+      w.db.prepare("DELETE FROM sessions WHERE node_id = ?").run(agent.id);
+    };
+    await w.notesOf(m.jobId);
+    await w.executor().idle();
+    w.hooks.afterAdd = undefined;
+    const [first] = w.slots.forModel(m.nodeId);
+    expect(JSON.parse(first!.attemptOutcome!)).toMatchObject({ status: "unknown", code: "no_session", call: { ok: true, status: "failed" } });
+    for (let i = 0; i < 2; i++) {
+      await w.notesOf(m.jobId);
+      await w.executor().idle();
+      const [kept] = w.slots.forModel(m.nodeId);
+      expect(JSON.parse(kept!.attemptOutcome!)).toMatchObject({ status: "unknown", code: "no_session", call: { ok: true, status: "failed" } });
+    }
+    expect(w.converge).toHaveBeenCalledTimes(1);
+  });
+
   it("An add whose settle fails after its call returned keeps the call on its row, and a later cycle settles it by that call.", async () => {
     const w = lifecycleWorld();
     const m = await w.model({ max: 1, min: 1 });
