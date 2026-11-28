@@ -3146,6 +3146,19 @@ describe("#3315 — archiveSpentReservation", () => {
   beforeEach(() => { home = fs.mkdtempSync(path.join(os.tmpdir(), "spent-reservation-")); });
   afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
 
+  it.each(["same inode", "other file", "symlink"])("resumes a partial stop archive only for the same inode: %s", (kind) => {
+    const file = path.join(home, "daemon-start.lock");
+    const raw = "a\nb\n";
+    fs.writeFileSync(file, raw);
+    const archive = `${file}.stopped-${fs.statSync(file).ino}`;
+    if (kind === "same inode") fs.linkSync(file, archive);
+    else if (kind === "symlink") fs.symlinkSync(file, archive);
+    else fs.writeFileSync(archive, "other");
+    expect(archiveSpentReservation(file, raw)).toBe(kind === "same inode" ? archive : undefined);
+    expect(fs.existsSync(file)).toBe(kind !== "same inode");
+    expect(fs.readFileSync(archive, "utf8")).toBe(kind === "other file" ? "other" : raw);
+  });
+
   it("archives the reservation under its inode only while it holds exactly the expected bytes, and only once", () => {
     const file = path.join(home, "daemon-start.lock");
     fs.writeFileSync(file, "a\nb\n");

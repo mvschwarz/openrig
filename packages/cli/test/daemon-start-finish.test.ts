@@ -242,6 +242,42 @@ describe("an ordinary start finishes a start that ended pending", () => {
     expect(f.deps.spawn).not.toHaveBeenCalled();
   });
 
+  it("retries retirement after the archive link succeeded but removing the reservation failed", async () => {
+    const f = setup();
+    const unlink = fs.unlinkSync;
+    let failed = false;
+    const spy = vi.spyOn(fs, "unlinkSync").mockImplementation((file) => {
+      if (String(file) === lockFile() && !failed) {
+        failed = true;
+        throw Object.assign(new Error("EIO: removing reservation"), { code: "EIO" });
+      }
+      return unlink(file);
+    });
+    const first = await start(f.deps) as Awaited<ReturnType<typeof startDaemon>>;
+    expect(first.finished).toMatchObject({ publication: "written", reservation: { kept: expect.any(String) } });
+    const published = f.files.get(STATE_FILE);
+    expect(fs.existsSync(lockFile())).toBe(true);
+    expect(finishedArchives()).toHaveLength(1);
+    spy.mockRestore();
+    const second = await start(f.deps) as Awaited<ReturnType<typeof startDaemon>>;
+    expect(second.finished).toMatchObject({ publication: "already-correct", reservation: { retired: expect.any(String) } });
+    expect(fs.existsSync(lockFile())).toBe(false);
+    expect(f.files.get(STATE_FILE)).toBe(published);
+    expect(finishedArchives()).toHaveLength(1);
+    expect(f.deps.spawn).not.toHaveBeenCalled();
+    expect(f.deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("does not replace a different file at the finished archive name", async () => {
+    const f = setup();
+    const archive = `${lockFile()}.finished-${fs.statSync(lockFile()).ino}`;
+    fs.writeFileSync(archive, "another archive\n");
+    const result = await start(f.deps) as Awaited<ReturnType<typeof startDaemon>>;
+    expect(result.finished).toMatchObject({ publication: "written", reservation: { kept: expect.any(String) } });
+    expect(fs.readFileSync(archive, "utf8")).toBe("another archive\n");
+    expect(fs.readFileSync(lockFile(), "utf8")).toBe(reservation());
+  });
+
   it("is an ordinary start afterwards: the published daemon is already running, and nothing spawns", async () => {
     const f = setup();
     expect(await start(f.deps)).not.toBeInstanceOf(Error);

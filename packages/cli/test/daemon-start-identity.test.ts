@@ -526,6 +526,25 @@ describe("local startup reservation", () => {
       fs.utimesSync(file, written, written);
       return file;
     };
+    it.each(["same inode", "other file", "symlink"])("resumes a partial abandoned archive only for the same inode: %s", (kind) => withHome((home) => {
+      const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = abandonedOf(file);
+      const raw = fs.readFileSync(file, "utf8");
+      if (kind === "same inode") fs.linkSync(file, archive);
+      else if (kind === "symlink") fs.symlinkSync(file, archive);
+      else fs.writeFileSync(archive, "other");
+      const acquire = () => acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: dead, pidNamespace: NS });
+      if (kind === "same inode") {
+        const lock = acquire();
+        expect(lock.archived).toBe(archive);
+        expect(fs.readFileSync(archive, "utf8")).toContain(raw);
+        lock.release();
+      } else {
+        expect(acquire).toThrow(/already reserved/);
+        expect(fs.readFileSync(file, "utf8")).toBe(raw);
+        expect(fs.readFileSync(archive, "utf8")).toBe(kind === "other file" ? "other" : raw);
+      }
+    }));
+
     it("is archived when it records this boot's ID and both its launcher and child are dead in this shell's pid namespace", () => withHome((home) => {
       const file = sameBoot(home, { bootId: "boot-b", pidNamespace: NS }), archive = abandonedOf(file), liveness = vi.fn(dead);
       const lock = acquireDaemonStartLock(home, { bootId: "boot-b", bootedAtMs, processLiveness: liveness, pidNamespace: NS });

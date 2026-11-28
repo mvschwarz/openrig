@@ -222,7 +222,15 @@ function claimAndArchive(file: string, inspected: fs.Stats, text: string, target
     }
     underClaim?.();
     try {
-      fs.linkSync(file, target);
+      try {
+        fs.linkSync(file, target);
+      } catch (error) {
+        if (code(error) !== "EEXIST") throw error;
+        // A previous attempt may have linked the archive but failed to unlink the reservation.
+        // Resume that move only for the same inode, never another archive or a symlink to this file.
+        const archived = fs.lstatSync(target);
+        if (archived.dev !== inspected.dev || archived.ino !== inspected.ino) return false;
+      }
       fs.unlinkSync(file);
       return true;
     } catch {
