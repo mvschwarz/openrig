@@ -269,10 +269,16 @@ Setup also prints the one line OpenRig can add to each seat's `CLAUDE.md` or
 `AGENTS.md`, plus OpenRig's markers around it so it can be removed cleanly: the
 exact text it writes, which files it goes in, and what a no gives up. Show the person,
 ask, and save their answer with `rig setup --router-line yes` or
-`rig setup --router-line no`. No answer isn't a yes: with nothing saved and
+`rig setup --router-line no`. On its own, that saves only the answer and says so; no
+other setup step runs again. No answer isn't a yes: with nothing saved and
 nothing set in the environment, the line isn't added. The answer covers only
 that line, and so does what setup says a no gives up; setup's "OpenRig may
 modify" list names the other writes.
+
+When Tailscale is active on the machine and no daemon address is set, setup also
+says that the daemon's default bind adds this machine's Tailscale address, so your
+other OpenRig machines and the web UI can reach it, and how to keep it on this
+machine only: `rig config set daemon.host 127.0.0.1`. The default itself doesn't change.
 
 The block keeps `terminal.history_limit` rows of scrollback per pane (default
 10000). To keep more, run `rig config set terminal.history_limit 50000`, then

@@ -13,6 +13,7 @@
     "./tmux-server-start": { "types": "./dist/tmux-server-start-surface.d.ts", "import": "./dist/tmux-server-start-surface.js" },
     "./bundle-behaviour": { "types": "./dist/bundle-behaviour-surface.d.ts", "import": "./dist/bundle-behaviour-surface.js" },
     "./router-line": { "types": "./dist/router-line-surface.d.ts", "import": "./dist/router-line-surface.js" },
+    "./bind-plan": { "types": "./dist/bind-plan-surface.d.ts", "import": "./dist/bind-plan-surface.js" },
     "./spec-validation": {
       "types": "./dist/spec-validation-surface.d.ts",
       "import": "./dist/spec-validation-surface.js"

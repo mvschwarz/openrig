@@ -7,11 +7,12 @@ import { shellQuote } from "../cross-host-executor.js";
 import { fileURLToPath } from "node:url";
 import { parseDocument } from "yaml";
 import { runDoctorChecks, type DoctorDeps } from "./doctor.js";
-import { resolveDaemonPath } from "../daemon-lifecycle.js";
+import { resolveBindIntent, resolveDaemonPath } from "../daemon-lifecycle.js";
 import { ConfigStore } from "../config-store.js";
 import { buildTmuxCaptureFailure, buildTmuxControlFailure, buildTmuxVersionCheckFailure, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
 import { checkClaudeAuth, checkCodexAuth } from "../provider-auth.js";
 import { describeSkillRouterFootprint } from "@openrig/daemon/router-line";
+import { detectTailscaleInterface, resolveBindPlan } from "@openrig/daemon/bind-plan";
 
 export interface SetupStep {
   id: string;
@@ -44,9 +45,28 @@ export interface SetupResult {
   runtimeConfig: RuntimeConfigDisclosure[];
   /** The one line OpenRig can add to shared guidance files, with its markers, and the person's answer (slice 20). */
   routerLine: RouterLinePreview;
+  /** Present when the daemon's default bind will add this machine's Tailscale address: why, and how to keep it local. */
+  daemonBind?: DaemonBindNote;
   verification?: {
     checks: VerificationCheck[];
   };
+}
+
+/** `rig setup --router-line yes|no` on its own: that one answer, saved and reported; no other setup step runs. */
+export interface RouterLineAnswerResult {
+  scope: "router-line";
+  /** True when the answer was written; false for a dry run or a save that failed. */
+  saved: boolean;
+  steps: SetupStep[];
+  routerLine: RouterLinePreview;
+  note: string;
+}
+
+export interface DaemonBindNote {
+  /** The addresses the default bind listens on: loopback, and this machine's Tailscale address. */
+  hosts: string[];
+  why: string;
+  change: string;
 }
 
 export interface RouterLinePreview {
@@ -80,6 +100,9 @@ export interface SetupDeps {
   routerLineStore?: Pick<ConfigStore, "resolveWithSource" | "set">;
   /** Saves the --providers choice as provider.selected (default: the OpenRig config). */
   recordProviders?: (value: string) => void;
+  /** Whether a daemon bind is chosen, and this machine's Tailscale address, read as `rig daemon start` reads them
+   *  (default: the OpenRig config, OPENRIG_BIND_HOST and this machine's network interfaces). */
+  daemonBind?: () => { explicit: boolean; tailscaleIp: string | null };
 }
 
 const ROUTER_LINE_KEY = "skills.router_line.enabled";
@@ -96,8 +119,9 @@ function readRouterLineAnswer(store: Pick<ConfigStore, "resolveWithSource">): Pi
   }
 }
 
-/** The router-line question: the exact preview, the saved answer, and the step that reports or saves it. */
-function routerLineStep(deps: SetupDeps, choice: "yes" | "no" | undefined, dryRun: boolean): { step: SetupStep; preview: RouterLinePreview } {
+/** The router-line question: the exact preview, the saved answer, and the step that reports or saves it. `saved` is
+ *  true only when this call wrote the person's answer. */
+function routerLineStep(deps: SetupDeps, choice: "yes" | "no" | undefined, dryRun: boolean): { step: SetupStep; preview: RouterLinePreview; saved?: boolean } {
   const store = deps.routerLineStore ?? new ConfigStore();
   const { line, written, placement, ifNo } = describeSkillRouterFootprint([]);
   const preview = (answer: Pick<RouterLinePreview, "answer" | "by">): RouterLinePreview => ({
@@ -122,9 +146,9 @@ function routerLineStep(deps: SetupDeps, choice: "yes" | "no" | undefined, dryRu
     }
     const after = readRouterLineAnswer(store);
     if (after.by === "environment") {
-      return { step: { id: "router_line", status: "warn", message: `Saved your answer (${choice}), but OPENRIG_SKILLS_ROUTER_LINE_ENABLED in this environment overrides it (${after.answer}).`, fixHint: "Unset OPENRIG_SKILLS_ROUTER_LINE_ENABLED where the daemon runs." }, preview: preview(after) };
+      return { step: { id: "router_line", status: "warn", message: `Saved your answer (${choice}), but OPENRIG_SKILLS_ROUTER_LINE_ENABLED in this environment overrides it (${after.answer}).`, fixHint: "Unset OPENRIG_SKILLS_ROUTER_LINE_ENABLED where the daemon runs." }, preview: preview(after), saved: true };
     }
-    return { step: { id: "router_line", status: "applied", message: choice === "yes" ? "Saved: yes. Seats add the line to their guidance file at their next start." : "Saved: no. Seats don't add the line." }, preview: preview(after) };
+    return { step: { id: "router_line", status: "applied", message: choice === "yes" ? "Saved: yes. Seats add the line to their guidance file at their next start." : "Saved: no. Seats don't add the line." }, preview: preview(after), saved: true };
   }
   const answer = readRouterLineAnswer(store);
   const step: SetupStep = answer.answer === "unasked" || answer.answer === "unreadable"
@@ -134,6 +158,61 @@ function routerLineStep(deps: SetupDeps, choice: "yes" | "no" | undefined, dryRu
     : { id: "router_line", status: dryRun ? "skipped" : "pass",
         message: `${dryRun ? "Dry run: " : ""}${answer.by === "environment" ? "From the environment (OPENRIG_SKILLS_ROUTER_LINE_ENABLED), not a saved answer" : "Saved answer"}: ${answer.answer}.` };
   return { step, preview: preview(answer) };
+}
+
+/** `rig setup --router-line yes|no` with no other setup option: save that one answer and report it. The rest of setup
+ *  (installs, checks, the tmux block, the doctor checks) doesn't run again for it. */
+export function runRouterLineAnswer(deps: SetupDeps, choice: "yes" | "no", dryRun: boolean): RouterLineAnswerResult {
+  const { step, preview, saved = false } = routerLineStep(deps, choice, dryRun);
+  const note = dryRun ? "Dry run: nothing was saved, and no other setup step ran."
+    : saved ? "Only your router-line answer was saved; no other setup step ran. Run rig setup on its own for the rest."
+    : "The answer wasn't saved, and no other setup step ran.";
+  return { scope: "router-line", saved, steps: [step], routerLine: preview, note };
+}
+
+/** What setup says about the daemon's address before it starts: only when no bind is chosen and Tailscale is active,
+ *  so the default adds this machine's Tailscale address. The intent rule and bind plan are the ones `rig daemon start`
+ *  and the daemon apply; the default itself is unchanged. */
+export function daemonBindNote(facts: { explicit: boolean; tailscaleIp: string | null }): DaemonBindNote | undefined {
+  if (facts.explicit) return undefined;
+  const plan = resolveBindPlan({ bindHostEnv: undefined, routingHostEnv: undefined, tailscaleIp: facts.tailscaleIp });
+  const tailnet = plan.hosts.filter((host) => host !== "127.0.0.1");
+  if (!plan.tailscaleDetected || tailnet.length === 0) return undefined;
+  return {
+    hosts: plan.hosts,
+    why: `Tailscale is active on this machine, so by default \`rig daemon start\` listens on 127.0.0.1 and on its Tailscale address, ${tailnet.join(", ")}: your other OpenRig machines and the web UI can then reach it over your tailnet.`,
+    change: "To keep it on this machine only: rig config set daemon.host 127.0.0.1 (it applies from the daemon's next start).",
+  };
+}
+
+function readDaemonBindFacts(): { explicit: boolean; tailscaleIp: string | null } {
+  const store = new ConfigStore();
+  const intent = resolveBindIntent({
+    flagHost: undefined,
+    envBindHost: process.env["OPENRIG_BIND_HOST"],
+    configSource: store.resolveWithSource("daemon.host").source,
+    configHost: store.resolve().daemon.host,
+  });
+  return { explicit: intent.explicit, tailscaleIp: intent.explicit ? null : detectTailscaleInterface() };
+}
+
+/** The address note, or none when the facts can't be read: it informs, and never changes whether setup is ready. */
+function setupDaemonBind(deps: SetupDeps): DaemonBindNote | undefined {
+  try {
+    return daemonBindNote((deps.daemonBind ?? readDaemonBindFacts)());
+  } catch {
+    return undefined;
+  }
+}
+
+/** One step as setup prints it. */
+function setupStepLines(step: SetupStep): string[] {
+  const icon = step.status === "pass" ? "OK" : step.status === "applied" ? "APPLIED" : step.status === "warn" ? "WARN" : step.status === "skipped" ? "SKIP" : "FAIL";
+  return [
+    `  [${icon}] ${step.id}: ${step.message}`,
+    ...(step.reason ? [`       Why: ${step.reason}`] : []),
+    ...(step.fixHint ? [`       Fix: ${step.fixHint}`] : []),
+  ];
 }
 
 // Preserve the setup module's existing selector export.
@@ -453,12 +532,20 @@ function recordProvidersStep(deps: SetupDeps, chosen: readonly SetupProvider[]):
   };
 }
 
-export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; herdr?: boolean; ghostty?: boolean; providers?: readonly SetupProvider[]; doctorDeps?: DoctorDeps; routerLine?: "yes" | "no" }): Promise<SetupResult> {
+export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; herdr?: boolean; ghostty?: boolean; providers?: readonly SetupProvider[]; doctorDeps?: DoctorDeps; routerLine?: "yes" | "no"; progress?: (line: string) => void }): Promise<SetupResult> {
   const profile = opts.full ? "full" : "core";
   const platform = deps.platform ?? process.platform;
   const runtimeConfig = [...BASE_RUNTIME_CONFIG_DISCLOSURE];
   const stepIds = opts.full ? [...CORE_STEP_IDS, ...FULL_EXTRA_STEP_IDS] : [...CORE_STEP_IDS];
   const steps: SetupStep[] = [];
+  const progress = opts.dryRun ? undefined : opts.progress;
+  if (progress) {
+    // Each step reports as it lands, so a long install or check never looks like a hang.
+    const push = steps.push.bind(steps);
+    steps.push = (...added: SetupStep[]) => { for (const step of added) progress(`${step.id}: ${step.status}`); return push(...added); };
+  }
+  const daemonBind = setupDaemonBind(deps);
+  const withBind = daemonBind ? { daemonBind } : {};
   // No --providers: both are checked, as before. With it, only the chosen ones.
   const selected = (provider: SetupProvider) => !opts.providers || opts.providers.includes(provider);
 
@@ -486,7 +573,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     if (opts.providers) {
       steps.push({ id: "providers_record", status: "skipped", message: `Dry run: would record provider.selected=${providersValue(opts.providers)}.` });
     }
-    return { profile, platform, ready: false, steps, runtimeConfig, routerLine: routerLine.preview };
+    return { profile, platform, ready: false, steps, runtimeConfig, routerLine: routerLine.preview, ...withBind };
   }
 
   // Core steps
@@ -694,6 +781,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   // Run doctor-backed verification if not dry-run and doctorDeps available
   let verification: SetupResult["verification"];
   if (!opts.dryRun && opts.doctorDeps) {
+    progress?.("verification: running the doctor checks");
     const doctorDeps = opts.doctorDeps;
     // Reuse the post-install facts above; do not repeat login probes during verification.
     const providerChecks = steps
@@ -728,7 +816,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   const stepsFailed = steps.some((s) => s.status === "fail");
   const verificationFailed = verification?.checks.some((c) => c.status === "fail") ?? false;
   const ready = !stepsFailed && !verificationFailed;
-  return { profile, platform, ready, steps, runtimeConfig, routerLine: routerLine.preview, ...(verification ? { verification } : {}) };
+  return { profile, platform, ready, steps, runtimeConfig, routerLine: routerLine.preview, ...withBind, ...(verification ? { verification } : {}) };
 }
 
 function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
@@ -904,8 +992,25 @@ tmux scrollback:
         return;
       }
       const deps = depsOverride ?? defaultDeps();
+      // Answering the router line is one answer, not another setup run: with no other setup option, save it and report
+      // it. Beside another option (the person asked for setup too), setup runs as before and saves it as one of its steps.
+      const otherSetupOption = opts.full === true || opts.herdr === false || opts.ghostty !== undefined
+        || providers !== undefined || opts.policy !== undefined || opts.spec !== undefined;
+      if (routerLine !== undefined && !otherSetupOption) {
+        const answer = runRouterLineAnswer(deps, routerLine, opts.dryRun === true);
+        if (opts.json) console.log(JSON.stringify(answer, null, 2));
+        else {
+          for (const line of answer.steps.flatMap(setupStepLines)) console.log(line);
+          console.log(answer.note);
+        }
+        if (!opts.dryRun && !answer.saved) process.exitCode = 1;
+        return;
+      }
+      // With --json, stdout stays one JSON result; stderr says what a long run is doing while it works.
+      const progress = opts.json && !opts.dryRun ? (line: string) => console.error(`rig setup: ${line}`) : undefined;
+      progress?.("running every setup step (installs and checks can take a few minutes); the JSON result prints when they finish.");
       const doctorDeps = opts.dryRun ? undefined : buildDefaultDoctorDeps(deps);
-      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, herdr: opts.herdr, ghostty: opts.ghostty, providers, doctorDeps, routerLine });
+      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, herdr: opts.herdr, ghostty: opts.ghostty, providers, doctorDeps, routerLine, progress });
 
       if (opts.json) {
         console.log(JSON.stringify({ ...result, nextSteps: goldenPathNextSteps() }, null, 2));
@@ -921,12 +1026,7 @@ tmux scrollback:
       }
       console.log("  - Note: already-running adopted sessions may need restart to pick up runtime config changes.\n");
 
-      for (const step of result.steps) {
-        const icon = step.status === "pass" ? "OK" : step.status === "applied" ? "APPLIED" : step.status === "warn" ? "WARN" : step.status === "skipped" ? "SKIP" : "FAIL";
-        console.log(`  [${icon}] ${step.id}: ${step.message}`);
-        if (step.reason) console.log(`       Why: ${step.reason}`);
-        if (step.fixHint) console.log(`       Fix: ${step.fixHint}`);
-      }
+      for (const line of result.steps.flatMap(setupStepLines)) console.log(line);
       if (!providers) {
         console.log("\n  Providers: setup installs and checks both Claude Code and Codex. If the person chose one, pass it,");
         console.log("  for example rig setup --providers claude; the other then reads not selected instead of failed.");
@@ -969,6 +1069,11 @@ tmux scrollback:
       // before the optional menu so a short output read still includes the handoff.
       console.log("");
       for (const line of goldenPathNextSteps()) console.log(line);
+      // Before the daemon starts: why its default bind adds this machine's Tailscale address, and how to keep it local.
+      if (result.daemonBind) {
+        console.log(`\nDaemon address: ${result.daemonBind.why}`);
+        console.log(`  ${result.daemonBind.change}`);
+      }
 
       // The router-line question the person answers; then the permission menu, which records no choice.
       for (const line of routerLineLines(result.routerLine)) console.log(line);
