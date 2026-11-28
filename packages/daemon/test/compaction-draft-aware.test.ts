@@ -40,18 +40,24 @@ async function fixture(opts: { pane: string | null; mode?: "off" | "draft-aware"
     INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('ga','a',1,'g1','fresh');`);
   const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name));
   guard.recoverActivation();
-  let body = "", staged = "";
+  // `body` is what the box holds; `shown` is how Claude Code draws it: a paste with line breaks collapses to its
+  // counted label, "[Pasted text #N +M lines]" with M the paste's newlines (composer-prompts.ts).
+  let body = "", shown = "", staged = "", pastes = 0;
   let onStage: (() => void) | undefined;
   const snapshot = () => {
-    const s = frame(body);
-    if (!body && opts.suggestion) s.screen = frame(opts.suggestion === "faint" ? '\x1b[2mTry "fix typecheck errors"\x1b[22m' : 'Try "fix typecheck errors"').screen;
+    const s = frame(shown);
+    if (!shown && opts.suggestion) s.screen = frame(opts.suggestion === "faint" ? '\x1b[2mTry "fix typecheck errors"\x1b[22m' : 'Try "fix typecheck errors"').screen;
     if (opts.footer) s.screen += "\n✔ Update installed · /restart to apply";
     return s;
   };
   const writes: string[] = [];
   const tmux = new TmuxAdapter(async command => {
-    if (command.includes("paste-buffer")) { writes.push(`paste:${staged}`); body += staged; }
-    if (command.includes("send-keys") && command.includes("Enter")) { writes.push("enter"); body = ""; }
+    if (command.includes("paste-buffer")) {
+      writes.push(`paste:${staged}`); body += staged;
+      const breaks = staged.split("\n").length - 1;
+      shown += breaks > 0 ? `[Pasted text #${++pastes} +${breaks} lines]` : staged;
+    }
+    if (command.includes("send-keys") && command.includes("Enter")) { writes.push("enter"); body = ""; shown = ""; }
     return "";
   }, { writeFile: async (_path, text) => { staged = text; onStage?.(); }, unlink: async () => {}, tmpName: () => "/fixture/compact-input", bufferName: () => "compact-input" });
   tmux.deliveryGuard = guard;
@@ -90,8 +96,8 @@ async function fixture(opts: { pane: string | null; mode?: "off" | "draft-aware"
     const next = new ClaudeCompactionEnforcer({ resolveClaudeCompactionPolicy: () => policy } as any, transport,
       { openrigHome: home, now: () => clock, resolveOccupantGeneration: () => "g1" });
     next.recoverSeat(input); return next;
-  }, body: () => body,
-    onStage: (fn: () => void) => { onStage = fn; }, activity: (s: string) => { activity = s; }, draft: (text: string) => { body = text; } };
+  }, body: () => body, shown: () => shown,
+    onStage: (fn: () => void) => { onStage = fn; }, activity: (s: string) => { activity = s; }, draft: (text: string) => { body = text; shown = text; } };
 }
 
 it.each([
@@ -413,7 +419,7 @@ it("manual, the box changes between the /compact paste and its Enter: the reques
   let staged = false;
   const real = f.transport.send.bind(f.transport);
   vi.spyOn(f.transport, "send").mockImplementation(async (s: string, t: string, o?: any) => { const r = await real(s, t, o); if (!staged) { staged = true; f.stageMap(); } return r; });
-  vi.spyOn(f.tmux, "captureComposerSnapshot").mockImplementation(async () => frame(f.body().startsWith("/compact") ? `${f.body()} and a word` : f.body()));
+  vi.spyOn(f.tmux, "captureComposerSnapshot").mockImplementation(async () => frame(f.body().startsWith("/compact") ? `${f.body()} and a word` : f.shown()));
   const body = await triggerRoute(f);
   expect(body.preparation?.compact).toBe("uncertain");
   expect(f.effects()).toMatchObject({ compactPastes: 1 });

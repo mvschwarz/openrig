@@ -8,6 +8,7 @@ import { migrate } from "../src/db/migrate.js";
 import nativePaste from "./fixtures/claude-paste-footer.json";
 import { wrapPaneEnvelope } from "../src/lib/pane-envelope.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
+import { buildPostCompactRestorePrompt } from "../src/domain/claude-compaction-enforcer.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { COALESCED_INTO, DRAFT_HELD_BEHIND_EARLIER, DRAFT_HELD_PER_SENDER, OutboxHandler } from "../src/domain/outbox-handler.js";
 import { attachDraftHeldReoffer, createDraftHeldReoffer } from "../src/domain/draft-held-reoffer.js";
@@ -438,6 +439,25 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(f.writes.filter(write => write.startsWith("keys:"))).toHaveLength(2);
     expect(f.bodies.a).toBe("");
     expect(f.outbox.getById("wake-intent-" + item.qitemId)!.deliveryState).toBe("delivered");
+  });
+
+  // #4084: the managed compaction requests are long. Claude Code collapses a long one-line paste to a count-less label,
+  // which #3462 holds when it is first drawn at submit; a multi-line request draws the counted label that #1871 accepts.
+  it("submits a managed restore request whose collapsed label is drawn late", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = buildPostCompactRestorePrompt({ sessionName: "worker@test", openrigHome: "/tmp/openrig-home" });
+    const breaks = text.split("\n").length - 1;
+    let readsAfterPaste = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text) {
+        return frame(readsAfterPaste++ === 0 ? "" : breaks > 0 ? `[Pasted text #1 +${breaks} lines]` : "[Pasted text #1]");
+      }
+      return body == null ? null : frame(body);
+    });
+    expect(await f.send("managed-restore", text, { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+    expect(f.bodies.a).toBe("");
   });
 
   // Constructed footer transition: U3 retained no immediate pre-Enter snapshot.
