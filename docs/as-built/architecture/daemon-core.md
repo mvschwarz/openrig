@@ -179,10 +179,10 @@ observer (`:497`), JSON body-parse error tracking, which turns a malformed body 
 recording, the browser boundary on `/api/*` (`:647`, Host and Origin checks; see
 `OPENRIG_ALLOWED_HOSTS` and `OPENRIG_ALLOWED_ORIGINS`), and host read-through.
 
-`createAppWithWebSocket(deps)` (`server.ts:893`) sets `enableNodeWebSocket` and
-calls `createApp`; the terminal WebSocket is registered only when the web UI is
-also enabled (`server.ts:756`). Otherwise only its bearer-auth handler is
-registered (`registerTerminalAuthOnly`, `:762`).
+`createAppWithWebSocket(deps)` (`server.ts:1049`) sets `enableNodeWebSocket` and
+calls `createApp`; the terminal WebSocket is registered independently of
+`ui.enabled` (`server.ts:894-900`), with the same terminal bearer and browser
+boundary checks. The setting controls only the web UI's pages and assets.
 
 ## 4. Startup sequence (`createDaemon`)
 
