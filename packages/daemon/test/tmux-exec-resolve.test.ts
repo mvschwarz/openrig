@@ -3,7 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { execArgvCommand, execCommand, resolveOnPath } from "../src/adapters/tmux-exec.js";
+import { execArgvCommand, execCommand, execTmuxCommand, resolveOnPath, spawnTmuxClient } from "../src/adapters/tmux-exec.js";
+import { resolveSecret } from "../src/domain/gateway/slack/secrets.js";
+import { resolveBearer } from "../src/domain/hosts/remote-daemon-http.js";
+import { notificationAdapterFromEnv } from "../src/domain/mission-control/notification-adapter-from-env.js";
 
 // Fake `tmux` binaries in private directories: each prints its own directory, so a call shows which one ran.
 // PATH holds only these directories: a real tmux later on PATH would answer for a fake that has gone.
@@ -73,6 +76,72 @@ describe.skipIf(process.platform === "win32")("tmux binary resolution", { timeou
 
     const clientVisibility = [await execCommand("tmux -V"), await execArgvCommand(["tmux", "-V"])];
     expect(clientVisibility).toEqual(["absent", "absent"]);
+  });
+
+  // Synthetic values only. The daemon's Slack tokens (both names resolveSecret reads), its notification target and the
+  // bearer_env names its host registry configures stay out of tmux clients; provider keys, ordinary configuration and
+  // a token-like name nothing configures still arrive; and the daemon's own process keeps every value, which its
+  // Slack secrets, its cross-host bearer and its notification adapter still read.
+  it("keeps the daemon's Slack, notification and host-registry bearer credentials out of tmux clients, and nothing else", async () => {
+    const home = dir("credential-home");
+    const registry = path.join(home, "hosts.yaml");
+    fs.writeFileSync(registry, "hosts:\n  - id: remote-a\n    transport: http\n    url: http://127.0.0.1:9\n    bearer_env: SYNTH_REMOTE_A_BEARER\n");
+    const excluded = ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "OPENRIG_SLACK_BOT_TOKEN", "OPENRIG_SLACK_APP_TOKEN",
+      "OPENRIG_NOTIFICATIONS_TARGET", "SYNTH_REMOTE_A_BEARER"];
+    const kept = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENRIG_NOTIFICATIONS_MECHANISM", "SYNTH_ORDINARY_SETTING",
+      "SYNTH_UNCONFIGURED_TOKEN", "SYNTH_REMOTE_B_BEARER"];
+    const fakeTmuxDir = dir("credential-env");
+    fs.writeFileSync(path.join(fakeTmuxDir, "tmux"), [
+      "#!/bin/sh",
+      ...[...excluded, ...kept].map(key => `if [ "\${${key}+x}" = x ]; then printf '${key} '; fi`),
+      "",
+    ].join("\n"), { mode: 0o755 });
+    const values = Object.fromEntries([...excluded, ...kept].map(key => [key, `synthetic-${key.toLowerCase()}`]));
+    for (const [key, value] of Object.entries(values)) vi.stubEnv(key, value);
+    vi.stubEnv("OPENRIG_NOTIFICATIONS_TARGET", "https://ntfy.example.invalid/synthetic-topic");
+    vi.stubEnv("OPENRIG_NOTIFICATIONS_MECHANISM", "ntfy");
+    vi.stubEnv("OPENRIG_HOME", home);
+    vi.stubEnv("PATH", `${fakeTmuxDir}:/usr/bin:/bin`);
+    const control = async () => {
+      const child = await spawnTmuxClient(["-V"]);
+      let out = "";
+      child.stdout.on("data", chunk => { out += String(chunk); });
+      await new Promise(resolve => child.on("close", resolve));
+      return out;
+    };
+    // Every tmux client the daemon starts: the shell, the tmux-only shell and the argv transports, and the control client.
+    const seen = async () => [await execCommand("tmux -V"), await execTmuxCommand("tmux -V"), await execArgvCommand(["tmux", "-V"]),
+      await control()].map(out => out.trim().split(" ").sort());
+    const each = (names: string[]) => Array.from({ length: 4 }, () => [...names].sort());
+
+    expect(await seen()).toEqual(each(kept));
+
+    // The registry is read on every client start: a same-size edit naming another bearer_env excludes it, and the one it
+    // no longer names arrives.
+    fs.writeFileSync(registry, "hosts:\n  - id: remote-b\n    transport: http\n    url: http://127.0.0.1:9\n    bearer_env: SYNTH_REMOTE_B_BEARER\n");
+    const afterChange = [...kept.filter(key => key !== "SYNTH_REMOTE_B_BEARER"), "SYNTH_REMOTE_A_BEARER"];
+    expect(await seen()).toEqual(each(afterChange));
+
+    // An entry the registry's validation rejects (here a second host with a reserved id) still keeps its name out.
+    fs.writeFileSync(registry, "hosts:\n  - id: remote-a\n    transport: http\n    url: http://127.0.0.1:9\n    bearer_env: SYNTH_REMOTE_A_BEARER\n"
+      + "  - id: local\n    transport: http\n    url: http://127.0.0.1:9\n    bearer_env: SYNTH_REMOTE_B_BEARER\n");
+    expect(await seen()).toEqual(each(kept.filter(key => key !== "SYNTH_REMOTE_B_BEARER")));
+
+    // The daemon's own paths read its process environment, which the filter never touches.
+    expect(Object.fromEntries(excluded.map(key => [key, process.env[key]]))).toEqual(
+      { ...Object.fromEntries(excluded.map(key => [key, values[key]])), OPENRIG_NOTIFICATIONS_TARGET: "https://ntfy.example.invalid/synthetic-topic" });
+    expect(resolveSecret("SLACK_BOT_TOKEN")).toBe(values.SLACK_BOT_TOKEN);
+    expect(resolveSecret("SLACK_APP_TOKEN")).toBe(values.SLACK_APP_TOKEN);
+    expect(resolveBearer({ id: "remote-b", transport: "http", url: "http://127.0.0.1:9", bearer_env: "SYNTH_REMOTE_B_BEARER" }, {}))
+      .toEqual({ ok: true, token: values.SYNTH_REMOTE_B_BEARER });
+    // The notification adapter the daemon builds at startup still posts to its target.
+    const posted: string[] = [];
+    const notifier = notificationAdapterFromEnv(process.env, {
+      fetchImpl: (async (url: RequestInfo | URL) => { posted.push(String(url)); return new Response(null, { status: 200 }); }) as typeof fetch,
+    });
+    expect(notifier?.mechanism).toBe("ntfy");
+    expect((await notifier!.send({ title: "synthetic", body: "synthetic" })).ok).toBe(true);
+    expect(posted).toEqual(["https://ntfy.example.invalid/synthetic-topic"]);
   });
 
   it("falls back to the shell when the cached binary has gone, and the shell finds the next one", async () => {

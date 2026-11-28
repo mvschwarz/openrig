@@ -21,6 +21,8 @@ async function withServer(mode: "shell" | "argv", check: (adapter: TmuxAdapter, 
   delete env.TMUX;
   delete env.TMUX_TMPDIR;
   const tmux = async (args: string[]) => (await runFile("tmux", ["-S", socket, ...args], { env })).stdout;
+  // The adapter reads the host registry from OPENRIG_HOME: this fixture's, never the runner's.
+  vi.stubEnv("OPENRIG_HOME", home);
   try {
     await tmux(["-f", "/dev/null", "new-session", "-d", "-s", "worker-long", "-e", "OPENRIG_NODE_ID=neighbor-node", "-e", "OPENRIG_SESSION_NAME=worker-long", "-e", "OPENRIG_RUNTIME=terminal", "sleep 60"]);
     const shellExec = async (cmd: string) => {
@@ -33,6 +35,7 @@ async function withServer(mode: "shell" | "argv", check: (adapter: TmuxAdapter, 
     } : undefined);
     await check(adapter, home, tmux);
   } finally {
+    vi.unstubAllEnvs();
     await tmux(["kill-server"]).catch(() => {});
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -118,6 +121,32 @@ describe.skipIf(process.platform === "win32")("native tmux session launch enviro
         for (let i = 0; i < 50 && !fs.existsSync(resultFile); i++) await new Promise(r => setTimeout(r, 100));
         const present = JSON.parse(fs.readFileSync(resultFile, "utf8")) as Record<string, boolean>;
         expect(present).toEqual(Object.fromEntries(keys.map(key => [key, false])));
+      });
+    });
+
+    // Synthetic values only. A seat given one of the daemon's Slack, notification or host-registry bearer names
+    // explicitly has it; removing it marks it removed, so a server-global value never comes back to the seat.
+    it(`${mode}: explicit seat values of the daemon's Slack, notification and registry bearer names work, and their removal never reveals a server-global value`, async () => {
+      await withServer(mode, async (adapter, home, tmux) => {
+        fs.writeFileSync(path.join(home, "hosts.yaml"),
+          "hosts:\n  - id: remote-a\n    transport: http\n    url: http://127.0.0.1:9\n    bearer_env: SYNTH_REMOTE_A_BEARER\n");
+        const keys = ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "OPENRIG_SLACK_BOT_TOKEN", "OPENRIG_SLACK_APP_TOKEN",
+          "OPENRIG_NOTIFICATIONS_TARGET", "SYNTH_REMOTE_A_BEARER"];
+        const seedConfig = path.join(home, "seed-global-daemon-credentials.conf");
+        fs.writeFileSync(seedConfig, `${keys.map(key => `set-environment -g ${key} ${randomBytes(24).toString("hex")}`).join("\n")}\n`, { mode: 0o600 });
+        await tmux(["source-file", seedConfig]);
+        await tmux(["set-environment", "-g", "SYNTH_ORDINARY_SETTING", "from-server"]);
+        await tmux(["set-environment", "-t", "=worker-long", "SYNTH_ORDINARY_SETTING", "one-off"]);
+
+        const explicit = Object.fromEntries(keys.map(key => [key, `seat-${randomBytes(12).toString("hex")}`]));
+        for (const key of keys) await adapter.setSessionEnv("worker-long", key, explicit[key]!);
+        const withExplicit = await nextPaneEnv(home, tmux, "worker-long");
+        for (const key of keys) expect(withExplicit).toContain(`${key}=${explicit[key]}`);
+
+        for (const key of [...keys, "SYNTH_ORDINARY_SETTING"]) await adapter.unsetSessionEnv("worker-long", key);
+        const afterRemoval = await nextPaneEnv(home, tmux, "worker-long");
+        expect(keys.filter(key => afterRemoval.some(line => line.startsWith(`${key}=`)))).toEqual([]);
+        expect(afterRemoval).toContain("SYNTH_ORDINARY_SETTING=from-server");
       });
     });
 

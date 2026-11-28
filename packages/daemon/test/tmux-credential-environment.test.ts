@@ -75,6 +75,36 @@ it("a scoped launch drops a herdr-core terminal's scope from the policy env, kee
   expect(file).toContain(`export HC_SOCKET=${shellQuote("/run/hc.sock")}`);
 });
 
+it("a scoped launch copies update-environment names from the daemon except its own credentials, and a seat's explicit value still wins", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "tmux scoped registry "));
+  writeFileSync(path.join(home, "hosts.yaml"), "hosts:\n  - id: remote-a\n    transport: http\n    url: http://127.0.0.1:9\n    bearer_env: SYNTH_REMOTE_A_BEARER\n");
+  const daemon = { SLACK_BOT_TOKEN: "SYNTHETIC-DAEMON-BOT", OPENRIG_NOTIFICATIONS_TARGET: "https://ntfy.example.invalid/synthetic-daemon",
+    SYNTH_REMOTE_A_BEARER: "SYNTHETIC-DAEMON-BEARER", SLACK_APP_TOKEN: "SYNTHETIC-DAEMON-APP", SYNTH_ORDINARY_SETTING: "synthetic-ordinary" };
+  for (const [key, value] of Object.entries(daemon)) vi.stubEnv(key, value);
+  vi.stubEnv("OPENRIG_HOME", home);
+  const writes = new Map<string, string>();
+  const respond = async (args: string[]) => {
+    if (args.some(arg => arg.includes("default-shell"))) return "/bin/bash";
+    if (args.at(-1) === "update-environment") return Object.keys(daemon).join(" ");
+    return "";
+  };
+  const a = new TmuxAdapter(command => respond([command]), {
+    writeFile: async (p: string, content: string) => { writes.set(p, content); }, unlink: async () => {}, tmpName: () => "/tmp/synthetic-updated", bufferName: () => "unused",
+  }, respond);
+  a.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: { PATH: "/bin" } });
+  try {
+    const plan = await (a as unknown as { scopedLaunchCommand(env: Record<string, string>, command: string): Promise<string[] | null> })
+      .scopedLaunchCommand({ OPENRIG_NODE_ID: "synthetic-node", SLACK_APP_TOKEN: "SYNTHETIC-SEAT-APP" }, "/bin/sh");
+    expect(plan).not.toBeNull();
+    const file = writes.get("/tmp/synthetic-updated")!;
+    for (const value of ["SYNTHETIC-DAEMON-BOT", "https://ntfy.example.invalid/synthetic-daemon", "SYNTHETIC-DAEMON-BEARER", "SYNTHETIC-DAEMON-APP"]) {
+      expect(file).not.toContain(value);
+    }
+    expect(file).toContain(`export SLACK_APP_TOKEN=${shellQuote("SYNTHETIC-SEAT-APP")}`);
+    expect(file).toContain(`export SYNTH_ORDINARY_SETTING=${shellQuote("synthetic-ordinary")}`);
+  } finally { vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true }); }
+});
+
 describe.skipIf(process.platform === "win32")("owned tmux credential delivery (no provider)", () => {
   it.each(["inherited", "scoped", "fallback"] as const)("%s: fresh and respawned panes receive exact credentials and public env", async mode => {
     const home = mkdtempSync(path.join(tmpdir(), "tmux private env ")), socket = path.join(home, "owned.sock"), output = path.join(home, "observed");

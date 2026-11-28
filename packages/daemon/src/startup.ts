@@ -219,9 +219,7 @@ import {
 } from "./domain/mission-control/mission-control-fleet-cli-capability.js";
 import { MissionControlAuditBrowse } from "./domain/mission-control/audit-browse.js";
 import { MissionControlNotificationDispatcher } from "./domain/mission-control/notification-dispatcher.js";
-import { NtfyNotificationAdapter } from "./domain/mission-control/notification-adapter-ntfy.js";
-import { WebhookNotificationAdapter } from "./domain/mission-control/notification-adapter-webhook.js";
-import type { NotificationAdapter } from "./domain/mission-control/notification-adapter-types.js";
+import { notificationAdapterFromEnv } from "./domain/mission-control/notification-adapter-from-env.js";
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import { homeIsolationAdvisory } from "./domain/home-isolation.js";
 import { materializeBuiltinPolicyReference } from "./domain/builtin-policy-reference.js";
@@ -2240,32 +2238,21 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
     deps.terminalBearerToken = terminalBearerToken;
 
-    // Notification dispatcher: chosen mechanism via env config.
-    // OPENRIG_NOTIFICATIONS_MECHANISM=ntfy|webhook|none (default none).
-    // OPENRIG_NOTIFICATIONS_TARGET=<topic url | webhook url>.
+    // Notification dispatcher: chosen mechanism via env config
+    // (notificationAdapterFromEnv: OPENRIG_NOTIFICATIONS_MECHANISM and
+    // OPENRIG_NOTIFICATIONS_TARGET).
     // OPENRIG_NOTIFICATIONS_INCLUDE_VERB_COMPLETION=1 to opt into the
     // verb-completion trigger (default off; only human-gate arrivals
     // trigger by default per planner brief).
     // No legacy alias for these env vars (new in Phase B).
-    const mechanism = process.env.OPENRIG_NOTIFICATIONS_MECHANISM ?? "none";
-    const target = process.env.OPENRIG_NOTIFICATIONS_TARGET ?? "";
     const missionControlBaseUrl =
       process.env.OPENRIG_MISSION_CONTROL_BASE_URL ??
       process.env.OPENRIG_URL ??
       process.env.RIGGED_URL;
     const includeVerbCompletion =
       process.env.OPENRIG_NOTIFICATIONS_INCLUDE_VERB_COMPLETION === "1";
-    if (mechanism !== "none" && target.length > 0) {
-      let adapter: NotificationAdapter;
-      if (mechanism === "ntfy") {
-        adapter = new NtfyNotificationAdapter({ topicUrl: target });
-      } else if (mechanism === "webhook") {
-        adapter = new WebhookNotificationAdapter({ endpointUrl: target });
-      } else {
-        throw new Error(
-          `OPENRIG_NOTIFICATIONS_MECHANISM='${mechanism}' is not recognized; supported: ntfy | webhook | none`,
-        );
-      }
+    const adapter = notificationAdapterFromEnv();
+    if (adapter) {
       if (adapter.disabled) {
         // Target URL failed validation; warning was logged and daemon starts with notifications disabled.
       } else {

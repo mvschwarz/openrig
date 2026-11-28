@@ -2,7 +2,7 @@ import { exec, execFile, spawn, type ChildProcessWithoutNullStreams } from "node
 import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
-import { isTmuxCredentialEnvKey } from "./tmux-credential-env.js";
+import { withoutTmuxCredentialEnv } from "./tmux-credential-env.js";
 import type { ArgvExecFn, ExecFn } from "./tmux.js";
 import { mayStartTmuxServer, reportTmuxServerLimit, startsServerOnly, TMUX_SERVER_LIMIT_PREFIX, TMUX_SERVER_NO_SESSION_BUS,
   tmuxServerStartCommand } from "../tmux-server-start.js";
@@ -16,9 +16,7 @@ export const TMUX_EXEC_TIMEOUT_MS = 30_000;
 // The first client seeds tmux's global environment. Seat credentials still arrive through
 // the explicit per-session config channel, never through the daemon's ambient credentials.
 function tmuxClientEnvironment(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) if (isTmuxCredentialEnvKey(key)) delete env[key];
-  return env;
+  return withoutTmuxCredentialEnv(process.env);
 }
 
 const tmuxExecOptions = { windowsHide: true, maxBuffer: TMUX_MAX_BUFFER, timeout: TMUX_EXEC_TIMEOUT_MS, killSignal: "SIGKILL" as const };
