@@ -205,7 +205,7 @@ function createMockDaemon() {
     server, exports,
     close: () => new Promise<void>((r) => server.close(() => r())),
     listen: () => new Promise<number>((r) => {
-      server.listen(0, () => {
+      server.listen(0, "127.0.0.1", () => {
         const addr = server.address();
         r(typeof addr === "object" && addr ? addr.port : 0);
       });

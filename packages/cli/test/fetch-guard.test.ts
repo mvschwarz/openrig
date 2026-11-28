@@ -23,7 +23,7 @@ describe("fetch guard — allowlist by shape, fail-closed, three-sided", () => {
 
   it("PERMITS a loopback-ephemeral fixture BY SHAPE (server.listen(0), no registration)", async () => {
     const server = http.createServer((_req, res) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end('{"ok":true}'); });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as { port: number }).port;
     try {
       const res = await fetch(`http://127.0.0.1:${port}/ping`); // NOT registered — permitted by shape

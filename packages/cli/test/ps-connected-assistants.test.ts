@@ -51,7 +51,7 @@ describe("rig ps: connected assistants and their check-in status", () => {
       }
       return reply(404, { error: "not found" });
     });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => {

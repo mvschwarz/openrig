@@ -73,7 +73,7 @@ describe("Restore CLI (L3)", () => {
       res.writeHead(404);
       res.end();
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
     port = (server.address() as { port: number }).port;
   });
 

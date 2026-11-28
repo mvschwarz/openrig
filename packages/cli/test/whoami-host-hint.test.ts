@@ -100,7 +100,7 @@ let sshCalls: string[] = [];
 
 beforeAll(async () => {
   for (const d of [remoteD, localD]) {
-    await new Promise<void>((resolve) => { d.server.listen(0, resolve); });
+    await new Promise<void>((resolve) => { d.server.listen(0, "127.0.0.1", resolve); });
     d.port = (d.server.address() as { port: number }).port;
   }
 });

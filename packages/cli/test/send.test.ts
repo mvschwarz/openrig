@@ -221,7 +221,7 @@ describe("Send CLI", () => {
         }
       });
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
     port = (server.address() as { port: number }).port;
     // Use an actual connection refusal: fetch blocks port1 before connecting,
     // without a cause code, so it cannot exercise the coded no-connect branch.
@@ -985,7 +985,7 @@ describe("Send CLI", () => {
         setTimeout(() => res.socket?.destroy(), 20);
       });
     });
-    await new Promise<void>((resolve) => { cut.listen(0, resolve); });
+    await new Promise<void>((resolve) => { cut.listen(0, "127.0.0.1", resolve); });
     try {
       let thrown: unknown;
       const { logs } = await captureLogs(async () => {

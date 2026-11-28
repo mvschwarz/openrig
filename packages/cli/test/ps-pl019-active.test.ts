@@ -175,7 +175,7 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
         res.end();
       }
     });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     port = (server.address() as { port: number }).port;
   });
 
