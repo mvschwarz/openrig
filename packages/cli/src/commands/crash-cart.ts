@@ -80,7 +80,8 @@ function matchesTarget(url: string, endpoint: { host?: string; port: number }): 
       || (selectedHost === "localhost" && loopback(localHost))
       || (localHost === "localhost" && loopback(selectedHost))
       || (localHost === "0.0.0.0" && (selectedHost === "localhost" || /^127\./.test(selectedHost)))
-      || (localHost === "::" && (selectedHost === "localhost" || selectedHost === "::1"));
+      // The daemon uses a dual-stack wildcard bind, which also accepts IPv4 loopback.
+      || (localHost === "::" && (selectedHost === "localhost" || loopback(selectedHost)));
     return selected.protocol === local.protocol && selected.port === local.port
       && selected.pathname === "/" && !selected.search && !selected.hash
       && sameHost;

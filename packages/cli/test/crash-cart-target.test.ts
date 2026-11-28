@@ -27,9 +27,9 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-function reservation(pid = process.pid, port?: number) {
+function reservation(pid = process.pid, port?: number, host = "127.0.0.1") {
   const text = JSON.stringify({ launcherPid: pid, startedAt: "2026-01-01T00:00:00Z" }) + "\n"
-    + JSON.stringify({ childPid: pid, ...(port ? { host: "127.0.0.1", port } : {}) }) + "\n";
+    + JSON.stringify({ childPid: pid, ...(port ? { host, port } : {}) }) + "\n";
   writeFileSync(join(home, "daemon-start.lock"), text);
   return text;
 }
@@ -130,6 +130,27 @@ describe("real crash-cart wiring: selected endpoint, reservation and discovery r
     vi.stubEnv("OPENRIG_URL", "http://localhost:18433");
     probes("refused");
     unverified(await run());
+  });
+  it.each(["pending", "recorded"] as const)("a dual-stack wildcard's %s owner matches IPv4 loopback", async (source) => {
+    const file = join(home, source === "pending" ? "daemon-start.lock" : "daemon.json");
+    if (source === "pending") reservation(process.pid, 18433, "::");
+    else writeFileSync(file, JSON.stringify({ pid: process.pid, host: "::", port: 18433, db: config.db.path }));
+    const before = readFileSync(file, "utf8");
+    vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:18433");
+    const probe = probes("refused");
+    const emit = await run();
+    unverified(emit);
+    expect(emit.evidence!.pidState).toContain(String(process.pid));
+    expect(probe.mock.calls.map(([url]) => url)).toEqual(Array(3).fill("http://127.0.0.1:18433/healthz"));
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(readdirSync(home)).toEqual([source === "pending" ? "daemon-start.lock" : "daemon.json"]);
+  });
+  it.each(["http://remote.example:18433", "http://127.0.0.1:19433"])("a dual-stack wildcard reservation does not describe %s", async (url) => {
+    reservation(process.pid, 18433, "::");
+    vi.stubEnv("OPENRIG_URL", url);
+    const probe = probes("refused");
+    expect((await run()).state).toBe("down");
+    expect(probe.mock.calls.map(([target]) => target)).toEqual(Array(2).fill(`${url}/healthz`));
   });
   it("an unrelated explicit remote target does not borrow a local reservation", async () => {
     reservation(process.pid, 18433);
