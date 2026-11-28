@@ -159,7 +159,7 @@ export const STARTUP_SUBMIT_RETRIES = 2;
 // A fresh Claude can lose its first startup Enter while it is still starting: the first look then finds the input box
 // empty because our paste hasn't drawn yet, and that reads as submitted (OBS1, 11-28: 3 of 40 0.7.25 starts read clear
 // there with the prompt left staged, and none of them reported a UserPromptSubmit hook; all 75 starts that did submit
-// reported one, about 2 s after that Enter). So a fresh start's first send waits, at most this long, for this session's
+// reported one, a median of about 1.2 s after the identity prompt's Enter). So a fresh start's first send waits, at most this long, for this session's
 // own UserPromptSubmit hook before an empty input box counts as submitted, then looks again.
 export const STARTUP_SUBMIT_EVIDENCE_WAIT_MS = 8000;
 
