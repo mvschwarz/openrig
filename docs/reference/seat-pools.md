@@ -209,6 +209,10 @@ plan never asks for both; an earlier drain's unconfirmed stop can still be tried
     | `awaiting-decision`, or `failed` with no session of the node running afterwards | `not_running`, with the status in `code` and the launch's error in `message` (for a pod-aware agent with no runtime adapter, the error names `rig seat launch <seat> --fresh`) | `drained` and held: it takes no room, and the other eligible slots or a new number go on within `max`. A rolled-back launch leaves the node's earlier session and binding as they were. |
     | `attention_required`, `left_attached`, or `failed` while a session of the node still runs | `attention_required` (with `failed` in `code` for a failure) or `left_attached` | `live` and held: it takes room, but it is not free, receives no row and is never drained by the pool. |
 
+    The ready read covers every status in this table, the launch's own session included: a session that reads ready is
+    the pool's test of a usable agent, as with `already_running` below, so a `left_attached` call or a `failed` launch
+    whose own session reads ready also makes the slot `live` with no hold, reported `running` with `later_session`.
+
     A launch that finds a live session already on the node (one the pool did not start and that is not proven to be an
     agent: the node is in `alreadyRunning`, nothing was launched) is reported `already_running`, and the slot is `live`
     with no hold. It takes room like any agent and is free only once idle at its prompt. Neither a hold nor this records a

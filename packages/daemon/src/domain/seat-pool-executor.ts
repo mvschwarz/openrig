@@ -1397,6 +1397,9 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
     const settledBy = (read: LaterChange["read"]) => JSON.stringify({
       ...readAttemptOutcome(slot.attemptOutcome), settledBy: "later_session", later: { sessionId: latest?.id ?? null, read, at: at() },
     });
+    // A held `live` slot put back in `adding` that settles `drained` is drained from now (the cooldown counts from it); a
+    // `drained` one keeps its drain's time.
+    const fromLive = readAttemptOutcome(slot.attemptOutcome)["reopenedFrom"] === "live";
     // A restore since the slot was put back in `adding` that launched the node and did not run gives it that outcome,
     // unless a session reads ready now.
     const restore = opts.sinceSeq === undefined ? null : restoreOf(deps.db, nodeId, opts.sinceSeq);
@@ -1407,7 +1410,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         const phase = held.as === "not_running" ? "drained" : "live";
         return deps.slots.settleIssuedByLater({
           slotId: slot.slotId, attemptId: slot.attemptId!, phase, hold: JSON.stringify(hold), outcome: settledBy("restore"),
-          result: heldSession(nodeId, latest, restore.seq), at: at(),
+          result: heldSession(nodeId, latest, restore.seq), at: at(), drainedNow: fromLive,
         }) ? { slotNumber: slot.slotNumber, logicalId, nodeId, session: latest, read: "restore", restore: { seq: restore.seq, status: restore.status }, phase, reuseHold: hold } : null;
       }
     }
@@ -1417,9 +1420,6 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
     if (read === "unknown") return null;
     const note = { slotNumber: slot.slotNumber, logicalId, nodeId, session: latest, read };
     const outcome = settledBy(read);
-    // A held `live` slot put back in `adding` that settles `drained` is drained from now (the cooldown counts from it); a
-    // `drained` one keeps its drain's time.
-    const fromLive = readAttemptOutcome(slot.attemptOutcome)["reopenedFrom"] === "live";
     const settle = (phase: "drained" | "live", hold: Record<string, unknown> | null, result: string | null) =>
       deps.slots.settleIssuedByLater({ slotId: slot.slotId, attemptId: slot.attemptId!, phase, hold: hold === null ? null : JSON.stringify(hold), outcome, result, at: at(), drainedNow: fromLive });
     if (read === "ready") return settle("live", null, null) ? { ...note, phase: "live" } : null;

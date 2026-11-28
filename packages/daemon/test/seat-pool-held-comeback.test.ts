@@ -1169,6 +1169,45 @@ describe("seat-pool held comeback: what a later change is measured from (#3395 P
     expect(w.slotOf(m, 1)).toMatchObject({ phase: "drained" });
     expect(w.slotOf(m, 1).phaseChangedAt).not.toBe(wentLive);
     expect(Date.parse(w.slotOf(m, 1).phaseChangedAt)).toBeGreaterThanOrEqual(Date.parse(settledAt));
+    // so with work waiting, nothing is brought back before `cooldown_s` from that settlement, and something is after it
+    const launches = w.launch.mock.calls.length;
+    await w.row(m.session);
+    w.clock.now = new Date(Date.parse(settledAt) + (HELD.cooldownSeconds - 10) * 1000);
+    await w.comeBack(m);
+    expect(w.launch.mock.calls.length).toBe(launches);
+    w.clock.now = new Date(Date.parse(settledAt) + (HELD.cooldownSeconds + 10) * 1000);
+    await w.comeBack(m);
+    expect(w.launch.mock.calls.length).toBe(launches + 1);
+  });
+
+  it("A held `live` slot put back in `adding` by a later session, whose node a later restore then fails to start, is drained from when that settles.", async () => {
+    const w = heldWorld();
+    const { m, s1 } = await w.twoDrained();
+    w.hooks.harness = (session) => (session === `dev-impl-s1@${RIG}` ? { ok: false, error: "resume picker is open", recovery: "attention_required" } : undefined);
+    await w.row(m.session);
+    await w.comeBack(m);
+    w.hooks.harness = undefined;
+    w.db.prepare("UPDATE queue_items SET state = 'done'").run();
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "live", attemptState: "settled" });
+    w.clock.now = new Date(w.clock.now.getTime() + 600_000);
+    const later = w.personSession(s1.nodeId, `dev-impl-s1@${RIG}`, "running", "pending");
+    await w.notesOf(m.jobId);
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "adding", attemptState: "issued" });
+    // the later session stays pending past the cooldown and ends; then a restore launches the node and fails
+    w.clock.now = new Date(w.clock.now.getTime() + (HELD.cooldownSeconds + 60) * 1000);
+    const settledAt = w.clock.now.toISOString();
+    w.sessions.updateStatus(later, "exited");
+    w.bus.emit({
+      type: "restore.completed", rigId: m.rigId, snapshotId: "up",
+      result: { snapshotId: "up", preRestoreSnapshotId: null, rigResult: "partially_restored", warnings: [],
+        nodes: [{ nodeId: s1.nodeId, logicalId: "dev.impl-s1", status: "failed", error: "launch failed" }] },
+    } as never);
+    const notes = await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(notes.laterChanges).toEqual([expect.objectContaining({ slotNumber: 1, read: "restore", phase: "drained" })]);
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "drained" });
+    expect(w.holdOf(m, 1)).toMatchObject({ code: "failed" });
+    expect(Date.parse(w.slotOf(m, 1).phaseChangedAt)).toBeGreaterThanOrEqual(Date.parse(settledAt));
   });
 
   it("An add cut off by a restart whose session runs with a startup that needs attention is held `live`, not left `unknown`.", async () => {
