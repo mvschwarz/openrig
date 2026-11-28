@@ -388,6 +388,90 @@ export function authList(paths: CodexAuthPaths): string[] {
   }
 }
 
+export type AuthSignOutResult =
+  | {
+      ok: true;
+      /** "absent" when neither the named profile nor (with none named) an active login was there: nothing to sign out. */
+      target: "profile" | "active" | "absent";
+      removedActive: boolean;
+      removedProfiles: string[];
+      /** Copies of the login that couldn't be removed (named by their place in the home). */
+      notRemoved: string[];
+      /** Saved profiles kept because they hold another login. */
+      keptProfiles: number;
+      /** Entries that might hold a login but weren't read as one (not a plain file, unreadable, or not JSON): kept. */
+      unchecked: string[];
+      note: string;
+    }
+  | { ok: false; reason: "invalid_profile" | "unsafe_path" };
+
+export const SIGN_OUT_NOTE = "This removes the copies stored in this Codex home only; it doesn't revoke the login at OpenAI. "
+  + "Codex's own logout (codex logout) revokes an active login, so run it first while the login is still active.";
+
+/** A candidate login file's bytes, read through one descriptor opened without following a link and checked to be a plain,
+ *  single-link file, with the inode it was read from; null otherwise. The caller scrubs the buffer. */
+function readLoginFile(p: string): { bytes: Buffer; dev: number; ino: number } | null {
+  let fd = -1;
+  try {
+    fd = fs.openSync(p, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const st = fs.fstatSync(fd);
+    return st.isFile() && st.nlink === 1 ? { bytes: fs.readFileSync(fd), dev: st.dev, ino: st.ino } : null;
+  } catch { return null; } finally { if (fd >= 0) try { fs.closeSync(fd); } catch { /* ignore */ } }
+}
+
+/** Which login a Codex auth file holds: its ChatGPT account (tokens.account_id); null when it names none (an API key), and
+ *  undefined when it isn't JSON. Read in memory only; never returned or printed. */
+function loginAccount(bytes: Buffer): string | null | undefined {
+  try {
+    const account = (JSON.parse(bytes.toString("utf8")) as { tokens?: { account_id?: unknown } } | null)?.tokens?.account_id;
+    return typeof account === "string" && account.length > 0 ? account : null;
+  } catch { return undefined; }
+}
+
+/** Sign out one login from one Codex home: remove the active auth.json and every saved profile holding the same login,
+ *  whatever saved it (rig auth save, a provider switch's before-switch copy, or a sign-in page's account pool). The login
+ *  is the named profile's, or the active auth.json's when none is named. Same login means the same ChatGPT account, so a
+ *  refreshed copy counts; a login with no account (an API key) matches only byte-identical copies. Other logins, other
+ *  homes and anything not read as a login stay. Nothing is revoked at the provider (SIGN_OUT_NOTE). */
+export function authSignOut(paths: CodexAuthPaths, profile?: string): AuthSignOutResult {
+  if (profile !== undefined && !validateProfileName(profile)) return { ok: false, reason: "invalid_profile" };
+  if (lstatSafe(paths.profileDir) !== null && !realDirContained(paths.profileDir, paths.codexHome)) return { ok: false, reason: "unsafe_path" };
+  const targetPath = profile === undefined ? paths.activeAuth : path.join(paths.profileDir, `${profile}.json`);
+  const result = { ok: true as const, target: (profile === undefined ? "active" : "profile") as "profile" | "active" | "absent",
+    removedActive: false, removedProfiles: [] as string[], notRemoved: [] as string[], keptProfiles: 0, unchecked: [] as string[], note: SIGN_OUT_NOTE };
+  if (lstatSafe(targetPath) === null) return { ...result, target: "absent", keptProfiles: authList(paths).length };
+  const read = readLoginFile(targetPath);
+  if (read === null) return { ok: false, reason: "unsafe_path" };
+  const target = read.bytes, account = loginAccount(target);
+  const candidates: Array<{ file: string; name: string | null; label: string }> = [];
+  if (lstatSafe(paths.activeAuth) !== null) candidates.push({ file: paths.activeAuth, name: null, label: "auth.json" });
+  try {
+    for (const n of fs.readdirSync(paths.profileDir).filter((f) => f.endsWith(".json")).sort()) {
+      candidates.push({ file: path.join(paths.profileDir, n), name: n.slice(0, -".json".length), label: `auth-profiles/${n}` });
+    }
+  } catch { /* no saved profiles */ }
+  try {
+    for (const c of candidates) {
+      const copy = readLoginFile(c.file);
+      if (copy === null) { result.unchecked.push(c.label); continue; }
+      const held = loginAccount(copy.bytes);
+      const same = account ? held === account : copy.bytes.equals(target);
+      copy.bytes.fill(0);
+      if (!same) {
+        if (held === undefined) result.unchecked.push(c.label);
+        else if (c.name !== null) result.keptProfiles++;
+        continue;
+      }
+      // Remove the file that was read: one swapped in since (another inode) is left alone and named.
+      const now = lstatSafe(c.file);
+      if (now === null || now.dev !== copy.dev || now.ino !== copy.ino) { result.notRemoved.push(c.label); continue; }
+      try { fs.unlinkSync(c.file); } catch { result.notRemoved.push(c.label); continue; }
+      if (c.name === null) result.removedActive = true; else result.removedProfiles.push(c.name);
+    }
+  } finally { target.fill(0); }
+  return result;
+}
+
 // --- Auth-B: seat -> profile METADATA registry (product-native; NO resume_token per orch D2) ---
 
 /** Stated in command output + docs: a seat label is metadata, never proof of a live account. */

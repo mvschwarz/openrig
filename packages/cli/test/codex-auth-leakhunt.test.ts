@@ -107,6 +107,8 @@ describe("rig auth LEAK-HUNT keystone (OPR.0.4.1.29)", () => {
       ["seats", "list"],
       ["seats", "show", "dev1@rig"],
       ["seats", "report"],
+      ["sign-out", "--profile", "work"], // reads every saved profile, the malformed one included, to find copies of one login
+      ["sign-out"], // and the active login
     ];
     let all = "";
     for (const v of verbs) {

@@ -932,6 +932,7 @@ It drives the maintained OpenShell reference; see the [OpenShell example](../ref
 | `rig auth list` | — | `--runtime <runtime>`<br>`--codex-home <dir>`<br>`--host <id>` |
 | `rig auth save <profile>` | — | `--runtime <runtime>` |
 | `rig auth switch <profile>` | — | `--runtime <runtime>`<br>`--codex-home <dir>`<br>`--host <id>` |
+| `rig auth sign-out` | — | `--runtime <runtime>`<br>`--profile <profile>`<br>`--codex-home <dir>` |
 | `rig auth validate <profile>` | — | `--runtime <runtime>` |
 | `rig auth seats` | — | — |
 | `rig auth seats list` | — | `--runtime <runtime>` |
