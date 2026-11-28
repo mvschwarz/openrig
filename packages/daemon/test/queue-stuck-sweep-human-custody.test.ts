@@ -404,4 +404,68 @@ describe("#514 custody findings for a human decision", () => {
     expect(repo.getById(finding!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
     expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(original);
   });
+
+  it("loads the human registry at most once per stuck-sweep pass and reads fresh on the next pass (#3635)", async () => {
+    let loads = 0;
+    const countedRepo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => {
+        loads++;
+        return registryError ? { ok: false, error: registryError } : { ok: true, entities: registeredHumans };
+      },
+      transport: { send: async () => ({ ok: true, verified: true }) },
+    });
+
+    const stale = new Date(Date.now() - 120 * 60_000).toISOString();
+    for (let i = 0; i < 4; i++) {
+      const update = await countedRepo.create({
+        sourceSession: "asker@r",
+        destinationSession: "owner@external",
+        humanIntent: "update",
+        body: `FYI update ${i}`,
+        nudge: false,
+      });
+      db.prepare("UPDATE queue_items SET ts_created = ?, ts_updated = ? WHERE qitem_id = ?").run(stale, stale, update.qitemId);
+
+      const custody = await countedRepo.create({
+        sourceSession: "asker@r",
+        destinationSession: "owner@external",
+        body: `Decision ${i}?`,
+        nudge: false,
+      });
+      await countedRepo.update({
+        qitemId: custody.qitemId,
+        actorSession: `closer-${i}@r`,
+        state: "done",
+        closureReason: "handed_off_to",
+        closureTarget: `next-${i}@r`,
+      });
+    }
+
+    loads = 0;
+    const first = await runStuckSweep({
+      db,
+      queueRepo: countedRepo,
+      status,
+      resolveOrchestrator: () => null,
+      unclaimedAgeMinutes: 60,
+      isRegisteredHost: () => false,
+    });
+    expect(first.outcome).not.toBe("failed");
+    expect(loads).toBe(1);
+
+    // Direct calls outside a sweep pass continue reading fresh, and the next pass reads once again.
+    expect(countedRepo.isHumanDestination("agent@r")).toBe(false);
+    expect(loads).toBe(2);
+
+    await runStuckSweep({
+      db,
+      queueRepo: countedRepo,
+      status,
+      resolveOrchestrator: () => null,
+      unclaimedAgeMinutes: 60,
+      isRegisteredHost: () => false,
+    });
+    expect(loads).toBe(3);
+  });
 });
