@@ -1,7 +1,8 @@
 // rig auth sign-out: every stored copy of one login leaves the Codex home; other logins, other homes and files it can't read
 // as a login stay; no token value reaches a result or output. Fake logins only.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { authCommand } from "../src/commands/auth.js";
@@ -29,7 +30,7 @@ beforeEach(() => {
   write(profile(paths, "work"), login("acct-B", "r3"));                          // another account, saved by name
   write(profile(other, "codex-aaaaaaaaaaaa"), login("acct-A", "r2"));            // the same account in another home
 });
-afterEach(() => { try { fs.chmodSync(paths.profileDir, 0o700); } catch { /* ignore */ } fs.rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); try { fs.chmodSync(paths.profileDir, 0o700); } catch { /* ignore */ } fs.rmSync(root, { recursive: true, force: true }); });
 
 async function run(args: string[]): Promise<{ out: string; exitCode: number | undefined }> {
   const chunks: string[] = [], log = console.log, err = console.error, code = process.exitCode;
@@ -143,5 +144,85 @@ describe("rig auth sign-out", () => {
     const r = await run(["--profile", "codex-aaaaaaaaaaaa"]);
     expect(r.exitCode).toBe(1);
     expect(r.out).toContain("not_removed: auth-profiles/before-switch-20261128T075000.123Z.json, auth-profiles/codex-aaaaaaaaaaaa.json");
+  });
+});
+
+
+describe("sign-out reports files it cannot check without removing them", () => {
+  it.each(["active", "profile"] as const)("keeps a malformed selected %s file and its identical copy", async selected => {
+    const file=selected==="active"?paths.activeAuth:profile(paths,"torn");
+    const raw="{not complete JSON";
+    write(file,raw);write(profile(paths,"same-torn"),raw);
+    const r=await run([...(selected==="profile"?["--profile","torn"]:[]),"--json"]);
+    expect(r.exitCode).toBeUndefined();
+    expect(JSON.parse(r.out)).toMatchObject({target:"unchecked",removedActive:false,removedProfiles:[],unchecked:[selected==="active"?"auth.json":"auth-profiles/torn.json"]});
+    expect(fs.readFileSync(file,"utf8")).toBe(raw);expect(fs.readFileSync(profile(paths,"same-torn"),"utf8")).toBe(raw);
+  });
+  it.each(["null", "{}", '{"tokens":{}}'])("does not interpret non-login JSON %s as an API-key login", raw=>{
+    write(paths.activeAuth,raw);write(profile(paths,"not-login"),raw);
+    expect(authSignOut(paths)).toMatchObject({target:"unchecked",removedActive:false,removedProfiles:[],unchecked:["auth.json"]});
+    expect(fs.existsSync(paths.activeAuth)).toBe(true);expect(fs.existsSync(profile(paths,"not-login"))).toBe(true);
+  });
+  for (const kind of ["symlink", "hardlink", "unreadable"]) it.skipIf(kind === "unreadable" && process.getuid?.() === 0)(`keeps and names a selected ${kind} without claiming sign-out`,async()=>{
+    const outside=path.join(root,"kept.json");write(outside,login("acct-A","r9"));
+    const selected=profile(paths,"selected");
+    if(kind==="symlink")fs.symlinkSync(outside,selected);
+    else if(kind==="hardlink")fs.linkSync(outside,selected);
+    else {write(selected,login("acct-A","r9"));fs.chmodSync(selected,0);}
+    const r=await run(["--profile","selected","--json"]);
+    expect(r.exitCode).toBeUndefined();
+    expect(JSON.parse(r.out)).toMatchObject({target:"unchecked",removedProfiles:[],unchecked:["auth-profiles/selected.json"]});
+    expect(fs.lstatSync(selected)).toBeTruthy();expect(fs.existsSync(outside)).toBe(true);
+    const text=await run(["--profile","selected"]);expect(text.out).toContain("could not be checked");
+    expect(text.out).not.toContain("signed_out: the login saved");
+  });
+  it.skipIf(process.getuid?.() === 0)("reports an unreadable profile directory while removing the checked active login",()=>{
+    write(paths.activeAuth,login("acct-A","r9"));fs.chmodSync(paths.profileDir,0);
+    const r=authSignOut(paths);
+    expect(r).toMatchObject({ok:true,removedActive:true,removedProfiles:[],unchecked:["auth-profiles/"]});
+  });
+  it("keeps a non-regular profile without waiting for a writer",()=>{
+    write(paths.activeAuth,login("acct-A","r9"));
+    expect(spawnSync("mkfifo",[profile(paths,"pipe")]).status).toBe(0);
+    const script='import {authSignOut,resolveCodexHome} from "@openrig/daemon/codex-auth";console.log(JSON.stringify(authSignOut(resolveCodexHome({CODEX_HOME:process.argv[1]}))));';
+    const child=spawnSync(process.execPath,["--input-type=module","-e",script,paths.codexHome],{encoding:"utf8",timeout:3000});
+    expect(child.error?.message).toBeUndefined();expect(child.status).toBe(0);
+    expect(JSON.parse(child.stdout)).toMatchObject({unchecked:["auth-profiles/pipe.json"]});
+    expect(fs.lstatSync(profile(paths,"pipe")).isFIFO()).toBe(true);
+  });
+  it("names a selected file replaced after its initial read and exits 1",async()=>{
+    const selected=profile(paths,"codex-aaaaaaaaaaaa");
+    const replacement=profile(paths,"replacement");write(replacement,login("acct-B","r8"));
+    const read=fs.readFileSync;let swapped=false;
+    vi.spyOn(fs,"readFileSync").mockImplementation(((file: Parameters<typeof fs.readFileSync>[0],...args: unknown[])=>{
+      const out=(read as Function)(file,...args);
+      if(!swapped&&typeof file==="number") {swapped=true;fs.renameSync(replacement,selected);}
+      return out;
+    }) as typeof fs.readFileSync);
+    const r=await run(["--profile","codex-aaaaaaaaaaaa","--json"]);
+    expect(r.exitCode).toBe(1);expect(JSON.parse(r.out).notRemoved).toContain("auth-profiles/codex-aaaaaaaaaaaa.json");
+    expect(fs.readFileSync(selected,"utf8")).toContain("acct-B");
+  });
+  it("names a candidate replaced between its read and removal and exits 1",async()=>{
+    const selected=profile(paths,"before-switch-20261128T075000.123Z");
+    const replacement=profile(paths,"replacement");write(replacement,login("acct-B","r8"));
+    const stat=fs.lstatSync, read=fs.readFileSync, inode=stat(selected).ino;let swapped=false, candidateRead=false;
+    vi.spyOn(fs,"readFileSync").mockImplementation(((file: Parameters<typeof fs.readFileSync>[0],...args:unknown[])=>{
+      const out=(read as Function)(file,...args);
+      if(typeof file==="number"&&fs.fstatSync(file).ino===inode) candidateRead=true;
+      return out;
+    }) as typeof fs.readFileSync);
+    vi.spyOn(fs,"lstatSync").mockImplementation(((file:fs.PathLike,...args:unknown[])=>{
+      if(candidateRead&&!swapped&&String(file)===selected){swapped=true;fs.renameSync(replacement,selected);}
+      return (stat as Function)(file,...args);
+    }) as typeof fs.lstatSync);
+    const r=await run(["--profile","codex-aaaaaaaaaaaa","--json"]);
+    expect(r.exitCode).toBe(1);expect(JSON.parse(r.out).notRemoved).toContain("auth-profiles/before-switch-20261128T075000.123Z.json");
+    expect(fs.readFileSync(selected,"utf8")).toContain("acct-B");
+  });
+  it("the JSON note names the checked locations and does not imply a scan elsewhere",async()=>{
+    const r=await run(["--profile","codex-aaaaaaaaaaaa","--json"]);
+    const note=JSON.parse(r.out).note;
+    expect(note).toContain("auth.json");expect(note).toContain("auth-profiles/*.json");expect(note).toContain("Other locations are not scanned");
   });
 });

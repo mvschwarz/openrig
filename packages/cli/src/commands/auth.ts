@@ -150,7 +150,7 @@ operations. To remove saved profiles after the active auth.json has gone, name o
       }
       if (!r.ok) return fail(r.reason);
       const which = opts.profile ? `the login saved in ${opts.profile}` : "the active login";
-      console.log(`signed_out: ${r.target === "absent" ? `nothing (${opts.profile ? `no profile named ${opts.profile}` : "no active login"} in this home)` : which}`);
+      console.log(`signed_out: ${r.target === "absent" ? `nothing (${opts.profile ? `no profile named ${opts.profile}` : "no active login"} in this home)` : r.target === "unchecked" ? `nothing (${which} could not be checked)` : which}`);
       console.log(`removed_active: ${r.removedActive ? "yes" : "no"}`);
       console.log(`removed_profiles: ${r.removedProfiles.length ? r.removedProfiles.join(", ") : "none"}`);
       if (r.notRemoved.length) console.log(`not_removed: ${r.notRemoved.join(", ")}`);
