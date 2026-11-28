@@ -180,9 +180,10 @@ recording, the browser boundary on `/api/*` (`:647`, Host and Origin checks; see
 `OPENRIG_ALLOWED_HOSTS` and `OPENRIG_ALLOWED_ORIGINS`), and host read-through.
 
 `createAppWithWebSocket(deps)` (`server.ts:1049`) sets `enableNodeWebSocket` and
-calls `createApp`; the terminal WebSocket is registered independently of
-`ui.enabled` (`server.ts:894-900`), with the same terminal bearer and browser
-boundary checks. The setting controls only the web UI's pages and assets.
+calls `createApp`, which registers the terminal WebSocket (`registerTerminalWs`,
+`server.ts:898`) whether or not the web UI is enabled: `ui.enabled` controls only
+the web UI's pages and assets. The terminal route keeps its bearer check
+(`terminalAuthMiddleware`) behind the `/api` browser boundary.
 
 ## 4. Startup sequence (`createDaemon`)
 
