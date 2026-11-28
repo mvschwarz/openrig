@@ -127,7 +127,7 @@ cross the connection.`)
     });
 
   withRuntime(auth.command("sign-out"))
-    .description("Remove every stored copy of one login from a Codex home: the active login, or the one a saved profile holds.")
+    .description("Remove one Codex login's matching active and saved login files (auth.json, auth-profiles/*.json) from a Codex home.")
     .option("--profile <profile>", "Sign out the login saved in this profile (default: the active login)")
     .option("--codex-home <dir>", "The Codex home to act on (default: CODEX_HOME, else ~/.codex)")
     .option("--json", "Print the result as JSON (names and counts only)")
