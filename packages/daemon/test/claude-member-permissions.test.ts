@@ -32,7 +32,7 @@ describe("per-member Claude permission rules", () => {
   });
 
   it("rejects an explicit rule block that could otherwise discard intended restrictions", () => {
-    const choice = { managedCompaction: false, claudePermissions: { deny: ["Read(./private/**)"], ask: ["Bash"] } };
-    expect(() => operationalLaunchArgs("claude-code", choice)).toThrow(/claude_permissions.*ask/);
+    const choice = { managedCompaction: false, claudePermissions: { deny: ["Read(./private/**)"], defaultMode: "bypassPermissions" } };
+    expect(() => operationalLaunchArgs("claude-code", choice)).toThrow(/claude_permissions.*defaultMode/);
   });
 });

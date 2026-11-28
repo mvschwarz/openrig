@@ -1064,7 +1064,8 @@ export class SeatLifecycleService {
               nodeId: seat.nodeId, from, to, actor: input.actor.trim(), reason: input.reason.trim(), effect: "future_launches_only" });
           }
           return { ok: true as const, seat, from, to, changed,
-            effect: "Rules apply at the next separately authorized managed launch or resume. The current process, permission mode and history are unchanged. Older readers may ignore these rules; check rollback compatibility and preserve restrictions before downgrading." };
+            effect: "Rules apply at the next separately authorized managed launch or resume. The current process, permission mode and history are unchanged. Older readers may ignore these rules; check rollback compatibility and preserve restrictions before downgrading."
+              + (to.ask ? " An older OpenRig without ask rules refuses to launch a seat whose rules include ask. Before downgrading, record this seat's rules without ask with the same command; this audit keeps the asks." : "") };
         })();
         if (persisted) this.eventBus.notifySubscribers(persisted);
         return result;

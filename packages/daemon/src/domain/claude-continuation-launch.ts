@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import { readNativeProcessLaunch } from "./native-process-arguments.js";
 import type { ClaudeAutoMode } from "./claude-auto-mode.js";
 import { ownClaudeSettings, type ClaudeSettingsSeat } from "../adapters/claude-settings-transport.js";
+import { shellWords } from "../adapters/shell-quote.js";
 
 /** Transient argv/config selector only; no general environment values or positional startup input. */
 export interface ClaudeContinuationLaunch { args?: string[]; configDir?: string | null; warnings: string[] }
@@ -82,6 +83,130 @@ function withAutoMode(args: string[], block: ClaudeAutoMode | null, seat?: Claud
   return result;
 }
 
+/** What a seat's composed launch owns in a continuation: the allow, ask and deny lists, and OpenRig's own permission
+ *  hook (the team or kernel default's Bash check, which holds that default's asks; kernel-authority.ts
+ *  claudeCommandSettings). The two go together: the default's allows assume its hook. Every other permissions field
+ *  (additionalDirectories, defaultMode and the like) and every other hook stay as the running process had them. */
+export interface SeatPermissionPolicy { lists: Record<string, unknown>; hooks: unknown[] }
+type Settings = Record<string, unknown>;
+const RULE_LISTS = ["allow", "ask", "deny"] as const;
+const PERMISSION_HOOK_SCRIPT = "claude-team-permissions.cjs";
+const isObject = (value: unknown): value is Settings => !!value && typeof value === "object" && !Array.isArray(value);
+const ruleLists = (permissions: Settings) =>
+  Object.fromEntries(RULE_LISTS.filter(key => permissions[key] !== undefined).map(key => [key, permissions[key]]));
+/** The launch policy OpenRig wrote as the hook's third word before it named a kind (#2640): base64 of a JSON object with
+ *  exactly allow and ask string lists. claude-team-permissions.cjs still reads it for sessions launched then. */
+function isEncodedLaunchPolicy(word: string): boolean {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(word)) return false;
+  const bytes = Buffer.from(word, "base64");
+  if (bytes.toString("base64") !== word) return false;
+  try {
+    const policy = JSON.parse(bytes.toString("utf8")) as unknown;
+    const list = (value: unknown) => Array.isArray(value) && value.every(entry => typeof entry === "string");
+    return isObject(policy) && Object.keys(policy).length === 2 && list(policy["allow"]) && list(policy["ask"]);
+  } catch { return false; }
+}
+
+/** OpenRig's own permission hook invocation, as claudeCommandSettings writes it: `<node> <…/claude-team-permissions.cjs>
+ *  <team|kernel>`, or an encoded launch policy from before #2640, each word shell-quoted. It's matched by its words, so
+ *  any install path and conventional quoting count, never by a substring: a command that only names the file, or runs a
+ *  longer file name, isn't OpenRig's. */
+const isPermissionHookCommand = (hook: unknown): boolean => {
+  if (!isObject(hook) || hook["type"] !== "command" || typeof hook["command"] !== "string") return false;
+  const words = shellWords(hook["command"]);
+  return words.length === 3 && /^node(?:js)?(?:\.exe)?$/.test(basename(words[0]!)) && basename(words[1]!) === PERMISSION_HOOK_SCRIPT
+    && (words[2] === "team" || words[2] === "kernel" || isEncodedLaunchPolicy(words[2]!));
+};
+const preToolUse = (settings: Settings): unknown[] => {
+  const entries = isObject(settings["hooks"]) ? settings["hooks"]["PreToolUse"] : undefined;
+  return Array.isArray(entries) ? entries : [];
+};
+/** PreToolUse entries without OpenRig's permission hook. Only that nested hook goes: an entry keeps its other hooks
+ *  and fields, and an entry left with no hooks is dropped. */
+function withoutPermissionHook(entries: unknown[]): unknown[] {
+  return entries.flatMap(entry => {
+    if (!isObject(entry) || !Array.isArray(entry["hooks"])) return [entry];
+    const hooks = entry["hooks"].filter(hook => !isPermissionHookCommand(hook));
+    if (hooks.length === entry["hooks"].length) return [entry];
+    return hooks.length ? [{ ...entry, hooks }] : [];
+  });
+}
+/** The entries that carry OpenRig's permission hook, each with that hook alone. */
+function permissionHookEntries(entries: unknown[]): unknown[] {
+  return entries.flatMap(entry => {
+    if (!isObject(entry) || !Array.isArray(entry["hooks"])) return [];
+    const hooks = entry["hooks"].filter(isPermissionHookCommand);
+    return hooks.length ? [{ ...entry, hooks }] : [];
+  });
+}
+
+/** Settings without the rule lists and permission hook a seat's policy owns; empty containers are left out. */
+function withoutPolicy(settings: Settings): Settings {
+  const { permissions, hooks, ...rest } = settings;
+  const result: Settings = { ...rest };
+  if (isObject(permissions)) {
+    const kept = Object.fromEntries(Object.entries(permissions).filter(([key]) => !(RULE_LISTS as readonly string[]).includes(key)));
+    if (Object.keys(kept).length) result["permissions"] = kept;
+  } else if (permissions !== undefined) result["permissions"] = permissions;
+  if (isObject(hooks)) {
+    const { PreToolUse: _pre, ...otherHooks } = hooks;
+    const kept = withoutPermissionHook(preToolUse(settings));
+    const next = kept.length ? { ...otherHooks, PreToolUse: kept } : otherHooks;
+    if (Object.keys(next).length) result["hooks"] = next;
+  } else if (hooks !== undefined) result["hooks"] = hooks;
+  return result;
+}
+
+function withPolicy(settings: Settings, policy: SeatPermissionPolicy): Settings {
+  const result: Settings = { ...settings, permissions: { ...(isObject(settings["permissions"]) ? settings["permissions"] : {}), ...policy.lists } };
+  if (policy.hooks.length) {
+    const hooks = isObject(settings["hooks"]) ? settings["hooks"] : {};
+    result["hooks"] = { ...hooks, PreToolUse: [...preToolUse(settings), ...policy.hooks] };
+  }
+  return result;
+}
+
+/** Sets a seat's composed policy in captured arguments in place of the running process's, so a relaunch sends the
+ *  seat's recorded rules, and the default's permission hook they depend on, rather than what it was started with.
+ *  Undefined for a foreign or changed settings file, which OpenRig can't see or change. */
+function withPermissions(args: string[], policy: SeatPermissionPolicy, seat?: ClaudeSettingsSeat): string[] | undefined {
+  const found = settingsValues(args, seat);
+  if (found.some(entry => !entry.value)) return undefined;
+  if (!found.length) return [...args, "--settings", JSON.stringify(withPolicy({}, policy))];
+  const result = [...args];
+  found.forEach((entry, index) => {
+    // The last settings value carries the policy; an earlier one keeps only what the policy doesn't own.
+    const stripped = withoutPolicy(entry.value!);
+    const json = JSON.stringify(index === found.length - 1 ? withPolicy(stripped, policy) : stripped);
+    if (entry.inline) result[entry.at] = `--settings=${json}`; else result[entry.at + 1] = json;
+  });
+  return result;
+}
+
+/** The policy a composed launch's one --settings value carries, for a continuation to send instead. */
+export function composedSeatPermissionPolicy(args: string[]): SeatPermissionPolicy | undefined {
+  const at = args.indexOf("--settings");
+  if (at < 0) return undefined;
+  try {
+    const settings = JSON.parse(args[at + 1]!) as unknown;
+    if (!isObject(settings) || !isObject(settings["permissions"])) return undefined;
+    return { lists: ruleLists(settings["permissions"]), hooks: permissionHookEntries(preToolUse(settings)) };
+  } catch { return undefined; }
+}
+
+/** Whether these final arguments send exactly this policy; false when a settings file hides it. */
+export function sendsSeatPermissionPolicy(args: string[], policy: SeatPermissionPolicy, seat?: ClaudeSettingsSeat): boolean {
+  const found = settingsValues(args, seat);
+  if (found.some(entry => !entry.value)) return false;
+  const lists = found.map(entry => entry.value!["permissions"]).filter(isObject).filter(value => Object.keys(ruleLists(value)).length);
+  const hooks = found.flatMap(entry => permissionHookEntries(preToolUse(entry.value!)));
+  return lists.length === 1 && JSON.stringify(ruleLists(lists[0]!)) === JSON.stringify(policy.lists)
+    && JSON.stringify(hooks) === JSON.stringify(policy.hooks);
+}
+
+/** The text a relaunch reports when captured settings keep it from sending the seat's recorded rules. */
+export const CONTINUATION_RULES_NOT_APPLIED = "The running Claude's --settings is a file OpenRig can't read, so this seat's recorded Claude rules were not applied to this relaunch: it keeps the running process's permissions. The rules apply at the seat's next ordinary launch.";
+
 /** The autoMode block these final arguments send: null for none, undefined when a settings file makes it unknown. */
 export function sentClaudeAutoMode(args: string[], seat?: ClaudeSettingsSeat): ClaudeAutoMode | null | undefined {
   const found = settingsValues(args, seat);
@@ -91,11 +216,15 @@ export function sentClaudeAutoMode(args: string[], seat?: ClaudeSettingsSeat): C
   return (blocks[0]?.value!["autoMode"] as ClaudeAutoMode | undefined) ?? null;
 }
 
-/** `autoMode` is the block this launch sends (null: none); undefined leaves captured settings as they are. */
+/** `autoMode` is the block this launch sends (null: none); undefined leaves captured settings as they are.
+ *  `policy` is the composed policy of a seat that records Claude rules (SeatPermissionPolicy): it replaces the running
+ *  rule lists and permission hook, and the running process keeps everything else. Undefined (a seat without rules)
+ *  leaves captured settings as they are. */
 export function resumedClaudeArguments(launch: ClaudeContinuationLaunch | undefined, fallback: string[], conversation: string, effort?: string | null, posture?: string,
-  autoMode?: ClaudeAutoMode | null, seat?: ClaudeSettingsSeat): string[] {
+  autoMode?: ClaudeAutoMode | null, seat?: ClaudeSettingsSeat, policy?: SeatPermissionPolicy): string[] {
   if (!launch?.args) return fallback;
-  const args = autoMode === undefined ? [...launch.args] : withAutoMode(launch.args, autoMode, seat) ?? [...launch.args];
+  const ruled = policy === undefined ? [...launch.args] : withPermissions(launch.args, policy, seat) ?? [...launch.args];
+  const args = autoMode === undefined ? ruled : withAutoMode(ruled, autoMode, seat) ?? ruled;
   // Keep restore's existing explicit seat-effort precedence.
   if (effort) {
     const at = args.findIndex(a => a === "--effort" || a.startsWith("--effort="));

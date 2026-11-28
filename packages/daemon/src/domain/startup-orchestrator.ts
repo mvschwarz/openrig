@@ -822,6 +822,9 @@ export class StartupOrchestrator {
             // isRestore selects context, not native continuity: pod-aware exact
             // resume also uses false. Only an actual fresh launch may re-prime; an
             // unverified fork keeps its unsent context for a verified continuation.
+            // The launch is kept, so its notes (such as rules not applied) still describe the process that runs. They join
+            // this start's other notes, which startNode returns with every result, as on a verified launch.
+            for (const note of launchResult.warnings ?? []) warnings.push(`${input.sessionName ?? input.nodeId}: ${note}`);
             return this.fail(input, "attention_required", errors, launchResult.evidence,
               launchResult.forkIdentityPending ? forkContext ?? false : continuityOutcome === "fresh",
               undefined, false, "harness_launch", true, launchResult.probe);

@@ -1,4 +1,4 @@
-import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
+import { composedSeatPermissionPolicy, continuationChoiceNotes, CONTINUATION_RULES_NOT_APPLIED, resumedClaudeArguments, sendsSeatPermissionPolicy, sentClaudeAutoMode, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
 import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js";
 import { claudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "../domain/claude-auto-mode.js";
 import { compactionPacketLaunchEnv, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
@@ -28,7 +28,9 @@ export type ResumeResult =
     warnings?: string[] }
   // Non-terminal: a chooser or an inconclusive observation must preserve the
   // launch. Attention is not proof of native identity or successful continuity.
-  | { ok: false; code: "attention_required"; message: string; evidence?: string }
+  | { ok: false; code: "attention_required"; message: string; evidence?: string;
+    /** The launch notes of the launch it retained, as a resumed result carries them (such as rules not applied). */
+    warnings?: string[] }
   | { ok: false; code: string; message: string };
 
 const CLAUDE_TYPES = new Set(["claude_name", "claude_id"]);
@@ -160,8 +162,11 @@ export class ClaudeResumeAdapter {
       try { wrapperPrefix = this.options.seatLaunchEnvironment.resolveLaunchWrapper(launchWrapper).map(shellQuote).join(" ") + " "; }
       catch { return { ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." }; }
     }
-    let nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture, autoMode.block ?? null, settingsSeat);
+    // A seat that records Claude rules sends its composed rule lists and permission hook, not the running process's.
+    const seatPolicy = claudePermissions !== undefined ? composedSeatPermissionPolicy(launchArgs) : undefined;
+    let nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture, autoMode.block ?? null, settingsSeat, seatPolicy);
     const sentNative = !!managed || !!(continuation?.args && executable);
+    if (seatPolicy && continuation?.args && sentNative && !sendsSeatPermissionPolicy(nativeArgs, seatPolicy, settingsSeat)) tokenWarnings.push(CONTINUATION_RULES_NOT_APPLIED);
     // The packet variable follows the grant this resume sends: a continuation sends the running Claude's arguments.
     const packetEnv = compactionPacketLaunchEnv(sentNative ? nativeArgs : launchArgs, { openrigHome: this.options.openrigHome, nativeSessionId: resumeToken! });
     if (sentNative) nativeArgs = transportClaudeSettings(nativeArgs, settingsSeat, tokenWarnings, continuation?.args);
@@ -235,7 +240,10 @@ export class ClaudeResumeAdapter {
       message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
     }));
     const warnings = result.ok ? [...tokenWarnings, ...(result.warnings ?? [])] : [];
-    return result.ok ? { ...result, appliedLaunch, ...(warnings.length ? { warnings } : {}) } : result;
+    if (result.ok) return { ...result, appliedLaunch, ...(warnings.length ? { warnings } : {}) };
+    // The launch is retained while it needs attention, so its notes still describe the process that runs.
+    if (result.code !== "attention_required" || !tokenWarnings.length) return result;
+    return { ...(result as Extract<ResumeResult, { code: "attention_required" }>), warnings: [...tokenWarnings] };
   }
 
   private async verifyResume(tmuxSessionName: string, resumeToken: string, launchLine?: string): Promise<ResumeResult> {

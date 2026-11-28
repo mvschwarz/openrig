@@ -1,20 +1,24 @@
 import type Database from "better-sqlite3";
 
-/** Planned native tool rules, separate from the seat's permission mode. */
+/** Planned native tool rules, separate from the seat's permission mode. `ask` is Claude's native `permissions.ask`: it
+ *  is kept only when it lists a rule, so a record without asks keeps its earlier bytes, which an older OpenRig reads. */
 export interface ClaudePermissionRules {
   allow: string[];
+  ask?: string[];
   deny: string[];
 }
 
+const RULE_LISTS = ["allow", "ask", "deny"] as const;
+
 export function validateClaudePermissionRules(value: unknown, label = "claude_permissions"): ClaudePermissionRules {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label}: expected an allow/deny mapping`);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label}: expected an allow/ask/deny mapping`);
   const raw = value as Record<string, unknown>;
-  for (const key of Object.keys(raw)) if (key !== "allow" && key !== "deny") throw new Error(`${label}.${key}: unsupported key; only allow and deny are supported`);
-  const result: ClaudePermissionRules = { allow: [], deny: [] };
-  for (const key of ["allow", "deny"] as const) {
+  for (const key of Object.keys(raw)) if (!(RULE_LISTS as readonly string[]).includes(key)) throw new Error(`${label}.${key}: unsupported key; only allow, ask and deny are supported`);
+  const lists: Record<(typeof RULE_LISTS)[number], string[]> = { allow: [], ask: [], deny: [] };
+  for (const key of RULE_LISTS) {
     if (raw[key] === undefined) continue;
     if (!Array.isArray(raw[key])) throw new Error(`${label}.${key}: expected a list of tool rules`);
-    result[key] = (raw[key] as unknown[]).map((rule, index) => {
+    lists[key] = (raw[key] as unknown[]).map((rule, index) => {
       if (typeof rule !== "string" || !rule.trim() || /[\r\n]/.test(rule)
         || !/^[A-Za-z_][A-Za-z0-9_*-]*(?:\(.+\))?$/.test(rule)) {
         throw new Error(`${label}.${key}[${index}]: expected Tool or Tool(specifier), without newlines`);
@@ -23,7 +27,7 @@ export function validateClaudePermissionRules(value: unknown, label = "claude_pe
       return rule;
     });
   }
-  return result;
+  return { allow: lists.allow, ...(lists.ask.length ? { ask: lists.ask } : {}), deny: lists.deny };
 }
 
 /** Read the current seat, not its original spec or a launch-time cache. Minimal old fixtures have no column. */

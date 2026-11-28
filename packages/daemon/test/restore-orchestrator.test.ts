@@ -7264,6 +7264,22 @@ describe("RestoreOrchestrator", () => {
       expect((tmux.killSession as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
     });
 
+    it("an attention result keeps the notes of the launch it retained, such as rules not applied", async () => {
+      const snap = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+        edges: [],
+        resumeType: "claude_name",
+        resumeToken: "tok",
+      });
+      const note = "this seat's recorded Claude rules were not applied to this relaunch";
+      const claude = mockClaudeResume({ ok: false as const, code: "attention_required", message: "resume selection prompt", warnings: [note] } as never);
+      const result = await createOrchestrator2(mockTmux(), claude).restore(snap.id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]!.status).toBe("attention_required");
+      expect(result.result.warnings).toEqual(expect.arrayContaining([expect.stringMatching(new RegExp(`: ${note}$`))]));
+    });
+
     it("--fresh opt-in (operation B): listed seat launches deliberately and reports fresh-primed", async () => {
       const snap = seedRigAndSnapshot({
         nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],

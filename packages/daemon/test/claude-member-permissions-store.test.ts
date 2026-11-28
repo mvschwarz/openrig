@@ -189,7 +189,7 @@ describe("current member Claude rules (offline, no native enforcement claim)", (
     expect(LegacyRigSpecSchema.normalize(parsed).nodes[0]!.claudePermissions).toEqual(rules);
   });
 
-  it.each([null, { ask: ["Bash"] }, { deny: ["mcp__server__tool(argument)"] }, { deny: ["Read\nWrite"] }, { allow: [""] }, { deny: "Read" }, { defaultMode: "bypassPermissions" }])("names invalid explicit input: %j", value => {
+  it.each([null, { ask: "Bash" }, { deny: ["mcp__server__tool(argument)"] }, { deny: ["Read\nWrite"] }, { allow: [""] }, { deny: "Read" }, { defaultMode: "bypassPermissions" }])("names invalid explicit input: %j", value => {
     expect(() => validateClaudePermissionRules(value)).toThrow(/claude_permissions/);
   });
 });
