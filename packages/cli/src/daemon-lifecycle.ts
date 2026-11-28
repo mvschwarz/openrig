@@ -1228,7 +1228,8 @@ function descriptorMismatch(state: DaemonState, r: StartReservation): string | u
  *  for exactly that child, or keeps a daemon.json that already describes it in full, and then retires that launch's
  *  reservation, under the claim every remover takes. The database is the one the launch recorded; an older CLI's
  *  reservation records none, so then it is the one daemon.json names (or this start's), only while the child holds that
- *  file open. It never spawns, signals or replaces anything. Returns undefined when there is no such start, why it
+ *  file open. It never spawns or signals a process, and the only file it replaces is a daemon.json whose PID is
+ *  positively gone (an earlier daemon's leftover), while its bytes are unchanged. Returns undefined when there is no such start, why it
  *  didn't finish one (that reservation then refuses this start, as before), or what it finished. */
 async function finishPendingStart(opts: StartOptions, deps: LifecycleDeps): Promise<StartedDaemon | string | undefined> {
   if (!deps.finishStartReservation) return undefined;
