@@ -536,6 +536,19 @@ describe("Daemon Lifecycle", () => {
     expect(deps.kill).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["resets the connection", Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })],
+    ["is blocked", Object.assign(new Error("connect EPERM"), { code: "EPERM" })],
+  ])("start: a no-state probe that %s on an occupied port refuses before any initialization", async (_case, failure) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const deps = mockDeps({ fetch: vi.fn(async () => { throw failure; }), isPortOccupied: vi.fn(async () => true) });
+    const outcome = await startDaemon({ port: 17433, host: "127.0.0.2" }, deps).catch((error) => error as Error);
+    expect((outcome as Error).message).toMatch(/EADDRINUSE.*port 17433/);
+    expect(deps.isPortOccupied).toHaveBeenCalledWith("127.0.0.2", 17433);
+    expect(deps.spawn).not.toHaveBeenCalled();
+    expect(deps.openForAppend).not.toHaveBeenCalled();
+  });
+
   it("start: an immediate connection refusal does not bind-probe the port", async () => {
     const deps = startableDeps();
     await startDaemon({}, deps);
@@ -3145,6 +3158,19 @@ describe("#3315 — archiveSpentReservation", () => {
   let home: string;
   beforeEach(() => { home = fs.mkdtempSync(path.join(os.tmpdir(), "spent-reservation-")); });
   afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
+
+  it.each(["same inode", "other file", "symlink"])("resumes a partial stop archive only for the same inode: %s", (kind) => {
+    const file = path.join(home, "daemon-start.lock");
+    const raw = "a\nb\n";
+    fs.writeFileSync(file, raw);
+    const archive = `${file}.stopped-${fs.statSync(file).ino}`;
+    if (kind === "same inode") fs.linkSync(file, archive);
+    else if (kind === "symlink") fs.symlinkSync(file, archive);
+    else fs.writeFileSync(archive, "other");
+    expect(archiveSpentReservation(file, raw)).toBe(kind === "same inode" ? archive : undefined);
+    expect(fs.existsSync(file)).toBe(kind !== "same inode");
+    expect(fs.readFileSync(archive, "utf8")).toBe(kind === "other file" ? "other" : raw);
+  });
 
   it("archives the reservation under its inode only while it holds exactly the expected bytes, and only once", () => {
     const file = path.join(home, "daemon-start.lock");

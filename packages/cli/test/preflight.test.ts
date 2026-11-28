@@ -49,6 +49,7 @@ describe("SystemPreflight", () => {
     tmuxMode?: "healthy" | "missing" | "unhealthy" | "refused";
     configOverrides?: Record<string, unknown>;
     daemonStatus?: Partial<DaemonStatus>;
+    pendingStart?: () => { pid?: number; host?: string; port?: number } | undefined;
   }) {
     const configPath = join(tmpDir, "config.json");
     const config = new ConfigStore(configPath);
@@ -60,6 +61,7 @@ describe("SystemPreflight", () => {
       exec: makeExec(opts?.tmuxMode ?? "healthy"),
       configStore: config,
       getDaemonStatus: makeStatus(opts?.daemonStatus),
+      ...(opts?.pendingStart ? { pendingStart: opts.pendingStart } : {}),
       riggedHome: homeDir,
     });
   }
@@ -172,6 +174,35 @@ describe("SystemPreflight", () => {
     expect(portCheck!.ok).toBe(false);
     expect(portCheck!.error).toContain(String(port));
     expect(portCheck!.fix).toContain("rig config set daemon.port");
+  });
+
+  // A start that ended pending leaves its child listening, and status may read a dead PID's leftover daemon.json as
+  // stale: the start must still reach the finish, which checks that child before anything else.
+  it("lets a start reservation's own child hold its launch port", async () => {
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as net.AddressInfo).port;
+    const pf = createPreflight({ daemonStatus: { state: "stale" }, pendingStart: () => ({ pid: 5151, host: "127.0.0.1", port }) });
+    const result = await pf.run({ port, host: "127.0.0.1" });
+    server.close();
+    expect(result.ready).toBe(true);
+    // The finish says what it waits for; this check adds no text that start would never print.
+    expect(result.checks.find((c) => c.name === "port_available")).toEqual({ name: "port_available", ok: true });
+  });
+
+  it.each([
+    ["at another port", (port: number) => ({ pid: 5151, host: "127.0.0.1", port: port + 1 })],
+    ["at another host", (port: number) => ({ pid: 5151, host: "127.0.0.2", port })],
+    ["that can't be read", () => { throw new Error("unreadable"); }],
+  ] as const)("still refuses an occupied port with a start reservation %s", async (_case, reservation) => {
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as net.AddressInfo).port;
+    const pf = createPreflight({ daemonStatus: { state: "stale" }, pendingStart: () => reservation(port) });
+    const result = await pf.run({ port, host: "127.0.0.1" });
+    server.close();
+    expect(result.ready).toBe(false);
+    expect(result.checks.find((c) => c.name === "port_available")).toMatchObject({ ok: false, error: expect.stringContaining(String(port)) });
   });
 
   it.each(["EPERM", "EACCES"])("does not say a blocked port probe is available (%s)", async (code) => {

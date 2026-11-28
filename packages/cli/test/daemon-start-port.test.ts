@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { startDaemon } from "../src/daemon-lifecycle.js";
-import { daemonCommand } from "../src/commands/daemon.js";
+import { databaseFlagPath, daemonCommand } from "../src/commands/daemon.js";
+import { createDb } from "../../daemon/src/db/connection.js";
+import { mkdirSync, realpathSync, symlinkSync } from "node:fs";
 
 const preflightRun = vi.hoisted(() => vi.fn(async () => ({ ready: true, checks: [] })));
 vi.mock("../src/daemon-lifecycle.js", async (original) => {
@@ -43,4 +45,34 @@ it("daemon start --port 0 reaches startup asking for any free port", async () =>
   await daemonCommand({} as never).parseAsync(["start", "--port", "0"], { from: "user" });
   expect(startDaemon).toHaveBeenCalledTimes(1);
   expect(vi.mocked(startDaemon).mock.calls[0]![0]).toMatchObject({ port: 0 });
+});
+
+it.each(["relative/openrig.sqlite", "link/../openrig.sqlite"])("daemon start --db %s reaches startup anchored at this directory, not normalized", async (db) => {
+  // Not collapsed: with link a symlink, link/.. is that link's parent, which only the OS can resolve.
+  await daemonCommand({} as never).parseAsync(["start", "--db", db], { from: "user" });
+  expect(startDaemon).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(startDaemon).mock.calls[0]![0]).toMatchObject({ db: `${process.cwd()}${sep}${db}` });
+});
+
+it.each([":memory:", " :memory: ", "/an/absolute/openrig.sqlite"])("daemon start --db '%s' reaches startup exactly as given", async (db) => {
+  await daemonCommand({} as never).parseAsync(["start", "--db", db], { from: "user" });
+  expect(vi.mocked(startDaemon).mock.calls[0]![0]).toMatchObject({ db });
+});
+
+it.each(["configured/openrig.sqlite", " :memory: "])("daemon start passes a configured database path ('%s') to startup unchanged", async (db) => {
+  vi.stubEnv("OPENRIG_DB", db);
+  await daemonCommand({} as never).parseAsync(["start"], { from: "user" });
+  expect(vi.mocked(startDaemon).mock.calls[0]![0]).toMatchObject({ db });
+});
+
+it("a relative --db names the file SQLite opens from that directory, through a symlinked parent too", () => {
+  mkdirSync(join(home, "target", "nested"), { recursive: true });
+  symlinkSync(join(home, "target", "nested"), join(home, "link"), "dir");
+  // From home, link/.. is target (the link's parent), not home: a lexical collapse would name home/selected.sqlite.
+  const db = createDb(databaseFlagPath("link/../selected.sqlite", home));
+  try {
+    expect((db.pragma("database_list") as { file: string }[])[0]!.file).toBe(join(realpathSync(home), "target", "selected.sqlite"));
+  } finally {
+    db.close();
+  }
 });

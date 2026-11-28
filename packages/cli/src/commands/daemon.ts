@@ -1,9 +1,10 @@
 import { signalProbe, createProcessLiveness, readProcessState } from "../process-liveness.js";
 import { Command } from "commander";
 import fs from "node:fs";
+import path from "node:path";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
-import { acquireDaemonStartLock, archiveSpentReservation, bootedAtMs, currentBootId, markReservationRetained, processStartToken } from "../daemon-start-lock.js";
+import { acquireDaemonStartLock, archiveSpentReservation, bootedAtMs, currentBootId, finishStartReservation, markReservationRetained, processStartToken } from "../daemon-start-lock.js";
 import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
@@ -14,6 +15,7 @@ import {
   startDaemon,
   stopDaemon,
   getDaemonStatus,
+  pendingStartEndpoint,
   readLogs,
   tailLogs,
   type LifecycleDeps,
@@ -43,6 +45,15 @@ export function createIsProcessAlive(deps: ProcessAliveDeps): (pid: number) => b
 export { signalProbe, createProcessLiveness, readProcessState } from "../process-liveness.js";
 export type { SignalOutcome } from "../process-liveness.js";
 
+/** A --db value as better-sqlite3 opens it: it trims the name, and an empty name or ":memory:" is an in-memory database.
+ *  Those and an absolute path stay exactly as given. A relative path is anchored at this command's working directory
+ *  without normalizing it, so it names the same file (symlinks and ".." included) from wherever a later start runs. */
+export function databaseFlagPath(db: string, cwd = process.cwd()): string {
+  const opened = db.trim();
+  if (opened === "" || opened === ":memory:" || path.isAbsolute(opened)) return db;
+  return `${cwd}${path.sep}${opened}`;
+}
+
 export function realDeps(): LifecycleDeps {
   const isProcessAlive = createIsProcessAlive({
     signalCheck: (pid) => signalProbe(pid) === "sent",
@@ -52,6 +63,34 @@ export function realDeps(): LifecycleDeps {
     signal: (pid) => signalProbe(pid),
     readProcessState: (pid) => readProcessState(pid),
   });
+
+  // lsof's answer when it exits non-zero: status 1 is an answer (none of those files is open, or the process is gone).
+  const lsofFailure = (error: unknown): false | { failure: string } => {
+    const err = error as { status?: number | null; code?: string; signal?: string | null };
+    if (err.status === 1) return false;
+    return { failure: err.code === "ENOENT" ? "lsof isn't installed" : err.signal ? "lsof timed out" : "lsof failed" };
+  };
+
+  // Whether a process holds a file open, as the daemon's own database-holder check asks lsof (daemon-db-path.ts).
+  const databaseHeldBy = (pid: number, file: string): boolean | { failure: string } => {
+    let real: string;
+    try { real = fs.realpathSync(file); } catch { return { failure: `${file} can't be resolved` }; }
+    if (process.platform === "linux") {
+      // Linux names each open file under /proc without lsof; a listing that can't be read leaves the answer to lsof.
+      let fds: string[] | undefined;
+      try { fds = fs.readdirSync(`/proc/${pid}/fd`); } catch { fds = undefined; }
+      if (fds) return fds.some((fd) => { try { return fs.readlinkSync(`/proc/${pid}/fd/${fd}`) === real; } catch { return false; } });
+    }
+    // lsof exits 1 both when nothing it was asked about is found and on an error, so ask for the process's own open files:
+    // a listing answers either way, and no listing is reported as unread, never as "not held".
+    try {
+      const listed = execFileSync("lsof", ["-a", "-p", String(pid), "-Fn"], { encoding: "utf-8", timeout: 2_000, maxBuffer: 1024 * 1024 });
+      return listed.split("\n").some((line) => line.startsWith("n") && (line.slice(1) === real || line.slice(1) === file));
+    } catch (error) {
+      const failure = lsofFailure(error);
+      return failure === false ? { failure: `lsof listed no open files for PID ${pid}` } : failure;
+    }
+  };
 
   // #3953: a process's stdout and stderr, read as the daemon's own database-holder check reads them (lsof, fds 1 and 2).
   const writesOutputTo = (pid: number, file: string): boolean | { failure: string } => {
@@ -69,10 +108,7 @@ export function realDeps(): LifecycleDeps {
       const listed = execFileSync("lsof", ["-a", "-p", String(pid), "-d", "1,2", "-Fn"], { encoding: "utf-8", timeout: 2_000, maxBuffer: 64 * 1024 });
       return listed.split("\n").some((line) => line.startsWith("n") && (line.slice(1) === real || line.slice(1) === file));
     } catch (error) {
-      const err = error as { status?: number | null; code?: string; signal?: string | null };
-      // Exit status 1 is an answer: none of those files is open (or the process is gone).
-      if (err.status === 1) return false;
-      return { failure: err.code === "ENOENT" ? "lsof isn't installed" : err.signal ? "lsof timed out" : "lsof failed" };
+      return lsofFailure(error);
     }
   };
 
@@ -159,6 +195,8 @@ export function realDeps(): LifecycleDeps {
     processStartToken,
     releaseStartReservation: archiveSpentReservation,
     retainStartReservation: markReservationRetained,
+    finishStartReservation,
+    databaseHeldBy,
     writesOutputTo,
   };
 }
@@ -170,7 +208,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
   cmd
     .command("start")
     .description("Start the daemon")
-    .addHelpText("after", "\nStartup reserves this local instance before initialization and verifies the spawned child PID on every required listener.\nMissing/mismatched identity or child exit fails startup; failed publication withdraws only this launch's matching state. Use a matching CLI/daemon installation.\nA concurrent start fails without spawning another child. Inspect daemon-start.lock for launcher/child PIDs after an interrupted start;\nonly archive an abandoned reservation after proving both processes absent. A failed cleanup retains it and reports the child PID.\nA reservation from an earlier boot is archived as daemon-start.lock.abandoned-<time> and the start goes on; so is one from\nthis boot whose recorded launcher and child are both gone in this shell's pid namespace and that no stop retained.\n")
+    .addHelpText("after", "\nStartup reserves this local instance before initialization and verifies the spawned child PID on every required listener.\nMissing/mismatched identity or child exit fails startup; failed publication withdraws only this launch's matching state. Use a matching CLI/daemon installation.\nA concurrent start fails without spawning another child. Inspect daemon-start.lock for launcher/child PIDs after an interrupted start;\nonly archive an abandoned reservation after proving both processes absent. A failed cleanup retains it and reports the child PID.\nA reservation from an earlier boot is archived as daemon-start.lock.abandoned-<time> and the start goes on; so is one from\nthis boot whose recorded launcher and child are both gone in this shell's pid namespace and that no stop retained.\nA start that ended pending (its child left running, its reservation kept) is finished by the next 'rig daemon start' once that\nchild is ready: it checks the child against the reservation, publishes daemon.json for it (or keeps one that already\ndescribes it) and retires that reservation, without starting another daemon.\n")
     .option("--port <port>", "Port to listen on")
     .option("--host <host>", "Host to bind on")
     .option("--db <path>", "Database path")
@@ -227,6 +265,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             exec: quietPreflightExec,
             configStore,
             getDaemonStatus: () => getDaemonStatus(getDeps()),
+            pendingStart: () => pendingStartEndpoint(getDeps()),
             openrigHome: OPENRIG_DIR,
           });
         const preflightResult = await preflight.run({ port: effectivePort, host: effectiveHost });
@@ -246,7 +285,9 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           {
             port: effectivePort,
             host: hostForDaemon,
-            db: opts.db ?? config.db.path,
+            // A relative --db is anchored at this directory, so the child, its reservation and daemon.json name the same file
+            // for a later start from anywhere. db.path and OPENRIG_DB reach SQLite exactly as before.
+            db: opts.db !== undefined ? databaseFlagPath(opts.db) : config.db.path,
             transcriptsEnabled: config.transcripts.enabled,
             transcriptsPath: config.transcripts.path,
             workspaceRoot: config.workspace.root,
@@ -264,7 +305,21 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           },
           getDeps(),
         );
-        console.log(`Daemon started on port ${state.port} (pid ${state.pid})`);
+        if (state.finished) {
+          // This start finished an earlier start that ended pending: no new daemon was started. Each part on its own line.
+          const { publication, replacedPid, reservation, readiness } = state.finished;
+          console.log(`Finished the earlier start of daemon pid ${state.pid} on port ${state.port}; no new daemon was started, and this command does not reconfigure the child's port, host or database.`);
+          console.log(publication === "written"
+            ? `  Publication: daemon.json written for pid ${state.pid}${replacedPid !== undefined ? `, replacing one that named pid ${replacedPid}, which isn't running` : ""}.`
+            : `  Publication: daemon.json already described pid ${state.pid}; kept as it was.`);
+          if ("retired" in reservation) console.log(`  Reservation: that start's reservation retired to ${reservation.retired}.`);
+          else console.error(`  Reservation: kept: ${reservation.kept}.`);
+          console.log("verified" in readiness
+            ? `  Readiness: /healthz named pid ${state.pid} on ${readiness.verified.join(", ")}.`
+            : `  Readiness: /healthz named pid ${state.pid} at the launch endpoint; unverified on ${readiness.unverified.join(", ")} (no clear answer, not a refusal).`);
+        } else {
+          console.log(`Daemon started on port ${state.port} (pid ${state.pid})`);
+        }
         // The daemon leaves a workspace.root that holds a project of its own as it is, and its log says so; so does this
         // output, from the same read-only check.
         const workspace = ensureDefaultWorkspace({ root: config.workspace.root, dryRun: true });

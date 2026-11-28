@@ -1178,8 +1178,10 @@ facts it needs.
 - **Don't let the supervisor clear `daemon-start.lock`.** A reservation from an
   earlier boot is archived by the next start, and so is one whose recorded launcher
   and child are both gone in the same pid namespace, unless `rig daemon stop`
-  retained it. Any other reservation stays; a person reads the start error, which
-  says what to inspect and when the reservation can be archived.
+  retained it. A start whose child became ready after its wait is finished by the
+  next `rig daemon start`, which retires that reservation itself. Any other
+  reservation stays; a person reads the start error, which says what to inspect and
+  when the reservation can be archived.
 
 ## Kernel framing (what `rig setup` does and does not do)
 
@@ -1562,6 +1564,24 @@ TUI's start, which allows its own call that wait plus the probe, cleanup and a m
 A running daemon isn't affected.
 When the wait runs out and the child is still alive, the start ends pending as before:
 the child is left running and the start reservation is kept, so inspect before retrying.
+Once that child is ready, run `rig daemon start` again: it finishes the pending start
+instead of starting another daemon. It checks that the reservation still names the child
+(the same boot and pid namespace, the start gone, the same process) and that the child
+passes the usual startup readiness, publishes `daemon.json` for it (or keeps a
+`daemon.json` that already describes it in full), and retires that start's reservation as
+`daemon-start.lock.finished-<inode>`. A `daemon.json` left by an earlier daemon that is no
+longer running (after a crash, for example) is replaced, as an ordinary start replaces it.
+The child keeps the settings it was launched with: this `rig daemon start` doesn't
+reconfigure its port, host or database.
+Readiness alone isn't always enough. A reservation written by an OpenRig before this
+change doesn't record the child's database, so the finish publishes only the database a
+`daemon.json` already names, or this start's own (`--db` or the configured path), and only
+while the child has that file open. On an OS that gives no boot ID (Windows), the
+reservation can't be matched to this boot, so the finish doesn't apply there.
+Its output reports the publication, the reservation and the readiness on separate lines.
+When publication succeeds but the reservation can't be archived, the output says
+`Reservation: kept` and why, the start doesn't fail, and the next `rig daemon start`
+retires it. When any check fails, it changes nothing and the start error says why.
 A wait shorter than the host needs only makes the start end pending sooner; it doesn't
 stop the child.
 Set the wait to what the host and its supervisor expect. A longer wait doesn't make a slow
