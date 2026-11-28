@@ -188,8 +188,10 @@ The app starts one `openrig` server, `rig mcp serve --front-door`, from the root
 ## What it doesn't do
 
 - It adds no panel to the app. Where its hooks don't run (apps other than Claude Code and Codex), nothing wakes your
-  chat when the team asks or finishes: ask your agent to check.
+  chat when the team asks or finishes. While work it handed over is open, your agent checks on that work at the start
+  of each of its turns, and an app's scheduled task can check between your messages (your agent says what that needs).
 - Everyone using the app on this machine acts as the seat it names.
 - It reaches a team on this machine.
-- **Outside Claude Code and Codex,** until you give the app a seat, it hands the team work only as an unknown sender
-  with no return address, and it can't record answers to the team's questions: see "No seat" above for how.
+- **Outside Claude Code and Codex,** until you give the app a seat, it hands the team work as an unknown sender. A task
+  it creates with `returnRoute` `auto` gets an address of the conversation's own, and it can answer the team's questions
+  about that task; anything else needs a seat (see "No seat" above).
