@@ -6,6 +6,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { resolveExternal } from "../src/domain/gateway/external-admission.js";
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
 import { QueueRepository, type QueueCreateInput, type QueueItem } from "../src/domain/queue-repository.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
 import { createStuckSweepStatus, findingDedupTag, runStuckSweep, STUCK_SWEEP_FINDING_TAG } from "../src/domain/queue-stuck-sweep.js";
 import { parseSessionName } from "../src/domain/session-name.js";
@@ -467,5 +468,45 @@ describe("#514 custody findings for a human decision", () => {
       isRegisteredHost: () => false,
     });
     expect(loads).toBe(3);
+  });
+
+  it("detaches post-commit wake delivery from the sweep's memoized human registry (#3635)", async () => {
+    let loads = 0;
+    registeredHumans = [];
+    const wakeRepo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => {
+        loads++;
+        return { ok: true, entities: registeredHumans };
+      },
+      transport: { send: async () => ({ ok: true, verified: true }) },
+    });
+    wakeRepo.attachOutbox(new OutboxHandler(db));
+
+    await wakeRepo.withMemoizedHumanRegistry(async () => {
+      // Prime the sweep's memo with an empty registry.
+      expect(wakeRepo.humanRegistry()).toEqual({ ok: true, entities: [] });
+      expect(loads).toBe(1);
+
+      // Simulate registry update while the sweep's memo scope is still active, then enqueue a wake.
+      registeredHumans = [owner];
+      const item = await wakeRepo.create({
+        sourceSession: "asker@r",
+        destinationSession: "owner@external",
+        body: "Decision after registry update?",
+        nudge: true,
+      });
+
+      // Wait for the queueMicrotask wake delivery scheduled inside the sweep scope.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      // The exited wake loaded the updated registry fresh instead of reusing the sweep's memo.
+      expect(loads).toBe(2);
+      expect(wakeRepo.getById(item.qitemId)?.lastNudgeResult).toContain("gateway-owned: 'owner@external'");
+
+      // Synchronous reads inside the sweep remain memoized.
+      expect(wakeRepo.humanRegistry()).toEqual({ ok: true, entities: [] });
+      expect(loads).toBe(2);
+    });
   });
 });

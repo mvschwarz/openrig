@@ -1916,11 +1916,11 @@ export class QueueRepository {
   }
 
   private deliverWakeIntentAfterCommit(outboxId: string): void {
-    queueMicrotask(() => {
+    queueMicrotask(() => this.humanRegistryMemo.exit(() => {
       void this.deliverWakeIntent(outboxId).catch((err) => {
         console.error(`Queue wake delivery failed for ${outboxId}:`, err);
       });
-    });
+    }));
   }
 
   /**
