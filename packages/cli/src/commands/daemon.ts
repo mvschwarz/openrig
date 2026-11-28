@@ -45,9 +45,13 @@ export function createIsProcessAlive(deps: ProcessAliveDeps): (pid: number) => b
 export { signalProbe, createProcessLiveness, readProcessState } from "../process-liveness.js";
 export type { SignalOutcome } from "../process-liveness.js";
 
-/** The daemon's own reading of its database path (startup.ts): an in-memory database as it is, any other path absolute. */
-export function daemonDatabasePath(db: string): string {
-  return db === ":memory:" ? db : path.resolve(db);
+/** A --db value as better-sqlite3 opens it: it trims the name, and an empty name or ":memory:" is an in-memory database.
+ *  Those and an absolute path stay exactly as given. A relative path is anchored at this command's working directory
+ *  without normalizing it, so it names the same file (symlinks and ".." included) from wherever a later start runs. */
+export function databaseFlagPath(db: string, cwd = process.cwd()): string {
+  const opened = db.trim();
+  if (opened === "" || opened === ":memory:" || path.isAbsolute(opened)) return db;
+  return `${cwd}${path.sep}${opened}`;
 }
 
 export function realDeps(): LifecycleDeps {
@@ -281,10 +285,9 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           {
             port: effectivePort,
             host: hostForDaemon,
-            // A relative database path (--db, db.path or OPENRIG_DB) is made absolute once, here, by the daemon's own rule
-            // (an in-memory database stays as it is): the child, its reservation and daemon.json then name the same file,
-            // and a later start from another directory compares that path.
-            db: daemonDatabasePath(opts.db ?? config.db.path),
+            // A relative --db is anchored at this directory, so the child, its reservation and daemon.json name the same file
+            // for a later start from anywhere. db.path and OPENRIG_DB reach SQLite exactly as before.
+            db: opts.db !== undefined ? databaseFlagPath(opts.db) : config.db.path,
             transcriptsEnabled: config.transcripts.enabled,
             transcriptsPath: config.transcripts.path,
             workspaceRoot: config.workspace.root,
