@@ -2877,8 +2877,8 @@ describe("draft-held queue wake offers: the terminal's quiet window, a paused of
   const settle = () => new Promise(resolve => setTimeout(resolve, 30));
   const tries = (f: ReturnType<typeof fixture>, qitemId: string) =>
     f.repo.listTransitions(qitemId).map(t => t.transitionNote ?? "").filter(n => n.startsWith("wake-attempt:"));
-  const heldWake = async (f: ReturnType<typeof fixture>) => {
-    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work" });
+  const heldWake = async (f: ReturnType<typeof fixture>, sourceSession = "sender@test") => {
+    const item = await f.repo.create({ sourceSession, destinationSession: "worker@test", body: "queued work" });
     await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
     return item.qitemId;
   };
@@ -2988,7 +2988,8 @@ describe("draft-held queue wake offers: the terminal's quiet window, a paused of
   it("stops the pass before a row a drain now covers: no try for it, and the offer is kept", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
     const first = await heldWake(f);
-    const second = await heldWake(f);
+    // Another sender: one sender's held messages at a seat coalesce into its newest (#2430), which would leave one wake.
+    const second = await heldWake(f, "pm@test");
     const drain = new RigDeliveryDrainStore(f.db), jobs = new WatchdogJobsRepository(f.db);
     const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
     f.bodies.a = "";
@@ -3044,11 +3045,14 @@ describe("draft-held queue wake offers: the terminal's quiet window, a paused of
     try {
       let at = Date.parse("2026-11-27T10:00:00.000Z");
       const lastTry = new Date(at - 10_000).toISOString();
-      let reads = 0;
+      let failed = false;
       const deliverWakes = vi.fn(async () => "draft" as const);
       const offer = createDraftHeldReoffer({ heldSeats: () => [], deliver: async () => "done", paneActivity: () => undefined,
-        // Read 1 picks the seat, read 2 re-checks its tries before the pass, read 3 is the one after the pass.
-        heldWakeSeats: () => { reads += 1; if (reads === 3) throw new Error("database is locked"); return [{ session: "worker@test", lastTry }]; },
+        // The first read after the first pass fails, however many reads came before it.
+        heldWakeSeats: () => {
+          if (!failed && deliverWakes.mock.calls.length === 1) { failed = true; throw new Error("database is locked"); }
+          return [{ session: "worker@test", lastTry }];
+        },
         deliverWakes, now: () => at, onError: error => { errors.push(error); } });
       offer(); await settle();
       expect(deliverWakes).toHaveBeenCalledTimes(1);
