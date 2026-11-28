@@ -298,7 +298,7 @@ function buildPreCompactPrepPrompt(input: {
       : []),
     "OpenRig will wait for this exact completed map before managed /compact. Normal work and messages remain available. rig compact <session> --cancel ends preparation; --skip-map explicitly skips this prerequisite once.",
   );
-  return pieces.join(" ");
+  return pieces.join("\n");
 }
 
 function sanitizeSessionKey(value: string): string {
@@ -431,7 +431,7 @@ export function buildPostCompactRestorePrompt(input: {
   const restoreMap = input.attemptMapPath ? "this preparation attempt's restore map" : "your newest restore map";
   pieces.push(`Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction when present, read ${restoreMap} and use the restore packet as a lookup, then reply with: restored from packet at <path>; resumed at step <X>.`);
   pieces.push(`During this restore, read ${path.join(input.openrigHome, "plugins", "openrig-core", "skills", "refocusing", "SKILL.md")} and consume the current topology and work traces delivered with this restore request, if present; do not rerun Python just to duplicate a delivered trace. Missing trace delivery is a named gap. Read required notes and full sources with the native file-read tool; a pointer, compact summary or truncated extract is not a full source read. Name any missing source, the current user outcome, and your next action from the files you actually read, not from the compact summary.`);
-  return pieces.join(" ");
+  return pieces.join("\n");
 }
 
 function buildPostCompactCompliancePrompt(postRestoreAuditInstruction?: string | null): string {
@@ -449,7 +449,7 @@ function buildPostCompactCompliancePrompt(postRestoreAuditInstruction?: string |
     "Required items are your restore map's ranked entries above your restore class's tier line (with no map: the instruction files and the packet's restore-instructions.md); the other restore packet files and the session JSONL stay lookup-only.",
     "Read every required item that is not FULL in full now, without skimming. Report the final read-depth table and the reconnect note as you resume; don't hold unaffected work for them.",
   );
-  return pieces.join(" ");
+  return pieces.join("\n");
 }
 
 export function buildPostCompactTurnBoundaryPrompt(): string {

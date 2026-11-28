@@ -223,6 +223,35 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  // #4084: Claude Code collapses a long one-line paste to a count-less label that draft-aware delivery won't submit
+  // when it is drawn late (#3462). Each managed request is sent as lines; the /compact command stays one line.
+  it("sends the preparation, restore and audit requests as lines and keeps /compact on one line", async () => {
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+      dedupWindowMs: 60_000,
+      postCompactRestoreCooldownMs: 0,
+      openrigHome: TEST_HOME,
+    });
+    let now = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const tick = (usedPercentage: number) => enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage, transcriptPath: "/tmp/claude.jsonl" });
+    expect(await tick(90)).toEqual({ triggered: true });
+    now += 30_000;
+    expect(await tick(95)).toEqual({ triggered: true });
+    for (let i = 0; i < 3; i++) expect(await tick(20)).toEqual({ triggered: true });
+    const sent = send.mock.calls.map(call => String(call[1]));
+    const preparation = sent.find(text => text.includes("OpenRig automatic compaction preparation"))!;
+    const restore = sent.find(text => text.includes("restoring this Claude session after compaction"))!;
+    const audit = sent.find(text => text.includes("Now audit your compaction restore"))!;
+    const compact = sent.find(text => text.startsWith("/compact"))!;
+    for (const request of [preparation, restore, audit]) {
+      expect(request.split("\n").length).toBeGreaterThan(1);
+      expect(request).not.toMatch(/\n\s*\n/);
+    }
+    expect(compact).not.toContain("\n");
+  });
+
   it("HG-4: repeated high usage stays suppressed until usage drops below threshold and re-arms after post-compact compliance prompt", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport, send } = makeSessionTransport();
