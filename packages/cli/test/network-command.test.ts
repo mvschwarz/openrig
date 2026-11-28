@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { Hono } from "hono";
 import Database from "better-sqlite3";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NetworkBindingStore } from "../../daemon/src/domain/network/network-bindings.js";
@@ -48,7 +48,7 @@ beforeEach(() => {
 });
 afterEach(() => { db.close(); rmSync(home, { recursive: true, force: true }); vi.restoreAllMocks(); vi.unstubAllEnvs(); process.exitCode = undefined; });
 
-function cli(tokenFile: Record<string, string> = {}) {
+function cli(tokenFile: Record<string, string> = {}, extra: Partial<NetworkDeps> = {}) {
   const lifecycleDeps: LifecycleDeps = {
     spawn: vi.fn(), fetch: vi.fn(async () => ({ ok: true })), kill: vi.fn(),
     readFile: (p) => p === STATE_FILE ? JSON.stringify({ pid: 123, port: 19731, db: "/fixture/test.sqlite", startedAt: new Date().toISOString() }) : null,
@@ -65,9 +65,71 @@ function cli(tokenFile: Record<string, string> = {}) {
       return call("POST", url, body, options?.headers);
     } }) as never,
     readTokenFile: (path) => { if (!(path in tokenFile)) throw new Error("no such file"); return tokenFile[path]!; },
+    ...extra,
   };
   return new Command().exitOverride().addCommand(networkCommand(deps));
 }
+
+const CODE = "ec1.page";
+const SITE = ["--site", "https://account.example"];
+/** Everything the CLI printed, to check the code never shows up in it. */
+const printed = (...spies: Array<{ mock: { calls: unknown[][] } }>) => spies.flatMap((spy) => spy.mock.calls.flat()).map(String).join("\n");
+
+it.each([
+  ["--code-file", (readStdin: () => Promise<string>) => ({ readCodeFile: (path: string) => { if (path !== "/code") throw new Error("no such file"); return CODE; }, readStdin }), ["--code-file", "/code"]],
+  ["--code-stdin", (readStdin: () => Promise<string>) => ({ readStdin }), ["--code-stdin"]],
+] as const)("enrolls with the one-time code from %s, as with the argument, without the code on the command line or in output", async (flag, deps, args) => {
+  listed.clear();
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const readStdin = vi.fn(async () => `${CODE}\n`);
+  const argv = ["node", "rig", "network", "enroll", ...args, ...SITE];
+  await cli({}, deps(readStdin)).parseAsync(argv);
+  expect(process.exitCode).toBeUndefined();
+  // The account stub enrolls only for this exact code, so enrolling proves the read code reached the enrollment body.
+  expect(String(out.mock.calls.at(-1)?.[0])).toMatch(/^Enrolled at https:\/\/account\.example\/ as installation lab \(neti-[0-9a-f]{20}\)\nConnect a seat with rig network connect/);
+  expect(posts.map((p) => p.url)).toEqual(["/api/network/installations"]);
+  expect(readStdin).toHaveBeenCalledTimes(flag === "--code-stdin" ? 1 : 0);
+  expect(argv.join(" ")).not.toContain(CODE);
+  expect(printed(out, err)).not.toContain(CODE);
+});
+
+it("reads --code-file from disk with the default reader, trimmed, and notes a file others can read without showing it", async () => {
+  listed.clear();
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const file = join(home, "code.txt");
+  writeFileSync(file, `${CODE}\n`);
+  chmodSync(file, 0o644); // whatever the umask, so the note is exercised
+  await cli().parseAsync(["node", "rig", "network", "enroll", "--code-file", file, ...SITE]);
+  expect(process.exitCode).toBeUndefined();
+  expect(String(out.mock.calls.at(-1)?.[0])).toMatch(/^Enrolled at https:\/\/account\.example\//);
+  expect(String(err.mock.calls[0]?.[0])).toBe(`Note: ${file} can be read by other users of this machine.`);
+  expect(printed(out, err)).not.toContain(CODE);
+});
+
+it("refuses a missing, doubled or unreadable code before contacting the daemon, and never falls back to another source", async () => {
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const readStdin = vi.fn(async () => `${CODE}\n`);
+  const readCodeFile = (path: string) => { if (path === "/empty") return ""; throw new Error("no such file"); };
+  const run = async (args: string[], extra: Partial<NetworkDeps> = { readCodeFile, readStdin }) => {
+    process.exitCode = undefined;
+    await cli({}, extra).parseAsync(["node", "rig", "network", "enroll", ...args, ...SITE]);
+    return { exitCode: process.exitCode, message: String(err.mock.calls.at(-1)?.[0]) };
+  };
+  expect(await run([])).toEqual({ exitCode: 1, message: "Give the one-time code: as the argument, with --code-file <path>, or with --code-stdin." });
+  for (const doubled of [[CODE, "--code-file", "/code"], [CODE, "--code-stdin"], ["--code-file", "/code", "--code-stdin"]]) {
+    expect(await run(doubled)).toEqual({ exitCode: 1, message: "Give the one-time code once: as the argument, with --code-file <path>, or with --code-stdin." });
+  }
+  expect(await run(["--code-file", "/missing"])).toEqual({ exitCode: 1, message: "Can't read the code file: no such file" });
+  expect(await run(["--code-file", "/empty"])).toEqual({ exitCode: 1, message: "The code file /empty is empty." });
+  expect(await run(["--code-stdin"], { readStdin: async () => " \n" })).toEqual({ exitCode: 1, message: "Standard input held no code." });
+  expect(await run(["--code-stdin"], { readStdin: async () => { throw new Error("stdin closed"); } })).toEqual({ exitCode: 1, message: "Can't read the code from standard input: stdin closed" });
+  // Standard input is read only when asked for, and a failed read never falls back to another source.
+  expect(readStdin).not.toHaveBeenCalled();
+  expect(posts).toEqual([]);
+  expect(printed(err)).not.toContain(CODE);
+});
 
 it("connects a seat with its token file, shows it in status without the token, and disconnects it", async () => {
   const out = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -313,5 +375,28 @@ it("shows the binding or seat as optional in each verb's usage", () => {
   const network = networkCommand();
   const usage = (name: string) => network.commands.find((c) => c.name() === name)!.helpInformation().split("\n")[0];
   expect(usage("peers")).toBe("Usage: network peers [options] [binding-or-seat]");
-  expect(usage("request")).toBe("Usage: network request [options] [binding-or-seat] <peer>");
+  expect(usage("request")).toBe("Usage: network request [options] [binding-or-seat] [peer]");
+});
+
+ it("sends requesterOf instead of a peer name, through the own seat or explicit binding", async () => {
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  hubRequests();
+  const ask = join(home, "ask.md"); writeFileSync(ask, "Which audience?");
+  vi.stubEnv("OPENRIG_SESSION_NAME", "dev-impl@lab");
+  for (const positional of [[], ["netb-fixture"]]) {
+    await cli().parseAsync(["node", "rig", "network", "request", ...positional, "--requester-of", "work-1", "--id", "question-1", "--body-file", ask, "--json"]);
+    const value = JSON.parse(String(out.mock.calls.at(-1)?.[0]));
+    expect(value).toMatchObject({ ref: positional[0] ?? "dev-impl@lab", requesterOf: "work-1", requestId: "question-1", body: "Which audience?" });
+    expect(value).not.toHaveProperty("peer");
+  }
+});
+
+
+it.each(["", "   "])("CR rejects supplied blank requesterOf %j without sending a peer request", async (value) => {
+  hubRequests();
+  const ask = join(home, "ask.md"); writeFileSync(ask, "Which audience?");
+  vi.stubEnv("OPENRIG_SESSION_NAME", "dev-impl@lab");
+  const before = posts.length;
+  await expect(cli().parseAsync(["node", "rig", "network", "request", "lead@team", `--requester-of=${value}`, "--id", "blank-requester", "--body-file", ask])).rejects.toThrow();
+  expect(posts).toHaveLength(before);
 });

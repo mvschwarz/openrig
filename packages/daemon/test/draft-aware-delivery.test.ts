@@ -10,7 +10,7 @@ import { wrapPaneEnvelope } from "../src/lib/pane-envelope.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { COALESCED_INTO, DRAFT_HELD_BEHIND_EARLIER, DRAFT_HELD_PER_SENDER, OutboxHandler } from "../src/domain/outbox-handler.js";
-import { attachDraftHeldReoffer } from "../src/domain/draft-held-reoffer.js";
+import { attachDraftHeldReoffer, createDraftHeldReoffer } from "../src/domain/draft-held-reoffer.js";
 import { HOOK_BRIDGE_LIVE_BOUND_MS, HookBridge } from "../src/domain/hook-bridge.js";
 import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -1190,6 +1190,15 @@ describe("supported seat and queue integration", () => {
     expect(f.repo.getById(item.qitemId)!.state).toBe("pending"); expect(f.writes).toEqual([]);
   });
 
+  /** Idle reports far enough apart to be distinct tries: each one past the quiet interval of the one before. */
+  const spacedIdleReports = async (f: ReturnType<typeof fixture>, n: number) => {
+    // Starts a minute back, so every try's time is past once the real clock returns (the ladder reads times after it).
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() - 60_000);
+    try {
+      for (let i = 0; i < n; i++) { await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle"); vi.setSystemTime(Date.now() + 5_000); }
+    } finally { vi.useRealTimers(); }
+  };
+
   // #48: the seat's idle report retries a draft-held wake through the same guarded delivery, within the wake retry cap.
   it("delivers a draft-held queue wake on the seat's next idle report once the draft has cleared", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
@@ -1206,7 +1215,8 @@ describe("supported seat and queue integration", () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
     const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work" });
     await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
-    for (let i = 0; i < 5; i++) await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
+    // Distinct idle reports, each past the quiet interval: reports within it are one burst and one try (below).
+    await spacedIdleReports(f, 5);
     expect(f.outbox.getById("wake-intent-" + item.qitemId)!.deliveryState).toBe("retained");
     expect(f.writes).toEqual([]);
     const attempts = f.repo.listTransitions(item.qitemId).filter(t => t.transitionNote?.startsWith("wake-attempt:"));
@@ -1253,7 +1263,7 @@ describe("supported seat and queue integration", () => {
     const tick = await heldLadder(f, 30);
     await tick();
     expect(notes(f, item.qitemId, "escalation-rung:")).toEqual([]);
-    for (let i = 0; i < 3; i++) await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
+    await spacedIdleReports(f, 3);
     await tick(); await tick();
     expect(notes(f, item.qitemId, "escalation-rung: orchestrator -> orch@test")).toHaveLength(1);
     expect(notes(f, item.qitemId, "escalation-rung:")[0]).toMatch(/held by worker@test's draft-aware guard for \d+ min \(3 retries\): each try stopped before typing anything/);
@@ -1313,15 +1323,54 @@ describe("supported seat and queue integration", () => {
     expect(typedInto(f, "a")).toEqual([]);
   });
 
-  it("leaves a handed-off row's draft-held wake to the wake ladder's own retries", async () => {
+  // #4041: handing work over is how it ordinarily reaches a seat, so a handoff successor held for a draft has the same one
+  // retry owner as a created row: the seat's idle report and the sweep's offer, not also the ladder's timer.
+  it("gives a handoff successor's draft-held wake the idle retry and the sweep's offer, and the ladder doesn't retry it too", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
     const src = await f.repo.create({ sourceSession: "sender@test", destinationSession: "sibling@test", body: "queued work", nudge: false });
     const { created } = await f.repo.handoff({ qitemId: src.qitemId, fromSession: "sibling@test", toSession: "worker@test" });
-    await vi.waitFor(() => expect(f.repo.getById(created.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
-    f.bodies.a = "";
-    await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
-    expect(notes(f, created.qitemId, "wake-attempt:")).toEqual([]);
-    expect(typedInto(f, "a")).toEqual([]);
+    const id = created.qitemId;
+    await vi.waitFor(() => expect(f.repo.getById(id)!.lastNudgeResult).toBe("retained:draft_aware"));
+    expect(f.repo.getById(id)!.handedOffFrom).toBe(src.qitemId);
+    const tick = await heldLadder(f, 30);
+    await tick();   // inside the cap and the window, with a zero retry interval: the ladder's timer leaves it alone
+    expect(notes(f, id, "wake-attempt:")).toEqual([]);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() - 60_000);
+    try {
+      const t0 = Date.now();
+      f.bodies.a = ""; f.hooks.clients = () => `0|${Math.floor(t0 / 1000)}\n`;   // the person's Enter, this second
+      await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");   // the activity path's try, held by the quiet window
+      expect(notes(f, id, "wake-attempt:")).toEqual(["wake-attempt: 1/3 outcome=retained:draft_aware trigger=seat-idle"]);
+      const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20) });
+      attachDraftHeldReoffer(structural, f.repo, () => "idle", { quietUntil: name => f.guard.inputQuietUntil(name) });
+      vi.setSystemTime(t0 + 4_600);   // no new report: only the sweep's offer
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await vi.waitFor(() => expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("delivered"));
+    } finally { vi.useRealTimers(); }
+    expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
+  });
+
+  // A successor held for a draft that the person then deletes, or walks away from, gives no activity report. It still gets
+  // the sweep's one offer, timed from when its wake was held, so it goes instead of waiting for the owner's escalation.
+  it("offers a held successor with no try yet from the sweep once its draft is cleared with no report, and it goes once", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const src = await f.repo.create({ sourceSession: "sender@test", destinationSession: "sibling@test", body: "queued work", nudge: false });
+    const { created } = await f.repo.handoff({ qitemId: src.qitemId, fromSession: "sibling@test", toSession: "worker@test" });
+    const id = created.qitemId;
+    await vi.waitFor(() => expect(f.repo.getById(id)!.lastNudgeResult).toBe("retained:draft_aware"));
+    expect(notes(f, id, "wake-attempt:")).toEqual([]);   // the handoff's own held wake isn't a try
+    const heldAt = Date.parse(f.repo.getById(id)!.lastNudgeAttempt!);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      f.bodies.a = ""; f.hooks.clients = () => `0|${Math.floor(heldAt / 1000)}\n`;   // the draft cleared then; no report
+      const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20) });
+      attachDraftHeldReoffer(structural, f.repo, () => "idle", { quietUntil: name => f.guard.inputQuietUntil(name) });
+      vi.setSystemTime(heldAt + 4_600);   // past the interval and the terminal's quiet window
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await vi.waitFor(() => expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("delivered"));
+    } finally { vi.useRealTimers(); }
+    expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
+    expect(notes(f, id, "wake-attempt:")).toHaveLength(1);   // the offer's one try, which delivered it
   });
 
   it("sends no typed notice to a sender who is a person; the owner's escalation still goes out", async () => {
@@ -2630,6 +2679,73 @@ describe("draft-held retry integration", () => {
 });
 
 
+// A handoff that arrives during a person's draft: the observations around their Enter can all land inside the guard's
+// quiet window, after which an idle seat reports nothing new (the next report can be the agent's own idle notification,
+// about a minute later). One burst is one try, and the seat-activity sweep gives each try one more offer after the window.
+describe("draft-held queue wakes after the person's Enter", () => {
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  const tries = (f: ReturnType<typeof fixture>, qitemId: string) =>
+    f.repo.listTransitions(qitemId).map(t => t.transitionNote ?? "").filter(n => n.startsWith("wake-attempt:"));
+  const heldWake = async (f: ReturnType<typeof fixture>) => {
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
+    return item.qitemId;
+  };
+  const sweepWiring = (f: ReturnType<typeof fixture>, clock: { at: number }) => {
+    const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20) }, () => new Date(clock.at));
+    attachDraftHeldReoffer(structural, f.repo, () => "idle", { now: () => clock.at });
+    return structural;
+  };
+
+  it("counts the observations around one Enter as one try", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const id = await heldWake(f);
+    f.bodies.a = ""; f.hooks.clients = () => `0|${nowSec()}\n`;   // the person's Enter: their client was active this second
+    await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");   // the agent's Stop
+    await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");   // a pane change in the same moment
+    expect(tries(f, id)).toEqual(["wake-attempt: 1/3 outcome=retained:draft_aware trigger=seat-idle"]);
+    expect(f.writes).toEqual([]);
+  });
+
+  it("offers it once more from the sweep after the quiet window, with no new report, and it goes", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const id = await heldWake(f);
+    f.bodies.a = ""; f.hooks.clients = () => `0|${nowSec()}\n`;
+    await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
+    const clock = { at: Date.now() };
+    const structural = sweepWiring(f, clock);
+    const passes = vi.spyOn(f.repo, "retryDraftHeldWakesOnIdle");
+    await structural.pollAllRunningTmuxSeats(f.db);   // inside the window: nothing offered
+    expect(passes).not.toHaveBeenCalled();
+    f.hooks.clients = () => `0|${nowSec() - 10}\n`; clock.at += 4_600;
+    await structural.pollAllRunningTmuxSeats(f.db);
+    await vi.waitFor(() => expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("delivered"));
+    for (let i = 0; i < 3; i++) { clock.at += 4_600; await structural.pollAllRunningTmuxSeats(f.db); }
+    expect(passes).toHaveBeenCalledTimes(1);
+    expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
+  });
+
+  it("gives a person who keeps typing one extra offer per try, not one per interval", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const id = await heldWake(f);
+    // One clock for the sweep and the tries, as in the daemon.
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() - 60_000);
+    try {
+      await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");   // one idle report, still drafted
+      const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20) });
+      attachDraftHeldReoffer(structural, f.repo, () => "idle");
+      for (let i = 0; i < 5; i++) {
+        vi.setSystemTime(Date.now() + 4_600);
+        await structural.pollAllRunningTmuxSeats(f.db);
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    } finally { vi.useRealTimers(); }
+    expect(tries(f, id)).toEqual([1, 2].map(n => `wake-attempt: ${n}/3 outcome=retained:draft_aware trigger=seat-idle`));
+    expect(f.writes).toEqual([]);
+  });
+});
+
+
 // Same-sender order across the routes and refusals around the draft-held pass: a hook bridge that has come live, a
 // held message its retry has claimed, and a held message whose own paste is then refused.
 describe("draft-held order across routes and refusals", () => {
@@ -2751,5 +2867,221 @@ describe("draft-held order across routes and refusals", () => {
     expect(f.submissions.some(s => s.includes("request B"))).toBe(true);
     await f.repo.deliverDraftHeldMessagesOnIdle("worker@test", "idle");
     expect(f.submissions.some(s => s.includes("request A"))).toBe(false);   // never replayed
+  });
+});
+
+// #4041 round 1: a person at the seat's own terminal moves the guard's quiet window with each key, an offer that couldn't
+// try isn't spent, and a failed read after a pass is reported, not left as an unhandled rejection.
+describe("draft-held queue wake offers: the terminal's quiet window, a paused offer and a failed re-read", () => {
+  const sec = (ms: number) => Math.floor(ms / 1000);
+  const settle = () => new Promise(resolve => setTimeout(resolve, 30));
+  const tries = (f: ReturnType<typeof fixture>, qitemId: string) =>
+    f.repo.listTransitions(qitemId).map(t => t.transitionNote ?? "").filter(n => n.startsWith("wake-attempt:"));
+  const heldWake = async (f: ReturnType<typeof fixture>, sourceSession = "sender@test") => {
+    const item = await f.repo.create({ sourceSession, destinationSession: "worker@test", body: "queued work" });
+    await vi.waitFor(() => expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware"));
+    return item.qitemId;
+  };
+  const sweep = (f: ReturnType<typeof fixture>) => {
+    const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20) });
+    attachDraftHeldReoffer(structural, f.repo, () => "idle", { quietUntil: name => f.guard.inputQuietUntil(name) });
+    return structural;
+  };
+
+  it("waits for the quiet window at the person's own terminal instead of trying inside it, then offers once and it goes", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const id = await heldWake(f);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() - 60_000);
+    try {
+      const t0 = Date.now();
+      f.bodies.a = ""; f.hooks.clients = () => `0|${sec(t0)}\n`;   // the person's Enter at their terminal
+      await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");   // the activity path's try, held by the window
+      expect(tries(f, id)).toHaveLength(1);
+      const structural = sweep(f);
+      const passes = vi.spyOn(f.repo, "retryDraftHeldWakesOnIdle");
+      // A key just before the offer's interval ends moves the window past it: the offer waits, with no try.
+      const key = t0 + 4_600;
+      vi.setSystemTime(key); f.hooks.clients = () => `0|${sec(key)}\n`;
+      await structural.pollAllRunningTmuxSeats(f.db); await settle();
+      vi.setSystemTime(key + 1_000);
+      await structural.pollAllRunningTmuxSeats(f.db); await settle();
+      expect(passes).not.toHaveBeenCalled();
+      expect(tries(f, id)).toHaveLength(1);
+      // The window ends: one offer, one try, and the wake goes.
+      vi.setSystemTime(sec(key) * 1000 + 999 + 3_000 + 100);
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await vi.waitFor(() => expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("delivered"));
+      expect(passes).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
+    expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
+  });
+
+  it("keeps the offer when a drain covers it, and the wake goes once the drain ends, with no new report", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const id = await heldWake(f);
+    const drain = new RigDeliveryDrainStore(f.db), jobs = new WatchdogJobsRepository(f.db);
+    const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() - 60_000);
+    try {
+      const t0 = Date.now();
+      f.bodies.a = ""; f.hooks.clients = () => `0|${sec(t0)}\n`;
+      await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");
+      const structural = sweep(f);
+      const passes = vi.spyOn(f.repo, "retryDraftHeldWakesOnIdle");
+      drain.begin(rigId, { drainId: "fixture-offer", owner: "human@test", reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+      vi.setSystemTime(t0 + 4_600);
+      await structural.pollAllRunningTmuxSeats(f.db); await settle();
+      expect(passes).toHaveBeenCalledTimes(1);
+      await expect(passes.mock.results[0]!.value).resolves.toBe("paused");
+      expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("retained");
+      drain.end(rigId, "fixture-offer", jobs);
+      vi.setSystemTime(t0 + 9_200);
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await vi.waitFor(() => expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("delivered"));
+      expect(passes).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+    expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
+  });
+
+  /** Parks the row on a blocker row, then closes the blocker: the unpark's own wake goes to the seat. */
+  const unpark = async (f: ReturnType<typeof fixture>, qitemId: string) => {
+    const blocker = await f.repo.create({ sourceSession: "sender@test", destinationSession: "sibling@test", body: "blocker", nudge: false });
+    f.repo.update({ qitemId, actorSession: "worker@test", state: "blocked", blockedOn: blocker.qitemId });
+    f.repo.claim({ qitemId: blocker.qitemId, destinationSession: "sibling@test" });
+    f.repo.update({ qitemId: blocker.qitemId, actorSession: "sibling@test", state: "done", closureReason: "no-follow-on" });
+    void f.repo.drainPendingWakeIntents();
+    const intent = () => f.db.prepare("SELECT outbox_id AS id, delivery_state AS state FROM outbox_entries WHERE audit_pointer = ? AND outbox_id LIKE 'wake-intent-blocker-%'")
+      .get(qitemId) as { id: string; state: string } | undefined;
+    await vi.waitFor(() => expect(intent()?.state).toBe("retained"));
+    return intent()!.id;
+  };
+
+  // The ladder leaves a held wake of a row that wasn't handed off to the idle retry, so the retry has to find it whichever
+  // intent holds it: here an unpark's, not the row's own.
+  it("tries a held unpark wake, not only the row's own intent, and it goes once the draft is gone", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "parked work", nudge: false });
+    const wake = await unpark(f, item.qitemId);
+    expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toBe("retained:draft_aware");
+    f.bodies.a = "";
+    await expect(f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle")).resolves.toBe("done");
+    expect(f.outbox.getById(wake)!.deliveryState).toBe("delivered");
+    expect(f.submissions.filter(s => s.includes(item.qitemId))).toHaveLength(1);
+  });
+
+  // A try from the row's earlier wake doesn't stand for a new hold that has had none: the offer is timed from the new hold.
+  it("times a new hold from when it was held, not from a try of the row's earlier wake", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const id = await heldWake(f);
+    await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");   // a try of the first wake, held by the draft
+    expect(tries(f, id)).toHaveLength(1);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() + 60_000);
+    try {
+      await unpark(f, id);   // a new wake of the same row, held, with no try of its own
+      const heldAt = f.repo.getById(id)!.lastNudgeAttempt!;
+      expect(f.repo.draftHeldWakeSeats()).toEqual([{ session: "worker@test", lastTry: heldAt }]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  // A drain that starts while an earlier row's delivery is under way covers the rest of the pass: no try is recorded for
+  // a wake that wasn't sent, and the pass ends `paused`, so the offer is kept.
+  it("stops the pass before a row a drain now covers: no try for it, and the offer is kept", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const first = await heldWake(f);
+    // Another sender: one sender's held messages at a seat coalesce into its newest (#2430), which would leave one wake.
+    const second = await heldWake(f, "pm@test");
+    const drain = new RigDeliveryDrainStore(f.db), jobs = new WatchdogJobsRepository(f.db);
+    const rigId = (f.db.prepare("SELECT rig_id FROM nodes WHERE id='a'").get() as { rig_id: string }).rig_id;
+    f.bodies.a = "";
+    let begun = false;
+    const send = f.transport.send.bind(f.transport);
+    vi.spyOn(f.transport, "send").mockImplementation(async (...args: Parameters<typeof f.transport.send>) => {
+      if (!begun) {
+        begun = true;   // the first row's send: a drain starts now
+        drain.begin(rigId, { drainId: "fixture-mid-pass", owner: "human@test", reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+      }
+      return send(...args);
+    });
+    await expect(f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle")).resolves.toBe("paused");
+    expect(begun).toBe(true);
+    expect(tries(f, second)).toEqual([]);
+    expect(f.outbox.getById("wake-intent-" + second)!.deliveryState).toBe("retained");
+    expect(f.outbox.getById("wake-intent-" + first)!.deliveryState).not.toBe("retained");   // the first row's wake was sent
+  });
+
+  // The seat's own idle report can record a try while the offer awaits the terminal's quiet read: that try keeps its own
+  // interval and its one offer.
+  it("leaves a try recorded during the offer's quiet read its own interval, and offers it once after", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "draft";
+    const id = await heldWake(f);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() - 60_000);
+    try {
+      const t0 = Date.now();
+      await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle");   // try 1, held by the draft
+      const structural = new SeatStructuralActivityService({ capturePaneContent: name => f.tmux.capturePaneContent(name, 20) });
+      let raced = false;
+      attachDraftHeldReoffer(structural, f.repo, () => "idle", { quietUntil: async () => {
+        // The seat's own report, while the offer reads the quiet window: try 2, held by the draft.
+        if (!raced) { raced = true; await f.repo.retryDraftHeldWakesOnIdle("worker@test", "idle"); }
+        return null;
+      } });
+      vi.setSystemTime(t0 + 4_600);   // try 1's interval has passed: the sweep picks the seat
+      const passes = vi.spyOn(f.repo, "retryDraftHeldWakesOnIdle");
+      await structural.pollAllRunningTmuxSeats(f.db); await settle();
+      expect(tries(f, id)).toHaveLength(2);
+      expect(passes).toHaveBeenCalledTimes(1);   // the report's pass only: no offer inside try 2's interval
+      f.bodies.a = "";   // the draft cleared, with no report
+      vi.setSystemTime(t0 + 9_300);   // past try 2's interval
+      await structural.pollAllRunningTmuxSeats(f.db);
+      await vi.waitFor(() => expect(f.outbox.getById("wake-intent-" + id)!.deliveryState).toBe("delivered"));
+    } finally { vi.useRealTimers(); }
+    expect(f.submissions.filter(s => s.includes(id))).toHaveLength(1);
+  });
+
+  it("reports a failed read after a wake pass through onError, leaves no unhandled rejection, and keeps the seat eligible", async () => {
+    const errors: unknown[] = [], unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let at = Date.parse("2026-11-27T10:00:00.000Z");
+      const lastTry = new Date(at - 10_000).toISOString();
+      let failed = false;
+      const deliverWakes = vi.fn(async () => "draft" as const);
+      const offer = createDraftHeldReoffer({ heldSeats: () => [], deliver: async () => "done", paneActivity: () => undefined,
+        // The first read after the first pass fails, however many reads came before it.
+        heldWakeSeats: () => {
+          if (!failed && deliverWakes.mock.calls.length === 1) { failed = true; throw new Error("database is locked"); }
+          return [{ session: "worker@test", lastTry }];
+        },
+        deliverWakes, now: () => at, onError: error => { errors.push(error); } });
+      offer(); await settle();
+      expect(deliverWakes).toHaveBeenCalledTimes(1);
+      expect(errors.map(e => (e as Error).message)).toEqual(["database is locked"]);
+      at += 4_600; offer(); await settle();
+      expect(deliverWakes).toHaveBeenCalledTimes(2);   // the error didn't mark the try offered
+      at += 4_600; offer(); await settle();
+      expect(deliverWakes).toHaveBeenCalledTimes(2);   // once read, the offer's try isn't offered again
+      expect(unhandled).toEqual([]);
+    } finally { process.off("unhandledRejection", onUnhandled); }
+  });
+
+  it("reports a failed re-read before the pass and still runs the seat's pass, every time it fails", async () => {
+    const errors: unknown[] = [];
+    let at = Date.parse("2026-11-27T10:00:00.000Z");
+    const lastTry = new Date(at - 10_000).toISOString();
+    let reads = 0;
+    const deliverWakes = vi.fn(async () => "draft" as const);
+    const offer = createDraftHeldReoffer({ heldSeats: () => [], deliver: async () => "done", paneActivity: () => undefined,
+      // Each offer reads the seats for the sweep, again just before the pass, and after it: the one before the pass fails.
+      heldWakeSeats: () => {
+        if (++reads === 2) throw new Error("database is locked");
+        return [{ session: "worker@test", lastTry }];
+      },
+      deliverWakes, now: () => at, onError: error => { errors.push(error); } });
+    offer(); await settle();
+    expect(deliverWakes).toHaveBeenCalledTimes(1);   // the failed read didn't postpone the pass
+    expect(errors.map(e => (e as Error).message)).toEqual(["database is locked"]);
+    reads = 0; at += 4_600; offer(); await settle();
+    expect(deliverWakes).toHaveBeenCalledTimes(1);   // the try it made is offered once, as with a successful read
   });
 });

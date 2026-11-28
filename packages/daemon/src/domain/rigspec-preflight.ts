@@ -91,10 +91,15 @@ export class RigSpecPreflight {
       }
     }
 
+    // Resolve once: a failed project lookup is a preflight error, including the
+    // later Codex reach advisory, which must not attempt the same lookup again.
+    const resolvedCwds = new Map<string, string>();
     // cwd existence
     for (const node of spec.nodes) {
       if (node.cwd) {
-        const cwd = resolveAuthoredCwd(node.cwd, null);
+        let cwd: string;
+        try { cwd = resolveAuthoredCwd(node.cwd, null); resolvedCwds.set(node.id, cwd); }
+        catch (err) { errors.push(`${node.id}: ${(err as Error).message}`); continue; }
         if (!existsSync(cwd)) {
           errors.push(`cwd '${cwd}' does not exist for node '${node.id}'`);
         } else {
@@ -129,7 +134,7 @@ export class RigSpecPreflight {
     }
 
     for (const node of spec.nodes) {
-      if (node.runtime === "codex") warnRigReach(node.id, node.codexPermissions, node.cwd ? resolveAuthoredCwd(node.cwd, null) : undefined, warnings);
+      if (node.runtime === "codex" && (!node.cwd || resolvedCwds.has(node.id))) warnRigReach(node.id, node.codexPermissions, resolvedCwds.get(node.id), warnings);
     }
     if (errors.length === 0) {
       await warnRigLoginPath(spec.nodes.filter(node => node.runtime === "codex").map(node => ({ label: node.id, env: {} })), this.exec, warnings);
@@ -162,7 +167,7 @@ import type { ResolutionContext, ResolutionResult } from "./profile-resolver.js"
 import { withNodeConfigResolver } from "./profile-resolution-worker.js";
 import { releaseScanCache } from "./skill-discovery.js";
 import { randomUUID } from "node:crypto";
-import { getOpenRigInstallCwdError, resolveAuthoredCwd, resolveLaunchCwd } from "./cwd-resolution.js";
+import { getOpenRigInstallCwdError, resolveAuthoredCwd, resolveLaunchCwd, type PlannedProjectRoots } from "./cwd-resolution.js";
 import nodePath from "node:path";
 import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
 import { BUILT_IN_RUNTIMES } from "./built-in-runtimes.js";
@@ -190,6 +195,7 @@ export interface RigPreflightInput {
   rigSpecYaml: string;
   rigRoot: string;
   cwdOverride?: string;
+  plannedProjectRoots?: PlannedProjectRoots;
   fsOps: AgentResolverFsOps;
   /** Config-resolved managed skill catalog root. Must match runtime resolution. */
   skillsRoot?: string;
@@ -211,6 +217,7 @@ export interface PreflightSpecContext {
   envOverride?: SeatEnv;
   rigRoot: string;
   cwdOverride?: string;
+  plannedProjectRoots?: PlannedProjectRoots;
   fsOps: AgentResolverFsOps;
   /** Config-resolved managed skill catalog root. Must match runtime resolution. */
   skillsRoot?: string;
@@ -338,6 +345,7 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
     includeModelWarnings: input.includeModelWarnings,
     rigRoot: input.rigRoot,
     cwdOverride: input.cwdOverride,
+    plannedProjectRoots: input.plannedProjectRoots,
     envOverride: input.envOverride,
     fsOps: input.fsOps,
     skillsRoot: input.skillsRoot,
@@ -406,11 +414,13 @@ async function preflightMembers(
         if (!member.cwd) {
           errors.push(`${pod.id}.${member.id}: cwd is required`);
         }
-        const terminalCwd = resolveLaunchCwd(member.cwd, preflightCtx.rigRoot, preflightCtx.cwdOverride);
-        const terminalCwdError = getOpenRigInstallCwdError(terminalCwd, preflightCtx.cwdOverride);
-        if (terminalCwdError) {
-          errors.push(`${pod.id}.${member.id}: ${terminalCwdError}`);
-        }
+        try {
+          const terminalCwd = resolveLaunchCwd(member.cwd, preflightCtx.rigRoot, preflightCtx.cwdOverride, preflightCtx.plannedProjectRoots);
+          const terminalCwdError = getOpenRigInstallCwdError(terminalCwd, preflightCtx.cwdOverride);
+          if (terminalCwdError) {
+            errors.push(`${pod.id}.${member.id}: ${terminalCwdError}`);
+          }
+        } catch (err) { errors.push(`${pod.id}.${member.id}: ${(err as Error).message}`); }
         continue;
       }
 
@@ -446,6 +456,7 @@ async function preflightMembers(
         profileName: member.profile,
         specRoot: preflightCtx.rigRoot,
         cwdOverride: preflightCtx.cwdOverride,
+        plannedProjectRoots: preflightCtx.plannedProjectRoots,
         skillsRoot: preflightCtx.skillsRoot,
         systemSkills: preflightCtx.systemSkills,
         systemWorldError: preflightCtx.systemWorldError,

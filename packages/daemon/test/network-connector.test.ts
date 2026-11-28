@@ -32,6 +32,8 @@ class FakeHub {
   revoked = false;
   down = false;
   settingUp = false;
+  requesterQuestions = false;
+  readonly beforeBlocks = new Map<string, string>();
   /** The next claim or close of these ids takes effect, then its answer is lost. */
   readonly loseClaimAnswer = new Set<string>();
   readonly loseCloseAnswer = new Set<string>();
@@ -94,6 +96,11 @@ class FakeHub {
         if (this.failNote.delete(id)) throw new HubError("unavailable", "The hub couldn't be reached: socket hang up");
         get(id).notes.push(note);
       },
+      block: async (id, blockedOn) => {
+        const item = get(id);
+        if (item.state !== "blocked") this.beforeBlocks.set(id, item.state);
+        Object.assign(item, { state: "blocked", blockedOn });
+      },
       close: async (id, input) => {
         this.closes++;
         const item = get(id);
@@ -101,6 +108,9 @@ class FakeHub {
         const theirs = this.raceClose.get(id);
         if (theirs) { Object.assign(item, theirs); return; }
         Object.assign(item, { state: input.state, closureReason: input.closureReason, resolution: input.resolution });
+        for (const waiting of this.items.values()) if (waiting.state === "blocked" && waiting.blockedOn === id) {
+          Object.assign(waiting, { state: this.beforeBlocks.get(waiting.qitemId) ?? "in-progress", blockedOn: null });
+        }
         if (this.loseCloseAnswer.delete(id)) throw new HubError("unavailable", "The hub couldn't be reached: socket hang up");
       },
       team: async (rigId) => {
@@ -110,24 +120,26 @@ class FakeHub {
       // As the hub's create does: the same id with the same parties returns the stored item (with a warning when the body
       // differs), other parties are refused, and an unknown seat is refused.
       create: async (input) => {
+        const destination = input.requesterOf ? get(input.requesterOf).sourceSession : input.destination!;
         this.creates++;
         const existing = this.items.get(input.qitemId);
         if (existing) {
-          if (existing.destinationSession !== input.destination || existing.sourceSession !== PARTICIPANT) throw new HubError("refused", `qitemId ${input.qitemId} is already taken.`, "qitem_id_reuse");
+          if (existing.destinationSession !== destination || existing.sourceSession !== PARTICIPANT) throw new HubError("refused", `qitemId ${input.qitemId} is already taken.`, "qitem_id_reuse");
           const { notes: _notes, ...stored } = existing;
           return existing.body === input.body ? { ...stored } : { ...stored, createWarning: "qitem_body_not_saved" };
         }
-        if (!this.seats.has(input.destination)) throw new HubError("refused", `No seat here is named '${input.destination}', so nothing was written.`, "destination_not_found");
-        this.items.set(input.qitemId, { qitemId: input.qitemId, sourceSession: PARTICIPANT, destinationSession: input.destination, state: "pending",
-          body: input.body, summary: input.summary ?? null, resolution: null, closureReason: null, notes: [] });
+        if (!this.seats.has(destination)) throw new HubError("refused", `No seat here is named '${destination}', so nothing was written.`, input.requesterOf ? "requester_unreachable" : "destination_not_found");
+        this.items.set(input.qitemId, { qitemId: input.qitemId, sourceSession: PARTICIPANT, state: "pending",
+          body: input.body, summary: input.summary ?? null, resolution: null, closureReason: null, notes: [], requesterOf: input.requesterOf ?? null,
+          destinationSession: destination });
         this.afterCreate?.(input.qitemId);
         if (this.loseCreateAnswer.delete(input.qitemId)) throw new HubError("unavailable", "The hub couldn't be reached: socket hang up");
         const { notes: _createdNotes, ...created } = this.items.get(input.qitemId)!;
         return { ...created };
       },
-      offers: async () => {
+      offers: async (_tool, property) => {
         if (this.failToolList) throw new HubError("unavailable", "The hub couldn't be reached: tools/list failed");
-        return true;
+        return property === undefined || (property === "requesterOf" && this.requesterQuestions);
       },
       end: async () => {},
     };
@@ -188,9 +200,10 @@ describe("network connector", () => {
     // After the requester's words: what goes back to them, that sharing instructions apply, and how to answer, in that order.
     const after = local!.body!.split("\n---\n")[1]!.split("\n");
     expect(after).toEqual([
-      "The requester gets back only this item's progress (queued, picked up, or an outcome that isn't known) and your answer: the resolution you close it with, or without one, your own note on the close. Nothing else from here goes to the hub: no other notes, items or files.",
+      "The requester gets back only this item's progress (queued, picked up, an explicit wait on a requester question, or an outcome that isn't known) and your answer: the resolution you close it with, or without one, your own note on the close. The connector does not copy other notes, unrelated items or files to the hub.",
       "Put in your answer only what this seat's sharing instructions allow.",
       `Answer by closing this item with your result: rig queue update ${local!.qitemId} --state done --closure-reason no-follow-on --resolution "<your answer>".`,
+      `If you need the requester's decision, ask with rig network request --requester-of ${local!.qitemId} --id <question-id> --body-file <question-file>. On a supporting hub this keeps this same work blocked on the question receipt. An unsupported hub writes no question or wait; keep the work open and report that limit. Never put the question only in a private note or substitute your own answer for the person's decision.`,
       "OpenRig returns the resolution to the hub item.",
     ]);
     // The hub claim is custody, not pickup: the item says it's queued and not picked up.
@@ -739,6 +752,396 @@ describe("network connector", () => {
     expect(hub.tokens).toEqual([]);
   });
 
+  describe("requester questions", () => {
+    const incoming = async () => {
+      const binding = bind();
+      hub.add("hub-work", "Ask me before choosing the audience.");
+      hub.items.get("hub-work")!.sourceSession = PEER;
+      await runNetworkBindingPass(deps, bindings.get(binding.id)!);
+      const work = runs("hub-work")[0]!;
+      repo.claim({ qitemId: work.qitemId, destinationSession: "dev-impl@lab" });
+      return { binding: bindings.get(binding.id)!, work: repo.getById(work.qitemId)! };
+    };
+
+    it.each(["", "   ", 42, null])("CR rejects explicitly malformed requester target %j before the peer route", async (requesterOf) => {
+      const binding = bind();
+      await expect(originateNetworkRequest(deps, binding, { peer: PEER, requesterOf, requestId: "malformed-target", body: "Which audience?" })).rejects.toMatchObject({ code: "invalid_request_route" });
+      expect(hub.creates).toBe(0);
+      expect(repo.getById("malformed-target")).toBeNull();
+    });
+
+    it.each([false, true])("CR rollback recovery keeps the first work version (later dependency=%s)", async (changed) => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const input = { requesterOf: work.qitemId, requestId: "rollback-question", body: "Which audience?" };
+      const update = repo.updateWithinTransaction.bind(repo);
+      const spy = vi.spyOn(repo, "updateWithinTransaction").mockImplementation(change => {
+        if (change.qitemId === work.qitemId && change.blockedOn === input.requestId) {
+          spy.mockRestore(); throw new Error("fixture: wait transaction rolled back");
+        }
+        return update(change);
+      });
+      await expect(originateNetworkRequest(deps, binding, input)).rejects.toThrow("wait transaction rolled back");
+      expect(db.prepare("SELECT count(*) AS n FROM network_requests WHERE local_qitem_id = ?").get(input.requestId)).toEqual({ n: 0 });
+      if (changed) {
+        await repo.create({ qitemId: "owner-later-wait", sourceSession: "dev-impl@lab", destinationSession: "dev-impl@lab", body: "Later decision", nudge: false });
+        repo.update({ qitemId: work.qitemId, actorSession: "dev-impl@lab", state: "blocked", blockedOn: "owner-later-wait" });
+      }
+      expect((await originateNetworkRequest(deps, binding, input)).state).toBe("sent");
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: changed ? "owner-later-wait" : input.requestId });
+    });
+
+    it("CR wait notifications follow the receipt commit", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const observed: boolean[] = [];
+      const notify = EventBus.prototype.notifySubscribers;
+      vi.spyOn(EventBus.prototype, "notifySubscribers").mockImplementation(function(this: EventBus, event) {
+        observed.push(db.inTransaction); return notify.call(this, event);
+      });
+      await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "commit-question", body: "Which audience?" });
+      expect(observed.length).toBeGreaterThan(0);
+      expect(observed).not.toContain(true);
+    });
+
+    it.each([
+      ["work", "unavailable"], ["question", "unavailable"], ["write", "unavailable"],
+      ["work", "revoked"], ["question", "revoked"], ["write", "revoked"],
+    ] as const)("CR optional wait %s failure %s preserves answer or revocation handling", async (stage, kind) => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const sent = await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "optional-question", body: "Which audience?" });
+      const other = await originateNetworkRequest(deps, binding, { peer: PEER, requestId: "other-answer", body: "Other question" });
+      Object.assign(hub.items.get(other.hubQitemId)!, { state: "done", closureReason: "no-follow-on", resolution: "Other answer" });
+      let failed = false;
+      const connect: HubConnect = async (...args) => {
+        const session = await hub.connect(...args);
+        return { ...session, show: async id => {
+          if (!failed && ((stage === "work" && id === "hub-work") || (stage === "question" && id === sent.hubQitemId))) {
+            failed = true; throw new HubError(kind, "fixture: optional wait read failed");
+          }
+          return session.show(id);
+        }, block: async (...blockArgs) => {
+          if (stage === "write") throw new HubError(kind, "fixture: optional wait write failed");
+          return session.block(...blockArgs);
+        } };
+      };
+      await runNetworkBindingPass({ ...deps, connect }, binding);
+      if (kind === "unavailable") expect(repo.getById("other-answer")).toMatchObject({ state: "done", resolution: "Other answer" });
+      else expect(repo.getById("other-answer")!.state).toBe("blocked");
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: "optional-question" });
+    });
+
+    it("CR wait reporting preserves another hub dependency", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "hub-block-question", body: "Which audience?" });
+      hub.add("hub-owner-dependency", "Owner-selected dependency");
+      Object.assign(hub.items.get("hub-work")!, { state: "blocked", blockedOn: "hub-owner-dependency" });
+      await runNetworkBindingPass(deps, binding);
+      expect(hub.items.get("hub-work")).toMatchObject({ state: "blocked", blockedOn: "hub-owner-dependency" });
+    });
+
+    it.each(["unavailable", "revoked"] as const)("CR blocker read %s remains generic or stops on revocation", async (kind) => {
+      const binding = bind();
+      const first = await originateNetworkRequest(deps, binding, { peer: PEER, requestId: "blocked-answer", body: "First question" });
+      const second = await originateNetworkRequest(deps, binding, { peer: PEER, requestId: "readable-answer", body: "Second question" });
+      Object.assign(hub.items.get(first.hubQitemId)!, { state: "blocked", blockedOn: "unreadable-blocker" });
+      Object.assign(hub.items.get(second.hubQitemId)!, { state: "done", closureReason: "no-follow-on", resolution: "Answer still returns" });
+      hub.duringShow = id => { if (id === "unreadable-blocker") throw new HubError(kind, "fixture: blocker read failed"); };
+      await runNetworkBindingPass(deps, binding);
+      if (kind === "unavailable") {
+        expect(repo.getById("blocked-answer")!.networkWait).toMatchObject({ kind: "another-request", hubQitemId: null });
+        expect(repo.getById("readable-answer")).toMatchObject({ state: "done", resolution: "Answer still returns" });
+      } else expect(repo.getById("readable-answer")!.state).toBe("blocked");
+    });
+
+    it("CR an unreadable hub handoff clears a previous wait projection", async () => {
+      const binding = bind();
+      const sent = await originateNetworkRequest(deps, binding, { peer: PEER, requestId: "handoff-wait", body: "Which audience?" });
+      Object.assign(hub.items.get(sent.hubQitemId)!, { state: "blocked", blockedOn: null });
+      await runNetworkBindingPass(deps, binding);
+      expect(repo.getById("handoff-wait")!.networkWait).toMatchObject({ kind: "another-request" });
+      Object.assign(hub.items.get(sent.hubQitemId)!, { state: "handed-off", successor: null });
+      await runNetworkBindingPass(deps, binding);
+      expect(repo.getById("handoff-wait")).not.toHaveProperty("networkWait");
+      expect(repo.getById("handoff-wait")!.state).toBe("blocked");
+    });
+
+    it.each([true, false])("R1 uncertain retry preserves the current dependency (owner selected another=%s)", async (changed) => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const input = { requesterOf: work.qitemId, requestId: "qitem-old-question", body: "Which audience?" };
+      const hubId = networkHubRequestId(binding, input.requestId);
+      hub.loseCreateAnswer.add(hubId);
+      expect((await originateNetworkRequest(deps, binding, input)).state).toBe("unknown");
+      if (changed) {
+        await repo.create({ qitemId: "qitem-new-question", sourceSession: "dev-impl@lab", destinationSession: "dev-impl@lab", body: "A later decision", nudge: false });
+        repo.update({ qitemId: work.qitemId, actorSession: "dev-impl@lab", state: "blocked", blockedOn: "qitem-new-question" });
+      }
+      expect((await originateNetworkRequest(deps, binding, input)).state).toBe("sent");
+      expect.soft(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: changed ? "qitem-new-question" : input.requestId });
+      expect(hub.creates).toBe(1);
+      Object.assign(hub.items.get(hubId)!, { state: "done", closureReason: "no-follow-on", resolution: "Old question's answer" });
+      await runNetworkBindingPass(deps, binding);
+      expect(repo.getById(input.requestId)!.state).toBe("done");
+      expect(repo.getById(work.qitemId)).toMatchObject(changed ? { state: "blocked", blockedOn: "qitem-new-question" } : { state: "pending", blockedOn: null });
+      if (changed) expect(repo.getById("qitem-new-question")!.state).toBe("pending");
+    });
+
+    it("R1 overlapping first attempts establish the wait only on the actual receipt insert", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const input = { requesterOf: work.qitemId, requestId: "qitem-overlap", body: "Which audience?" };
+      let entered!: () => void, release!: () => void;
+      const waiting = new Promise<void>(resolve => { entered = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const create = repo.create.bind(repo); let first = true;
+      const spy = vi.spyOn(repo, "create").mockImplementation(async (change) => {
+        const row = await create(change);
+        if (change.qitemId === input.requestId && first) { first = false; entered(); await gate; }
+        return row;
+      });
+      const delayed = originateNetworkRequest(deps, binding, input);
+      await Promise.race([waiting, delayed.then(() => { throw new Error("Origination finished before reaching the overlap gate"); })]);
+      try {
+        const hubId = networkHubRequestId(binding, input.requestId);
+        hub.loseCreateAnswer.add(hubId);
+        expect((await originateNetworkRequest(deps, binding, input)).state).toBe("unknown");
+        await repo.create({ qitemId: "qitem-overlap-new", sourceSession: "dev-impl@lab", destinationSession: "dev-impl@lab", body: "Later dependency", nudge: false });
+        repo.update({ qitemId: work.qitemId, actorSession: "dev-impl@lab", state: "blocked", blockedOn: "qitem-overlap-new" });
+      } finally { release(); }
+      expect((await delayed).state).toBe("sent"); spy.mockRestore();
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: "qitem-overlap-new" });
+      expect([...hub.items.values()].filter(x => x.requesterOf === "hub-work")).toHaveLength(1);
+    });
+
+    it("R1 an interrupted initial wait rolls back its receipt and a same-id retry completes it", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const input = { requesterOf: work.qitemId, requestId: "qitem-incomplete", body: "Which audience?" };
+      const update = repo.updateWithinTransaction.bind(repo);
+      const spy = vi.spyOn(repo, "updateWithinTransaction").mockImplementation((change) => {
+        if (change.qitemId === work.qitemId && change.blockedOn === input.requestId) {
+          spy.mockRestore(); throw new Error("fixture: initial wait interrupted");
+        }
+        return update(change);
+      });
+      await expect(originateNetworkRequest(deps, binding, input)).rejects.toThrow("initial wait interrupted");
+      expect(db.prepare("SELECT count(*) AS n FROM network_requests WHERE local_qitem_id = ?").get(input.requestId)).toEqual({ n: 0 });
+      expect(repo.getById(input.requestId)!.state).toBe("blocked");
+      expect(repo.getById(work.qitemId)!.state).toBe("in-progress");
+      expect((await originateNetworkRequest(deps, binding, input)).state).toBe("sent");
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: input.requestId });
+      expect(hub.creates).toBe(1);
+    });
+
+    it.each(["missing", "unreadable"] as const)("R1 a %s requester advertisement cannot prevent an existing answer from returning", async (mode) => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const sent = await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "qitem-confirmed-question", body: "Which audience?" });
+      await runNetworkBindingPass(deps, binding);
+      Object.assign(hub.items.get(sent.hubQitemId)!, { state: "done", closureReason: "no-follow-on", resolution: "Person Alex: use the public audience." });
+      if (mode === "missing") hub.requesterQuestions = false;
+      else hub.failToolList = true;
+      await runNetworkBindingPass(deps, binding);
+      expect(repo.getById("qitem-confirmed-question")).toMatchObject({ state: "done", resolution: "Person Alex: use the public audience." });
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "pending", blockedOn: null });
+      expect(hub.creates).toBe(1);
+    });
+
+    it("R1 canceling a deferred unsupported question releases the work without a create", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      let connects = 0;
+      hub.duringConnect = () => { if (++connects === 2) hub.requesterQuestions = false; };
+      expect((await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "qitem-deferred", body: "Which audience?" })).state).toBe("unknown");
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: "qitem-deferred" });
+      repo.update({ qitemId: "qitem-deferred", actorSession: "dev-impl@lab", state: "done", closureReason: "canceled", resolution: "Canceled the question" });
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "pending", blockedOn: null });
+      expect(hub.creates).toBe(0);
+    });
+
+    it("an old hub writes no question, receipt or wait and never tries name-based create", async () => {
+      const { binding, work } = await incoming();
+      const count = db.prepare("SELECT count(*) AS n FROM queue_items").get();
+      await expect(originateNetworkRequest(deps, binding, {
+        requesterOf: work.qitemId, requestId: "qitem-question-old", body: "Who is the audience?",
+      })).rejects.toMatchObject({ code: "requester_question_unsupported" });
+      expect(db.prepare("SELECT count(*) AS n FROM queue_items").get()).toEqual(count);
+      expect(db.prepare("SELECT count(*) AS n FROM network_requests").get()).toEqual({ n: 0 });
+      expect(hub.creates).toBe(0);
+      expect(repo.getById(work.qitemId)!.state).toBe("in-progress");
+    });
+
+    it.each([false, true])("the HTTP request route forwards requesterOf and the named outcome (supported=%s)", async (supported) => {
+      hub.requesterQuestions = supported;
+      const { binding, work } = await incoming();
+      const app = new Hono();
+      app.use("*", async (c, next) => { c.set("rigRepo" as never, new RigRepository(db) as never); c.set("queueRepo" as never, repo as never); await next(); });
+      app.route("/api/network", networkRoutes({ home, hubConnect: hub.connect }));
+      const request = { requesterOf: work.qitemId, requestId: "route-question", body: "Which audience?", returnRoute: "auto" };
+      const res = await app.request(`/api/network/bindings/${binding.id}/requests`, { method: "POST",
+        headers: { "content-type": "application/json", "X-OpenRig-Session": "reviewer@lab" }, body: JSON.stringify(request) });
+      expect(res.status).toBe(supported ? 201 : 409);
+      const response = await res.json();
+      expect(response).toMatchObject(supported ? { localQitemId: "route-question", state: "sent" } : { error: "requester_question_unsupported" });
+      expect(hub.creates).toBe(supported ? 1 : 0);
+      if (!supported) expect(repo.getById("route-question")).toBeNull();
+      else {
+        const local = repo.getById("route-question")!;
+        expect(local).toMatchObject({ sourceSession: "reviewer@lab", returnRouteBasis: "issued" });
+        expect(repo.listTransitions("route-question")[0]).toMatchObject({ identityProvenance: "transport:v1" });
+        expect(local.returnRoute).toMatch(/^conversation-[a-f0-9]{12}@kernel$/);
+        expect(local.tags).toContain("network-requester-question");
+        expect(hub.items.get(response.hubQitemId)).toMatchObject({ requesterOf: "hub-work" });
+        const retry = await app.request(`/api/network/bindings/${binding.id}/requests`, { method: "POST",
+          headers: { "content-type": "application/json", "X-OpenRig-Session": "later-caller@lab" }, body: JSON.stringify(request) });
+        expect(retry.status).toBe(201);
+        expect(await retry.json()).toMatchObject({ sourceSession: "reviewer@lab", returnRoute: local.returnRoute, returnRouteBasis: "issued" });
+        expect(hub.creates).toBe(1);
+      }
+    });
+
+    it("pins the route by work id, mirrors its wait, and resumes the same work on the explicit answer", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const sent = await originateNetworkRequest(deps, binding, {
+        requesterOf: work.qitemId, requestId: "qitem-question", body: "Who is the audience? Ask the person; do not infer it.",
+      });
+      expect(sent.state).toBe("sent");
+      expect(hub.items.get(sent.hubQitemId)).toMatchObject({ requesterOf: "hub-work", destinationSession: PEER });
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: "qitem-question", claimedAt: work.claimedAt });
+      await runNetworkBindingPass(deps, binding);
+      expect(hub.items.get("hub-work")).toMatchObject({ state: "blocked", blockedOn: sent.hubQitemId });
+      // An explicit answer fixture for the question's destination. This is not a real person/UI journey.
+      expect(hub.items.get(sent.hubQitemId)!.destinationSession).toBe(PEER);
+      const connection = await hub.connect("https://hub.example/mcp", "tok");
+      await connection.close(sent.hubQitemId, { state: "done", closureReason: "no-follow-on", resolution: "The reader is a first-time event organiser." });
+      await runNetworkBindingPass(deps, binding);
+      expect(repo.getById("qitem-question")).toMatchObject({ state: "done", resolution: "The reader is a first-time event organiser." });
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "pending", claimedAt: work.claimedAt });
+      expect(hub.items.get("hub-work")!.state).toBe("in-progress");
+      expect(runs("hub-work")).toHaveLength(1);
+      expect(hub.creates).toBe(1);
+    });
+
+    it("recovers a lost create reply with the same question id, never a second question or pickup", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const id = networkHubRequestId(binding, "lost-question");
+      hub.loseCreateAnswer.add(id);
+      expect((await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "lost-question", body: "Which audience?" })).state).toBe("unknown");
+      await runNetworkBindingPass(deps, binding);
+      await runNetworkBindingPass(deps, binding);
+      expect(hub.creates).toBe(1);
+      expect(runs("hub-work")).toHaveLength(1);
+      expect(hub.items.get("hub-work")).toMatchObject({ state: "blocked", blockedOn: id });
+      expect(hub.items.get("hub-work")!.notes.filter(n => n.startsWith("Picked up"))).toHaveLength(1);
+    });
+
+    it("keeps the same question and blocked work across connector restart and binding replacement", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const result = await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "rebound-question", body: "Which audience?" });
+      await runNetworkBindingPass(deps, binding);
+      expect(hub.items.get("hub-work")!.state).toBe("blocked");
+      bindings.disconnect(binding.id);
+      const replacement = bindings.create({ session: binding.localSession, hubUrl: binding.hubUrl, hubSeat: binding.hubSeat, token: "replacement" });
+      await runNetworkBindingPass({ ...deps }, bindings.get(replacement.id)!);
+      expect(db.prepare("SELECT binding_id FROM network_receipts WHERE local_qitem_id = ?").get(work.qitemId)).toEqual({ binding_id: replacement.id });
+      Object.assign(hub.items.get(result.hubQitemId)!, { state: "done", closureReason: "no-follow-on", resolution: "Person Alex: use the public audience." });
+      await runNetworkBindingPass({ ...deps }, bindings.get(replacement.id)!);
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "pending", claimedAt: work.claimedAt });
+      expect(repo.getById("rebound-question")).toMatchObject({ state: "done", resolution: "Person Alex: use the public audience." });
+      expect(runs("hub-work")).toHaveLength(1);
+      expect(hub.creates).toBe(1);
+    });
+
+    it("rechecks the original work after capability discovery before creating remotely", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      let connects = 0;
+      hub.duringConnect = () => {
+        if (++connects === 2) repo.update({ qitemId: work.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "canceled", resolution: "No longer needed" });
+      };
+      const result = await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "stopped-question", body: "Which audience?" });
+      expect(result.state).toBe("refused");
+      expect(hub.creates).toBe(0);
+      expect(repo.getById("stopped-question")!.state).toBe("failed");
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "done", closureReason: "canceled" });
+    });
+
+    it("does not confirm a lost-reply readback that lacks the persisted original-work relation", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const hubId = networkHubRequestId(binding, "unconfirmed-question");
+      hub.loseCreateAnswer.add(hubId);
+      await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "unconfirmed-question", body: "Which audience?" });
+      hub.items.get(hubId)!.requesterOf = null;
+      await runNetworkBindingPass(deps, binding);
+      expect(db.prepare("SELECT hub_created_at FROM network_requests WHERE local_qitem_id = 'unconfirmed-question'").get()).toEqual({ hub_created_at: null });
+      expect(repo.getById("unconfirmed-question")!.state).toBe("blocked");
+      expect(hub.creates).toBe(1);
+      expect(hub.items.get("hub-work")!.state).toBe("in-progress");
+    });
+
+    it("keeps unrelated local waits and private notes off the hub", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      await repo.create({ qitemId: "private-local", sourceSession: "dev-impl@lab", destinationSession: "dev-impl@lab", body: "private" });
+      repo.update({ qitemId: work.qitemId, actorSession: "dev-impl@lab", state: "blocked", blockedOn: "private-local", transitionNote: "PRIVATE-NOTE" });
+      await runNetworkBindingPass(deps, binding);
+      expect(hub.items.get("hub-work")).toMatchObject({ state: "in-progress" });
+      expect(hub.items.get("hub-work")!.notes.join(" ")).not.toContain("PRIVATE");
+    });
+
+    it("refuses unreachable original requesters without a name fallback and releases the local wait", async () => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      hub.seats.delete(PEER);
+      const result = await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "unreachable-question", body: "Which audience?" });
+      expect(result.state).toBe("refused");
+      expect(result.message).toContain("requester_unreachable");
+      expect(repo.getById("unreachable-question")!.state).toBe("failed");
+      expect(repo.getById(work.qitemId)!.state).toBe("pending");
+      expect(hub.items.has(result.hubQitemId)).toBe(false);
+      expect(hub.creates).toBe(1);
+    });
+
+    it.each([true, false])("retains explicit remote waits without copying notes or hidden identities (visible=%s)", async (visible) => {
+      const binding = bind();
+      const sent = await originateNetworkRequest(deps, bindings.get(binding.id)!, { peer: PEER, requestId: "outgoing-work", body: "Do the work" });
+      const local = await repo.create({ qitemId: "local-dependent", sourceSession: "dev-impl@lab", destinationSession: "dev-impl@lab", body: "Wait for it" });
+      repo.update({ qitemId: local.qitemId, actorSession: "dev-impl@lab", state: "blocked", blockedOn: "outgoing-work" });
+      hub.add("remote-question", "PRIVATE QUESTION TEXT");
+      Object.assign(hub.items.get("remote-question")!, { requesterOf: sent.hubQitemId, sourceSession: PEER });
+      Object.assign(hub.items.get(sent.hubQitemId)!, { state: "blocked", blockedOn: visible ? "remote-question" : null });
+      await runNetworkBindingPass(deps, bindings.get(binding.id)!);
+      const expected = visible ? { kind: "requester-question", hubQitemId: "remote-question", localQitemId: runs("remote-question")[0]!.qitemId, blockerState: "in-progress" }
+        : { kind: "another-request", hubQitemId: null, localQitemId: null, blockerState: null };
+      expect(repo.getById("outgoing-work")!.networkWait).toMatchObject(expected);
+      expect(repo.getById(local.qitemId)!.waiting!.blocker!.networkWait).toMatchObject(expected);
+      const stored = db.prepare("SELECT remote_wait FROM network_requests WHERE local_qitem_id = 'outgoing-work'").get() as { remote_wait: string };
+      expect(stored.remote_wait).not.toContain("PRIVATE");
+      hub.items.get(sent.hubQitemId)!.state = "in-progress";
+      await runNetworkBindingPass(deps, bindings.get(binding.id)!);
+      expect(repo.getById("outgoing-work")).not.toHaveProperty("networkWait");
+    });
+
+    it.each(["failed", "canceled", "denied"] as const)("a %s question releases the local wait without becoming approval", async (state) => {
+      hub.requesterQuestions = true;
+      const { binding, work } = await incoming();
+      const sent = await originateNetworkRequest(deps, binding, { requesterOf: work.qitemId, requestId: "qitem-not-approved", body: "May I proceed?" });
+      Object.assign(hub.items.get(sent.hubQitemId)!, { state, closureReason: state === "failed" ? null : state, resolution: "No approval was given." });
+      await runNetworkBindingPass(deps, binding);
+      expect(repo.getById("qitem-not-approved")).toMatchObject({ state: state === "failed" ? "failed" : "done", resolution: "No approval was given." });
+      if (state !== "failed") expect(repo.getById("qitem-not-approved")!.closureReason).toBe(state);
+      expect(repo.getById(work.qitemId)!.state).toBe("pending");
+      expect(hub.items.get("hub-work")!.state).toBe("in-progress");
+    });
+  });
+
   describe("requests the seat sends through its hub", () => {
     const send = (bindingId: string, requestId: string, body = "Review the release notes", peer = PEER) =>
       originateNetworkRequest(deps, bindings.get(bindingId)!, { peer, requestId, body, summary: "Release notes review" });
@@ -1217,19 +1620,21 @@ describe("network connector", () => {
      *  (packages/cli/src/mcp-server.ts, externalTools and offered), a tool the grant doesn't name isn't listed, and a call
      *  to it gets the answer McpServer gives an unknown tool (the SDK's server/mcp.js: "Tool <name> not found", as a tool
      *  error). */
-    async function grantHub(offered: string[]) {
+    async function grantHub(offered: string[], requesterQuestions = false) {
       const { createServer } = await import("node:http");
       const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
       const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
       const { CallToolRequestSchema, ListToolsRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
       const items = new Map<string, HubItem>();
+      const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
       const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });
       const refused = (text: string, code?: string) => ({ isError: true, content: [{ type: "text" as const, text }], ...(code ? { structuredContent: { code } } : {}) });
       const tools: Record<string, (args: Record<string, unknown>) => unknown> = {
         rig_team: () => json({ rig: "team", seats: [{ session: PEER }] }),
         rig_queue_create: (args) => {
           const id = String(args.qitemId);
-          if (!items.has(id)) items.set(id, { qitemId: id, sourceSession: PARTICIPANT, destinationSession: String(args.destination), state: "pending",
+          if (!items.has(id)) items.set(id, { qitemId: id, sourceSession: PARTICIPANT, destinationSession: args.requesterOf ? items.get(String(args.requesterOf))!.sourceSession! : String(args.destination), state: "pending",
+            requesterOf: typeof args.requesterOf === "string" ? args.requesterOf : null,
             body: String(args.body), summary: null, resolution: null, closureReason: null });
           return json(items.get(id));
         },
@@ -1250,18 +1655,51 @@ describe("network connector", () => {
       };
       const server = createServer((req, res) => {
         const mcp = new Server({ name: "grant hub", version: "1" }, { capabilities: { tools: {} } });
-        mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: offered.map((name) => ({ name, inputSchema: { type: "object" as const } })) }));
-        mcp.setRequestHandler(CallToolRequestSchema, async (request) => (offered.includes(request.params.name)
-          ? tools[request.params.name]!(request.params.arguments ?? {})
-          : refused(`MCP error -32602: Tool ${request.params.name} not found`)) as never);
+        mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: offered.map((name) => ({ name, inputSchema: { type: "object" as const, additionalProperties: false,
+          ...(name === "rig_queue_create" && requesterQuestions ? { properties: { requesterOf: { type: "string" } } } : {}) } })) }));
+        mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
+          calls.push({ name: request.params.name, args: request.params.arguments ?? {} });
+          return (offered.includes(request.params.name) ? tools[request.params.name]!(request.params.arguments ?? {})
+            : refused(`MCP error -32602: Tool ${request.params.name} not found`)) as never;
+        });
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         res.on("close", () => { void transport.close(); void mcp.close(); });
         void mcp.connect(transport).then(() => transport.handleRequest(req, res));
       });
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
-      return { items, url: `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`,
+      return { items, calls, url: `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`,
         close: () => new Promise<void>((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }) };
     }
+
+    it.each([false, true])("requester routing checks the real MCP input schema (advertised=%s) before any local write", async (advertised) => {
+      const real = await grantHub(["rig_queue_create", "rig_queue_show"], advertised);
+      try {
+        const first = bind();
+        bindings.disconnect(first.id);
+        const b = bindings.create({ session: first.localSession, hubUrl: real.url, hubSeat: PARTICIPANT, token: "tok-grant", allowHttp: true });
+        const work = await repo.create({ qitemId: "wire-work", sourceSession: OPENRIG_SENDER, destinationSession: first.localSession, body: "Work" });
+        repo.claim({ qitemId: work.qitemId, destinationSession: first.localSession });
+        db.prepare("INSERT INTO network_receipts (binding_id, hub_qitem_id, local_qitem_id, created_at) VALUES (?, ?, ?, ?)")
+          .run(b.id, "wire-hub-work", work.qitemId, new Date().toISOString());
+        real.items.set("wire-hub-work", { qitemId: "wire-hub-work", sourceSession: PEER, destinationSession: PARTICIPANT, state: "in-progress", body: "Work", summary: null, resolution: null, closureReason: null });
+        const send = originateNetworkRequest({ ...deps, connect: connectMcpHub }, bindings.get(b.id)!, { requesterOf: work.qitemId, requestId: "wire-question", body: "Which audience?" });
+        if (advertised) {
+          const result = await send;
+          expect(result.state).toBe("sent");
+          const create = real.calls.filter(c => c.name === "rig_queue_create");
+          expect(create).toHaveLength(1);
+          expect(create[0]!.args).toMatchObject({ requesterOf: "wire-hub-work", body: "Which audience?" });
+          expect(create[0]!.args).not.toHaveProperty("destination");
+          expect(real.items.get(result.hubQitemId)).toMatchObject({ requesterOf: "wire-hub-work", destinationSession: PEER });
+        } else {
+          await expect(send).rejects.toMatchObject({ code: "requester_question_unsupported" });
+          expect(real.calls).toEqual([]);
+          expect(repo.getById("wire-question")).toBeNull();
+          expect(repo.getById(work.qitemId)!.state).toBe("in-progress");
+          expect(db.prepare("SELECT count(*) AS n FROM network_requests").get()).toEqual({ n: 0 });
+        }
+      } finally { await real.close(); }
+    });
 
     it.each([
       ["sending only (team, create and show)", ["rig_team", "rig_queue_create", "rig_queue_show"]],

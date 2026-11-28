@@ -2,6 +2,9 @@ import nodePath from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 
+import { SettingsStore } from "./user-settings/settings-store.js";
+import { ProjectReadError, selectCatalogProject } from "./workspace/project-catalog.js";
+
 const ENV_REF = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
 
 /** Expands a leading `~` and `$VAR` / `${VAR}` references. A reference to an unset variable is
@@ -15,6 +18,38 @@ export function expandCwd(
   return tilded.replace(ENV_REF, (ref, braced?: string, bare?: string) => env[braced ?? bare!] ?? ref);
 }
 
+/** Install preflight may preview a carried project's destination before routing creates it.
+ * Actual launch never receives these roots: it reads the registered catalog. */
+export type PlannedProjectRoots = Readonly<Record<string, string>>;
+
+/** Expected project lookup/syntax failure, reported by launch and preflight boundaries. */
+export class ProjectCwdError extends Error {}
+
+export function projectCwdReference(authored: string): { id: string; suffix: string } | undefined {
+  if (!authored.includes("${project:")) return undefined;
+  const match = /^\$\{project:([^{}\/\\:\s]+)\}(\/.*)?$/.exec(authored);
+  if (!match || match[2]?.includes("${project:")) throw new ProjectCwdError('Project cwd must be "${project:project-id}" or "${project:project-id}/relative/path"; correct the cwd or supply --cwd.');
+  return { id: match[1]!, suffix: match[2] ?? "" };
+}
+
+export function resolveProjectCwd(authored: string, plannedRoots?: PlannedProjectRoots): string | undefined {
+  const ref = projectCwdReference(authored);
+  if (!ref) return undefined;
+  const catalog = new SettingsStore().resolveOne("workspace.catalog_path").value as string;
+  const planned = plannedRoots && Object.hasOwn(plannedRoots, ref.id) ? plannedRoots[ref.id] : undefined;
+  let root: string | undefined;
+  try { root = selectCatalogProject(catalog, ref.id)?.root; }
+  catch (err) {
+    if (!(err instanceof ProjectReadError) || !["project_not_found", "project_root_missing"].includes(err.code) || !planned) {
+      throw new ProjectCwdError(`Cannot resolve project cwd '${ref.id}': ${(err as Error).message}. Register that project or supply --cwd.`);
+    }
+  }
+  root ??= planned;
+  if (!root) throw new ProjectCwdError(`Cannot resolve project cwd '${ref.id}': no registered project in ${catalog}. Register that project or supply --cwd.`);
+  // The catalog root is already resolved; a literal '$' in its name is not an environment reference.
+  return nodePath.resolve(root, "." + ref.suffix);
+}
+
 /** Picks the directory an authored cwd means. The literal path wins when it exists, so a directory
  *  named with `~` or `$NAME` keeps its destination; otherwise the expanded path is used. A relative
  *  path resolves under `specRoot`; with no `specRoot` it stays relative, as the caller selected before. */
@@ -25,6 +60,8 @@ export function resolveAuthoredCwd(
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
 ): string {
+  const project = resolveProjectCwd(authored);
+  if (project) return project;
   const place = (p: string) => (specRoot === null || nodePath.isAbsolute(p) ? p : nodePath.resolve(specRoot, p));
   const literal = place(authored);
   return exists(literal) ? literal : place(expandCwd(authored, env, home));
@@ -39,6 +76,7 @@ export function resolveLaunchCwd(
   authoredCwd: string | null | undefined,
   specRoot: string,
   cwdOverride?: string | null,
+  plannedProjectRoots?: PlannedProjectRoots,
 ): string {
   const override = normalizeCwdOverride(cwdOverride);
   if (override) {
@@ -47,7 +85,7 @@ export function resolveLaunchCwd(
   if (!authoredCwd || authoredCwd.trim().length === 0) {
     return nodePath.resolve(specRoot);
   }
-  return resolveAuthoredCwd(authoredCwd, specRoot);
+  return resolveProjectCwd(authoredCwd, plannedProjectRoots) ?? resolveAuthoredCwd(authoredCwd, specRoot);
 }
 
 export function getOpenRigInstallRoot(): string {

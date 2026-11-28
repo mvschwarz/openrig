@@ -60,6 +60,19 @@ describe("Rigspec export routes", () => {
     db.close();
   });
 
+  it("names seat-specific startup text omitted from both export formats", async () => {
+    const rig = rigRepo.createRig("startup-export");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
+    rigRepo.addNode(rig.id, "dev.worker", { runtime: "codex", podId: pod.id, agentRef: "local:agents/worker", profile: "default", cwd: ".",
+      launchRecipe: { version: 1, rigRoot: "/tmp", startupTextPrivateLayers: ["rig"], rigSpec: { version: "0.2", name: "startup-export", edges: [], pods: [{ id: "dev", label: "Dev", edges: [], members: [{ id: "worker", agentRef: "local:agents/worker", profile: "default", runtime: "codex", cwd: "." }] }] } } });
+    for (const path of ["spec", "spec.json"]) {
+      const response = await app.request(`/api/rigs/${rig.id}/${path}`);
+      expect(response.status).toBe(200);
+      expect(JSON.parse(decodeURIComponent(response.headers.get("X-OpenRig-Export-Warnings")!))).toContainEqual({ logicalId: "dev.worker", reason: "seat-specific startup text is not carried" });
+      if (path === "spec") expect(await response.text()).toContain('# Not carried: "dev.worker"\'s seat-specific startup text');
+    }
+  });
+
   it("#1631 names unknown member startup on YAML and JSON export without inventing a declaration", async () => {
     const rig = rigRepo.createRig("old-pod");
     const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");

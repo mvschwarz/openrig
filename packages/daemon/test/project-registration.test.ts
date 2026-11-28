@@ -46,6 +46,20 @@ describe("registerBundleProject", () => {
     return (parseYaml(fs.readFileSync(catalogPath, "utf-8")) as { projects: Array<Record<string, unknown>> }).projects;
   }
 
+  it("previews the same destination and conflicts without placing folders or editing the catalog", () => {
+    const input = { bundleProjectDir: bundleProject, projectId: "openrig", rigName: "openrig-dev", projectsRoot, catalogPath, workspaceRoot: workspace };
+    const preview = registerBundleProject(input, { plan: true });
+    expect(preview).toMatchObject({ status: "registered", planned: true, projectRoot: path.join(projectsRoot, "openrig") });
+    expect(fs.existsSync(workspace)).toBe(false);
+    const actual = registerBundleProject(input);
+    expect(actual.projectRoot).toBe(preview.projectRoot);
+    const before = fs.readFileSync(catalogPath, "utf8");
+    expect(registerBundleProject(input, { plan: true }).status).toBe("already_registered");
+    expect(registerBundleProject({ ...input, projectsRoot: path.join(work, "other") }, { plan: true }).status).toBe("conflict");
+    expect(fs.readFileSync(catalogPath, "utf8")).toBe(before);
+    expect(fs.existsSync(path.join(work, "other"))).toBe(false);
+  });
+
   it("beside a user's project: adds the bundle's entry and leaves the user's entry and comments as they were", () => {
     fs.mkdirSync(workspace, { recursive: true });
     fs.writeFileSync(catalogPath, USER_CATALOG);

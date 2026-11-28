@@ -626,6 +626,28 @@ describe("seat-pool add: while max drops and across a restart (#3395 Piece 1)", 
     expect(w.stopSeat).not.toHaveBeenCalled();
   });
 
+  it("An add whose failed call left no session keeps that call on its row while a later cycle still finds no session.", async () => {
+    const w = lifecycleWorld();
+    const m = await w.model({ max: 1, min: 1 });
+    w.launchHarness.mockResolvedValueOnce({ ok: false, error: "harness exited" });
+    w.hooks.afterAdd = () => {
+      const agent = w.nodeOf(m.rigId, "dev.impl-s1")!;
+      w.db.prepare("DELETE FROM sessions WHERE node_id = ?").run(agent.id);
+    };
+    await w.notesOf(m.jobId);
+    await w.executor().idle();
+    w.hooks.afterAdd = undefined;
+    const [first] = w.slots.forModel(m.nodeId);
+    expect(JSON.parse(first!.attemptOutcome!)).toMatchObject({ status: "unknown", code: "no_session", call: { ok: true, status: "failed" } });
+    for (let i = 0; i < 2; i++) {
+      await w.notesOf(m.jobId);
+      await w.executor().idle();
+      const [kept] = w.slots.forModel(m.nodeId);
+      expect(JSON.parse(kept!.attemptOutcome!)).toMatchObject({ status: "unknown", code: "no_session", call: { ok: true, status: "failed" } });
+    }
+    expect(w.converge).toHaveBeenCalledTimes(1);
+  });
+
   it("An add whose settle fails after its call returned keeps the call on its row, and a later cycle settles it by that call.", async () => {
     const w = lifecycleWorld();
     const m = await w.model({ max: 1, min: 1 });
@@ -644,15 +666,17 @@ describe("seat-pool add: while max drops and across a restart (#3395 Piece 1)", 
     expect(kept).toMatchObject({ nodeId: agent.id, phase: "adding", attemptState: "issued" });
     expect(JSON.parse(kept!.attemptOutcome!)).toMatchObject({ status: "unknown", code: "settle_failed", call: { ok: true, status: "failed", nodeId: agent.id } });
 
-    // the next cycles read it again with the kept call: a failed launch whose session runs is not settled running
+    // the next cycles read it again with the kept call: a failed launch whose session runs is never settled running; it
+    // is held `live`, by the launch's status
     for (let i = 0; i < 2; i++) {
       const notes = await w.notesOf(m.jobId);
       await w.executor().idle();
       expect(JSON.stringify(notes.settled ?? [])).not.toContain("\"running\"");
     }
     const [slot] = w.slots.forModel(m.nodeId);
-    expect(slot).toMatchObject({ nodeId: agent.id, phase: "adding", attemptState: "issued", reuseHold: null });
-    expect(JSON.parse(slot!.attemptOutcome!)).toMatchObject({ status: "unknown", call: { ok: true, status: "failed", nodeId: agent.id } });
+    expect(slot).toMatchObject({ nodeId: agent.id, phase: "live", attemptState: "settled" });
+    expect(JSON.parse(slot!.reuseHold!)).toMatchObject({ code: "failed" });
+    expect(JSON.parse(slot!.attemptOutcome!)).toMatchObject({ status: "attention_required", code: "failed", call: { ok: true, status: "failed", nodeId: agent.id } });
     expect(w.converge).toHaveBeenCalledTimes(1);
     expect(w.stopSeat).not.toHaveBeenCalled();
     expect(id).toBe(slot!.attemptId);

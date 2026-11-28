@@ -471,6 +471,21 @@ type HeldRowFacts = Pick<QueueItem, "state" | "claimedAt" | "handedOffFrom" | "l
 /** #48: a created row (no handoff) whose wake the seat's guard held. The stuck sweep leaves a hold-mode row alone, so
  *  the ladder gives it the one held escalation batons get, and a draft-aware one once its idle retries reach the cap.
  *  Rows OpenRig raised itself (escalations, sweep findings, reminders) keep their own paths. */
+/** A queue wake the draft-aware guard held (as against a typing-guard hold, which is the person's choice). */
+export const DRAFT_HELD_WAKE_RESULT = "retained:draft_aware";
+
+/** #48, #4041: a pending, unclaimed row whose wake the draft-aware guard held, retried by its seat's idle report and the
+ *  periodic offer (QueueRepository.retryDraftHeldWakesOnIdle selects the same rows). The ladder's retry rung doesn't
+ *  retry it too; the ladder takes it once those tries reach the cap or the unconfirmed window passes.
+ *  - A created row #48 covers.
+ *  - A `rig queue handoff` successor, since handing work over is how it ordinarily reaches a seat, while its seat is in
+ *    draft-aware mode (`idleRetryOwns`), which is when those tries can run. Otherwise it keeps the ladder's own retry
+ *    path (#344), so there's one retry owner at a time and a successor is never left with none. */
+function idleRetriedDraftHold(row: HeldRowFacts & { destinationSession: string }, idleRetryOwns?: (session: string) => boolean): boolean {
+  if (row.state !== "pending" || row.claimedAt || row.lastNudgeResult !== DRAFT_HELD_WAKE_RESULT) return false;
+  return row.handedOffFrom ? idleRetryOwns?.(row.destinationSession) === true : heldCreatedRow(row);
+}
+
 function heldCreatedRow(row: HeldRowFacts): boolean {
   return row.state === "pending" && !row.claimedAt && !row.handedOffFrom && readWakeOutcome(row.lastNudgeResult)?.fact === "held"
     && !isOpenRigSender(row.sourceSession) && !row.sourceSession.endsWith("@system")
@@ -563,7 +578,8 @@ function suspensionReason(db: Database.Database, destination: string, graceSecon
 /** Read the existing ladder's next eligible action; never create an intent,
  * reserve a retry, consume provider state or change its policy. The scheduler
  * still makes the final live-state decision at delivery time. */
-export function readWakeLadderBackstop(db: Database.Database, qitemId: string, acceptsDestination?: (destination: string) => boolean): WaitingView["nextBackstop"] | null {
+export function readWakeLadderBackstop(db: Database.Database, qitemId: string, acceptsDestination?: (destination: string) => boolean,
+  idleRetryOwns?: (session: string) => boolean): WaitingView["nextBackstop"] | null {
   const row = db.prepare(`SELECT qitem_id AS qitemId, state, source_session AS sourceSession,
     destination_session AS destinationSession, claimed_at AS claimedAt, handed_off_from AS handedOffFrom,
     last_heartbeat AS lastHeartbeat, last_nudge_result AS lastNudgeResult,
@@ -583,9 +599,11 @@ export function readWakeLadderBackstop(db: Database.Database, qitemId: string, a
   if (recovery && !["pending", "in-progress", "blocked"].includes(recovery.state)) return recoveryBackstop();
   if (recovery && disposition && JSON.parse(disposition.tags ?? "[]").includes(PROMPT_ALERT_TAG)) return recoveryBackstop();
   // A held created row (#48) isn't eligible here: until the ladder's one notice it reads as held, and after it the
-  // recovery row it raised is its next step.
-  const mode = unclaimedWakeMode({ ...row, tags: JSON.parse(row.tagsJson ?? "[]") as string[] });
-  const eligible = (row.state === "pending" && !row.claimedAt && row.handedOffFrom)
+  // recovery row it raised is its next step. A draft-held handoff successor whose seat is in draft-aware mode is retried by
+  // the idle report (#4041), so the ladder's retry time isn't its next step either.
+  const facts = { ...row, tags: JSON.parse(row.tagsJson ?? "[]") as string[] };
+  const mode = unclaimedWakeMode(facts);
+  const eligible = (row.state === "pending" && !row.claimedAt && row.handedOffFrom && !idleRetriedDraftHold(facts, idleRetryOwns))
     || (row.state === "in-progress" && row.claimedAt && mode === "failed" && db.prepare(
       "SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND transition_note LIKE 'parked-owner wake delivery failed:%' LIMIT 1",
     ).get(qitemId));
@@ -960,10 +978,11 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       if (disposition && !["pending", "in-progress", "blocked"].includes(disposition.state)) continue;
       const view = readLadder(deps.db, row.qitemId);
       if (view.exhausted) continue; // finite: an exhausted ladder never re-fires
-      // #48: a created row's draft-aware hold is retried on its seat's idle report (retryDraftHeldWakesOnIdle), never on
-      // this timer. The ladder takes it once those tries reach the cap, or once the unconfirmed window passes, since a
-      // draft left in the box gives no idle report.
-      if (createdHeld && mode === "failed" && view.attempts < cap && minutesSince(row.tsCreated, now) < windowMin) continue;
+      // #48, #4041: a draft-aware hold, on a created row or a handoff successor, is retried on its seat's idle report and the
+      // periodic offer (retryDraftHeldWakesOnIdle), never on this timer. The ladder takes it once those tries reach the cap,
+      // or once the unconfirmed window passes, since a draft left in the box gives no idle report.
+      const idleRetried = idleRetriedDraftHold(row, session => deps.queueRepo.draftHeldIdleRetryOwns?.(session) === true);
+      if (idleRetried && mode === "failed" && view.attempts < cap && minutesSince(row.tsCreated, now) < windowMin) continue;
 
       // F1 gates for the unconfirmed class: never re-nudge; enter only past the window
       // with zero pickup evidence.
@@ -997,9 +1016,9 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       if (recoveryRow?.tags?.includes(PROMPT_ALERT_TAG)
         && ["pending", "in-progress", "blocked"].includes(recoveryRow.state)) continue;
 
-      // Retry rung — failed outcomes only, under the cap, inside the destination budget. A held created row's retries
-      // are its idle report's (#48).
-      if (mode === "failed" && view.attempts < cap && !createdHeld) {
+      // Retry rung — failed outcomes only, under the cap, inside the destination budget. A draft-held row's retries are
+      // its idle report's (#48, #4041).
+      if (mode === "failed" && view.attempts < cap && !createdHeld && !idleRetried) {
         if (!due) continue;
         // F2 — derived suspension, checked only when the ladder would otherwise act.
         if (suspended) {
@@ -1035,7 +1054,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       // Escalation phase (past the cap, or the F1 direct path). Grouped per destination
       // regardless of due-ness so the aggregate refresh rides every detection pass.
       const reason =
-        createdHeld && mode === "failed"
+        (createdHeld || idleRetried) && mode === "failed"
           ? `held by ${row.destinationSession}'s draft-aware guard for ${minutesSince(row.tsCreated, now)} min (${view.attempts} retries): each try stopped before typing anything (a draft, a prompt, a seat that wasn't ready, or input it couldn't read or reach)`
           : mode === "failed"
           ? `wake failed ${view.attempts} times over ${minutesSince(view.firstMarkerTs ?? row.tsCreated, now)} min`

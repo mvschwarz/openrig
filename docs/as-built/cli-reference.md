@@ -1292,7 +1292,7 @@ reports launch intent, not the model actually used by the successor. Older daemo
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig network` | — | — |
-| `rig network enroll <code>` | — | `--site <url>` **required**<br>`--allow-http`<br>`--replace`<br>`--json` |
+| `rig network enroll [code]` | — | `--site <url>` **required**<br>`--code-file <path>`<br>`--code-stdin`<br>`--allow-http`<br>`--replace`<br>`--json` |
 | `rig network connect <seat>` | — | `--as <participant>` **required**<br>`--hub <url>`<br>`--token-file <path>`<br>`--allow-http`<br>`--json` |
 | `rig network status` | — | `--json` |
 | `rig network disconnect <binding-or-seat>` | — | `--reason <text>`<br>`--json` |

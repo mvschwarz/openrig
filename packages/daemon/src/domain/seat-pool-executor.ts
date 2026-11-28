@@ -63,9 +63,15 @@ import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 // slot's own row and issues it under the lease; after the lease is released, the executor's `comeback` launches the
 // slot's own node through `launchSingleNode` with that explicit `snapshotId`, never without one, so the agent comes back
 // with its own sessions and stored settings. It settles running (`live`), or, refused before any launch, `drained` with
-// the refusal's code as its reuse hold, so the same snapshot is never sent again. Right before its launch the job and the
-// rig are read again: with the job stopped or the rig down, it is never launched and the slot is `drained` again. Only
-// when no eligible slot is left does the unit take a new number.
+// the refusal's code as its reuse hold, so the same snapshot is never sent again. A launch that ends without proof that
+// the agent runs holds the slot and is never repeated: awaiting a decision, or failed with no session running, the slot
+// is `drained` and held; needing attention, left attached, or failed while its session still runs, it is `live` and
+// held (it takes room, is not free, receives no row and is never drained by the pool). A live session that the launch
+// found already there (`alreadyRunning`) makes the slot `live` with no hold, free only once idle at its prompt. Right
+// before its issue the comeback is checked as an add is (the job, the holds, the block and surplus): one that would not
+// be issued is cancelled (`cancelled: not issued`) and the slot stays `drained` and eligible. Right before its launch
+// the job and the rig are read again: with the job stopped or the rig down, it is never launched and the slot is
+// `drained` again. Only when no eligible slot is left does the unit take a new number.
 //
 // A new number reserves a new `<member>-s<n>` slot, issues it with an operation id, and, after the lease is released, adds
 // the member through the same converge path as `rig add`, from the model member as the export writes it (without
@@ -82,7 +88,17 @@ import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 // running any more: a `reserved` row is cancelled; an `issued` one that is not in flight here (an add cut off by a daemon
 // restart, or one left `unknown`) is read again through its operation id, by replaying `reserveOperation` with what the
 // add was issued on. No node recorded: the row goes (`not launched (interrupted before create)`); a node: settled by the
-// same rule as above. The add is never issued again.
+// same rule as above. The add is never issued again. An issued comeback no process runs any more is settled from the
+// `restore.subset_completed` after what it was issued on that names its node (the launch records it before it returns),
+// by the same rule as its launch; with no such event and no newer session on its node, it stays issued and `unknown`,
+// takes room, and is never launched again.
+//
+// A held slot (a reuse hold on a `drained` or `live` slot) is read again at the start of each cycle, under the custody
+// lease: only a later change on its node (a session newer than the one the hold was set with, or a new status or startup
+// status on that session) can end the hold, and the node's latest session decides. Ready and not confirmed stopped: the
+// slot is `live` with no hold. Confirmed absent (exited, or confirmed stopped): `drained` and eligible, unless the hold
+// awaits a decision and no later session reached `ready`. Running with a startup that needs attention or failed: `live`
+// and held. Anything else is reported `unknown` with what was read, and read again next cycle.
 //
 // The whole pool is held, and nothing moves, drains, comes back or is added, while the job is not `active`, while the
 // stored block can't be read, while the model node is gone (or has no canonical session), and from the rig's latest
@@ -174,7 +190,8 @@ export interface SeatPoolExecutorDeps {
   rigRepo: Pick<RigRepository, "getNodePool" | "getNodeLaunchRecipe" | "getRig">;
   slots: Pick<SeatPoolSlotsRepository, "forModel" | "setPhase" | "stopOutcome" | "get" | "reserveAdd" | "issueAttempt"
     | "recordAttemptNode" | "settleAdd" | "settleAddNotRunning" | "recordAttemptOutcome" | "removeAddWithoutNode" | "cancelReservedAdd"
-    | "reserveComeback" | "holdComeback" | "settleComebackRefused" | "returnComebackToDrained">;
+    | "reserveComeback" | "holdComeback" | "settleComebackRefused" | "returnComebackToDrained" | "settleAddHeldLive"
+    | "settleComebackHeld" | "recordHeldSession" | "changeHeld" | "reopenHeld" | "settleIssuedByLater">;
   jobsRepo: Pick<WatchdogJobsRepository, "getById">;
   queue: SeatPoolQueue;
   /** Messages held for a node in the outbox (OutboxHandler.heldCount). */
@@ -391,7 +408,9 @@ export function readSeatPoolAgents(deps: SeatPoolExecutorDeps, slots: readonly S
     const latestSessionStatus = nodeId === null
       ? null
       : (latestStatus.get(nodeId) as { status: string } | undefined)?.status ?? null;
-    const running = nodeId !== null && (latestSessionStatus === "running" || latestSessionStatus === "idle")
+    // A `live` slot with a reuse hold is not proven to run: it takes room, but it is not free and receives no row.
+    const heldLive = slot.phase === "live" && slot.reuseHold !== null;
+    const running = nodeId !== null && !heldLive && (latestSessionStatus === "running" || latestSessionStatus === "idle")
       && !deps.confirmedStopped(nodeId);
     const state = running ? deps.seatState(nodeId!) : null;
     const idleAtPrompt = state?.activity === "idle-at-prompt" && state.needsInput.count === 0 && !state.backgroundWork;
@@ -489,12 +508,17 @@ function unreadableAdvisory(error: string): string {
  * How an attempt is reported, in `attempt.status`, never as a stop. An add: `in_flight` (reserved or issued, its call not
  * settled), `cancelled` (not issued), `running`, `no_node` (no node was created), `not_running` (a node that does not run,
  * with what was `observed`: its latest session `exited`, or its executor confirmed stopped, `probe_absent`) and `unknown`
- * (issued, with a node whose result can't be told yet; read again every cycle). A comeback: `in_flight` until it settles,
- * then `running` (with the snapshot it was launched from) or `refused` before any launch, with its code.
+ * (issued, with a node whose result can't be told yet; read again every cycle). A comeback: `in_flight` while its call
+ * runs in this process, then `running` (with the snapshot it was launched from), `already_running` (a live session the
+ * launch found), `not_running` (a decision awaited, or failed with nothing running, its launch status in `code`) or
+ * `refused` before any launch, with its code; `cancelled` before its issue; `unknown` while it stays issued with no
+ * call running. A `live` slot that is held, whichever attempt it came from, is reported `attention_required` or
+ * `left_attached`, with the launch's status in `code` when it is another one (a failure whose session still runs).
  */
 interface AttemptView {
   id: string;
-  status: "in_flight" | "cancelled" | "running" | "no_node" | "not_running" | "unknown" | "refused";
+  status: "in_flight" | "cancelled" | "running" | "already_running" | "no_node" | "not_running" | "attention_required"
+    | "left_attached" | "unknown" | "refused";
   observed?: "exited" | "probe_absent";
   message?: string;
   code?: string;
@@ -519,22 +543,84 @@ function slotRecord(text: string | null): Record<string, unknown> | null {
   }
 }
 
-/** A slot's attempt as its row records it. A comeback first: in flight until it settles, then `refused` with its code or
- *  `running` with its snapshot. An add: an issued one with an `unknown` outcome is reported so, and a settled one by the
+/** The statuses a held `live` slot is reported with (the E1 L10 row). */
+type HeldLiveStatus = "attention_required" | "left_attached";
+
+/** How a held `live` slot is reported, from its hold: `left_attached`, or `attention_required` (with the launch's status in
+ *  `code` when it is another one, as a failure whose session still runs), with the hold's error. */
+function heldLiveView(attemptId: string, hold: Record<string, unknown>): AttemptView {
+  const code = typeof hold["code"] === "string" ? hold["code"] : "attention_required";
+  const status: HeldLiveStatus = code === "left_attached" ? "left_attached" : "attention_required";
+  return {
+    id: attemptId, status,
+    ...(code !== status ? { code } : {}),
+    ...(typeof hold["error"] === "string" ? { message: hold["error"] } : {}),
+  };
+}
+
+/** A slot's attempt as its row records it. A `live` slot that is held is reported from its hold. A comeback: in flight
+ *  while its call runs in this process (`inFlightIds`; without it, every issued one), `unknown` once no call runs it,
+ *  then by how it settled. An add: an issued one with an `unknown` outcome is reported so, and a settled one by the
  *  status its outcome kept (a settled add with no such status settled running). */
-function attemptView(slot: SeatPoolSlot): AttemptView | undefined {
+function attemptView(slot: SeatPoolSlot, inFlightIds?: ReadonlySet<string>): AttemptView | undefined {
   if (slot.attemptId === null || slot.attemptState === null) return undefined;
   const outcome = readAttemptOutcome(slot.attemptOutcome);
+  const text = (key: string) => (typeof outcome[key] === "string" ? { [key]: outcome[key] as string } : {});
+  if (slot.attemptState === "settled" && slot.phase === "live" && slot.reuseHold !== null) {
+    return heldLiveView(slot.attemptId, slotRecord(slot.reuseHold) ?? {});
+  }
+  // Put back in `adding` by a later session that has not settled: unknown, read again every cycle.
+  if (slot.attemptState === "issued" && outcome["reread"] === "session") {
+    const pending = slotRecord(JSON.stringify(outcome["pending"] ?? null)) ?? {};
+    return { id: slot.attemptId, status: "unknown", code: typeof pending["code"] === "string" ? pending["code"] : "later_session_not_settled",
+      ...(typeof pending["message"] === "string" ? { message: pending["message"] } : {}) };
+  }
+  if (slot.attemptState === "settled") {
+    const hold = slotRecord(slot.reuseHold);
+    // Held `drained` for a decision or a failure the launch (or a later restore) returned: not running, with that status.
+    if (slot.phase === "drained" && hold !== null && !("observed" in hold) && (hold["code"] === "awaiting-decision" || hold["code"] === "failed")) {
+      return { id: slot.attemptId, status: "not_running", code: hold["code"], ...(typeof hold["error"] === "string" ? { message: hold["error"] } : {}) };
+    }
+    // Settled by a later session on its node rather than by its call.
+    // Reported by what that session read when it settled the attempt, not by the slot's phase now (a normal drain later
+    // does not change how the attempt settled).
+    if (outcome["settledBy"] === "later_session") {
+      const later = slotRecord(JSON.stringify(outcome["later"] ?? null));
+      const ran = later !== null && typeof later["read"] === "string" ? later["read"] === "ready" : slot.phase === "live" && slot.reuseHold === null;
+      return ran
+        ? { id: slot.attemptId, status: "running", code: "later_session" }
+        : { id: slot.attemptId, status: "not_running", code: "later_session_absent" };
+    }
+  }
   if (slot.attemptKind === "comeback") {
-    if (slot.attemptState !== "settled") return inFlight(slot.attemptId);
+    if (slot.attemptState !== "settled") {
+      if (inFlightIds === undefined || inFlightIds.has(slot.attemptId)) return inFlight(slot.attemptId);
+      return { id: slot.attemptId, status: "unknown", code: typeof outcome["code"] === "string" ? outcome["code"] : "no_outcome",
+        message: typeof outcome["message"] === "string" ? outcome["message"]
+          : "unknown: the comeback's launch is not running in this process and its result is not recorded" };
+    }
+    if (outcome["cancelled"] === true) {
+      return { id: slot.attemptId, status: "cancelled", message: CANCELLED_NOT_ISSUED, ...text("code") };
+    }
+    if (outcome["settledAs"] === "already_running") return { id: slot.attemptId, status: "already_running" };
+    if (outcome["settledAs"] === "attention_required" || outcome["settledAs"] === "left_attached") {
+      return heldLiveView(slot.attemptId, { code: typeof outcome["status"] === "string" ? outcome["status"] : outcome["settledAs"],
+        ...(typeof outcome["error"] === "string" ? { error: outcome["error"] } : {}) });
+    }
+    if (outcome["settledAs"] === "not_running") {
+      return { id: slot.attemptId, status: "not_running", ...(typeof outcome["status"] === "string" ? { code: outcome["status"] } : {}),
+        ...(typeof outcome["error"] === "string" ? { message: outcome["error"] } : {}) };
+    }
     if (outcome["ok"] === false) {
       return { id: slot.attemptId, status: "refused", ...(typeof outcome["code"] === "string" ? { code: outcome["code"] } : {}) };
     }
     const selection = outcome["snapshotSelection"] as AttemptView["snapshotSelection"] | undefined;
     return { id: slot.attemptId, status: "running", ...(selection ? { snapshotSelection: selection } : {}) };
   }
-  const text = (key: string) => (typeof outcome[key] === "string" ? { [key]: outcome[key] as string } : {});
   if (slot.attemptState === "settled") {
+    if (outcome["status"] === "attention_required" || outcome["status"] === "left_attached") {
+      return heldLiveView(slot.attemptId, { code: typeof outcome["code"] === "string" ? outcome["code"] : outcome["status"], ...(typeof outcome["message"] === "string" ? { error: outcome["message"] } : {}) });
+    }
     if (outcome["status"] !== "not_running") return { id: slot.attemptId, status: "running" };
     return {
       id: slot.attemptId, status: "not_running",
@@ -549,11 +635,11 @@ function attemptView(slot: SeatPoolSlot): AttemptView | undefined {
 }
 
 /** The slots as reported: each one's attempt and, on a slot the pool does not bring back, its reuse hold, every cycle. */
-function slotsView(slots: readonly SeatPoolSlot[]): Array<{
+function slotsView(slots: readonly SeatPoolSlot[], inFlightIds?: ReadonlySet<string>): Array<{
   slotNumber: number; nodeId: string | null; phase: SeatPoolPhase; attempt?: AttemptView; reuseHold?: Record<string, unknown>;
 }> {
   return slots.map((slot) => {
-    const attempt = attemptView(slot);
+    const attempt = attemptView(slot, inFlightIds);
     return {
       slotNumber: slot.slotNumber,
       nodeId: slot.nodeId,
@@ -570,8 +656,9 @@ function slotsView(slots: readonly SeatPoolSlot[]): Array<{
  *  reuse hold (a refusal is a `comeback` attempt; `holdComeback` keeps the slot's add attempt, which settled running) or
  *  an `unknown` add (still `adding`). */
 function confirmedFailedAdd(slot: SeatPoolSlot): boolean {
+  const outcome = readAttemptOutcome(slot.attemptOutcome);
   return slot.phase === "drained" && slot.attemptKind === "add" && slot.attemptState === "settled" && slot.attemptId !== null
-    && slot.reuseHold !== null && readAttemptOutcome(slot.attemptOutcome)["status"] === "not_running";
+    && slot.reuseHold !== null && outcome["status"] === "not_running" && outcome["later"] === undefined;
 }
 
 /** The add's notes while a confirmed failed add holds the new number: that attempt, its slot and its evidence. */
@@ -656,13 +743,15 @@ function addCallOutcome(outcome: AddMemberOutcome): AddCallOutcome {
 type AddSettlement =
   | { status: "running"; sessionId: string }
   | { status: "not_running"; observed: "exited" | "probe_absent"; code?: string; message?: string }
+  | { status: HeldLiveStatus; code: string; message?: string }
   | { status: "unknown"; code: string; message: string };
 
 /**
  * The one rule an add with a node settles by, in the cycle that ran it and in a later cycle (or process) that reads it
- * again. Exited, or the node's executor confirmed stopped: not running, never retried. Running or idle with startup
- * `ready`: running, unless the call is known to have returned anything but a launch (a failed launch whose session
- * still runs is not settled here). Anything else (startup not ready, no session, another status): unknown.
+ * again. Exited, or the node's executor confirmed stopped: not running, never retried. Running or idle while the call is
+ * known to have returned anything but a launch (`attention_required`, `left_attached`, a failure): held `live`, reported
+ * by the launch's status (`left_attached`, else `attention_required`, with the status or code in `code`). Running or idle
+ * with startup `ready` after a launch: running. Anything else (startup not ready, no session, another status): unknown.
  */
 function classifyAdd(
   call: AddCallOutcome | null,
@@ -674,13 +763,23 @@ function classifyAdd(
     : { code: call.code, message: call.message };
   if (latest?.status === "exited") return { status: "not_running", observed: "exited", ...failure };
   if (confirmedStopped) return { status: "not_running", observed: "probe_absent", ...failure };
+  // The add said it needs attention or was left attached: held `live` whatever its session reads, since a pane may run.
+  if (call !== null && call.ok && (call.status === "attention_required" || call.status === "left_attached")) {
+    return { status: call.status, code: call.status, ...(call.error !== undefined ? { message: call.error } : {}) };
+  }
   if (latest === null) return { status: "unknown", code: "no_session", message: "unknown: the node has no session yet" };
   const evidence = `latest session ${latest.status}, startup ${latest.startupStatus ?? "unknown"}`;
   if (latest.status === "running" || latest.status === "idle") {
     if (call !== null && !(call.ok && call.status === "launched")) {
-      return { status: "unknown", code: call.ok ? `node_${call.status}` : call.code, message: `unknown: the add returned ${call.ok ? call.status : call.code}; ${evidence}` };
+      const code = call.ok ? call.status : call.code;
+      const message = call.ok ? call.error : call.message;
+      return { status: code === "left_attached" ? "left_attached" : "attention_required", code, ...(message !== undefined ? { message } : {}) };
     }
     if (latest.startupStatus === "ready") return { status: "running", sessionId: latest.id };
+    // A startup that needs attention or failed while the session runs (the add's call not known, as after a restart).
+    if (latest.startupStatus === "attention_required" || latest.startupStatus === "failed") {
+      return { status: "attention_required", code: latest.startupStatus, message: `startup ${latest.startupStatus}; ${evidence}` };
+    }
   }
   return { status: "unknown", code: "not_settled", message: `unknown: ${evidence}` };
 }
@@ -764,6 +863,121 @@ function latestSession(db: Database.Database, nodeId: string): { id: string; sta
     { id: string; status: string } | undefined) ?? null;
 }
 
+/** A node's session as a later change reads it. */
+type SessionView = { id: string; status: string; startupStatus: string | null };
+
+/** A node's latest session with its startup status, in the order the reader uses, leaving out a session a launch rolled
+ *  back (`superseded`): that one was never the node's occupant. Null: none. */
+function latestSessionView(db: Database.Database, nodeId: string): SessionView | null {
+  return (db.prepare(
+    `SELECT id, status, startup_status AS startupStatus FROM sessions WHERE node_id = ? AND status != 'superseded'
+      ORDER BY created_at DESC, id DESC LIMIT 1`,
+  ).get(nodeId) as SessionView | undefined) ?? null;
+}
+
+/** A session by id as a later change reads it; null for null or an unknown id. */
+function sessionViewOf(db: Database.Database, sessionId: string | null): SessionView | null {
+  if (sessionId === null) return null;
+  return (db.prepare("SELECT id, status, startup_status AS startupStatus FROM sessions WHERE id = ?").get(sessionId) as SessionView | undefined) ?? null;
+}
+
+/** The highest event seq of the node's rig; 0 when none. */
+function rigEventSeq(db: Database.Database, nodeId: string): number {
+  return (db.prepare("SELECT MAX(seq) AS seq FROM events WHERE rig_id = (SELECT rig_id FROM nodes WHERE id = ?)").get(nodeId) as
+    { seq: number | null }).seq ?? 0;
+}
+
+/** What a hold is measured from, kept on the slot row (`attempt_result`, marked `held`): the node's latest session as read
+ *  when the hold was set, with its status and startup status (`sessionId: null` when the node has none), and the rig's
+ *  event seq then. A later change is measured against it. */
+function heldSession(nodeId: string, latest: SessionView | null, eventSeq: number): string {
+  return JSON.stringify({
+    held: true, nodeId, sessionId: latest?.id ?? null,
+    ...(latest !== null ? { status: latest.status, startupStatus: latest.startupStatus } : {}),
+    eventSeq,
+  });
+}
+
+/** What a hold is measured from, read back from the slot row; null when the row keeps none (an attempt's own result, or
+ *  anything that does not read as one). */
+function readHeldSession(text: string | null): { sessionId: string | null; status?: string; startupStatus: string | null; eventSeq: number } | null {
+  const record = slotRecord(text);
+  if (record === null || record["held"] !== true) return null;
+  const sessionId = record["sessionId"];
+  if (sessionId !== null && (typeof sessionId !== "string" || sessionId === "")) return null;
+  return {
+    sessionId,
+    ...(typeof record["status"] === "string" ? { status: record["status"] } : {}),
+    startupStatus: typeof record["startupStatus"] === "string" ? record["startupStatus"] : null,
+    eventSeq: typeof record["eventSeq"] === "number" ? record["eventSeq"] : 0,
+  };
+}
+
+/** The status a held comeback settles with, from its launch's status for the node: a decision awaited, or a failure with
+ *  no session running, holds it `drained` (`not_running`); attention, left attached, or a failure whose session still
+ *  runs holds it `live`. Null for a status that runs, or one this does not settle. */
+function heldComeback(nodeStatus: string, sessionRuns: boolean): { as: "not_running" } | { as: HeldLiveStatus } | null {
+  if (nodeStatus === "awaiting-decision") return { as: "not_running" };
+  if (nodeStatus === "attention_required") return { as: "attention_required" };
+  if (nodeStatus === "left_attached") return { as: "left_attached" };
+  if (nodeStatus === "failed") return sessionRuns ? { as: "attention_required" } : { as: "not_running" };
+  return null;
+}
+
+/** A slot whose hold a later change on its node can end: a reuse hold on a `drained` or `live` slot with a node, and no
+ *  attempt running. */
+function isWatchedHold(slot: SeatPoolSlot): boolean {
+  return slot.reuseHold !== null && slot.nodeId !== null && (slot.phase === "drained" || slot.phase === "live")
+    && (slot.attemptState === null || slot.attemptState === "settled");
+}
+
+/** What a later change on a slot's node made of it, as the cycle reports it (`laterChanges`). `read` is how it read: a
+ *  restore since the hold that launched the node and did not run (`restore`, with its event: the slot takes that
+ *  outcome), or the node's latest session: `ready` (the slot is `live`, no hold), `absent` (`drained` and eligible, or
+ *  still held while its decision is awaited), `attention` (`live` and held) or `unknown` (the slot is `adding` and its
+ *  attempt issued again, read again every cycle, as an unknown result). */
+interface LaterChange {
+  slotNumber: number;
+  logicalId: string;
+  nodeId: string;
+  session: SessionView | null;
+  read: "restore" | "ready" | "absent" | "attention" | "unknown";
+  restore?: { seq: number; status: string };
+  phase: SeatPoolPhase;
+  reuseHold?: Record<string, unknown>;
+}
+
+/** The newest restore since `sinceSeq` (a whole-rig `restore.completed` or a `restore.subset_completed`) that names the
+ *  node, with its status and error for it; null when none does. A payload that can't be read names no node. */
+function restoreOf(db: Database.Database, nodeId: string, sinceSeq: number, snapshotId?: string):
+  { seq: number; status: string; error?: string; snapshotSelection?: { snapshotId: string; mode: string } } | null {
+  // A comeback's own launch records only a `restore.subset_completed`; a later change also reads a whole-rig restore.
+  const events = db.prepare(
+    `SELECT seq, type, payload FROM events WHERE rig_id = (SELECT rig_id FROM nodes WHERE id = ?)
+      AND type IN ('restore.subset_completed'${snapshotId === undefined ? ", 'restore.completed'" : ""}) AND seq > ? ORDER BY seq DESC`,
+  ).all(nodeId, sinceSeq) as Array<{ seq: number; type: string; payload: string }>;
+  for (const event of events) {
+    let payload: { snapshotId?: unknown; result?: { nodes?: unknown; snapshotSelection?: unknown } };
+    try {
+      payload = JSON.parse(event.payload) as typeof payload;
+    } catch {
+      continue;
+    }
+    if (snapshotId !== undefined && payload.snapshotId !== snapshotId) continue;
+    const nodes = Array.isArray(payload.result?.nodes) ? payload.result.nodes as unknown[] : [];
+    const node = nodes.find((n): n is Record<string, unknown> => n !== null && typeof n === "object" && (n as Record<string, unknown>)["nodeId"] === nodeId);
+    if (!node || typeof node["status"] !== "string") continue;
+    const selection = payload.result?.snapshotSelection as { snapshotId?: unknown; mode?: unknown } | undefined;
+    return {
+      seq: event.seq, status: node["status"],
+      ...(typeof node["error"] === "string" ? { error: node["error"] } : {}),
+      ...(selection && typeof selection.snapshotId === "string" && typeof selection.mode === "string"
+        ? { snapshotSelection: { snapshotId: selection.snapshotId, mode: selection.mode } } : {}),
+    };
+  }
+  return null;
+}
+
 /** The spec the job was last ensured with (`context.pool`); null when it has none that reads. */
 function lastEnsuredSpec(context: Record<string, unknown>): SeatPoolSpec | null {
   const read = parsePoolBlock(context["pool"]);
@@ -834,7 +1048,16 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       };
       return deps.slots.settleAddNotRunning(add.slotId, add.attemptId, {
         outcome: JSON.stringify({ status: "not_running", ...seen, call }), hold: JSON.stringify(hold), at: at(),
+        result: heldSession(add.nodeId, latest, rigEventSeq(deps.db, add.nodeId)),
       }) ? entry({ id: add.attemptId, status: "not_running", ...seen }) : null;
+    }
+    if (settlement.status === "attention_required" || settlement.status === "left_attached") {
+      // Held `live`: a session may run, so the slot takes room, but it is not free, receives no row and is never drained.
+      const hold = { code: settlement.code, ...(settlement.message !== undefined ? { error: settlement.message } : {}) };
+      return deps.slots.settleAddHeldLive(add.slotId, add.attemptId, {
+        outcome: JSON.stringify({ status: settlement.status, code: settlement.code, ...(settlement.message !== undefined ? { message: settlement.message } : {}), call }),
+        hold: JSON.stringify(hold), result: heldSession(add.nodeId, latest, rigEventSeq(deps.db, add.nodeId)), at: at(),
+      }) ? entry(heldLiveView(add.attemptId, hold)) : null;
     }
     deps.slots.recordAttemptOutcome(add.slotId, add.attemptId,
       JSON.stringify({ status: "unknown", code: settlement.code, message: settlement.message, call }));
@@ -880,7 +1103,10 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         : null;
     }
     const latest = operation.current.nodes.find((node) => node.id === slot.nodeId)?.latestSession ?? null;
-    return settleWithNode({ slotId: slot.slotId, slotNumber: slot.slotNumber, logicalId, attemptId, nodeId: slot.nodeId }, keptCall(slot), latest);
+    // An add read with no session yet made none of its own: a session found now is someone else's, so the call that
+    // returned without one does not hold it. With still no session, the call is kept with its failure.
+    const call = latest !== null && readAttemptOutcome(slot.attemptOutcome)["code"] === "no_session" ? null : keptCall(slot);
+    return settleWithNode({ slotId: slot.slotId, slotNumber: slot.slotNumber, logicalId, attemptId, nodeId: slot.nodeId }, call, latest);
   };
 
   /** Why the model member gives no agent, read from the model node itself (the export leaves these out silently), or null. */
@@ -981,6 +1207,8 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
   const comeback = async (request: SeatPoolComebackRequest): Promise<void> => {
     const report = (entry: SettledAdd) => settled.set(request.modelNodeId, [...(settled.get(request.modelNodeId) ?? []), entry]);
     const base = { slotNumber: request.slotNumber, logicalId: request.logicalId, nodeId: request.nodeId };
+    // Running in this process until it settles, whoever calls it: a cycle does not read it as left over meanwhile.
+    inFlightAttempts.add(request.attemptId);
     try {
       if (!deps.comeback) {
         report({ ...base, attempt: { ...inFlight(request.attemptId), code: "comeback_not_composed" } });
@@ -1018,7 +1246,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       const selection = launch.snapshotSelection
         ? { snapshotId: launch.snapshotSelection.snapshotId, mode: launch.snapshotSelection.mode }
         : undefined;
-      const stored = JSON.stringify({
+      const storedOutcome: Record<string, unknown> = {
         ok: launch.ok && !threw,
         ...(launch.code !== undefined ? { code: launch.code } : {}),
         ...(launch.message !== undefined ? { message: launch.message } : {}),
@@ -1026,7 +1254,8 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         ...(node ? { nodeId: node.nodeId, status: node.status, ...(node.error ? { error: node.error } : {}) } : {}),
         ...(launch.alreadyRunning?.length ? { alreadyRunning: launch.alreadyRunning.map((n) => n.nodeId) } : {}),
         ...(selection ? { snapshotSelection: selection } : {}),
-      });
+      };
+      const stored = JSON.stringify(storedOutcome);
       // Running, on the same node: settled, and the slot `live`.
       if (!threw && launch.ok && node && node.nodeId === request.nodeId && launchStatusIsRunning(node.status)) {
         const sessionId = latestSession(deps.db, request.nodeId)?.id ?? null;
@@ -1037,10 +1266,42 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           return;
         }
       }
+      // Launched on the same node and not running: held, and never launched again (a decision awaited, a failure with
+      // nothing running: `drained`; attention, left attached, a failure whose session still runs: `live`).
+      if (!threw && launch.ok && node && node.nodeId === request.nodeId) {
+        // The node's current state first, as for a leftover: a session that reads ready now (an agent someone recovered by
+        // hand while the launch ran) is not held from the launch's status.
+        const now = latestSessionView(deps.db, request.nodeId);
+        if (now !== null && readSession(request.nodeId, now) === "ready") {
+          if (deps.slots.settleIssuedByLater({
+            slotId: request.slotId, attemptId: request.attemptId, phase: "live", hold: null, result: null, at: at(),
+            outcome: JSON.stringify({ ...storedOutcome, settledBy: "later_session", later: { sessionId: now.id, read: "ready", at: at() } }),
+          })) report({ ...base, attempt: { id: request.attemptId, status: "running", code: "later_session" }, ...warning });
+          return;
+        }
+        const held = settleHeldComeback(request, node.status, node.error, storedOutcome);
+        if (held === "moved_on") return;
+        if (held !== "not_held") {
+          report({ ...base, attempt: held, ...warning });
+          return;
+        }
+      }
+      // No launch, and the node in `alreadyRunning`: a live session the pool did not start. `live`, with no hold and no
+      // session of the attempt's own; free only once idle at its prompt.
+      if (!threw && launch.ok && !launch.launched?.length && launch.alreadyRunning?.some((n) => n.nodeId === request.nodeId)) {
+        if (deps.slots.settleAdd(request.slotId, request.attemptId, {
+          outcome: JSON.stringify({ ...storedOutcome, settledAs: "already_running" }), result: null, at: at(),
+        })) {
+          report({ ...base, attempt: { id: request.attemptId, status: "already_running" }, ...warning });
+        }
+        return;
+      }
       // Refused before any launch: settled, `drained` again with the code as the reuse hold.
       if (!threw && !launch.ok && launch.code !== undefined && COMEBACK_REFUSALS.has(launch.code)) {
         const hold = JSON.stringify({ code: launch.code, snapshotId: request.snapshotId });
-        if (deps.slots.settleComebackRefused(request.slotId, request.attemptId, { outcome: stored, hold })) {
+        if (deps.slots.settleComebackRefused(request.slotId, request.attemptId, {
+          outcome: stored, hold, result: heldSession(request.nodeId, latestSessionView(deps.db, request.nodeId), rigEventSeq(deps.db, request.nodeId)),
+        })) {
           report({
             ...base,
             attempt: { id: request.attemptId, status: "refused", code: launch.code, ...(launch.message ? { message: launch.message } : {}) },
@@ -1049,9 +1310,9 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           return;
         }
       }
-      // Anything else (a launch that does not run, a live session, another refusal, a call that threw) is not settled
-      // here: the attempt stays issued, with its outcome kept. Nothing is reported when its row went with a node deleted
-      // by hand, or the attempt moved on.
+      // Anything else (another refusal, a launch on another node, a call that threw) is not settled here: the attempt
+      // stays issued, with its outcome kept, and later cycles report it `unknown` and read it again. Nothing is reported
+      // when its row went with a node deleted by hand, or the attempt moved on.
       if (!deps.slots.recordAttemptOutcome(request.slotId, request.attemptId, stored)) return;
       const code = launch.code ?? (launch.alreadyRunning?.length ? "already_running" : node?.status ?? "no_launch_result");
       report({
@@ -1061,7 +1322,277 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       });
     } catch (error) {
       report({ ...base, attempt: { ...inFlight(request.attemptId), code: "settle_failed", message: errorMessage(error) } });
+    } finally {
+      inFlightAttempts.delete(request.attemptId);
     }
+  };
+
+  /**
+   * An issued comeback whose launch on its node did not run, settled held from the launch's status for the node (from the
+   * call, or from the restore event a later cycle reads): `drained` (`not_running`) or `live` (`attention_required`,
+   * `left_attached`), with the status as the reuse hold's code, the launch's error and the snapshot. The hold is measured
+   * from the node's latest session now (or, with `measuredFrom`, from that session: null when there was none) and the
+   * rig's event seq. `not_held` for a status this does not settle; `moved_on` when the row no longer holds the issued
+   * attempt.
+   */
+  const settleHeldComeback = (
+    attempt: { slotId: string; attemptId: string; nodeId: string; snapshotId: string },
+    nodeStatus: string, error: string | undefined, outcome: Record<string, unknown>,
+    measuredFrom?: { sessionId: string | null },
+  ): AttemptView | "not_held" | "moved_on" => {
+    const latest = latestSessionView(deps.db, attempt.nodeId);
+    const from = measuredFrom === undefined ? latest : sessionViewOf(deps.db, measuredFrom.sessionId);
+    const held = heldComeback(nodeStatus, sessionRuns(attempt.nodeId, latest));
+    if (held === null) return "not_held";
+    const hold = { code: nodeStatus, snapshotId: attempt.snapshotId, ...(error !== undefined ? { error } : {}) };
+    if (!deps.slots.settleComebackHeld(attempt.slotId, attempt.attemptId, {
+      phase: held.as === "not_running" ? "drained" : "live",
+      outcome: JSON.stringify({ ...outcome, settledAs: held.as }), hold: JSON.stringify(hold),
+      result: heldSession(attempt.nodeId, from, rigEventSeq(deps.db, attempt.nodeId)), at: at(),
+    })) return "moved_on";
+    return held.as === "not_running"
+      ? { id: attempt.attemptId, status: "not_running", code: nodeStatus, ...(error !== undefined ? { message: error } : {}) }
+      : heldLiveView(attempt.attemptId, hold);
+  };
+
+  /** Whether the session runs: running or idle, and its node's executor not confirmed stopped. */
+  const sessionRuns = (nodeId: string, latest: SessionView | null): boolean =>
+    latest !== null && (latest.status === "running" || latest.status === "idle") && !deps.confirmedStopped(nodeId);
+
+  /** How a node's latest session reads for a later change: confirmed absent (exited, or its executor confirmed stopped),
+   *  ready (running or idle with startup `ready`), needing attention (running with a startup that needs attention or
+   *  failed), or anything else. */
+  const readSession = (nodeId: string, latest: SessionView): "absent" | "ready" | "attention" | "unknown" => {
+    if (latest.status === "exited" || deps.confirmedStopped(nodeId)) return "absent";
+    const runs = latest.status === "running" || latest.status === "idle";
+    if (runs && latest.startupStatus === "ready") return "ready";
+    if (runs && (latest.startupStatus === "attention_required" || latest.startupStatus === "failed")) return "attention";
+    return "unknown";
+  };
+
+  /** Whether a session of the node reached startup `ready` after `sinceSessionId` (any, when null or unknown), in the
+   *  order `latestSessionView` reads sessions (`created_at`, then `id`), so "later" means one thing. */
+  const laterReady = (nodeId: string, sinceSessionId: string | null): boolean => deps.db.prepare(
+    `SELECT 1 FROM sessions s WHERE s.node_id = ? AND s.startup_status = 'ready'
+       AND (NOT EXISTS (SELECT 1 FROM sessions WHERE id = ?)
+            OR (s.created_at, s.id) > (SELECT created_at, id FROM sessions WHERE id = ?)) LIMIT 1`,
+  ).get(nodeId, sinceSessionId, sinceSessionId) !== undefined;
+
+  /** The hold a later attention reading gives: its startup status as the code, and the session. */
+  const attentionHold = (latest: SessionView) => ({ code: latest.startupStatus === "failed" ? "failed" : "attention_required", sessionId: latest.id });
+
+  /**
+   * An issued attempt no call runs any more, settled by its node's latest session (a comeback cut off before its launch
+   * recorded anything, or a slot a later change left `unknown`): ready, the slot is `live` with no hold and no session of
+   * the attempt's own; confirmed absent, `drained` and eligible, unless the hold it had awaits a decision and no session
+   * reached `ready` since `since` (it is held again); needing attention, `live` and held; anything else is not settled.
+   * With `newerThan`, only a session other than that one counts. Returns what changed, or null.
+   */
+  const settleIssuedBySession = (
+    modelNodeId: string, slot: SeatPoolSlot, opts: { newerThan?: string | null; since: string | null; sinceSeq?: number },
+  ): LaterChange | null => {
+    const nodeId = slot.nodeId!;
+    const latest = latestSessionView(deps.db, nodeId);
+    const logicalId = logicalIdOf(modelNodeId, slot.slotNumber);
+    const settledBy = (read: LaterChange["read"]) => JSON.stringify({
+      ...readAttemptOutcome(slot.attemptOutcome), settledBy: "later_session", later: { sessionId: latest?.id ?? null, read, at: at() },
+    });
+    // A held `live` slot put back in `adding` that settles `drained` is drained from now (the cooldown counts from it); a
+    // `drained` one keeps its drain's time.
+    const fromLive = readAttemptOutcome(slot.attemptOutcome)["reopenedFrom"] === "live";
+    // A restore since the slot was put back in `adding` that launched the node and did not run gives it that outcome,
+    // unless a session reads ready now.
+    const restore = opts.sinceSeq === undefined ? null : restoreOf(deps.db, nodeId, opts.sinceSeq);
+    if (restore !== null && !launchStatusIsRunning(restore.status) && (latest === null || readSession(nodeId, latest) !== "ready")) {
+      const held = heldComeback(restore.status, sessionRuns(nodeId, latest));
+      if (held !== null) {
+        const hold = { code: restore.status, ...(restore.error !== undefined ? { error: restore.error } : {}), restoreSeq: restore.seq };
+        const phase = held.as === "not_running" ? "drained" : "live";
+        return deps.slots.settleIssuedByLater({
+          slotId: slot.slotId, attemptId: slot.attemptId!, phase, hold: JSON.stringify(hold), outcome: settledBy("restore"),
+          result: heldSession(nodeId, latest, restore.seq), at: at(), drainedNow: fromLive,
+        }) ? { slotNumber: slot.slotNumber, logicalId, nodeId, session: latest, read: "restore", restore: { seq: restore.seq, status: restore.status }, phase, reuseHold: hold } : null;
+      }
+    }
+    if (latest === null) return null;
+    if (opts.newerThan !== undefined && latest.id === opts.newerThan) return null;
+    const read = readSession(nodeId, latest);
+    if (read === "unknown") return null;
+    const note = { slotNumber: slot.slotNumber, logicalId, nodeId, session: latest, read };
+    const outcome = settledBy(read);
+    const settle = (phase: "drained" | "live", hold: Record<string, unknown> | null, result: string | null) =>
+      deps.slots.settleIssuedByLater({ slotId: slot.slotId, attemptId: slot.attemptId!, phase, hold: hold === null ? null : JSON.stringify(hold), outcome, result, at: at(), drainedNow: fromLive });
+    if (read === "ready") return settle("live", null, null) ? { ...note, phase: "live" } : null;
+    if (read === "attention") {
+      const hold = attentionHold(latest);
+      return settle("live", hold, heldSession(nodeId, latest, rigEventSeq(deps.db, nodeId))) ? { ...note, phase: "live", reuseHold: hold } : null;
+    }
+    const prior = slotRecord(slot.reuseHold);
+    if (prior?.["code"] === "awaiting-decision" && !laterReady(nodeId, opts.since)) {
+      return settle("drained", prior, heldSession(nodeId, latest, rigEventSeq(deps.db, nodeId))) ? { ...note, phase: "drained", reuseHold: prior } : null;
+    }
+    return settle("drained", null, null) ? { ...note, phase: "drained" } : null;
+  };
+
+  /**
+   * An issued comeback no process runs any more (its launch was cut off by a daemon restart, or returned what it does not
+   * settle), read again under the custody lease. The launch records a `restore.subset_completed` naming the node, for the
+   * comeback's snapshot, before it returns, so the newest one after what the comeback was issued on settles it by the same
+   * rule as the call: running (`live`, while its session runs), held, or not settled; the hold is measured from the
+   * session the comeback was issued on, so a session someone started since is a later change. The node's current state
+   * comes first: when its latest session reads ready, the slot is `live` with no hold, whatever the event recorded
+   * (someone recovered the agent by hand before this read), with or without an event (a launch that found the agent
+   * already running records none). Otherwise, with no such event, a session newer than that one settles it by the
+   * later-change rule (`changes`). With neither, it stays issued and
+   * `unknown`: it takes room and is never launched again. Nothing is written then.
+   */
+  const settleComebackLeftover = (modelNodeId: string, slot: SeatPoolSlot, changes: LaterChange[]): SettledAdd | null => {
+    const attemptId = slot.attemptId!;
+    const nodeId = slot.nodeId!;
+    const logicalId = logicalIdOf(modelNodeId, slot.slotNumber);
+    const entry = (attempt: AttemptView): SettledAdd => ({ slotNumber: slot.slotNumber, logicalId, nodeId, attempt });
+    if (slot.attemptState === "reserved") {
+      // A reservation is issued in the transaction that made it, so none is left behind; one that is goes back.
+      const outcome = JSON.stringify({ ok: false, code: "interrupted_before_issue", launched: false, cancelled: true });
+      return deps.slots.returnComebackToDrained(slot.slotId, attemptId, outcome)
+        ? entry({ id: attemptId, status: "cancelled", message: CANCELLED_NOT_ISSUED, code: "interrupted_before_issue" })
+        : null;
+    }
+    const basis = slotRecord(slot.attemptBasis);
+    const snapshotId = typeof basis?.["snapshotId"] === "string" ? basis["snapshotId"] : null;
+    const basisSession = typeof basis?.["sessionId"] === "string" ? basis["sessionId"] : null;
+    const eventSeq = typeof basis?.["eventSeq"] === "number" ? basis["eventSeq"] : 0;
+    if (snapshotId === null) return null;
+    const event = restoreOf(deps.db, nodeId, eventSeq, snapshotId);
+    const latest = latestSessionView(deps.db, nodeId);
+    const readyNow = latest !== null && readSession(nodeId, latest) === "ready";
+    if (event !== null) {
+      const outcome = {
+        ok: true, nodeId, status: event.status, ...(event.error !== undefined ? { error: event.error } : {}), fromEvent: event.seq,
+        ...(event.snapshotSelection ? { snapshotSelection: event.snapshotSelection } : {}),
+      };
+      if (launchStatusIsRunning(event.status) && readyNow) {
+        return deps.slots.settleAdd(slot.slotId, attemptId, { outcome: JSON.stringify(outcome), result: JSON.stringify({ nodeId, sessionId: latest!.id }), at: at() })
+          ? entry({ id: attemptId, status: "running", ...(event.snapshotSelection ? { snapshotSelection: event.snapshotSelection } : {}) })
+          : null;
+      }
+      // The node's current state first: a session that reads ready now (an agent recovered by hand since the event) is
+      // not held from the event's outcome; the later-change rule below settles it `live` with no hold.
+      if (!launchStatusIsRunning(event.status) && !readyNow) {
+        // An `awaiting-decision` launch was rolled back, so the node's latest session is someone else's: that hold is
+        // measured from the session the comeback was issued on, and a session started since (not ready yet) is a later
+        // change the next read takes. Any other status keeps the launch's own session as what the hold is measured from.
+        const held = settleHeldComeback({ slotId: slot.slotId, attemptId, nodeId, snapshotId }, event.status, event.error, outcome,
+          event.status === "awaiting-decision" ? { sessionId: basisSession } : undefined);
+        if (typeof held !== "string") return entry(held);
+        if (held === "moved_on") return null;
+      }
+    }
+    if (readyNow) {
+      // With or without an event, no `newerThan`: the session the comeback was issued on counts too, when it reads ready
+      // now (a launch that found it already running records no event, and settles it `live` the same way).
+      const change = settleIssuedBySession(modelNodeId, slot, { since: basisSession });
+      if (change) changes.push(change);
+      return null;
+    }
+    const change = settleIssuedBySession(modelNodeId, slot, { newerThan: basisSession, since: basisSession });
+    if (change) changes.push(change);
+    return null;
+  };
+
+  /**
+   * The held slots of a model, read again under the custody lease. A hold ends only through a later change on the slot's
+   * node, measured from what the hold kept: a restore since then that launched the node (a whole-rig `rig up`, or a
+   * `rig launch --seats`) and did not run gives the slot that outcome (`drained` and held for a decision or a failure
+   * with nothing running, `live` and held otherwise); otherwise a session newer than the kept one (which the pool did not
+   * start: it never relaunches a held slot), or a new status or startup status on the kept session of a `live` slot
+   * (`rig seat continue` reruns startup on the same session), is read: ready, the slot is `live` with no hold; confirmed
+   * absent, `drained` and eligible, unless its hold awaits a decision and no session reached `ready` since the kept one,
+   * when it stays held; needing attention, `live` and held; anything else puts the slot back in `adding` with its attempt
+   * issued and `unknown`, read again every cycle. A `drained` slot's kept session ending again is no change: nothing ran
+   * on it when the hold was set. A hold kept before what it is measured from was kept gets it now. No event is written.
+   */
+  const laterChanges = (modelNodeId: string): LaterChange[] => {
+    const out: LaterChange[] = [];
+    for (const slot of deps.slots.forModel(modelNodeId)) {
+      if (!isWatchedHold(slot)) continue;
+      const nodeId = slot.nodeId!;
+      const from = slot.phase as "drained" | "live";
+      const latest = latestSessionView(deps.db, nodeId);
+      const seen = readHeldSession(slot.attemptResult);
+      if (seen === null) {
+        deps.slots.recordHeldSession(slot.slotId, slot.attemptId, slot.attemptResult, heldSession(nodeId, latest, rigEventSeq(deps.db, nodeId)));
+        continue;
+      }
+      const hold = slotRecord(slot.reuseHold) ?? { unreadable: slot.reuseHold };
+      const logicalId = logicalIdOf(modelNodeId, slot.slotNumber);
+      const later = (read: LaterChange["read"], sessionId: string | null) =>
+        JSON.stringify({ ...readAttemptOutcome(slot.attemptOutcome), later: { sessionId, read, at: at() } });
+      const change = (to: "drained" | "live", newHold: Record<string, unknown> | null, result: string | null, outcome: string | null) =>
+        deps.slots.changeHeld({
+          slotId: slot.slotId, attemptId: slot.attemptId, from, to, hold: newHold === null ? null : JSON.stringify(newHold), outcome, result, at: at(),
+        });
+      const restore = restoreOf(deps.db, nodeId, seen.eventSeq);
+      // A session that reads ready now wins over a restore outcome recorded before it.
+      if (restore !== null && !launchStatusIsRunning(restore.status) && (latest === null || readSession(nodeId, latest) !== "ready")) {
+        // The restore's own outcome for the node, as for a comeback's launch.
+        const held = heldComeback(restore.status, sessionRuns(nodeId, latest));
+        if (held !== null) {
+          const newHold = { code: restore.status, ...(restore.error !== undefined ? { error: restore.error } : {}), restoreSeq: restore.seq };
+          const to = held.as === "not_running" ? "drained" : "live";
+          if (change(to, newHold, heldSession(nodeId, latest, restore.seq), later("restore", latest?.id ?? null))) {
+            out.push({ slotNumber: slot.slotNumber, logicalId, nodeId, session: latest, read: "restore", restore: { seq: restore.seq, status: restore.status }, phase: to, reuseHold: newHold });
+          }
+          continue;
+        }
+      }
+      const eventSeq = restore?.seq ?? seen.eventSeq;
+      /** Nothing to end the hold: measured from now on from what was read. */
+      const rebase = () => { if (eventSeq !== seen.eventSeq || latest?.id !== seen.sessionId) change(from, hold, heldSession(nodeId, latest, eventSeq), slot.attemptOutcome); };
+      if (latest === null) {
+        // A held `live` slot with no session row whose executor is now confirmed stopped: nothing runs, `drained` and eligible.
+        if (from === "live" && deps.confirmedStopped(nodeId)) {
+          if (change("drained", null, null, later("absent", null))) out.push({ slotNumber: slot.slotNumber, logicalId, nodeId, session: null, read: "absent", phase: "drained" });
+          continue;
+        }
+        rebase(); continue;
+      }
+      const newer = latest.id !== seen.sessionId;
+      const statusChanged = !newer && seen.status !== undefined && (latest.status !== seen.status || latest.startupStatus !== seen.startupStatus);
+      // A held `live` slot whose session's executor is now confirmed stopped: its session ended, even with a stale status.
+      const probeAbsent = !newer && from === "live" && deps.confirmedStopped(nodeId);
+      if (!newer && !statusChanged && !probeAbsent) { rebase(); continue; }
+      const read = readSession(nodeId, latest);
+      // A held `drained` slot's own session: nothing ran on it when the hold was set, so only a resume of it (ready, or
+      // needing attention) is a change; marked down, detached or stale, it is not.
+      if (!newer && from === "drained" && read !== "ready" && read !== "attention") { rebase(); continue; }
+      const note = { slotNumber: slot.slotNumber, logicalId, nodeId, session: latest, read };
+      if (read === "ready") {
+        if (change("live", null, null, later(read, latest.id))) out.push({ ...note, phase: "live" });
+      } else if (read === "absent") {
+        if (hold["code"] === "awaiting-decision" && !laterReady(nodeId, seen.sessionId)) {
+          // The decision is still awaited: the hold stays, measured from this session now.
+          if (change(from, hold, heldSession(nodeId, latest, eventSeq), slot.attemptOutcome)) out.push({ ...note, phase: from, reuseHold: hold });
+        } else if (change("drained", null, null, later(read, latest.id))) {
+          out.push({ ...note, phase: "drained" });
+        }
+      } else if (read === "attention") {
+        const attention = attentionHold(latest);
+        if (change("live", attention, heldSession(nodeId, latest, eventSeq), later(read, latest.id))) out.push({ ...note, phase: "live", reuseHold: attention });
+      } else if (slot.attemptId !== null) {
+        // Not settled yet (a startup still pending): counted as an unknown result, `adding` with its attempt issued, the
+        // hold it had kept, and read again every cycle by its session.
+        const outcome = JSON.stringify({
+          ...readAttemptOutcome(slot.attemptOutcome), reread: "session", reopenedFrom: from, since: seen.sessionId, sinceSeq: eventSeq,
+          pending: { code: "later_session_not_settled", message: `unknown: a later session on the node, ${latest.status}, startup ${latest.startupStatus ?? "unknown"}` },
+          later: { sessionId: latest.id, read, at: at() },
+        });
+        if (deps.slots.reopenHeld({ slotId: slot.slotId, attemptId: slot.attemptId, from, outcome, at: at() })) out.push({ ...note, phase: "adding", reuseHold: hold });
+      } else {
+        out.push({ ...note, phase: from, reuseHold: hold });
+      }
+    }
+    return out;
   };
 
   /** One call after another, each after the lease is released; the cycle does not wait for them. */
@@ -1099,14 +1630,13 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         const held: Held = found.cause === "node_gone"
           ? { cause: "model node gone", message: "held: model node gone" }
           : { cause: "model has no canonical session", message: "held: model has no canonical session" };
-        return report({ modelNodeId: found.modelNodeId, slots: slotsView(deps.slots.forModel(found.modelNodeId)), held });
+        return report({ modelNodeId: found.modelNodeId, slots: slotsView(deps.slots.forModel(found.modelNodeId), inFlightAttempts), held });
       }
       const { model, modelNodeId, rigId } = found;
-      const slots = deps.slots.forModel(modelNodeId);
       let block = blockView(deps.rigRepo.getNodePool(modelNodeId));
       // The report reads the slot rows when it is built, not the snapshot the plan used: an add that settles while the cycle
       // waits for custody is then reported the same way in `slots` and in `settled`.
-      const base = () => ({ modelNodeId, ...block, slots: slotsView(deps.slots.forModel(modelNodeId)) });
+      const base = () => ({ modelNodeId, ...block, slots: slotsView(deps.slots.forModel(modelNodeId), inFlightAttempts) });
       if (!active()) return report({ ...base(), held: JOB_STOPPED });
       if (block.block === "unusable") return report({ ...base(), held: BLOCK_UNREADABLE, advisory: unreadableAdvisory(block.error) });
       // After `pool: {}` the model has no block: the job drains with the spec last stored on its row (`drain` set), and
@@ -1116,6 +1646,23 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       if (block.block === "none" && lastSpec === null) return report(base());
       const spec: SeatPoolSpec = block.block === "stored" ? block.spec : { ...lastSpec!, drain: true };
       const removal = removed ? { removal: "the pool block was removed; draining with the spec last stored on the job" } : {};
+
+      // A held slot, read again before the plan, under the custody lease, so the plan sees what a later change on its
+      // node made of it. Only while a slot is held, and never while the pool is: a held pool changes nothing.
+      let changes: LaterChange[] = [];
+      if (deps.slots.forModel(modelNodeId).some(isWatchedHold)) {
+        try {
+          await deps.custody([modelNodeId], async () => {
+            if (!active() || readSeatPoolHold(deps.db, rigId).stoppedSeq !== null) return;
+            if (blockView(deps.rigRepo.getNodePool(modelNodeId)).block === "unusable") return;
+            changes = laterChanges(modelNodeId);
+          });
+        } catch (error) {
+          // A refused custody changes nothing here; the cycle's own lease below reports it.
+          if (!(error instanceof DeliveryGuardError)) throw error;
+        }
+      }
+      const slots = deps.slots.forModel(modelNodeId);
 
       // The plan is read outside the lease; the custody is for the hold check, the moves, the drain decisions and the
       // add's reservation and issue. The add's call goes out after it.
@@ -1184,9 +1731,22 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           if (blockView(deps.rigRepo.getNodePool(modelNodeId)).block === "unusable") { blockChangedNow(); return; }
           // An add attempt no process runs any more (a reservation never issued, or an issued add not in flight in this
           // process: cut off by a daemon restart, or left unknown), settled from its row. One in flight here is left alone.
+          // A comeback no process runs any more is read again the same way, from the event its launch records, or by a
+          // later session on its node; a slot a later change left `unknown` is read again by its node's latest session.
           for (const slot of deps.slots.forModel(modelNodeId)) {
-            if (slot.phase !== "adding" || slot.attemptKind !== "add" || slot.attemptId === null || inFlightAttempts.has(slot.attemptId)) continue;
-            const entry = settleLeftover(modelNodeId, slot);
+            if (slot.phase !== "adding" || slot.attemptId === null || inFlightAttempts.has(slot.attemptId)) continue;
+            const outcome = readAttemptOutcome(slot.attemptOutcome);
+            if (outcome["reread"] === "session" && slot.nodeId !== null && slot.attemptState === "issued") {
+              const change = settleIssuedBySession(modelNodeId, slot, {
+                since: typeof outcome["since"] === "string" ? outcome["since"] : null,
+                sinceSeq: typeof outcome["sinceSeq"] === "number" ? outcome["sinceSeq"] : undefined,
+              });
+              if (change) changes.push(change);
+              continue;
+            }
+            const entry = slot.attemptKind === "add" ? settleLeftover(modelNodeId, slot)
+              : slot.attemptKind === "comeback" && slot.nodeId !== null ? settleComebackLeftover(modelNodeId, slot, changes)
+              : null;
             if (entry) reportSettled(modelNodeId, entry);
           }
           // A leftover settled `not_running` here drains its slot, which starts the cooldown the plan could not see: under
@@ -1220,7 +1780,8 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           if (spec.drain && deps.drain && !held && !blockChangedNow()) {
             const current = deps.slots.forModel(modelNodeId);
             const agentsNow = readSeatPoolAgents(deps, current);
-            for (const slot of current.filter((s) => s.phase === "live" && s.nodeId !== null)) {
+            // A held `live` slot is never drained by the pool: only a later change on its node ends its hold.
+            for (const slot of current.filter((s) => s.phase === "live" && s.nodeId !== null && s.reuseHold === null)) {
               const agent = agentsNow.find((a) => a.slotNumber === slot.slotNumber);
               if (!agent || agent.nodeId === null || agent.sessionName === null || agent.running) continue;
               if (agent.openRows > 0 || agent.heldCount > 0) continue;
@@ -1339,10 +1900,44 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
           const cancelled: Array<{ slotNumber: number; logicalId: string; attempt: AttemptView }> = [];
           /** A confirmed failed add met where a unit would take a new number: the add's notes name it. */
           let failedAddNote: Record<string, unknown> | undefined;
-          /** The rig hold read just before an issue, when it stopped the issue. */
-          const heldAtIssue = (stopped: SeatPoolHoldRead) => {
-            if (!active()) held = JOB_STOPPED;
-            else { hold = stopped; held = { cause: "rig stopped", seq: stopped.stoppedSeq!, message: `held: rig stopped (event ${stopped.stoppedSeq})` }; }
+          /**
+           * The re-check of a reservation just before its issue, add or comeback, with nothing awaited since it was made:
+           * the job, the holds and the stored block again, then a new plan with the reservation counted. The cause that
+           * cancels it (a stopped job, a `rig.stopped`, a lower `max`, `drain: true`, any other change to the block, or
+           * surplus that reaches it), or null when it may be issued. A cause that holds the pool also sets the hold.
+           */
+          const recheckReservation = (slotNumber: number, comebackSession?: string | null): string | null => {
+            if (!active()) { held = JOB_STOPPED; return "job_stopped"; }
+            const holdNow = readSeatPoolHold(deps.db, rigId);
+            if (holdNow.stoppedSeq !== null) {
+              hold = holdNow;
+              held = {
+                cause: "rig stopped", seq: holdNow.stoppedSeq, message: `held: rig stopped (event ${holdNow.stoppedSeq})`,
+                ...(holdNow.seatsLaunchedSeq !== null
+                  ? { exit: `seats launched with \`rig launch --seats\` (event ${holdNow.seatsLaunchedSeq}) do not end the hold; run \`rig down\`, then \`rig up\`` }
+                  : {}),
+              };
+              return "rig_stopped";
+            }
+            const storedSpec = deps.rigRepo.getNodePool(modelNodeId);
+            const specNow = storedSpec !== undefined && "spec" in storedSpec ? storedSpec.spec : null;
+            if (blockChangedNow()) {
+              if (specNow === null) return "pool_block_changed";
+              return specNow.max < spec.max ? "max_lowered" : specNow.drain ? "drain" : "pool_block_changed";
+            }
+            const slotsNow = deps.slots.forModel(modelNodeId);
+            const stateNow = readSeatPoolState(deps, model, slotsNow);
+            // A comeback's reservation took its slot out of `drained`: the rows left with that agent still wait for it, and
+            // count as work waiting, as they did in the plan.
+            const pending = [...stateNow.pending];
+            if (comebackSession) {
+              for (const row of deps.queue.pendingRows(comebackSession)) {
+                if (stateNow.rawDestination.has(row.qitemId)) continue;
+                pending.push({ qitemId: row.qitemId, destination: model.sessionName, waitingSince: row.waitingSince, tags: spec.dispatchTag ? [spec.dispatchTag] : row.tags });
+              }
+            }
+            const replan = planSeatPool(spec, { ...stateNow, pending, lastStepAt: lastDrainStep(slotsNow) }, deps.now().getTime());
+            return replan.intents.some((i) => i.kind === "cancel" && i.slotNumber === slotNumber) ? "surplus" : null;
           };
           units: for (let unit = 0; unit < addIntent.count; unit++) {
             if (!active()) { held = JOB_STOPPED; break; }
@@ -1365,37 +1960,45 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
                 const hold = selection.conflict !== undefined
                   ? { code: "conflicting_occupants", nodeId, snapshotId: selection.conflict.snapshotId, candidateIds: selection.conflict.candidateIds, read: selection.read, failed: selection.failed }
                   : { code: "no_qualifying_snapshot", nodeId, read: selection.read, failed: selection.failed };
-                comebackNotes.push(deps.slots.holdComeback(slot.slotId, JSON.stringify(hold)) ? { ...note, hold } : { ...note, code: "slot_moved_on" });
+                const measured = heldSession(nodeId, latestSessionView(deps.db, nodeId), rigEventSeq(deps.db, nodeId));
+                comebackNotes.push(deps.slots.holdComeback(slot.slotId, JSON.stringify(hold), measured) ? { ...note, hold } : { ...note, code: "slot_moved_on" });
                 continue;
               }
               const snapshotId = selection.chosen.id;
               const unknowns = selection.failed.flatMap((f) => (f.unknown ? [{ snapshotId: f.snapshotId, ...f.unknown }] : []));
-              // The reservation, on the slot's own row, with the chosen snapshot, and the issue: the job's state and the
-              // holds again, then the issued attempt and what it was issued on (the snapshot, the node's latest session and
-              // the rig's latest event), in one transaction. A comeback held or not issued is `drained` again in the same
-              // transaction, its row never removed; an unexpected error rolls it all back, so the slot stays `drained`
-              // with the attempt it had.
+              // The reservation, on the slot's own row, with the chosen snapshot, and the issue: the re-check of the
+              // reservation (as an add's), then the issued attempt and what it was issued on (the snapshot, the node's
+              // latest session and the rig's latest event), in one transaction. A comeback the re-check cancels, or not
+              // issued, is `drained` again in the same transaction, eligible, its row never removed, and never launched;
+              // an unexpected error rolls it all back, so the slot stays `drained` with the attempt it had.
               const attemptId = randomUUID();
-              const issueComeback = deps.db.transaction((): { code: string; stopped?: SeatPoolHoldRead } | null => {
+              const issueComeback = deps.db.transaction((): { code: string; cancelled?: true } | null => {
                 if (!deps.slots.reserveComeback({ slotId: slot.slotId, attemptId, snapshotId })) return { code: "slot_moved_on" };
-                const returnUnissued = (code: string, stopped?: SeatPoolHoldRead) => {
-                  deps.slots.returnComebackToDrained(slot.slotId, attemptId, JSON.stringify({ ok: false, code, launched: false }));
-                  return { code, ...(stopped ? { stopped } : {}) };
-                };
-                const recheck = readSeatPoolHold(deps.db, rigId);
-                if (!active() || recheck.stoppedSeq !== null) return returnUnissued("held", recheck);
+                const cause = recheckReservation(slot.slotNumber, agentNode(deps.db, nodeId)?.sessionName ?? null);
+                if (cause !== null) {
+                  deps.slots.returnComebackToDrained(slot.slotId, attemptId, JSON.stringify({ ok: false, code: cause, launched: false, cancelled: true }));
+                  return { code: cause, cancelled: true };
+                }
                 const eventSeq = (deps.db.prepare("SELECT MAX(seq) AS seq FROM events WHERE rig_id = ?").get(rigId) as { seq: number | null }).seq;
-                const basis = JSON.stringify({ snapshotId, sessionId: latestSession(deps.db, nodeId)?.id ?? null, eventSeq });
-                if (!deps.slots.issueAttempt(slot.slotId, attemptId, basis)) return returnUnissued("slot_changed");
+                const basis = JSON.stringify({ snapshotId, sessionId: latestSessionView(deps.db, nodeId)?.id ?? null, eventSeq });
+                if (!deps.slots.issueAttempt(slot.slotId, attemptId, basis)) {
+                  deps.slots.returnComebackToDrained(slot.slotId, attemptId, JSON.stringify({ ok: false, code: "slot_changed", launched: false }));
+                  return { code: "slot_changed" };
+                }
                 return null;
               });
               const unissued = issueComeback();
               if (unissued !== null) {
-                if (unissued.stopped !== undefined) { heldAtIssue(unissued.stopped); break units; }
+                if (unissued.cancelled) {
+                  // Cancelled before its issue (`cancelled: not issued`): never launched, and this cycle's adds end.
+                  cancelled.push({ slotNumber: slot.slotNumber, logicalId, attempt: { id: attemptId, status: "cancelled", message: CANCELLED_NOT_ISSUED, code: unissued.code } });
+                  break units;
+                }
                 comebackNotes.push({ ...note, snapshotId, code: unissued.code });
                 continue;
               }
-              // The request goes out only once its issue committed.
+              // The request goes out only once its issue committed; its call runs in this process until it settles.
+              inFlightAttempts.add(attemptId);
               comebacks.push({ jobId: job.jobId, modelNodeId, rigId, slotId: slot.slotId, slotNumber: slot.slotNumber, nodeId, logicalId, attemptId, snapshotId, cwdFromModel: spec.cwdTemplate === null });
               comebackNotes.push({ ...note, snapshotId, attempt: inFlight(attemptId), ...(unknowns.length ? { unknownOccupants: unknowns } : {}) });
               continue units;
@@ -1420,28 +2023,11 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
             // the key out is not enough, since the add then resolves it from the agent spec's profile or defaults.
             const member = { id: memberId, ...inherited, cwd: folder ?? raw["cwd"], keep_alive: false };
 
-            // The re-check just before the issue, with nothing awaited since the reservation: the job, the holds and the
-            // stored block again, then a new plan with this reservation counted. A lower `max`, `drain: true`, any other
-            // change to the block, a hold, or surplus that reaches this reservation cancels it before any operation row
-            // or call, and ends this cycle's adds.
-            let stopped: SeatPoolHoldRead | undefined;
-            const recheck = (): string | null => {
-              if (!active()) return "job_stopped";
-              const holdNow = readSeatPoolHold(deps.db, rigId);
-              if (holdNow.stoppedSeq !== null) { stopped = holdNow; return "rig_stopped"; }
-              const storedSpec = deps.rigRepo.getNodePool(modelNodeId);
-              const specNow = storedSpec !== undefined && "spec" in storedSpec ? storedSpec.spec : null;
-              if (blockChangedNow()) {
-                if (specNow === null) return "pool_block_changed";
-                return specNow.max < spec.max ? "max_lowered" : specNow.drain ? "drain" : "pool_block_changed";
-              }
-              const slotsNow = deps.slots.forModel(modelNodeId);
-              const replan = planSeatPool(spec, { ...readSeatPoolState(deps, model, slotsNow), lastStepAt: lastDrainStep(slotsNow) }, deps.now().getTime());
-              return replan.intents.some((i) => i.kind === "cancel" && i.slotNumber === slot.slotNumber) ? "surplus" : null;
-            };
+            // The re-check just before the issue (recheckReservation): what cancels the reservation cancels it before any
+            // operation row or call, and ends this cycle's adds.
             let cancelCause: string | null;
             try {
-              cancelCause = recheck();
+              cancelCause = recheckReservation(slot.slotNumber);
             } catch (error) {
               // A re-check that fails leaves no reservation behind: the reserved row goes before its error is raised.
               try { deps.slots.cancelReservedAdd(slot.slotId, attemptId); } catch { /* the re-check's own error is the one raised */ }
@@ -1454,11 +2040,6 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
                 cancelled.push({ slotNumber: slot.slotNumber, logicalId, attempt: { id: attemptId, status: "cancelled", message: CANCELLED_NOT_ISSUED, code: cancelCause } });
               } else {
                 notIssued.push({ slotNumber: slot.slotNumber, logicalId, code: "slot_changed" });
-              }
-              if (cancelCause === "job_stopped") held = JOB_STOPPED;
-              else if (stopped !== undefined) {
-                hold = stopped;
-                held = { cause: "rig stopped", seq: stopped.stoppedSeq!, message: `held: rig stopped (event ${stopped.stoppedSeq})` };
               }
               break;
             }
@@ -1784,6 +2365,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         ...(held ? { held } : {}),
         ...(advisory ? { advisory } : {}),
         ...(restore ? { restore } : {}),
+        ...(changes.length ? { laterChanges: changes } : {}),
         ...(moved.length ? { moved } : {}),
         ...(skipped.length ? { skipped } : {}),
         ...(failed.length ? { failed } : {}),

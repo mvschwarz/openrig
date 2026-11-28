@@ -1,7 +1,7 @@
 import { isRosterReadyNotice } from "./roster-ready-notice.js";
 import { queueDisplayText, QUEUE_DISPLAY_PREFIX_UNITS } from "./queue-display.js";
 import { RigDeliveryDrainStore } from "./rig-delivery-drain.js";
-import { PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap } from "./queue-wake-ladder.js";
+import { DRAFT_HELD_WAKE_RESULT, PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop, resolveWakeRetryCap } from "./queue-wake-ladder.js";
 import { LADDER_ATTEMPT_PREFIX } from "./queue-stuck-sweep.js";
 import { withUrgentLine } from "./urgent-line.js";
 import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js";
@@ -80,11 +80,13 @@ export interface RecordRelayOwnerNotificationTransportFailedInput extends Format
 }
 import { DRAFT_HELD_ELIGIBLE_TAG, HELD_RETRY_NOT_ADMITTED, HELD_SENDER_NOTICE_PREFIX, WAKE_INTENT_PREFIX, type DraftHeldPassEnd, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import { readStandbyStop } from "./seat-standby.js";
+import { DRAFT_HELD_REOFFER_MS } from "./draft-held-reoffer.js";
+/** A queue wake the draft-aware guard held for a draft in the input (#48). */
 import { physicalSessionName, SessionRegistry } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { withRecoveryIndex } from "./queue-recovery.js";
-import { lastMeaningfulTransition, lastMeaningfulTransitionMany, meaningfulFor, readWaitingView, WaitingStatements, type WaitingView, type WaitingActivityReader, type WaitingReads } from "./queue-waiting.js";
+import { lastMeaningfulTransition, lastMeaningfulTransitionMany, meaningfulFor, readWaitingView, WaitingStatements, type WaitingView, type NetworkWait, type WaitingActivityReader, type WaitingReads } from "./queue-waiting.js";
 import { isTypedGateBlocker, typedGateBlockerPrefix } from "./queue-blocker.js";
 export { TYPED_GATE_BLOCKER_PREFIXES, isTypedGateBlocker, typedGateBlockerPrefix } from "./queue-blocker.js";
 import { isOpenRigSender, OPENRIG_SENDER, wrapPaneEnvelope } from "../lib/pane-envelope.js";
@@ -351,6 +353,7 @@ export interface QueueItem {
    *  + heartbeat; a closed row is terminal, never stalled. */
   pickup?: PickupReceipt;
   waiting?: WaitingView;
+  networkWait?: NetworkWait;
   handedOffTo: string | null;
   handedOffFrom: string | null;
   expiresAt: string | null;
@@ -1322,6 +1325,7 @@ export class QueueRepository {
   private readonly hasSummaryColumn: boolean;
   private readonly hasHumanIntentColumn: boolean;
   private readonly hasReplyToColumn: boolean;
+  private readonly hasNetworkWaitColumn: boolean;
   private readonly hasReturnRouteColumn: boolean;
   private readonly hasHumanQuestionsColumn: boolean;
   private readonly hasDelegatedDecisionColumn: boolean;
@@ -1435,6 +1439,7 @@ export class QueueRepository {
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasHumanIntentColumn = detectQueueColumn(db, "human_intent");
     this.hasReplyToColumn = detectQueueColumn(db, "reply_to");
+    this.hasNetworkWaitColumn = !!db.prepare("SELECT 1 FROM pragma_table_info('network_requests') WHERE name = 'remote_wait'").get();
     this.hasReturnRouteColumn = detectQueueColumn(db, "return_route");
     this.hasHumanQuestionsColumn = detectQueueColumn(db, "human_questions");
     this.hasDelegatedDecisionColumn = detectQueueColumn(db, "delegated_decision");
@@ -2537,32 +2542,85 @@ export class QueueRepository {
 
   /** #48: a queue wake the draft-aware guard held is tried again when its seat reports idle, through the same guarded
    *  delivery, which re-checks the input and holds it again if it still can't go. Only while the seat is still in
-   *  draft-aware mode: switching modes alone replays nothing, and a retry already admitted goes once. Only rows created
-   *  straight to the seat: a handed-off row's retries are the wake ladder's. A hold-mode wake is never retried. Each try
-   *  is one of the ladder's attempts, so the existing wake retry cap bounds them; the ladder's one held notice comes past
-   *  that cap or the unconfirmed window. */
-  async retryDraftHeldWakesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<void> {
-    if (state !== "idle" || !this.outbox || !this.transport?.draftAwareTarget?.(sessionName)) return;
+   *  draft-aware mode: switching modes alone replays nothing, and a retry already admitted goes once. A row created to
+   *  the seat and a `rig queue handoff` successor alike (#4041): the wake ladder doesn't retry these on its timer
+   *  (idleRetriedDraftHold), so each has one retry owner. A hold-mode wake is never retried. Each try is one of the
+   *  ladder's attempts, so the existing wake retry cap bounds them; the ladder's one held notice comes past that cap or
+   *  the unconfirmed window. */
+  async retryDraftHeldWakesOnIdle(sessionName: string, state: AgentActivity["state"] | undefined): Promise<DraftHeldPassEnd> {
+    if (state !== "idle" || !this.outbox || !this.transport?.draftAwareTarget?.(sessionName)) return "skipped";
     const addresses = this.resolveSessionAddresses(sessionName);
-    if (!addresses.length || addresses.some(address => this.deliveryDrains.holds(address))) return;
+    if (!addresses.length) return "skipped";
+    if (addresses.some(address => this.deliveryDrains.holds(address))) return "paused";
     // As for a prompt clear (#2575): while a compaction's restore is owed, the wake would reach the agent before it.
-    if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return;
+    if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return "paused";
     const rows = this.db.prepare(`SELECT qitem_id FROM queue_items WHERE state = 'pending' AND claimed_at IS NULL
-      AND handed_off_from IS NULL AND destination_session IN (${addresses.map(() => "?").join(",")})
-      AND last_nudge_result = 'retained:draft_aware' ORDER BY ts_created, qitem_id`).all(...addresses) as Array<{ qitem_id: string }>;
+      AND destination_session IN (${addresses.map(() => "?").join(",")})
+      AND last_nudge_result = ? ORDER BY ts_created, qitem_id`).all(...addresses, DRAFT_HELD_WAKE_RESULT) as Array<{ qitem_id: string }>;
     const cap = resolveWakeRetryCap();
-    for (const { qitem_id } of rows) {
+    let held = false;
+    let paused = false;
+    rowsLoop: for (const { qitem_id } of rows) {
       if (this.transferFence(qitem_id)) continue;
-      const intent = `${WAKE_INTENT_PREFIX}${qitem_id}`;
+      // A drain or a restore that started while an earlier row's delivery awaited stops the pass before this row is
+      // reopened: no try, and the offer is kept.
+      if (this.draftHeldPaused(sessionName, addresses)) { paused = true; break; }
       const after = lastMeaningfulTransition(this.db, qitem_id)?.id ?? 0;
       const tries = (this.db.prepare(`SELECT COUNT(*) AS n FROM queue_transitions WHERE qitem_id = ? AND transition_id > ?
         AND transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%'`).get(qitem_id, after) as { n: number }).n;
-      if (tries >= cap || !this.outbox.reopenHeld(intent)) continue;
-      const outcome = await this.deliverWakeIntent(intent);
-      const row = this.getById(qitem_id);
-      if (row) this.transitionLog.append({ qitemId: qitem_id, state: row.state, actorSession: "wake-ladder@system",
-        transitionNote: `${LADDER_ATTEMPT_PREFIX} ${tries + 1}/${cap} outcome=${row.lastNudgeResult ?? outcome} trigger=seat-idle` });
+      if (tries >= cap) { held = true; continue; }
+      // The row's held wake, whichever intent holds it: its own, an unpark's or a reroute's, as the ladder's retry selects.
+      const intents = this.db.prepare(`SELECT outbox_id FROM outbox_entries WHERE audit_pointer = ? AND substr(outbox_id, 1, ?) = ?
+        AND delivery_state = 'retained' ORDER BY rowid`).all(qitem_id, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX) as Array<{ outbox_id: string }>;
+      for (const { outbox_id: intent } of intents) {
+        if (!this.outbox.reopenHeld(intent)) continue;
+        const outcome = await this.deliverWakeIntent(intent);
+        // Not sent: a drain or a restore met it at its claim. No try is recorded, and the offer is kept. The entry stays
+        // owed as pending, which the drain's end (or wake recovery) sends again.
+        if (outcome === "skipped") { paused = true; continue; }
+        const row = this.getById(qitem_id);
+        if (!row) continue rowsLoop;
+        const result = row.lastNudgeResult ?? outcome;
+        if (result === DRAFT_HELD_WAKE_RESULT) {
+          held = true;
+          // One burst of observations is one try: the observations around a single Enter (the agent's Stop, a pane change)
+          // can arrive inside the guard's quiet window together. A hold within that window of this row's previous held try
+          // records nothing, so it doesn't spend the cap that #48's escalation counts.
+          const last = this.db.prepare(`SELECT ts, transition_note AS note FROM queue_transitions WHERE qitem_id = ? AND transition_id > ?
+            AND transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%' ORDER BY transition_id DESC LIMIT 1`).get(qitem_id, after) as { ts: string; note: string } | undefined;
+          if (last && last.note.includes(`outcome=${DRAFT_HELD_WAKE_RESULT}`) && Date.now() - Date.parse(last.ts) < DRAFT_HELD_REOFFER_MS) continue;
+        }
+        this.transitionLog.append({ qitemId: qitem_id, state: row.state, actorSession: "wake-ladder@system",
+          transitionNote: `${LADDER_ATTEMPT_PREFIX} ${tries + 1}/${cap} outcome=${result} trigger=seat-idle` });
+      }
     }
+    return paused ? "paused" : held ? "draft" : "done";
+  }
+
+  /** Whether this seat's idle report and the periodic offer can retry its draft-held queue wakes: it's in draft-aware
+   *  mode. While it is, a draft-held handoff successor's retries are theirs; otherwise the wake ladder keeps them (#344). */
+  draftHeldIdleRetryOwns(sessionName: string): boolean {
+    return !!this.outbox && !!this.transport?.draftAwareTarget?.(sessionName);
+  }
+
+  /** Seats with draft-held queue wakes, each with its newest try's time, or for a wake not tried yet the time it was held:
+   *  the periodic offer gives each such time one offer after the quiet interval (createDraftHeldReoffer). So a held wake
+   *  whose draft is cleared with no activity report is still tried. Reads pending rows by state. */
+  draftHeldWakeSeats(): Array<{ session: string; lastTry: string }> {
+    const rows = this.db.prepare(`SELECT qitem_id AS qitemId, destination_session AS session, last_nudge_attempt AS heldAt
+      FROM queue_items WHERE state = 'pending' AND claimed_at IS NULL AND last_nudge_result = ?`)
+      .all(DRAFT_HELD_WAKE_RESULT) as Array<{ qitemId: string; session: string; heldAt: string | null }>;
+    // Only this wake's tries count, those after the row's last meaningful transition, as the pass counts them: a try from
+    // an earlier wake of the same row doesn't stand for a new hold that has had none.
+    const since = lastMeaningfulTransitionMany(this.db, rows.map(row => row.qitemId));
+    const lastTry = new Map<string, string>();
+    for (const row of rows) {
+      const tried = (this.db.prepare(`SELECT MAX(ts) AS ts FROM queue_transitions WHERE qitem_id = ? AND transition_id > ?
+        AND transition_note LIKE '${LADDER_ATTEMPT_PREFIX}%'`).get(row.qitemId, since.get(row.qitemId)?.id ?? 0) as { ts: string | null }).ts;
+      const at = tried ?? row.heldAt;
+      if (at !== null && at > (lastTry.get(row.session) ?? "")) lastTry.set(row.session, at);
+    }
+    return [...lastTry].map(([session, at]) => ({ session, lastTry: at }));
   }
 
   /** Seats with a draft-held delivery pass running, so overlapping idle observations don't race each other. */
@@ -7499,11 +7557,27 @@ export class QueueRepository {
   }
 
   /** listed: the row's owner notifications and ledger, when a listing read them for all its rows. */
+  private networkWaitFor(qitemId: string): NetworkWait | null {
+    if (!this.hasNetworkWaitColumn) return null;
+    const row = this.db.prepare("SELECT remote_wait FROM network_requests WHERE local_qitem_id = ? AND settled_at IS NULL").get(qitemId) as { remote_wait: string | null } | undefined;
+    if (!row?.remote_wait) return null;
+    try {
+      const wait: unknown = JSON.parse(row.remote_wait);
+      if (!wait || typeof wait !== "object") return null;
+      const value = wait as NetworkWait;
+      return ["requester-question", "another-request"].includes(value.kind) && typeof value.observedAt === "string" ? value : null;
+    } catch { return null; }
+  }
+
   waitingView(qitemId: string, listed?: ListedLedger): WaitingView | null {
     // The row in hand, when the listing passed it: its later re-reads below are served by it too.
     const inHand = listed?.row && listed.row.qitem_id === qitemId ? listed.row : undefined;
     const reads = listed?.reads && inHand ? { ...listed.reads, row: inHand } : listed?.reads;
     const view = readWaitingView(this.db, qitemId, listed?.reads?.activity ?? this.activityReader, target => this.acceptsDestination(target), reads);
+    if (view?.blocker?.owner === OPENRIG_SENDER) {
+      const networkWait = this.networkWaitFor(view.blocker.ref);
+      if (networkWait) view.blocker.networkWait = networkWait;
+    }
     if (view && ["pending", "in-progress"].includes(view.state)) {
       // #514 — the unclaimed sweep skips a pending ask already posted to its human in the current
       // episode (same predicate as runStuckSweep), so the view must not promise that sweep.
@@ -7536,7 +7610,7 @@ export class QueueRepository {
         view.nextBackstop = quiet;
         return view;
       }
-      const recovery = readWakeLadderBackstop(this.db, qitemId, target => this.acceptsDestination(target));
+      const recovery = readWakeLadderBackstop(this.db, qitemId, target => this.acceptsDestination(target), session => this.draftHeldIdleRetryOwns(session));
       if (recovery && !localOnly) {
         if (!awaitingHuman && !humanUpdate) view.laterBackstop = { ...view.nextBackstop, note: "Conditional safety net; current delivery/recovery ownership is evaluated first." };
         view.nextBackstop = recovery;
@@ -7597,6 +7671,7 @@ export class QueueRepository {
     const meaningful = meaningfulFor(this.db, row.qitem_id, listed?.reads);
     // A listing's rows are its own SELECT *: the waiting view reads the row in hand instead of reading it again.
     const waiting = includeWaiting ? this.waitingView(row.qitem_id, listed?.reads ? { ...listed, row } : listed) : null;
+    const networkWait = row.destination_session === OPENRIG_SENDER ? this.networkWaitFor(row.qitem_id) : null;
     const listedActivity = listed?.reads?.activity;
     const activity = listedActivity ? listedActivity(row.destination_session) : this.ownerActivity(row.destination_session);
     const pickup = derivePickup({
@@ -7616,6 +7691,7 @@ export class QueueRepository {
       ...(handoffAdvisory ? { handoffAdvisory } : {}),
       pickup,
       ...(waiting ? { waiting } : {}),
+      ...(networkWait ? { networkWait } : {}),
       qitemId: row.qitem_id,
       tsCreated: row.ts_created,
       tsUpdated: row.ts_updated,

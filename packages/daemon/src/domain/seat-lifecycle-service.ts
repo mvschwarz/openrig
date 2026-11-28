@@ -10,6 +10,7 @@ import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type T
 import { verifyPaneEmptyShell, type NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
 import type Database from "better-sqlite3";
+import { clearStartupTextOverride, editSavedStartupText, inspectSavedStartupText, type StartupTextLayer } from "./seat-startup-text.js";
 import type { RigRepository } from "./rig-repository.js";
 import { storedPoolAdvisories } from "./seat-pool-spec.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -129,6 +130,7 @@ export interface SeatLifecycleDeps {
   readProcessCensus?: () => Promise<ProcessTableCensus>;
   nodeLauncher?: NodeLauncher;
   startupOrchestrator?: StartupOrchestrator;
+  inspectStartupActions?: (rigId: string, nodeId: string) => Promise<import("./types.js").StartupAction[] | null>;
   /** Arms the seat's continuity notice (its `managed-compaction` or `apprentice-handover` jobs) for the occupant a fresh launch just
    *  started, reconciled by the seat's stable address. Resolves to a warning to report, or null. A failure never fails the launch. */
   armContinuity?: (rigId: string, nodeId: string) => Promise<string | null>;
@@ -388,6 +390,7 @@ export interface ParsedStartupContext {
 
 export class SeatLifecycleService {
   private readonly db: Database.Database;
+  private readonly inspectStartupActions: SeatLifecycleDeps["inspectStartupActions"];
   private readonly rigRepo: RigRepository;
   private readonly sessionRegistry: SessionRegistry;
   private readonly eventBus: EventBus;
@@ -413,6 +416,7 @@ export class SeatLifecycleService {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("SeatLifecycleService: sessionRegistry must share the same db handle");
     if (deps.db !== deps.eventBus.db) throw new Error("SeatLifecycleService: eventBus must share the same db handle");
     this.db = deps.db;
+    this.inspectStartupActions = deps.inspectStartupActions;
     this.rigRepo = deps.rigRepo;
     this.sessionRegistry = deps.sessionRegistry;
     this.eventBus = deps.eventBus;
@@ -2073,6 +2077,7 @@ export class SeatLifecycleService {
       plan: startup.plan,
       resolvedStartupFiles: startup.resolvedStartupFiles,
       startupActions: startup.startupActions,
+      startupActionsSource: "saved",
       isRestore: false,
       refreshClaudeFragments: true,
       includeDurableObligations: true,
@@ -2834,6 +2839,26 @@ export class SeatLifecycleService {
   private claimedRoutes(seat: SeatDescriptor, sessionName: string): string {
     return claimedSessionRoutes(seat.rigName, sessionName,
       seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(seat.nodeId)?.attachmentType)) === "external");
+  }
+
+  async setStartupText(input: { seatRef: string; inspect?: boolean; clearOverride?: boolean; overrideIndex?: unknown; layer: unknown; recipeIndex: unknown; contextIndex: unknown; value: unknown; expectedRevision?: unknown }): Promise<ReturnType<typeof editSavedStartupText> | ReturnType<typeof inspectSavedStartupText> | ReturnType<typeof clearStartupTextOverride> | SeatRefusal | { ok: false; code: string; message: string }> {
+    if (!input.inspect && ((!input.clearOverride && (!(["rig", "pod", "member", "context"] as unknown[]).includes(input.layer)
+      || !Number.isInteger(input.recipeIndex) || (input.recipeIndex as number) < 0 || typeof input.value !== "string" || !input.value))
+      || (input.clearOverride && input.overrideIndex !== undefined ? !Number.isInteger(input.overrideIndex) || (input.overrideIndex as number) < 0 : !Number.isInteger(input.contextIndex) || (input.contextIndex as number) < 0)
+      || (input.expectedRevision !== undefined && (typeof input.expectedRevision !== "string" || !input.expectedRevision)))) {
+      return { ok: false as const, code: "invalid_startup_text", message: "Supply a layer, two nonnegative action indexes, nonempty text, and an expected revision when applying." };
+    }
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(resolved.nodeId)) return guard.lifecycle([resolved.nodeId], () => this.setStartupText(input));
+    if (input.inspect) return inspectSavedStartupText(this.db, resolved.nodeId, resolved.entry.logicalId,
+      await this.inspectStartupActions?.(resolved.entry.rigId, resolved.nodeId));
+    if (input.clearOverride) return clearStartupTextOverride(this.db, { nodeId: resolved.nodeId, logicalId: resolved.entry.logicalId,
+      contextIndex: input.contextIndex as number, ...(typeof input.overrideIndex === "number" ? { overrideIndex: input.overrideIndex } : {}), ...(typeof input.expectedRevision === "string" ? { expectedRevision: input.expectedRevision } : {}) });
+    return editSavedStartupText(this.db, { nodeId: resolved.nodeId, logicalId: resolved.entry.logicalId,
+      layer: input.layer as StartupTextLayer, recipeIndex: input.recipeIndex as number, contextIndex: input.contextIndex as number,
+      value: input.value as string, ...(typeof input.expectedRevision === "string" ? { expectedRevision: input.expectedRevision } : {}) });
   }
 
   private describe(resolved: ResolvedSeat): SeatDescriptor {

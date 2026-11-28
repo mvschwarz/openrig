@@ -38,6 +38,8 @@ export interface BundleContentRouting {
 }
 
 export interface BundleContentRoutingOptions {
+  /** Effective install name when the caller renamed the bundled rig. */
+  rigName?: string;
   /** Called after context packs were routed, so the live library can rescan them. Returns the scan's per-pack errors. */
   onContextPacksRouted?: () => { errors?: Array<{ source: string; error: string }> } | void;
 }
@@ -78,6 +80,23 @@ function pluginEntries(value: unknown): PluginRoutingInput[] {
  * every declared kind. A kind the bundle does not declare is left out of the
  * result.
  */
+/** The same selection and conflict checks for install planning and actual routing. */
+export function registerDeclaredBundleProject(bundleRoot: string, manifest: Record<string, unknown>, opts: { plan?: boolean; rigName?: string } = {}): ProjectRegistrationResult | undefined {
+  const project = manifest["project"] as { id?: unknown; path?: unknown } | undefined;
+  if (!project) return undefined;
+  if (typeof project.id !== "string" || typeof project.path !== "string") throw new Error("bundle project entry needs an id and a path");
+  const rigSpec = parseYaml(fs.readFileSync(nodePath.join(bundleRoot, String(manifest["rig_spec"])), "utf-8")) as { name?: unknown };
+  const rigName = opts.rigName ?? rigSpec?.name;
+  if (typeof rigName !== "string") throw new Error("bundle rig spec has no name");
+  const settings = new SettingsStore();
+  return registerBundleProject({
+    bundleProjectDir: nodePath.join(bundleRoot, project.path), projectId: project.id, rigName,
+    projectsRoot: settings.resolveOne("workspace.projects_root").value as string,
+    workspaceRoot: settings.resolveOne("workspace.root").value as string,
+    catalogPath: settings.resolveOne("workspace.catalog_path").value as string,
+  }, opts);
+}
+
 export async function routeBundleContents(
   bundlePath: string,
   opts: BundleContentRoutingOptions = {},
@@ -177,20 +196,8 @@ export async function routeBundleContents(
       // this rig associated, so work-install resolves it at the first turn.
       const project = manifest["project"];
       if (project && typeof project === "object" && !Array.isArray(project)) {
-        const { id, path: projectPath } = project as { id?: unknown; path?: unknown };
         attempt("project", () => {
-          if (typeof id !== "string" || typeof projectPath !== "string") throw new Error("bundle project entry needs an id and a path");
-          const rigSpec = parseYaml(fs.readFileSync(nodePath.join(bundleRoot, String(manifest!["rig_spec"])), "utf-8")) as { name?: unknown };
-          if (typeof rigSpec?.name !== "string") throw new Error("bundle rig spec has no name");
-          const settings = new SettingsStore();
-          const result = registerBundleProject({
-            bundleProjectDir: nodePath.join(bundleRoot, projectPath),
-            projectId: id,
-            rigName: rigSpec.name,
-            projectsRoot: settings.resolveOne("workspace.projects_root").value as string,
-            workspaceRoot: settings.resolveOne("workspace.root").value as string,
-            catalogPath: settings.resolveOne("workspace.catalog_path").value as string,
-          });
+          const result = registerDeclaredBundleProject(bundleRoot, manifest!, { rigName: opts.rigName })!;
           routing.projectRegistration = result;
           if (result.status === "conflict") failures.push({ kind: "project", error: result.detail ?? "project registration conflict" });
         });

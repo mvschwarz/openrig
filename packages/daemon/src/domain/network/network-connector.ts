@@ -124,18 +124,24 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
     // no inbound work to take then, and the answers to the seat's requests are still read below. A tool list that can't
     // be read (anything but a refused credential) takes no work this pass, still reads the answers, and is reported.
     let inbound = false;
+    let requesterQuestions = false;
     let discovery: HubError | null = null;
     try {
       inbound = await hub.offers("rig_queue_list");
+      if (inbound) requesterQuestions = await hub.offers("rig_queue_create", "requesterOf");
     } catch (error) {
       if (!(error instanceof HubError) || error.kind === "revoked" || deadline.signal.aborted) throw error;
       discovery = error;
     }
     if (destination && inbound) {
       // What this participant already holds (claimed before a restart, or through an earlier binding) comes first.
-      for (const held of await hub.listOwned("in-progress", PAGE * MAX_PAGES)) {
+      const heldStates = requesterQuestions ? ["in-progress", "blocked"] as const : ["in-progress"] as const;
+      for (const state of heldStates) {
         if (!live()) break;
-        if (held.destinationSession === binding.hubSeat && await ensureLocal(deps, binding, hub, held, destination, now, live)) result.taken++;
+        for (const held of await hub.listOwned(state, PAGE * MAX_PAGES)) {
+          if (!live()) break;
+          if (held.destinationSession === binding.hubSeat && await ensureLocal(deps, binding, hub, held, destination, now, live)) result.taken++;
+        }
       }
       // New work, a page at a time: a claim moves an item out of pending, so each page is new items.
       for (let page = 0; page < MAX_PAGES && live(); page++) {
@@ -156,7 +162,7 @@ export async function runNetworkBindingPass(deps: NetworkConnectorDeps, binding:
       }
     }
     // Report back what happened locally, for the items this binding holds. A revoked binding never gets here.
-    if (live()) await reportBack(deps, binding, hub, now, result);
+    if (live()) await reportBack(deps, binding, hub, now, result, live);
     // Then the requests this seat sent through the hub: a create whose answer was lost, and each answer that arrived.
     // `live()` includes the credential revision, so a replaced credential stops this between requests.
     const unread = live() ? await reconcileNetworkRequests(deps, binding, hub, now, live) : null;
@@ -242,9 +248,10 @@ async function ensureLocal(deps: NetworkConnectorDeps, binding: NetworkBinding, 
         "",
         "---",
         // What leaves this install is what reportBack sends: the queued and pickup notes, then the result (closingWords).
-        "The requester gets back only this item's progress (queued, picked up, or an outcome that isn't known) and your answer: the resolution you close it with, or without one, your own note on the close. Nothing else from here goes to the hub: no other notes, items or files.",
+        "The requester gets back only this item's progress (queued, picked up, an explicit wait on a requester question, or an outcome that isn't known) and your answer: the resolution you close it with, or without one, your own note on the close. The connector does not copy other notes, unrelated items or files to the hub.",
         "Put in your answer only what this seat's sharing instructions allow.",
         `Answer by closing this item with your result: rig queue update ${localId} --state done --closure-reason no-follow-on --resolution "<your answer>".`,
+        `If you need the requester's decision, ask with rig network request --requester-of ${localId} --id <question-id> --body-file <question-file>. On a supporting hub this keeps this same work blocked on the question receipt. An unsupported hub writes no question or wait; keep the work open and report that limit. Never put the question only in a private note or substitute your own answer for the person's decision.`,
         "OpenRig returns the resolution to the hub item.",
       ].join("\n"),
       tags: [`network-binding:${binding.id}`, `network-hub-item:${item.qitemId}`],
@@ -297,7 +304,7 @@ export function networkClosedElsewhere(db: Database.Database, bindingId: string)
     .map((row) => ({ hubItem: row.hub_qitem_id, localItem: row.local_qitem_id, note: row.last_error }));
 }
 
-async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, hub: HubSession, now: () => Date, result: NetworkPassResult): Promise<void> {
+async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, hub: HubSession, now: () => Date, result: NetworkPassResult, live: () => boolean): Promise<void> {
   const open = deps.db.prepare(`SELECT * FROM network_receipts WHERE binding_id = ? AND settled_at IS NULL
     ORDER BY COALESCE(checked_at, ''), created_at LIMIT ?`).all(binding.id, deps.reportLimit ?? REPORT_LIMIT) as Receipt[];
   const mark = (column: "queued_sent_at" | "pickup_sent_at" | "settled_at", receipt: Receipt, outcome?: string, lastError: string | null = null) =>
@@ -331,6 +338,35 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
       if (!end) {
         await unknown("This item was handed on here without one successor, so its outcome is unknown. It won't be run again.");
         continue;
+      }
+      if (end.state === "blocked" && end.blockedOn) {
+        // A requester question has an explicit receipt relation. Other local dependencies and notes stay private.
+        const question = deps.db.prepare("SELECT hub_qitem_id FROM network_requests WHERE local_qitem_id = ? AND requester_local_qitem_id = ? AND requester_hub_qitem_id = ? AND hub_created_at IS NOT NULL AND settled_at IS NULL")
+          .get(end.blockedOn, end.qitemId, receipt.hub_qitem_id) as { hub_qitem_id: string } | undefined;
+        if (question) {
+          let advertised: boolean;
+          try { advertised = await hub.offers("rig_queue_create", "requesterOf"); } catch (error) {
+            if (!(error instanceof HubError) || error.kind === "revoked" || !live()) throw error;
+            // Capability discovery can fail while show still works: skip this write, not answer reconciliation.
+            throw new HubError("refused", `The requester wait remains local: ${error.message}`, error.code);
+          }
+          if (!advertised) throw new HubError("refused", "This hub does not advertise requester-question waits; the wait remains local.");
+          try {
+            const shown = await hub.show(receipt.hub_qitem_id);
+            const hubQuestion = await hub.show(question.hub_qitem_id);
+            const current = deps.queueRepo.getById(end.qitemId);
+            const localQuestion = deps.queueRepo.getById(end.blockedOn);
+            if (live() && localQuestion && !FINAL.has(localQuestion.state) && !HUB_CLOSED.has(hubQuestion.state) && current?.state === "blocked" && current.blockedOn === end.blockedOn && !HUB_CLOSED.has(shown.state)
+              && (!shown.blockedOn || shown.blockedOn === question.hub_qitem_id)
+              && (shown.state !== "blocked" || shown.blockedOn !== question.hub_qitem_id)) {
+              await hub.block(receipt.hub_qitem_id, question.hub_qitem_id);
+            }
+          } catch (error) {
+            if (!(error instanceof HubError) || error.kind === "revoked" || !live()) throw error;
+            // Wait reporting is optional; a failed read or write cannot prevent other answers returning.
+            throw new HubError("refused", `The requester wait remains local: ${error.message}`, error.code);
+          }
+        }
       }
       if (!FINAL.has(end.state)) continue;
       // The hub item closes the way the queue closes one: done with the local closure reason, or failed. A refusal, a

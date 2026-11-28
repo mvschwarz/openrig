@@ -275,9 +275,16 @@ resume launches (`codex-runtime-adapter.ts:378`, `codex-resume.ts:103`).
   and forwarded keys).
 - **Managed bootstrap.** Before delivery the adapter marks the seat's working
   directory as trusted and onboarding as completed in Claude's state file,
-  writing only when a flag is missing (`provisionManagedBootstrap`, `:697`).
-  It writes no permission settings. The Codex adapter does the same for
-  project trust in its `config.toml` (`codex-runtime-adapter.ts:736`).
+  writing only when a flag is missing (`provisionManagedBootstrap`, `:1364`).
+  It writes no permission settings. The Codex adapter also trusts the
+  workspace, but not only when a flag is missing: every Codex
+  `deliverStartup` with a working directory (`codex-runtime-adapter.ts:983`,
+  through `ensureManagedBootstrap`, `:1618`) rewrites `config.toml` with
+  `trust_level = "trusted"` under `[projects."<path>"]` for the workspace
+  path and its real path (`provisionWorkspaceTrust`, `:1908`). An existing
+  `trust_level` there is replaced (`upsertCodexProjectTrust`, `:2307`); a
+  project the file already defines another way (an inline table or dotted
+  keys) is left as it is.
 - **Readiness** (`checkReady`, `:356`): verifies tmux session alive (`:361`),
   captures the pane command and 40 pane lines, and assesses them with
   `assessNativeResumeProbe` (§3) through `assessManagedProbe` (called `:368`,

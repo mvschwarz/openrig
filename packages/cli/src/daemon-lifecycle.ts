@@ -6,7 +6,7 @@ import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemo
 import { daemonFetch, SandboxProxyError } from "./daemon-transport.js";
 import { blockedConnectionGuidance, daemonMayAnswer, isBlockedConnectionCode } from "./daemon-reachability.js";
 export { daemonMayAnswer } from "./daemon-reachability.js";
-import type { DaemonStartLock, ReservationMark } from "./daemon-start-lock.js";
+import { observeStartReservation, type DaemonStartLock, type ReservationMark } from "./daemon-start-lock.js";
 import { DAEMON_START_READINESS_WAIT_MS as STARTUP_READINESS_DEADLINE_MS, DAEMON_START_PROBE_TIMEOUT_MS as STARTUP_PROBE_TIMEOUT_MS, DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, occupiedPortGuidance, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
 import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
@@ -1699,35 +1699,15 @@ function findSiblingHome(deps: LifecycleDeps): DaemonStatus["siblingHint"] {
 /** T2 — read-only: the live launcher (else child) PID named by a start reservation, or undefined
  *  when there is no reservation, it is unreadable, or every PID it names is dead. */
 function liveStartReservation(deps: LifecycleDeps): DaemonStatus["startPending"] {
-  try {
-    const file = path.join(deps.homeDir ?? OPENRIG_DIR, "daemon-start.lock");
-    const raw = deps.exists(file) ? deps.readFile(file) : null;
-    if (!raw) return undefined;
-    let launcherPid: number | undefined;
-    let childPid: number | undefined;
-    let since: string | undefined;
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const rec = JSON.parse(line) as { launcherPid?: unknown; childPid?: unknown; startedAt?: unknown };
-        if (typeof rec.launcherPid === "number") launcherPid = rec.launcherPid;
-        if (typeof rec.childPid === "number") childPid = rec.childPid;
-        if (typeof rec.startedAt === "string") since = rec.startedAt;
-      } catch {
-        // partial line: keep whatever parsed
-      }
-    }
-    for (const pid of [launcherPid, childPid]) {
-      if (pid === undefined) continue;
-      const liveness: ProcessLiveness = deps.processLiveness
-        ? deps.processLiveness(pid)
-        : deps.isProcessAlive(pid) ? "alive" : "dead";
-      if (liveness !== "dead") return { pid, ...(since ? { since } : {}) };
-    }
-  } catch {
-    // best-effort only: a status read must never fail on the reservation
-  }
-  return undefined;
+  const reservation = observeStartReservation({
+    home: deps.homeDir ?? OPENRIG_DIR,
+    bootId: deps.bootId?.(),
+    readFile: (file) => deps.exists(file) ? deps.readFile(file) : null,
+    processLiveness: (pid) => deps.processLiveness
+      ? deps.processLiveness(pid) : deps.isProcessAlive(pid) ? "alive" : "dead",
+  });
+  if (!reservation || reservation.liveness === "dead" || reservation.pid === undefined) return undefined;
+  return { pid: reservation.pid, ...(reservation.since ? { since: reservation.since } : {}) };
 }
 
 export async function getDaemonStatus(
