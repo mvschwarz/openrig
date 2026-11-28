@@ -23,10 +23,10 @@ import { unpack } from "./bundle-archive.js";
 import { parsePodBundleManifest } from "./bundle-types.js";
 import os from "node:os";
 import fs from "node:fs";
-import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js";
+import { getOpenRigInstallCwdError, resolveLaunchCwd, normalizeCwdOverride, projectCwdReference, ProjectCwdError, type PlannedProjectRoots } from "./cwd-resolution.js";
 import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
 import { execRuntimeProbe } from "../adapters/runtime-probe-exec.js";
-import { routeBundleContents, routingFailureWarnings, thrownMessage, type BundleContentRouting } from "./bundle-content-routing.js";
+import { routeBundleContents, registerDeclaredBundleProject, routingFailureWarnings, thrownMessage, type BundleContentRouting, type BundleContentRoutingOptions } from "./bundle-content-routing.js";
 import { bundleInstallContext, bundleInstallContextLines, isExistingBundleTarget, type BundleInstallContext } from "./bundle-install-context.js";
 import { confirmStoppedGenerations } from "./running-name-guard.js";
 import { inspectBundleBehaviour } from "./bundle-behaviour-inspect.js";
@@ -98,7 +98,7 @@ interface BootstrapOrchestratorDeps {
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   rigRepo?: import("./rig-repository.js").RigRepository;
   /** Routes a bundle's declared contents; startup wires it to rescan the live context-pack library. */
-  routeBundleContents?: (bundlePath: string) => Promise<BundleContentRouting>;
+  routeBundleContents?: (bundlePath: string, opts?: BundleContentRoutingOptions) => Promise<BundleContentRouting>;
 }
 
 /** Generates a deterministic action key for plan->apply identity */
@@ -137,9 +137,12 @@ export class BootstrapOrchestrator {
   }
 
   /** Route a bundle's declared skills, plugins, workflow specs, context packs and agent images. Never throws. */
-  async routeBundleContents(bundlePath: string): Promise<BundleContentRouting> {
+  async routeBundleContents(bundlePath: string, rigName?: string): Promise<BundleContentRouting> {
     try {
-      return await (this.deps.routeBundleContents ? this.deps.routeBundleContents(bundlePath) : routeBundleContents(bundlePath));
+      if (this.deps.routeBundleContents) {
+        return await (rigName ? this.deps.routeBundleContents(bundlePath, { rigName }) : this.deps.routeBundleContents(bundlePath));
+      }
+      return await routeBundleContents(bundlePath, { rigName });
     } catch (err) {
       return { routingFailures: [{ kind: "bundle", error: thrownMessage(err) }] };
     }
@@ -193,6 +196,27 @@ export class BootstrapOrchestrator {
             const sharedProject = rigNameComposeProjectConflict(sourceYaml, opts.rigName);
             if (sharedProject) return this.refuseRigName(run, stages, warnings, sharedProject);
             const rawYaml = withRigName(sourceYaml, opts.rigName);
+            // Preview only the new project-relative cwd form. Plans and preflight must not
+            // place the carried project; normal routing still owns that before the first launch.
+            let plannedProjectRoots: PlannedProjectRoots | undefined;
+            let cwdProjectId: string | undefined;
+            if (!normalizeCwdOverride(opts.cwdOverride)) {
+              const { RigSpecSchema: PodSchema } = await import("./rigspec-schema.js");
+              const raw = parsePodBundleManifest(rawYaml) as Record<string, unknown>;
+              if (PodSchema.validate(raw).valid) {
+                const spec = PodSchema.normalize(raw);
+                const refs = spec.pods.flatMap(pod => pod.members.map(member => projectCwdReference(member.cwd))).filter(ref => ref !== undefined);
+                if (refs.length) {
+                  const manifest = parsePodBundleManifest(fs.readFileSync(nodePath.join(podSource.tempDir, "bundle.yaml"), "utf-8")) as Record<string, unknown>;
+                  const preview = registerDeclaredBundleProject(podSource.tempDir, manifest, { plan: true, rigName: spec.name });
+                  if (preview && refs.some(ref => ref.id === preview.projectId)) {
+                    if (preview.status === "conflict") throw new Error(`Project cwd '${preview.projectId}': ${preview.detail}. Correct the project registration or supply --cwd.`);
+                    cwdProjectId = preview.projectId;
+                    plannedProjectRoots = { [preview.projectId]: preview.projectRoot };
+                  }
+                }
+              }
+            }
             specDir = nodePath.dirname(podSource.specPath);
             let installRoot: string | undefined;
             stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: podSource.manifest.name, source: "pod_bundle" } });
@@ -289,7 +313,7 @@ export class BootstrapOrchestrator {
               }
             }
 
-            const result = await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings, installRoot);
+            const result = await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings, installRoot, plannedProjectRoots, cwdProjectId);
             if (mode === "apply" && result.status === "failed") result.warnings.push(...context.resolutions);
             return { ...result, bundleInstall: { ...context, resolutions: mode === "apply" && result.status === "completed" ? [] : context.resolutions } };
           } finally {
@@ -325,6 +349,7 @@ export class BootstrapOrchestrator {
         stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: spec.name, specVersion: spec.schemaVersion, source: "rig_bundle" } });
       } catch (err) {
         const msg = (err as Error).message;
+        if (err instanceof ProjectCwdError) return this.cwdPreflightFailure(run, stages, warnings, msg);
         stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "bundle_error", error: msg } });
         errors.push(msg);
         this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
@@ -364,6 +389,7 @@ export class BootstrapOrchestrator {
         stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: spec.name, specVersion: spec.schemaVersion } });
       } catch (err) {
         const msg = (err as Error).message;
+        if (err instanceof ProjectCwdError) return this.cwdPreflightFailure(run, stages, warnings, msg);
         const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? "file_not_found"
           : msg.includes("YAML") || msg.includes("parse") ? "parse_error"
           : "read_error";
@@ -727,6 +753,8 @@ export class BootstrapOrchestrator {
     errors: string[],
     warnings: string[],
     installRoot?: string,
+    plannedProjectRoots?: PlannedProjectRoots,
+    cwdProjectId?: string,
   ): Promise<BootstrapResult> {
     const { mode } = opts;
     const podInstantiator = this.deps.podInstantiator!;
@@ -754,6 +782,7 @@ export class BootstrapOrchestrator {
           rigSpecYaml,
           rigRoot,
           cwdOverride: opts.cwdOverride,
+          plannedProjectRoots,
           fsOps: podInstantiator["deps"].fsOps,
           skillsRoot: podInstantiator.resolveSkillsRoot?.(),
           exec: execFn,
@@ -786,23 +815,29 @@ export class BootstrapOrchestrator {
     const serviceHook = await this.buildServicePrelaunchHook(rigSpecYaml, rigRoot, stages, errors);
     let bundleRouting: BundleContentRouting | undefined;
     const bundleHook = opts.sourceKind === "rig_bundle"
-      ? async (): Promise<{ ok: true }> => {
-          // Routing never blocks the launch: a failed hook, or a throw, would roll the rig back.
+      ? async (): Promise<{ ok: true } | { ok: false; code: string; message: string }> => {
+          // Ordinary routing failures remain warnings. A referenced carried project must
+          // actually register before a member can resolve its project cwd.
           try {
-            bundleRouting = await this.routeBundleContents(opts.sourceRef);
+            bundleRouting = await this.routeBundleContents(opts.sourceRef, cwdProjectId ? opts.rigName : undefined);
           } catch (err) {
             bundleRouting = { routingFailures: [{ kind: "bundle", error: thrownMessage(err) }] };
           }
           const failureWarnings = routingFailureWarnings(bundleRouting);
           stages.push({ stage: "route_bundle_contents", status: failureWarnings.length > 0 ? "failed" : "ok", detail: bundleRouting });
           warnings.push(...(bundleRouting.warnings ?? []).filter(w => !warnings.includes(w)), ...failureWarnings);
+          if (cwdProjectId && (!bundleRouting.projectRegistration || bundleRouting.projectRegistration.status === "conflict" || bundleRouting.projectRegistration.projectId !== cwdProjectId)) {
+            return { ok: false, code: "project_cwd_failed", message: `Project cwd '${cwdProjectId}' could not be registered: ${failureWarnings.join("; ") || "no project registration result"}. Correct the project registration or supply --cwd.` };
+          }
           return { ok: true };
         }
       : undefined;
     const prelaunchHook = serviceHook && bundleHook
       ? async (...args: Parameters<typeof serviceHook>) => {
           const serviceResult = await serviceHook(...args);
-          if (serviceResult.ok) await bundleHook();
+          if (!serviceResult.ok) return serviceResult;
+          const bundleResult = await bundleHook();
+          if (!bundleResult.ok) { await serviceResult.rollback?.(); return bundleResult; }
           return serviceResult;
         }
       : serviceHook ?? bundleHook;
@@ -812,7 +847,7 @@ export class BootstrapOrchestrator {
       if (typeof raw?.["non_interruptive"] === "boolean") declaredNonInterruptive = raw["non_interruptive"];
     } catch { /* The instantiator returns the existing structured validation failure. */ }
     const nonInterruptive = opts.nonInterruptive ?? declaredNonInterruptive ?? (new SettingsStore().resolveOne("launch.non_interruptive").value === true);
-    const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { nonInterruptive, cwdOverride: opts.cwdOverride, env: opts.envOverride, prelaunchHook, installRoot });
+    const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { nonInterruptive, cwdOverride: opts.cwdOverride, env: opts.envOverride, prelaunchHook, installRoot, plannedProjectRoots });
     if ((outcome.ok || "rigId" in outcome) && (nonInterruptive || opts.nonInterruptive === false)) warnings.push(nonInterruptiveSummary(nonInterruptive));
     const withRouting = (r: BootstrapResult): BootstrapResult => (bundleRouting ? { ...r, bundleRouting } : r);
 
@@ -1011,6 +1046,12 @@ export class BootstrapOrchestrator {
       });
       return { ok: true, rollback };
     };
+  }
+
+  private cwdPreflightFailure(run: { id: string }, stages: BootstrapStageResult[], warnings: string[], message: string): BootstrapResult {
+    stages.push({ stage: "preflight", status: "blocked", detail: { code: "preflight_failed", errors: [message] } });
+    this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+    return { runId: run.id, status: "failed", stages, errors: [message], warnings };
   }
 
   private resolveLegacyNodeCwds(spec: RigSpec, specRoot: string, cwdOverride?: string): RigSpec {

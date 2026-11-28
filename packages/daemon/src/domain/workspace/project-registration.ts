@@ -51,6 +51,8 @@ export interface ProjectRegistrationResult {
   /** The project folder already existed with different files; it was kept unchanged. */
   projectFolderKept?: boolean;
   detail?: string;
+  /** Read-only preflight preview; no folder or catalog was written. */
+  planned?: true;
 }
 
 const CATALOG_HEADER = "schema: openrig.workspace/v0alpha1\n";
@@ -178,14 +180,14 @@ function entryRigs(entry: YAMLMap): string[] {
   return isSeq(rigs) ? rigs.items.map((item) => String(isScalar(item) ? item.value : item)) : [];
 }
 
-export function registerBundleProject(input: ProjectRegistrationInput): ProjectRegistrationResult {
+export function registerBundleProject(input: ProjectRegistrationInput, opts: { plan?: boolean } = {}): ProjectRegistrationResult {
   const projectRoot = nodePath.join(input.projectsRoot, input.projectId);
   const catalogDir = nodePath.dirname(input.catalogPath);
   const relativeRoot = nodePath.relative(catalogDir, projectRoot).split(nodePath.sep).join("/") || ".";
-  const base = { projectId: input.projectId, projectRoot, catalogPath: input.catalogPath, rigName: input.rigName };
+  const base = { ...(opts.plan ? { planned: true as const } : {}), projectId: input.projectId, projectRoot, catalogPath: input.catalogPath, rigName: input.rigName };
   // The project folder is placed only once every check has passed, so a conflict changes nothing.
   const placeFolder = (): { projectFolderKept?: true } =>
-    (materializeProjectFolder(input.bundleProjectDir, projectRoot) ? { projectFolderKept: true } : {});
+    (!opts.plan && materializeProjectFolder(input.bundleProjectDir, projectRoot) ? { projectFolderKept: true } : {});
 
   let doc: Document;
   let existingText: string | undefined;
@@ -262,7 +264,7 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
       };
     }
     const placed = placeFolder();
-    writeCatalog(input.catalogPath, edited);
+    if (!opts.plan) writeCatalog(input.catalogPath, edited);
     return { ...base, ...placed, projectId: targetId!, status: "associated" };
   }
 
@@ -276,12 +278,14 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
       };
     }
     const placed = placeFolder();
-    writeCatalog(input.catalogPath, appended);
+    if (!opts.plan) writeCatalog(input.catalogPath, appended);
     return { ...base, ...placed, status: "registered" };
   }
   (projects as YAMLSeq).add(doc.createNode(entry));
   const placed = placeFolder();
-  fs.mkdirSync(catalogDir, { recursive: true });
-  writeCatalog(input.catalogPath, doc.toString());
+  if (!opts.plan) {
+    fs.mkdirSync(catalogDir, { recursive: true });
+    writeCatalog(input.catalogPath, doc.toString());
+  }
   return { ...base, ...placed, status: "registered" };
 }

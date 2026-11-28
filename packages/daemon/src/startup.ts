@@ -1474,7 +1474,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     serviceOrchestrator, rigRepo,
     // A bundle's packs land in context.root before its seats launch; rescan
     // so the live library serves them on the first turn.
-    routeBundleContents: (bundlePath) => routeBundleContents(bundlePath, {
+    routeBundleContents: (bundlePath, opts) => routeBundleContents(bundlePath, {
+      ...opts,
       onContextPacksRouted: () => contextPackLibrary.scan(),
     }),
   });
