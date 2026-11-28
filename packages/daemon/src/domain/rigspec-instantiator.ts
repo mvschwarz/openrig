@@ -21,7 +21,7 @@ import { deriveCanonicalSessionName, validateSessionComponents } from "./session
 import { LegacyRigSpecSchema as RigSpecSchema } from "./rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import type { LegacyRigSpec as RigSpec, LegacyRigSpecEdge as RigSpecEdge, InstantiateOutcome, InstantiateResult } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
-import { resolveLaunchCwd } from "./cwd-resolution.js";
+import { resolveLaunchCwd, ProjectCwdError } from "./cwd-resolution.js";
 import type { RecordCreated } from "./operation-correlation.js";
 import { markRigBuilding, unmarkRigBuilding } from "./rigs-being-built.js";
 
@@ -922,6 +922,9 @@ export class PodRigInstantiator {
         },
       };
     } catch (err) {
+      if (err instanceof ProjectCwdError) {
+        return { ok: false, code: "preflight_failed", errors: [err.message], warnings: preflightWarnings };
+      }
       if (err && typeof err === "object" && "code" in err && "message" in err) {
         const typed = err as { code: string; message: string; existingNodeId?: string };
         if (typed.code === "materialize_conflict") {
@@ -1478,7 +1481,7 @@ export class PodRigInstantiator {
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: warnings.length ? warnings : result.warnings };
   }
 
-  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
+  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; plannedProjectRoots?: import("./cwd-resolution.js").PlannedProjectRoots; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // #141: while an import may archive a stopped same-name generation, allow one import per rig name at
     // a time on this daemon. Otherwise two imports could each replace it, or one could archive the other's
     // in-progress replacement. Unrelated names are unaffected; an adapter that cannot probe keeps today's
@@ -1533,7 +1536,7 @@ export class PodRigInstantiator {
     return outcome;
   }
 
-  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; recordRosterComplete?: () => void; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
+  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; plannedProjectRoots?: import("./cwd-resolution.js").PlannedProjectRoots; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; recordRosterComplete?: () => void; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -1558,7 +1561,7 @@ export class PodRigInstantiator {
     if (!nameGuard.ok) return nameGuard;
 
     // 2. Preflight
-    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, includeModelWarnings: false, cwdOverride: opts?.cwdOverride, envOverride: opts?.env, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
+    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, includeModelWarnings: false, cwdOverride: opts?.cwdOverride, plannedProjectRoots: opts?.plannedProjectRoots, envOverride: opts?.env, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
@@ -1731,7 +1734,7 @@ export class PodRigInstantiator {
           this.deps.rigRepo.deleteRig(rigId);
           restoreArchived();
         }
-        return { ok: false, code: hookResult.code === "compose_project_conflict" ? "compose_project_conflict" : "service_boot_failed", message: hookResult.message };
+        return { ok: false, code: hookResult.code === "compose_project_conflict" ? "compose_project_conflict" : hookResult.code === "project_cwd_failed" ? "project_cwd_failed" : "service_boot_failed", message: hookResult.message };
       }
       rollbackServices = hookResult.rollback;
     }
@@ -2483,6 +2486,25 @@ export class PodRigInstantiator {
     } };
   }
 
+  /** Resolve today's recipe source for inspection without starting or changing the seat. */
+  async inspectStartupActions(rigId: string, nodeId: string): Promise<StartupAction[] | null> {
+    const node = this.deps.rigRepo.getRig(rigId)?.nodes.find(candidate => candidate.id === nodeId);
+    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
+    if (!node || !recipe) return null;
+    const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
+    if (!context) return null;
+    const member = this.persistedMember(node, context.member);
+    const layers = this.rigStartupLayers(recipe.rigSpec, recipe.rigRoot, rigId);
+    if (member.agentRef === "builtin:terminal") return resolveStartup({ specStartup: { files: [], actions: [] }, profileStartup: undefined,
+      rigCultureFile: layers.cultureFile, rigStartup: layers.startup, podStartup: context.pod.startup, memberStartup: member.startup, operatorStartup: undefined }).actions;
+    const resolved = resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
+    if (!resolved.ok) return null;
+    const config = await resolveNodeConfigAsync({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
+      profileName: member.profile, specRoot: recipe.rigRoot, cwdOverride: node.cwd ?? undefined, member, pod: context.pod,
+      rig: this.withRigStartupLayers(recipe.rigSpec, layers), skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
+    return config.ok ? config.config.startup.actions : null;
+  }
+
   seatClaudeFragments: ResolveClaudeFragments = async (rigId, nodeId) => {
     const resolved = await this.resolvePersistedSeatConfig(rigId, nodeId, "current");
     if (!resolved.ok) return resolved;
@@ -3193,6 +3215,10 @@ export class PodRigInstantiator {
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.launchExistingTerminalMember(input));
     }
+    const terminalRigLayers = this.rigStartupLayers(input.rigSpec, input.rigRoot, input.rigId);
+    const startup = resolveStartup({ specStartup: { files: [], actions: [] }, profileStartup: undefined,
+      rigCultureFile: terminalRigLayers.cultureFile, rigStartup: terminalRigLayers.startup,
+      podStartup: input.pod.startup, memberStartup: input.member.startup, operatorStartup: undefined });
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
     const terminalPolicyAttachment = this.resolveMemberPolicyAttachment(input.member.permissionPolicy, input.rigSpec.permissionPolicy, input.rigRoot);
     if (terminalPolicyAttachment) this.persistNodePolicyProvenance(input.nodeId, terminalPolicyAttachment);
@@ -3243,16 +3269,6 @@ export class PodRigInstantiator {
         .run("checkpoint_only", launchResult.session.id);
     } catch { /* best-effort */ }
 
-    const terminalRigLayers = this.rigStartupLayers(input.rigSpec, input.rigRoot, input.rigId);
-    const startup = resolveStartup({
-      specStartup: { files: [], actions: [] },
-      profileStartup: undefined,
-      rigCultureFile: terminalRigLayers.cultureFile,
-      rigStartup: terminalRigLayers.startup,
-      podStartup: input.pod.startup,
-      memberStartup: input.member.startup,
-      operatorStartup: undefined,
-    });
     const resolvedFiles = this.buildTerminalResolvedStartupFiles(terminalRigLayers, input.rigRoot, input.pod, input.member);
     const binding: NodeBinding = {
       id: launchResult.binding.id,

@@ -74,8 +74,11 @@ The outcomes above ride on three DISTINCT mechanisms; keep them separate:
 OpenRig path EDITS provider-owned native **session / auth / transcript** files to
 inject context. Context enters ONLY through sanctioned channels: the hook
 `additionalContext`, a normal user message via `rig send`, or Codex resume tokens.
-Precise nuance: OpenRig *does* write `~/.codex/config.toml` — but only to install
-OpenRig activity **hooks** and `[features]`, never session or auth state. So the
+Precise nuance: OpenRig *does* write `~/.codex/config.toml`: it installs OpenRig
+activity **hooks** and `[features]`, marks each Codex seat's workspace trusted at
+seat startup (`trust_level = "trusted"` for the workspace path, replacing a value
+already there), and can add selected MCP or config resources. It never writes
+session or auth state. So the
 rule is "never edits native session/auth/transcript files," NOT "never touches any
 provider-owned file."
 

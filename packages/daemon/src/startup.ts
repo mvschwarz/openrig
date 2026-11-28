@@ -778,7 +778,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // A held message whose last try met the person's recent typing, a drain or a restore is offered again from the same
   // per-tick sweep, even when the seat's state stays the same (#3991). No capture or delivery path of its own.
   attachDraftHeldReoffer(seatStructuralActivityService, queueRepoInstance, sessionName => currentSeatActivity(sessionName).activity?.state,
-    { onError: error => console.warn(`Draft-held message re-offer: ${error instanceof Error ? error.name : typeof error}`) });
+    { onError: error => console.warn(`Draft-held message re-offer: ${error instanceof Error ? error.name : typeof error}`),
+      quietUntil: sessionName => deliveryGuard.inputQuietUntil(sessionName) });
   eventBus.subscribe(event => { if (event.type === "agent.activity") retryPromptWakes(event.sessionName); });
   // #3315 — whether the daemon reaches its tmux server is state of its own (terminal-server-seats.ts): recorded once
   // per change, delivery to its seats held meanwhile, its return noticed by a read-only probe and owed work offered
@@ -1524,7 +1525,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     serviceOrchestrator, rigRepo,
     // A bundle's packs land in context.root before its seats launch; rescan
     // so the live library serves them on the first turn.
-    routeBundleContents: (bundlePath) => routeBundleContents(bundlePath, {
+    routeBundleContents: (bundlePath, opts) => routeBundleContents(bundlePath, {
+      ...opts,
       onContextPacksRouted: () => contextPackLibrary.scan(),
     }),
   });
@@ -1658,6 +1660,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { CurrentModelReader } = await import("./domain/model-divergence/current-model-reader.js");
   const { ProcessCensus: ModelProcessCensus } = await import("./domain/process-census.js");
   const { CodexThreadIdResolver: ModelThreadResolver } = await import("./domain/codex-thread-id.js");
+  const { readThreadIdAcrossHomes } = await import("./domain/model-divergence/codex-thread-homes.js");
   const modelCensus = new ModelProcessCensus();
   const modelThreads = new ModelThreadResolver({ defaultHome: daemonHome, codexHome: configuredCodexHome });
   // A seat with its own CODEX_HOME logs its threads there. The read is gated by the process's identity, so after the
@@ -1675,14 +1678,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     native: {
       getPanePid: async (target) => tmuxAdapter.getPanePid ? tmuxAdapter.getPanePid(target) : null,
       listProcesses: () => modelCensus.list(),
-      readThreadIdByPid: async (pid, identity) => {
-        const resolvers = [modelThreads, ...declaredRuntimeHomes(db, "codex").filter(home => home !== configuredCodexHome).map(modelThreadsFor)];
-        for (const resolver of resolvers) {
-          const threadId = identity === undefined ? await resolver.resolveUngatedLegacy(pid) : await resolver.resolve(pid, identity);
-          if (threadId) return threadId;
-        }
-        return undefined;
-      },
+      readThreadIdByPid: async (pid, identity) => readThreadIdAcrossHomes(
+        [modelThreads, ...declaredRuntimeHomes(db, "codex").filter(home => home !== configuredCodexHome).map(modelThreadsFor)], pid, identity),
     },
     codexRollout: (threadId, sessionName, reporting) => reporting
       ? contextUsageStore.readCodexTranscriptPath(threadId)

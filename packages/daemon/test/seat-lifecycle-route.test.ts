@@ -51,6 +51,61 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     });
   }
 
+  it("inspects, previews and replaces selected saved startup text through the seat route", async () => {
+    const { node, sessionName } = seedSeat();
+    const action = { type: "send_text", value: "old", phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true };
+    const recipe = { version: 1, rigRoot: "/tmp", rigSpec: { pods: [{ id: "dev", members: [{ id: "impl", startup: { files: [], actions: [action] } }] }] } };
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), node.id);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', ?, 'claude-code')").run(node.id, JSON.stringify([action]));
+    const inspect = await post("set-startup-text", sessionName, { inspect: true });
+    expect(inspect.status).toBe(200);
+    expect(await inspect.json()).toMatchObject({ candidates: [{ layer: "member", recipeIndex: 0, contextIndex: 0, value: "old" }] });
+    const request = { layer: "member", recipeIndex: 0, contextIndex: 0, value: "new" };
+    const preview = await post("set-startup-text", sessionName, request);
+    expect(preview.status).toBe(200);
+    const body = await preview.json() as { revision: string };
+    const applied = await post("set-startup-text", sessionName, { ...request, expectedRevision: body.revision });
+    expect(applied.status).toBe(200);
+    expect(await applied.json()).toMatchObject({ preview: false, from: "old", to: "new", recipeText: "new" });
+    expect((await post("set-startup-text", sessionName, { ...request, expectedRevision: body.revision })).status).toBe(409);
+  });
+
+  it("corrects saved text after a failed startup with pending context", async () => {
+    const { rig, node, session, sessionName } = seedSeat();
+    const action = { type: "send_text", value: "old", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true };
+    const recipe = { version: 1, rigRoot: "/tmp", rigSpec: { pods: [{ id: "dev", members: [{ id: "impl", startup: { files: [], actions: [action] } }] }] } };
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), node.id);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', ?, 'claude-code')").run(node.id, JSON.stringify([action]));
+    setup.eventBus.emit({ type: "node.startup_failed", rigId: rig.id, nodeId: node.id, sessionId: session.id, error: "consent needed", freshContextPending: true });
+    expect(setup.startupOrchestrator.pendingStartupContext(node.id, session.id)).not.toBeNull();
+    const input = { layer: "member", recipeIndex: 0, contextIndex: 0, value: "corrected" };
+    const preview = await (await post("set-startup-text", sessionName, input)).json() as { revision: string };
+    const applied = await post("set-startup-text", sessionName, { ...input, expectedRevision: preview.revision });
+    expect(applied.status).toBe(200);
+    expect(await applied.json()).toMatchObject({ changed: true, to: "corrected" });
+    expect(setup.startupOrchestrator.pendingStartupContext(node.id, session.id)).not.toBeNull();
+  });
+
+  it("clears a stale override by its inspected index after saved context changes", async () => {
+    const { node, sessionName } = seedSeat();
+    const old = { type: "send_text", value: "old source", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true };
+    const recipe = { version: 1, rigRoot: "/tmp", rigSpec: { pods: [{ id: "dev", members: [{ id: "impl" }] }] }, startupTextOverrides: [{ before: old, value: "replacement" }] };
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), node.id);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', ?, 'claude-code')").run(node.id, JSON.stringify([{ ...old, value: "changed source" }]));
+    const inspected = await (await post("set-startup-text", sessionName, { inspect: true })).json() as { overrides: unknown[] };
+    expect(inspected.overrides).toMatchObject([{ overrideIndex: 0, status: "source_unverified", value: "replacement" }]);
+    const request = { clearOverride: true, overrideIndex: 0 };
+    const preview = await (await post("set-startup-text", sessionName, request)).json() as { revision: string };
+    const applied = await post("set-startup-text", sessionName, { ...request, expectedRevision: preview.revision });
+    expect(applied.status).toBe(200);
+    expect(await applied.json()).toMatchObject({ clearOverride: true, from: "replacement" });
+  });
+
+  it("rejects a malformed startup-text request", async () => {
+    const response = await setup.app.request("/api/seat/set-startup-text/dev.impl", { method: "POST", headers: { "Content-Type": "application/json" }, body: "null" });
+    expect(response.status).toBe(400);
+  });
+
   it("set-cwd forwards the requested directory, prefers the transport actor and returns preparation warnings", async () => {
     const result = { ok: true as const, seat: {} as never, from: "/workspace", to: "/workspace/planner",
       changed: true, effect: "next_launch" as const, warnings: ["Existing local guidance was retained"] };

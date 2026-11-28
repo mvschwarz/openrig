@@ -3,8 +3,8 @@
 // THREE states — the cockpit + the C2 direct read fire ONLY on DOWN, and DOWN requires POSITIVE
 // evidence. A probe blip must NEVER fabricate a crash narrative or offer RESTORE EVERYTHING:
 //   UP         — /healthz answered (openrig is serving).
-//   DOWN       — (no daemon.json OR pid dead) AND /healthz connection-REFUSED. REFUSED is the ONLY
-//                strong down signal; a timeout NEVER promotes to DOWN (at any retry count).
+//   DOWN       — no matching live/unknown process or startup reservation AND /healthz connection-
+//                REFUSED. A timeout NEVER promotes to DOWN (at any retry count).
 //   UNVERIFIED — everything else: timeout, a wedged daemon (pid alive but refused/unresponsive), or a
 //                non-openrig process on the port. Renders its own minimal screen, never the cockpit.
 //
@@ -39,6 +39,10 @@ export interface ClassifyDaemonDeps {
   isProcessAlive: (pid: number) => boolean;
   probeHealthz: (url: string) => Promise<HealthzProbeResult>;
   openrigUrl?: string;
+  /** Target-scoped local process/startup evidence, when the caller has resolved an explicit target. */
+  readProcessEvidence?: (state: DaemonStateFile | undefined) => { pidState: string; mayBeRunning: boolean };
+  /** The evidence from this exact probe, including a discovery recheck; no extra evidence probe. */
+  onEvidence?: (evidence: DaemonUnverifiedEvidence) => void;
 }
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -60,10 +64,15 @@ function healthzUrl(deps: ClassifyDaemonDeps, state: DaemonStateFile | undefined
  */
 export async function classifyDaemonState(deps: ClassifyDaemonDeps): Promise<DaemonState> {
   const state = deps.readDaemonJson(deps.openrigHome);
-  const pidDeadOrAbsent = !state || !deps.isProcessAlive(state.pid);
-  const probe = await deps.probeHealthz(healthzUrl(deps, state));
+  const process = deps.readProcessEvidence?.(state) ?? (() => {
+    const alive = state ? deps.isProcessAlive(state.pid) : false;
+    return { mayBeRunning: alive, pidState: state ? `${alive ? "alive" : "dead"} (pid ${state.pid})` : "no daemon.json" };
+  })();
+  const url = healthzUrl(deps, state);
+  const probe = await deps.probeHealthz(url);
+  deps.onEvidence?.({ pidState: process.pidState, probeResult: probe, failedSignal: `healthz ${probe} at ${url}` });
   if (probe === "answered") return "up";
-  if (probe === "refused" && pidDeadOrAbsent) return "down";
+  if (probe === "refused" && !process.mayBeRunning) return "down";
   // timeout · wedged (pid alive but refused/unresponsive) · foreign occupant → never a crash verdict.
   return "unverified";
 }

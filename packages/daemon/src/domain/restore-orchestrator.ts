@@ -2953,6 +2953,7 @@ export class RestoreOrchestrator {
               plan,
               resolvedStartupFiles: filteredFiles,
               startupActions: sourceActions,
+              snapshotStartupActions: true,
               isRestore: replayAsRestore,
               refreshClaudeFragments: !resumeRequested && (freshRequested || !replayAsRestore),
               ...(replaySkip ? { replaySkip } : {}),

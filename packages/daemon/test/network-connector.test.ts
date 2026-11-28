@@ -43,6 +43,8 @@ class FakeHub {
   readonly stallShow = new Set<string>();
   /** Runs while a show is waiting on the hub, before it answers; the show waits for what it returns. */
   duringShow: ((id: string) => void | Promise<void>) | null = null;
+  /** Runs while a claim is waiting on the hub, before it takes effect; the claim waits for what it returns. */
+  duringClaim: ((id: string) => void | Promise<void>) | null = null;
   /** Runs right after a create stores a new item, before it answers. */
   afterCreate: ((id: string) => void) | null = null;
   /** Runs while a connection is being set up, before it's ready. */
@@ -79,6 +81,7 @@ class FakeHub {
       listOwned: async (state, limit) => [...this.items.values()].filter((i) => i.destinationSession === PARTICIPANT && i.state === state).slice(0, limit)
         .map(({ notes: _notes, ...item }) => ({ ...item, body: null })),
       claim: async (id) => {
+        await this.duringClaim?.(id);
         const item = get(id);
         if (item.state !== "pending") throw new HubError("refused", `qitem ${id} is ${item.state}`);
         item.state = "in-progress";
@@ -684,6 +687,264 @@ describe("network connector", () => {
     repo.claim({ qitemId: runs("hub-q3")[0]!.qitemId, destinationSession: "dev-impl@lab" });
     for (let i = 0; i < 3; i++) await runNetworkBindingPass(limited, bindings.get(b.id)!);
     expect(hub.items.get("hub-q3")!.notes.at(-1)).toMatch(/^Picked up by the local seat at /);
+  });
+
+  /** Close every local item still open here, as a seat that finished them would. */
+  const finishAll = async (resolution = "Done.") => {
+    for (const local of repo.list({ limit: 2000 }).filter((i) => i.state === "pending")) {
+      repo.claim({ qitemId: local.qitemId, destinationSession: "dev-impl@lab" });
+      await repo.update({ qitemId: local.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", resolution });
+    }
+  };
+  const hubStates = () => [...hub.items.values()].reduce<Record<string, number>>((counts, i) => ({ ...counts, [i.state]: (counts[i.state] ?? 0) + 1 }), {});
+
+  it("under a sustained backlog, each pass reports on the hub everything that finished here since the last one", async () => {
+    const b = bind();
+    let next = 0;
+    const refill = () => { for (let i = 0; i < 200; i++) hub.add(`hub-b${next++}`); };
+    refill();
+    expect(await pass(b.id)).toMatchObject({ taken: 200 });
+    for (let round = 0; round < 3; round++) {
+      await finishAll();
+      refill();
+      // A full page set is taken, and every result that finished since the last pass reaches the hub in this one.
+      expect(await pass(b.id)).toMatchObject({ taken: 200, resultsSent: 200 });
+    }
+    // What the hub shows in progress is only what this seat hasn't finished: the last pass's new items, each queued.
+    expect(hubStates()).toEqual({ done: 600, "in-progress": 200 });
+    expect([...hub.items.values()].filter((i) => i.state === "in-progress").every((i) => i.notes[0] === "Queued for the connected local seat. Not picked up yet.")).toBe(true);
+  });
+
+  it("an item that finished here is reported before older ones still open here with nothing new to send", async () => {
+    const b = bind();
+    for (let i = 1; i <= 6; i++) hub.add(`hub-o${i}`);
+    const limited = { ...deps, reportLimit: 3 };
+    await runNetworkBindingPass(limited, bindings.get(b.id)!);
+    await runNetworkBindingPass(limited, bindings.get(b.id)!);
+    expect([...hub.items.values()].map((i) => i.notes.length)).toEqual([1, 1, 1, 1, 1, 1]);
+    const last = runs("hub-o6")[0]!;
+    repo.claim({ qitemId: last.qitemId, destinationSession: "dev-impl@lab" });
+    await repo.update({ qitemId: last.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", resolution: "Done last, reported first." });
+    expect(await runNetworkBindingPass(limited, bindings.get(b.id)!)).toMatchObject({ resultsSent: 1 });
+    expect(hub.items.get("hub-o6")).toMatchObject({ state: "done", resolution: "Done last, reported first." });
+  });
+
+  it("on a slow hub, reporting stops at its share of the pass's deadline: the pass ends without an error, and the rest are reported next", async () => {
+    const b = bind();
+    for (let i = 0; i < 30; i++) hub.add(`hub-t${i}`);
+    await pass(b.id);
+    await finishAll();
+    hub.duringShow = () => new Promise((resolve) => setTimeout(resolve, 20));
+    const slow = { ...deps, passTimeoutMs: 1000 };
+    const first = await runNetworkBindingPass(slow, bindings.get(b.id)!);
+    expect(first.error).toBeUndefined();
+    expect(bindings.get(b.id)!.lastError).toBeNull();
+    expect(first.resultsSent).toBeGreaterThan(0);
+    expect(first.resultsSent).toBeLessThan(30);
+    for (let passes = 1; hubStates().done !== 30 && passes < 10; passes++) {
+      expect((await runNetworkBindingPass(slow, bindings.get(b.id)!)).error).toBeUndefined();
+    }
+    expect(hubStates()).toEqual({ done: 30 });
+  });
+
+  it("a long intake leaves reporting its window: what finished here reaches the hub in the same pass", async () => {
+    const b = bind();
+    for (let i = 0; i < 20; i++) hub.add(`hub-w${i}`);
+    await pass(b.id);
+    await finishAll();
+    // A full backlog of new work whose every claim is slow: taking all of it would outlast the pass.
+    for (let i = 0; i < 200; i++) hub.add(`hub-n${i}`);
+    hub.duringClaim = () => new Promise((resolve) => setTimeout(resolve, 20));
+    const slow = { ...deps, passTimeoutMs: 1000 };
+    const result = await runNetworkBindingPass(slow, bindings.get(b.id)!);
+    expect(result.error).toBeUndefined();
+    expect(result.resultsSent).toBe(20);
+    expect(result.taken).toBeGreaterThan(0);
+    expect(result.taken).toBeLessThan(200);
+  });
+
+  it("items handed on to successors still open here don't hold reporting's first places; each closes first once its successor finishes", async () => {
+    const b = bind();
+    for (const id of ["hub-p1", "hub-p2", "hub-p3"]) hub.add(id);
+    await pass(b.id);
+    const local = (id: string) => runs(id)[0]!;
+    for (const id of ["hub-p1", "hub-p2"]) repo.claim({ qitemId: local(id).qitemId, destinationSession: "dev-impl@lab" });
+    await pass(b.id);
+    const successors: string[] = [];
+    for (const id of ["hub-p1", "hub-p2"]) {
+      const { created } = await repo.handoff({ qitemId: local(id).qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+      successors.push(created.qitemId);
+    }
+    repo.claim({ qitemId: local("hub-p3").qitemId, destinationSession: "dev-impl@lab" });
+    // Two places a pass: the two handed-on items, with nothing new to send, don't keep hub-p3's pickup out.
+    const limited = { ...deps, reportLimit: 2 };
+    await runNetworkBindingPass(limited, bindings.get(b.id)!);
+    expect(hub.items.get("hub-p3")!.notes).toContain(`Picked up by the local seat at ${local("hub-p3").claimedAt}.`);
+    repo.claim({ qitemId: successors[0]!, destinationSession: "review@lab" });
+    await repo.update({ qitemId: successors[0]!, actorSession: "review@lab", state: "done", closureReason: "no-follow-on", resolution: "Reviewed: fine." });
+    expect(await runNetworkBindingPass(limited, bindings.get(b.id)!)).toMatchObject({ resultsSent: 1 });
+    expect(hub.items.get("hub-p1")).toMatchObject({ state: "done", resolution: "Reviewed: fine." });
+  });
+
+  it("a chain of handoffs whose last item is still open doesn't hold reporting's first places either, at any hop", async () => {
+    const b = bind();
+    for (const id of ["hub-q1", "hub-q2", "hub-q3"]) hub.add(id);
+    await pass(b.id);
+    const local = (id: string) => runs(id)[0]!;
+    for (const id of ["hub-q1", "hub-q2"]) repo.claim({ qitemId: local(id).qitemId, destinationSession: "dev-impl@lab" });
+    await pass(b.id);
+    const lasts: string[] = [];
+    for (const id of ["hub-q1", "hub-q2"]) {
+      const { created } = await repo.handoff({ qitemId: local(id).qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+      repo.claim({ qitemId: created.qitemId, destinationSession: "review@lab" });
+      const { created: last } = await repo.handoff({ qitemId: created.qitemId, fromSession: "review@lab", toSession: "qa@lab", nudge: false });
+      lasts.push(last.qitemId);
+    }
+    repo.claim({ qitemId: local("hub-q3").qitemId, destinationSession: "dev-impl@lab" });
+    const limited = { ...deps, reportLimit: 2 };
+    await runNetworkBindingPass(limited, bindings.get(b.id)!);
+    expect(hub.items.get("hub-q3")!.notes).toContain(`Picked up by the local seat at ${local("hub-q3").claimedAt}.`);
+    repo.claim({ qitemId: lasts[0]!, destinationSession: "qa@lab" });
+    await repo.update({ qitemId: lasts[0]!, actorSession: "qa@lab", state: "done", closureReason: "no-follow-on", resolution: "Checked: fine." });
+    expect(await runNetworkBindingPass(limited, bindings.get(b.id)!)).toMatchObject({ resultsSent: 1 });
+    expect(hub.items.get("hub-q1")).toMatchObject({ state: "done", resolution: "Checked: fine." });
+  });
+
+  it("a chain whose middle item closed done while handing on reports that result first, whatever its successor is doing", async () => {
+    const b = bind();
+    for (const id of ["hub-r1", "hub-r2", "hub-r3"]) hub.add(id);
+    await pass(b.id);
+    const local = (id: string) => runs(id)[0]!;
+    repo.claim({ qitemId: local("hub-r1").qitemId, destinationSession: "dev-impl@lab" });
+    await pass(b.id);
+    // The review finishes with a result and hands a follow-up on in one step: it's done, and qa's item is still open.
+    const { created } = await repo.handoff({ qitemId: local("hub-r1").qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+    repo.claim({ qitemId: created.qitemId, destinationSession: "review@lab" });
+    await repo.handoffAndComplete({ qitemId: created.qitemId, fromSession: "review@lab", toSession: "qa@lab", nudge: false,
+      transitionNote: "Reviewed: fine; qa checks the follow-up." });
+    for (const id of ["hub-r2", "hub-r3"]) repo.claim({ qitemId: local(id).qitemId, destinationSession: "dev-impl@lab" });
+    // Two places a pass, two pickups to send: the finished review's result still comes first.
+    expect(await runNetworkBindingPass({ ...deps, reportLimit: 2 }, bindings.get(b.id)!)).toMatchObject({ resultsSent: 1 });
+    expect(hub.items.get("hub-r1")).toMatchObject({ state: "done", resolution: "Reviewed: fine; qa checks the follow-up." });
+  });
+
+  it("an ambiguous handoff is reported unknown before older open receipts", async () => {
+    const b = bind();
+    hub.add("hub-open-first");
+    hub.add("hub-ambiguous");
+    await pass(b.id);
+    const item = runs("hub-ambiguous")[0]!;
+    repo.claim({ qitemId: item.qitemId, destinationSession: "dev-impl@lab" });
+    await pass(b.id);
+    await repo.handoff({ qitemId: item.qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+    repo.update({ qitemId: item.qitemId, actorSession: "dev-impl@lab", state: "in-progress", reopen: true,
+      transitionNote: "Reassign the work after the first handoff" });
+    await repo.handoff({ qitemId: item.qitemId, fromSession: "dev-impl@lab", toSession: "qa@lab", nudge: false });
+    expect(repo.list({ handedOffFrom: item.qitemId, limit: 3 })).toHaveLength(2);
+    expect(await runNetworkBindingPass({ ...deps, reportLimit: 1 }, bindings.get(b.id)!)).toMatchObject({ unknown: 1 });
+    expect(hub.items.get("hub-ambiguous")!.notes.at(-1)).toContain("without one successor");
+  });
+
+  /** A finding as a Core hub's stuck sweep writes one, addressed to the participant that claimed `about`. */
+  const finding = (id: string, about: string) => hub.items.set(id, { qitemId: id, sourceSession: "assistant@team", destinationSession: PARTICIPANT,
+    state: "pending", summary: `Checked on ${about}: it stalled after it was picked up (4 minutes)`, resolution: null, closureReason: null, notes: [],
+    body: [`STUCK SWEEP FINDING (stalled-after-claim)`, `row: ${about}`, `destination: ${PARTICIPANT} (source assistant@team, state in-progress)`, "age: 4 min",
+      "last transition: Queued for the connected local seat. Not picked up yet.", "why: no meaningful queue change for 4 min; owner activity unknown (queue age does not prove idle)",
+      `This is a diagnostic about ${about}, not a second assignment. Read ${about} and act on it.`].join("\n") });
+
+  it("an unknown local outcome does not promise a result on the hub", async () => {
+    const b = bind();
+    hub.add("hub-gone");
+    await pass(b.id);
+    db.prepare("DELETE FROM queue_items WHERE qitem_id = ?").run(runs("hub-gone")[0]!.qitemId);
+    finding("qitem-recovery-unknown", "hub-gone");
+    expect(await pass(b.id)).toMatchObject({ findingsAnswered: 1, unknown: 1 });
+    const answer = hub.items.get("qitem-recovery-unknown")!.resolution;
+    expect(answer).toContain("whether it ran is unknown");
+    expect(answer).not.toContain("brings its result back");
+  });
+
+  it.each(["open", "closed", "revoked"] as const)("a refused finding close follows its %s readback", async (outcome) => {
+    const b = bind();
+    hub.add("hub-held");
+    await pass(b.id);
+    const id = "qitem-recovery-refused";
+    finding(id, "hub-held");
+    const connect: HubConnect = async (...args) => {
+      const session = await hub.connect(...args);
+      let closeRefused = false;
+      return { ...session, show: async (target) => {
+        if (target === id && closeRefused && outcome === "revoked") throw new HubError("revoked", "The grant was revoked.");
+        return session.show(target);
+      }, close: async (target, input) => {
+        if (target === id) {
+          closeRefused = true;
+          if (outcome === "closed") hub.items.get(id)!.state = "done";
+          throw new HubError("refused", "This grant cannot close this finding.");
+        }
+        return session.close(target, input);
+      } };
+    };
+    const result = await runNetworkBindingPass({ ...deps, connect }, bindings.get(b.id)!);
+    expect(result).toMatchObject({ taken: outcome === "open" ? 1 : 0, findingsAnswered: outcome === "closed" ? 1 : 0 });
+    expect(runs(id)).toHaveLength(outcome === "open" ? 1 : 0);
+    expect(hub.items.get(id)!.state).toBe(outcome === "closed" ? "done" : "in-progress");
+    if (outcome === "revoked") expect(result.error).toBe("revoked");
+  });
+
+  it("a finding about an item someone else closed on the hub first says its result stayed here, not that it's on the hub", async () => {
+    const b = bind();
+    hub.add("hub-c1");
+    await pass(b.id);
+    hub.raceClose.set("hub-c1", { state: "done", closureReason: "no-follow-on", resolution: "Someone else's answer." });
+    await repo.update({ qitemId: runs("hub-c1")[0]!.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", resolution: "Ours." });
+    await pass(b.id);
+    expect(db.prepare("SELECT outcome FROM network_receipts WHERE hub_qitem_id = 'hub-c1'").get()).toEqual({ outcome: "closed_on_hub" });
+    finding("qitem-recovery-0000000000000009", "hub-c1");
+    expect(await pass(b.id)).toMatchObject({ taken: 0, findingsAnswered: 1 });
+    expect(hub.items.get("qitem-recovery-0000000000000009")!.resolution).toBe("alex@team holds hub-c1 through a connected OpenRig: "
+      + "it has finished there, but hub-c1 was closed here before its result arrived, so the result stays with that OpenRig.");
+    repo.update({ qitemId: runs("hub-c1")[0]!.qitemId, actorSession: "dev-impl@lab", state: "pending", reopen: true,
+      transitionNote: "Continue working locally" });
+    finding("qitem-recovery-reopened", "hub-c1");
+    expect(await pass(b.id)).toMatchObject({ findingsAnswered: 1, resultsSent: 0 });
+    expect(hub.items.get("qitem-recovery-reopened")!.resolution).not.toContain("it has finished there");
+    expect(hub.items.get("qitem-recovery-reopened")!.resolution).toContain("it's open there again, but hub-c1 was closed here before its earlier result arrived");
+  });
+
+  it("a hub's stuck-sweep finding about an item this seat holds is answered on the hub from the local item, and never taken as work", async () => {
+    const b = bind();
+    hub.add("hub-f1");
+    await pass(b.id);
+    finding("qitem-recovery-0000000000000001", "hub-f1");
+    expect(await pass(b.id)).toMatchObject({ taken: 0, findingsAnswered: 1 });
+    expect(runs("qitem-recovery-0000000000000001")).toHaveLength(0);
+    expect(repo.list({ limit: 50 })).toHaveLength(1);
+    expect(hub.items.get("qitem-recovery-0000000000000001")).toMatchObject({ state: "done", closureReason: "no-follow-on",
+      resolution: "alex@team holds hub-f1 through a connected OpenRig: it's queued for the seat there and not picked up yet. That OpenRig follows it and brings its result back to hub-f1." });
+
+    // Picked up here: the next finding says so.
+    repo.claim({ qitemId: runs("hub-f1")[0]!.qitemId, destinationSession: "dev-impl@lab" });
+    finding("qitem-recovery-0000000000000002", "hub-f1");
+    expect(await pass(b.id)).toMatchObject({ taken: 0, findingsAnswered: 1 });
+    expect(hub.items.get("qitem-recovery-0000000000000002")!.resolution)
+      .toMatch(/^alex@team holds hub-f1 through a connected OpenRig: the seat picked it up at \S+, and it's still open there\. /);
+
+    // Finished here: before its result is reported, and after.
+    await repo.update({ qitemId: runs("hub-f1")[0]!.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", resolution: "Looks good." });
+    finding("qitem-recovery-0000000000000004", "hub-f1");
+    await runNetworkBindingPass({ ...deps, reportLimit: 0 }, bindings.get(b.id)!);
+    expect(hub.items.get("qitem-recovery-0000000000000004")!.resolution).toContain("it has finished there, and its result comes back to hub-f1 next.");
+    await pass(b.id);
+    expect(hub.items.get("hub-f1")).toMatchObject({ state: "done", resolution: "Looks good." });
+    finding("qitem-recovery-0000000000000005", "hub-f1");
+    await pass(b.id);
+    expect(hub.items.get("qitem-recovery-0000000000000005")!.resolution).toContain("it has finished there, and its result is on hub-f1.");
+
+    // A finding about an item this seat doesn't hold is taken as work, as before.
+    finding("qitem-recovery-0000000000000003", "hub-elsewhere");
+    expect(await pass(b.id)).toMatchObject({ taken: 1, findingsAnswered: 0 });
+    expect(runs("qitem-recovery-0000000000000003")).toHaveLength(1);
   });
 
   it("a pass whose hub stalls is closed at its deadline before any late local work, and the next binding still gets its turn", async () => {

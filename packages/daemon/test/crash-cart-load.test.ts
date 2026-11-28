@@ -6,6 +6,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import {
   loadCrashCartDiscovery,
   DaemonLiveError,
+  DaemonStateChangedError,
   CrashCartReadError,
 } from "../src/domain/crash-cart-discovery.js";
 
@@ -25,7 +26,7 @@ function baseDeps(over: Record<string, unknown> = {}) {
     openrigHome: "/scratch/.openrig",
     readDaemonJson: () => ({ pid: 9, port: 7433, db: "/scratch/.openrig/openrig.sqlite" }),
     isProcessAlive: () => false,
-    probeHealthz: async () => false,
+    probeHealthz: async () => "refused" as const,
     openrigUrl: undefined as string | undefined,
     copyFile: vi.fn(),
     exists: () => true,
@@ -37,8 +38,21 @@ function baseDeps(over: Record<string, unknown> = {}) {
 }
 
 describe("loadCrashCartDiscovery — fail-closed FIRST, always clean up", () => {
+  it.each(["timeout", "not-openrig"] as const)("a %s recheck cannot reach scratch creation or copying", async (result) => {
+    const deps = baseDeps({ probeHealthz: async () => result });
+    await expect(loadCrashCartDiscovery(deps)).rejects.toMatchObject({ state: "unverified" });
+    expect(deps.makeScratchDir).not.toHaveBeenCalled();
+    expect(deps.copyFile).not.toHaveBeenCalled();
+    expect(deps.openDb).not.toHaveBeenCalled();
+  });
+  it("a startup appearing before discovery keeps the selected target unverified", async () => {
+    const deps = baseDeps({ readProcessEvidence: () => ({ mayBeRunning: true, pidState: "start pending" }) });
+    await expect(loadCrashCartDiscovery(deps)).rejects.toBeInstanceOf(DaemonStateChangedError);
+    expect(deps.makeScratchDir).not.toHaveBeenCalled();
+    expect(deps.copyFile).not.toHaveBeenCalled();
+  });
   it("an empty private instance does not borrow the unrelated default daemon's identity", async () => {
-    const probeHealthz = vi.fn(async (url: string) => url.includes(":7433/"));
+    const probeHealthz = vi.fn(async (url: string) => url.includes(":7433/") ? "answered" as const : "refused" as const);
     const deps = baseDeps({ readDaemonJson: () => undefined, exists: () => false,
       openrigUrl: "http://127.0.0.1:17433", probeHealthz });
     const result = await loadCrashCartDiscovery(deps);
@@ -48,8 +62,9 @@ describe("loadCrashCartDiscovery — fail-closed FIRST, always clean up", () => 
     expect(deps.makeScratchDir).not.toHaveBeenCalled();
   });
   it("an explicit target does not override a recorded live owner of the local database", async () => {
-    const deps = baseDeps({ openrigUrl: "http://127.0.0.1:17433", isProcessAlive: () => true });
-    await expect(loadCrashCartDiscovery(deps)).rejects.toBeInstanceOf(DaemonLiveError);
+    const deps = baseDeps({ openrigUrl: "http://127.0.0.1:17433", isProcessAlive: () => true,
+      readProcessEvidence: () => ({ mayBeRunning: false, pidState: "explicit target; no matching local record" }) });
+    await expect(loadCrashCartDiscovery(deps)).rejects.toThrow("daemon.json pid 9 is still alive");
     expect(deps.makeScratchDir).not.toHaveBeenCalled();
   });
   it("uses the configured database before the first recorded daemon boot", async () => {

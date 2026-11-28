@@ -8,7 +8,7 @@ import type {
   SkillResource, GuidanceResource, SubagentResource, RuntimeResource, PluginResource,
 } from "./types.js";
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
-import { resolveAuthoredCwd } from "./cwd-resolution.js";
+import { resolveAuthoredCwd, resolveProjectCwd, type PlannedProjectRoots } from "./cwd-resolution.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { discoverSkillsForRuntime, findNamedSkillsForRuntime, parseSkillFrontmatter, scanCacheFor, type SkillRuntime } from "./skill-discovery.js";
 import { inspectSkillDirectory, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
@@ -77,6 +77,7 @@ export interface ResolutionContext {
   profileName: string;
   specRoot?: string;
   cwdOverride?: string;
+  plannedProjectRoots?: PlannedProjectRoots;
   member: RigSpecPodMember;
   pod: RigSpecPod;
   rig: RigSpec;
@@ -193,9 +194,12 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
 
   const advisor = resolveAdvisorModel(member.advisor, profile.preferences?.advisor, spec.defaults?.advisor);
 
-  const cwd = ctx.cwdOverride
-    ? nodePath.resolve(ctx.cwdOverride)
-    : resolveAuthoredCwd(member.cwd, ctx.specRoot || null);
+  let cwd: string;
+  try {
+    cwd = ctx.cwdOverride?.trim()
+      ? nodePath.resolve(ctx.cwdOverride)
+      : resolveProjectCwd(member.cwd, ctx.plannedProjectRoots) ?? resolveAuthoredCwd(member.cwd, ctx.specRoot || null);
+  } catch (err) { return { ok: false, errors: [(err as Error).message] }; }
 
   // 2b. Augment the pool with filesystem-discovered skills. Rig-local
   // resources.skills (already in the pool from buildResourcePool) win

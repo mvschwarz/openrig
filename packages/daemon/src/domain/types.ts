@@ -1629,6 +1629,10 @@ export interface NodeLaunchRecipe {
   version: 1;
   rigRoot: string;
   rigSpec: RigSpec;
+  /** Seat-only substitutions for saved actions supplied by a shared source. */
+  startupTextOverrides?: Array<{ before: StartupAction; value: string }>;
+  /** Seat-specific edits to otherwise shared recipe layers, which a rig export cannot represent. */
+  startupTextPrivateLayers?: Array<"rig" | "pod">;
 }
 
 export interface RigServicesWaitTarget {
@@ -1726,7 +1730,7 @@ export type InstantiateOutcome =
   | { ok: false; code: "preflight_failed"; errors: string[]; warnings: string[] }
   | { ok: false; code: "instantiate_error"; message: string }
   | { ok: false; code: "cycle_error"; message: string }
-  | { ok: false; code: "service_boot_failed"; message: string }
+  | { ok: false; code: "service_boot_failed" | "project_cwd_failed"; message: string }
   | { ok: false; code: "compose_project_conflict"; message: string }
   // S5b (OPR.0.5.4.11) — the running-name guard refusal: a same-name rig is
   // RUNNING, so instantiation refuses before any create/launch. The message

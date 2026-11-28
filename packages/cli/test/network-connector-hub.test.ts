@@ -1,7 +1,7 @@
 // The outbound connector against a real hub: the daemon's routes behind `rig mcp serve --http` with a grant per
 // participant, reached by the connector's own MCP client. A second, local queue takes the work, and what happens there
 // comes back to the hub item: queued, picked up, the result, and a revoked grant ending the binding.
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +18,7 @@ import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
 import { RigRepository } from "../../daemon/src/domain/rig-repository.js";
 import { NetworkBindingStore } from "../../daemon/src/domain/network/network-bindings.js";
 import { networkClosedElsewhere, runNetworkBindingPass, type NetworkConnectorDeps } from "../../daemon/src/domain/network/network-connector.js";
+import { runStuckSweep } from "../../daemon/src/domain/queue-stuck-sweep.js";
 import { addGrant, revokeGrant, startMcpHttpServer } from "../src/mcp-http.js";
 
 let hubDb: Database.Database;
@@ -214,4 +215,36 @@ it("a lead's aggregate over its own local child work comes back once on the orig
   expect(hubRepo.listTransitions(task.qitemId)).toHaveLength(transitions.length);
   expect(transitions.filter((t) => t.state === "done")).toHaveLength(1);
   expect(transitions.map((t) => t.transitionNote ?? "").join("\n")).not.toMatch(/Waiting on|Built:.*\n.*Reviewed:/);
+});
+
+it("an item the seat holds past the hub's stall threshold: the hub's stuck sweep asks the participant, and the connector answers it there instead of carrying it to the seat", async () => {
+  const token = await addGrant(tokenFile, { name: "alex", seat: "alex@team", rigs: ["team"], roots: [], workspace: false, owner: false });
+  const task = await hubRepo.create({ sourceSession: "lead@team", destinationSession: "alex@team", summary: "Review the plan", body: "Review the plan.", nudge: false } as never);
+  const localRepo = queue(localDb);
+  const bindings = new NetworkBindingStore(localDb, localHome);
+  const binding = bindings.create({ session: "dev-impl@lab", hubUrl, hubSeat: "alex@team", token, allowHttp: true });
+  const pass = () => runNetworkBindingPass({ db: localDb, queueRepo: localRepo, bindings, home: localHome }, bindings.get(binding.id)!);
+  expect(await pass()).toMatchObject({ taken: 1 });
+
+  // Ten minutes on, with the seat still working on it here: nothing new has reached the hub item since it was queued.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    const swept = await runStuckSweep({ db: hubDb, queueRepo: hubRepo, resolveOrchestrator: () => null, sessionConfirmedMissing: () => false });
+    const found = swept.findings.find((f) => f.qitemId === task.qitemId && f.action === "created");
+    // The hub's finding goes to the claimant: the participant this binding connects.
+    expect(hubRepo.getById(found!.findingQitemId)).toMatchObject({ destinationSession: "alex@team", state: "pending" });
+    expect(await pass()).toMatchObject({ taken: 0, findingsAnswered: 1 });
+    // The seat holds only the work it was sent; the finding is answered on the hub.
+    expect(localRepo.list({ limit: 50 })).toHaveLength(1);
+    expect(hubRepo.getById(found!.findingQitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on",
+      resolution: `alex@team holds ${task.qitemId} through a connected OpenRig: it's queued for the seat there and not picked up yet. That OpenRig follows it and brings its result back to ${task.qitemId}.` });
+    expect(hubRepo.getById(task.qitemId)!.state).toBe("in-progress");
+    // Answered, the same stall isn't asked about again: the sweep files a new finding only on newer evidence.
+    vi.setSystemTime(Date.now() + 5 * 60_000);
+    const again = await runStuckSweep({ db: hubDb, queueRepo: hubRepo, resolveOrchestrator: () => null, sessionConfirmedMissing: () => false });
+    expect(again.findings.filter((f) => f.qitemId === task.qitemId && f.action === "created")).toEqual([]);
+  } finally {
+    vi.useRealTimers();
+  }
 });
