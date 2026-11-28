@@ -289,15 +289,17 @@ export class SeatPoolSlotsRepository {
 
   /** An issued attempt, of either kind, settled by its node's latest session rather than by its call: the slot goes to
    *  `phase` with the hold given (null: none), the outcome and what the hold is measured from (null: nothing). A slot that
-   *  goes to `drained` keeps its phase time. */
+   *  goes to `drained` keeps its phase time, unless `drainedNow` (a held `live` slot put back in `adding`): then it is
+   *  drained from `at`. */
   settleIssuedByLater(input: {
     slotId: string; attemptId: string; phase: "drained" | "live"; hold: string | null; outcome: string; result: string | null; at: string;
+    drainedNow?: boolean;
   }): boolean {
     return this.db.prepare(
       `UPDATE seat_pool_slots SET attempt_state = 'settled', phase = ?, reuse_hold = ?, attempt_outcome = ?, attempt_result = ?,
-         phase_changed_at = CASE WHEN ? = 'drained' THEN phase_changed_at ELSE ? END
+         phase_changed_at = CASE WHEN ? = 'drained' AND ? = 0 THEN phase_changed_at ELSE ? END
         WHERE slot_id = ? AND attempt_id = ? AND attempt_state = 'issued' AND phase = 'adding'`,
-    ).run(input.phase, input.hold, input.outcome, input.result, input.phase, input.at, input.slotId, input.attemptId).changes === 1;
+    ).run(input.phase, input.hold, input.outcome, input.result, input.phase, input.drainedNow === true ? 1 : 0, input.at, input.slotId, input.attemptId).changes === 1;
   }
 
   /**

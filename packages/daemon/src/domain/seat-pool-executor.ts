@@ -1241,6 +1241,16 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       // Launched on the same node and not running: held, and never launched again (a decision awaited, a failure with
       // nothing running: `drained`; attention, left attached, a failure whose session still runs: `live`).
       if (!threw && launch.ok && node && node.nodeId === request.nodeId) {
+        // The node's current state first, as for a leftover: a session that reads ready now (an agent someone recovered by
+        // hand while the launch ran) is not held from the launch's status.
+        const now = latestSessionView(deps.db, request.nodeId);
+        if (now !== null && readSession(request.nodeId, now) === "ready") {
+          if (deps.slots.settleIssuedByLater({
+            slotId: request.slotId, attemptId: request.attemptId, phase: "live", hold: null, result: null, at: at(),
+            outcome: JSON.stringify({ ...storedOutcome, settledBy: "later_session", later: { sessionId: now.id, read: "ready", at: at() } }),
+          })) report({ ...base, attempt: { id: request.attemptId, status: "running", code: "later_session" }, ...warning });
+          return;
+        }
         const held = settleHeldComeback(request, node.status, node.error, storedOutcome);
         if (held === "moved_on") return;
         if (held !== "not_held") {
@@ -1379,8 +1389,11 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
     if (read === "unknown") return null;
     const note = { slotNumber: slot.slotNumber, logicalId, nodeId, session: latest, read };
     const outcome = settledBy(read);
+    // A held `live` slot put back in `adding` that settles `drained` is drained from now (the cooldown counts from it); a
+    // `drained` one keeps its drain's time.
+    const fromLive = readAttemptOutcome(slot.attemptOutcome)["reopenedFrom"] === "live";
     const settle = (phase: "drained" | "live", hold: Record<string, unknown> | null, result: string | null) =>
-      deps.slots.settleIssuedByLater({ slotId: slot.slotId, attemptId: slot.attemptId!, phase, hold: hold === null ? null : JSON.stringify(hold), outcome, result, at: at() });
+      deps.slots.settleIssuedByLater({ slotId: slot.slotId, attemptId: slot.attemptId!, phase, hold: hold === null ? null : JSON.stringify(hold), outcome, result, at: at(), drainedNow: fromLive });
     if (read === "ready") return settle("live", null, null) ? { ...note, phase: "live" } : null;
     if (read === "attention") {
       const hold = attentionHold(latest);
@@ -1400,8 +1413,9 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
    * rule as the call: running (`live`, while its session runs), held, or not settled; the hold is measured from the
    * session the comeback was issued on, so a session someone started since is a later change. The node's current state
    * comes first: when its latest session reads ready, the slot is `live` with no hold, whatever the event recorded
-   * (someone recovered the agent by hand before this read). With no such event, a
-   * session newer than that one settles it by the later-change rule (`changes`). With neither, it stays issued and
+   * (someone recovered the agent by hand before this read), with or without an event (a launch that found the agent
+   * already running records none). Otherwise, with no such event, a session newer than that one settles it by the
+   * later-change rule (`changes`). With neither, it stays issued and
    * `unknown`: it takes room and is never launched again. Nothing is written then.
    */
   const settleComebackLeftover = (modelNodeId: string, slot: SeatPoolSlot, changes: LaterChange[]): SettledAdd | null => {
@@ -1422,13 +1436,13 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
     const eventSeq = typeof basis?.["eventSeq"] === "number" ? basis["eventSeq"] : 0;
     if (snapshotId === null) return null;
     const event = restoreOf(deps.db, nodeId, eventSeq, snapshotId);
+    const latest = latestSessionView(deps.db, nodeId);
+    const readyNow = latest !== null && readSession(nodeId, latest) === "ready";
     if (event !== null) {
       const outcome = {
         ok: true, nodeId, status: event.status, ...(event.error !== undefined ? { error: event.error } : {}), fromEvent: event.seq,
         ...(event.snapshotSelection ? { snapshotSelection: event.snapshotSelection } : {}),
       };
-      const latest = latestSessionView(deps.db, nodeId);
-      const readyNow = latest !== null && readSession(nodeId, latest) === "ready";
       if (launchStatusIsRunning(event.status) && readyNow) {
         return deps.slots.settleAdd(slot.slotId, attemptId, { outcome: JSON.stringify(outcome), result: JSON.stringify({ nodeId, sessionId: latest!.id }), at: at() })
           ? entry({ id: attemptId, status: "running", ...(event.snapshotSelection ? { snapshotSelection: event.snapshotSelection } : {}) })
@@ -1445,12 +1459,13 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         if (typeof held !== "string") return entry(held);
         if (held === "moved_on") return null;
       }
-      if (readyNow) {
-        // no `newerThan`: the session the comeback was issued on counts too, when it reads ready now
-        const change = settleIssuedBySession(modelNodeId, slot, { since: basisSession });
-        if (change) changes.push(change);
-        return null;
-      }
+    }
+    if (readyNow) {
+      // With or without an event, no `newerThan`: the session the comeback was issued on counts too, when it reads ready
+      // now (a launch that found it already running records no event, and settles it `live` the same way).
+      const change = settleIssuedBySession(modelNodeId, slot, { since: basisSession });
+      if (change) changes.push(change);
+      return null;
     }
     const change = settleIssuedBySession(modelNodeId, slot, { newerThan: basisSession, since: basisSession });
     if (change) changes.push(change);
@@ -1506,7 +1521,14 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
       const eventSeq = restore?.seq ?? seen.eventSeq;
       /** Nothing to end the hold: measured from now on from what was read. */
       const rebase = () => { if (eventSeq !== seen.eventSeq || latest?.id !== seen.sessionId) change(from, hold, heldSession(nodeId, latest, eventSeq), slot.attemptOutcome); };
-      if (latest === null) { rebase(); continue; }
+      if (latest === null) {
+        // A held `live` slot with no session row whose executor is now confirmed stopped: nothing runs, `drained` and eligible.
+        if (from === "live" && deps.confirmedStopped(nodeId)) {
+          if (change("drained", null, null, later("absent", null))) out.push({ slotNumber: slot.slotNumber, logicalId, nodeId, session: null, read: "absent", phase: "drained" });
+          continue;
+        }
+        rebase(); continue;
+      }
       const newer = latest.id !== seen.sessionId;
       const statusChanged = !newer && seen.status !== undefined && (latest.status !== seen.status || latest.startupStatus !== seen.startupStatus);
       // A held `live` slot whose session's executor is now confirmed stopped: its session ended, even with a stale status.
@@ -1533,7 +1555,7 @@ export function makeSeatPoolExecutor(deps: SeatPoolExecutorDeps): SeatPoolExecut
         // Not settled yet (a startup still pending): counted as an unknown result, `adding` with its attempt issued, the
         // hold it had kept, and read again every cycle by its session.
         const outcome = JSON.stringify({
-          ...readAttemptOutcome(slot.attemptOutcome), reread: "session", since: seen.sessionId, sinceSeq: eventSeq,
+          ...readAttemptOutcome(slot.attemptOutcome), reread: "session", reopenedFrom: from, since: seen.sessionId, sinceSeq: eventSeq,
           pending: { code: "later_session_not_settled", message: `unknown: a later session on the node, ${latest.status}, startup ${latest.startupStatus ?? "unknown"}` },
           later: { sessionId: latest.id, read, at: at() },
         });

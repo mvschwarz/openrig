@@ -454,6 +454,27 @@ describe("seat-pool held comeback: a comeback that needs a decision (#3395 Piece
     expect((JSON.parse(after.reuseHold!) as { error: string }).error).toContain("rig seat launch");
     expect(w.launchesOf("dev.impl-s1")).toBe(1);
   });
+
+  it("A comeback whose launch ends `awaiting-decision` while someone recovers the agent by hand to a ready session before the call returns makes `s1` `live` with no hold.", async () => {
+    const w = heldWorld();
+    const { m, s1 } = await w.twoDrained();
+    w.hooks.adapters = (logicalId) => (logicalId === "dev.impl-s1" ? {} : undefined);
+    // the launch recorded its event; someone recovers the agent before the call returns
+    let sessionId: string | undefined;
+    w.hooks.afterLaunch = (logicalId) => {
+      if (logicalId === "dev.impl-s1") sessionId = w.personSession(s1.nodeId, `dev-impl-s1@${RIG}`, "running", "ready");
+    };
+    await w.row(m.session);
+    const { settled } = await w.comeBack(m);
+    const [event] = w.db.prepare("SELECT payload FROM events WHERE type = 'restore.subset_completed' AND payload LIKE ?").all(`%${s1.nodeId}%`) as Array<{ payload: string }>;
+    expect((JSON.parse(event!.payload) as { result: { nodes: unknown[] } }).result.nodes).toContainEqual(
+      expect.objectContaining({ nodeId: s1.nodeId, status: "awaiting-decision" }));
+    const slot = w.slotOf(m, 1);
+    expect(settled.find((s) => s.slotNumber === 1)?.attempt).toEqual({ id: slot.attemptId, status: "running", code: "later_session" });
+    expect(slot).toMatchObject({ phase: "live", reuseHold: null, attemptState: "settled" });
+    expect(w.latestOf(s1.nodeId).id).toBe(sessionId);
+    expect(w.launchesOf("dev.impl-s1")).toBe(1);
+  });
 });
 
 describe("seat-pool held comeback: a daemon restart in the middle of a comeback (#3395 Piece 1)", () => {
@@ -559,6 +580,33 @@ describe("seat-pool held comeback: a daemon restart in the middle of a comeback 
     await w.executor().idle();
     expect(notes.laterChanges ?? []).toEqual([]);
     expect(w.slotOf(m, 1)).toMatchObject({ phase: "live", attemptState: "settled", reuseHold: hold });
+    expect(w.launchesOf("dev.impl-s1")).toBe(1);
+  });
+
+  it("A comeback cut off by a restart after a launch that found the agent's session already running, which records no event, makes `s1` `live` with no hold once that session reads ready.", async () => {
+    const w = heldWorld();
+    const { m, s1 } = await w.twoDrained();
+    // the drained agent's session runs again in its terminal, started by no one the pool knows
+    const session = w.latestOf(s1.nodeId);
+    w.sessions.updateStatus(session.id, "running");
+    w.sessions.updateStartupStatus(session.id, "ready");
+    w.panes.set(`dev-impl-s1@${RIG}`, 900);
+    // the launch returns `alreadyRunning`, and the daemon goes away before the executor reads it
+    let returned = false;
+    w.hooks.afterLaunch = () => { returned = true; return never(); };
+    await w.row(m.session);
+    await w.notesOf(m.jobId);
+    await vi.waitFor(() => expect(returned).toBe(true));
+    expect(w.eventsNaming(s1.nodeId, "restore.subset_completed")).toEqual([]);
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "adding", attemptKind: "comeback", attemptState: "issued", attemptOutcome: null });
+
+    w.hooks.afterLaunch = undefined;
+    w.restart(m);
+    const notes = await w.notesOf(m.jobId);
+    await w.executor().idle();
+    expect(notes.laterChanges).toEqual([expect.objectContaining({ slotNumber: 1, read: "ready", phase: "live", session: expect.objectContaining({ id: session.id }) })]);
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "live", reuseHold: null, attemptState: "settled" });
+    expect(w.latestOf(s1.nodeId).id).toBe(session.id);
     expect(w.launchesOf("dev.impl-s1")).toBe(1);
   });
 
@@ -890,6 +938,40 @@ describe("seat-pool held comeback: an add that needs attention (#3395 Piece 1)",
       expect(w.stopSeat, c.name).not.toHaveBeenCalled();
     }
   });
+
+  it("An add left attached with no session row whose node's executor is later confirmed stopped is `drained` and eligible.", async () => {
+    const w = heldWorld();
+    const m = await w.model({ pool: { max: 1, min: 1 } });
+    // the add reports the seat left attached, and its node has no session row
+    w.hooks.afterAdd = (result) => {
+      const r = result as { outcome?: { ok: boolean; result?: { node: { nodeId: string; status: string } } } };
+      if (r.outcome?.ok && r.outcome.result) {
+        r.outcome.result.node.status = "left_attached";
+        w.db.prepare("DELETE FROM sessions WHERE node_id = ?").run(r.outcome.result.node.nodeId);
+      }
+      return result;
+    };
+    await w.notesOf(m.jobId);
+    await w.executor().idle();
+    w.hooks.afterAdd = undefined;
+    await w.notesOf(m.jobId);
+    const agent = w.slotOf(m, 1).nodeId!;
+    expect(w.sessionsOf(agent)).toEqual([]);
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "live", attemptKind: "add", attemptState: "settled" });
+    expect(w.holdOf(m, 1)).toMatchObject({ code: "left_attached" });
+    // nothing changed: it stays held
+    expect(await w.notesOf(m.jobId)).not.toHaveProperty("laterChanges");
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "live" });
+
+    // its executor is confirmed stopped
+    const confirmed = w.deps.confirmedStopped;
+    w.deps.confirmedStopped = (nodeId) => nodeId === agent || confirmed(nodeId);
+    const notes = await w.notesOf(m.jobId);
+    expect(notes.laterChanges).toEqual([{ slotNumber: 1, logicalId: "dev.impl-s1", nodeId: agent, session: null, read: "absent", phase: "drained" }]);
+    expect(w.slotOf(m, 1)).toMatchObject({ phase: "drained", reuseHold: null });
+    expect(JSON.stringify(notes)).not.toContain("\"stop\"");
+    expect(w.stopSeat).not.toHaveBeenCalled();
+  });
 });
 
 describe("seat-pool held comeback: a reserved comeback cancelled before its issue (#3395 Piece 1)", () => {
@@ -1063,7 +1145,7 @@ describe("seat-pool held comeback: what a later change is measured from (#3395 P
     expect(w.launchesOf("dev.impl-s1")).toBe(1);
   });
 
-  it("A held `live` slot put back in `adding` by a later session that then ends counts its drain from when it left `live`, not from when it went `live`.", async () => {
+  it("A held `live` slot put back in `adding` by a later session that then ends is drained from when that settles, not from when it went `live` or left it.", async () => {
     const w = heldWorld();
     const { m, s1 } = await w.twoDrained();
     w.hooks.harness = (session) => (session === `dev-impl-s1@${RIG}` ? { ok: false, error: "resume picker is open", recovery: "attention_required" } : undefined);
@@ -1078,14 +1160,15 @@ describe("seat-pool held comeback: what a later change is measured from (#3395 P
     const later = w.personSession(s1.nodeId, `dev-impl-s1@${RIG}`, "running", "pending");
     await w.notesOf(m.jobId);
     expect(w.slotOf(m, 1)).toMatchObject({ phase: "adding", attemptState: "issued" });
-    const leftLive = w.clock.now.toISOString();
-    w.clock.now = new Date(w.clock.now.getTime() + 60_000);
+    // the later session stays pending past the cooldown, then ends
+    w.clock.now = new Date(w.clock.now.getTime() + (HELD.cooldownSeconds + 60) * 1000);
+    const settledAt = w.clock.now.toISOString();
     w.sessions.updateStatus(later, "exited");
     await w.notesOf(m.jobId);
     await w.executor().idle();
     expect(w.slotOf(m, 1)).toMatchObject({ phase: "drained" });
     expect(w.slotOf(m, 1).phaseChangedAt).not.toBe(wentLive);
-    expect(Date.parse(w.slotOf(m, 1).phaseChangedAt)).toBeGreaterThanOrEqual(Date.parse(leftLive));
+    expect(Date.parse(w.slotOf(m, 1).phaseChangedAt)).toBeGreaterThanOrEqual(Date.parse(settledAt));
   });
 
   it("An add cut off by a restart whose session runs with a startup that needs attention is held `live`, not left `unknown`.", async () => {
