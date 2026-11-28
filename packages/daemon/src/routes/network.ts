@@ -128,7 +128,7 @@ export function networkRoutes(opts?: { bearerToken?: string | null; home?: strin
       const derived = requireSenderIdentity(c, { verb: "network request" });
       const identity = derived.ok ? derived : { ok: true as const, session: issued ?? target.localSession, provenance: "claimed:v1" as const };
       const result = await originateNetworkRequest(deps, target, {
-        peer: body.peer, requestId: body.requestId, body: body.body, summary: body.summary,
+        peer: body.peer, requesterOf: body.requesterOf, requestId: body.requestId, body: body.body, summary: body.summary,
         caller: { sourceSession: identity.session, ...resolveRecordedIdentity(c, identity), tags,
           ...(issued ? { returnRoute: issued, returnRouteBasis: derived.ok ? "issued" : "issued-actor" } : {}) },
       });

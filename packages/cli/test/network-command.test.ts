@@ -313,5 +313,28 @@ it("shows the binding or seat as optional in each verb's usage", () => {
   const network = networkCommand();
   const usage = (name: string) => network.commands.find((c) => c.name() === name)!.helpInformation().split("\n")[0];
   expect(usage("peers")).toBe("Usage: network peers [options] [binding-or-seat]");
-  expect(usage("request")).toBe("Usage: network request [options] [binding-or-seat] <peer>");
+  expect(usage("request")).toBe("Usage: network request [options] [binding-or-seat] [peer]");
+});
+
+ it("sends requesterOf instead of a peer name, through the own seat or explicit binding", async () => {
+  const out = vi.spyOn(console, "log").mockImplementation(() => {});
+  hubRequests();
+  const ask = join(home, "ask.md"); writeFileSync(ask, "Which audience?");
+  vi.stubEnv("OPENRIG_SESSION_NAME", "dev-impl@lab");
+  for (const positional of [[], ["netb-fixture"]]) {
+    await cli().parseAsync(["node", "rig", "network", "request", ...positional, "--requester-of", "work-1", "--id", "question-1", "--body-file", ask, "--json"]);
+    const value = JSON.parse(String(out.mock.calls.at(-1)?.[0]));
+    expect(value).toMatchObject({ ref: positional[0] ?? "dev-impl@lab", requesterOf: "work-1", requestId: "question-1", body: "Which audience?" });
+    expect(value).not.toHaveProperty("peer");
+  }
+});
+
+
+it.each(["", "   "])("CR rejects supplied blank requesterOf %j without sending a peer request", async (value) => {
+  hubRequests();
+  const ask = join(home, "ask.md"); writeFileSync(ask, "Which audience?");
+  vi.stubEnv("OPENRIG_SESSION_NAME", "dev-impl@lab");
+  const before = posts.length;
+  await expect(cli().parseAsync(["node", "rig", "network", "request", "lead@team", `--requester-of=${value}`, "--id", "blank-requester", "--body-file", ask])).rejects.toThrow();
+  expect(posts).toHaveLength(before);
 });

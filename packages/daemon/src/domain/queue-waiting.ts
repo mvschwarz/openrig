@@ -152,12 +152,21 @@ function sweepSeconds(): number {
   } catch { return 300; }
 }
 
+/** A hub's observed wait, already projected for this network participant. Receipts contain no question text. */
+export interface NetworkWait {
+  kind: "requester-question" | "another-request";
+  hubQitemId: string | null;
+  localQitemId: string | null;
+  blockerState: string | null;
+  observedAt: string;
+}
+
 export interface WaitingView {
   obligation: string;
   owner: string;
   state: string;
   actionableSince: string | null;
-  blocker: { ref: string; owner: string | null; state: string | null } | null;
+  blocker: { ref: string; owner: string | null; state: string | null; networkWait?: NetworkWait } | null;
   lastMeaningfulChange: { id: number; at: string } | null;
   liveness: { subject: string; activity: string; needsInput: { count: number; reason: string | null }; confidence: "oracle" | "unknown" };
   nextBackstop: { owner: string; mechanism: string; dueAt: string | null; intervalSeconds: number | null; suspendedUntil?: string; recovery?: { qitemId: string; state: string }; note?: string;

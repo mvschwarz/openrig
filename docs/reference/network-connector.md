@@ -154,6 +154,31 @@ rig network request [binding-or-seat] <peer> --id <request-id> --body-file <path
 Leave out the binding or seat to use your own seat, so a connected seat can type `rig network peers`. With one
 argument, `request` reads it as the peer. Run outside a seat, both still need it.
 
+To ask the original requester of imported network work, use its **local work id**:
+
+```bash
+rig network request [binding-or-seat] --requester-of <work-id> --id <question-id> --body-file <path>
+```
+
+This mode excludes a peer argument. It is available only when the hub advertises `requesterOf` in
+`rig_queue_create`'s input schema. Otherwise it reports `requester_question_unsupported` and writes no question,
+receipt or wait; it never falls back to a copied requester name. A supporting hub pins the question to the original
+source connection before writing it. An unreachable original requester is reported as `requester_unreachable`.
+
+If the hub stops advertising support before a deferred create, the question stays open and the work stays blocked;
+cancel the question to release the work. Recovering an existing question never replaces a later dependency selected by the owner.
+
+The same local work waits on the question receipt. The connector reports this explicit relation to the hub after
+confirming the question. Other local dependencies and progress notes stay private. The question's terminal outcome
+returns through its receipt and releases the local work to pending through the queue's ordinary dependency handling;
+a failure, refusal or cancellation is an outcome to read, never approval. The hub preserves its work's pre-wait state
+and pickup. If an outbound request is waiting remotely, its local receipt and any local work blocked on it carry
+`networkWait`: either the visible question's hub/local ids and state, or a generic wait without hidden ids. `observedAt`
+names the last successful observation, not a promise that the hub is reachable now.
+
+A person decision must come from the person through an available person/UI route. This Core path alone does not
+supply that route. On hubs without requester-question support, keep the work open and report the limit.
+
 `peers` lists the seats and members the hub lets the participant address, as the hub's `rig_team` answers for the
 participant's rig. `request` sends one request to a peer, named as `peers` lists it:
 
